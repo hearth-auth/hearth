@@ -182,9 +182,16 @@ async fn delegation_grant_persisted_after_exchange() {
     assert!(!g.delegation_id.is_empty(), "delegation_id must be set");
 }
 
-/// After revocation, the delegation no longer appears in the listing.
+/// G1 regression (HEA-1753): revoking a delegation consent must immediately
+/// invalidate the previously-issued, **session-bound** OBO access token — not
+/// merely drop it from the listing. The prior test only asserted the listing no
+/// longer showed the grant (false confidence): it never re-validated the issued
+/// token, so the broken session-path revocation check went undetected. The OBO
+/// token issued by `rfc8693_token_exchange` inherits the subject's `sid`
+/// (session-bound), and revocation projects its `jti` into the revocation
+/// cache; `validate_token` must reject it on the session path.
 #[tokio::test]
-async fn revoked_delegation_not_in_listing() {
+async fn revoked_delegation_rejects_previously_issued_obo_token() {
     let harness = common::TestHarness::embedded()
         .await
         .expect("test setup failed");
@@ -208,22 +215,36 @@ async fn revoked_delegation_not_in_listing() {
         dpop_jkt: None,
     };
 
-    identity
+    let exchange = identity
         .rfc8693_token_exchange(&realm_id, &request)
         .expect("exchange should succeed");
+    let obo_token = exchange.access_token.clone();
+
+    // Sanity: the freshly-issued OBO token validates before revocation.
+    identity
+        .validate_token(&realm_id, &obo_token)
+        .expect("OBO token must be valid before consent revocation");
 
     let user_sub = user_id.to_string();
     let grants = identity
         .list_delegation_grants(&realm_id, &user_sub)
         .expect("list should succeed");
     assert_eq!(grants.len(), 1, "setup: one delegation expected");
-
     let delegation_id = grants[0].delegation_id.clone();
 
+    // Revoke the delegation consent.
     identity
         .revoke_delegation_grant(&realm_id, &delegation_id, &user_sub)
         .expect("revoke should succeed");
 
+    // The previously-issued session-bound OBO token must now be rejected.
+    let after = identity.validate_token(&realm_id, &obo_token);
+    assert!(
+        after.is_err(),
+        "revoked delegation must invalidate the previously-issued OBO token, got: {after:?}"
+    );
+
+    // And it must no longer appear in the listing (retains prior coverage).
     let grants_after = identity
         .list_delegation_grants(&realm_id, &user_sub)
         .expect("list after revoke should succeed");

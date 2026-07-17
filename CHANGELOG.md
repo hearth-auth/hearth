@@ -7,6 +7,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Delegation consent revocation now invalidates session-bound OBO tokens** —
+  revoking a delegation grant projected the token's `jti` into the revocation
+  cache, but `validate_token` only consulted that cache on the sessionless
+  (client_credentials) path. A session-bound on-behalf-of token therefore stayed
+  valid until natural expiry after its consent was revoked; the session path now
+  checks the revocation cache too (G1, HEA-1753).
+- **Capability-token JTI is spent only after all authorization checks pass** —
+  the single-use JTI for an approval capability token was recorded before the M5
+  caller-binding check, so an unauthorized caller could grief the legitimate
+  holder by replaying the token once (burning the JTI) and causing the rightful
+  caller's use to be rejected as already-spent. The JTI is now recorded only
+  after caller binding and all other checks succeed (G2, HEA-1753).
+- **Token exchange rejects a revoked agent anywhere in the delegation chain** —
+  a revoked agent previously resolved to the loosest global delegation-depth
+  ceiling (fail-open) and was not blocked as an actor. RFC 8693 token exchange
+  now rejects the request when the actor or any entry in the subject's `act`
+  chain resolves to a `Revoked` agent (G3, HEA-1753).
 - **MFA completion no longer bypasses pending required actions** — the browser
   MFA challenge (`POST /ui/mfa-challenge`) and forced-enrollment
   (`POST /ui/mfa-enroll-required/activate`) handlers now run the required-action

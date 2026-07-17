@@ -601,13 +601,14 @@ impl EmbeddedIdentityEngine {
             return Err(deny());
         }
 
-        // Record JTI as spent (single-use).
-        self.storage
-            .put(realm_id, &jti_key, b"1")
-            .map_err(Self::storage_err)?;
-
         // M5 — caller binding: capability token must have been minted for the caller.
         // Prevents agent A from consuming an approval that was issued for agent B.
+        //
+        // G2: this check MUST run before the JTI is burned. Spending the JTI on a
+        // failed caller-binding lets any actor grief the legitimate caller by
+        // replaying their capability token once — the single-use guard would then
+        // reject the rightful holder. JTI is recorded as spent only after every
+        // authorization check below has passed.
         if claims.sub != caller_sub {
             return Err(deny());
         }
@@ -615,6 +616,12 @@ impl EmbeddedIdentityEngine {
         // Parse agent ID from `sub`.
         let agent_uuid = uuid::Uuid::parse_str(&claims.sub).map_err(|_| deny())?;
         let agent_id = AgentId::new(agent_uuid);
+
+        // Record JTI as spent (single-use) — only now that all authorization
+        // checks (tool/action, caller binding, agent parse) have passed.
+        self.storage
+            .put(realm_id, &jti_key, b"1")
+            .map_err(Self::storage_err)?;
 
         // Emit audit event for the authorized invocation.
         let _ = self.record_audit(

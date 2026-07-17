@@ -3575,14 +3575,27 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         claims: &TokenClaims,
     ) -> Result<(), IdentityError> {
-        if let Some(ref jti) = claims.jti {
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            let cache = self.revoked_jti_cache.load();
-            if cache.contains_key(cache_key.as_str()) {
-                return Err(IdentityError::InvalidToken);
-            }
+        if self.is_token_jti_revoked(realm_id, claims) {
+            return Err(IdentityError::InvalidToken);
         }
         Ok(())
+    }
+
+    /// Returns `true` when the token's `jti` appears in the revocation
+    /// projection (`revoked_jti_cache`). Both the sessionless
+    /// (client_credentials) path and the session-bound path consult this so a
+    /// revoked delegation grant is honored immediately rather than at natural
+    /// expiry (G1).
+    ///
+    /// Hot-path safe: a single atomic `load()` — no lock, no syscall (§10.5).
+    fn is_token_jti_revoked(&self, realm_id: &RealmId, claims: &TokenClaims) -> bool {
+        let Some(ref jti) = claims.jti else {
+            return false;
+        };
+        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
+        self.revoked_jti_cache
+            .load()
+            .contains_key(cache_key.as_str())
     }
 
     /// Emits `LoginFailed` and, when the lockout threshold is first reached,
@@ -6795,6 +6808,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.verify_client_credentials_token(realm_id, &claims)?;
             return Ok(claims);
         };
+
+        // G1: session-bound OBO / delegation tokens carry a `jti` that consent
+        // revocation projects into `revoked_jti_cache`. The sessionless path
+        // already consults this cache via `verify_client_credentials_token`;
+        // the session path must too, or a revoked delegation grant stays
+        // honored until the token's natural expiry (broken revocation).
+        if self.is_token_jti_revoked(realm_id, &claims) {
+            return Err(IdentityError::InvalidToken);
+        }
 
         // Look up session — this is the actual session-validity check.
         let session = self
@@ -13274,6 +13296,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 (actor_sub, actor_scope, subject_claims.permissions.clone())
             };
 
+        // G3: a revoked agent must not participate in a delegation chain —
+        // neither as the immediate actor nor anywhere in the subject's existing
+        // `act` chain. Previously a revoked actor resolved to `None` in
+        // `resolve_agent_max_depth`, which fell back to the loosest global
+        // ceiling (fail-open) instead of blocking the exchange. Reject outright.
+        if self.agent_sub_is_revoked(realm_id, &actor_sub) {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: "actor is a revoked agent".to_string(),
+                oauth_error: "invalid_grant",
+            });
+        }
+        let mut chain_entry = subject_claims.act.as_ref();
+        while let Some(act) = chain_entry {
+            if self.agent_sub_is_revoked(realm_id, &act.sub) {
+                return Err(IdentityError::TokenExchangeRejected {
+                    reason: "act chain contains a revoked agent".to_string(),
+                    oauth_error: "invalid_grant",
+                });
+            }
+            chain_entry = act.act.as_deref();
+        }
+
         // 4. Delegation depth check.
         let existing_depth = subject_claims.act.as_ref().map_or(0, |a| a.depth());
         let new_depth = existing_depth + 1;
@@ -13674,6 +13718,30 @@ impl EmbeddedIdentityEngine {
             return None;
         }
         Some(agent.max_delegation_depth())
+    }
+
+    /// Returns `true` when `sub` resolves to a registered agent whose status is
+    /// [`AgentStatus::Revoked`].
+    ///
+    /// Non-agent subjects (plain clients, unparseable IDs, or unknown agents)
+    /// return `false` — only an explicitly revoked agent record blocks
+    /// delegation. Used by token exchange to reject any chain that names a
+    /// revoked agent as the actor or as a prior delegator (G3). Without this a
+    /// revoked actor resolved to `None` in [`Self::resolve_agent_max_depth`],
+    /// which fell back to the loosest global ceiling (fail-open).
+    fn agent_sub_is_revoked(&self, realm_id: &RealmId, sub: &str) -> bool {
+        let raw = sub
+            .strip_prefix("agent:agt_")
+            .or_else(|| sub.strip_prefix("agt_"))
+            .unwrap_or(sub);
+        let Ok(uuid) = uuid::Uuid::parse_str(raw) else {
+            return false;
+        };
+        let agent_id = crate::core::AgentId::new(uuid);
+        matches!(
+            self.get_agent(realm_id, &agent_id),
+            Ok(Some(agent)) if matches!(agent.status(), AgentStatus::Revoked)
+        )
     }
 
     /// Returns the effective delegation depth ceiling for the new token.
@@ -19278,6 +19346,148 @@ mod tests {
         assert_eq!(
             ceiling, 5,
             "no prior act chain: ceiling must equal actor's own max_delegation_depth"
+        );
+    }
+
+    // G3 regression (HEA-1753): a revoked agent anywhere in the delegation chain
+    // must cause token exchange to be rejected. Previously a revoked agent
+    // resolved to `None` in `resolve_agent_max_depth`, which fell back to the
+    // loosest global ceiling (fail-open) and was silently ignored in the chain.
+
+    #[test]
+    fn agent_sub_is_revoked_distinguishes_active_revoked_and_nonagent() {
+        use crate::identity::{AgentOwner, CreateAgentRequest};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let owner = create_test_user(&engine, &realm);
+        let agent = engine
+            .create_agent(
+                &realm,
+                &CreateAgentRequest {
+                    display_name: "revocable-agent".to_string(),
+                    description: None,
+                    owner: AgentOwner::User(owner.id().clone()),
+                    capabilities: vec![],
+                    max_delegation_depth: 5,
+                },
+                None,
+            )
+            .expect("create agent");
+        let agent_sub = format!("{}", agent.id());
+
+        assert!(
+            !engine.agent_sub_is_revoked(&realm, &agent_sub),
+            "active agent must not be flagged revoked"
+        );
+        assert!(
+            !engine.agent_sub_is_revoked(&realm, &uuid::Uuid::new_v4().to_string()),
+            "a non-agent subject must never be flagged revoked"
+        );
+
+        engine
+            .revoke_agent(&realm, agent.id(), None)
+            .expect("revoke agent");
+        assert!(
+            engine.agent_sub_is_revoked(&realm, &agent_sub),
+            "revoked agent must be flagged"
+        );
+    }
+
+    #[test]
+    fn token_exchange_rejects_revoked_agent_in_act_chain() {
+        use crate::core::ClientId;
+        use crate::identity::tokens::{decode_claims_unverified, ActClaim};
+        use crate::identity::{
+            AgentOwner, CreateAgentRequest, Rfc8693Request, SessionContext, TokenIssuanceContext,
+        };
+        use std::collections::BTreeSet;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // Agent A is a prior delegator recorded in the subject token's act chain.
+        let owner = create_test_user(&engine, &realm);
+        let agent_a = engine
+            .create_agent(
+                &realm,
+                &CreateAgentRequest {
+                    display_name: "chain-agent".to_string(),
+                    description: None,
+                    owner: AgentOwner::User(owner.id().clone()),
+                    capabilities: vec![],
+                    max_delegation_depth: 5,
+                },
+                None,
+            )
+            .expect("create agent A");
+        let agent_a_sub = format!("{}", agent_a.id());
+
+        // Build a valid, session-bound subject token, then re-sign it with an
+        // `act` chain naming agent A (issuance API does not expose act directly).
+        let subject = create_test_user(&engine, &realm);
+        let session = engine
+            .create_session(&realm, subject.id(), &SessionContext::default())
+            .expect("create subject session");
+        let mut granted = BTreeSet::new();
+        granted.insert("mcp:tools:invoke".to_string());
+        let base = engine
+            .issue_tokens_with_context(
+                &realm,
+                subject.id(),
+                session.id(),
+                &TokenIssuanceContext {
+                    client_id: None,
+                    granted_scopes: granted,
+                    oid: None,
+                    resource: None,
+                },
+            )
+            .expect("issue subject token");
+        let mut claims =
+            decode_claims_unverified(base.access_token()).expect("decode subject claims");
+        claims.act = Some(ActClaim {
+            sub: agent_a_sub.clone(),
+            act: None,
+        });
+        let subject_token = engine
+            .get_signing_key_or_default(&realm)
+            .issue_token(&claims)
+            .expect("re-sign subject token with act chain");
+
+        let client_id = ClientId::new(uuid::Uuid::new_v4());
+        let make_req = || Rfc8693Request {
+            client_id: client_id.clone(),
+            subject_token: subject_token.clone(),
+            subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            actor_token: None,
+            actor_token_type: None,
+            requested_token_type: None,
+            scope: Some("mcp:tools:invoke".to_string()),
+            resource: None,
+            audience: None,
+            dpop_jkt: None,
+        };
+
+        // Control: with agent A active, the exchange succeeds.
+        let before = engine.rfc8693_token_exchange(&realm, &make_req());
+        assert!(
+            before.is_ok(),
+            "exchange with an active agent in the act chain should succeed, got: {before:?}"
+        );
+
+        // Revoke agent A — the same exchange must now be rejected.
+        engine
+            .revoke_agent(&realm, agent_a.id(), None)
+            .expect("revoke agent A");
+        let after = engine.rfc8693_token_exchange(&realm, &make_req());
+        assert!(
+            matches!(
+                after,
+                Err(IdentityError::TokenExchangeRejected { ref reason, .. })
+                    if reason.contains("revoked agent")
+            ),
+            "a revoked agent in the act chain must reject the exchange, got: {after:?}"
         );
     }
 
