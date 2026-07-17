@@ -12,10 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   then performed its own DNS lookup before `connect()`, leaving a DNS-rebinding
   TOCTOU: a hostname resolving to a public IP during the guard could be re-bound
   to an internal/link-local address (IMDS `169.254.169.254`, RFC 1918) before
-  the connect. All three webhook egress paths (dispatcher, approval notifier,
-  pre-token webhook) now build their `ureq` agent with an SSRF-validating
-  resolver that rejects private/reserved addresses on the *exact* lookup that
-  feeds `connect()`, collapsing the two lookups into one (HEA-1762).
+  the connect. All four webhook egress paths (dispatcher, approval notifier,
+  pre-token webhook, and the admin webhook test-ping) now build their `ureq`
+  agent with an SSRF-validating resolver that rejects private/reserved addresses
+  on the *exact* lookup that feeds `connect()`, collapsing the two lookups into
+  one. The admin test-ping additionally now pins `max_redirects(0)` so a `3xx`
+  can no longer chase an internal target, matching the other paths (HEA-1762).
 - **gRPC audit reads require `hearth.realm.admin`; OIDC nonce replay scoped;
   CSP tightened** — a batch of function-level authz and defense-in-depth fixes
   (HEA-1757). (Z1) `AuditService.list_events` and `verify_integrity` on the gRPC

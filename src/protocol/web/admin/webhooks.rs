@@ -750,12 +750,17 @@ async fn fire_test_ping_result(url: &str, secret: Option<&str>) -> (bool, String
             Ok(b) => b,
             Err(e) => return (false, format!("Failed to build payload: {e}")),
         };
-        let agent = ureq::config::Config::builder()
+        // ssrf_agent SSRF-validates the connect-time DNS lookup, closing the
+        // DNS-rebinding TOCTOU left open by the pre-flight check_webhook_url
+        // above (W1 residual risk, HEA-1762). This admin test-ping is a fourth
+        // webhook egress path and must be guarded like the other three.
+        let config = ureq::config::Config::builder()
             .timeout_connect(Some(std::time::Duration::from_secs(5)))
             .timeout_global(Some(std::time::Duration::from_secs(10)))
             .https_only(true)
-            .build()
-            .new_agent();
+            .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+            .build();
+        let agent = crate::webhook::ssrf::ssrf_agent(config);
         let mut req = agent
             .post(&url)
             .header("Content-Type", "application/json")

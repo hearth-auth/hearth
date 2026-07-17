@@ -769,4 +769,13 @@ mod tests {
         // Mirrors src/identity/pre_token_webhook.rs::UreqPreTokenWebhookTransport.
         assert_redirect_refused("identity::pre_token_webhook");
     }
+
+    #[test]
+    fn admin_test_ping_egress_refuses_redirect_to_internal() {
+        // Mirrors src/protocol/web/admin/webhooks.rs::fire_test_ping_result — the
+        // fourth webhook egress path. It previously used a default agent (no
+        // MAX_WEBHOOK_REDIRECTS), so a 3xx could chase an internal target; it now
+        // builds via ssrf_agent with the shared redirect policy (HEA-1762).
+        assert_redirect_refused("web::admin::webhooks::fire_test_ping");
+    }
 }
