@@ -717,3 +717,76 @@ async fn mfa_challenge_post_rejected_with_mismatched_csrf() {
         "mismatched CSRF token must be rejected with 422"
     );
 }
+
+/// HEA-1752 D1: a user with a pending required action (e.g. forced password
+/// change) must NOT obtain a session by completing the MFA challenge. The
+/// completion handler must redirect into the required-action flow and issue
+/// no session cookie, mirroring the direct-login and OIDC interceptors.
+#[tokio::test]
+async fn mfa_challenge_post_with_pending_required_action_blocks_session() {
+    use hearth::identity::RequiredAction;
+
+    let rig = build_rig();
+    let secret = enroll_mfa(&rig);
+
+    // Attach a pending required action to the user.
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![RequiredAction::UpdatePassword]),
+                ..Default::default()
+            },
+        )
+        .expect("set required action");
+
+    // Log in (password OK) to obtain the MFA pending cookie.
+    let login_resp = post_login(rig.app.clone(), "alice@acme.test", PASSWORD, None).await;
+    let cookies = set_cookies(&login_resp);
+    let pending_value =
+        find_cookie_value(&cookies, "hearth_ui_mfa_pending").expect("pending cookie must be set");
+
+    // Complete MFA with a valid TOTP for the next step (enrollment consumed the
+    // current step).
+    let code = compute_totp_code(&secret, current_unix_secs() + 30);
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/mfa-challenge")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ui_mfa_pending={pending_value}"),
+                )
+                .body(Body::from(format!("code={code}")))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    // Must redirect into the required-action flow, NOT to /ui.
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("Location header");
+    assert!(
+        location.starts_with("/required-action/"),
+        "must redirect into required-action flow, got: {location}"
+    );
+
+    // Crucially, NO usable session cookie may be issued.
+    let resp_cookies = set_cookies(&response);
+    assert!(
+        !resp_cookies
+            .iter()
+            .any(|c| c.starts_with("hearth_ui_session=") && !c.contains("Max-Age=0")),
+        "session cookie must NOT be set while a required action is pending: {resp_cookies:?}"
+    );
+}

@@ -905,6 +905,21 @@ pub trait IdentityEngine: Send + Sync {
     /// Reads directly from WAL storage so the check survives server restarts.
     fn is_mfa_nonce_burned(&self, realm_id: &RealmId, nonce: &str) -> Result<bool, IdentityError>;
 
+    /// Atomically redeems an MFA pending-cookie nonce.
+    ///
+    /// Holds a per-nonce redemption lock across the burned-check and burn write
+    /// so two concurrent redemptions of the same nonce cannot both succeed
+    /// (TOCTOU — HEA-1752 M1a). Returns `Ok(true)` when this call burned the
+    /// nonce for the first time and the caller may proceed to create a session,
+    /// or `Ok(false)` when it was already burned (replayed or concurrent).
+    /// `exp_secs` matches the semantics of [`burn_mfa_nonce`](Self::burn_mfa_nonce).
+    fn redeem_mfa_nonce(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        exp_secs: u64,
+    ) -> Result<bool, IdentityError>;
+
     /// Generates a new set of recovery codes, replacing any existing ones.
     ///
     /// Requires MFA to be already enabled. Returns the new plaintext codes

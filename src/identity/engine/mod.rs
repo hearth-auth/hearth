@@ -5917,6 +5917,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Err(e) = self.bump_user_sv_inner(realm_id, user_id, retention) {
             tracing::warn!(realm=%realm_id, user=%user_id.as_uuid(), error=%e, "sv bump on password change failed");
         }
+        // D2 (HEA-1752): existing sessions are revoked by `set_password` above
+        // (A-42: any credential change revokes all of the user's sessions), so a
+        // stolen session cookie cannot outlive the credential. Guarded by the
+        // `change_password_revokes_existing_sessions` regression test.
         Ok(())
     }
 
@@ -7409,6 +7413,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get(realm_id, &key)
             .map_err(Self::storage_err)?;
         Ok(result.is_some())
+    }
+
+    fn redeem_mfa_nonce(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        exp_secs: u64,
+    ) -> Result<bool, IdentityError> {
+        // M1a (HEA-1752): serialize the burned-check → burn write for this nonce
+        // under a per-nonce redemption lock so two concurrent MFA-challenge
+        // submissions replaying the same pending cookie cannot both pass the
+        // check before either persists the burn.
+        let lock = self.token_redemption_lock(nonce);
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
+        if self.is_mfa_nonce_burned(realm_id, nonce)? {
+            return Ok(false);
+        }
+        self.burn_mfa_nonce(realm_id, nonce, exp_secs)?;
+        Ok(true)
     }
 
     fn load_pending_recovery_codes(

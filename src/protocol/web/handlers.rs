@@ -1735,34 +1735,56 @@ pub async fn mfa_challenge_submit(
         }
     }
 
-    // MFA passed — enforce single-use nonce before creating the session.
-    // Nonce is persisted in WAL storage so replay is rejected even after a
-    // server restart (fixes HSS-009 / HEA-SEC-25).
+    // MFA passed — atomically redeem the single-use nonce before creating the
+    // session. Redemption is serialized per-nonce (M1a / HEA-1752) and persisted
+    // in WAL storage so replay is rejected even after a server restart and even
+    // under concurrent submissions (fixes HSS-009 / HEA-SEC-25 / HEA-1752).
     {
         let nonce = &pending.nonce;
-        match state.identity.is_mfa_nonce_burned(&pending.realm_id, nonce) {
-            Ok(true) => {
-                // Nonce already consumed — replayed pending cookie.
-                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "mfa-challenge: nonce replay check failed");
-                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
-            }
-            Ok(false) => {}
-        }
         let exp_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
             .saturating_add(super::auth::MFA_PENDING_TTL_SECS);
-        if let Err(e) = state
+        match state
             .identity
-            .burn_mfa_nonce(&pending.realm_id, nonce, exp_secs)
+            .redeem_mfa_nonce(&pending.realm_id, nonce, exp_secs)
         {
-            tracing::warn!(error = %e, "mfa-challenge: failed to persist burned nonce");
-            return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            Ok(true) => {}
+            Ok(false) => {
+                // Nonce already consumed — replayed or concurrent pending cookie.
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "mfa-challenge: nonce redemption failed");
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
         }
+    }
+
+    // --- Required-action gate (D1 / HEA-1752) ---
+    // Completing MFA proves the second factor but must NOT bypass pending
+    // required actions (forced password change, forced enrollment, email
+    // verification). Mirror the direct-login and OIDC interceptors: if any
+    // action is pending, redirect into the required-action flow instead of
+    // issuing a session.
+    let now_ra = crate::core::Timestamp::from_micros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_micros()).ok())
+            .unwrap_or(0),
+    );
+    if let Some(ra_response) = super::required_action::required_action_check_browser(
+        &state,
+        &pending.realm_id,
+        &pending.user_id,
+        pending.return_to.as_deref(),
+        &headers,
+        now_ra,
+    ) {
+        state.set_current_realm(pending.realm_id.clone());
+        return ra_response;
     }
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
@@ -1898,6 +1920,7 @@ pub struct MfaEnrollRequiredForm {
 ///
 /// Reads the MFA pending cookie, confirms the enrollment code, enables MFA,
 /// then issues full session + CSRF cookies (same as a successful MFA challenge).
+#[allow(clippy::too_many_lines)]
 pub async fn mfa_enroll_required_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1957,6 +1980,31 @@ pub async fn mfa_enroll_required_submit(
 
     // Enrollment confirmed — complete login.
     let secure = state.is_secure_request(&headers);
+
+    // --- Required-action gate (D1 / HEA-1752) ---
+    // Completing forced MFA enrollment satisfies the enrollment requirement but
+    // must NOT bypass any *other* pending required action (e.g. forced password
+    // change). Mirror the direct-login and OIDC interceptors before issuing a
+    // session. The just-completed TOTP enrollment no longer re-injects
+    // ENROLL_MFA, so this cannot loop.
+    let now_ra = crate::core::Timestamp::from_micros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_micros()).ok())
+            .unwrap_or(0),
+    );
+    if let Some(ra_response) = super::required_action::required_action_check_browser(
+        &state,
+        &pending.realm_id,
+        &pending.user_id,
+        pending.return_to.as_deref(),
+        &headers,
+        now_ra,
+    ) {
+        state.set_current_realm(pending.realm_id.clone());
+        return ra_response;
+    }
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);

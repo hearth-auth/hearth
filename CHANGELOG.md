@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **MFA completion no longer bypasses pending required actions** — the browser
+  MFA challenge (`POST /ui/mfa-challenge`) and forced-enrollment
+  (`POST /ui/mfa-enroll-required/activate`) handlers now run the required-action
+  gate before issuing a session, matching the direct-login and OIDC
+  interceptors. A user with a pending required action (forced password change,
+  email verification, forced enrollment) is redirected into the required-action
+  flow instead of receiving a session (D1, HEA-1752).
+- **MFA pending-cookie nonce redemption is now atomic** — the single-use nonce
+  check-and-burn is serialized under a per-nonce lock, so two concurrent MFA
+  challenge submissions replaying the same pending cookie can no longer both
+  succeed (M1a, HEA-1752).
 - **SAML IdP SSO endpoints now require an authenticated session** — `GET`/`POST`
   `/ui/realms/{realm}/saml/sso` and `GET /ui/realms/{realm}/saml/sso/init` previously minted a
   signed SAML assertion for any anonymous caller (a signing oracle) using a fixed placeholder
