@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **OAuth client registration now requires admin authorization** — `POST /clients` (REST) and
+  `OAuthService.register_client` (gRPC) previously skipped every authorization gate, letting any
+  unauthenticated caller mint OAuth clients (bypassing the realm's `dcr_policy` that guards
+  `POST /register`). Both now require an admin bearer token carrying `hearth.clients.admin` (or
+  `hearth.admin`), matching the `/admin/clients` and `ApplicationAdminService.create_application`
+  gates. Unauthenticated dynamic registration remains available via `POST /register` under
+  `dcr_policy`. Proto-registered clients now default to `ThirdParty` trust, so they present the
+  consent screen instead of silently skipping it (HEA-1750).
 - **Delegated (`act`) token RBAC permissions now attenuated** — token exchange previously copied
   the subject's full `permissions` claim verbatim into the delegated token, allowing any actor
   (regardless of its own RBAC grants) to acquire admin-level access by exchanging an admin's

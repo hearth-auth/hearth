@@ -16,6 +16,7 @@ use crate::protocol::convert::oauth::{
 use crate::protocol::proto::identity::v1 as pb;
 use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 
+use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::{
     extract_grpc_user_auth, extract_realm_id, identity_to_status, verify_grpc_client_auth,
 };
@@ -175,12 +176,17 @@ impl OAuthService for OAuthSvc {
         &self,
         req: Request<pb::RegisterClientRequest>,
     ) -> Result<Response<pb::OAuthClient>, Status> {
-        let realm_id = extract_realm_id(req.metadata())?;
+        // HEA-1750 (A1): client registration is a privileged operation. This RPC
+        // previously only read the realm header, letting any caller mint OAuth
+        // clients. Require an admin token carrying `hearth.clients.admin`, matching
+        // the `ApplicationAdminService::create_application` gate.
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let body: domain::RegisterClientRequest = req.into_inner().into();
         let client = self
             .state
             .identity
-            .register_client(&realm_id, &body)
+            .register_client(&auth.realm_id, &body)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::OAuthClient::from(&client)))
     }

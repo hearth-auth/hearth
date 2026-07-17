@@ -581,28 +581,46 @@ async fn realm_token_preflight(
     token_options_preflight(State(state), headers, realm_id).await
 }
 
-/// Register an OAuth 2.0 client.
+/// Register an OAuth 2.0 client (privileged admin API).
 ///
-/// Requires `X-Realm-ID` header. Returns the created client record.
+/// Requires `X-Realm-ID` header and an admin bearer token carrying
+/// `hearth.clients.admin` (or `hearth.admin`). Unauthenticated dynamic
+/// registration is served by `POST /register`, which is gated by the realm's
+/// `dcr_policy`. HEA-1750 (A1): this handler previously skipped both gates,
+/// letting anyone mint OAuth clients — it now enforces the same authorization
+/// as the `/admin/clients` handler.
 async fn register_client(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<pb::RegisterClientRequest>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(t) => t,
+    let auth = match super::extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = super::require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
 
     let mut request = crate::identity::RegisterClientRequest::from(body);
     request.client_secret = None;
 
-    match state.identity.register_client(&realm_id, &request) {
-        Ok(client) => (
-            StatusCode::CREATED,
-            Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
-        )
-            .into_response(),
+    match state.identity.register_client(&auth.realm_id, &request) {
+        Ok(client) => {
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::ClientRegistered,
+                resource_type: "client".to_string(),
+                resource_id: client.client_id().as_uuid().to_string(),
+                metadata: Some(serde_json::json!({"via": "clients_api"})),
+            });
+            (
+                StatusCode::CREATED,
+                Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
+            )
+                .into_response()
+        }
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
