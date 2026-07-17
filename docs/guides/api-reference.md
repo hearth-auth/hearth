@@ -216,3 +216,151 @@ docs/api/
 scripts/
 └── merge_openapi.py           # Merges proto-derived + supplement → openapi.json
 ```
+
+---
+
+## POST /clients — Admin authentication required
+
+**Who this affects:** integrators or scripts that call `POST /clients` (REST) or `OAuthService.register_client` (gRPC) to create OAuth clients programmatically.
+
+`POST /clients` is an admin operation. As of [HEA-1750](/HEA/issues/HEA-1750), both the
+REST endpoint and the equivalent gRPC RPC require a Bearer token carrying
+`hearth.clients.admin` (or the umbrella `hearth.admin`). Unauthenticated calls receive
+`401 Unauthorized`.
+
+### Required header
+
+```http
+Authorization: Bearer <admin-token>
+```
+
+### Example
+
+```bash
+# Obtain an admin token first (dev: use the bootstrap token)
+ADMIN_TOKEN="<your-admin-token>"
+
+curl -s -X POST http://127.0.0.1:8420/clients \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "My App",
+    "redirect_uris": ["https://myapp.example.com/callback"],
+    "grant_types": ["authorization_code"]
+  }'
+```
+
+A token without `hearth.clients.admin` receives `403 Forbidden`.
+
+### gRPC (`OAuthService.register_client`)
+
+The gRPC RPC applies the same gate. Pass the admin token as `Authorization: Bearer
+<admin-token>` gRPC metadata alongside the standard `x-realm-id` header.
+
+### Unauthenticated dynamic client registration
+
+If your use-case is self-service client registration (third-party apps registering
+themselves), use `POST /register` instead. That endpoint follows the realm's
+`dcr_policy` and does **not** require an admin token:
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/register \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Third-Party App",
+    "redirect_uris": ["https://thirdparty.example.com/callback"]
+  }'
+```
+
+The realm-scoped equivalent is `POST /realms/<realm-name>/register`. Whether DCR is
+open, token-gated, or disabled is controlled by `dcr_policy` in `hearth.yaml` (see
+[CONFIGURATION.md](../specs/CONFIGURATION.md#dcr_policy)).
+
+---
+
+## POST /token — Confidential-client authentication
+
+**Who this affects:** integrators using confidential clients (clients with a
+`client_secret`) on the `authorization_code` or `refresh_token` grant types.
+
+As of [HEA-1755](/HEA/issues/HEA-1755), the token endpoint (`POST /token` and
+`POST /realms/<realm-name>/token`) enforces client authentication for confidential
+clients on both grant arms. Public clients (PKCE-only, no `client_secret`) are
+**unaffected**.
+
+### Client authentication methods
+
+Hearth accepts credentials in two forms (RFC 6749 §2.3.1). HTTP Basic Auth is preferred:
+
+| Method | How to supply credentials |
+|--------|--------------------------|
+| **HTTP Basic Auth** (preferred) | `Authorization: Basic base64(<client_id>:<client_secret>)` |
+| **Body parameters** | `client_id=<id>&client_secret=<secret>` in the form body |
+
+### `grant_type=authorization_code` — code exchange
+
+Confidential clients must authenticate when redeeming an authorization code. The server
+returns `401 invalid_client` if the secret is missing or wrong.
+
+```bash
+# HTTP Basic Auth (preferred)
+curl -s -X POST http://127.0.0.1:8420/token \
+  -u "<client-id>:<client-secret>" \
+  -d "grant_type=authorization_code" \
+  -d "code=<auth-code>" \
+  -d "redirect_uri=https://myapp.example.com/callback"
+```
+
+```bash
+# Body parameters (alternative)
+curl -s -X POST http://127.0.0.1:8420/token \
+  -d "grant_type=authorization_code" \
+  -d "client_id=<client-id>" \
+  -d "client_secret=<client-secret>" \
+  -d "code=<auth-code>" \
+  -d "redirect_uri=https://myapp.example.com/callback"
+```
+
+Unknown or non-existent `client_id` values still surface `invalid_grant` (not
+`invalid_client`) so that a bad code cannot be used to confirm whether a client
+exists.
+
+### `grant_type=refresh_token` — token refresh
+
+Confidential clients must authenticate on refresh, **and** the refresh token is now
+bound to the client that originally received it. A refresh token issued to client A
+cannot be redeemed by client B or by an unauthenticated request.
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/token \
+  -u "<client-id>:<client-secret>" \
+  -d "grant_type=refresh_token" \
+  -d "refresh_token=<refresh-token>"
+```
+
+Presenting a refresh token with the wrong client identity — or without any client
+credentials — returns `401 invalid_client`.
+
+### Realm-scoped token endpoint
+
+The realm-scoped endpoint (`POST /realms/<realm-name>/token`) enforces the same rules:
+
+```bash
+curl -s -X POST http://127.0.0.1:8420/realms/myrealm/token \
+  -u "<client-id>:<client-secret>" \
+  -d "grant_type=authorization_code" \
+  -d "code=<auth-code>" \
+  -d "redirect_uri=https://myapp.example.com/callback"
+```
+
+### gRPC (`OAuthService.token_exchange`)
+
+The gRPC `TokenExchange` RPC applies the same rules. Pass client credentials as
+`x-hearth-client-id` and `x-hearth-client-secret` metadata fields alongside the
+standard `x-realm-id` header.
+
+### Public clients are unaffected
+
+Public clients (PKCE flows with no `client_secret`) continue to authenticate via
+`code_verifier` alone. Do not add a `client_secret` to a public client registration.
