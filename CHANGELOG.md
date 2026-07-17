@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Token endpoint enforces confidential-client authentication** — the
+  `authorization_code` exchange never verified `client_secret`, so a
+  confidential client's code could be redeemed by anyone who intercepted it, and
+  the `refresh_token` grant had no client authentication or token↔client
+  binding. The token endpoint (`POST /token` and `/realms/{realm}/token`, plus
+  the gRPC `TokenExchange` RPC) now requires a valid `client_secret` (HTTP Basic
+  Auth or body parameter) for confidential clients on code exchange, and
+  `rotate_grant_family` binds each refresh grant to the confidential client it
+  was issued to — a refresh token minted for one confidential client can no
+  longer be redeemed unauthenticated or by a different client. Public (PKCE)
+  clients are unaffected (O1+O2, HEA-1755).
 - **Webhook egress no longer follows HTTP redirects** — the SSRF guard
   (`check_webhook_url`) only validated a webhook's initial destination, so a
   `3xx` response could bounce the request to an internal/link-local address

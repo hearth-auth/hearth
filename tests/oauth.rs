@@ -319,9 +319,15 @@ async fn refresh_token_rotation_e2e() {
     //    Note: with a real-time clock at the same second, the JWT claims are
     //    identical (Ed25519 is deterministic), so token strings may match.
     //    The rotation is tracked by the stored hash, not the token string.
+    // O1 (HEA-1755): a confidential client must authenticate on refresh. Bind
+    // the refresh call to the client the grant family was issued to.
+    let refresh_bind = hearth::identity::RefreshBindContext {
+        authenticated_client_id: Some(client.client_id().clone()),
+        ..Default::default()
+    };
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm, &original_refresh, None, None)
+        .refresh_tokens(&realm, &original_refresh, None, Some(&refresh_bind))
         .expect("refresh tokens");
 
     // 4. Validate new access token — should succeed

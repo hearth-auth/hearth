@@ -95,8 +95,29 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::TokenExchangeRequest>,
     ) -> Result<Response<pb::OidcTokenResponse>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
+        let md = req.metadata().clone();
         let body = req.into_inner();
         let domain_req = proto_token_exchange_to_domain(&body).map_err(Status::invalid_argument)?;
+
+        // O2 (HEA-1755): confidential clients MUST authenticate on the
+        // code-exchange path. Public (PKCE) and unknown clients pass through —
+        // the exchange enforces PKCE and surfaces invalid_grant for bad codes.
+        if let Ok(Some(client)) = self
+            .state
+            .identity
+            .get_client(&realm_id, &domain_req.client_id)
+        {
+            if client.is_confidential() {
+                let authenticated =
+                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                if authenticated != domain_req.client_id {
+                    return Err(Status::unauthenticated(
+                        "client authentication does not match request client_id",
+                    ));
+                }
+            }
+        }
+
         let resp = self
             .state
             .identity

@@ -392,6 +392,7 @@ fn a49_refresh_bind_context_struct_has_expected_fields() {
     let ctx = RefreshBindContext {
         user_agent: Some("Mozilla/5.0 (Attacker)".to_string()),
         asn: None,
+        authenticated_client_id: None,
     };
     assert_eq!(
         ctx.user_agent.as_deref(),

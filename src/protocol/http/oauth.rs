@@ -386,6 +386,60 @@ fn verify_endpoint_client(
         })
 }
 
+/// Enforces confidential-client authentication on the `authorization_code`
+/// exchange arm (O2, HEA-1755).
+///
+/// The code-exchange path never verified `client_secret`, so a confidential
+/// client's authorization code could be redeemed without proving possession of
+/// the secret. This checks the secret when — and only when — the request names a
+/// registered confidential client:
+/// - unparseable or unknown `client_id` → `Ok(())`, so the exchange itself
+///   surfaces `invalid_grant` for the (bad) code rather than leaking client
+///   existence via a differing error;
+/// - public clients (no `client_secret_hash`) → `Ok(())`, since PKCE alone
+///   authenticates them (RFC 9700 §2.1.1);
+/// - confidential clients → the secret (HTTP Basic Auth preferred, body
+///   `client_secret` fallback) must verify, else `Err` with a 401.
+fn enforce_confidential_client_auth(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body_client_id: &str,
+    body_client_secret: Option<&str>,
+) -> Result<(), Response> {
+    let Ok(uuid) = body_client_id.parse::<uuid::Uuid>() else {
+        return Ok(());
+    };
+    let client_id = ClientId::new(uuid);
+    let client = match state.identity.get_client(realm_id, &client_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(identity_error_to_response(&e).into_response()),
+    };
+    if !client.is_confidential() {
+        return Ok(());
+    }
+    // Confidential client: a valid secret is mandatory. Prefer HTTP Basic Auth
+    // credentials (RFC 6749 §2.3.1), fall back to the body `client_secret`.
+    let secret = parse_basic_auth(headers)
+        .map(|(_, s)| s)
+        .or_else(|| body_client_secret.map(str::to_string));
+    state
+        .identity
+        .authenticate_client(realm_id, &client_id, secret.as_deref())
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Basic realm=\"hearth\"")],
+                Json(serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "client authentication failed"
+                })),
+            )
+                .into_response()
+        })
+}
+
 /// Returns the CORS `Access-Control-Allow-Origin` value for `origin` if it
 /// matches an entry in the client's dedicated `cors_origins` allowlist.
 ///
@@ -1164,6 +1218,19 @@ async fn token_exchange_impl(
 
     match grant_type {
         "authorization_code" => {
+            // O2 (HEA-1755): confidential clients must authenticate on the
+            // code-exchange arm; public (PKCE) clients and unknown clients pass
+            // through unchanged.
+            if let Err(resp) = enforce_confidential_client_auth(
+                &state,
+                &realm_id,
+                &headers,
+                &body.client_id,
+                body.client_secret.as_deref(),
+            ) {
+                return resp;
+            }
+
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -1224,12 +1291,35 @@ async fn token_exchange_impl(
                     .into_response();
             };
 
+            // O1 (HEA-1755): authenticate the presenting client. Confidential
+            // clients MUST supply a valid secret; public clients are identified
+            // by client_id alone. The engine binds the grant family to this
+            // authenticated identity in rotate_grant_family. Requests with no
+            // client_id and no Basic Auth (legacy session refresh) pass through
+            // unauthenticated — those grant families carry no client binding.
+            let authenticated_client_id =
+                if parse_basic_auth(&headers).is_some() || !body.client_id.trim().is_empty() {
+                    match verify_endpoint_client(
+                        &state,
+                        &realm_id,
+                        &headers,
+                        Some(body.client_id.as_str()),
+                        body.client_secret.as_deref(),
+                    ) {
+                        Ok(cid) => Some(cid),
+                        Err(resp) => return resp,
+                    }
+                } else {
+                    None
+                };
+
             let refresh_bind = crate::identity::RefreshBindContext {
                 user_agent: headers
                     .get(axum::http::header::USER_AGENT)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
                 asn: None,
+                authenticated_client_id,
             };
 
             match state.identity.refresh_tokens(
@@ -2216,6 +2306,18 @@ async fn realm_token_exchange(
 
     let mut resp = match grant_type {
         "authorization_code" => {
+            // O2 (HEA-1755): confidential clients must authenticate on the
+            // code-exchange arm; public (PKCE) clients and unknown clients pass
+            // through unchanged.
+            if let Err(resp) = enforce_confidential_client_auth(
+                &state,
+                &realm_id,
+                &headers,
+                &body.client_id,
+                body.client_secret.as_deref(),
+            ) {
+                return resp;
+            }
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -2264,12 +2366,31 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
+            // O1 (HEA-1755): authenticate the presenting client (see the
+            // header-realm handler for rationale). The engine binds the grant
+            // family to this authenticated identity in rotate_grant_family.
+            let authenticated_client_id =
+                if parse_basic_auth(&headers).is_some() || !body.client_id.trim().is_empty() {
+                    match verify_endpoint_client(
+                        &state,
+                        &realm_id,
+                        &headers,
+                        Some(body.client_id.as_str()),
+                        body.client_secret.as_deref(),
+                    ) {
+                        Ok(cid) => Some(cid),
+                        Err(resp) => return resp,
+                    }
+                } else {
+                    None
+                };
             let refresh_bind = crate::identity::RefreshBindContext {
                 user_agent: headers
                     .get(axum::http::header::USER_AGENT)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
                 asn: None,
+                authenticated_client_id,
             };
             match state.identity.refresh_tokens(
                 &realm_id,
