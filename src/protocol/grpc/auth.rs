@@ -78,7 +78,8 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
     Ok(AdminAuth {
         realm_id,
         user_id,
-        permissions: claims.permissions,
+        // `claims` is an `Arc<TokenClaims>` (HEA-1771); clone the owned field.
+        permissions: claims.permissions.clone(),
     })
 }
 

@@ -2988,7 +2988,8 @@ impl EmbeddedIdentityEngine {
         );
 
         Ok(crate::identity::oidc::UserInfoResponse {
-            sub: claims.sub,
+            // `claims` is an `Arc<TokenClaims>` (HEA-1771); clone the owned field.
+            sub: claims.sub.clone(),
             email: custom
                 .get("email")
                 .and_then(|value| value.as_str().map(str::to_string)),

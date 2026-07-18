@@ -39,6 +39,57 @@ fn hex_encode(bytes: &[u8]) -> String {
         })
 }
 
+/// Fixed-capacity stack buffer implementing [`std::fmt::Write`] for zero-alloc
+/// key formatting on the token-validation hot path.
+///
+/// Writing past the capacity sets an overflow flag and returns
+/// [`std::fmt::Error`], letting callers fall back to a heap allocation for the
+/// rare oversized input while keeping the common case allocation-free.
+struct StackKeyBuf {
+    buf: [u8; 128],
+    len: usize,
+    overflow: bool,
+}
+
+impl StackKeyBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0; 128],
+            len: 0,
+            overflow: false,
+        }
+    }
+
+    /// Returns the written bytes as `&str`, or `None` if a write overflowed the
+    /// buffer (in which case the contents are truncated and must not be used).
+    fn as_str(&self) -> Option<&str> {
+        if self.overflow {
+            return None;
+        }
+        // Bytes originate exclusively from `write_str(&str)`, so they are valid
+        // UTF-8 by construction; `from_utf8` re-verifies rather than using
+        // `unsafe`.
+        std::str::from_utf8(&self.buf[..self.len]).ok()
+    }
+}
+
+impl std::fmt::Write for StackKeyBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        let Some(end) = self.len.checked_add(bytes.len()) else {
+            self.overflow = true;
+            return Err(std::fmt::Error);
+        };
+        if end > self.buf.len() {
+            self.overflow = true;
+            return Err(std::fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(())
+    }
+}
+
 /// Validates capability list bounds: max 50 entries, max 256 chars each.
 fn validate_agent_capabilities(caps: &[String]) -> Result<(), crate::identity::IdentityError> {
     if caps.len() > 50 {
@@ -3124,6 +3175,59 @@ impl EmbeddedIdentityEngine {
         });
     }
 
+    /// Hot-path session lookup that returns the cached `Arc<Session>` without
+    /// deep-cloning the session body.
+    ///
+    /// Mirrors [`IdentityEngine::get_session`] semantics — validity and A-18
+    /// policy eviction — but avoids the `Session` clone on the zero-allocation
+    /// token validation path. On a warm cache hit this bumps the `Arc` refcount
+    /// only (no heap allocation). Returns `Ok(None)` for missing, revoked or
+    /// expired, or policy-evicted sessions.
+    fn get_session_arc(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> Result<Option<Arc<Session>>, IdentityError> {
+        let now = self.clock.now();
+
+        // Hot path: check the in-process session cache (zero I/O, one atomic load).
+        let cache_key = (realm_id.clone(), session_id.clone());
+        {
+            let cache = self.session_cache.load();
+            if let Some(s) = cache.get(&cache_key) {
+                // Clone the Arc (refcount bump only) before dropping the guard.
+                let arc = Arc::clone(s);
+                drop(cache);
+                return if !arc.is_valid(now) {
+                    self.session_cache_evict(realm_id, session_id);
+                    Ok(None)
+                } else if arc.is_policy_expired(now) {
+                    // A-18: idle or absolute timeout. Lazy eviction.
+                    self.session_cache_evict(realm_id, session_id);
+                    let _ = self.evict_session_by_policy(realm_id, &arc, now);
+                    Ok(None)
+                } else {
+                    Ok(Some(arc))
+                };
+            }
+        }
+
+        // Cache miss: load from storage and warm the cache on a valid result.
+        let session = self.load_session_raw(realm_id, session_id)?;
+        match session {
+            Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
+                self.session_cache_insert(realm_id, &s);
+                Ok(Some(Arc::new(s)))
+            }
+            Some(s) if s.is_valid(now) => {
+                // Policy-expired (A-18) — evict lazily.
+                let _ = self.evict_session_by_policy(realm_id, &s, now);
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Removes a session from the in-process cache after revocation or expiry.
     ///
     /// No-ops when the key is absent to avoid a pointless `rcu()` clone.
@@ -3608,10 +3712,21 @@ impl EmbeddedIdentityEngine {
         let Some(ref jti) = claims.jti else {
             return false;
         };
-        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-        self.revoked_jti_cache
-            .load()
-            .contains_key(cache_key.as_str())
+        use std::fmt::Write as _;
+        let cache = self.revoked_jti_cache.load();
+        // Hot-path zero-alloc: format the `{realm_uuid}:{jti}` composite key into
+        // a fixed stack buffer. A hyphenated UUID is 36 bytes; the buffer holds
+        // the UUID + ':' + a jti of up to ~91 bytes without touching the heap.
+        let mut key = StackKeyBuf::new();
+        if write!(key, "{}:{}", realm_id.as_uuid(), jti).is_ok() {
+            if let Some(k) = key.as_str() {
+                return cache.contains_key(k);
+            }
+        }
+        // Fallback (jti longer than the stack buffer, off the warm path): a
+        // single heap allocation keeps the check correct for oversized jtis.
+        let heap_key = format!("{}:{}", realm_id.as_uuid(), jti);
+        cache.contains_key(heap_key.as_str())
     }
 
     /// Emits `LoginFailed` and, when the lockout threshold is first reached,
@@ -6699,7 +6814,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         token: &str,
-    ) -> Result<TokenClaims, IdentityError> {
+    ) -> Result<Arc<TokenClaims>, IdentityError> {
         // Conditional span: only allocated when debug tracing is active.
         // validate_token is on the zero-allocation hot path; this guard
         // ensures no heap allocation occurs when debug is disabled.
@@ -6720,18 +6835,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // instance. All semantic checks (expiry, realm binding, session
         // validity) still run below — only the Ed25519 verify + serde parse
         // are skipped on a cache hit.
-        let claims = {
+        // `claims` is an `Arc<TokenClaims>`: a warm cache hit bumps the refcount
+        // (zero heap allocation) instead of deep-cloning ~15 String/Vec/Option
+        // fields. The `Arc` is returned to the caller unchanged (HEA-1771).
+        let claims: Arc<TokenClaims> = {
             let maybe_key = Self::token_cache_hash(token);
             let cached = maybe_key.and_then(|k| self.token_claims_cache.load().get(&k).cloned());
             match cached {
-                Some(arc) => (*arc).clone(),
+                Some(arc) => arc,
                 None => {
                     // Cache miss: full Ed25519 verify + serde_json parse.
                     let c = self.verify_token_signature_for_realm(realm_id, token)?;
+                    let arc = Arc::new(c);
                     if let Some(k) = maybe_key {
-                        self.token_claims_cache_insert(k, Arc::new(c.clone()));
+                        self.token_claims_cache_insert(k, Arc::clone(&arc));
                     }
-                    c
+                    arc
                 }
             }
         };
@@ -6835,8 +6954,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // Look up session — this is the actual session-validity check.
+        // `get_session_arc` returns the cached `Arc<Session>` without deep-cloning
+        // the session body, preserving the zero-allocation hot path (HEA-1771).
         let session = self
-            .get_session(realm_id, &sid)?
+            .get_session_arc(realm_id, &sid)?
             .ok_or(IdentityError::InvalidToken)?;
 
         // Bind claims.sub to session owner (defense-in-depth against sub
