@@ -395,7 +395,10 @@ async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
         .expect("corp realm exists");
     let idps = identity.list_idps(realm.id()).expect("list idps");
 
-    let strict = idps.iter().find(|c| c.name == "strict").expect("strict idp");
+    let strict = idps
+        .iter()
+        .find(|c| c.name == "strict")
+        .expect("strict idp");
     assert!(
         strict.want_assertions_signed,
         "want_assertions_signed: true must survive reconcile"

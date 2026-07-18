@@ -99,12 +99,18 @@ fn a40_session_cookie_hardening_attributes() {
         sc.starts_with(&format!("{SESSION_COOKIE}=")),
         "session cookie must be named {SESSION_COOKIE}: {sc}"
     );
-    assert!(sc.contains("HttpOnly"), "session cookie must be HttpOnly: {sc}");
+    assert!(
+        sc.contains("HttpOnly"),
+        "session cookie must be HttpOnly: {sc}"
+    );
     assert!(
         sc.contains("SameSite=Lax"),
         "session cookie must set SameSite=Lax: {sc}"
     );
-    assert!(sc.contains("Path=/ui"), "session cookie must scope Path=/ui: {sc}");
+    assert!(
+        sc.contains("Path=/ui"),
+        "session cookie must scope Path=/ui: {sc}"
+    );
     assert!(
         sc.contains("; Secure"),
         "session cookie must set Secure over TLS: {sc}"
@@ -113,7 +119,10 @@ fn a40_session_cookie_hardening_attributes() {
     // Plaintext request (dev/local HTTP): identical hardening minus `Secure`.
     let insecure = issue_auth_cookies(&secret, &realm, &session, false);
     let ic = insecure.session_cookie;
-    assert!(ic.contains("HttpOnly"), "session cookie must stay HttpOnly: {ic}");
+    assert!(
+        ic.contains("HttpOnly"),
+        "session cookie must stay HttpOnly: {ic}"
+    );
     assert!(
         !ic.contains("; Secure"),
         "session cookie must omit Secure for plaintext requests: {ic}"
