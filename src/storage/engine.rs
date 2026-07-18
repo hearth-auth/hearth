@@ -178,6 +178,15 @@ pub struct EmbeddedStorageEngine {
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
     flush_lock: Arc<Mutex<()>>,
+    /// Serializes [`put_if_absent`](StorageEngine::put_if_absent) so the
+    /// existence check and the write are atomic against each other.
+    ///
+    /// The default trait implementation does a non-atomic `get` then `put`,
+    /// leaving a TOCTOU window: two concurrent tasks can both observe the key
+    /// as absent and both write. Holding this lock across the check-and-write
+    /// closes that window in single-node mode (HEA-1767). Cluster mode routes
+    /// `put_if_absent` through Raft and does not rely on this lock.
+    put_if_absent_lock: Mutex<()>,
     /// Monotonically increasing SST file counter.
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
@@ -404,6 +413,7 @@ impl EmbeddedStorageEngine {
             hot_tier,
             data_dir: config.data_dir,
             flush_lock,
+            put_if_absent_lock: Mutex::new(()),
             sst_counter,
             fs,
             key_registry,
@@ -802,6 +812,33 @@ impl StorageEngine for EmbeddedStorageEngine {
         Ok(())
     }
 
+    /// Atomic single-node check-and-write.
+    ///
+    /// The trait default performs a non-atomic `get` then `put`, which leaves a
+    /// TOCTOU window: two concurrent tasks can both observe the key as absent
+    /// and both proceed to write. This override serializes the check-and-write
+    /// under [`put_if_absent_lock`](Self::put_if_absent_lock) so exactly one
+    /// concurrent writer wins for a given key (HEA-1767). The lock is held only
+    /// across the in-memory existence check and the `put` — the underlying WAL
+    /// append still fsyncs for durability.
+    fn put_if_absent(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        let Ok(_guard) = self.put_if_absent_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "put_if_absent mutex poisoned",
+            )));
+        };
+        if self.get(realm_id, key)?.is_some() {
+            return Ok(false);
+        }
+        self.put(realm_id, key, value)?;
+        Ok(true)
+    }
+
     fn write_batch(
         &self,
         realm_id: &RealmId,
@@ -993,6 +1030,77 @@ mod tests {
         engine.put(&realm, b"key1", b"value1").expect("put");
         let val = engine.get(&realm, b"key1").expect("get");
         assert_eq!(val, Some(b"value1".to_vec()));
+    }
+
+    #[test]
+    fn put_if_absent_first_writer_wins_single_thread() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+
+        assert!(
+            engine.put_if_absent(&realm, b"jti", b"1").expect("first"),
+            "first put_if_absent should insert"
+        );
+        assert!(
+            !engine.put_if_absent(&realm, b"jti", b"2").expect("second"),
+            "second put_if_absent should observe the key and skip"
+        );
+        // The original value must survive — the losing writer must not overwrite.
+        assert_eq!(
+            engine.get(&realm, b"jti").expect("get"),
+            Some(b"1".to_vec())
+        );
+    }
+
+    // HEA-1767: the trait-default `put_if_absent` is a non-atomic get-then-put
+    // with a TOCTOU window. `EmbeddedStorageEngine` overrides it to hold a lock
+    // across the check-and-write. Under N concurrent tasks racing on the same
+    // key, exactly one must win.
+    #[test]
+    fn put_if_absent_exactly_one_winner_under_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+
+        const N: usize = 16;
+        let barrier = Arc::new(Barrier::new(N));
+        let winners = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                let winners = Arc::clone(&winners);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let value = i.to_string();
+                    if engine
+                        .put_if_absent(&realm, b"jti", value.as_bytes())
+                        .expect("put_if_absent")
+                    {
+                        winners.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("join");
+        }
+
+        assert_eq!(
+            winners.load(Ordering::SeqCst),
+            1,
+            "exactly one concurrent put_if_absent must succeed"
+        );
+        assert!(
+            engine.get(&realm, b"jti").expect("get").is_some(),
+            "the winning write must be durable"
+        );
     }
 
     #[test]

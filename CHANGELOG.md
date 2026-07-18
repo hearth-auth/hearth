@@ -18,6 +18,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the scoped and admin login surfaces (HEA-1763).
 
 ### Security
+- **Single-node `put_if_absent` is now atomic, closing the capability-JTI TOCTOU
+  window** — the `StorageEngine::put_if_absent` trait default is a non-atomic
+  get-then-put, and `EmbeddedStorageEngine` did not override it, so the
+  capability-token single-use JTI guard (HEA-1757 G2) still had a narrow race
+  under concurrent Tokio tasks on a multi-threaded executor in single-node mode:
+  two requests bearing the same capability token in a sub-millisecond window
+  could both observe the JTI as absent and both spend it. `EmbeddedStorageEngine`
+  now overrides `put_if_absent` to hold a write lock across the existence check
+  and the write, so exactly one concurrent writer wins per key. Cluster mode was
+  already atomic via Raft and is unaffected (HEA-1767).
 - **Webhook egress SSRF guard extended to connect-time DNS resolution** — the
   pre-flight `check_webhook_url` guard validated the destination, but `ureq`
   then performed its own DNS lookup before `connect()`, leaving a DNS-rebinding
