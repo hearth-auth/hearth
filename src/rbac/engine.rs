@@ -742,8 +742,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             &grant.user_id,
         );
         let bytes = Self::ser(grant)?;
-        self.storage
-            .put_batch(realm_id, &[(primary, bytes), (reverse, Vec::new())])?;
+        self.write_put_batch(realm_id, &[(primary, bytes), (reverse, Vec::new())])?;
         tracing::info!(
             realm_id = %realm_id,
             user_id = %grant.user_id,
@@ -1273,10 +1272,8 @@ impl RbacEngine for EmbeddedRbacEngine {
         group_id: &GroupId,
         member: &GroupMember,
     ) -> Result<(), RbacError> {
-        self.storage
-            .delete(realm_id, &keys::encode_gm_forward(group_id, member))?;
-        self.storage
-            .delete(realm_id, &keys::encode_gm_reverse(member, group_id))?;
+        self.write_delete(realm_id, &keys::encode_gm_forward(group_id, member))?;
+        self.write_delete(realm_id, &keys::encode_gm_reverse(member, group_id))?;
 
         match member {
             GroupMember::User(uid) => self.bump_sv_for_user(realm_id, uid),
@@ -2058,6 +2055,98 @@ mod tests {
         assert!(
             !r2.permissions.contains(&perm("billing.read")),
             "revoked permission must not survive in a cached resolution"
+        );
+    }
+
+    // HEA-1777 (Critical): removing a user from a group must invalidate the
+    // resolution cache. Group membership is a primary grant mechanism and
+    // removal reduces privilege — a stale cache here re-issues tokens carrying
+    // the removed group's permissions, a silent deprovisioning failure.
+    #[test]
+    fn resolution_cache_invalidates_on_group_member_removal() {
+        let (engine, _storage, realm) = mk_counting_engine();
+        engine.seed_realm(&realm).expect("seed");
+        let user = UserId::generate();
+
+        // Role granting docs.view, bound to a group the user belongs to.
+        let role = mk_role(&engine, &realm, "viewer", "docs.view");
+        let group = engine
+            .create_group(
+                &realm,
+                &CreateGroupRequest {
+                    name: "Docs Viewers".to_string(),
+                    slug: "docs-viewers".to_string(),
+                    description: None,
+                },
+            )
+            .expect("create group");
+        engine
+            .assign_role(
+                &realm,
+                &AssignRoleRequest {
+                    subject: Subject::Group(group.id.clone()),
+                    role_id: role,
+                    scope: Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign role to group");
+        let member = GroupMember::User(user.clone());
+        engine
+            .add_group_member(&realm, &group.id, &member)
+            .expect("add group member");
+
+        // Resolve caches the full set including the group-granted permission.
+        let r1 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(r1.permissions.contains(&perm("docs.view")));
+
+        // Remove the user from the group — the group's grant must disappear.
+        engine
+            .remove_group_member(&realm, &group.id, &member)
+            .expect("remove group member");
+
+        let r2 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(
+            !r2.permissions.contains(&perm("docs.view")),
+            "group-granted permission must not survive removal in a cached resolution"
+        );
+    }
+
+    // HEA-1777 (Medium): a direct user-permission grant must invalidate the
+    // resolution cache so the new grant appears in freshly issued tokens
+    // (fail-closed today, but a real correctness defect).
+    #[test]
+    fn resolution_cache_invalidates_on_direct_grant() {
+        let (engine, _storage, realm) = mk_counting_engine();
+        engine.seed_realm(&realm).expect("seed");
+        let user = UserId::generate();
+
+        // Prime the cache with the empty set.
+        let r1 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(!r1.permissions.contains(&perm("billing.read")));
+
+        let grant = UserPermissionGrant {
+            realm_id: realm.clone(),
+            user_id: user.clone(),
+            permission: perm("billing.read"),
+            scope: Scope::Realm,
+            granted_at: Timestamp::from_micros(1),
+            granted_by: None,
+        };
+        engine.grant_user_permission(&realm, &grant).expect("grant");
+
+        let r2 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(
+            r2.permissions.contains(&perm("billing.read")),
+            "direct grant must invalidate the cache and appear in a fresh resolution"
         );
     }
 
