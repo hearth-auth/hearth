@@ -239,18 +239,23 @@ async fn cli_app_create_against_running_server() {
         "server should accept TCP connections within 10s"
     );
 
-    // First create a realm ID
-    let realm_output = Command::new(hearth_bin())
-        .args(["realm", "create"])
-        .output()
-        .expect("run hearth realm create");
-    assert!(realm_output.status.success(), "realm create should exit 0");
-    let realm_body: serde_json::Value =
-        serde_json::from_str(String::from_utf8_lossy(&realm_output.stdout).trim())
-            .expect("parse realm JSON");
-    let realm_id = realm_body["realm_id"]
+    // Client registration is a privileged operation (HEA-1750): mint an admin
+    // token + realm via the dev-only bootstrap endpoint. The target realm is
+    // derived from the token, so we register under the bootstrap realm.
+    let client = reqwest::Client::new();
+    let boot: serde_json::Value = client
+        .post(format!("http://127.0.0.1:{port}/admin/bootstrap"))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("bootstrap request")
+        .json()
+        .await
+        .expect("parse bootstrap JSON");
+    let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
+    let admin_token = boot["access_token"]
         .as_str()
-        .expect("realm_id")
+        .expect("access_token")
         .to_string();
 
     // Register an app (OAuth client) via CLI
@@ -266,6 +271,8 @@ async fn cli_app_create_against_running_server() {
             "CLI Test App",
             "--redirect-uri",
             "https://cli-test.example.com/callback",
+            "--token",
+            &admin_token,
         ])
         .output()
         .expect("run hearth app create");

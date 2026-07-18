@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`hearth app create` now requires an admin `--token`** — client registration
+  via `POST /clients` was gated behind admin authorization in HEA-1750, so the
+  CLI's `app create` command now takes a mandatory `--token` flag carrying an
+  admin bearer token (`hearth.clients.admin` or `hearth.admin`; obtain one via
+  `POST /admin/bootstrap` in dev mode). Requests without it are rejected `401`.
+  The target realm is derived from the token (HEA-1749).
+
 ### Fixed
 - **Realm-scoped and admin MFA login: TOTP submit no longer 404s** — the inline
   two-factor form rendered on `/ui/realms/{realm}/login` and `/ui/admin/login`
