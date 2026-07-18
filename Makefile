@@ -204,12 +204,20 @@ ci-fast: fmt clippy proto-lint css-check test-quality abuse-check
 
 ## CI benchmark gate: compile and run hot-path perf threshold gates.
 ##
-## Four bench binaries run in sequence; each asserts p50/p99 targets
-## before Criterion sampling begins. Non-zero exit fails the Standard CI tier.
+## Five bench binaries run in sequence; each asserts p50/p99 and (where
+## applicable) per-call allocation targets before Criterion sampling begins.
+## Non-zero exit fails the Standard CI tier. Together they lock the §2 Big-O
+## endpoint baseline (E1/E2/E7) in CI so hot-path regressions are caught
+## automatically (HEA-1776).
 ##
-## rbac_check gates:
+## rbac_check gates (E7):
 ##   resolve_permissions p99 ≤ 1 ms
 ##   hasPermission p99       ≤ 1 µs
+##   hasPermission allocs    ≤ 0 allocs/call (zero-alloc proof)
+##
+## session_lookup gates (E2, HEA-1776):
+##   session lookup p99      ≤ 1 ms  (1×runner headroom over 100 µs prod target)
+##   session lookup allocs   ≤ 0 allocs/call (warm-path zero-alloc proof)
 ##
 ## storage_gate gates:
 ##   storage hot-tier lookup   p50 ≤ 10 µs, p99 ≤ 100 µs
@@ -227,6 +235,7 @@ ci-fast: fmt clippy proto-lint css-check test-quality abuse-check
 ##   validate_token allocs     ≤ 64 allocs/call (regression ceiling)
 bench-gate:
 	PROTOC=$(PROTOC) cargo bench --bench rbac_check $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo bench --bench session_lookup $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench storage_gate $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench demotion_latency $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench validate_token $(CARGO_FLAGS)
