@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Expired-session eviction moved off the token-validation read path** — the
+  `validate_token` hot path previously performed a storage write (persist-revoke
+  + audit + session-version bump) when it encountered an idle/absolute-timeout
+  (A-18) session, violating the "no read-path syscall" hot-path rule. Such
+  sessions are still rejected fail-closed on read, but the eviction write is now
+  deferred to the periodic background cleanup sweep (`sweep_expired_sessions`,
+  driven by the existing cleanup task). This also wires the previously-unwired
+  session reaper into the cleanup loop; its count is reported as
+  `sessions_evicted` in the `Cleanup` audit event (HEA-1774).
 - **`hearth app create` now requires an admin `--token`** — client registration
   via `POST /clients` was gated behind admin authorization in HEA-1750, so the
   CLI's `app create` command now takes a mandatory `--token` flag carrying an

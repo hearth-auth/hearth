@@ -3187,9 +3187,12 @@ impl EmbeddedIdentityEngine {
                     self.session_cache_evict(realm_id, session_id);
                     Ok(None)
                 } else if arc.is_policy_expired(now) {
-                    // A-18: idle or absolute timeout. Lazy eviction.
-                    self.session_cache_evict(realm_id, session_id);
-                    let _ = self.evict_session_by_policy(realm_id, &arc, now);
+                    // A-18: idle or absolute timeout. Reject fail-closed on the
+                    // read path; the eviction storage write + audit is deferred
+                    // to the background session GC sweep
+                    // (`sweep_expired_sessions`, driven by `sweep_expired`) so
+                    // token validation performs zero storage syscalls (C-5,
+                    // hot-path rule §"no read-path syscall").
                     Ok(None)
                 } else {
                     Ok(Some(arc))
@@ -3205,8 +3208,9 @@ impl EmbeddedIdentityEngine {
                 Ok(Some(Arc::new(s)))
             }
             Some(s) if s.is_valid(now) => {
-                // Policy-expired (A-18) — evict lazily.
-                let _ = self.evict_session_by_policy(realm_id, &s, now);
+                // Policy-expired (A-18): reject fail-closed. Eviction is
+                // deferred to the background GC sweep (C-5) — no storage write
+                // on the read path.
                 Ok(None)
             }
             _ => Ok(None),
@@ -6244,9 +6248,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     self.session_cache_evict(realm_id, session_id);
                     Ok(None)
                 } else if cloned.is_policy_expired(now) {
-                    // A-18: idle or absolute timeout. Lazy eviction.
-                    self.session_cache_evict(realm_id, session_id);
-                    let _ = self.evict_session_by_policy(realm_id, &cloned, now);
+                    // A-18: idle or absolute timeout. Reject fail-closed on the
+                    // read path; eviction (storage write + audit) is deferred to
+                    // the background session GC sweep (`sweep_expired_sessions`,
+                    // driven by `sweep_expired`) so the read path performs zero
+                    // storage syscalls (C-5).
                     Ok(None)
                 } else {
                     Ok(Some(cloned))
@@ -6262,8 +6268,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Ok(Some(s))
             }
             Some(s) if s.is_valid(now) => {
-                // Policy-expired (A-18) — evict lazily.
-                let _ = self.evict_session_by_policy(realm_id, &s, now);
+                // Policy-expired (A-18): reject fail-closed. Eviction is
+                // deferred to the background GC sweep (C-5) — no storage write
+                // on the read path.
                 Ok(None)
             }
             _ => Ok(None),
@@ -12240,6 +12247,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        // C-5: evict A-18 idle/absolute-timeout sessions. Policy-expired
+        // sessions are rejected fail-closed on the read path with zero storage
+        // writes; the deferred eviction (revoke + audit + SV bump) happens here
+        // on the periodic sweep. Fail-open on error — the next tick retries.
+        match self.sweep_expired_sessions(realm_id) {
+            Ok(n) => stats.sessions_evicted += n,
+            Err(e) => {
+                stats.errors += 1;
+                tracing::warn!(
+                    realm = %realm_id,
+                    error = %e,
+                    "cleanup: expired-session sweep failed"
+                );
+            }
+        }
+
         // D.6: evict idle agent-rate windows to bound memory.
         self.agent_rate_monitor
             .prune_idle(std::time::Instant::now());
@@ -12251,6 +12274,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 "pending_tickets_deleted": stats.pending_tickets_deleted,
                 "grant_families_deleted": stats.grant_families_deleted,
                 "rate_trackers_pruned": stats.rate_trackers_pruned,
+                "sessions_evicted": stats.sessions_evicted,
                 "errors": stats.errors,
             }));
             let ctx = crate::audit::context::AuditContext {
@@ -17261,6 +17285,199 @@ mod tests {
         assert!(
             !engine.session_cache.load().contains_key(&key),
             "expired session must be lazily evicted after get_session"
+        );
+    }
+
+    /// Test-only storage decorator that counts mutating operations. Used to
+    /// assert that the token-validation read path issues zero storage writes
+    /// when it encounters an A-18 policy-expired session (C-5).
+    struct CountingWriteStorage {
+        inner: Arc<dyn StorageEngine>,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingWriteStorage {
+        fn new(inner: Arc<dyn StorageEngine>) -> Self {
+            Self {
+                inner,
+                writes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn writes(&self) -> usize {
+            self.writes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn bump(&self) {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl StorageEngine for CountingWriteStorage {
+        fn get(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+            self.inner.get(realm_id, key)
+        }
+        fn put(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.put(realm_id, key, value)
+        }
+        fn delete(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.delete(realm_id, key)
+        }
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
+            self.inner.scan(realm_id, start, end)
+        }
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.put_batch(realm_id, entries)
+        }
+        fn put_if_absent(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<bool, crate::storage::StorageError> {
+            self.bump();
+            self.inner.put_if_absent(realm_id, key, value)
+        }
+        fn write_batch(
+            &self,
+            realm_id: &RealmId,
+            puts: &[(Vec<u8>, Vec<u8>)],
+            deletes: &[Vec<u8>],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.write_batch(realm_id, puts, deletes)
+        }
+    }
+
+    /// C-5: `validate_token`'s read path MUST NOT write to storage when it
+    /// encounters an A-18 policy-expired session. The session is still
+    /// rejected fail-closed on read; the eviction storage write is deferred to
+    /// the background GC sweep (`sweep_expired`).
+    #[test]
+    fn c5_policy_expired_read_path_performs_no_storage_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let counting = Arc::new(CountingWriteStorage::new(inner));
+        let storage = Arc::clone(&counting) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
+
+        // Realm with a 5-minute idle timeout. Kept below the 15-minute access
+        // token TTL so `validate_token` reaches the session policy-expiry check
+        // (rather than short-circuiting on JWT `exp`) after the clock advance.
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs: Some(300),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(
+            engine.session_cache.load().contains_key(&key),
+            "session must be cached before idle timeout"
+        );
+
+        // Advance 10 minutes: past the 5-minute idle timeout but within the
+        // 15-minute access-token TTL and the multi-day session TTL.
+        clock.advance(10 * 60 * 1_000_000);
+
+        // Read path MUST reject the session (fail-closed) with zero writes.
+        let writes_before = counting.writes();
+        let arc = engine
+            .get_session_arc(&realm_id, session.id())
+            .expect("get_session_arc must not error");
+        assert!(
+            arc.is_none(),
+            "policy-expired session must be rejected on read (fail-closed)"
+        );
+        assert_eq!(
+            counting.writes(),
+            writes_before,
+            "read path must perform zero storage writes for a policy-expired session"
+        );
+
+        // The full validate_token hot path must also reject fail-closed with no write.
+        let before_validate = counting.writes();
+        let err = engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect_err("policy-expired session must reject token");
+        assert!(
+            matches!(err, IdentityError::InvalidToken),
+            "expected InvalidToken for policy-expired session, got {err:?}"
+        );
+        assert_eq!(
+            counting.writes(),
+            before_validate,
+            "validate_token read path must perform zero storage writes"
+        );
+
+        // The deferred eviction is performed by the background sweep, which
+        // DOES write (persist revoke + audit + SV bump).
+        let before_sweep = counting.writes();
+        let stats = engine.sweep_expired(&realm_id).expect("sweep");
+        assert_eq!(
+            stats.sessions_evicted, 1,
+            "background sweep must evict the deferred policy-expired session"
+        );
+        assert!(
+            counting.writes() > before_sweep,
+            "background sweep must persist the eviction (storage write)"
         );
     }
 

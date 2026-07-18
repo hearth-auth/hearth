@@ -70,6 +70,12 @@ pub struct CleanupStats {
     pub dpop_jtis_deleted: u64,
     /// Actor token JTI replay-cache entries swept (RFC 8693 B.5).
     pub actor_jtis_deleted: u64,
+    /// A-18 idle/absolute-timeout sessions evicted by the background sweep.
+    ///
+    /// Policy-expired sessions are rejected fail-closed on the read path with
+    /// zero storage writes (C-5); the actual eviction (revoke + audit + SV
+    /// bump) is performed here on the periodic sweep.
+    pub sessions_evicted: u64,
     /// In-memory rate-tracker entries pruned across all five maps.
     ///
     /// Rate tracker `HashMap`s are not backed by storage; they are pruned
@@ -91,6 +97,7 @@ impl CleanupStats {
             + self.dpop_jtis_deleted
             + self.actor_jtis_deleted
             + self.rate_trackers_pruned
+            + self.sessions_evicted
     }
 }
 
