@@ -9,12 +9,12 @@
 //! token issuance; `resolve.rs` still tolerates a late-appearing cycle
 //! in case storage was corrupted out-of-band).
 
-use std::collections::{BTreeSet, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::core::{Clock, OrganizationId, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
-use crate::storage::StorageEngine;
+use crate::storage::{StorageEngine, StorageError};
 
 use super::error::RbacError;
 use super::keys;
@@ -29,6 +29,75 @@ use super::types::{
 };
 use super::{RbacEngine, SvBumper};
 
+/// Upper bound on cached resolutions across all realms. When exceeded, the
+/// entire cache is cleared (coarse eviction — correctness-safe, since every
+/// entry is re-derivable from storage). Sized to comfortably hold the working
+/// set of a large tenant without unbounded growth.
+const MAX_RESOLUTION_CACHE_ENTRIES: usize = 50_000;
+
+/// Decision cache for full (pre-scope-narrowing) permission resolutions.
+///
+/// # Correctness
+///
+/// Each realm carries a monotonic *graph version* (`generations`). Every RBAC
+/// mutation bumps its realm's version (see [`EmbeddedRbacEngine::invalidate_realm`]).
+/// A cache entry is only served when its stored version equals the realm's
+/// current version, so any mutation atomically renders every prior entry for
+/// that realm unreachable. This makes a stale-permission read — a
+/// privilege-escalation bug — impossible, at the cost of coarse (whole-realm)
+/// invalidation.
+///
+/// The cached value is the *unnarrowed* effective set (`requested_scope = None`),
+/// which depends only on the stored RBAC graph and never on the config scope
+/// registry, so RBAC hot-reload of scope definitions needs no special handling
+/// here: scope narrowing runs fresh on top of the cached full set on every call.
+#[derive(Default)]
+struct ResolutionCache {
+    /// Per-realm graph version, bumped on every mutation.
+    generations: HashMap<RealmId, u64>,
+    /// `(realm, user, org)` → `(version-at-fill, resolved)`.
+    entries: HashMap<(RealmId, UserId, Option<OrganizationId>), (u64, ResolvedPermissions)>,
+}
+
+impl ResolutionCache {
+    /// Current graph version for a realm (`0` if never mutated).
+    fn generation(&self, realm_id: &RealmId) -> u64 {
+        self.generations.get(realm_id).copied().unwrap_or(0)
+    }
+
+    /// Returns the cached resolution iff it matches the realm's current version.
+    fn get(
+        &self,
+        key: &(RealmId, UserId, Option<OrganizationId>),
+    ) -> Option<ResolvedPermissions> {
+        let current = self.generation(&key.0);
+        match self.entries.get(key) {
+            Some((version, value)) if *version == current => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    /// Inserts a resolution tagged with the version it was computed against.
+    /// Callers MUST pass the version captured *before* the storage reads that
+    /// produced `value`, and only after confirming it is still current.
+    fn insert(
+        &mut self,
+        key: (RealmId, UserId, Option<OrganizationId>),
+        version: u64,
+        value: ResolvedPermissions,
+    ) {
+        if self.entries.len() >= MAX_RESOLUTION_CACHE_ENTRIES && !self.entries.contains_key(&key) {
+            self.entries.clear();
+        }
+        self.entries.insert(key, (version, value));
+    }
+
+    /// Bumps a realm's graph version, invalidating all of its cached entries.
+    fn bump(&mut self, realm_id: &RealmId) {
+        *self.generations.entry(realm_id.clone()).or_insert(0) += 1;
+    }
+}
+
 /// Embedded RBAC engine backed by [`StorageEngine`].
 pub struct EmbeddedRbacEngine {
     storage: Arc<dyn StorageEngine>,
@@ -39,6 +108,9 @@ pub struct EmbeddedRbacEngine {
     /// Serializes concurrent role-assignment writes to prevent duplicate assignments
     /// (A-28: same user+role+scope pair from two concurrent requests).
     assign_write_lock: std::sync::Mutex<()>,
+    /// Memoizes full permission resolutions to collapse the per-issuance N+1
+    /// storage fan-out (HEA-1770). Invalidated per-realm on every mutation.
+    resolution_cache: Mutex<ResolutionCache>,
 }
 
 impl EmbeddedRbacEngine {
@@ -49,7 +121,51 @@ impl EmbeddedRbacEngine {
             clock,
             sv_bumper: OnceLock::new(),
             assign_write_lock: std::sync::Mutex::new(()),
+            resolution_cache: Mutex::new(ResolutionCache::default()),
         }
+    }
+
+    // -------------------- resolution decision cache (HEA-1770) --------------------
+
+    /// Bumps the realm's RBAC graph version, invalidating every cached
+    /// resolution for that realm.
+    ///
+    /// INVARIANT: callers MUST invoke this strictly *after* the storage write
+    /// that mutated the RBAC graph is durable. Because readers capture the
+    /// pre-read version and only cache when it is unchanged, bumping after the
+    /// write guarantees a concurrent reader either (a) observes the new version
+    /// and refuses to cache its pre-mutation snapshot, or (b) already cached a
+    /// snapshot under the old version which this bump renders unreachable.
+    fn invalidate_realm(&self, realm_id: &RealmId) {
+        self.resolution_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bump(realm_id);
+    }
+
+    /// [`StorageEngine::put`] followed by cache invalidation for the realm.
+    fn write_put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.storage.put(realm_id, key, value)?;
+        self.invalidate_realm(realm_id);
+        Ok(())
+    }
+
+    /// [`StorageEngine::put_batch`] followed by cache invalidation for the realm.
+    fn write_put_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), StorageError> {
+        self.storage.put_batch(realm_id, entries)?;
+        self.invalidate_realm(realm_id);
+        Ok(())
+    }
+
+    /// [`StorageEngine::delete`] followed by cache invalidation for the realm.
+    fn write_delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        self.storage.delete(realm_id, key)?;
+        self.invalidate_realm(realm_id);
+        Ok(())
     }
 
     /// Injects the [`SvBumper`] implementation. Called once at startup after
@@ -396,6 +512,50 @@ impl EmbeddedRbacEngine {
 // ---------------------------------------------------------------------------
 
 impl Resolver for EmbeddedRbacEngine {
+    /// Memoized full (unnarrowed) resolution — the decision cache that
+    /// collapses the per-issuance N+1 storage fan-out (HEA-1770).
+    ///
+    /// Reads outside the lock (only the hit-check and version capture hold it),
+    /// and only fills the cache when the realm's graph version is unchanged
+    /// across the read — a concurrent mutation between the version capture and
+    /// the fill skips caching, so a snapshot taken before a mutation can never
+    /// be stored as current.
+    fn resolve_full_cached(
+        &self,
+        user_id: &UserId,
+        realm_id: &RealmId,
+        org_id: Option<&OrganizationId>,
+    ) -> Result<ResolvedPermissions, RbacError> {
+        let key = (realm_id.clone(), user_id.clone(), org_id.cloned());
+
+        // Fast path: serve a version-matched hit; otherwise capture the current
+        // version to validate the fill against.
+        let version_at_read = {
+            let cache = self
+                .resolution_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(hit) = cache.get(&key) {
+                return Ok(hit);
+            }
+            cache.generation(realm_id)
+        };
+
+        let resolved = resolve::resolve_full(self, user_id, realm_id, org_id)?;
+
+        let mut cache = self
+            .resolution_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only cache if no mutation raced our storage reads. If the version
+        // moved, the snapshot may already be stale — drop it rather than risk
+        // serving stale permissions.
+        if cache.generation(realm_id) == version_at_read {
+            cache.insert(key, version_at_read, resolved.clone());
+        }
+        Ok(resolved)
+    }
+
     fn parent_groups_of(
         &self,
         realm_id: &RealmId,
@@ -608,8 +768,8 @@ impl RbacEngine for EmbeddedRbacEngine {
         let primary = keys::encode_user_permission(realm_id, user_id, scope, permission.as_str());
         let reverse =
             keys::encode_user_permission_by_perm(realm_id, permission.as_str(), scope, user_id);
-        self.storage.delete(realm_id, &primary)?;
-        self.storage.delete(realm_id, &reverse)?;
+        self.write_delete(realm_id, &primary)?;
+        self.write_delete(realm_id, &reverse)?;
         tracing::info!(
             realm_id = %realm_id,
             user_id = %user_id,
@@ -650,7 +810,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         }
         let key = keys::encode_org_extra_role(realm_id, org_id, user_id, role_name);
         let value = Self::ser(&role_name)?;
-        self.storage.put(realm_id, &key, &value)?;
+        self.write_put(realm_id, &key, &value)?;
         tracing::info!(
             realm_id = %realm_id,
             org_id = %org_id,
@@ -669,7 +829,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         role_name: &str,
     ) -> Result<(), RbacError> {
         let key = keys::encode_org_extra_role(realm_id, org_id, user_id, role_name);
-        self.storage.delete(realm_id, &key)?;
+        self.write_delete(realm_id, &key)?;
         tracing::info!(
             realm_id = %realm_id,
             org_id = %org_id,
@@ -737,7 +897,7 @@ impl RbacEngine for EmbeddedRbacEngine {
 
         let role_key = keys::encode_role(&role.id);
         let name_key = keys::encode_role_name(realm_id, &role.name);
-        self.storage.put_batch(
+        self.write_put_batch(
             realm_id,
             &[
                 (role_key, Self::ser(&role)?),
@@ -820,10 +980,10 @@ impl RbacEngine for EmbeddedRbacEngine {
         if let Some((_old, new)) = &rename {
             writes.push((new.clone(), Self::ser(&role.id)?));
         }
-        self.storage.put_batch(realm_id, &writes)?;
+        self.write_put_batch(realm_id, &writes)?;
 
         if let Some((old, _)) = rename {
-            self.storage.delete(realm_id, &old)?;
+            self.write_delete(realm_id, &old)?;
         }
 
         Ok(role)
@@ -833,7 +993,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         let Some(role) = self.load_role(realm_id, role_id)? else {
             return Err(RbacError::RoleNotFound);
         };
-        self.storage.delete(realm_id, &keys::encode_role(role_id))?;
+        self.write_delete(realm_id, &keys::encode_role(role_id))?;
         self.storage
             .delete(realm_id, &keys::encode_role_name(realm_id, &role.name))?;
         Ok(())
@@ -907,7 +1067,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             updated_at: now,
         };
 
-        self.storage.put_batch(
+        self.write_put_batch(
             realm_id,
             &[
                 (keys::encode_group(&group.id), Self::ser(&group)?),
@@ -967,10 +1127,10 @@ impl RbacEngine for EmbeddedRbacEngine {
         if let Some((_, new)) = &reslug {
             writes.push((new.clone(), Self::ser(&group.id)?));
         }
-        self.storage.put_batch(realm_id, &writes)?;
+        self.write_put_batch(realm_id, &writes)?;
 
         if let Some((old, _)) = reslug {
-            self.storage.delete(realm_id, &old)?;
+            self.write_delete(realm_id, &old)?;
         }
 
         Ok(group)
@@ -986,7 +1146,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         let fwd_end = keys::prefix_end(&fwd_prefix);
         for e in self.storage.scan(realm_id, &fwd_prefix, &fwd_end)? {
             let member: GroupMember = Self::de(&e.value)?;
-            self.storage.delete(realm_id, &e.key)?;
+            self.write_delete(realm_id, &e.key)?;
             self.storage
                 .delete(realm_id, &keys::encode_gm_reverse(&member, group_id))?;
         }
@@ -997,8 +1157,8 @@ impl RbacEngine for EmbeddedRbacEngine {
         let rev_end = keys::prefix_end(&rev_prefix);
         for e in self.storage.scan(realm_id, &rev_prefix, &rev_end)? {
             let parent_group: GroupId = Self::de(&e.value)?;
-            self.storage.delete(realm_id, &e.key)?;
-            self.storage.delete(
+            self.write_delete(realm_id, &e.key)?;
+            self.write_delete(
                 realm_id,
                 &keys::encode_gm_forward(&parent_group, &GroupMember::Group(group_id.clone())),
             )?;
@@ -1015,7 +1175,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                 self.storage
                     .delete(realm_id, &keys::encode_assign_role(&a.role_id, &aid))?;
             }
-            self.storage.delete(realm_id, &e.key)?;
+            self.write_delete(realm_id, &e.key)?;
         }
 
         self.storage
@@ -1085,7 +1245,7 @@ impl RbacEngine for EmbeddedRbacEngine {
 
         // Forward value holds the GroupMember (for cycle scans).
         // Reverse value holds the GroupId (so user → parent groups list is cheap).
-        self.storage.put_batch(
+        self.write_put_batch(
             realm_id,
             &[
                 (
@@ -1219,7 +1379,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             };
             let role_idx = keys::encode_assign_role(&assignment.role_id, &id);
 
-            self.storage.put_batch(
+            self.write_put_batch(
                 realm_id,
                 &[
                     (pri, Self::ser(&assignment)?),
@@ -1255,8 +1415,8 @@ impl RbacEngine for EmbeddedRbacEngine {
             Subject::User(u) => keys::encode_assign_user(u, assignment_id),
             Subject::Group(g) => keys::encode_assign_group(g, assignment_id),
         };
-        self.storage.delete(realm_id, &subject_idx)?;
-        self.storage.delete(
+        self.write_delete(realm_id, &subject_idx)?;
+        self.write_delete(
             realm_id,
             &keys::encode_assign_role(&a.role_id, assignment_id),
         )?;
@@ -1300,7 +1460,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                 self.storage
                     .delete(realm_id, &keys::encode_assign_role(&a.role_id, &aid))?;
             }
-            self.storage.delete(realm_id, &e.key)?;
+            self.write_delete(realm_id, &e.key)?;
         }
 
         // Remove the user from all groups they belong to.
@@ -1311,7 +1471,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             let group_id: GroupId = Self::de(&e.value)?;
             self.storage
                 .delete(realm_id, &keys::encode_gm_forward(&group_id, &member))?;
-            self.storage.delete(realm_id, &e.key)?;
+            self.write_delete(realm_id, &e.key)?;
         }
 
         Ok(())
@@ -1359,7 +1519,12 @@ impl RbacEngine for EmbeddedRbacEngine {
     // ---------- Bootstrap ----------
 
     fn seed_realm(&self, realm_id: &RealmId) -> Result<(), RbacError> {
-        seed::seed_realm(&self.storage, &self.clock, realm_id)
+        // `seed` writes through the raw storage handle (bypassing the
+        // cache-invalidating `write_*` helpers), so invalidate explicitly after
+        // it lands.
+        seed::seed_realm(&self.storage, &self.clock, realm_id)?;
+        self.invalidate_realm(realm_id);
+        Ok(())
     }
 
     // ---------- Declarative reconciliation ----------
@@ -1378,7 +1543,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                 if let Ok(mut record) = Self::de::<PermissionRecord>(&raw) {
                     if record.status == PermissionStatus::Archived {
                         record.status = PermissionStatus::Active;
-                        self.storage.put(realm_id, &key, &Self::ser(&record)?)?;
+                        self.write_put(realm_id, &key, &Self::ser(&record)?)?;
                     }
                 }
                 continue;
@@ -1387,7 +1552,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                 name: perm,
                 status: PermissionStatus::Active,
             };
-            self.storage.put(realm_id, &key, &Self::ser(&record)?)?;
+            self.write_put(realm_id, &key, &Self::ser(&record)?)?;
         }
         Ok(())
     }
@@ -1415,7 +1580,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             if !yaml_names.contains(perm_name) {
                 record.status = PermissionStatus::Archived;
                 let key = keys::encode_permission(realm_id, perm_name);
-                self.storage.put(realm_id, &key, &Self::ser(&record)?)?;
+                self.write_put(realm_id, &key, &Self::ser(&record)?)?;
             }
         }
         Ok(())
@@ -1445,7 +1610,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                 role.status = RoleStatus::Archived;
                 role.updated_at = now;
                 let role_key = keys::encode_role(&role.id);
-                self.storage.put(realm_id, &role_key, &Self::ser(&role)?)?;
+                self.write_put(realm_id, &role_key, &Self::ser(&role)?)?;
             }
         }
         Ok(())
@@ -1507,7 +1672,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                     role.updated_at = now;
                     self.check_role_parents_no_cycle(realm_id, &role.id, &role.parent_roles)?;
                     let role_key = keys::encode_role(&role.id);
-                    self.storage.put(realm_id, &role_key, &Self::ser(&role)?)?;
+                    self.write_put(realm_id, &role_key, &Self::ser(&role)?)?;
                 }
                 continue;
             }
@@ -1529,7 +1694,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             self.check_role_parents_no_cycle(realm_id, &role.id, &role.parent_roles)?;
             let role_key = keys::encode_role(&role.id);
             let name_key = keys::encode_role_name(realm_id, &role.name);
-            self.storage.put_batch(
+            self.write_put_batch(
                 realm_id,
                 &[
                     (role_key, Self::ser(&role)?),
@@ -1558,7 +1723,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                 permissions,
             };
             let key = keys::encode_scope(realm_id, &spec.name);
-            self.storage.put(realm_id, &key, &Self::ser(&stored)?)?;
+            self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
         }
         Ok(())
     }
@@ -1588,7 +1753,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                     permissions,
                 };
                 let key = keys::encode_resource_scope(realm_id, &hash, &bundle.name);
-                self.storage.put(realm_id, &key, &Self::ser(&stored)?)?;
+                self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
             }
         }
         Ok(())
@@ -1630,7 +1795,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                     };
                     let group_key = keys::encode_group(&new_group.id);
                     let slug_key = keys::encode_group_slug(realm_id, slug);
-                    self.storage.put_batch(
+                    self.write_put_batch(
                         realm_id,
                         &[
                             (group_key, Self::ser(&new_group)?),
@@ -1715,6 +1880,185 @@ mod tests {
 
     fn perm(s: &str) -> Permission {
         Permission::new(s).expect("valid perm")
+    }
+
+    /// A [`StorageEngine`] decorator that counts read operations (`get`,
+    /// `scan`) so tests can prove the resolution decision cache actually
+    /// avoids re-hitting storage on a hit. All writes and defaults delegate to
+    /// the inner engine.
+    struct CountingStorage {
+        inner: Arc<dyn StorageEngine>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingStorage {
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl StorageEngine for CountingStorage {
+        fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get(realm_id, key)
+        }
+        fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(realm_id, key, value)
+        }
+        fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<crate::storage::ScanEntry>, StorageError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.scan(realm_id, start, end)
+        }
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), StorageError> {
+            self.inner.put_batch(realm_id, entries)
+        }
+    }
+
+    fn mk_counting_engine() -> (EmbeddedRbacEngine, Arc<CountingStorage>, RealmId) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(tmp.path().to_path_buf()))
+                .expect("storage"),
+        ) as Arc<dyn StorageEngine>;
+        std::mem::forget(tmp);
+        let counting = Arc::new(CountingStorage {
+            inner,
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let storage = counting.clone() as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1))) as Arc<dyn Clock>;
+        (
+            EmbeddedRbacEngine::new(storage, clock),
+            counting,
+            RealmId::generate(),
+        )
+    }
+
+    fn assign(engine: &EmbeddedRbacEngine, realm: &RealmId, user: &UserId, role_id: &RoleId) {
+        engine
+            .assign_role(
+                realm,
+                &AssignRoleRequest {
+                    subject: Subject::User(user.clone()),
+                    role_id: role_id.clone(),
+                    scope: Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign");
+    }
+
+    fn mk_role(engine: &EmbeddedRbacEngine, realm: &RealmId, name: &str, p: &str) -> RoleId {
+        engine
+            .create_role(
+                realm,
+                &CreateRoleRequest {
+                    name: name.to_string(),
+                    description: None,
+                    permissions: vec![perm(p)],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("create role")
+            .id
+    }
+
+    // HEA-1770: the decision cache must (1) memoize repeated identical
+    // resolutions so a hit performs zero storage reads, and (2) invalidate on
+    // mutation so a re-issued token never carries a stale (pre-mutation)
+    // permission set — a stale read here is a privilege-escalation bug.
+    #[test]
+    fn resolution_cache_memoizes_and_invalidates_on_mutation() {
+        let (engine, storage, realm) = mk_counting_engine();
+        engine.seed_realm(&realm).expect("seed");
+        let user = UserId::generate();
+        let role1 = mk_role(&engine, &realm, "viewer", "docs.view");
+        assign(&engine, &realm, &user, &role1);
+
+        // First resolution is a cache miss → touches storage.
+        let r1 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(r1.permissions.contains(&perm("docs.view")));
+        let after_first = storage.reads();
+        assert!(after_first > 0, "first resolve must read storage");
+
+        // Second identical resolution is a hit → zero additional reads.
+        let r2 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert_eq!(r2, r1);
+        assert_eq!(
+            storage.reads(),
+            after_first,
+            "cache hit must not touch storage"
+        );
+
+        // Mutation must invalidate: grant a second permission via a new role.
+        let role2 = mk_role(&engine, &realm, "editor", "docs.edit");
+        assign(&engine, &realm, &user, &role2);
+
+        let before_third = storage.reads();
+        let r3 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(
+            storage.reads() > before_third,
+            "post-mutation resolve must re-read storage (cache invalidated)"
+        );
+        assert!(
+            r3.permissions.contains(&perm("docs.edit")),
+            "resolution after mutation must reflect the new grant (no stale cache)"
+        );
+        assert!(r3.permissions.contains(&perm("docs.view")));
+    }
+
+    // Guards the invalidation path specifically for direct user-permission
+    // revocation (a different mutation family than role assignment).
+    #[test]
+    fn resolution_cache_invalidates_on_permission_revoke() {
+        let (engine, _storage, realm) = mk_counting_engine();
+        engine.seed_realm(&realm).expect("seed");
+        let user = UserId::generate();
+        let grant = UserPermissionGrant {
+            realm_id: realm.clone(),
+            user_id: user.clone(),
+            permission: perm("billing.read"),
+            scope: Scope::Realm,
+            granted_at: Timestamp::from_micros(1),
+            granted_by: None,
+        };
+        engine.grant_user_permission(&realm, &grant).expect("grant");
+
+        let r1 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(r1.permissions.contains(&perm("billing.read")));
+
+        engine
+            .revoke_user_permission(&realm, &user, &perm("billing.read"), &Scope::Realm)
+            .expect("revoke");
+
+        let r2 = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(
+            !r2.permissions.contains(&perm("billing.read")),
+            "revoked permission must not survive in a cached resolution"
+        );
     }
 
     #[test]
