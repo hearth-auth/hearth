@@ -321,6 +321,16 @@ pub(crate) struct SstReader {
     /// written before HEA-1626 are still read correctly; they just don't get
     /// the fast-reject optimisation.
     bloom_filter: Option<BloomFilter>,
+    /// Inclusive `(min, max)` `CompositeKey` bounds of the entries in this SST,
+    /// or `None` for an empty SST.
+    ///
+    /// Because entries are stored sorted, these are simply the first and last
+    /// keys. They enable O(1) range pruning (HEA-1773): a point or range lookup
+    /// whose realm-first `CompositeKey` falls entirely outside `[min, max]` can
+    /// skip this SST without touching the Bloom filter or binary search. This
+    /// bounds cold-read fan-out `S` when SSTs cover disjoint key ranges (e.g.
+    /// realm-partitioned data), independent of compaction cadence.
+    key_range: Option<(CompositeKey, CompositeKey)>,
 }
 
 impl SstReader {
@@ -401,12 +411,59 @@ impl SstReader {
             (Self::deserialize_entries(&plaintext, entry_count)?, None)
         };
 
+        // Precompute inclusive key-range bounds for O(1) pruning. Entries are
+        // sorted, so the first and last keys are the min and max.
+        let key_range = match (entries.first(), entries.last()) {
+            (Some((min, _)), Some((max, _))) => Some((min.clone(), max.clone())),
+            _ => None,
+        };
+
         Ok(Self {
             entries,
             entry_count,
             sst_number,
             bloom_filter,
+            key_range,
         })
+    }
+
+    /// Returns `true` if the point key `(realm_id, key)` could fall within this
+    /// SST's stored key range.
+    ///
+    /// This is an O(1) range check against the precomputed `[min, max]` bounds.
+    /// An empty SST covers nothing and always returns `false`. A `true` result
+    /// does not guarantee the key is present — it only means the key is not
+    /// provably outside the range, so callers still consult the Bloom filter
+    /// and binary search.
+    pub(crate) fn may_contain(&self, realm_id: &RealmId, key: &[u8]) -> bool {
+        let Some((min, max)) = &self.key_range else {
+            return false;
+        };
+        // Compare the (realm, key) tuple against min/max without allocating a
+        // CompositeKey: order by realm UUID first, then key bytes.
+        let cmp = |ck: &CompositeKey| ck.realm_id().cmp(realm_id).then_with(|| ck.key().cmp(key));
+        cmp(min).is_le() && cmp(max).is_ge()
+    }
+
+    /// Returns `true` if this SST's key range overlaps the half-open range
+    /// `[start_key, end_key)` within `realm_id`.
+    ///
+    /// O(1) prune used before a range scan to skip non-overlapping SSTs. An
+    /// empty SST never overlaps.
+    pub(crate) fn overlaps_range(
+        &self,
+        realm_id: &RealmId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> bool {
+        let Some((min, max)) = &self.key_range else {
+            return false;
+        };
+        let cmp = |ck: &CompositeKey, key: &[u8]| {
+            ck.realm_id().cmp(realm_id).then_with(|| ck.key().cmp(key))
+        };
+        // Overlap iff min < end (half-open upper bound) and max >= start.
+        cmp(min, end_key).is_lt() && cmp(max, start_key).is_ge()
     }
 
     /// Returns all entries in sorted order.
@@ -431,6 +488,12 @@ impl SstReader {
     /// allocation-free: `(realm_id, key)` bytes are compared directly against
     /// `CompositeKey` fields without constructing a new `CompositeKey`.
     pub(crate) fn get(&self, realm_id: &RealmId, key: &[u8]) -> Option<MemtableValue> {
+        // O(1) range prune: skip SSTs whose key range cannot contain the key
+        // (HEA-1773). Cheaper than the Bloom filter's k hashes and also rejects
+        // V1 SSTs that carry no filter.
+        if !self.may_contain(realm_id, key) {
+            return None;
+        }
         // Fast reject: if the bloom filter says "no", the key is definitely absent.
         if let Some(ref filter) = self.bloom_filter {
             if !filter.might_contain(realm_id, key) {
@@ -456,6 +519,10 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Vec<(Vec<u8>, MemtableValue)> {
+        // O(1) range prune: skip SSTs disjoint from the scan window (HEA-1773).
+        if !self.overlaps_range(realm_id, start_key, end_key) {
+            return Vec::new();
+        }
         let start = CompositeKey::new(realm_id.clone(), start_key.to_vec());
         let end = CompositeKey::new(realm_id.clone(), end_key.to_vec());
 
@@ -480,6 +547,10 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Vec<(Vec<u8>, bool)> {
+        // O(1) range prune: skip SSTs disjoint from the scan window (HEA-1773).
+        if !self.overlaps_range(realm_id, start_key, end_key) {
+            return Vec::new();
+        }
         let start = CompositeKey::new(realm_id.clone(), start_key.to_vec());
         let end = CompositeKey::new(realm_id.clone(), end_key.to_vec());
 
@@ -864,6 +935,90 @@ mod tests {
         assert_eq!(all[0].1, MemtableValue::Data(b"v1-new".to_vec()));
         assert_eq!(all[1].0.key(), b"key2");
         assert_eq!(all[1].1, MemtableValue::Data(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn may_contain_prunes_keys_outside_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("range.sst");
+        let realm = RealmId::generate();
+
+        // Entries span [key1, key3].
+        let entries = vec![
+            (
+                CompositeKey::new(realm.clone(), b"key1".to_vec()),
+                MemtableValue::Data(b"v1".to_vec()),
+            ),
+            (
+                CompositeKey::new(realm.clone(), b"key3".to_vec()),
+                MemtableValue::Data(b"v3".to_vec()),
+            ),
+        ];
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+
+        // Below min and above max are pruned; in-range keys are not.
+        assert!(!reader.may_contain(&realm, b"key0"), "below min pruned");
+        assert!(!reader.may_contain(&realm, b"key9"), "above max pruned");
+        assert!(reader.may_contain(&realm, b"key1"), "min boundary kept");
+        assert!(reader.may_contain(&realm, b"key3"), "max boundary kept");
+        assert!(reader.may_contain(&realm, b"key2"), "interior kept");
+
+        // A different realm is entirely out of this SST's range.
+        let other = RealmId::generate();
+        assert!(!reader.may_contain(&other, b"key2"));
+
+        // get() honours the prune: an out-of-range key returns None.
+        assert!(reader.get(&realm, b"key9").is_none());
+    }
+
+    #[test]
+    fn empty_sst_never_contains_or_overlaps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("empty_range.sst");
+        let entries: Vec<(CompositeKey, MemtableValue)> = vec![];
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+
+        let realm = RealmId::generate();
+        assert!(!reader.may_contain(&realm, b"anything"));
+        assert!(!reader.overlaps_range(&realm, b"a", b"z"));
+    }
+
+    #[test]
+    fn overlaps_range_prunes_disjoint_scan_windows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("scan_range.sst");
+        let realm = RealmId::generate();
+
+        // Entries span [key3, key6].
+        let entries = vec![
+            (
+                CompositeKey::new(realm.clone(), b"key3".to_vec()),
+                MemtableValue::Data(b"v3".to_vec()),
+            ),
+            (
+                CompositeKey::new(realm.clone(), b"key6".to_vec()),
+                MemtableValue::Data(b"v6".to_vec()),
+            ),
+        ];
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+
+        // Window entirely below the range (end_key is exclusive at key3).
+        assert!(!reader.overlaps_range(&realm, b"key0", b"key3"));
+        // Window entirely above the range.
+        assert!(!reader.overlaps_range(&realm, b"key7", b"key9"));
+        // Overlapping windows.
+        assert!(reader.overlaps_range(&realm, b"key0", b"key4"));
+        assert!(reader.overlaps_range(&realm, b"key5", b"key9"));
+
+        // Disjoint scan returns no rows; overlapping scan returns them.
+        assert!(reader.range_scan(&realm, b"key7", b"key9").is_empty());
+        assert_eq!(reader.range_scan(&realm, b"key0", b"zzz").len(), 2);
     }
 
     #[test]
