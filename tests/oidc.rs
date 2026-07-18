@@ -249,6 +249,7 @@ async fn oidc_authorization_code_flow_via_http() {
     let register_resp = http_client
         .post(format!("{base}/clients"))
         .header("X-Realm-ID", &realm_id)
+        .header("Authorization", format!("Bearer {admin_token}"))
         .json(&serde_json::json!({
             "client_name": "HTTP Integration Test App",
             "redirect_uris": ["https://app.example.com/callback"]
