@@ -2730,11 +2730,7 @@ impl EmbeddedIdentityEngine {
         } else if let Some(ref jti) = claims.jti {
             // Sessionless token — check JTI revocation projection (hot-path safe).
             let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            if self
-                .revoked_jti_cache
-                .load()
-                .contains_key(cache_key.as_str())
-            {
+            if self.revoked_jti_cache.contains_key(cache_key.as_str()) {
                 return Ok(IntrospectionResponse::inactive());
             }
         }
@@ -2858,11 +2854,7 @@ impl EmbeddedIdentityEngine {
         } else if let Some(ref jti) = claims.jti {
             // Check JTI revocation projection (hot-path safe).
             let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            if self
-                .revoked_jti_cache
-                .load()
-                .contains_key(cache_key.as_str())
-            {
+            if self.revoked_jti_cache.contains_key(cache_key.as_str()) {
                 return Ok(DecidePermissionResponse { allowed: false });
             }
         }

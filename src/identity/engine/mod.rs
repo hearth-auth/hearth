@@ -310,11 +310,14 @@ use crate::storage::StorageEngine;
 
 pub(super) mod approval;
 pub(super) mod oauth;
+mod sharded_cache;
 // Phase D engine modules
 pub(super) mod aat;
 pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
+
+use sharded_cache::ShardedArcSwapMap;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
 /// influence which claims are embedded in the issued token pair.
@@ -512,9 +515,10 @@ pub struct EmbeddedIdentityEngine {
     /// validate in another.
     ///
     /// Hot-path readers call `load()` — one atomic fence, no locking.
-    /// Writers use `rcu()` to clone-and-CAS the map; realm key ops are rare.
+    /// Writers `rcu()` only the affected shard; realm key ops are rare.
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
-    realm_signing_keys: Arc<ArcSwap<HashMap<RealmId, Arc<SigningKey>>>>,
+    /// Sharded (HEA-1772) so an insert clones ~`1/N` of the map, not all of it.
+    realm_signing_keys: Arc<ShardedArcSwapMap<RealmId, Arc<SigningKey>>>,
     /// Wait-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -735,22 +739,24 @@ pub struct EmbeddedIdentityEngine {
     /// Key: JWK thumbprint string. Present = blocked; absent = allowed.
     ///
     /// Populated at startup by scanning `agt:dpop:block:jkt:*` across all realms.
-    /// Updated via `rcu()` by `block_dpop_jkt` / `unblock_dpop_jkt`.
-    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
-    blocked_dpop_jkt_cache: ArcSwap<std::collections::HashSet<String>>,
+    /// Updated by `block_dpop_jkt` / `unblock_dpop_jkt`; each write `rcu()`s a
+    /// single shard. Modelled as a set via `V = ()`.
+    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
+    blocked_dpop_jkt_cache: ShardedArcSwapMap<String, ()>,
     /// Hot-path JTI revocation projection (§10.5).
     ///
     /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
     /// for entries written before this projection existed (stored as `b"1"`).
     ///
     /// Populated at startup by scanning `oauth:revjti:*` across all realms.
-    /// Updated (via `rcu()`) whenever a sessionless token is revoked.
-    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
+    /// Updated whenever a sessionless token is revoked; each write `rcu()`s a
+    /// single shard (HEA-1772) rather than cloning the whole projection.
+    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
     ///
-    /// Expired entries remain until the next `rcu()` eviction sweep; an expired
-    /// token is rejected by the `exp` claim check before we reach this cache,
-    /// so stale entries are harmless.
-    revoked_jti_cache: ArcSwap<HashMap<String, i64>>,
+    /// Expired entries remain until the next per-shard eviction sweep; an
+    /// expired token is rejected by the `exp` claim check before we reach this
+    /// cache, so stale entries are harmless.
+    revoked_jti_cache: ShardedArcSwapMap<String, i64>,
     // INVARIANT: guard released before method returns; no .await in scope.
     agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
     /// Per-code-hash advisory lock for single-use enforcement of authorization codes.
@@ -1061,7 +1067,7 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1112,8 +1118,8 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
-            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
+            revoked_jti_cache: ShardedArcSwapMap::new(),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1487,7 +1493,7 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        self.revoked_jti_cache.store(Arc::new(map));
+        self.revoked_jti_cache.replace_all(map);
         Ok(())
     }
 
@@ -1534,7 +1540,8 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        self.blocked_dpop_jkt_cache.store(Arc::new(set));
+        self.blocked_dpop_jkt_cache
+            .replace_all(set.into_iter().map(|jkt| (jkt, ())));
         Ok(())
     }
 
@@ -1545,16 +1552,11 @@ impl EmbeddedIdentityEngine {
     fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
         let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
         let now_secs = self.clock.now().as_micros() / 1_000_000;
-        self.revoked_jti_cache.rcu(|old| {
-            let mut next: HashMap<String, i64> = old
-                .iter()
-                // Evict expired entries while we hold the clone.
-                .filter(|(_, &exp)| exp == i64::MAX || now_secs < exp)
-                .map(|(k, &v)| (k.clone(), v))
-                .collect();
-            next.insert(cache_key.clone(), exp_secs);
-            next
-        });
+        // Evict expired entries in the target shard while we hold the clone.
+        self.revoked_jti_cache
+            .insert_retaining(cache_key, exp_secs, |_, &exp| {
+                exp == i64::MAX || now_secs < exp
+            });
     }
 
     /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
@@ -1571,12 +1573,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &key, b"")
             .map_err(Self::storage_err)?;
-        let jkt_owned = jkt.to_string();
-        self.blocked_dpop_jkt_cache.rcu(|old| {
-            let mut next = (**old).clone();
-            next.insert(jkt_owned.clone());
-            next
-        });
+        self.blocked_dpop_jkt_cache.insert(jkt.to_string(), ());
         Ok(())
     }
 
@@ -1594,12 +1591,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &key)
             .map_err(Self::storage_err)?;
-        let jkt_owned = jkt.to_string();
-        self.blocked_dpop_jkt_cache.rcu(|old| {
-            let mut next = (**old).clone();
-            next.remove(&jkt_owned);
-            next
-        });
+        self.blocked_dpop_jkt_cache.remove(jkt);
         Ok(())
     }
 
@@ -1628,7 +1620,7 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1679,8 +1671,8 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
-            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
+            revoked_jti_cache: ShardedArcSwapMap::new(),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1800,15 +1792,8 @@ impl EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
-        {
-            let key_arc = Arc::new(realm_signing_key);
-            let sys_realm_id = sys_realm.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(sys_realm_id.clone(), Arc::clone(&key_arc));
-                new_map
-            });
-        }
+        self.realm_signing_keys
+            .insert(sys_realm.clone(), Arc::new(realm_signing_key));
 
         Ok(())
     }
@@ -3421,11 +3406,8 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
     ) -> Result<Arc<SigningKey>, IdentityError> {
         // Wait-free read: one atomic load, no locking.
-        {
-            let map = self.realm_signing_keys.load();
-            if let Some(key) = map.get(realm_id) {
-                return Ok(Arc::clone(key));
-            }
+        if let Some(key) = self.realm_signing_keys.get(realm_id) {
+            return Ok(key);
         }
 
         // Cache miss: load key bytes from storage.
@@ -3445,15 +3427,10 @@ impl EmbeddedIdentityEngine {
 
         let signing_key = Arc::new(SigningKey::from_pkcs8(&key_bytes)?);
 
-        // Insert into cache via CAS loop — safe under concurrent loaders:
-        // the last writer wins but all produce equivalent keys.
-        let realm_id_owned = realm_id.clone();
-        let key_clone = Arc::clone(&signing_key);
-        self.realm_signing_keys.rcu(|current| {
-            let mut new_map = (**current).clone();
-            new_map.insert(realm_id_owned.clone(), Arc::clone(&key_clone));
-            new_map
-        });
+        // Insert into cache — safe under concurrent loaders: the last writer
+        // wins but all produce equivalent keys.
+        self.realm_signing_keys
+            .insert(realm_id.clone(), Arc::clone(&signing_key));
 
         Ok(signing_key)
     }
@@ -3713,20 +3690,19 @@ impl EmbeddedIdentityEngine {
             return false;
         };
         use std::fmt::Write as _;
-        let cache = self.revoked_jti_cache.load();
         // Hot-path zero-alloc: format the `{realm_uuid}:{jti}` composite key into
         // a fixed stack buffer. A hyphenated UUID is 36 bytes; the buffer holds
         // the UUID + ':' + a jti of up to ~91 bytes without touching the heap.
         let mut key = StackKeyBuf::new();
         if write!(key, "{}:{}", realm_id.as_uuid(), jti).is_ok() {
             if let Some(k) = key.as_str() {
-                return cache.contains_key(k);
+                return self.revoked_jti_cache.contains_key(k);
             }
         }
         // Fallback (jti longer than the stack buffer, off the warm path): a
         // single heap allocation keeps the check correct for oversized jtis.
         let heap_key = format!("{}:{}", realm_id.as_uuid(), jti);
-        cache.contains_key(heap_key.as_str())
+        self.revoked_jti_cache.contains_key(heap_key.as_str())
     }
 
     /// Emits `LoginFailed` and, when the lockout threshold is first reached,
@@ -4501,15 +4477,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Cache signing key (wait-free reads on hot path).
-        {
-            let key_arc = Arc::new(realm_signing_key);
-            let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), Arc::clone(&key_arc));
-                new_map
-            });
-        }
+        self.realm_signing_keys
+            .insert(realm_id.clone(), Arc::new(realm_signing_key));
 
         // Cache realm status for wait-free validate_token reads.
         {
@@ -4913,11 +4882,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     let _ = audit.append(&audit_event);
 
                     // Remove from in-memory caches.
-                    signing_keys.rcu(|current| {
-                        let mut new_map = (**current).clone();
-                        new_map.remove(&realm_id_bg);
-                        new_map
-                    });
+                    signing_keys.remove(&realm_id_bg);
                     status_cache.rcu(|current| {
                         let mut new_map = (**current).clone();
                         new_map.remove(&realm_id_bg);
@@ -4955,11 +4920,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // happened above; this drops the cached Arc and status entry.
         {
             let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.remove(&id);
-                new_map
-            });
+            self.realm_signing_keys.remove(&id);
             self.realm_status_cache.rcu(|current| {
                 let mut new_map = (**current).clone();
                 new_map.remove(&id);
@@ -5255,14 +5216,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
-        {
-            let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.remove(&id);
-                new_map
-            });
-        }
+        self.realm_signing_keys.remove(realm_id);
 
         tracing::info!(
             realm = %realm_id.as_uuid(),
@@ -6931,7 +6885,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // §10.4 — DPoP JKT blocklist: reject tokens whose `cnf.jkt` thumbprint
         // is server-blocked. Hot-path safe: single atomic `load()`, no syscall.
         if let Some(ref cnf) = claims.cnf {
-            if self.blocked_dpop_jkt_cache.load().contains(&cnf.jkt) {
+            if self.blocked_dpop_jkt_cache.contains_key(cnf.jkt.as_str()) {
                 return Err(IdentityError::DPopJktBlocked);
             }
         }
@@ -9348,13 +9302,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         {
-            let key_arc = Arc::new(realm_signing_key);
             let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), Arc::clone(&key_arc));
-                new_map
-            });
+            self.realm_signing_keys
+                .insert(id.clone(), Arc::new(realm_signing_key));
             self.realm_status_cache.rcu(|current| {
                 let mut new_map = (**current).clone();
                 new_map.insert(id.clone(), RealmStatus::Active);
