@@ -17,7 +17,7 @@ use crate::storage::fs::{Fs, RealFs};
 use crate::storage::key_registry::KeyRegistry;
 use crate::storage::memtable::{Memtable, MemtableConfig, MemtableValue};
 use crate::storage::sst::{self, SstReader, SstWriter};
-use crate::storage::tiered::{HotTier, TieredConfig};
+use crate::storage::tiered::{HotTier, TieredConfig, PRODUCTION_PROMOTE_SAMPLE_RATE};
 use crate::storage::wal::{BatchEntry, Wal, WalConfig, WalEntry, WalOperation};
 use crate::storage::{ScanEntry, StorageEngine};
 
@@ -122,6 +122,9 @@ impl StorageConfig {
             tiered_config: TieredConfig {
                 hot_tier_capacity,
                 eviction_batch_size: 64,
+                // Bound promote-path write-lock/clone churn under cold-read load
+                // in production (HEA-1775). Dev/embedded keeps rate=1.
+                promote_sample_rate: PRODUCTION_PROMOTE_SAMPLE_RATE,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -145,6 +148,7 @@ impl StorageConfig {
             tiered_config: TieredConfig {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
+                promote_sample_rate: 1,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig {
@@ -1214,6 +1218,7 @@ mod tests {
             tiered_config: TieredConfig {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
+                promote_sample_rate: 1,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -1273,6 +1278,7 @@ mod tests {
             tiered_config: TieredConfig {
                 hot_tier_capacity: 64,
                 eviction_batch_size: 8,
+                promote_sample_rate: 1,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -1342,6 +1348,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1370,6 +1377,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1475,6 +1483,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1532,6 +1541,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1880,6 +1890,7 @@ mod tests {
         let tier = HotTier::new(TieredConfig {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
+            promote_sample_rate: 1,
         });
         let realm = RealmId::generate();
         tier.promote(&realm, b"key", b"data");
