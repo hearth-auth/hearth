@@ -3173,6 +3173,17 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<Option<Arc<Session>>, IdentityError> {
+        // Conditional span: only allocated when debug tracing is active to
+        // preserve the zero-allocation guarantee on the token validation path.
+        let _span = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+            tracing::debug_span!(
+                "hearth.auth.session_lookup",
+                "hearth.session_id" = %session_id,
+                "hearth.realm_id" = %realm_id,
+            )
+            .entered()
+        });
+
         let now = self.clock.now();
 
         // Hot path: check the in-process session cache (zero I/O, one atomic load).
@@ -6223,58 +6234,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<Option<Session>, IdentityError> {
-        // Conditional span: only allocated when debug tracing is active to
-        // preserve the zero-allocation guarantee on the token validation path.
-        let _span = tracing::enabled!(tracing::Level::DEBUG).then(|| {
-            tracing::debug_span!(
-                "hearth.auth.session_lookup",
-                "hearth.session_id" = %session_id,
-                "hearth.realm_id" = %realm_id,
-            )
-            .entered()
-        });
-
-        let now = self.clock.now();
-
-        // Hot path: check the in-process session cache (zero I/O, one atomic load).
-        let cache_key = (realm_id.clone(), session_id.clone());
-        {
-            let cache = self.session_cache.load();
-            if let Some(s) = cache.get(&cache_key) {
-                // Clone before dropping the guard so no borrow crosses the drop.
-                let cloned = (**s).clone();
-                drop(cache);
-                return if !cloned.is_valid(now) {
-                    self.session_cache_evict(realm_id, session_id);
-                    Ok(None)
-                } else if cloned.is_policy_expired(now) {
-                    // A-18: idle or absolute timeout. Reject fail-closed on the
-                    // read path; eviction (storage write + audit) is deferred to
-                    // the background session GC sweep (`sweep_expired_sessions`,
-                    // driven by `sweep_expired`) so the read path performs zero
-                    // storage syscalls (C-5).
-                    Ok(None)
-                } else {
-                    Ok(Some(cloned))
-                };
-            }
-        }
-
-        // Cache miss: load from storage and warm the cache on a valid result.
-        let session = self.load_session_raw(realm_id, session_id)?;
-        match session {
-            Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
-                self.session_cache_insert(realm_id, &s);
-                Ok(Some(s))
-            }
-            Some(s) if s.is_valid(now) => {
-                // Policy-expired (A-18): reject fail-closed. Eviction is
-                // deferred to the background GC sweep (C-5) — no storage write
-                // on the read path.
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
+        // Single validity path: delegate to `get_session_arc` so validity /
+        // A-18 policy-eviction semantics are defined in exactly one place and
+        // cannot drift (LOW-1). The owned-`Session` return deep-clones the
+        // cached `Arc` body here — off the zero-alloc hot path, which uses
+        // `get_session_arc` directly. The debug span lives in `get_session_arc`
+        // so it covers both callers (LOW-2).
+        Ok(self
+            .get_session_arc(realm_id, session_id)?
+            .map(|arc| (*arc).clone()))
     }
 
     fn revoke_session(
@@ -17478,6 +17446,87 @@ mod tests {
         assert!(
             counting.writes() > before_sweep,
             "background sweep must persist the eviction (storage write)"
+        );
+    }
+
+    /// HEA-1783 (LOW-1): `get_session` and `get_session_arc` MUST agree on
+    /// validity for every state — present/valid, revoked, and A-18
+    /// policy-expired — because `get_session` now delegates to
+    /// `get_session_arc` (single validity path, no drift). A future policy
+    /// check added to one path can no longer be missed by the other.
+    #[test]
+    fn get_session_and_arc_agree_on_validity() {
+        let (_dir, engine, clock) = setup_engine();
+
+        // Realm with a 5-minute idle timeout so we can drive A-18 policy expiry
+        // without exceeding the multi-day session TTL.
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs: Some(300),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+
+        // --- Case 1: present + valid → both return Some, identical body. ---
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let sid = session.id().clone();
+
+        let owned = engine.get_session(&realm_id, &sid).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &sid)
+            .expect("get_session_arc");
+        assert!(owned.is_some() && arc.is_some(), "valid session: both Some");
+        assert_eq!(
+            owned.as_ref(),
+            arc.as_deref(),
+            "valid session: both paths must return byte-identical Session"
+        );
+
+        // --- Case 2: A-18 policy-expired → both fail-closed with None. ---
+        clock.advance(10 * 60 * 1_000_000); // 10 min > 5 min idle timeout
+        let owned = engine.get_session(&realm_id, &sid).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &sid)
+            .expect("get_session_arc");
+        assert!(
+            owned.is_none() && arc.is_none(),
+            "policy-expired session: both paths must reject fail-closed"
+        );
+
+        // --- Case 3: revoked → both return None. ---
+        let session2 = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session 2");
+        let sid2 = session2.id().clone();
+        engine
+            .revoke_session(&realm_id, &sid2)
+            .expect("revoke session");
+        let owned = engine.get_session(&realm_id, &sid2).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &sid2)
+            .expect("get_session_arc");
+        assert!(
+            owned.is_none() && arc.is_none(),
+            "revoked session: both paths must return None"
+        );
+
+        // --- Case 4: absent → both return None. ---
+        let missing = SessionId::generate();
+        let owned = engine.get_session(&realm_id, &missing).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &missing)
+            .expect("get_session_arc");
+        assert!(
+            owned.is_none() && arc.is_none(),
+            "absent session: both paths must return None"
         );
     }
 
