@@ -143,9 +143,17 @@ impl EmbeddedRbacEngine {
             .bump(realm_id);
     }
 
+    // GUARDRAIL: these three helpers are the ONLY place `self.storage.put`,
+    // `put_batch`, or `delete` may be called in this file. Every RBAC-graph
+    // mutation MUST route through them so `invalidate_realm` bumps the graph
+    // version and no stale (pre-mutation) resolution is served — a stale hit is
+    // privilege escalation (see HEA-1770 § febfe092, HEA-1777). The
+    // `// rbac-storage-write-ok` markers exempt these lines from the CI guard in
+    // scripts/check-rbac-storage-writes.sh (HEA-1781); any NEW raw call fails CI.
+
     /// [`StorageEngine::put`] followed by cache invalidation for the realm.
     fn write_put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        self.storage.put(realm_id, key, value)?;
+        self.storage.put(realm_id, key, value)?; // rbac-storage-write-ok
         self.invalidate_realm(realm_id);
         Ok(())
     }
@@ -156,14 +164,14 @@ impl EmbeddedRbacEngine {
         realm_id: &RealmId,
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<(), StorageError> {
-        self.storage.put_batch(realm_id, entries)?;
+        self.storage.put_batch(realm_id, entries)?; // rbac-storage-write-ok
         self.invalidate_realm(realm_id);
         Ok(())
     }
 
     /// [`StorageEngine::delete`] followed by cache invalidation for the realm.
     fn write_delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
-        self.storage.delete(realm_id, key)?;
+        self.storage.delete(realm_id, key)?; // rbac-storage-write-ok
         self.invalidate_realm(realm_id);
         Ok(())
     }

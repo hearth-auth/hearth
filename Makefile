@@ -94,6 +94,13 @@ abuse-check:
 auth-discard-check: ## Lint for discarded authentication results (HEA-1657)
 	@bash scripts/check-auth-discard.sh
 
+## Guard: RBAC-graph mutations in src/rbac/engine.rs must route through the
+## invalidating write_* helpers so the resolution decision cache is bumped
+## (HEA-1781, follow-up to HEA-1777). A raw self.storage.put/delete call would
+## leave a stale cached resolution live — a privilege-escalation bug.
+rbac-storage-check: ## Lint for un-invalidating RBAC storage writes (HEA-1781)
+	@bash scripts/check-rbac-storage-writes.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).
@@ -257,6 +264,7 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> test-quality"              && $(MAKE) test-quality
 	@echo "==> abuse-check (§3.41)"       && $(MAKE) abuse-check
 	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
+	@echo "==> rbac-storage-check (HEA-1781)" && $(MAKE) rbac-storage-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
