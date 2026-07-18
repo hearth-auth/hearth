@@ -116,6 +116,7 @@ fn make_idp_config(leeway_seconds: u32) -> hearth::identity::federation::IdpConf
         client_secret: FederationSecret::new("secret".to_string()),
         claim_mappings: Default::default(),
         leeway_seconds,
+        want_assertions_signed: false,
         apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),

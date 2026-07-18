@@ -9,6 +9,45 @@ use std::io::Write as _;
 use super::xml::{escape_attr, parse_err};
 use crate::identity::error::IdentityError;
 
+/// Maximum number of bytes we will inflate from a single HTTP-Redirect
+/// binding payload.
+///
+/// A legitimate SAML `AuthnRequest` / `LogoutRequest` is a few kilobytes;
+/// this 1 MiB ceiling is orders of magnitude above any real message. The
+/// cap defends against a DEFLATE decompression bomb (S2 / HEA-1751): a tiny
+/// highly-compressible payload that would otherwise expand to gigabytes and
+/// exhaust server memory before the XML parser ever runs.
+const MAX_INFLATED_SAML_BYTES: usize = 1 << 20;
+
+/// A [`std::io::Write`] sink that accepts at most `limit` bytes in total,
+/// returning an error the moment the cap would be exceeded.
+///
+/// Wrapping the DEFLATE decoder's output in this sink bounds inflation
+/// incrementally: the decoder errors out as soon as cumulative decompressed
+/// output crosses the ceiling, so a compression bomb is stopped long before
+/// it can materialize in full.
+struct CappedSink {
+    buf: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for CappedSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len() + data.len() > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "inflated SAML payload exceeds byte cap",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Builds a fully-qualified redirect URL per SAML HTTP-Redirect binding.
 ///
 /// `base` is the upstream SSO or SLO URL. `saml_xml` is the raw
@@ -50,13 +89,16 @@ pub fn decode_redirect_request(param_value: &str) -> Result<Vec<u8>, IdentityErr
     let b64_decoded = B64
         .decode(url_decoded.as_slice())
         .map_err(|e| parse_err(format!("base64 decode: {e}")))?;
-    let mut dec = DeflateDecoder::new(Vec::new());
+    let mut dec = DeflateDecoder::new(CappedSink {
+        buf: Vec::new(),
+        limit: MAX_INFLATED_SAML_BYTES,
+    });
     dec.write_all(&b64_decoded)
         .map_err(|e| parse_err(format!("inflate: {e}")))?;
     let inflated = dec
         .finish()
         .map_err(|e| parse_err(format!("inflate finish: {e}")))?;
-    Ok(inflated)
+    Ok(inflated.buf)
 }
 
 /// Builds the HTML form-POST body per SAML HTTP-POST binding.
@@ -156,6 +198,44 @@ mod tests {
             .next()
             .expect("first segment");
         let decoded = decode_redirect_request(param).expect("decode");
+        assert_eq!(decoded, xml);
+    }
+
+    #[test]
+    fn inflate_rejects_decompression_bomb() {
+        // 5 MiB of zeros compresses to a few hundred bytes of DEFLATE but
+        // would inflate well past the 1 MiB cap — the classic bomb shape.
+        let big = vec![0u8; 5 * 1024 * 1024];
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&big).expect("deflate");
+        let deflated = enc.finish().expect("finish");
+        assert!(
+            deflated.len() < 64 * 1024,
+            "sanity: bomb payload should be tiny, got {} bytes",
+            deflated.len()
+        );
+        let b64 = B64.encode(&deflated);
+        let result = decode_redirect_request(&b64);
+        assert!(
+            result.is_err(),
+            "oversized inflate must be rejected before full expansion"
+        );
+    }
+
+    #[test]
+    fn inflate_accepts_normal_payload() {
+        // A legitimate small payload still round-trips under the cap.
+        let xml = b"<AuthnRequest>hello world</AuthnRequest>";
+        let url =
+            build_redirect_url("https://idp.example/sso", "SAMLRequest", xml, None).expect("build");
+        let param = url
+            .split("SAMLRequest=")
+            .nth(1)
+            .expect("param")
+            .split('&')
+            .next()
+            .expect("segment");
+        let decoded = decode_redirect_request(param).expect("decode within cap");
         assert_eq!(decoded, xml);
     }
 

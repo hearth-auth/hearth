@@ -4,7 +4,7 @@
 **Goal:** Query, export, verify integrity of, and configure retention for the Hearth audit log on a realm.
 **Time to complete:** 15–20 min.
 
-Hearth records a tamper-evident audit log for every realm. Each event is appended to a SHA-256 hash chain so that truncation or modification is detectable. This guide covers how to query, export, and retain audit events.
+Hearth records a tamper-evident audit log for every realm. Each event is appended to a per-realm HMAC-SHA256 hash chain so that truncation or modification is detectable. A signed chain head (last hash + event count) is persisted atomically with every append and prune, enabling detection of tail truncation in addition to internal reordering or deletion. This guide covers how to query, export, and retain audit events.
 
 ---
 
@@ -191,7 +191,7 @@ If `retention_days` is `0` (unlimited), the endpoint returns `{"deleted": 0}` wi
 - Testing retention behavior in staging without waiting for the background job.
 
 :::note[Hash chain integrity after pruning]
-Pruning deletes events from the bottom of the hash chain. The remaining events are still internally consistent — each still links to its predecessor — but the chain no longer starts at genesis for the pruned realm. `POST /admin/realms/{realm}/audit/verify` reports the first surviving event as the new chain head; it does **not** flag pruned history as a tampering violation. If you require a continuous unbroken chain for compliance, export the events first, then prune.
+Pruning re-anchors the HMAC-SHA256 chain to the last-pruned event's hash, so the retained window continues to verify correctly — `verify_integrity` does **not** flag the pruned prefix as a tampering violation, and the surviving events form a coherent chain from the new anchor point. `POST /admin/realms/{realm}/audit/verify` reports this anchor; an unbroken chain from the original genesis is no longer available after a prune. If your compliance policy requires a continuous chain from genesis, export the events first, then prune.
 :::
 
 ---
@@ -200,7 +200,7 @@ Pruning deletes events from the bottom of the hash chain. The remaining events a
 
 `POST /admin/realms/{realm}/audit/verify`
 
-Recomputes the SHA-256 hash chain for the realm's audit log and reports any breaks. Use this to detect storage corruption or unauthorized deletion.
+Recomputes the HMAC-SHA256 hash chain for the realm's audit log and reports any breaks. Use this to detect storage corruption, unauthorized deletion, or tail truncation (removing the newest events). The signed chain head is compared against the live event count on every call — a missing or mismatched head is reported as a truncation violation even if all surviving events form an internally valid chain.
 
 ```bash
 curl -X POST https://auth.example.com/admin/realms/production/audit/verify \
@@ -208,6 +208,17 @@ curl -X POST https://auth.example.com/admin/realms/production/audit/verify \
 ```
 
 A clean result returns `200 OK` with a summary of the verified event count. A broken chain returns a non-2xx status with the position of the first inconsistency.
+
+### gRPC equivalents
+
+Both operations are available on the gRPC `AuditService`:
+
+| gRPC RPC | Equivalent REST |
+|---|---|
+| `AuditService.ListEvents` | `GET /admin/api/realms/{realm}/audit/events` |
+| `AuditService.VerifyIntegrity` | `POST /admin/realms/{realm}/audit/verify` |
+
+Both gRPC methods require an admin bearer token carrying the `hearth.realm.admin` permission. A token with only `hearth.users.admin` or other sub-admin permissions will receive `PERMISSION_DENIED`.
 
 ---
 

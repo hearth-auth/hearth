@@ -1114,6 +1114,14 @@ pub struct RefreshBindContext {
     pub user_agent: Option<String>,
     /// Originating ASN (stub — always `None` until HEA-1205 ships).
     pub asn: Option<u32>,
+    /// The client that authenticated on the refresh request (O1, HEA-1755).
+    ///
+    /// `rotate_grant_family` asserts this equals the grant family's bound
+    /// `client_id` for confidential clients, so a refresh token minted for one
+    /// confidential client cannot be redeemed by another and confidential
+    /// clients must authenticate on the refresh arm. `None` for legacy
+    /// session-bound refresh tokens (grant family carries no `client_id`).
+    pub authenticated_client_id: Option<crate::core::ClientId>,
 }
 
 /// OIDC Discovery document (`OpenID` Connect Discovery 1.0).

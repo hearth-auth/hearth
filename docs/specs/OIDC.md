@@ -161,7 +161,39 @@ Standard clients never receive `s_hash` in their JARM JWTs.
 
 ---
 
-## 3. JAR (JWT Authorization Requests, RFC 9101)
+## 3. DPoP Sender-Constraint (RFC 9449)
+
+DPoP is required for FAPI 2.0 clients (§2.2) and RECOMMENDED for all public clients. Hearth implements DPoP per [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449).
+
+### 3.1 Access Token Binding
+
+When a token request includes a `DPoP` proof header, the issued access token carries a `cnf.jkt` claim containing the SHA-256 JWK thumbprint of the DPoP public key:
+
+```json
+{
+  "cnf": { "jkt": "<SHA-256 JWK thumbprint of the DPoP public key>" }
+}
+```
+
+Resource servers MUST verify that incoming DPoP proofs are signed by the key whose thumbprint matches `cnf.jkt`.
+
+### 3.2 Refresh Token Binding (RFC 9449 §5)
+
+When the initial token request includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint of the proving key. This binding is enforced on every subsequent use of the grant family:
+
+- The issued refresh token is stored against the same `cnf.jkt`. Subsequent `refresh_token` grant requests MUST include a `DPoP` proof signed by the **same key pair** used at grant issuance.
+- A mismatch between the stored thumbprint and the presented proof is rejected with `invalid_dpop_proof`.
+- The rotated access and refresh tokens produced by a successful DPoP-bound refresh carry the same `cnf.jkt` — the binding is never relaxed mid-family.
+
+**Key rotation invalidates the refresh token.** A client that must rotate its DPoP key pair (e.g., after suspected compromise) must revoke the affected grant family and begin a new authorization flow. There is no mechanism to re-bind an existing refresh token to a new key.
+
+Clients SHOULD confirm `cnf.jkt` is present in the issued access token before relying on long-lived refresh token continuity.
+
+> For agent-specific guidance on persisting DPoP key pairs across grant lifetimes, see [AGENT_AUTH.md §6.5](AGENT_AUTH.md#65-dpop-refresh-token-binding-rfc-9449-5).
+
+---
+
+## 4. JAR (JWT Authorization Requests, RFC 9101)
 
 Authorization requests may include a `request` parameter containing a signed JWT. Hearth enforces:
 
@@ -175,7 +207,7 @@ Supported signing algorithms: `EdDSA` (Ed25519), `RS256`, `RS384`, `RS512`, `PS2
 
 ---
 
-## 4. JARM (JWT Authorization Response Mode)
+## 5. JARM (JWT Authorization Response Mode)
 
 Hearth supports three JARM response modes per the JARM specification:
 
@@ -185,7 +217,7 @@ Hearth supports three JARM response modes per the JARM specification:
 | `fragment.jwt` | `#response=<jwt>` in redirect URI fragment | SPAs / native |
 | `jwt` | Alias for `query.jwt` by default | Convenience |
 
-### 4.1 Per-Client Mandatory JARM
+### 5.1 Per-Client Mandatory JARM
 
 Clients may register with `authorization_signed_response_alg` set (e.g., `"EdDSA"`). When set:
 
@@ -193,7 +225,7 @@ Clients may register with `authorization_signed_response_alg` set (e.g., `"EdDSA
 - If the client requests `response_mode=query` (plain), the AS silently upgrades it to `query.jwt`.
 - JARM JWTs are signed with the realm signing key; the client verifies against the realm JWKS.
 
-### 4.2 JARM Error Responses
+### 5.2 JARM Error Responses
 
 When authorization fails for a FAPI/JARM client, the error is also JWT-wrapped:
 
@@ -212,7 +244,7 @@ When authorization fails for a FAPI/JARM client, the error is also JWT-wrapped:
 
 ---
 
-## 5. Discovery Advertisement
+## 6. Discovery Advertisement
 
 The `/.well-known/openid-configuration` endpoint advertises FAPI-relevant capabilities:
 
@@ -238,11 +270,11 @@ When a FAPI 2.0 Advanced realm is active, `require_pushed_authorization_requests
 
 ---
 
-## 6. RP-Initiated Logout
+## 7. RP-Initiated Logout
 
 Hearth implements [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html).
 
-### 6.1 Endpoints
+### 7.1 Endpoints
 
 | Endpoint | Method | Realm resolution |
 |----------|--------|-----------------|
@@ -251,7 +283,7 @@ Hearth implements [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/sp
 
 The realm-path-scoped endpoint additionally clears Hearth UI session cookies in the response so that a browser redirect after logout forces re-authentication on the next `/authorize` visit.
 
-### 6.2 Query Parameters
+### 7.2 Query Parameters
 
 All parameters are optional.
 
@@ -265,11 +297,11 @@ All parameters are optional.
 When neither `id_token_hint` nor an inferable session is present, the endpoint returns `400 invalid_request`.
 When the session is already gone, the endpoint still redirects cleanly (idempotent behavior).
 
-### 6.3 Back-Channel Logout Fan-Out
+### 7.3 Back-Channel Logout Fan-Out
 
 On successful logout, Hearth fans out back-channel logout tokens to all registered RPs that have a `backchannel_logout_uri` configured. Front-channel logout URIs are served via a redirect page when `post_logout_redirect_uri` is absent.
 
-### 6.4 Authorization Endpoint — GET Shim for SPAs
+### 7.4 Authorization Endpoint — GET Shim for SPAs
 
 The OIDC discovery document advertises `authorization_endpoint` as `{issuer}/authorize`. Browser-based PKCE clients (SPAs) redirect the user's browser there via `GET`. The interactive login+consent UI lives at `/ui/realms/{realm}/oauth/authorize`, so:
 
@@ -305,7 +337,7 @@ The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 
 ---
 
-## 7. Test Coverage
+## 8. Test Coverage
 
 | Test file | What it covers |
 |-----------|----------------|
@@ -319,7 +351,7 @@ The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 
 ---
 
-## 8. References
+## 9. References
 
 - [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
 - [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html)

@@ -84,7 +84,19 @@ impl ApprovalWebhookTransport for UreqApprovalTransport {
             crate::webhook::ssrf::check_webhook_url(&url)
                 .map_err(|e| format!("SSRF guard rejected approval webhook URL: {e}"))?;
 
-            let mut req = ureq::post(&url)
+            // Do not follow redirects: check_webhook_url only validated the
+            // initial host, so a 3xx could redirect to an internal target (W1).
+            // ssrf_agent SSRF-validates the connect-time DNS lookup, closing
+            // the DNS-rebinding TOCTOU left open by the pre-flight check above
+            // (W1 residual risk, HEA-1762).
+            let config = ureq::config::Config::builder()
+                .https_only(true)
+                .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+                .build();
+            let agent = crate::webhook::ssrf::ssrf_agent(config);
+
+            let mut req = agent
+                .post(&url)
                 .header("Content-Type", "application/json")
                 .header("X-Hearth-Event", &event_type)
                 .header("X-Hearth-Delivery", &delivery_id);

@@ -16,6 +16,7 @@ use crate::protocol::convert::oauth::{
 use crate::protocol::proto::identity::v1 as pb;
 use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 
+use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::{
     extract_grpc_user_auth, extract_realm_id, identity_to_status, verify_grpc_client_auth,
 };
@@ -94,8 +95,29 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::TokenExchangeRequest>,
     ) -> Result<Response<pb::OidcTokenResponse>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
+        let md = req.metadata().clone();
         let body = req.into_inner();
         let domain_req = proto_token_exchange_to_domain(&body).map_err(Status::invalid_argument)?;
+
+        // O2 (HEA-1755): confidential clients MUST authenticate on the
+        // code-exchange path. Public (PKCE) and unknown clients pass through —
+        // the exchange enforces PKCE and surfaces invalid_grant for bad codes.
+        if let Ok(Some(client)) = self
+            .state
+            .identity
+            .get_client(&realm_id, &domain_req.client_id)
+        {
+            if client.is_confidential() {
+                let authenticated =
+                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                if authenticated != domain_req.client_id {
+                    return Err(Status::unauthenticated(
+                        "client authentication does not match request client_id",
+                    ));
+                }
+            }
+        }
+
         let resp = self
             .state
             .identity
@@ -175,12 +197,17 @@ impl OAuthService for OAuthSvc {
         &self,
         req: Request<pb::RegisterClientRequest>,
     ) -> Result<Response<pb::OAuthClient>, Status> {
-        let realm_id = extract_realm_id(req.metadata())?;
+        // HEA-1750 (A1): client registration is a privileged operation. This RPC
+        // previously only read the realm header, letting any caller mint OAuth
+        // clients. Require an admin token carrying `hearth.clients.admin`, matching
+        // the `ApplicationAdminService::create_application` gate.
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let body: domain::RegisterClientRequest = req.into_inner().into();
         let client = self
             .state
             .identity
-            .register_client(&realm_id, &body)
+            .register_client(&auth.realm_id, &body)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::OAuthClient::from(&client)))
     }

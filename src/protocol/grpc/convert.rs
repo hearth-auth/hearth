@@ -361,7 +361,7 @@ pub fn verify_grpc_client_auth(
     md: &MetadataMap,
     realm_id: &RealmId,
     identity: &dyn crate::identity::IdentityEngine,
-) -> Result<(), Status> {
+) -> Result<crate::core::ClientId, Status> {
     let raw_id = md
         .get(CLIENT_ID_META_KEY)
         .ok_or_else(|| Status::unauthenticated("missing x-hearth-client-id metadata"))?
@@ -377,5 +377,6 @@ pub fn verify_grpc_client_auth(
 
     identity
         .authenticate_client(realm_id, &client_id, secret)
+        .map(|()| client_id)
         .map_err(|_| Status::unauthenticated("invalid client credentials"))
 }

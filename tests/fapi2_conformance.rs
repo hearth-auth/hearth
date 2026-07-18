@@ -806,10 +806,21 @@ async fn fapi2_std02_standard_refresh_without_dpop_succeeds() {
         )
         .expect("standard token exchange");
 
-    // Refresh without DPoP — allowed for standard clients.
+    // Refresh without DPoP — allowed for standard clients. O1 (HEA-1755): a
+    // confidential client (this one has a client_secret) must authenticate on
+    // refresh, so bind the call to the issuing client. DPoP remains optional.
+    let refresh_bind = hearth::identity::RefreshBindContext {
+        authenticated_client_id: Some(client_id.clone()),
+        ..Default::default()
+    };
     let refreshed = h
         .identity()
-        .refresh_tokens(&realm, initial_tokens.refresh_token(), None, None)
+        .refresh_tokens(
+            &realm,
+            initial_tokens.refresh_token(),
+            None,
+            Some(&refresh_bind),
+        )
         .expect("standard client refresh without DPoP must succeed");
 
     assert!(

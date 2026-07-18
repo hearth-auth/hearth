@@ -6,7 +6,152 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`hearth app create` now requires an admin `--token`** — client registration
+  via `POST /clients` was gated behind admin authorization in HEA-1750, so the
+  CLI's `app create` command now takes a mandatory `--token` flag carrying an
+  admin bearer token (`hearth.clients.admin` or `hearth.admin`; obtain one via
+  `POST /admin/bootstrap` in dev mode). Requests without it are rejected `401`.
+  The target realm is derived from the token (HEA-1749).
+
+### Fixed
+- **Realm-scoped and admin MFA login: TOTP submit no longer 404s** — the inline
+  two-factor form rendered on `/ui/realms/{realm}/login` and `/ui/admin/login`
+  posted to `{prefix}/mfa-challenge` (e.g. `/ui/realms/acme/mfa-challenge`), a
+  route that is not registered, so submitting a valid TOTP code returned
+  `404 Not Found`. Both the TOTP form action and the "use a recovery code" link
+  now target the global `/ui/mfa-challenge` / `/ui/mfa-recovery` routes (the
+  MFA-pending cookie already carries realm scope), matching the standalone
+  challenge page. This also made the HEA-1752 required-action gate reachable on
+  the scoped and admin login surfaces (HEA-1763).
+
 ### Security
+- **Single-node `put_if_absent` is now atomic, closing the capability-JTI TOCTOU
+  window** — the `StorageEngine::put_if_absent` trait default is a non-atomic
+  get-then-put, and `EmbeddedStorageEngine` did not override it, so the
+  capability-token single-use JTI guard (HEA-1757 G2) still had a narrow race
+  under concurrent Tokio tasks on a multi-threaded executor in single-node mode:
+  two requests bearing the same capability token in a sub-millisecond window
+  could both observe the JTI as absent and both spend it. `EmbeddedStorageEngine`
+  now overrides `put_if_absent` to hold a write lock across the existence check
+  and the write, so exactly one concurrent writer wins per key. Cluster mode was
+  already atomic via Raft and is unaffected (HEA-1767).
+- **Webhook egress SSRF guard extended to connect-time DNS resolution** — the
+  pre-flight `check_webhook_url` guard validated the destination, but `ureq`
+  then performed its own DNS lookup before `connect()`, leaving a DNS-rebinding
+  TOCTOU: a hostname resolving to a public IP during the guard could be re-bound
+  to an internal/link-local address (IMDS `169.254.169.254`, RFC 1918) before
+  the connect. All four webhook egress paths (dispatcher, approval notifier,
+  pre-token webhook, and the admin webhook test-ping) now build their `ureq`
+  agent with an SSRF-validating resolver that rejects private/reserved addresses
+  on the *exact* lookup that feeds `connect()`, collapsing the two lookups into
+  one. The admin test-ping additionally now pins `max_redirects(0)` so a `3xx`
+  can no longer chase an internal target, matching the other paths (HEA-1762).
+- **gRPC audit reads require `hearth.realm.admin`; OIDC nonce replay scoped;
+  CSP tightened** — a batch of function-level authz and defense-in-depth fixes
+  (HEA-1757). (Z1) `AuditService.list_events` and `verify_integrity` on the gRPC
+  surface authenticated the admin token but never asserted a permission, so any
+  authenticated sub-admin (e.g. a users-only admin) could read the audit log —
+  both RPCs now require `hearth.realm.admin`, matching the REST surface. (O3)
+  the OIDC nonce replay-protection set was keyed on the raw nonce value globally,
+  so an identical nonce independently chosen by clients in different realms could
+  spuriously reject one as a replay; the set is now keyed by realm + client. (M1)
+  the `/ui/**` Content-Security-Policy now pins `object-src 'none'` and
+  `form-action 'self'`, and the capability-token single-use JTI guard now uses an
+  atomic `put_if_absent` (closing a check-then-set TOCTOU double-spend window).
+- **Audit hash-chain hardened against false alarms, prune breakage, and tail
+  truncation** — three integrity gaps in the tamper-evident audit log are
+  closed (HEA-1756). (1) Events sharing the same microsecond timestamp were
+  stored under UUID-suffixed keys, so the storage scan order could diverge from
+  append order and `verify_integrity` raised a false tamper alarm; the primary
+  key now embeds a per-realm monotonic sequence so scan order always equals
+  append order. (2) Retention pruning (`prune_before` / `max_rows` backstop)
+  permanently invalidated the chain because the surviving events chained from a
+  now-deleted event; pruning now re-anchors the chain to the last-pruned event's
+  hash so the retained window still verifies. (3) A new per-realm HMAC-signed
+  chain head (last hash + live-event count) is persisted atomically with each
+  append and prune, so deleting the newest events (tail truncation) is now
+  detected by `verify_integrity` instead of passing silently (U1/U2/U3).
+- **Token endpoint enforces confidential-client authentication** — the
+  `authorization_code` exchange never verified `client_secret`, so a
+  confidential client's code could be redeemed by anyone who intercepted it, and
+  the `refresh_token` grant had no client authentication or token↔client
+  binding. The token endpoint (`POST /token` and `/realms/{realm}/token`, plus
+  the gRPC `TokenExchange` RPC) now requires a valid `client_secret` (HTTP Basic
+  Auth or body parameter) for confidential clients on code exchange, and
+  `rotate_grant_family` binds each refresh grant to the confidential client it
+  was issued to — a refresh token minted for one confidential client can no
+  longer be redeemed unauthenticated or by a different client. Public (PKCE)
+  clients are unaffected (O1+O2, HEA-1755).
+- **Webhook egress no longer follows HTTP redirects** — the SSRF guard
+  (`check_webhook_url`) only validated a webhook's initial destination, so a
+  `3xx` response could bounce the request to an internal/link-local address
+  (IMDS `169.254.169.254`, RFC 1918) that was never checked. All three egress
+  paths (event dispatcher, approval notifier, pre-token webhook) now pin
+  `max_redirects` to `0` and require `https_only`, refusing any redirect. DNS
+  rebinding TOCTOU remains a separate residual risk (W1, HEA-1754).
+- **Delegation consent revocation now invalidates session-bound OBO tokens** —
+  revoking a delegation grant projected the token's `jti` into the revocation
+  cache, but `validate_token` only consulted that cache on the sessionless
+  (client_credentials) path. A session-bound on-behalf-of token therefore stayed
+  valid until natural expiry after its consent was revoked; the session path now
+  checks the revocation cache too (G1, HEA-1753).
+- **Capability-token JTI is spent only after all authorization checks pass** —
+  the single-use JTI for an approval capability token was recorded before the M5
+  caller-binding check, so an unauthorized caller could grief the legitimate
+  holder by replaying the token once (burning the JTI) and causing the rightful
+  caller's use to be rejected as already-spent. The JTI is now recorded only
+  after caller binding and all other checks succeed (G2, HEA-1753).
+- **Token exchange rejects a revoked agent anywhere in the delegation chain** —
+  a revoked agent previously resolved to the loosest global delegation-depth
+  ceiling (fail-open) and was not blocked as an actor. RFC 8693 token exchange
+  now rejects the request when the actor or any entry in the subject's `act`
+  chain resolves to a `Revoked` agent (G3, HEA-1753).
+- **MFA completion no longer bypasses pending required actions** — the browser
+  MFA challenge (`POST /ui/mfa-challenge`) and forced-enrollment
+  (`POST /ui/mfa-enroll-required/activate`) handlers now run the required-action
+  gate before issuing a session, matching the direct-login and OIDC
+  interceptors. A user with a pending required action (forced password change,
+  email verification, forced enrollment) is redirected into the required-action
+  flow instead of receiving a session (D1, HEA-1752).
+- **MFA pending-cookie nonce redemption is now atomic** — the single-use nonce
+  check-and-burn is serialized under a per-nonce lock, so two concurrent MFA
+  challenge submissions replaying the same pending cookie can no longer both
+  succeed (M1a, HEA-1752).
+- **SAML IdP SSO endpoints now require an authenticated session** — `GET`/`POST`
+  `/ui/realms/{realm}/saml/sso` and `GET /ui/realms/{realm}/saml/sso/init` previously minted a
+  signed SAML assertion for any anonymous caller (a signing oracle) using a fixed placeholder
+  subject. Both now require a valid Hearth UI session in the same realm and derive the assertion
+  `NameID` from the authenticated user; unauthenticated callers are redirected to login (S1,
+  HEA-1751).
+- **SAML HTTP-Redirect binding caps DEFLATE inflation** — inbound `SAMLRequest`/`SAMLResponse`
+  payloads are now bounded to 1 MiB of decompressed output, rejecting DEFLATE decompression bombs
+  before they can exhaust memory (S2, HEA-1751).
+- **SAML audience/destination no longer sourced from the `Host` header** — when
+  `onboarding.base_url` is configured, SAML assertion audience/destination validation uses that
+  trusted origin instead of the attacker-controllable request `Host`, closing a spoofing bypass
+  (S3, HEA-1751).
+- **SAML assertions without `Conditions/NotOnOrAfter` are rejected** — an assertion carrying no
+  expiry upper bound was previously accepted and would never age out, making it replayable
+  indefinitely; a missing `NotOnOrAfter` is now rejected (S4, HEA-1751).
+- **SAML SP `want_assertions_signed` is now enforced per connector** — the
+  federation connector's `want_assertions_signed` YAML flag was parsed but
+  silently dropped during reconcile, so the SP ACS always fell back to accepting
+  a Response-level signature regardless of configuration. The flag now flows
+  through to the ACS: when set to `true`, an inbound assertion that is not
+  individually signed is rejected instead of accepted (S4 Part A, HEA-1759).
+- **GitHub federation no longer trusts the public profile email as verified** — the
+  `/user.email` field is accepted as verified only when it also appears as a verified row in
+  `/user/emails`; unverified addresses are neither surfaced nor marked verified, preventing
+  auto-link account takeover (S5, HEA-1751).
+- **OAuth client registration now requires admin authorization** — `POST /clients` (REST) and
+  `OAuthService.register_client` (gRPC) previously skipped every authorization gate, letting any
+  unauthenticated caller mint OAuth clients (bypassing the realm's `dcr_policy` that guards
+  `POST /register`). Both now require an admin bearer token carrying `hearth.clients.admin` (or
+  `hearth.admin`), matching the `/admin/clients` and `ApplicationAdminService.create_application`
+  gates. Unauthenticated dynamic registration remains available via `POST /register` under
+  `dcr_policy`. Proto-registered clients now default to `ThirdParty` trust, so they present the
+  consent screen instead of silently skipping it (HEA-1750).
 - **Delegated (`act`) token RBAC permissions now attenuated** — token exchange previously copied
   the subject's full `permissions` claim verbatim into the delegated token, allowing any actor
   (regardless of its own RBAC grants) to acquire admin-level access by exchanging an admin's
@@ -87,8 +232,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`token_redemption_lock`) is now acquired before any read-modify-write (HEA-1728).
 - **Token introspection scoped to intended audience (L7)** — any authenticated realm client could
   previously introspect any token regardless of whether the token was issued to it. The endpoint
-  now returns `active: false` if the introspecting client is not the token's `azp` or `sub`
-  (client_credentials self-introspect) (HEA-1728).
+  now enforces per-token-class audience restriction (RFC 7662 §2): (1) tokens carrying an `azp`
+  claim may only be introspected by the `azp` client or a member of the token's `aud`; (2)
+  M2M/`client_credentials` tokens (no `azp`, `sid == "none"`) may only be introspected by the
+  issuing client (`sub == client_id`) or an explicit `aud` member; (3) user-session tokens with
+  no `azp` may be introspected by any authenticated realm client. All other cases return
+  `{ "active": false }` (HEA-1728, HEA-1729).
 - **`Cache-Control: no-store` added to all authenticated HTML responses (L8)** — the
   `SecurityHeadersLayer` now emits `Cache-Control: no-store` on any `text/html` response,
   preventing sensitive admin and account pages from being retained by shared or private caches.
@@ -124,6 +273,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   configuration. Existing configs that explicitly set `enabled: false` are unaffected.
   Integration tests inject a no-network stub transport to avoid HIBP API calls in CI
   (HEA-1727).
+- **WebAuthn RP ID derived from `oidc.issuer` config, not `Host` header (L5)** — the
+  relying-party origin used during passkey registration and authentication was previously derived
+  from the request's `Host` header. An attacker who could manipulate the `Host` header during a
+  WebAuthn ceremony could redirect the server to validate assertions against a different origin
+  than the one the credential was bound to. `resolve_public_origin` now unconditionally prefers
+  `config.oidc.issuer` as the RP origin; the `Host` header is used only as a fallback when no
+  issuer is configured (HEA-1729).
+- **SCIM JWT-fallback path now rejects cross-realm JWTs** — when a SCIM endpoint received no
+  per-realm bearer token and fell back to validating a JWT in the `Authorization` header, the
+  server previously accepted any valid admin JWT regardless of which realm it was issued for. An
+  admin of realm A could present their JWT against realm B's SCIM endpoints (identified via
+  `X-Realm-ID`) and gain cross-realm user-provisioning access. The fallback path now asserts
+  `jwt.realm_id == X-Realm-ID`; a mismatch returns `403 Forbidden` with `"realm mismatch"` (HEA-1738).
 
 ### Changed
 - **Password minimum length floor raised from 8 to 12 characters (NIST SP 800-63B §5.1.1.1)**

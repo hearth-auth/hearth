@@ -588,26 +588,18 @@ impl EmbeddedIdentityEngine {
             return Err(deny());
         }
 
-        // Single-use enforcement: check JTI blocklist.
+        // Resolve the single-use JTI key up front, but do NOT touch storage yet.
         let jti = claims.jti.as_deref().ok_or_else(deny)?;
         let jti_key = keys::encode_capability_jti(jti);
-        if self
-            .storage
-            .get(realm_id, &jti_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            // Token already used — treat as requiring fresh approval.
-            return Err(deny());
-        }
-
-        // Record JTI as spent (single-use).
-        self.storage
-            .put(realm_id, &jti_key, b"1")
-            .map_err(Self::storage_err)?;
 
         // M5 — caller binding: capability token must have been minted for the caller.
         // Prevents agent A from consuming an approval that was issued for agent B.
+        //
+        // G2: this check MUST run before the JTI is burned. Spending the JTI on a
+        // failed caller-binding lets any actor grief the legitimate caller by
+        // replaying their capability token once — the single-use guard would then
+        // reject the rightful holder. JTI is recorded as spent only after every
+        // authorization check below has passed.
         if claims.sub != caller_sub {
             return Err(deny());
         }
@@ -615,6 +607,23 @@ impl EmbeddedIdentityEngine {
         // Parse agent ID from `sub`.
         let agent_uuid = uuid::Uuid::parse_str(&claims.sub).map_err(|_| deny())?;
         let agent_id = AgentId::new(agent_uuid);
+
+        // Single-use enforcement (M1 — TOCTOU hardening, HEA-1757): the previous
+        // implementation did a `get` existence check followed by a later `put`,
+        // leaving a window where two concurrent invocations of the same token
+        // could both observe an absent JTI and both proceed (double-spend). Fold
+        // the check-and-set into one atomic `put_if_absent`: the first writer wins
+        // and every subsequent caller sees `false` and is denied. This runs only
+        // after all authorization checks above have passed, so a failed
+        // caller-binding never burns the JTI (preserves the G2 grief protection).
+        let recorded = self
+            .storage
+            .put_if_absent(realm_id, &jti_key, b"1")
+            .map_err(Self::storage_err)?;
+        if !recorded {
+            // Token already used — treat as requiring fresh approval.
+            return Err(deny());
+        }
 
         // Emit audit event for the authorized invocation.
         let _ = self.record_audit(

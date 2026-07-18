@@ -1380,14 +1380,19 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
         "expected FapiViolation for refresh without DPoP in Baseline realm, got: {err:?}"
     );
 
-    // Refresh WITH DPoP — must succeed.
+    // Refresh WITH DPoP — must succeed. O1 (HEA-1755): a confidential client
+    // must authenticate on refresh, so bind the call to the issuing client.
+    let refresh_bind = hearth::identity::RefreshBindContext {
+        authenticated_client_id: Some(client.client_id().clone()),
+        ..Default::default()
+    };
     env.harness
         .identity()
         .refresh_tokens(
             &env.realm,
             initial_tokens.refresh_token(),
             Some(DPOP_JKT),
-            None,
+            Some(&refresh_bind),
         )
         .expect("refresh with DPoP must succeed");
 }

@@ -165,6 +165,22 @@ async fn csp_frame_ancestors_none() {
     );
 }
 
+/// M1 (HEA-1757): the CSP must pin `object-src` to `'none'` (blocks plugin/embed
+/// vectors) and `form-action` to `'self'` (blocks exfiltration via attacker-set
+/// form targets). Regression guard — fails against the pre-HEA-1757 directive set.
+#[tokio::test]
+async fn csp_object_src_and_form_action_hardened() {
+    let csp = get_csp(make_web_state(), "/ui/login").await;
+    assert!(
+        csp.contains("object-src 'none'"),
+        "CSP must set object-src 'none': {csp}"
+    );
+    assert!(
+        csp.contains("form-action 'self'"),
+        "CSP must set form-action 'self': {csp}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Self-hosted asset serving
 // ---------------------------------------------------------------------------

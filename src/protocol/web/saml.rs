@@ -26,6 +26,7 @@ use crate::identity::federation::saml::{
 };
 use crate::identity::federation::IdpKind;
 
+use super::auth::UiSession;
 use super::WebState;
 use crate::abuse::redirect::validate_return_to;
 
@@ -64,7 +65,7 @@ pub async fn sp_metadata(
     // Build SP metadata. For Phase 1 we advertise unsigned AuthnRequests by
     // default but include our signing cert so the operator's IdP admin can
     // enable signature validation on their side.
-    let realm_url = realm_base_url_from_headers(&headers, &realm_name);
+    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
     let acs_url = format!("{realm_url}/federation/saml/acs");
     let sp_entity_id = realm_url.clone();
 
@@ -149,10 +150,11 @@ pub async fn sp_acs(
 
     // Adapt generic IdpConfig → SamlIdpConfig (SAML-specific fields are
     // shoehorned into the generic shape during reconcile).
-    // `want_assertions_signed` defaults to false so the SP-service falls
-    // through to Response-level signature verification when the Assertion
-    // itself isn't individually signed (common for Hearth's own output
-    // and for SPs that sign the outer Response only).
+    // `want_assertions_signed` is driven per-IdP from the connector config
+    // (HEA-1759 / S4 Part A): when `true` the SP-service requires an
+    // individually-signed `<Assertion>`; when `false` it falls back to
+    // accepting a Response-level signature (common for SPs that sign the
+    // outer Response only).
     let saml_idp = crate::identity::federation::saml::SamlIdpConfig {
         idp_id: idp_cfg.id.clone(),
         name: idp_cfg.name.clone(),
@@ -161,11 +163,11 @@ pub async fn sp_acs(
         slo_url: idp_cfg.userinfo_endpoint.clone(),
         idp_certificates_pem: vec![idp_cfg.client_secret.expose_secret().to_string()],
         sign_authn_requests: false,
-        want_assertions_signed: false,
+        want_assertions_signed: idp_cfg.want_assertions_signed,
         attribute_map: idp_cfg.claim_mappings.clone(),
     };
 
-    let realm_url = realm_base_url_from_headers(&headers, &realm_name);
+    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
     let sp_entity_id = realm_url.clone();
     let acs_url = format!("{realm_url}/federation/saml/acs");
     let now = Timestamp::from_micros(
@@ -273,7 +275,7 @@ pub async fn sp_begin(
         return (StatusCode::BAD_REQUEST, "IdP is not SAML").into_response();
     }
 
-    let realm_url = realm_base_url_from_headers(&headers, &realm_name);
+    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
     let sp_entity_id = realm_url.clone();
     let acs_url = format!("{realm_url}/federation/saml/acs");
 
@@ -345,7 +347,7 @@ pub async fn idp_metadata(
         None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
     };
 
-    let realm_url = realm_base_url_from_headers(&headers, &realm_name);
+    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
     let sso_url = format!("{realm_url}/saml/sso");
     let slo_service_url = format!("{realm_url}/saml/slo-idp");
     let entity_id = realm_url.clone();
@@ -389,39 +391,48 @@ pub async fn idp_sso_get(
     State(state): State<Arc<WebState>>,
     AxumPath(realm_name): AxumPath<String>,
     headers: axum::http::HeaderMap,
+    session: UiSession,
     Query(q): Query<IdpSsoQuery>,
 ) -> Response {
     let realm = match resolve_realm(&state, &realm_name) {
         Some(r) => r,
         None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
     };
+    if let Some(resp) = reject_session_realm_mismatch(&session, &realm) {
+        return resp;
+    }
     let Ok(xml) = crate::identity::federation::saml::decode_redirect_request(&q.saml_request)
     else {
         return (StatusCode::BAD_REQUEST, "bad SAMLRequest").into_response();
     };
-    idp_complete_sso(state, headers, realm, xml, q.relay_state).await
+    idp_complete_sso(state, headers, realm, &session, xml, q.relay_state).await
 }
 
 pub async fn idp_sso_post(
     State(state): State<Arc<WebState>>,
     AxumPath(realm_name): AxumPath<String>,
     headers: axum::http::HeaderMap,
+    session: UiSession,
     Form(q): Form<IdpSsoQuery>,
 ) -> Response {
     let realm = match resolve_realm(&state, &realm_name) {
         Some(r) => r,
         None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
     };
+    if let Some(resp) = reject_session_realm_mismatch(&session, &realm) {
+        return resp;
+    }
     let Ok(xml) = parse_post_form_saml(&q.saml_request) else {
         return (StatusCode::BAD_REQUEST, "bad SAMLRequest").into_response();
     };
-    idp_complete_sso(state, headers, realm, xml, q.relay_state).await
+    idp_complete_sso(state, headers, realm, &session, xml, q.relay_state).await
 }
 
 async fn idp_complete_sso(
     state: Arc<WebState>,
     headers: axum::http::HeaderMap,
     realm: RealmId,
+    session: &UiSession,
     xml: Vec<u8>,
     relay_state: Option<String>,
 ) -> Response {
@@ -453,16 +464,14 @@ async fn idp_complete_sso(
         metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
     });
 
-    // For Phase 1 the IdP-side handler produces a self-contained Response
-    // using a placeholder subject derived from the AuthnRequest issuer —
-    // a full deployment integrates with the user's live Hearth session
-    // (the UI redirects to login if no session, then back here). Keeping
-    // the scope tight: if there's a session cookie, use its user; else
-    // redirect to /ui/login with a post-login return.
-    //
-    // (This minimal Phase-1 handler produces a demonstration assertion
-    // suitable for smoke-testing SAML wire-format interop; real
-    // production deployments would gate on `UiSession`.)
+    // S1 (HEA-1751): this endpoint is a SAML *signing oracle* — it mints a
+    // signed assertion for a registered SP. It MUST be gated on a live,
+    // authenticated Hearth session (enforced by the `UiSession` extractor on
+    // the public handlers) and the asserted subject MUST be derived from that
+    // authenticated user — never a fixed placeholder, and never a value the
+    // requester controls. The NameID is the session user's email (the
+    // EmailAddress NameID format that registered SPs default to).
+    let subject_name_id = session.user_email.clone();
 
     let realm_url = realm_base_url_for_realm(&headers, &state, &realm).unwrap_or_default();
     let idp_entity_id = realm_url.clone();
@@ -487,7 +496,7 @@ async fn idp_complete_sso(
         issuer: &idp_entity_id,
         audience: &sp.entity_id,
         assertion_id: &assertion_id,
-        subject_name_id: "placeholder@example.com",
+        subject_name_id: &subject_name_id,
         subject_name_id_format: sp.nameid_format.as_uri(),
         session_index: &session_index,
         not_before: now,
@@ -527,17 +536,25 @@ pub async fn idp_sso_init(
     State(state): State<Arc<WebState>>,
     AxumPath(realm_name): AxumPath<String>,
     headers: axum::http::HeaderMap,
+    session: UiSession,
     Query(q): Query<IdpInitQuery>,
 ) -> Response {
     let realm = match resolve_realm(&state, &realm_name) {
         Some(r) => r,
         None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
     };
+    // S1 (HEA-1751): IdP-initiated SSO also mints a signed assertion, so it
+    // is gated on a live session (via the `UiSession` extractor) and the
+    // subject is the authenticated user — never a fixed placeholder.
+    if let Some(resp) = reject_session_realm_mismatch(&session, &realm) {
+        return resp;
+    }
     let Ok(Some(sp)) = state.identity.get_saml_sp_by_key(&realm, &q.sp) else {
         return (StatusCode::NOT_FOUND, "SP not registered").into_response();
     };
+    let subject_name_id = session.user_email.clone();
 
-    let realm_url = realm_base_url_from_headers(&headers, &realm_name);
+    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
     let idp_entity_id = realm_url.clone();
     let key = match state
         .identity
@@ -560,7 +577,7 @@ pub async fn idp_sso_init(
         issuer: &idp_entity_id,
         audience: &sp.entity_id,
         assertion_id: &assertion_id,
-        subject_name_id: "placeholder@example.com",
+        subject_name_id: &subject_name_id,
         subject_name_id_format: sp.nameid_format.as_uri(),
         session_index: &session_index,
         not_before: now,
@@ -575,7 +592,7 @@ pub async fn idp_sso_init(
 
     let _ = state.audit.append(&CreateAuditEvent {
         realm_id: realm.clone(),
-        actor: "system".to_string(),
+        actor: session.user_id.as_uuid().to_string(),
         action: AuditAction::SamlIdpInitiatedSso,
         resource_type: "saml".to_string(),
         resource_id: response_id,
@@ -695,6 +712,22 @@ async fn idp_complete_slo(
 // Helpers
 // ============================================================================
 
+/// Rejects a request whose authenticated session belongs to a different
+/// realm than the one named in the path.
+///
+/// S1 (HEA-1751): the `UiSession` extractor proves the caller is logged in,
+/// but the session's realm is bound to the cookie, not the URL. Without this
+/// check a user authenticated in realm A could drive realm B's IdP endpoints
+/// to mint an assertion — a cross-realm privilege escalation. Returns
+/// `Some(FORBIDDEN)` on mismatch, `None` when the realms agree.
+fn reject_session_realm_mismatch(session: &UiSession, realm: &RealmId) -> Option<Response> {
+    if &session.realm_id == realm {
+        None
+    } else {
+        Some((StatusCode::FORBIDDEN, "session realm mismatch").into_response())
+    }
+}
+
 fn resolve_realm(state: &WebState, realm_name: &str) -> Option<RealmId> {
     state
         .identity
@@ -704,13 +737,37 @@ fn resolve_realm(state: &WebState, realm_name: &str) -> Option<RealmId> {
         .map(|r| r.id().clone())
 }
 
+/// Resolves the trusted public origin for this server (scheme + host).
+///
+/// S3 (HEA-1751): SAML audience/destination validation MUST NOT be anchored
+/// to an attacker-controlled `Host` header. When the operator has configured
+/// `onboarding.base_url` (the canonical public URL, also used for emailed
+/// links), that value is authoritative and the request headers are ignored.
+/// Only when no base URL is configured (dev / tests) do we fall back to the
+/// request `Host` — in that mode there is no multi-tenant origin to spoof.
+fn trusted_base_url(state: &WebState, headers: &axum::http::HeaderMap) -> String {
+    let configured = state
+        .config
+        .as_ref()
+        .and_then(|c| c.onboarding.base_url.as_deref());
+    trusted_origin(configured, headers)
+}
+
+/// Pure core of [`trusted_base_url`]: prefer the configured public origin,
+/// ignoring the request `Host` entirely when one is set. Falls back to the
+/// `Host` header only when no origin is configured.
+fn trusted_origin(configured_base_url: Option<&str>, headers: &axum::http::HeaderMap) -> String {
+    configured_base_url
+        .map(|u| u.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| base_url_from_headers(headers))
+}
+
 /// Extracts the public base URL from the request's `Host` header.
 ///
-/// SAML metadata has to advertise URLs the external party can reach us
-/// at — that's the Host the browser hit. We trust the Host header
-/// implicitly (axum + trusted-proxies are the perimeter); operators
-/// terminating TLS at a proxy should ensure `X-Forwarded-Host` /
-/// `X-Forwarded-Proto` are propagated if they want HTTPS-only URLs.
+/// Only used as the dev/test fallback for [`trusted_base_url`] when no
+/// `onboarding.base_url` is configured. Operators terminating TLS at a proxy
+/// should propagate `X-Forwarded-Host` / `X-Forwarded-Proto` if they want
+/// HTTPS-only URLs in that fallback mode.
 fn base_url_from_headers(headers: &axum::http::HeaderMap) -> String {
     let host = headers
         .get("x-forwarded-host")
@@ -730,10 +787,14 @@ fn base_url_from_headers(headers: &axum::http::HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
-fn realm_base_url_from_headers(headers: &axum::http::HeaderMap, realm_name: &str) -> String {
+fn realm_base_url_from_headers(
+    state: &WebState,
+    headers: &axum::http::HeaderMap,
+    realm_name: &str,
+) -> String {
     format!(
         "{}/ui/realms/{}",
-        base_url_from_headers(headers),
+        trusted_base_url(state, headers),
         realm_name
     )
 }
@@ -743,7 +804,7 @@ fn realm_base_url_for_realm(
     state: &WebState,
     realm: &RealmId,
 ) -> Option<String> {
-    let base = base_url_from_headers(headers);
+    let base = trusted_base_url(state, headers);
     state
         .identity
         .get_realm(realm)
@@ -759,4 +820,46 @@ fn now() -> Timestamp {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn headers_with_host(host: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("host", host.parse().expect("host header"));
+        h
+    }
+
+    #[test]
+    fn trusted_origin_ignores_spoofed_host_when_configured() {
+        // S3 (HEA-1751): with a configured public origin, an attacker who
+        // controls the `Host` header must NOT be able to shift the origin
+        // used for SAML audience/destination validation.
+        let headers = headers_with_host("evil.attacker.example");
+        let origin = trusted_origin(Some("https://auth.company.example/"), &headers);
+        assert_eq!(origin, "https://auth.company.example");
+        assert!(
+            !origin.contains("attacker"),
+            "spoofed Host must not leak into the trusted origin"
+        );
+    }
+
+    #[test]
+    fn trusted_origin_trims_trailing_slash_on_config() {
+        let headers = headers_with_host("ignored.example");
+        assert_eq!(
+            trusted_origin(Some("https://auth.company.example/"), &headers),
+            "https://auth.company.example"
+        );
+    }
+
+    #[test]
+    fn trusted_origin_falls_back_to_host_when_unconfigured() {
+        // Dev / test mode: no configured origin, so the Host header is used.
+        let headers = headers_with_host("localhost:8420");
+        assert_eq!(trusted_origin(None, &headers), "http://localhost:8420");
+    }
 }

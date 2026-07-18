@@ -458,6 +458,71 @@ async fn capability_token_single_use_enforcement() {
     );
 }
 
+/// G2 regression (HEA-1753): a capability-token validation that fails the M5
+/// caller-binding check MUST NOT consume the single-use JTI. Otherwise an
+/// unauthorized caller can grief the legitimate caller by presenting the token
+/// once (burning the JTI) so the rightful holder's subsequent use is rejected
+/// as already-spent. The JTI must only be spent after every authorization check
+/// passes.
+#[tokio::test]
+async fn failed_caller_binding_does_not_consume_capability_jti() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+    let agent_sub = agent_id.as_uuid().to_string();
+
+    // Mint a real capability token bound to `agent_id` via the approval flow.
+    let req = CreateApprovalRequestInput {
+        agent_id,
+        tool: "send_email".to_string(),
+        action: "invoke".to_string(),
+        context: serde_json::json!({}),
+        delegation_chain: vec![],
+        expires_in_secs: None,
+    };
+    let created = h
+        .identity()
+        .create_approval_request(&realm_id, &req)
+        .expect("create");
+    let response = h
+        .identity()
+        .approve_approval_request(&realm_id, &created.request_id, None)
+        .expect("approve");
+    let cap = response.capability_token.expect("capability token present");
+
+    // A different caller presents the token — caller binding must reject it.
+    let wrong_caller = uuid::Uuid::new_v4().to_string();
+    let griefing_attempt = h.identity().validate_capability_token(
+        &realm_id,
+        &cap.token,
+        "send_email",
+        "invoke",
+        &wrong_caller,
+    );
+    assert!(
+        matches!(
+            griefing_attempt,
+            Err(IdentityError::ToolApprovalRequired { ref tool }) if tool == "send_email"
+        ),
+        "wrong caller must be rejected by caller binding, got: {griefing_attempt:?}"
+    );
+
+    // The legitimate caller must STILL be able to use the token — the failed
+    // attempt above must not have burned the single-use JTI.
+    let legitimate = h.identity().validate_capability_token(
+        &realm_id,
+        &cap.token,
+        "send_email",
+        "invoke",
+        &agent_sub,
+    );
+    assert!(
+        legitimate.is_ok(),
+        "legitimate caller's use must succeed after a failed caller-binding attempt \
+         (JTI must not be spent on failure), got: {legitimate:?}"
+    );
+}
+
 // ─── C.4.8: Concurrent approve — exactly one token ────────────────────────────
 
 /// Ten concurrent `approve` calls on the same request must result in exactly

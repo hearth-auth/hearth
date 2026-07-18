@@ -197,6 +197,13 @@ pub struct IdpConfig {
     /// is known to drift, or lower it for stricter security posture.
     #[serde(default = "IdpConfig::default_leeway_seconds")]
     pub leeway_seconds: u32,
+    /// SAML only: whether Hearth (acting as SP) requires the inbound
+    /// `<Assertion>` itself to be individually signed. When `false` the
+    /// SP falls back to accepting a Response-level signature. Driven from
+    /// the connector's `want_assertions_signed` YAML field; ignored for
+    /// non-SAML connectors. Defaults to `false` (HEA-1759 / S4 Part A).
+    #[serde(default)]
+    pub want_assertions_signed: bool,
     /// Apple-specific config required when `kind == IdpKind::Apple`.
     /// `None` for all other connector kinds.
     #[serde(default)]
@@ -446,6 +453,7 @@ mod tests {
             client_secret: FederationSecret::new("sekret".to_string()),
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
+            want_assertions_signed: false,
             apple: None,
             created_at: Timestamp::from_micros(1),
             updated_at: Timestamp::from_micros(2),

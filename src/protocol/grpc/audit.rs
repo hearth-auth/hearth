@@ -7,7 +7,7 @@ use crate::core::{RealmId, Timestamp};
 use crate::protocol::proto::events::v1 as pb;
 use crate::protocol::proto::events::v1::audit_service_server::AuditService;
 
-use super::auth::authenticate_admin;
+use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::{audit_error_to_status, identity_to_status};
 use super::server::GrpcState;
 
@@ -29,6 +29,7 @@ impl AuditService for AuditSvc {
         req: Request<pb::AuditQuery>,
     ) -> Result<Response<pb::AuditEventPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let q = req.into_inner();
         let query = proto_query_to_domain(&q, auth.realm_id);
         let events = self
@@ -46,6 +47,7 @@ impl AuditService for AuditSvc {
         req: Request<pb::VerifyIntegrityRequest>,
     ) -> Result<Response<pb::VerifyIntegrityResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let ok = self
             .state
             .audit

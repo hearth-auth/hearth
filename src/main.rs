@@ -376,6 +376,12 @@ enum AppAction {
         /// OAuth 2.0 redirect URI for the application.
         #[arg(long)]
         redirect_uri: String,
+
+        /// Admin bearer token carrying `hearth.clients.admin` (or
+        /// `hearth.admin`). Client registration is a privileged operation;
+        /// obtain a token via `POST /admin/bootstrap` in dev mode.
+        #[arg(long)]
+        token: String,
     },
 }
 
@@ -442,8 +448,9 @@ async fn main() {
                 realm_id,
                 name,
                 redirect_uri,
+                token,
             } => {
-                if let Err(e) = run_app_create(&server, &realm_id, &name, &redirect_uri) {
+                if let Err(e) = run_app_create(&server, &realm_id, &name, &redirect_uri, &token) {
                     error!("{e}");
                     std::process::exit(1);
                 }
@@ -2972,11 +2979,16 @@ fn run_realm_create() {
 /// Runs the `hearth app create` command.
 ///
 /// Registers an OAuth 2.0 client against a running Hearth server via HTTP.
+/// Client registration is a privileged operation (HEA-1750): the caller must
+/// supply an admin bearer token carrying `hearth.clients.admin` (or
+/// `hearth.admin`). The target realm is derived from the token, so `realm_id`
+/// is sent for reference only.
 fn run_app_create(
     server: &str,
     realm_id: &str,
     name: &str,
     redirect_uri: &str,
+    token: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{server}/clients");
     let body = serde_json::json!({
@@ -2985,6 +2997,7 @@ fn run_app_create(
     });
 
     let response: serde_json::Value = ureq::post(&url)
+        .header("Authorization", &format!("Bearer {token}"))
         .header("X-Realm-ID", realm_id)
         .header("Content-Type", "application/json")
         .send_json(&body)?

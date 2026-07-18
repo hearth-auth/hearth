@@ -73,7 +73,11 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             require_consent: true,
             client_logo_url: None,
             slug: None,
-            trust_level: domain::ClientTrustLevel::FirstParty,
+            // HEA-1750 (A2): default proto-registered clients to ThirdParty so
+            // they present the consent screen. FirstParty (consent-skipping)
+            // trust is only granted via an explicit admin update, never inferred
+            // from an incoming proto request.
+            trust_level: domain::ClientTrustLevel::ThirdParty,
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
             access_token_authorization,
@@ -424,6 +428,26 @@ mod tests {
         assert_eq!(domain.client_name, "My App");
         assert_eq!(domain.client_secret.as_deref(), Some("secret123"));
         assert_eq!(domain.grant_types, vec!["authorization_code"]);
+    }
+
+    /// HEA-1750 (A2): proto-registered clients must default to `ThirdParty`
+    /// trust so the engine forces `require_consent = true`. A `FirstParty`
+    /// default would silently skip the consent screen.
+    #[test]
+    fn register_client_request_defaults_to_thirdparty_consent() {
+        let proto = pb::RegisterClientRequest {
+            client_name: "Proto App".to_string(),
+            redirect_uris: vec!["https://app.example.com/cb".to_string()],
+            client_secret: None,
+            grant_types: vec![],
+            access_token_authorization: 0,
+        };
+        let domain = domain::RegisterClientRequest::from(proto);
+        assert_eq!(
+            domain.trust_level,
+            domain::ClientTrustLevel::ThirdParty,
+            "proto conversion must default to ThirdParty so consent is required"
+        );
     }
 
     #[test]
