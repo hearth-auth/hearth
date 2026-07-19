@@ -1,0 +1,163 @@
+# loadtest-corpus.yaml — the LARGE corpus that `make loadtest` runs against.
+#
+# This is the default dataset for the `loadtest` Makefile target specifically
+# (HEA-1787). It boots a fully-seeded, multi-hundred-thousand-user Hearth so the
+# Goose journeys observe tail latency, saturation, and drift against a
+# realistically-large storage engine — NOT an empty DB or the old 200-user REST
+# seed. It is driven by `loadtest/scripts/run-loadtest.sh`, which sets the
+# `LOADTEST_*` env vars below and then attaches the token-pool seed step + run.
+#
+# Every value that the harness needs to vary (port, on-disk corpus location,
+# per-realm user counts, hot-tier capacity) is an env placeholder with a large
+# default, so `make loadtest` with no arguments produces the full corpus while
+# `LOADTEST_CORPUS_ACME=200 make loadtest` (etc.) gives a fast pipeline smoke.
+#
+# NOT for production. The mass seeder is gated by `demo.enabled: true`; a
+# production config omits this block so the seeder can never fire against real
+# data. See loadtest/README.md § "The large corpus".
+
+# ── Demo mode (master guard for the large-scale seeder) ──────────────────────
+demo:
+  enabled: true
+  # Shared by EVERY seeded user across all realms. Hashed once, reused for all.
+  # The seed step ROPCs the named `seed_users` below with this password.
+  password: "DemoPassw0rd!"
+
+server:
+  bind_address: "127.0.0.1"
+  # run-loadtest.sh auto-picks a free loopback port and passes it here so bare
+  # `make loadtest` never collides with a running `make dev` (8420).
+  port: ${LOADTEST_PORT:-8420}
+
+security:
+  # Load-test escape hatch: disables ALL request-rate limiters so the run
+  # saturates the hot path instead of a limiter. Refused unless the bind is
+  # loopback (it is: 127.0.0.1). See loadtest/README.md § "Rate limits".
+  load_test_unthrottled: true
+
+storage:
+  # Throwaway on-disk corpus. run-loadtest.sh wipes and re-seeds this dir each
+  # run so the dev-realm bootstrap the token pool needs always starts clean
+  # (a persisted dev realm would 401 the anonymous re-bootstrap).
+  data_dir: ${LOADTEST_DATA_DIR:-./data/loadtest-corpus}
+  # No per-write fsync during the bulk seed — fast loading that still persists.
+  fsync: false
+  # Size the hot tier so a representative slice of the corpus stays resident
+  # (HEA-1800). Override for tier-miss / cold-read profiles.
+  hot_tier_capacity: ${LOADTEST_HOT_TIER_CAPACITY:-100000}
+
+oidc:
+  issuer: ${LOADTEST_ISSUER:-http://127.0.0.1:8420}
+
+onboarding:
+  base_url: ${LOADTEST_ISSUER:-http://127.0.0.1:8420}
+
+observability:
+  log_level: "info"
+  log_format: "text"
+
+email:
+  transport: mailcatcher   # captured in-process; inbox at /dev/mail
+
+# ── Realms ───────────────────────────────────────────────────────────────────
+#
+# Per-realm user counts default large (matching examples/large-scale-demo:
+# ~1.2M total) and are individually env-tunable for a quick pipeline smoke.
+# Each realm carries a named `seed_user` with the shared password so the seed
+# step can mint live tokens against a real subject in the realm.
+realms:
+  # ── Acme — 500,000 users ────────────────────────────────────────────────────
+  acme:
+    applications:
+      acme-portal:
+        name: "Acme Portal"
+        confidential: false           # public client; PKCE required
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+    permissions:
+      - name: content.read
+        display_name: "Read content"
+        category: content
+      - name: content.write
+        display_name: "Write content"
+        category: content
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+        permissions: [content.read]
+      - name: editor
+        display_name: "Editor"
+        scope_kind: realm
+        permissions: [content.read, content.write]
+    seed_users:
+      - email: admin@acme.demo
+        display_name: Ada Admin
+        password: "DemoPassw0rd!"
+        roles: [editor]
+    seeding:
+      users: ${LOADTEST_CORPUS_ACME:-500000}
+      email_domain: acme.demo
+
+  # ── Globex — 400,000 users ──────────────────────────────────────────────────
+  globex:
+    applications:
+      globex-app:
+        name: "Globex App"
+        confidential: false
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+    seed_users:
+      - email: admin@globex.demo
+        display_name: Gil Globex
+        password: "DemoPassw0rd!"
+        roles: [member]
+    seeding:
+      users: ${LOADTEST_CORPUS_GLOBEX:-400000}
+      email_domain: globex.demo
+
+  # ── Initech — 200,000 users ─────────────────────────────────────────────────
+  initech:
+    applications:
+      initech-tps:
+        name: "Initech TPS"
+        confidential: false
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+    seeding:
+      users: ${LOADTEST_CORPUS_INITECH:-200000}
+      email_domain: initech.demo
+
+  # ── Umbrella — 100,000 users ────────────────────────────────────────────────
+  umbrella:
+    applications:
+      umbrella-console:
+        name: "Umbrella Console"
+        confidential: false
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+    seeding:
+      users: ${LOADTEST_CORPUS_UMBRELLA:-100000}
+      email_domain: umbrella.demo

@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`make loadtest` now runs against the large corpus by default** — the
+  `loadtest` Makefile target boots a demo-seeded, multi-hundred-thousand-user
+  Hearth (~1.2M users across the `acme`/`globex`/`initech`/`umbrella` realms,
+  from the new `loadtest/loadtest-corpus.yaml`) instead of the prior ~200-user
+  REST seed, so the Goose journeys observe tail latency and saturation against a
+  realistically-large storage engine. The corpus is seeded in-server by the fast
+  batched demo seeder and the pipeline waits for it to finish before load
+  starts. New `CORPUS_ACME`/`CORPUS_GLOBEX`/`CORPUS_INITECH`/`CORPUS_UMBRELLA`,
+  `LOADTEST_DATA_DIR`, `HOT_TIER_CAPACITY`, and `SEED_WAIT` env knobs tune the
+  dataset (shrink the `CORPUS_*` counts for a fast pipeline smoke). This is
+  scoped to the `loadtest` target only — the standalone `make seed` / `seed`
+  subcommand keep their small explicit defaults (HEA-1787).
+
 ### Fixed
 - **`--dev` now honors `storage.data_dir`** — dev mode previously ignored the
   configured `storage.data_dir` and always used an ephemeral temp directory

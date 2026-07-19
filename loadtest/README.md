@@ -16,9 +16,10 @@ built/run explicitly instead.
 ## Building and running
 
 **The one-liner.** With no `ARGS`, `make loadtest` runs the *whole* pipeline —
-it boots a fresh throwaway dev Hearth on loopback, seeds a deterministic corpus,
-runs the Goose journeys, writes `report.json` + HTML into `reports/`, and tears
-the server down. No manual bootstrap / seed / attach steps:
+it boots a fresh throwaway dev Hearth on loopback **pre-seeded with the large
+corpus**, mints a live-token pool, runs the Goose journeys, writes
+`report.json` + HTML into `reports/`, and tears the server down. No manual
+bootstrap / seed / attach steps:
 
 ```bash
 make loadtest                          # that's it — nothing else is required
@@ -28,6 +29,29 @@ make loadtest                          # that's it — nothing else is required
 `make seed`, no ARGS, no env vars, no ports to free up. It builds a release
 Hearth, boots a throwaway instance on a free loopback port, seeds, runs, writes
 the reports, and cleans up. If you can build the repo, `make loadtest` works.
+
+### The large corpus (default for `make loadtest`)
+
+Numbers against an empty DB are meaningless, so `make loadtest` **specifically**
+defaults to a large, demo-seeded corpus — a multi-hundred-thousand-user dataset
+(~1.2M users across the `acme`/`globex`/`initech`/`umbrella` realms) described by
+[`loadtest-corpus.yaml`](loadtest-corpus.yaml). This is the whole point of the
+harness: the journeys observe tail latency, saturation, and drift against a
+realistically-large storage engine, not a toy DB.
+
+- The corpus is seeded **in-server** by the fast batched demo seeder
+  (`demo.enabled`), not over REST — millions of users load in a couple of
+  minutes on a release build.
+- It runs in a background task, so the pipeline **waits for the server's
+  `demo seeding finished (all realms)` log line** before starting load (env
+  `SEED_WAIT`, default `1800s`).
+- The corpus is **fresh each run** (its data dir is wiped before boot) so the
+  dev-realm bootstrap the token pool needs always starts clean.
+- Only `make loadtest` gets the large corpus by default. The standalone
+  `make seed` / `seed` subcommand keep their small, explicit defaults — the big
+  dataset is opt-in there (see [Seed step](#seed-step-hea-1789)).
+- **Fast pipeline smoke:** shrink the corpus with the `CORPUS_*` knobs, e.g.
+  `CORPUS_ACME=200 CORPUS_GLOBEX=0 CORPUS_INITECH=0 CORPUS_UMBRELLA=0 make loadtest`.
 
 Everything below is **optional tuning** — the defaults are chosen so the bare
 command always produces a valid report. You never need any of it.
@@ -48,7 +72,14 @@ knob is an **optional** env var (defaults in brackets):
 | `RUN_TIME` | `90s` | Per-run duration |
 | `HATCH_RATE` | `50` | Users spawned per second |
 | `THROTTLE` | `0` | Cap total req/s; `0` = **unthrottled** (default). Server-side rate limits are disabled (see below), so there is no limiter to stay under. Set `>0` only to pin a specific offered load for a controlled ramp |
-| `USERS_PER_REALM` | `80` | Seeded user records per realm |
+| `LOADTEST_DATA_DIR` | `./data/loadtest-corpus` | Throwaway corpus data dir (wiped + re-seeded before each boot) |
+| `CORPUS_ACME` | `500000` | Users seeded into the `acme` realm (the large default) |
+| `CORPUS_GLOBEX` | `400000` | Users seeded into the `globex` realm |
+| `CORPUS_INITECH` | `200000` | Users seeded into the `initech` realm |
+| `CORPUS_UMBRELLA` | `100000` | Users seeded into the `umbrella` realm |
+| `HOT_TIER_CAPACITY` | `100000` | Hot-tier resident capacity (HEA-1800) |
+| `SEED_WAIT` | `1800` | Max seconds to wait for background corpus seeding to finish |
+| `USERS_PER_REALM` | `80` | Token-pool user records (dev realm; drives the token journeys) |
 | `SESSIONS_FRAC` | `0.5` | Fraction of users given a live token |
 | `REVOKED_FRAC` | `0.1` | Fraction of live tokens pre-revoked |
 | `SEED` | `1` | Determinism seed |

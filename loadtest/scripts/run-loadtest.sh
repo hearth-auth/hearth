@@ -2,17 +2,26 @@
 #
 # One-shot load-test pipeline for Hearth (HEA-1787).
 #
-# Boots a fresh, isolated, dev-only Hearth on loopback, seeds a deterministic
-# corpus, runs the Goose journeys, and writes the JSON + HTML reports — then
-# tears the server down. This is the "just run it" entrypoint behind
-# `make loadtest` (no ARGS). For advanced/attach usage, call the binary
-# directly via `make loadtest ARGS="..."` (see loadtest/README.md).
+# Boots a dev-only Hearth on loopback that is pre-seeded with the LARGE demo
+# corpus (multi-hundred-thousand users; see loadtest/loadtest-corpus.yaml),
+# mints a live-token pool, runs the Goose journeys, and writes the JSON + HTML
+# reports — then tears the server down. Running the journeys against a
+# realistically-large storage engine (not an empty DB) is the entire point of
+# the loadtest, so the large corpus is the DEFAULT for `make loadtest`
+# specifically (HEA-1787). For advanced/attach usage, call the binary directly
+# via `make loadtest ARGS="..."` (see loadtest/README.md).
+#
+# The corpus is seeded FRESH on every run into a throwaway on-disk data dir
+# (LOADTEST_DATA_DIR, wiped before boot) so the dev-realm bootstrap the token
+# pool needs always succeeds. Seeding the full ~1.2M-user corpus takes a couple
+# of minutes on a release build; shrink it via the CORPUS_* knobs for a fast
+# pipeline smoke. This is a nightly / pre-release tool, not a per-PR gate.
 #
 # Everything is overridable via environment variables (defaults in brackets):
-#   PORT              [auto]   loopback port the throwaway server binds
+#   PORT              [auto]   loopback port the server binds
 #                             (default: a free ephemeral port; never collides)
 #   MODE              [steady] steady | ramp | soak
-#   USERS             [20]     concurrent Goose users
+#   USERS             [200]    concurrent Goose users
 #   RUN_TIME          [90s]    per-run duration
 #   HATCH_RATE        [50]     users spawned per second
 #   THROTTLE          [0]      cap total req/s; 0 = unthrottled (the default —
@@ -20,20 +29,29 @@
 #                             security.load_test_unthrottled, so there is no
 #                             limiter to stay under). Set >0 only to pin a
 #                             specific offered load for a controlled ramp.
-#   USERS_PER_REALM   [80]     seeded user records per realm
-#   SESSIONS_FRAC     [0.5]    fraction of users given a live token
+#   LOADTEST_DATA_DIR [./data/loadtest-corpus]  throwaway corpus data dir
+#                             (wiped before each boot so bootstrap stays fresh)
+#   CORPUS_ACME       [500000] users seeded into the acme realm (large default)
+#   CORPUS_GLOBEX     [400000] users seeded into the globex realm
+#   CORPUS_INITECH    [200000] users seeded into the initech realm
+#   CORPUS_UMBRELLA   [100000] users seeded into the umbrella realm
+#                             Lower these for a fast pipeline smoke, e.g.
+#                             CORPUS_ACME=200 CORPUS_GLOBEX=0 ... make loadtest
+#   HOT_TIER_CAPACITY [100000] hot-tier resident capacity (HEA-1800)
+#   SEED_WAIT         [1800]   max seconds to wait for background seeding to
+#                             finish before load starts
+#   USERS_PER_REALM   [80]     token-pool user records (dev realm; token journeys)
+#   SESSIONS_FRAC     [0.5]    fraction of pool users given a live token
 #   REVOKED_FRAC      [0.1]    fraction of live tokens pre-revoked
 #   SEED              [1]      determinism seed
-#   SETTLE            [0]      seconds to wait after seeding before the run.
-#                             Default 0: with rate limits disabled there is no
-#                             admin-write window to wait out.
+#   SETTLE            [0]      seconds to wait after seeding before the run
 #   EXTRA_RUN_ARGS    []       extra flags appended to the `run` subcommand
 #
 # Loopback / dev only — the server boots with `--dev` (bootstrap enabled,
-# relaxed security), an in-memory store, and `security.load_test_unthrottled`
-# which disables ALL request-rate limiters so the run saturates the hot path
-# instead of a limiter. That flag is refused on any non-loopback bind. Never
-# point this at shared infra.
+# relaxed security) and `security.load_test_unthrottled` which disables ALL
+# request-rate limiters so the run saturates the hot path instead of a limiter.
+# That flag is refused on any non-loopback bind. Never point this at shared
+# infra.
 set -euo pipefail
 
 # ── Resolve paths ────────────────────────────────────────────────────────────
@@ -76,9 +94,21 @@ SEED="${SEED:-1}"
 SETTLE="${SETTLE:-0}"
 EXTRA_RUN_ARGS="${EXTRA_RUN_ARGS:-}"
 
+# ── Large-corpus parameters (the default dataset for `make loadtest`) ────────
+# Seeded fresh each run into a throwaway data dir (wiped before boot) so the
+# dev-realm bootstrap the token pool needs always succeeds on a clean instance.
+LOADTEST_DATA_DIR="${LOADTEST_DATA_DIR:-${REPO_ROOT}/data/loadtest-corpus}"
+CORPUS_ACME="${CORPUS_ACME:-500000}"
+CORPUS_GLOBEX="${CORPUS_GLOBEX:-400000}"
+CORPUS_INITECH="${CORPUS_INITECH:-200000}"
+CORPUS_UMBRELLA="${CORPUS_UMBRELLA:-100000}"
+HOT_TIER_CAPACITY="${HOT_TIER_CAPACITY:-100000}"
+SEED_WAIT="${SEED_WAIT:-1800}"
+CORPUS_TOTAL=$(( CORPUS_ACME + CORPUS_GLOBEX + CORPUS_INITECH + CORPUS_UMBRELLA ))
+
 HOST="http://127.0.0.1:${PORT}"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/hearth-loadtest.XXXXXX")"
-CONFIG="${WORKDIR}/hearth-loadtest.yaml"
+CORPUS_CONFIG="${LOADTEST_DIR}/loadtest-corpus.yaml"
 SEED_HANDLE="${LOADTEST_DIR}/reports/seed-handle.json"
 SERVER_LOG="${WORKDIR}/server.log"
 SERVER_PID=""
@@ -107,22 +137,31 @@ LOADTEST_BIN="$(cargo metadata --format-version 1 --no-deps \
   --manifest-path "${LOADTEST_DIR}/Cargo.toml" \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/hearth-loadtest"
 
-# ── 2. Loopback-only config with all rate limiters disabled ──────────────────
-# security.load_test_unthrottled disables the token, admin, export, and per-IP/
+# ── 2. Large-corpus config (loopback-only, all rate limiters disabled) ───────
+# loadtest/loadtest-corpus.yaml is the DEFAULT dataset for `make loadtest`: a
+# demo-seeded, multi-hundred-thousand-user corpus. Its env placeholders let us
+# pin the port, the throwaway data dir, the hot-tier capacity, and the
+# per-realm user counts without editing the file. security.load_test_unthrottled
+# (baked into that config) disables the token, admin, export, and per-IP/
 # per-realm request-shaper limiters so the run measures the hot path, not a
-# limiter. The flag is refused unless the bind is loopback (it is: 127.0.0.1).
-# See loadtest/README.md "Rate limits".
-cat >"${CONFIG}" <<YAML
-server:
-  bind_address: "127.0.0.1"
-  port: ${PORT}
-security:
-  load_test_unthrottled: true
-YAML
+# limiter — refused unless the bind is loopback (it is: 127.0.0.1).
+export LOADTEST_PORT="${PORT}"
+export LOADTEST_DATA_DIR
+export LOADTEST_HOT_TIER_CAPACITY="${HOT_TIER_CAPACITY}"
+export LOADTEST_ISSUER="${HOST}"
+export LOADTEST_CORPUS_ACME="${CORPUS_ACME}"
+export LOADTEST_CORPUS_GLOBEX="${CORPUS_GLOBEX}"
+export LOADTEST_CORPUS_INITECH="${CORPUS_INITECH}"
+export LOADTEST_CORPUS_UMBRELLA="${CORPUS_UMBRELLA}"
+# Fresh data dir each run: the dev-realm bootstrap the token pool needs only
+# succeeds anonymously on a clean instance (a persisted dev realm 401s).
+rm -rf "${LOADTEST_DATA_DIR}"
+mkdir -p "${LOADTEST_DATA_DIR}"
 
-# ── 3. Boot the throwaway server (in-memory, dev mode) ───────────────────────
-echo "==> Booting throwaway hearth on ${HOST} (dev, in-memory)"
-"${HEARTH_BIN}" serve --dev --config "${CONFIG}" >"${SERVER_LOG}" 2>&1 &
+# ── 3. Boot the server, pre-seeded with the large corpus (dev mode, on disk) ──
+echo "==> Booting hearth on ${HOST} (dev, large corpus target=${CORPUS_TOTAL} users)"
+echo "    corpus data dir: ${LOADTEST_DATA_DIR} (fresh; re-seeded each run)"
+"${HEARTH_BIN}" serve --dev --config "${CORPUS_CONFIG}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
 echo "==> Waiting for health check"
@@ -143,8 +182,35 @@ if ! curl -sf "${HOST}/health" >/dev/null 2>&1; then
   exit 1
 fi
 
-# ── 4. Seed a deterministic corpus (fresh instance → anonymous bootstrap) ────
-echo "==> Seeding corpus (${USERS_PER_REALM} users, seed=${SEED})"
+# ── 3b. Wait for the background large-corpus seeding to finish ────────────────
+# demo.enabled seeding runs in a BACKGROUND task (src/main.rs), so the server is
+# healthy while it is still loading ~1.2M users. Running load now would measure a
+# partially-resident, actively-writing store. Gate on the server's completion
+# log line so the run starts against the full corpus. The line is emitted once
+# per boot whether the corpus was freshly seeded or resumed from the sentinel.
+echo "==> Waiting for large-corpus seeding to finish (target=${CORPUS_TOTAL} users, timeout=${SEED_WAIT}s)"
+seed_deadline=$(( SECONDS + SEED_WAIT ))
+until grep -q "demo seeding finished (all realms)" "${SERVER_LOG}" 2>/dev/null; do
+  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+    echo "error: server exited during corpus seeding; log:" >&2
+    cat "${SERVER_LOG}" >&2
+    exit 1
+  fi
+  if (( SECONDS >= seed_deadline )); then
+    echo "error: corpus seeding did not finish within ${SEED_WAIT}s; raise SEED_WAIT or lower CORPUS_*; log tail:" >&2
+    tail -n 20 "${SERVER_LOG}" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "==> Large corpus resident; proceeding to token-pool seed + run"
+
+# ── 4. Seed the live-token pool (dev realm; drives the token journeys) ────────
+# Distinct from the large corpus above: the validate/issuance/revoke journeys
+# need live access tokens, minted here against the fresh dev realm that
+# POST /admin/bootstrap creates. The large corpus provides the lookup/residency
+# pressure; this pool provides the tokens.
+echo "==> Seeding token pool (${USERS_PER_REALM} users, seed=${SEED})"
 "${LOADTEST_BIN}" seed \
   --target-host "${HOST}" \
   --users-per-realm "${USERS_PER_REALM}" \
