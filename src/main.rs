@@ -609,37 +609,66 @@ async fn main() {
 /// Outcome of evaluating the `security.load_test_unthrottled` escape hatch
 /// against the server's bind address.
 ///
-/// The rate-limit-disable path (HEA-1796) is prod-gated: it takes effect
-/// **only** on a loopback bind. Any other bind refuses the request and keeps
-/// every limiter on, so a misconfigured production server can never silently
-/// ship with brute-force / abuse protection removed.
+/// The rate-limit-disable path (HEA-1796) is prod-gated on TWO conditions
+/// (HEA-1797): the process must run in `--dev` mode **and** every effective
+/// bind (HTTP and, when enabled, gRPC) must be loopback. If either check fails
+/// the request is refused and every limiter stays on, so a misconfigured
+/// production server — or a dev server whose gRPC listener diverges onto a
+/// public interface, or a prod-config binary behind a reverse proxy — can never
+/// silently ship with brute-force / abuse protection removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoadtestUnthrottle {
     /// The flag is unset — limiters stay on (normal operation).
     Off,
-    /// The flag is set and the bind is loopback — disable all limiters.
+    /// The flag is set, dev mode is on, and every bind is loopback — disable
+    /// all limiters.
     Enabled,
-    /// The flag is set but the bind is non-loopback — refuse, keep limiters on.
+    /// The flag is set but at least one effective bind (HTTP or gRPC) is
+    /// non-loopback — refuse, keep limiters on.
     RefusedNonLoopback,
+    /// The flag is set but the process is not in `--dev` mode — refuse, keep
+    /// limiters on. Guards the reverse-proxy topology where a prod server binds
+    /// loopback yet is reachable from the internet via nginx.
+    RefusedNotDev,
 }
 
-/// Decides whether the load-test unthrottle escape hatch applies, gating it on
-/// a loopback bind. Pure (no logging / I/O) so the prod-safety gate is unit
-/// tested; the caller emits the operator-facing warn/error log.
+/// Decides whether the load-test unthrottle escape hatch applies. Gated on
+/// `--dev` mode AND every effective bind being loopback (HEA-1797). Pure (no
+/// logging / I/O) so the prod-safety gate is unit tested; the caller emits the
+/// operator-facing warn/error log.
 ///
-/// `bind` is the raw `server.bind_address` (already trimmed by the caller). A
-/// bare `localhost` is treated as loopback; anything that does not parse to a
-/// loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is refused.
-fn loadtest_unthrottle_decision(enabled: bool, bind: &str) -> LoadtestUnthrottle {
+/// `http_bind` is the raw `server.bind_address` and `grpc_bind` the effective
+/// gRPC bind (`None` when the gRPC listener is disabled), both already trimmed
+/// by the caller. A bare `localhost` is treated as loopback; anything that does
+/// not parse to a loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is
+/// non-loopback and refuses the request.
+fn loadtest_unthrottle_decision(
+    enabled: bool,
+    dev: bool,
+    http_bind: &str,
+    grpc_bind: Option<&str>,
+) -> LoadtestUnthrottle {
     if !enabled {
         return LoadtestUnthrottle::Off;
     }
-    let is_loopback = bind.eq_ignore_ascii_case("localhost")
-        || bind
-            .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false);
-    if is_loopback {
+    if !dev {
+        return LoadtestUnthrottle::RefusedNotDev;
+    }
+    let is_loopback = |bind: &str| {
+        bind.eq_ignore_ascii_case("localhost")
+            || bind
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    };
+    // Every effective bind must be loopback. A disabled gRPC listener (`None`)
+    // cannot be reached, so it does not gate the decision.
+    let all_loopback = is_loopback(http_bind)
+        && match grpc_bind {
+            Some(g) => is_loopback(g),
+            None => true,
+        };
+    if all_loopback {
         LoadtestUnthrottle::Enabled
     } else {
         LoadtestUnthrottle::RefusedNonLoopback
@@ -1874,19 +1903,36 @@ async fn run_serve(
     // counters accumulate across protocols — a caller cannot evade the limit by
     // switching from REST to gRPC.
     // Load-test escape hatch (`security.load_test_unthrottled`): when set AND
-    // the server binds a loopback address, disable every request-rate limiter so
-    // a single-node throughput/soak test can saturate the hot path instead of
-    // measuring the rate limiter. Refused (fail-safe: limiters stay ON) on any
-    // non-loopback bind so this can never silently expose a public server.
+    // the process runs in `--dev` mode AND every effective bind (HTTP + gRPC)
+    // is loopback, disable every request-rate limiter so a single-node
+    // throughput/soak test can saturate the hot path instead of measuring the
+    // rate limiter. Refused (fail-safe: limiters stay ON) when not in dev mode
+    // (guards reverse-proxy prod topologies) or when any bind — including the
+    // gRPC listener, which may diverge from the HTTP bind — is non-loopback, so
+    // this can never silently expose a public server (HEA-1797).
     let bind = config.server.bind_address.trim();
+    // Effective gRPC bind: only relevant when the gRPC listener is enabled
+    // (`grpc_port` set); it inherits `bind_address` when `grpc_bind_address` is
+    // unset. Mirrors the resolution at the gRPC spawn site below.
+    let grpc_bind = config.server.grpc_port.map(|_| {
+        config
+            .server
+            .grpc_bind_address
+            .as_deref()
+            .unwrap_or(config.server.bind_address.as_str())
+            .trim()
+    });
     let load_test_unthrottled = match loadtest_unthrottle_decision(
         config.security.load_test_unthrottled.unwrap_or(false),
+        config.dev_mode,
         bind,
+        grpc_bind,
     ) {
         LoadtestUnthrottle::Off => false,
         LoadtestUnthrottle::Enabled => {
             tracing::warn!(
                 bind_address = %bind,
+                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
                 "security.load_test_unthrottled=true — ALL request-rate limiters \
                  (token endpoint, admin API, export, request shaper) are DISABLED. \
                  Load-test-only mode; never enable on a production bind."
@@ -1896,9 +1942,20 @@ async fn run_serve(
         LoadtestUnthrottle::RefusedNonLoopback => {
             tracing::error!(
                 bind_address = %bind,
-                "security.load_test_unthrottled=true refused on a non-loopback bind; \
-                 rate limiters remain ENABLED. Bind to 127.0.0.1 or ::1 to run an \
-                 unthrottled load test."
+                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
+                "security.load_test_unthrottled=true refused: every effective bind \
+                 (HTTP and gRPC) must be loopback; rate limiters remain ENABLED. \
+                 Bind both to 127.0.0.1 or ::1 to run an unthrottled load test."
+            );
+            false
+        }
+        LoadtestUnthrottle::RefusedNotDev => {
+            tracing::error!(
+                bind_address = %bind,
+                "security.load_test_unthrottled=true refused: only permitted in \
+                 --dev mode; rate limiters remain ENABLED. A loopback bind can \
+                 still be internet-reachable behind a reverse proxy, so unthrottled \
+                 load testing is dev-only."
             );
             false
         }
@@ -4117,18 +4174,19 @@ mod tests {
 
     #[test]
     fn unthrottle_off_when_flag_unset() {
-        // Flag unset → limiters stay on regardless of bind (even loopback).
+        // Flag unset → limiters stay on regardless of dev/bind (even loopback).
         assert_eq!(
-            loadtest_unthrottle_decision(false, "127.0.0.1"),
+            loadtest_unthrottle_decision(false, true, "127.0.0.1", None),
             LoadtestUnthrottle::Off
         );
     }
 
     #[test]
     fn unthrottle_enabled_on_loopback_binds() {
+        // Dev mode + loopback HTTP bind, gRPC disabled → enabled.
         for bind in ["127.0.0.1", "127.0.0.53", "::1", "localhost", "LOCALHOST"] {
             assert_eq!(
-                loadtest_unthrottle_decision(true, bind),
+                loadtest_unthrottle_decision(true, true, bind, None),
                 LoadtestUnthrottle::Enabled,
                 "{bind} must be treated as loopback"
             );
@@ -4136,16 +4194,54 @@ mod tests {
     }
 
     #[test]
+    fn unthrottle_enabled_when_both_binds_loopback() {
+        // HEA-1797 Finding 1: an enabled gRPC listener must also be loopback.
+        assert_eq!(
+            loadtest_unthrottle_decision(true, true, "127.0.0.1", Some("::1")),
+            LoadtestUnthrottle::Enabled
+        );
+    }
+
+    #[test]
     fn unthrottle_refused_on_non_loopback_binds() {
-        // Wildcard and routable binds MUST refuse — this is the production
+        // Wildcard and routable HTTP binds MUST refuse — this is the production
         // guard that keeps rate limiters on if the flag is set by mistake.
         for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
             assert_eq!(
-                loadtest_unthrottle_decision(true, bind),
+                loadtest_unthrottle_decision(true, true, bind, None),
                 LoadtestUnthrottle::RefusedNonLoopback,
                 "{bind} must refuse the unthrottle escape hatch"
             );
         }
+    }
+
+    #[test]
+    fn unthrottle_refused_on_divergent_grpc_bind() {
+        // HEA-1797 Finding 1: HTTP loopback but gRPC on a public interface must
+        // refuse — otherwise the disabled shaper + admin limiter leak onto a
+        // publicly reachable gRPC management endpoint.
+        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
+            assert_eq!(
+                loadtest_unthrottle_decision(true, true, "127.0.0.1", Some(grpc)),
+                LoadtestUnthrottle::RefusedNonLoopback,
+                "gRPC bind {grpc} must refuse even when HTTP is loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn unthrottle_refused_when_not_dev() {
+        // HEA-1797 Finding 2: a prod-config binary on loopback can still be
+        // internet-reachable behind a reverse proxy — refuse unless --dev.
+        assert_eq!(
+            loadtest_unthrottle_decision(true, false, "127.0.0.1", None),
+            LoadtestUnthrottle::RefusedNotDev
+        );
+        // Non-dev takes precedence over a bind check.
+        assert_eq!(
+            loadtest_unthrottle_decision(true, false, "0.0.0.0", Some("0.0.0.0")),
+            LoadtestUnthrottle::RefusedNotDev
+        );
     }
 
     // ── maybe_upgrade_email_transport ─────────────────────────────────────

@@ -59,9 +59,11 @@ knob is an **optional** env var (defaults in brackets):
 > server with `security.load_test_unthrottled: true`, which turns off the token,
 > admin, export, and per-IP/per-realm request-shaper limiters so the run
 > saturates the `validate_token` hot path instead of measuring a limiter. That
-> flag is **loopback-gated** (see [Rate limits](#rate-limits-on-a-dev-instance-why-you-throttle))
-> and refused on any non-loopback bind, so it can never silently disable abuse
-> protection on a production server.
+> flag is **dev-mode- and loopback-gated** (see [Rate limits](#rate-limits-on-a-dev-instance-why-you-throttle)):
+> it is refused unless the server runs in `--dev` mode **and** every effective
+> bind (HTTP and gRPC) is loopback, so it can never silently disable abuse
+> protection on a production server — including one bound to loopback behind a
+> reverse proxy.
 
 **Advanced / attach usage.** Passing `ARGS` bypasses the pipeline and invokes the
 binary directly (for driving an instance you booted/seeded yourself):
@@ -285,18 +287,25 @@ you do not set it by hand for the standard pipeline.
 
 ### Why this is production-safe
 
-The flag is **loopback-gated at boot** (`loadtest_unthrottle_decision` in
-`src/main.rs`, unit-tested):
+The flag is **dev-mode- and loopback-gated at boot** (`loadtest_unthrottle_decision`
+in `src/main.rs`, unit-tested):
 
 - **Flag unset** → every limiter stays on (normal operation). Default is `false`.
-- **Flag set + loopback bind** (`127.0.0.0/8`, `::1`, or `localhost`) → limiters
-  disabled; boot logs a **loud `WARN`** naming every disabled limiter.
-- **Flag set + any non-loopback bind** (including wildcard `0.0.0.0` / `::`) →
-  **refused, fail-safe**: limiters stay **on** and boot logs an `ERROR`.
+- **Flag set + `--dev` + all binds loopback** (`127.0.0.0/8`, `::1`, or
+  `localhost`; the gRPC bind is checked too when the gRPC listener is enabled) →
+  limiters disabled; boot logs a **loud `WARN`** naming every disabled limiter.
+- **Flag set but not `--dev`** → **refused, fail-safe**: limiters stay **on** and
+  boot logs an `ERROR`. A loopback bind can still be internet-reachable behind a
+  reverse proxy, so unthrottled load testing is dev-only.
+- **Flag set + any non-loopback bind** (HTTP or gRPC, including wildcard
+  `0.0.0.0` / `::`) → **refused, fail-safe**: limiters stay **on** and boot logs
+  an `ERROR`.
 
-So a production server that binds a routable address can never silently ship with
-brute-force / abuse protection removed, even if the flag is set by mistake. This
-mechanism was reviewed by SecurityAuditor (see the HEA-1796 review child).
+So a production server — whether it binds a routable address directly or sits on
+loopback behind a proxy — can never silently ship with brute-force / abuse
+protection removed, even if the flag is set by mistake. The gate also covers a
+gRPC listener whose bind diverges from the HTTP bind. This mechanism was reviewed
+by SecurityAuditor (HEA-1797).
 
 ## Driving high concurrency (fan-out) and finding the knee
 
