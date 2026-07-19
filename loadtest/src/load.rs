@@ -290,9 +290,11 @@ async fn run_steady(
     .await?;
     let journeys = report::journey_rows(&metrics.requests);
     let pass = report::overall_pass(&journeys);
+    let summary = report::summarize(&journeys, params.users, requests_per_second(&metrics));
     Ok(LoadReport {
         schema: SCHEMA_VERSION,
         metadata: metadata(params, host, Mode::Steady, handle),
+        summary,
         journeys,
         ramp_steps: None,
         knee_rps: None,
@@ -330,17 +332,19 @@ async fn run_ramp(
     }
 
     let knee_rps = report::find_knee(&steps);
-    // Primary table = the knee step if any breached, else the final (highest) step.
-    let primary = steps
-        .iter()
-        .find(|s| s.breached)
-        .or_else(|| steps.last())
-        .map(|s| s.journeys.clone())
-        .unwrap_or_default();
+    // Primary step = the knee step if any breached, else the final (highest) step.
+    let primary_step = steps.iter().find(|s| s.breached).or_else(|| steps.last());
+    let primary = primary_step.map(|s| s.journeys.clone()).unwrap_or_default();
+    let summary = report::summarize(
+        &primary,
+        primary_step.map_or(0, |s| s.users),
+        primary_step.map_or(0.0, |s| s.rps),
+    );
     let pass = knee_rps.is_none();
     Ok(LoadReport {
         schema: SCHEMA_VERSION,
         metadata: metadata(params, host, Mode::Ramp, handle),
+        summary,
         journeys: primary,
         ramp_steps: Some(steps),
         knee_rps,
@@ -359,10 +363,12 @@ async fn run_soak(
 ) -> Result<LoadReport, LoadError> {
     let mut buckets: Vec<SoakBucket> = Vec::new();
     let mut all_pass = true;
+    let mut last_rps = 0.0;
     for bucket in 0..params.soak_buckets.max(1) {
         let html = report_dir.join(format!("soak-bucket-{bucket}.html"));
         let metrics = run_attack(params, host, weights, params.users, &html).await?;
         let journeys = report::journey_rows(&metrics.requests);
+        last_rps = requests_per_second(&metrics);
         all_pass &= report::overall_pass(&journeys);
         println!(
             "  soak bucket {bucket}: validate p99={} ms",
@@ -378,9 +384,11 @@ async fn run_soak(
         .last()
         .map(|b| b.journeys.clone())
         .unwrap_or_default();
+    let summary = report::summarize(&primary, params.users, last_rps);
     Ok(LoadReport {
         schema: SCHEMA_VERSION,
         metadata: metadata(params, host, Mode::Soak, handle),
+        summary,
         journeys: primary,
         ramp_steps: None,
         knee_rps: None,

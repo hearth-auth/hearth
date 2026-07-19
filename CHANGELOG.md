@@ -7,6 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`security.load_test_unthrottled` config flag (loopback-gated)** — when `true`
+  and the server binds a loopback address, disables all request-rate limiters
+  (token endpoint, admin API, export, and the per-IP/per-realm request shaper) so
+  a single-node load test can saturate the `validate_token` hot path instead of
+  measuring the limiter. **Prod-safe:** it is refused (fail-safe — limiters stay
+  on) on any non-loopback bind, logging a loud `WARN` when enabled and an `ERROR`
+  when refused. Defaults to `false`. Never enable on a production or
+  externally-reachable bind (HEA-1796).
+- **`hearth-loadtest` high-concurrency rework** — the `make loadtest` pipeline now
+  boots with `load_test_unthrottled` and runs **unthrottled** by default
+  (`THROTTLE=0`), with higher default concurrency (`USERS=200`, `HATCH_RATE=50`)
+  so `steady` mode at high `--users` drives concurrent fan-out onto the hot path.
+  The `report.json` schema bumps to `2`, adding a top-level `summary` block:
+  achieved concurrency + RPS, aggregate failure rate, and an explicit **ceiling
+  attribution** (`server` / `load_generator_or_headroom` / `generator_saturated`)
+  so a reader can tell the single-node ceiling from a load-generator bottleneck.
+  README documents the fan-out/ramp invocations and `ulimit -n` /
+  `ip_local_port_range` / `TIME_WAIT` generator tuning (HEA-1796).
 - **`make loadtest` is now a one-command pipeline** — with no `ARGS` it boots a
   fresh throwaway dev Hearth on loopback, seeds a deterministic corpus, runs the
   Goose journeys, writes `report.json` + HTML, and tears the server down — no

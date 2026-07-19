@@ -606,6 +606,46 @@ async fn main() {
     }
 }
 
+/// Outcome of evaluating the `security.load_test_unthrottled` escape hatch
+/// against the server's bind address.
+///
+/// The rate-limit-disable path (HEA-1796) is prod-gated: it takes effect
+/// **only** on a loopback bind. Any other bind refuses the request and keeps
+/// every limiter on, so a misconfigured production server can never silently
+/// ship with brute-force / abuse protection removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoadtestUnthrottle {
+    /// The flag is unset — limiters stay on (normal operation).
+    Off,
+    /// The flag is set and the bind is loopback — disable all limiters.
+    Enabled,
+    /// The flag is set but the bind is non-loopback — refuse, keep limiters on.
+    RefusedNonLoopback,
+}
+
+/// Decides whether the load-test unthrottle escape hatch applies, gating it on
+/// a loopback bind. Pure (no logging / I/O) so the prod-safety gate is unit
+/// tested; the caller emits the operator-facing warn/error log.
+///
+/// `bind` is the raw `server.bind_address` (already trimmed by the caller). A
+/// bare `localhost` is treated as loopback; anything that does not parse to a
+/// loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is refused.
+fn loadtest_unthrottle_decision(enabled: bool, bind: &str) -> LoadtestUnthrottle {
+    if !enabled {
+        return LoadtestUnthrottle::Off;
+    }
+    let is_loopback = bind.eq_ignore_ascii_case("localhost")
+        || bind
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    if is_loopback {
+        LoadtestUnthrottle::Enabled
+    } else {
+        LoadtestUnthrottle::RefusedNonLoopback
+    }
+}
+
 /// Runs the `hearth serve` command.
 #[allow(clippy::too_many_lines)]
 async fn run_serve(
@@ -1833,14 +1873,49 @@ async fn run_serve(
     // wire it to BOTH the HTTP AppState and the gRPC GrpcState so that per-IP
     // counters accumulate across protocols — a caller cannot evade the limit by
     // switching from REST to gRPC.
-    let request_shaper = Arc::new(match config.security.request_shaper.as_ref() {
-        Some(cfg) => {
-            hearth::abuse::shaper::RequestShaper::with_config(hearth::abuse::shaper::ShaperConfig {
-                ip_rps: Some(cfg.ip_rps),
-                realm_rps: Some(cfg.realm_rps),
-            })
+    // Load-test escape hatch (`security.load_test_unthrottled`): when set AND
+    // the server binds a loopback address, disable every request-rate limiter so
+    // a single-node throughput/soak test can saturate the hot path instead of
+    // measuring the rate limiter. Refused (fail-safe: limiters stay ON) on any
+    // non-loopback bind so this can never silently expose a public server.
+    let bind = config.server.bind_address.trim();
+    let load_test_unthrottled = match loadtest_unthrottle_decision(
+        config.security.load_test_unthrottled.unwrap_or(false),
+        bind,
+    ) {
+        LoadtestUnthrottle::Off => false,
+        LoadtestUnthrottle::Enabled => {
+            tracing::warn!(
+                bind_address = %bind,
+                "security.load_test_unthrottled=true — ALL request-rate limiters \
+                 (token endpoint, admin API, export, request shaper) are DISABLED. \
+                 Load-test-only mode; never enable on a production bind."
+            );
+            true
         }
-        None => hearth::abuse::shaper::RequestShaper::new(),
+        LoadtestUnthrottle::RefusedNonLoopback => {
+            tracing::error!(
+                bind_address = %bind,
+                "security.load_test_unthrottled=true refused on a non-loopback bind; \
+                 rate limiters remain ENABLED. Bind to 127.0.0.1 or ::1 to run an \
+                 unthrottled load test."
+            );
+            false
+        }
+    };
+
+    let request_shaper = Arc::new(if load_test_unthrottled {
+        hearth::abuse::shaper::RequestShaper::disabled()
+    } else {
+        match config.security.request_shaper.as_ref() {
+            Some(cfg) => hearth::abuse::shaper::RequestShaper::with_config(
+                hearth::abuse::shaper::ShaperConfig {
+                    ip_rps: Some(cfg.ip_rps),
+                    realm_rps: Some(cfg.realm_rps),
+                },
+            ),
+            None => hearth::abuse::shaper::RequestShaper::new(),
+        }
     });
 
     let allowed_hosts = config.security.allowed_hosts.clone();
@@ -1864,6 +1939,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts.clone())
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limiters_disabled(load_test_unthrottled)
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
             // without manually setting every capability flag.
@@ -1887,6 +1963,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts)
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limiters_disabled(load_test_unthrottled)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced),
@@ -4035,6 +4112,41 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────
+
+    #[test]
+    fn unthrottle_off_when_flag_unset() {
+        // Flag unset → limiters stay on regardless of bind (even loopback).
+        assert_eq!(
+            loadtest_unthrottle_decision(false, "127.0.0.1"),
+            LoadtestUnthrottle::Off
+        );
+    }
+
+    #[test]
+    fn unthrottle_enabled_on_loopback_binds() {
+        for bind in ["127.0.0.1", "127.0.0.53", "::1", "localhost", "LOCALHOST"] {
+            assert_eq!(
+                loadtest_unthrottle_decision(true, bind),
+                LoadtestUnthrottle::Enabled,
+                "{bind} must be treated as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn unthrottle_refused_on_non_loopback_binds() {
+        // Wildcard and routable binds MUST refuse — this is the production
+        // guard that keeps rate limiters on if the flag is set by mistake.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
+            assert_eq!(
+                loadtest_unthrottle_decision(true, bind),
+                LoadtestUnthrottle::RefusedNonLoopback,
+                "{bind} must refuse the unthrottle escape hatch"
+            );
+        }
+    }
 
     // ── maybe_upgrade_email_transport ─────────────────────────────────────
 

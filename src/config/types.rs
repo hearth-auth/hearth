@@ -819,6 +819,17 @@ pub struct SecurityYaml {
     /// Global per-IP + per-realm request shaper (A-2).
     #[serde(default)]
     pub request_shaper: Option<RequestShaperYaml>,
+    /// **Load-test escape hatch.** When `true`, disables ALL request-rate
+    /// limiters (token endpoint, admin API, export, and the per-IP/per-realm
+    /// request shaper) so a single-node throughput/soak test can saturate the
+    /// hot path instead of measuring the rate limiter.
+    ///
+    /// Refused unless the server binds a loopback address (127.0.0.0/8 or ::1)
+    /// — see `main.rs`. Never enable on a production or externally-reachable
+    /// bind: it removes brute-force, credential-stuffing, and abuse protection.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub load_test_unthrottled: Option<bool>,
     /// Absolute origins permitted as `return_to` redirect targets (A-52).
     ///
     /// Relative paths (`/ui/…`) are always accepted.  Absolute URLs are only

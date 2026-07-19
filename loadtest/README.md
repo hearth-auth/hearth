@@ -43,17 +43,25 @@ knob is an **optional** env var (defaults in brackets):
 | Env | Default | Meaning |
 |---|---|---|
 | `PORT` | `auto` | Loopback port (default: a free ephemeral port — never collides) |
-| `MODE` | `steady` | `steady` \| `ramp` \| `soak` |
-| `USERS` | `20` | Concurrent Goose users |
+| `MODE` | `steady` | `steady` \| `ramp` \| `soak` (steady at high `USERS` **is** the concurrent fan-out shape) |
+| `USERS` | `200` | Concurrent Goose users — raise into the thousands for a fan-out run |
 | `RUN_TIME` | `90s` | Per-run duration |
-| `HATCH_RATE` | `5` | Users spawned per second |
-| `THROTTLE` | `3` | Cap total req/s (stays under dev rate limits) |
-| `USERS_PER_REALM` | `80` | Seeded user records |
+| `HATCH_RATE` | `50` | Users spawned per second |
+| `THROTTLE` | `0` | Cap total req/s; `0` = **unthrottled** (default). Server-side rate limits are disabled (see below), so there is no limiter to stay under. Set `>0` only to pin a specific offered load for a controlled ramp |
+| `USERS_PER_REALM` | `80` | Seeded user records per realm |
 | `SESSIONS_FRAC` | `0.5` | Fraction of users given a live token |
 | `REVOKED_FRAC` | `0.1` | Fraction of live tokens pre-revoked |
 | `SEED` | `1` | Determinism seed |
-| `SETTLE` | `65` | Seconds to wait after seeding so the 100/min admin-write window resets (set `0` to skip) |
+| `SETTLE` | `0` | Seconds to wait after seeding before the run. Default `0`: with rate limits disabled there is no admin-write window to wait out |
 | `EXTRA_RUN_ARGS` | — | Extra flags appended to the `run` subcommand |
+
+> **Rate limits are disabled by default.** The pipeline boots the throwaway
+> server with `security.load_test_unthrottled: true`, which turns off the token,
+> admin, export, and per-IP/per-realm request-shaper limiters so the run
+> saturates the `validate_token` hot path instead of measuring a limiter. That
+> flag is **loopback-gated** (see [Rate limits](#rate-limits-on-a-dev-instance-why-you-throttle))
+> and refused on any non-loopback bind, so it can never silently disable abuse
+> protection on a production server.
 
 **Advanced / attach usage.** Passing `ARGS` bypasses the pipeline and invokes the
 binary directly (for driving an instance you booted/seeded yourself):
@@ -156,10 +164,15 @@ make loadtest ARGS="run --weight-validate 40 --weight-issuance 40 --weight-revok
 | 5 | Revoke→re-validate | `--weight-revoke` (2) | `POST /token` → `POST /revoke` → `POST /introspect` asserts `active:false` (exercises the 64-shard revoke cache) |
 
 Other run knobs: `--users`, `--run-time`, `--hatch-rate`, and `--throttle N`
-(cap total requests/sec — useful against an instance with per-client token rate
-limits, where an unthrottled run is dominated by `429`s rather than the hot
-path — see [Rate limits](#rate-limits-on-a-dev-instance-why-you-throttle)). A
-weight of `0` drops that journey entirely; at least one journey must be weighted.
+(pin total requests/sec to a **specific offered load** — omit it, or the
+pipeline's `THROTTLE=0` default, to run unthrottled and let `--users` decide the
+load). A weight of `0` drops that journey entirely; at least one journey must be
+weighted.
+
+> The default profile weights `validate` ≫ `session`/`user` ≫ `issuance` ≫
+> `revoke`, so an unthrottled run pours load onto the `validate_token` hot path
+> with issuance/revoke as small weighted slices — exactly the shape HEA-1796
+> wants to saturate.
 
 ## Run modes (HEA-1791)
 
@@ -193,9 +206,15 @@ incompatible schemas):
 
 | Field | Meaning |
 |---|---|
+| `schema` | Report schema version (currently `2`; a nightly diff refuses to compare across versions). |
 | `metadata.git_sha` | Build commit (`HEARTH_GIT_SHA` env override, else `git rev-parse`, else `"unknown"`). |
 | `metadata.timestamp_unix` | Wall-clock the report was produced. |
 | `metadata.{mode,host,seed,dataset_shape,users,run_time,hatch_rate}` | Run configuration + the corpus it ran against. |
+| `summary.achieved_users` | Peak concurrent Goose users the run actually reached. |
+| `summary.achieved_rps` | Achieved aggregate requests/sec (all journeys, total ÷ duration). |
+| `summary.{total_requests,total_failures,failure_rate}` | Aggregate volume + failure fraction. |
+| `summary.ceiling` | **Ceiling attribution** (HEA-1796): `server` (a budget p99 breached — the server is the limiter), `load_generator_or_headroom` (no breach, negligible failures — the server kept up, so raise `--users`), or `generator_saturated` (elevated failures with no latency breach — the load generator/host ran out of ports/fds; tune it and re-run). |
+| `summary.ceiling_reason` | Human-readable rationale for the `ceiling` verdict. |
 | `journeys[]` | Per-journey rows (sorted by name for diff-stable output). |
 | `journeys[].{p50,p95,p99,p999}_ms` | Response-time percentiles (whole ms — Goose's granularity). |
 | `journeys[].{requests,failures,failure_rate}` | Volume + non-2xx fraction. A journey that is fast-but-erroring is **not** a pass. |
@@ -237,40 +256,92 @@ engine-level ceiling, and this HTTP harness is a **drift detector and capacity
 probe**, not a sub-ms pass gate. Sub-ms verification lives in the in-process
 `make bench-gate`, not here.
 
-## Rate limits on a dev instance (why you throttle)
+## Rate limits: disabled for load tests (`security.load_test_unthrottled`)
 
-A dev boot enforces per-client rate limits that an unthrottled load run trips
+A dev boot normally enforces per-client rate limits that a load run trips
 immediately, because every journey authenticates as the **single** dev client:
 
 - **Token endpoint** (`/token`, `/introspect`, `/revoke`): 200 req/min per
   client (`TOKEN_RATE_LIMIT`). `validate` + `issuance` + `revoke` share it.
 - **Admin writes** (`/admin/users`, …): 100 req/min per admin
-  (`ADMIN_RATE_LIMIT`). Bounds both the seed (≤ ~90 users/boot) and
-  `user_lookup`.
-- **Per-IP request shaper**: 100 req/s per source IP by default.
+  (`ADMIN_RATE_LIMIT`). Bounds both the seed and `user_lookup`.
+- **Export**: 1/hour per admin (`EXPORT_RATE_LIMIT`).
+- **Per-IP / per-realm request shaper**: 100 req/s per source IP by default.
 
-An unthrottled run is therefore dominated by `429`s rather than the hot path.
-Two ways to get a clean run:
+Rate limiting works **against** what a load test measures — a limited run is
+dominated by `429`s rather than the `validate_token` hot path. So HEA-1796 adds a
+config escape hatch:
 
-1. **Throttle under the limit** (single-subject boot-local corpus): keep the
-   token-bucket journeys under ~3.3 req/s combined, e.g.
-   `--throttle 3`. This is what the committed baseline uses.
-2. **Raise the shaper for a loopback-only run.** Boot with a config that lifts
-   `security.request_shaper` (the admin/token per-client caps are compile-time
-   constants and are *not* raised by this — they still bound a single-subject
-   run):
+```yaml
+# loopback dev only — never production
+security:
+  load_test_unthrottled: true
+```
 
-   ```yaml
-   # hearth-loadtest.yaml — loopback dev only, never production
-   security:
-     request_shaper: { ip_rps: 500000, realm_rps: 5000000 }
-   ```
-   ```bash
-   hearth serve --dev --config hearth-loadtest.yaml
-   ```
+When set, it swaps the token, admin, export, **and** request-shaper limiters for
+no-op `disabled()` variants, so the run saturates the hot path with no limiter in
+the way. `make loadtest` writes this into the throwaway config automatically —
+you do not set it by hand for the standard pipeline.
 
-For a realistic *high-throughput* run the per-client caps must be spread across
-**many** subjects — use the multi-subject attach path below.
+### Why this is production-safe
+
+The flag is **loopback-gated at boot** (`loadtest_unthrottle_decision` in
+`src/main.rs`, unit-tested):
+
+- **Flag unset** → every limiter stays on (normal operation). Default is `false`.
+- **Flag set + loopback bind** (`127.0.0.0/8`, `::1`, or `localhost`) → limiters
+  disabled; boot logs a **loud `WARN`** naming every disabled limiter.
+- **Flag set + any non-loopback bind** (including wildcard `0.0.0.0` / `::`) →
+  **refused, fail-safe**: limiters stay **on** and boot logs an `ERROR`.
+
+So a production server that binds a routable address can never silently ship with
+brute-force / abuse protection removed, even if the flag is set by mistake. This
+mechanism was reviewed by SecurityAuditor (see the HEA-1796 review child).
+
+## Driving high concurrency (fan-out) and finding the knee
+
+`steady` mode at a high `--users` **is** the concurrent fan-out shape — there is
+no separate "fanout" mode. To push a single node toward its ceiling:
+
+```bash
+# Concurrent fan-out: thousands of simultaneous virtual users, unthrottled.
+make loadtest USERS=10000 HATCH_RATE=500 RUN_TIME=3m
+# Find the p99-breach knee under rising RPS:
+make loadtest MODE=ramp EXTRA_RUN_ARGS="--ramp-start-users 500 --ramp-step-users 500 --ramp-steps 20"
+```
+
+**Read `summary.ceiling` first.** It tells you honestly whether the number you
+got is the *server's* ceiling or the *load generator's*:
+
+- `server` — a budgeted journey's p99 breached; the server is the limiter. In
+  `ramp` mode `knee_rps` is the RPS at that step.
+- `load_generator_or_headroom` — no breach, failures negligible: the server kept
+  up. You have **not** found the server ceiling — raise `USERS`.
+- `generator_saturated` — elevated failures with no latency breach: the generator
+  ran out of resources. Tune the host (below) and re-run before trusting numbers.
+
+### Load-generator tuning (so the generator isn't the bottleneck)
+
+A single box driving tens of thousands of connections to itself needs OS tuning,
+or it — not Hearth — becomes the ceiling:
+
+```bash
+ulimit -n 1048576                                   # file descriptors (sockets)
+sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"   # more ephemeral ports
+sudo sysctl -w net.ipv4.tcp_tw_reuse=1              # reuse TIME_WAIT sockets
+```
+
+Pin the server and goose to **disjoint CPU cores** so the generator does not
+starve the server (or vice-versa):
+
+```bash
+taskset -c 0-3  hearth serve --dev --config hearth-loadtest.yaml   # server: cores 0-3
+taskset -c 4-15 hearth-loadtest run --users 10000 ...              # goose: cores 4-15
+```
+
+For a realistic *high-throughput* run the token cap (now disabled) is no longer
+the constraint; spread live tokens across many subjects via the multi-subject
+attach path below for a more representative corpus.
 
 ## ⚠️ Security warnings (read before running)
 
@@ -330,18 +401,22 @@ subjects) is a follow-up; the deterministic per-user credential API
 has a reference to compare against. It lives outside the git-ignored
 `reports/` directory precisely so it can be tracked.
 
-How it was captured (reproducible):
+> **Note (HEA-1796):** the committed baseline is a `schema:1`, throttled 20-user
+> run. The report schema is now `2` (adds the `summary`/ceiling block) and the
+> pipeline now runs **unthrottled**, so that baseline is stale and the nightly
+> diff refuses to compare across schema versions by design. The canonical
+> `schema:2` baseline is regenerated from a high-concurrency verification run
+> (owned by the HEA-1796 QA child) using the steps below.
+
+How it is captured (reproducible — the pipeline sets `load_test_unthrottled`
+itself, so no manual config or settle wait):
 
 ```bash
-# 1. Boot a dev instance with the shaper raised (see Rate limits above):
-hearth serve --dev --config hearth-loadtest.yaml
-# 2. Seed under the 100/min admin-write cap:
-make seed ARGS="--users-per-realm 80 --sessions-frac 0.5 --revoked-frac 0.1"
-# 3. Wait ~65 s for the admin-write window to reset, then run throttled:
-make loadtest ARGS="run --mode steady --users 20 --run-time 90s --hatch-rate 5 --throttle 3"
-# 4. Copy the fresh report over the baseline (zero out volatile metadata):
-#    cp loadtest/reports/report.json loadtest/baseline/steady-baseline.json
-#    then set metadata.timestamp_unix to 0 and metadata.git_sha to the capture commit.
+# Boot + seed + run + report in one shot, unthrottled:
+make loadtest MODE=steady USERS=200 RUN_TIME=90s HATCH_RATE=50
+# Copy the fresh report over the baseline (zero out volatile metadata):
+#   cp loadtest/reports/report.json loadtest/baseline/steady-baseline.json
+#   then set metadata.timestamp_unix to 0 and metadata.git_sha to the capture commit.
 ```
 
 ### Updating the baseline

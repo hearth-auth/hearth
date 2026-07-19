@@ -20,7 +20,7 @@ use crate::budget::{self, Budget};
 
 /// Report schema version. Bump on any breaking shape change so a nightly diff
 /// job can refuse to compare across incompatible schemas.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Run metadata stamped into every report header.
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +104,106 @@ pub struct SoakBucket {
     pub journeys: Vec<JourneyRow>,
 }
 
+/// Attribution of the observed throughput ceiling — the DoD (HEA-1796 §4)
+/// requires the report to state, explicitly and honestly, whether the run was
+/// limited by the server under test or by the load generator itself.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Ceiling {
+    /// A budgeted journey's p99 breached its HTTP budget: server latency is the
+    /// limiter, so the observed ceiling is the server under test.
+    Server,
+    /// No budgeted journey breached and failures were negligible: the server
+    /// sustained the offered load, so the run did not reach the server's
+    /// ceiling. The limit is the load generator (or simply untested headroom —
+    /// raise `--users` to push further).
+    LoadGeneratorOrHeadroom,
+    /// Elevated failure rate without a latency breach — the offered load
+    /// exceeded what the generator/host could faithfully drive (ephemeral-port
+    /// exhaustion, `ulimit -n`, `TIME_WAIT`). Tune the generator (README
+    /// "Driving high concurrency") and re-run before trusting the numbers.
+    GeneratorSaturated,
+}
+
+/// Aggregate run summary: achieved concurrency + throughput and the ceiling
+/// attribution, so a reader can tell the single-node ceiling from a generator
+/// bottleneck at a glance (HEA-1796 §4).
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummary {
+    /// Peak concurrent Goose users the run reached.
+    pub achieved_users: usize,
+    /// Achieved aggregate requests-per-second (all journeys, total / duration).
+    pub achieved_rps: f64,
+    /// Total requests recorded across all journeys.
+    pub total_requests: usize,
+    /// Total failed requests across all journeys.
+    pub total_failures: usize,
+    /// Aggregate failure fraction in `[0.0, 1.0]`.
+    pub failure_rate: f64,
+    /// Attribution of the observed throughput ceiling.
+    pub ceiling: Ceiling,
+    /// Human-readable rationale for the [`Ceiling`] verdict.
+    pub ceiling_reason: String,
+}
+
+/// Failure fraction above which, absent a latency breach, we suspect the load
+/// generator rather than the server (connection resets from port/fd exhaustion
+/// show up as request failures, not slow-but-successful responses).
+const GENERATOR_SATURATION_FAILURE_RATE: f64 = 0.02;
+
+/// Builds the aggregate [`RunSummary`] + ceiling attribution from the primary
+/// journey rows and the achieved concurrency/throughput.
+#[must_use]
+pub fn summarize(rows: &[JourneyRow], achieved_users: usize, achieved_rps: f64) -> RunSummary {
+    let total_requests: usize = rows.iter().map(|r| r.requests).sum();
+    let total_failures: usize = rows.iter().map(|r| r.failures).sum();
+    let failure_rate = if total_requests == 0 {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            total_failures as f64 / total_requests as f64
+        }
+    };
+
+    let (ceiling, ceiling_reason) = if any_breach(rows) {
+        (
+            Ceiling::Server,
+            "a budgeted journey's p99 breached its HTTP budget — server latency is the limiter; \
+             the observed ceiling is the server under test"
+                .to_string(),
+        )
+    } else if failure_rate > GENERATOR_SATURATION_FAILURE_RATE {
+        (
+            Ceiling::GeneratorSaturated,
+            format!(
+                "failure rate {:.2}% exceeds {:.0}% with no latency breach — suspect load-generator \
+                 saturation (ephemeral ports, ulimit -n, TIME_WAIT); tune the generator and re-run",
+                failure_rate * 100.0,
+                GENERATOR_SATURATION_FAILURE_RATE * 100.0,
+            ),
+        )
+    } else {
+        (
+            Ceiling::LoadGeneratorOrHeadroom,
+            "no budgeted journey breached and failures were negligible — the server sustained the \
+             offered load; the ceiling is the load generator or untested headroom. Raise --users \
+             to push further"
+                .to_string(),
+        )
+    };
+
+    RunSummary {
+        achieved_users,
+        achieved_rps,
+        total_requests,
+        total_failures,
+        failure_rate,
+        ceiling,
+        ceiling_reason,
+    }
+}
+
 /// The full report serialized to `report.json`.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadReport {
@@ -111,6 +211,8 @@ pub struct LoadReport {
     pub schema: u32,
     /// Run metadata header.
     pub metadata: RunMetadata,
+    /// Aggregate summary: achieved concurrency/RPS + ceiling attribution.
+    pub summary: RunSummary,
     /// Primary per-journey percentile table (the final/aggregate step).
     pub journeys: Vec<JourneyRow>,
     /// Ramp steps + saturation knee (ramp mode only).
@@ -326,6 +428,57 @@ mod tests {
         assert!(!any_breach(&rows));
     }
 
+    /// Minimal [`JourneyRow`] for summary tests: only the fields `summarize`
+    /// reads (requests, failures, pass) are meaningful.
+    fn row(journey: &str, requests: usize, failures: usize, pass: Option<bool>) -> JourneyRow {
+        JourneyRow {
+            journey: journey.to_string(),
+            method: "POST".to_string(),
+            requests,
+            failures,
+            failure_rate: budget::failure_rate(failures, requests),
+            p50_ms: 0,
+            p95_ms: 0,
+            p99_ms: 0,
+            p999_ms: 0,
+            spec_engine_p99_us: None,
+            http_budget_p99_us: None,
+            pass,
+        }
+    }
+
+    #[test]
+    fn ceiling_is_server_when_a_budget_breaches() {
+        let rows = vec![
+            row("validate", 10_000, 0, Some(true)),
+            row("session_lookup", 5_000, 0, Some(false)), // breach
+        ];
+        let s = summarize(&rows, 10_000, 42_000.0);
+        assert_eq!(s.ceiling, Ceiling::Server);
+        assert_eq!(s.achieved_users, 10_000);
+        assert_eq!(s.total_requests, 15_000);
+    }
+
+    #[test]
+    fn ceiling_is_generator_or_headroom_when_clean() {
+        // No breach, negligible failures → the server kept up; ceiling is the
+        // generator or untested headroom, not the server.
+        let rows = vec![row("validate", 100_000, 0, Some(true))];
+        let s = summarize(&rows, 10_000, 55_000.0);
+        assert_eq!(s.ceiling, Ceiling::LoadGeneratorOrHeadroom);
+        assert!((s.failure_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ceiling_is_generator_saturated_on_high_failures_without_breach() {
+        // 5% failures but every journey within its latency budget → the failures
+        // are connection-level (generator saturation), not server latency.
+        let rows = vec![row("validate", 100_000, 5_000, Some(true))];
+        let s = summarize(&rows, 10_000, 30_000.0);
+        assert_eq!(s.ceiling, Ceiling::GeneratorSaturated);
+        assert!(s.failure_rate > GENERATOR_SATURATION_FAILURE_RATE);
+    }
+
     #[test]
     fn knee_is_first_breaching_step() {
         let steps = vec![
@@ -391,6 +544,7 @@ mod tests {
                 run_time: "60s".into(),
                 hatch_rate: "5".into(),
             },
+            summary: summarize(&[], 50, 0.0),
             journeys: vec![],
             ramp_steps: None,
             knee_rps: None,
@@ -398,8 +552,9 @@ mod tests {
             pass: true,
         };
         let json = serde_json::to_string(&report).expect("serialize");
-        assert!(json.contains("\"schema\":1"));
+        assert!(json.contains("\"schema\":2"));
         assert!(json.contains("\"git_sha\":\"abc123\""));
+        assert!(json.contains("\"summary\""));
         assert!(json.contains("\"pass\":true"));
         // steady-mode report omits ramp/soak-only fields.
         assert!(!json.contains("knee_rps"));
@@ -422,6 +577,7 @@ mod tests {
                 run_time: "30s".into(),
                 hatch_rate: "5".into(),
             },
+            summary: summarize(&[], 10, 123.5),
             journeys: vec![],
             ramp_steps: Some(vec![RampStep {
                 users: 10,

@@ -14,19 +14,26 @@
 #   MODE              [steady] steady | ramp | soak
 #   USERS             [20]     concurrent Goose users
 #   RUN_TIME          [90s]    per-run duration
-#   HATCH_RATE        [5]      users spawned per second
-#   THROTTLE          [3]      cap total req/s (stays under dev rate limits)
-#   USERS_PER_REALM   [80]     seeded user records (<= admin-write budget/boot)
+#   HATCH_RATE        [50]     users spawned per second
+#   THROTTLE          [0]      cap total req/s; 0 = unthrottled (the default —
+#                             all server-side rate limits are disabled via
+#                             security.load_test_unthrottled, so there is no
+#                             limiter to stay under). Set >0 only to pin a
+#                             specific offered load for a controlled ramp.
+#   USERS_PER_REALM   [80]     seeded user records per realm
 #   SESSIONS_FRAC     [0.5]    fraction of users given a live token
 #   REVOKED_FRAC      [0.1]    fraction of live tokens pre-revoked
 #   SEED              [1]      determinism seed
-#   SETTLE            [65]     seconds to wait after seeding so the 100/min
-#                             admin-write window resets before the run (set 0
-#                             to skip; risks 429s on the user_lookup journey)
+#   SETTLE            [0]      seconds to wait after seeding before the run.
+#                             Default 0: with rate limits disabled there is no
+#                             admin-write window to wait out.
 #   EXTRA_RUN_ARGS    []       extra flags appended to the `run` subcommand
 #
 # Loopback / dev only — the server boots with `--dev` (bootstrap enabled,
-# relaxed security) and an in-memory store. Never point this at shared infra.
+# relaxed security), an in-memory store, and `security.load_test_unthrottled`
+# which disables ALL request-rate limiters so the run saturates the hot path
+# instead of a limiter. That flag is refused on any non-loopback bind. Never
+# point this at shared infra.
 set -euo pipefail
 
 # ── Resolve paths ────────────────────────────────────────────────────────────
@@ -58,15 +65,15 @@ if [[ -z "${PORT:-}" ]]; then
   [[ "${PORT}" == "0" || -z "${PORT}" ]] && PORT="8420"
 fi
 MODE="${MODE:-steady}"
-USERS="${USERS:-20}"
+USERS="${USERS:-200}"
 RUN_TIME="${RUN_TIME:-90s}"
-HATCH_RATE="${HATCH_RATE:-5}"
-THROTTLE="${THROTTLE:-3}"
+HATCH_RATE="${HATCH_RATE:-50}"
+THROTTLE="${THROTTLE:-0}"
 USERS_PER_REALM="${USERS_PER_REALM:-80}"
 SESSIONS_FRAC="${SESSIONS_FRAC:-0.5}"
 REVOKED_FRAC="${REVOKED_FRAC:-0.1}"
 SEED="${SEED:-1}"
-SETTLE="${SETTLE:-65}"
+SETTLE="${SETTLE:-0}"
 EXTRA_RUN_ARGS="${EXTRA_RUN_ARGS:-}"
 
 HOST="http://127.0.0.1:${PORT}"
@@ -100,18 +107,17 @@ LOADTEST_BIN="$(cargo metadata --format-version 1 --no-deps \
   --manifest-path "${LOADTEST_DIR}/Cargo.toml" \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/hearth-loadtest"
 
-# ── 2. Loopback-only config with the request shaper raised ───────────────────
-# The per-client token/admin caps are compile-time constants (we stay under
-# them via THROTTLE); this only lifts the per-IP shaper so a loopback run is
-# not dominated by 429s. See loadtest/README.md "Rate limits".
+# ── 2. Loopback-only config with all rate limiters disabled ──────────────────
+# security.load_test_unthrottled disables the token, admin, export, and per-IP/
+# per-realm request-shaper limiters so the run measures the hot path, not a
+# limiter. The flag is refused unless the bind is loopback (it is: 127.0.0.1).
+# See loadtest/README.md "Rate limits".
 cat >"${CONFIG}" <<YAML
 server:
   bind_address: "127.0.0.1"
   port: ${PORT}
 security:
-  request_shaper:
-    ip_rps: 500000
-    realm_rps: 5000000
+  load_test_unthrottled: true
 YAML
 
 # ── 3. Boot the throwaway server (in-memory, dev mode) ───────────────────────
@@ -154,7 +160,14 @@ if [[ "${SETTLE}" != "0" ]]; then
 fi
 
 # ── 6. Run the Goose journeys ────────────────────────────────────────────────
-echo "==> Running load (mode=${MODE}, users=${USERS}, run-time=${RUN_TIME}, throttle=${THROTTLE})"
+# THROTTLE=0 (the default) means unthrottled: omit --throttle entirely so goose
+# offers as much load as USERS can generate. A positive THROTTLE pins a specific
+# offered request rate, e.g. for a controlled ramp to find the p99 knee.
+THROTTLE_ARG=""
+if [[ -n "${THROTTLE}" && "${THROTTLE}" != "0" ]]; then
+  THROTTLE_ARG="--throttle ${THROTTLE}"
+fi
+echo "==> Running load (mode=${MODE}, users=${USERS}, run-time=${RUN_TIME}, throttle=${THROTTLE:-0})"
 # shellcheck disable=SC2086
 "${LOADTEST_BIN}" run \
   --seed-handle "${SEED_HANDLE}" \
@@ -162,7 +175,7 @@ echo "==> Running load (mode=${MODE}, users=${USERS}, run-time=${RUN_TIME}, thro
   --users "${USERS}" \
   --run-time "${RUN_TIME}" \
   --hatch-rate "${HATCH_RATE}" \
-  --throttle "${THROTTLE}" \
+  ${THROTTLE_ARG} \
   ${EXTRA_RUN_ARGS}
 
 echo "==> Done. Reports in ${LOADTEST_DIR}/reports/ (report.json + *.html)"
