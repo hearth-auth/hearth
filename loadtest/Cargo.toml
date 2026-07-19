@@ -37,3 +37,8 @@ clap = { version = "4", features = ["derive", "env"] }
 # Loopback guard on --target-host (HEA-1794). Already in the tree via reqwest;
 # using the same parser reqwest connects with avoids a parser differential.
 url = "2"
+
+# Post-processing the Goose HTML report to rewrite its whole-ms Min/Max cells
+# with our microsecond-resolution extremes (HEA-1788 board follow-up). Already
+# in the lock via goose's transitive tree, so no new audit surface.
+regex = "1"

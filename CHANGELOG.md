@@ -21,6 +21,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   subcommand keep their small explicit defaults (HEA-1787).
 
 ### Fixed
+- **`hearth-loadtest` HTML report shows un-rounded Min/Max latency** — Goose
+  renders the Request Metrics table's `Min (ms)`/`Max (ms)` columns in whole
+  milliseconds, so a sub-ms request rounded up to `1` and `Min` could read larger
+  than the two-decimal `Average (ms)`. The harness now post-processes the Goose
+  HTML to rewrite those two cells with the microsecond-resolution extremes it
+  already records (the same figures in `report.json`), so the rendered table
+  matches (HEA-1788).
 - **`--dev` now honors `storage.data_dir`** — dev mode previously ignored the
   configured `storage.data_dir` and always used an ephemeral temp directory
   unless `HEARTH_DEV_DATA_DIR` was set, so cold-tier SSTs vanished between runs

@@ -428,7 +428,29 @@ async fn run_attack(
         .register_scenario(scenario)
         .execute()
         .await?;
-    Ok((metrics, latency::snapshot()))
+    let latency = latency::snapshot();
+    rewrite_html_extremes(html, &latency)?;
+    Ok((metrics, latency))
+}
+
+/// Rewrites the whole-ms `Min (ms)` / `Max (ms)` cells of the Goose HTML report
+/// at `html` with our microsecond-resolution extremes (HEA-1788 board
+/// follow-up), so the rendered table matches the un-rounded figures in
+/// `report.json`. Best-effort on the read: if Goose wrote no report (e.g. an
+/// attack recorded zero requests) the file is simply absent and there is nothing
+/// to fix. A failed write is a real I/O error and is propagated.
+fn rewrite_html_extremes(
+    html: &Path,
+    latency: &HashMap<&'static str, LatencyExtremes>,
+) -> Result<(), LoadError> {
+    let Ok(original) = std::fs::read_to_string(html) else {
+        return Ok(());
+    };
+    let rewritten = crate::html::rewrite_request_extremes(&original, latency);
+    if rewritten != original {
+        std::fs::write(html, rewritten).map_err(LoadError::Report)?;
+    }
+    Ok(())
 }
 
 /// Steady mode: one attack, one HTML, primary percentile table.
@@ -656,18 +678,15 @@ async fn run_tier_miss(params: &LoadParams, report_dir: &Path) -> Result<LoadRep
     scenarios::set_tier_context(Arc::new(ctx));
 
     let scenario = scenarios::build_tier_scenario(hot_w, cold_w)?;
-    let config = build_config(
-        params,
-        host.clone(),
-        params.users,
-        &report_dir.join("tier-miss.html"),
-    );
+    let html = report_dir.join("tier-miss.html");
+    let config = build_config(params, host.clone(), params.users, &html);
     latency::reset();
     let metrics = GooseAttack::initialize_with_config(config)?
         .register_scenario(scenario)
         .execute()
         .await?;
     let latency = latency::snapshot();
+    rewrite_html_extremes(&html, &latency)?;
 
     let journeys = report::journey_rows(&metrics.requests, &latency);
     let rps = requests_per_second(&metrics);
@@ -1002,11 +1021,7 @@ mod tests {
         assert!(matches!(tier_miss_plan(&p), Err(LoadError::HostGuard(_))));
 
         let mut args = tier_args();
-        args.extend_from_slice(&[
-            "--host",
-            "http://10.0.0.5:8420",
-            "--allow-remote-target",
-        ]);
+        args.extend_from_slice(&["--host", "http://10.0.0.5:8420", "--allow-remote-target"]);
         let p = parse(&args);
         assert_eq!(
             tier_miss_plan(&p).expect("opt-in must pass").host,

@@ -352,7 +352,10 @@ which is **git-ignored**):
 - `report.json` — the machine-readable report (schema below). This is the
   artifact a nightly diff consumes.
 - `steady.html` / `ramp-{N}u.html` / `soak-bucket-{N}.html` — Goose's own HTML
-  report(s) for eyeball inspection (traces, per-request timelines).
+  report(s) for eyeball inspection (traces, per-request timelines). The harness
+  post-processes each one to rewrite the Request Metrics table's `Min (ms)` /
+  `Max (ms)` cells at microsecond resolution (Goose renders them in whole ms,
+  which rounds a sub-ms request up to `1`); every other cell is Goose's own.
 
 `report.json` shape (`schema` is [`report::SCHEMA_VERSION`](src/report.rs) —
 bumped on any breaking change so a nightly diff refuses to compare across

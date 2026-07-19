@@ -13,6 +13,7 @@
 mod budget;
 mod client;
 mod handle;
+mod html;
 mod latency;
 mod load;
 mod params;
