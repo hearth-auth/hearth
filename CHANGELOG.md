@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`make loadtest` / `make loadtest-check`** — new load-testing harness crate
+  (`hearth-loadtest`, goose-based) for exercising Hearth under concurrent load.
+  The crate is excluded from the Cargo workspace so it does not slow the unit
+  test gate; run it explicitly via `make loadtest ARGS="…"` (HEA-1788).
+
 ### Changed
 - **Expired-session eviction moved off the token-validation read path** — the
   `validate_token` hot path previously performed a storage write (persist-revoke
