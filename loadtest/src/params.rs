@@ -66,6 +66,20 @@ pub struct SeedParams {
         default_value = "loadtest/reports/seed-handle.json"
     )]
     pub seed_out: String,
+
+    /// Allow a non-loopback `--target-host` (HEA-1794).
+    ///
+    /// The seed step drives `POST /admin/bootstrap`, mints live tokens with the
+    /// well-known dev credentials, and writes those tokens to disk — by default
+    /// it therefore refuses any target that is not loopback (`127.0.0.0/8`,
+    /// `::1`, or the literal host `localhost`). Set this flag only for an
+    /// isolated lab instance you control; never for shared or production hosts.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_ALLOW_REMOTE_TARGET",
+        default_value_t = false
+    )]
+    pub allow_remote_target: bool,
 }
 
 /// Errors from validating [`SeedParams`].
@@ -77,6 +91,11 @@ pub enum ParamError {
     NoUsers,
     /// `realms` was zero — nothing to seed.
     NoRealms,
+    /// `target_host` could not be parsed as an HTTP(S) URL.
+    InvalidTargetHost(String),
+    /// `target_host` resolves to a non-loopback host and
+    /// `--allow-remote-target` was not set.
+    NonLoopbackTarget(String),
 }
 
 impl std::fmt::Display for ParamError {
@@ -87,6 +106,15 @@ impl std::fmt::Display for ParamError {
             }
             Self::NoUsers => write!(f, "users-per-realm must be at least 1"),
             Self::NoRealms => write!(f, "realms must be at least 1"),
+            Self::InvalidTargetHost(host) => {
+                write!(f, "target-host is not a valid http(s) URL: {host}")
+            }
+            Self::NonLoopbackTarget(host) => write!(
+                f,
+                "target-host {host} is not loopback; seeding mints live tokens and \
+                 drives admin endpoints, so remote targets require the explicit \
+                 --allow-remote-target opt-in (isolated lab instances only)"
+            ),
         }
     }
 }
@@ -111,7 +139,34 @@ impl SeedParams {
         if !(0.0..=1.0).contains(&self.revoked_frac) {
             return Err(ParamError::FractionOutOfRange("revoked-frac"));
         }
-        Ok(())
+        self.validate_target_host()
+    }
+
+    /// Failure-closed loopback guard on the seed target (HEA-1794).
+    ///
+    /// Parses `target_host` with the same `url` parser reqwest connects with
+    /// (no hand-rolled host extraction → no parser differential) and rejects
+    /// anything that is not a loopback IP or the literal `localhost`, unless
+    /// `--allow-remote-target` was explicitly set.
+    fn validate_target_host(&self) -> Result<(), ParamError> {
+        let parsed = url::Url::parse(&self.target_host)
+            .map_err(|_| ParamError::InvalidTargetHost(self.target_host.clone()))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(ParamError::InvalidTargetHost(self.target_host.clone()));
+        }
+        let host = parsed
+            .host()
+            .ok_or_else(|| ParamError::InvalidTargetHost(self.target_host.clone()))?;
+        let loopback = match host {
+            url::Host::Ipv4(ip) => ip.is_loopback(),
+            url::Host::Ipv6(ip) => ip.is_loopback(),
+            url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        };
+        if loopback || self.allow_remote_target {
+            Ok(())
+        } else {
+            Err(ParamError::NonLoopbackTarget(host.to_string()))
+        }
     }
 
     /// Number of live sessions to mint per realm, rounded to nearest.
@@ -316,6 +371,64 @@ mod tests {
         ]);
         assert_eq!(all.sessions_per_realm(), 10);
         assert_eq!(all.revoked_per_realm(), 10);
+    }
+
+    /// Regression (HEA-1794): the seed step must refuse non-loopback targets
+    /// unless `--allow-remote-target` is explicitly set — it drives admin
+    /// endpoints and writes live tokens to disk.
+    #[test]
+    fn loopback_targets_pass_the_guard() {
+        for host in [
+            "http://127.0.0.1:8420",
+            "http://127.0.0.53:8420",
+            "http://localhost:8420",
+            "http://LOCALHOST:8420",
+            "http://[::1]:8420",
+            "https://127.0.0.1",
+        ] {
+            let p = parse(&["--target-host", host]);
+            p.validate()
+                .unwrap_or_else(|e| panic!("loopback target {host} must pass the guard: {e}"));
+        }
+    }
+
+    #[test]
+    fn non_loopback_targets_are_rejected_without_opt_in() {
+        for host in [
+            "http://10.0.0.5:8420",
+            "http://192.168.1.10:8420",
+            "https://hearth.example.com",
+            "http://[2001:db8::1]:8420",
+            // Userinfo trick: the connect host is evil.example, not 127.0.0.1.
+            "http://127.0.0.1@evil.example:8420",
+        ] {
+            let p = parse(&["--target-host", host]);
+            assert!(
+                matches!(p.validate(), Err(ParamError::NonLoopbackTarget(_))),
+                "non-loopback target {host} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_remote_target_is_an_explicit_opt_in() {
+        let p = parse(&[
+            "--target-host",
+            "http://10.0.0.5:8420",
+            "--allow-remote-target",
+        ]);
+        p.validate().expect("explicit opt-in must pass the guard");
+    }
+
+    #[test]
+    fn malformed_or_non_http_targets_are_rejected() {
+        for host in ["not a url", "ftp://127.0.0.1", "file:///etc/passwd", ""] {
+            let p = parse(&["--target-host", host]);
+            assert!(
+                matches!(p.validate(), Err(ParamError::InvalidTargetHost(_))),
+                "target {host:?} must be rejected as invalid"
+            );
+        }
     }
 
     #[test]

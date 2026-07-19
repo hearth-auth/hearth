@@ -54,6 +54,7 @@ make seed ARGS="--users-per-realm 500 --sessions-frac 0.5 --revoked-frac 0.1"
 | `--revoked-frac` | `HEARTH_LOADTEST_REVOKED_FRAC` | `0.1` | Fraction of live tokens pre-revoked |
 | `--seed` | `HEARTH_LOADTEST_SEED` | `1` | Determinism seed (reproducible corpus) |
 | `--seed-out` | `HEARTH_LOADTEST_SEED_OUT` | `loadtest/reports/seed-handle.json` | Seed-handle output path |
+| `--allow-remote-target` | `HEARTH_LOADTEST_ALLOW_REMOTE_TARGET` | off | Explicit opt-in for a non-loopback target (isolated lab only) |
 
 The dataset shape is echoed to stdout and stored in the seed-handle so every
 report can describe the corpus it ran against. The same `--seed` always
@@ -61,10 +62,18 @@ produces the same emails and (ephemeral, never-persisted) passwords.
 
 ## ⚠️ Security warnings (read before running)
 
-- **Dev / loopback only.** The seed step calls `POST /admin/bootstrap`, mints
-  live tokens, and revokes them. Point it **only** at a local dev instance
-  (`--dev` mode, loopback address). Never at a shared or production instance —
-  it would create real users and tokens and could exhaust admin rate limits.
+- **Dev / loopback only — enforced at runtime.** The seed step calls
+  `POST /admin/bootstrap`, mints live tokens, and revokes them. It **refuses
+  any non-loopback `--target-host`** unless you pass the explicit
+  `--allow-remote-target` opt-in; use that only for an isolated lab instance
+  you control, never a shared or production instance — it would create real
+  users and tokens and could exhaust admin rate limits. (Production servers
+  fail closed anyway: `/admin/bootstrap` is disabled outside `--dev` mode, so
+  the flow dies at step 1 before any credential is sent.)
+- **Deterministic passwords are derivable from the seed.** `--seed` is not a
+  secret: anyone who knows (or guesses the default) seed can derive every
+  seeded password. That is fine for a loopback dev corpus and is exactly why
+  these credentials must never be provisioned on shared infrastructure.
 - **The seed-handle holds live bearer tokens.** It is written owner-only
   (`0600`) into `loadtest/reports/`, which is **git-ignored**. Do not commit
   it, paste it into issues/logs, or move it outside that directory.

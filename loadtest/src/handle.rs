@@ -268,10 +268,8 @@ mod tests {
     #[cfg(unix)]
     fn write_to_tightens_a_preexisting_loose_file() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "hearth-loadtest-test-loose-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("hearth-loadtest-test-loose-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create dir");
         let path = dir.join("seed-handle.json");
         std::fs::write(&path, "{}").expect("pre-create");

@@ -45,6 +45,14 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
     println!("hearth-loadtest seed: {}", params.dataset_shape_summary());
     println!("  target: {}", params.target_host);
 
+    if params.allow_remote_target {
+        println!(
+            "  WARNING: --allow-remote-target set — seeding a NON-loopback host. \
+             This mints live tokens against it and writes them to the seed handle. \
+             Only do this to an isolated lab instance you control."
+        );
+    }
+
     if params.realms > 1 {
         println!(
             "  WARNING: POST /admin/realms is disabled on the server (realms come \

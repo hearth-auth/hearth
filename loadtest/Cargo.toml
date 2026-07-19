@@ -33,3 +33,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
+
+# Loopback guard on --target-host (HEA-1794). Already in the tree via reqwest;
+# using the same parser reqwest connects with avoids a parser differential.
+url = "2"
