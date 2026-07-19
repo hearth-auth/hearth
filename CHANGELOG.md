@@ -21,13 +21,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   subcommand keep their small explicit defaults (HEA-1787).
 
 ### Fixed
-- **`hearth-loadtest` HTML report shows un-rounded Min/Max latency** — Goose
-  renders the Request Metrics table's `Min (ms)`/`Max (ms)` columns in whole
-  milliseconds, so a sub-ms request rounded up to `1` and `Min` could read larger
-  than the two-decimal `Average (ms)`. The harness now post-processes the Goose
-  HTML to rewrite those two cells with the microsecond-resolution extremes it
-  already records (the same figures in `report.json`), so the rendered table
-  matches (HEA-1788).
+- **`hearth-loadtest` HTML report shows un-rounded latency in µs resolution** —
+  Goose measures every response time in whole milliseconds, so its Request
+  Metrics `Min`/`Max` columns and its entire Response Time Metrics percentile
+  table rendered Hearth's sub-ms hot path as a flat `1`. The harness now records
+  a lock-free per-journey microsecond histogram and post-processes the Goose HTML
+  to rewrite both tables — Request `Min`/`Max` and every percentile
+  (50/60/70/80/90/95/99/100), per journey and for the aggregate — with the real
+  microsecond figures. A prior fix targeted only the `Min`/`Max` cells but scoped
+  the rewrite by the first `</div>`, which in real Goose reports closes the nested
+  echarts chart before the table, so the rewrite silently no-op'd; scoping is now
+  anchored to each metrics `<table>` (HEA-1788).
 - **`--dev` now honors `storage.data_dir`** — dev mode previously ignored the
   configured `storage.data_dir` and always used an ephemeral temp directory
   unless `HEARTH_DEV_DATA_DIR` was set, so cold-tier SSTs vanished between runs

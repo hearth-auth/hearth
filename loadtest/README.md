@@ -352,10 +352,15 @@ which is **git-ignored**):
 - `report.json` — the machine-readable report (schema below). This is the
   artifact a nightly diff consumes.
 - `steady.html` / `ramp-{N}u.html` / `soak-bucket-{N}.html` — Goose's own HTML
-  report(s) for eyeball inspection (traces, per-request timelines). The harness
-  post-processes each one to rewrite the Request Metrics table's `Min (ms)` /
-  `Max (ms)` cells at microsecond resolution (Goose renders them in whole ms,
-  which rounds a sub-ms request up to `1`); every other cell is Goose's own.
+  report(s) for eyeball inspection (traces, per-request timelines). Goose measures
+  every response time in whole milliseconds, so its Request Metrics `Min`/`Max`
+  and its Response Time Metrics percentile table render Hearth's sub-ms hot path
+  as a flat `1`. The harness records a per-journey microsecond histogram and
+  post-processes each report to rewrite those two tables — Request `Min`/`Max` and
+  every percentile column (50/60/70/80/90/95/99/100), per journey and aggregate —
+  at microsecond resolution. All other tables (transactions, scenarios, status
+  codes) and the `Users:` count are Goose's own; `Users:` is the `--users`
+  concurrency the run used (default 50).
 
 `report.json` shape (`schema` is [`report::SCHEMA_VERSION`](src/report.rs) —
 bumped on any breaking change so a nightly diff refuses to compare across

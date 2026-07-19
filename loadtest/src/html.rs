@@ -1,42 +1,56 @@
-//! Sub-millisecond Min/Max in the Goose HTML report (HEA-1788 board follow-up).
+//! Microsecond-resolution rewrites of the Goose HTML report (HEA-1788 board
+//! follow-up).
 //!
-//! Goose renders its **Request Metrics** table with whole-millisecond `Min (ms)`
-//! and `Max (ms)` columns while the `Average (ms)` column carries two decimals.
-//! At Hearth's sub-ms latencies that rounds a 0.09 ms fastest request up to `1`
-//! and can make `Min` read *larger* than the average — exactly the confusion the
-//! board flagged. Our [`crate::latency`] registry already measures each journey's
-//! true microsecond extremes (the same figures `report.json` surfaces); this
-//! module rewrites the rendered HTML so the table shows them un-rounded too.
+//! Goose measures every response time in **whole milliseconds** internally, so
+//! its rendered tables round Hearth's sub-ms hot-path latencies out of
+//! existence: the `Min (ms)` / `Max (ms)` columns of the **Request Metrics**
+//! table show `1` for a 90 µs request, and every column of the **Response Time
+//! Metrics** percentile table collapses to `1`. Our [`crate::latency`] registry
+//! measures each journey at microsecond resolution (min/max *and* a histogram),
+//! and these functions rewrite the rendered HTML so both tables show the real
+//! figures.
 //!
-//! The rewrite is scoped to the `<div class="requests">` block and only touches
-//! the two extreme cells of each nine-cell request row, so the transaction /
-//! coordinated-omission / response tables and every other cell are left byte-for-
-//! byte intact.
+//! Each rewrite is scoped to the specific `<table>` inside its section `<div>`
+//! (found by locating the first `<table>` after the section marker and its
+//! closing `</table>`), so the echarts `<script>` blocks and every other table —
+//! transactions, scenarios, status codes — are left byte-for-byte intact.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use regex::{Captures, Regex};
 
-use crate::latency::LatencyExtremes;
+use crate::latency::{LatencyExtremes, LatencyPercentiles, PercentileSnapshot};
 
-/// Formats a microsecond extreme as millimeters-of-a-second with microsecond
-/// precision (three decimals) — exact for our `u64` µs samples and unit-matched
-/// to the `Average (ms)` column, so a sub-ms min no longer rounds to a whole ms.
+/// Formats a microsecond value as milliseconds with microsecond precision (three
+/// decimals) — exact for our `u64` µs samples and unit-matched to the report's
+/// `(ms)` columns, so a sub-ms figure no longer rounds to a whole ms.
 fn format_ms(us: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     let ms = us as f64 / 1000.0;
     format!("{ms:.3}")
 }
 
+/// Byte range of the first `<table>…</table>` inside the section `<div
+/// class="{div_class}">`. Goose nests an echarts `<div class="graph">` (with its
+/// own `</div>`) *before* the metrics table, so scoping by the first `</div>`
+/// after the section marker stops short of the table — this scopes to the table
+/// itself instead. `None` if the section or its table is absent.
+fn table_region(report: &str, div_class: &str) -> Option<(usize, usize)> {
+    let marker = format!(r#"<div class="{div_class}">"#);
+    let div = report.find(&marker)?;
+    let after = div + marker.len();
+    let table_start = after + report[after..].find("<table>")?;
+    let table_end = table_start + report[table_start..].find("</table>")? + "</table>".len();
+    Some((table_start, table_end))
+}
+
 /// Matches one nine-cell **request-metrics** row: `<tr>` then exactly nine plain
 /// `<td>…</td>` cells then `</tr>`. Transaction rows open with `<td colspan="2">`
 /// and response rows carry ten cells, so neither matches — only request rows do.
-fn row_regex() -> &'static Regex {
+fn request_row_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Built from adjacent literals (no backslash line-continuation, which a
-        // raw string would treat as a literal `\`) to keep the pattern readable.
         let pattern = concat!(
             r"(?s)<tr>\s*<td>(?P<method>[^<]*)</td>\s*<td>(?P<name>[^<]*)</td>\s*",
             r"<td>(?P<req>[^<]*)</td>\s*<td>(?P<fail>[^<]*)</td>\s*",
@@ -48,31 +62,39 @@ fn row_regex() -> &'static Regex {
     })
 }
 
+/// Matches one ten-cell **response-time (percentile)** row: `<tr>`, a method and
+/// name cell, then eight percentile cells (50/60/70/80/90/95/99/100), then
+/// `</tr>`. Nine-cell request rows and `colspan` transaction rows do not match.
+fn percentile_row_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        let pattern = concat!(
+            r"(?s)<tr>\s*<td>(?P<method>[^<]*)</td>\s*<td>(?P<name>[^<]*)</td>\s*",
+            r"<td>(?P<p50>[^<]*)</td>\s*<td>(?P<p60>[^<]*)</td>\s*<td>(?P<p70>[^<]*)</td>\s*",
+            r"<td>(?P<p80>[^<]*)</td>\s*<td>(?P<p90>[^<]*)</td>\s*<td>(?P<p95>[^<]*)</td>\s*",
+            r"<td>(?P<p99>[^<]*)</td>\s*<td>(?P<p100>[^<]*)</td>\s*</tr>",
+        );
+        Regex::new(pattern).expect("static percentile-row regex is valid")
+    })
+}
+
 /// Rewrites the `Min (ms)` / `Max (ms)` cells of every request-metrics row in the
 /// Goose HTML `report` using the microsecond `latency` extremes, keyed by journey
 /// name. The synthetic `Aggregated` row uses the overall min/max across all
 /// journeys. Rows whose name is absent from `latency` (and the aggregate when no
 /// journey was recorded) are left exactly as Goose rendered them.
 ///
-/// Pure and total: an HTML string with no requests block is returned unchanged.
+/// Pure and total: an HTML string with no requests table is returned unchanged.
 #[must_use]
 pub fn rewrite_request_extremes(
     report: &str,
     latency: &HashMap<&'static str, LatencyExtremes>,
 ) -> String {
-    // Scope the rewrite to the Request Metrics table so no other table's cells
-    // can be touched, even if a future Goose layout collides with the row shape.
-    let Some(start) = report.find(r#"<div class="requests">"#) else {
+    let Some((start, end)) = table_region(report, "requests") else {
         return report.to_string();
     };
-    let Some(rel_end) = report[start..].find("</div>") else {
-        return report.to_string();
-    };
-    let end = start + rel_end;
-
     let agg = aggregate_extremes(latency);
-    let region = &report[start..end];
-    let rewritten = row_regex().replace_all(region, |caps: &Captures| {
+    let rewritten = request_row_regex().replace_all(&report[start..end], |caps: &Captures| {
         let name = &caps["name"];
         let extremes = if name == "Aggregated" {
             agg
@@ -97,8 +119,54 @@ pub fn rewrite_request_extremes(
             fps = &caps["fps"],
         )
     });
-
     format!("{}{}{}", &report[..start], rewritten, &report[end..])
+}
+
+/// Rewrites every percentile cell (50/60/70/80/90/95/99/100) of the Response Time
+/// Metrics table using the microsecond `percentiles` snapshot, keyed by journey
+/// name; the `Aggregated` row uses the merged aggregate. Rows with no recorded
+/// percentiles (unknown journey, or the aggregate when nothing was recorded) are
+/// left exactly as Goose rendered them.
+///
+/// Pure and total: an HTML string with no responses table is returned unchanged.
+#[must_use]
+pub fn rewrite_response_percentiles(report: &str, percentiles: &PercentileSnapshot) -> String {
+    let Some((start, end)) = table_region(report, "responses") else {
+        return report.to_string();
+    };
+    let rewritten = percentile_row_regex().replace_all(&report[start..end], |caps: &Captures| {
+        let name = &caps["name"];
+        let pct = if name == "Aggregated" {
+            percentiles.aggregate
+        } else {
+            percentiles.per_journey.get(name).copied()
+        };
+        match pct {
+            Some(p) => format_percentile_row(&caps["method"], name, p),
+            // Unknown journey (or empty aggregate): keep Goose's original cells.
+            None => caps[0].to_string(),
+        }
+    });
+    format!("{}{}{}", &report[..start], rewritten, &report[end..])
+}
+
+/// Renders a ten-cell percentile row with our microsecond figures formatted as
+/// milliseconds, matching Goose's cell layout.
+fn format_percentile_row(method: &str, name: &str, p: LatencyPercentiles) -> String {
+    format!(
+        "<tr>\n            <td>{method}</td>\n            <td>{name}</td>\n            \
+         <td>{p50}</td>\n            <td>{p60}</td>\n            <td>{p70}</td>\n            \
+         <td>{p80}</td>\n            <td>{p90}</td>\n            <td>{p95}</td>\n            \
+         <td>{p99}</td>\n            <td>{p100}</td>\n        </tr>",
+        p50 = format_ms(p.p50_us),
+        p60 = format_ms(p.p60_us),
+        p70 = format_ms(p.p70_us),
+        p80 = format_ms(p.p80_us),
+        p90 = format_ms(p.p90_us),
+        p95 = format_ms(p.p95_us),
+        p99 = format_ms(p.p99_us),
+        p100 = format_ms(p.p100_us),
+    )
 }
 
 /// Overall extremes across every recorded journey: the smallest min and largest
@@ -113,12 +181,17 @@ fn aggregate_extremes(latency: &HashMap<&'static str, LatencyExtremes>) -> Optio
 mod tests {
     use super::*;
 
-    /// Minimal request-metrics table mirroring Goose's `raw_request_metrics_row`
-    /// layout (nine plain `<td>` cells, whole-ms Min/Max, two-decimal Average).
+    /// Full Goose section layout: a nested echarts `<div class="graph">` (with its
+    /// own `<div id=…></div>` and `<script>`) precedes the metrics table — the
+    /// exact structure whose stray `</div>` defeated the earlier scoping.
     fn requests_html(rows: &str) -> String {
         format!(
             r#"<div class="requests">
             <h2>Request Metrics</h2>
+            <div class="graph">
+                <div id="graph-rps" style="width: 1000px; height:500px; background: white;"></div>
+                <script type="text/javascript">var x = [["a",1]];</script>
+            </div>
             <table><thead><tr><th>Method</th></tr></thead><tbody>
             {rows}
             </tbody></table>
@@ -140,7 +213,23 @@ mod tests {
         )
     }
 
-    fn row(method: &str, name: &str, min: &str, max: &str) -> String {
+    /// Response section with the nested graph div and a ten-cell percentile row.
+    fn responses_html(rows: &str) -> String {
+        format!(
+            r#"<div class="responses">
+            <h2>Response Time Metrics</h2>
+            <div class="graph">
+                <div id="graph-avg-response-time"></div>
+                <script>var d = [["t",1.5]];</script>
+            </div>
+            <table><thead><tr><th>Method</th></tr></thead><tbody>
+            {rows}
+            </tbody></table>
+        </div>"#
+        )
+    }
+
+    fn request_row(method: &str, name: &str, min: &str, max: &str) -> String {
         format!(
             "<tr>\n        <td>{method}</td>\n        <td>{name}</td>\n        <td>100</td>\n        \
              <td>0</td>\n        <td>0.02</td>\n        <td>{min}</td>\n        <td>{max}</td>\n        \
@@ -148,11 +237,35 @@ mod tests {
         )
     }
 
+    fn percentile_row(method: &str, name: &str, cells: [&str; 8]) -> String {
+        format!(
+            "<tr>\n            <td>{method}</td>\n            <td>{name}</td>\n            \
+             <td>{}</td>\n            <td>{}</td>\n            <td>{}</td>\n            \
+             <td>{}</td>\n            <td>{}</td>\n            <td>{}</td>\n            \
+             <td>{}</td>\n            <td>{}</td>\n        </tr>",
+            cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], cells[6], cells[7],
+        )
+    }
+
+    fn pct(v: u64) -> LatencyPercentiles {
+        LatencyPercentiles {
+            p50_us: v,
+            p60_us: v,
+            p70_us: v,
+            p80_us: v,
+            p90_us: v,
+            p95_us: v,
+            p99_us: v,
+            p100_us: v,
+        }
+    }
+
     #[test]
     fn min_max_are_replaced_with_submillisecond_values() {
         // Regression: Goose rounds a 90 µs fastest request to Min=1 ms and a
-        // 1450 µs slowest to Max=1 ms; the rewrite must show 0.090 / 1.450.
-        let html = requests_html(&row("POST", "validate", "1", "1"));
+        // 1450 µs slowest to Max=1 ms; the rewrite must show 0.090 / 1.450 —
+        // and it must survive the nested graph div that broke the old scoping.
+        let html = requests_html(&request_row("POST", "validate", "1", "1"));
         let mut latency = HashMap::new();
         latency.insert(
             "validate",
@@ -164,17 +277,16 @@ mod tests {
         let out = rewrite_request_extremes(&html, &latency);
         assert!(out.contains("<td>0.090</td>"), "min not rewritten: {out}");
         assert!(out.contains("<td>1.450</td>"), "max not rewritten: {out}");
-        // The whole-ms originals are gone.
-        assert!(!out.contains(&row("POST", "validate", "1", "1")));
+        assert!(!out.contains(&request_row("POST", "validate", "1", "1")));
     }
 
     #[test]
     fn aggregated_row_uses_overall_extremes() {
         let rows = format!(
             "{}\n{}\n{}",
-            row("POST", "validate", "1", "7"),
-            row("GET", "session_lookup", "1", "4"),
-            row("", "Aggregated", "1", "5068"),
+            request_row("POST", "validate", "1", "7"),
+            request_row("GET", "session_lookup", "1", "4"),
+            request_row("", "Aggregated", "1", "5068"),
         );
         let html = requests_html(&rows);
         let mut latency = HashMap::new();
@@ -193,17 +305,14 @@ mod tests {
             },
         );
         let out = rewrite_request_extremes(&html, &latency);
-        // Aggregate min = min(180,420)=0.180 ms; max = max(6900,4050)=6.900 ms.
         assert!(out.contains("<td>0.180</td>"), "agg min: {out}");
         assert!(out.contains("<td>6.900</td>"), "agg max: {out}");
-        // Per-journey cells rewritten too.
         assert!(out.contains("<td>4.050</td>"), "session max: {out}");
     }
 
     #[test]
     fn unknown_journey_keeps_goose_values() {
-        // A row with no latency sample must be left byte-for-byte unchanged.
-        let original = row("POST", "mystery", "3", "9");
+        let original = request_row("POST", "mystery", "3", "9");
         let html = requests_html(&original);
         let out = rewrite_request_extremes(&html, &HashMap::new());
         assert!(
@@ -213,10 +322,10 @@ mod tests {
     }
 
     #[test]
-    fn cells_outside_the_requests_div_are_untouched() {
+    fn request_rewrite_ignores_the_responses_table() {
         // The lookalike nine-cell row in the responses div must NOT be rewritten:
-        // only the requests table is in scope.
-        let html = requests_html(&row("POST", "validate", "1", "1"));
+        // scoping is confined to the requests table.
+        let html = requests_html(&request_row("POST", "validate", "1", "1"));
         let mut latency = HashMap::new();
         latency.insert(
             "validate",
@@ -226,21 +335,95 @@ mod tests {
             },
         );
         let out = rewrite_request_extremes(&html, &latency);
-        // The responses-div block (all-`1` cells) survives intact.
-        assert!(
-            out.contains("<div class=\"responses\">"),
-            "responses div present"
-        );
-        // Exactly one rewrite happened (the requests-table validate row), so the
-        // sub-ms value appears once, not twice.
         assert_eq!(out.matches("<td>0.090</td>").count(), 1, "{out}");
     }
 
     #[test]
-    fn no_requests_div_returns_input_unchanged() {
+    fn no_requests_table_returns_input_unchanged() {
         let html = "<html><body>no metrics here</body></html>";
-        let out = rewrite_request_extremes(html, &HashMap::new());
-        assert_eq!(out, html);
+        assert_eq!(rewrite_request_extremes(html, &HashMap::new()), html);
+    }
+
+    #[test]
+    fn percentiles_are_replaced_with_submillisecond_values() {
+        // Regression (board follow-up): Goose renders a sub-ms journey's whole
+        // percentile row as `1`; the rewrite must show real µs figures.
+        let html = responses_html(&percentile_row(
+            "GET",
+            "session_lookup",
+            ["1", "1", "1", "1", "1", "1", "1", "4"],
+        ));
+        let mut snap = PercentileSnapshot {
+            per_journey: HashMap::new(),
+            aggregate: None,
+        };
+        snap.per_journey.insert(
+            "session_lookup",
+            LatencyPercentiles {
+                p50_us: 12,
+                p60_us: 15,
+                p70_us: 18,
+                p80_us: 24,
+                p90_us: 40,
+                p95_us: 60,
+                p99_us: 120,
+                p100_us: 4_000,
+            },
+        );
+        let out = rewrite_response_percentiles(&html, &snap);
+        assert!(out.contains("<td>0.012</td>"), "p50 not rewritten: {out}");
+        assert!(out.contains("<td>0.120</td>"), "p99 not rewritten: {out}");
+        assert!(out.contains("<td>4.000</td>"), "p100 not rewritten: {out}");
+        // The flat all-`1` row is gone.
+        assert!(!out.contains(&percentile_row(
+            "GET",
+            "session_lookup",
+            ["1", "1", "1", "1", "1", "1", "1", "4"]
+        )));
+    }
+
+    #[test]
+    fn percentile_aggregated_row_uses_aggregate() {
+        let html = responses_html(&percentile_row(
+            "",
+            "Aggregated",
+            ["1", "1", "1", "1", "370", "1,000", "2,000", "5,000"],
+        ));
+        let snap = PercentileSnapshot {
+            per_journey: HashMap::new(),
+            aggregate: Some(pct(2_500)),
+        };
+        let out = rewrite_response_percentiles(&html, &snap);
+        assert!(out.contains("<td>2.500</td>"), "aggregate row: {out}");
+        assert!(
+            !out.contains("<td>1,000</td>"),
+            "goose comma value gone: {out}"
+        );
+    }
+
+    #[test]
+    fn percentile_unknown_journey_is_untouched() {
+        let original = percentile_row("POST", "mystery", ["1", "2", "3", "4", "5", "6", "7", "8"]);
+        let html = responses_html(&original);
+        let snap = PercentileSnapshot {
+            per_journey: HashMap::new(),
+            aggregate: None,
+        };
+        let out = rewrite_response_percentiles(&html, &snap);
+        assert!(
+            out.contains(&original),
+            "unknown row must be untouched: {out}"
+        );
+    }
+
+    #[test]
+    fn no_responses_table_returns_input_unchanged() {
+        let html = "<html><body>nothing here</body></html>";
+        let snap = PercentileSnapshot {
+            per_journey: HashMap::new(),
+            aggregate: None,
+        };
+        assert_eq!(rewrite_response_percentiles(html, &snap), html);
     }
 
     #[test]

@@ -429,24 +429,29 @@ async fn run_attack(
         .execute()
         .await?;
     let latency = latency::snapshot();
-    rewrite_html_extremes(html, &latency)?;
+    let percentiles = latency::snapshot_percentiles();
+    rewrite_html_extremes(html, &latency, &percentiles)?;
     Ok((metrics, latency))
 }
 
-/// Rewrites the whole-ms `Min (ms)` / `Max (ms)` cells of the Goose HTML report
-/// at `html` with our microsecond-resolution extremes (HEA-1788 board
-/// follow-up), so the rendered table matches the un-rounded figures in
-/// `report.json`. Best-effort on the read: if Goose wrote no report (e.g. an
-/// attack recorded zero requests) the file is simply absent and there is nothing
-/// to fix. A failed write is a real I/O error and is propagated.
+/// Rewrites the whole-ms cells of the Goose HTML report at `html` with our
+/// microsecond-resolution figures (HEA-1788 board follow-up): the Request
+/// Metrics `Min`/`Max` columns from `latency`, and the Response Time Metrics
+/// percentile table from `percentiles`. Goose measures response times in whole
+/// ms, so without this both tables render Hearth's sub-ms hot path as `1`.
+/// Best-effort on the read: if Goose wrote no report (e.g. an attack recorded
+/// zero requests) the file is simply absent and there is nothing to fix. A
+/// failed write is a real I/O error and is propagated.
 fn rewrite_html_extremes(
     html: &Path,
     latency: &HashMap<&'static str, LatencyExtremes>,
+    percentiles: &latency::PercentileSnapshot,
 ) -> Result<(), LoadError> {
     let Ok(original) = std::fs::read_to_string(html) else {
         return Ok(());
     };
     let rewritten = crate::html::rewrite_request_extremes(&original, latency);
+    let rewritten = crate::html::rewrite_response_percentiles(&rewritten, percentiles);
     if rewritten != original {
         std::fs::write(html, rewritten).map_err(LoadError::Report)?;
     }
@@ -686,7 +691,8 @@ async fn run_tier_miss(params: &LoadParams, report_dir: &Path) -> Result<LoadRep
         .execute()
         .await?;
     let latency = latency::snapshot();
-    rewrite_html_extremes(&html, &latency)?;
+    let percentiles = latency::snapshot_percentiles();
+    rewrite_html_extremes(&html, &latency, &percentiles)?;
 
     let journeys = report::journey_rows(&metrics.requests, &latency);
     let rps = requests_per_second(&metrics);
