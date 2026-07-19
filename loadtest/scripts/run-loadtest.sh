@@ -9,7 +9,8 @@
 # directly via `make loadtest ARGS="..."` (see loadtest/README.md).
 #
 # Everything is overridable via environment variables (defaults in brackets):
-#   PORT              [8420]   loopback port the throwaway server binds
+#   PORT              [auto]   loopback port the throwaway server binds
+#                             (default: a free ephemeral port; never collides)
 #   MODE              [steady] steady | ramp | soak
 #   USERS             [20]     concurrent Goose users
 #   RUN_TIME          [90s]    per-run duration
@@ -40,7 +41,22 @@ fi
 export PROTOC
 
 # ── Parameters ───────────────────────────────────────────────────────────────
-PORT="${PORT:-8420}"
+# Auto-pick a free loopback port unless one is pinned via PORT=. This keeps
+# bare `make loadtest` a true zero-requirement command: it never collides with
+# a running `make dev` (8420) or a stale throwaway from a prior run.
+pick_free_port() {
+  python3 - <<'PY' 2>/dev/null || echo 0
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+if [[ -z "${PORT:-}" ]]; then
+  PORT="$(pick_free_port)"
+  [[ "${PORT}" == "0" || -z "${PORT}" ]] && PORT="8420"
+fi
 MODE="${MODE:-steady}"
 USERS="${USERS:-20}"
 RUN_TIME="${RUN_TIME:-90s}"

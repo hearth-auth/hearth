@@ -21,17 +21,28 @@ runs the Goose journeys, writes `report.json` + HTML into `reports/`, and tears
 the server down. No manual bootstrap / seed / attach steps:
 
 ```bash
-make loadtest                          # boot → seed → run → report → teardown
-make loadtest MODE=ramp                # env vars tune it (see below)
+make loadtest                          # that's it — nothing else is required
+```
+
+**That command is the entire contract.** No running server, no bootstrap, no
+`make seed`, no ARGS, no env vars, no ports to free up. It builds a release
+Hearth, boots a throwaway instance on a free loopback port, seeds, runs, writes
+the reports, and cleans up. If you can build the repo, `make loadtest` works.
+
+Everything below is **optional tuning** — the defaults are chosen so the bare
+command always produces a valid report. You never need any of it.
+
+```bash
+make loadtest MODE=ramp                # optional: env vars tune the run
 make loadtest USERS=50 RUN_TIME=3m THROTTLE=3
 ```
 
 The pipeline lives in [`scripts/run-loadtest.sh`](scripts/run-loadtest.sh); every
-knob is an env var (defaults in brackets):
+knob is an **optional** env var (defaults in brackets):
 
 | Env | Default | Meaning |
 |---|---|---|
-| `PORT` | `8420` | Loopback port for the throwaway server |
+| `PORT` | `auto` | Loopback port (default: a free ephemeral port — never collides) |
 | `MODE` | `steady` | `steady` \| `ramp` \| `soak` |
 | `USERS` | `20` | Concurrent Goose users |
 | `RUN_TIME` | `90s` | Per-run duration |

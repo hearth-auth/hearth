@@ -69,15 +69,15 @@ test:
 clippy:
 	PROTOC=$(PROTOC) cargo clippy --all-targets $(CARGO_FLAGS) -- -D warnings
 
-## Run the WHOLE load-test pipeline with one command: `make loadtest` boots a
-## fresh throwaway dev Hearth on loopback, seeds a deterministic corpus, runs
-## the Goose journeys, writes report.json + HTML, and tears the server down.
-## No manual bootstrap/seed/attach steps. Tune it with env vars (see
-## loadtest/scripts/run-loadtest.sh header), e.g. `make loadtest MODE=ramp`.
+## `make loadtest` — that's the whole contract. Nothing else is required: no
+## running server, no bootstrap, no seed, no ARGS, no env vars, no free port.
+## It builds a release Hearth, boots a throwaway instance on a free loopback
+## port, seeds a deterministic corpus, runs the Goose journeys, writes
+## report.json + HTML, and tears the server down.
 ##
-## For advanced/attach usage, pass ARGS to invoke the binary directly instead
-## of the pipeline, e.g. `make loadtest ARGS="run --weight-revoke 0"` or
-## `make loadtest ARGS="--help"` (see loadtest/README.md).
+## Optional env-var tuning only (defaults always produce a valid report):
+## `make loadtest MODE=ramp`. Optional advanced/attach usage via ARGS invokes
+## the binary directly: `make loadtest ARGS="--help"` (see loadtest/README.md).
 loadtest:
 ifeq ($(strip $(ARGS)),)
 	PROTOC=$(PROTOC) loadtest/scripts/run-loadtest.sh
