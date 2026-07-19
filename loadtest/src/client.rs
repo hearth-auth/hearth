@@ -105,16 +105,27 @@ impl SeedClient {
     /// Bootstraps a dev instance and returns a realm-scoped client plus the
     /// bootstrap result.
     ///
+    /// `admin_token` lets the seed attach to an **already-bootstrapped**
+    /// instance: `POST /admin/bootstrap` only succeeds anonymously on a fresh
+    /// realm; a re-bootstrap requires the bearer token from the first bootstrap
+    /// and returns fresh credentials (200) instead of `401`. When `None` the
+    /// call is anonymous (the fresh-instance path).
+    ///
     /// # Errors
     /// Returns [`SeedError`] on transport failure or a non-2xx bootstrap
-    /// response (e.g. when the target is not running in `--dev` mode).
-    pub async fn bootstrap(base_url: &str) -> Result<(Self, Bootstrap), SeedError> {
+    /// response (e.g. when the target is not running in `--dev` mode, or when
+    /// the instance is already bootstrapped and no `admin_token` was supplied).
+    pub async fn bootstrap(
+        base_url: &str,
+        admin_token: Option<&str>,
+    ) -> Result<(Self, Bootstrap), SeedError> {
         let base_url = base_url.trim_end_matches('/').to_string();
         let anon = reqwest::Client::builder().build()?;
-        let resp = anon
-            .post(format!("{base_url}/admin/bootstrap"))
-            .send()
-            .await?;
+        let mut req = anon.post(format!("{base_url}/admin/bootstrap"));
+        if let Some(token) = admin_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await?;
         let boot: BootstrapResponse = json_or_err("bootstrap", resp).await?;
 
         let mut headers = reqwest::header::HeaderMap::new();

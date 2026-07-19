@@ -63,7 +63,37 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
         );
     }
 
-    let (client, boot) = SeedClient::bootstrap(&params.target_host).await?;
+    let (client, boot) =
+        match SeedClient::bootstrap(&params.target_host, params.admin_token.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => {
+                // The most common failure: seeding an instance that was already
+                // bootstrapped (manual quickstart curl, or a prior seed run) with
+                // no admin token, so the anonymous re-bootstrap is rejected 401.
+                // Point the operator at the exact fix instead of failing opaquely.
+                if params.admin_token.is_none()
+                    && matches!(
+                        &e,
+                        SeedError::Api {
+                            op: "bootstrap",
+                            status: 401,
+                            ..
+                        }
+                    )
+                {
+                    eprintln!(
+                        "  HINT: this target is already bootstrapped, so anonymous \
+                         POST /admin/bootstrap is rejected. Re-run with the admin bearer \
+                         token from your first bootstrap:\n\
+                         \x20     make seed ARGS=\"--admin-token $ADMIN_TOKEN ...\"\n\
+                         \x20   (or set HEARTH_LOADTEST_ADMIN_TOKEN). Alternatively restart \
+                         the dev server from a clean data dir, or use `make loadtest`, which \
+                         boots its own fresh instance. See loadtest/README.md."
+                    );
+                }
+                return Err(e);
+            }
+        };
     println!("  bootstrapped realm {}", boot.realm_id);
 
     let realm = seed_realm(&client, params, 0).await?;

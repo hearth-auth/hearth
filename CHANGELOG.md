@@ -32,6 +32,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   add a CTO-approved loopback envelope. A journey passes only when it is both
   within its latency budget and actually succeeding (failure rate ≤ 5%), so a
   fast-but-erroring run never reads as a pass (HEA-1791).
+- **`hearth-loadtest seed --admin-token` / `HEARTH_LOADTEST_ADMIN_TOKEN`** — the
+  seed step can now attach to an **already-bootstrapped** dev instance by
+  supplying the admin bearer token from the first bootstrap, instead of failing
+  the anonymous re-bootstrap with `401 missing authorization header`. When the
+  token is omitted and that 401 occurs, the seed now prints an actionable hint
+  naming the flag/env var and alternatives (`make loadtest` boots its own fresh
+  instance) (HEA-1787).
 
 ### Changed
 - **Expired-session eviction moved off the token-validation read path** — the

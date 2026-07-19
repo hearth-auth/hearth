@@ -80,6 +80,21 @@ pub struct SeedParams {
         default_value_t = false
     )]
     pub allow_remote_target: bool,
+
+    /// Admin bearer token for attaching to an **already-bootstrapped** dev
+    /// instance.
+    ///
+    /// The seed's first step calls `POST /admin/bootstrap`, which only succeeds
+    /// anonymously on a *fresh* instance. On one that was already bootstrapped
+    /// (e.g. the CLAUDE.md quickstart's manual `curl -X POST /admin/bootstrap`,
+    /// or a prior seed run against the same long-lived instance) that endpoint
+    /// requires the bearer token from the first bootstrap and otherwise returns
+    /// `401 {"error":"missing authorization header"}`. Pass that token here (or
+    /// via `HEARTH_LOADTEST_ADMIN_TOKEN`) to re-bootstrap and attach instead of
+    /// failing. `make loadtest` boots its own fresh instance and never needs
+    /// this.
+    #[arg(long, env = "HEARTH_LOADTEST_ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
 }
 
 /// Errors from validating [`SeedParams`].
@@ -429,6 +444,17 @@ mod tests {
                 "target {host:?} must be rejected as invalid"
             );
         }
+    }
+
+    /// Regression: `--admin-token` / `HEARTH_LOADTEST_ADMIN_TOKEN` must parse so
+    /// the seed can attach to an already-bootstrapped dev instance instead of
+    /// 401ing on the anonymous re-bootstrap (the board's recurring seed failure).
+    #[test]
+    fn admin_token_flag_parses_and_defaults_to_none() {
+        let p = parse(&[]);
+        assert_eq!(p.admin_token, None);
+        let p = parse(&["--admin-token", "secret-bearer"]);
+        assert_eq!(p.admin_token.as_deref(), Some("secret-bearer"));
     }
 
     #[test]

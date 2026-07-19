@@ -54,7 +54,32 @@ make seed ARGS="--users-per-realm 500 --sessions-frac 0.5 --revoked-frac 0.1"
 | `--revoked-frac` | `HEARTH_LOADTEST_REVOKED_FRAC` | `0.1` | Fraction of live tokens pre-revoked |
 | `--seed` | `HEARTH_LOADTEST_SEED` | `1` | Determinism seed (reproducible corpus) |
 | `--seed-out` | `HEARTH_LOADTEST_SEED_OUT` | `loadtest/reports/seed-handle.json` | Seed-handle output path |
+| `--admin-token` | `HEARTH_LOADTEST_ADMIN_TOKEN` | _(none)_ | Admin bearer token to attach to an **already-bootstrapped** instance (see below) |
 | `--allow-remote-target` | `HEARTH_LOADTEST_ALLOW_REMOTE_TARGET` | off | Explicit opt-in for a non-loopback target (isolated lab only) |
+
+### Seeding an already-bootstrapped instance (`401 missing authorization header`)
+
+The seed's first step calls `POST /admin/bootstrap`. That endpoint only succeeds
+**anonymously on a fresh instance** — on one that was *already* bootstrapped it
+requires the bearer token from the first bootstrap and otherwise returns
+`401 {"error":"missing authorization header"}`. You hit this whenever you seed a
+long-lived dev server you (or the CLAUDE.md quickstart's manual
+`curl -X POST /admin/bootstrap`) already bootstrapped, or re-run `make seed`
+against the same instance. Note the dev-realm is **persistent across restarts**
+when `HEARTH_DEV_DATA_DIR` is set, so restarting alone does not clear it.
+
+Pass the admin token from your first bootstrap to re-bootstrap and attach:
+
+```bash
+# Grab the token once (first bootstrap returns it; re-bootstrap needs it):
+ADMIN_TOKEN=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap | jq -r '.access_token')
+make seed ARGS="--admin-token $ADMIN_TOKEN --users-per-realm 80 --sessions-frac 0.5 --revoked-frac 0.1"
+# …or export HEARTH_LOADTEST_ADMIN_TOKEN and omit the flag.
+```
+
+`make loadtest` boots its **own** fresh instance and never needs this. Access
+tokens expire after 15 minutes; if the token has expired, re-bootstrap with it to
+mint a fresh one (re-bootstrap does not change the admin password).
 
 The dataset shape is echoed to stdout and stored in the seed-handle so every
 report can describe the corpus it ran against. The same `--seed` always
