@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`hearth-loadtest` tier-miss run mode + per-tier lookup latency reporting** —
+  a new `run --mode tier-miss` profile drives the corpus-scale `lookup_user` hot
+  path (ROPC `POST /token`) against the bulk demo corpus, splitting every request
+  into a resident **hot** working set (`--tier-miss-hot-set-size`) hit repeatedly
+  and a uniform **cold** draw across the whole corpus (`--tier-miss-corpus-size`)
+  that mostly falls through to the cold/SST read path. `report.json` gains an
+  additive, back-compat `tier_miss` block splitting hot-tier-hit `hot_p99_ms`
+  from cold/SST-miss `cold_p99_ms`, plus the achieved corpus size, hot-tier
+  capacity, and an estimated cold miss rate; the block is omitted for every other
+  mode so existing consumers are unaffected. New `--tier-miss-*` flags (env
+  `HEARTH_LOADTEST_TIER_*`); sweep the corpus size (`10k → 100k → 1M`) to prove
+  the per-tier tail stays flat as the corpus grows (HEA-1801).
 - **`--dev` honors `storage.hot_tier_capacity`** — dev mode previously always
   used the default 100k-entry hot tier and ignored the configured capacity, so
   the whole working set fit in the hot tier and every lookup was a hot-tier hit.

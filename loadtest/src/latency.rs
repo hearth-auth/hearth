@@ -25,7 +25,7 @@ use std::time::Duration;
 /// [`crate::scenarios`]. A name absent here is silently ignored by [`record`],
 /// so adding a journey without registering it degrades gracefully (no min/max)
 /// rather than panicking the run.
-const JOURNEY_NAMES: [&str; 7] = [
+const JOURNEY_NAMES: [&str; 9] = [
     "validate",
     "session_lookup",
     "user_lookup",
@@ -33,6 +33,10 @@ const JOURNEY_NAMES: [&str; 7] = [
     "revoke_mint",
     "revoke",
     "revoke_revalidate",
+    // Tier-miss lookup profile (HEA-1801): resident hot working set vs uniform
+    // cold draw, so the report can split hot-tier-hit from cold/SST-miss tails.
+    "lookup_hot",
+    "lookup_cold",
 ];
 
 /// Lock-free microsecond min/max accumulator for one journey.
@@ -161,6 +165,18 @@ mod tests {
         reset();
         record("not_a_journey", Duration::from_micros(10));
         assert!(!snapshot().contains_key("not_a_journey"));
+    }
+
+    #[test]
+    fn tier_miss_journeys_are_tracked() {
+        // Regression (HEA-1801): the hot/cold tier lookups must be recordable so
+        // the report can surface their microsecond extremes per tier.
+        reset();
+        record("lookup_hot", Duration::from_micros(80));
+        record("lookup_cold", Duration::from_micros(2_400));
+        let snap = snapshot();
+        assert_eq!(snap.get("lookup_hot").map(|e| e.min_us), Some(80));
+        assert_eq!(snap.get("lookup_cold").map(|e| e.max_us), Some(2_400));
     }
 
     #[test]

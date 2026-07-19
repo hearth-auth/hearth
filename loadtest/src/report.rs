@@ -216,6 +216,106 @@ pub fn summarize(rows: &[JourneyRow], achieved_users: usize, achieved_rps: f64) 
     }
 }
 
+/// Per-tier lookup latency split for the tier-miss profile (HEA-1801).
+///
+/// Additive, back-compat report block: present only for `tier-miss` runs and
+/// omitted otherwise, so existing `report.json` consumers stay unaffected. The
+/// corpus-scale proof is the **hot-vs-cold p99 delta**: a hot working set that
+/// stays resident in the size-capped hot tier vs a uniform draw across the whole
+/// corpus that mostly falls through to the cold/SST read path. If lookup latency
+/// is corpus-size independent, `hot_p99_ms` and `cold_p99_ms` stay flat as the
+/// corpus grows across a `10k → 100k → 1M` sweep.
+#[derive(Debug, Clone, Serialize)]
+pub struct TierMissReport {
+    /// Total addressable corpus the cold draw spanned (`1..=corpus_size`).
+    pub corpus_size: u64,
+    /// Size of the resident hot working set the hot draw spanned
+    /// (`1..=hot_working_set_size`).
+    pub hot_working_set_size: u64,
+    /// Configured hot-tier capacity (entries) the instance was booted with, if
+    /// the operator supplied it. Sizing this below the corpus is what forces the
+    /// cold draw through the SST tier (`storage.hot_tier_capacity`, HEA-1800).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_tier_capacity: Option<u64>,
+    /// Fraction of requests drawn from the hot working set, by construction
+    /// (`hot_weight / (hot_weight + cold_weight)`).
+    pub hot_request_fraction: f64,
+    /// Expected fraction of a uniform cold draw that misses the hot tier, by
+    /// construction: `1 - min(1, hot_tier_capacity / corpus_size)`. `None` when
+    /// no hot-tier capacity was supplied (cannot be estimated). This is a
+    /// by-construction estimate, not a server-observed counter — the HTTP client
+    /// cannot see which tier served a given lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_cold_miss_rate: Option<f64>,
+    /// Hot-tier-hit p99 (ms), from the `lookup_hot` journey. `None` if the hot
+    /// journey recorded no requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_p99_ms: Option<usize>,
+    /// Cold/SST-miss p99 (ms), from the `lookup_cold` journey. `None` if the
+    /// cold journey recorded no requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_p99_ms: Option<usize>,
+    /// Hot-tier-hit slowest observed latency (µs), microsecond resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_max_us: Option<u64>,
+    /// Cold/SST-miss slowest observed latency (µs), microsecond resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_max_us: Option<u64>,
+}
+
+/// Builds the [`TierMissReport`] from the measured hot/cold journey rows.
+///
+/// `rows` are the tier-miss run's journey rows (containing `lookup_hot` /
+/// `lookup_cold`); `hot_tier_capacity` is the operator-supplied capacity the
+/// instance was booted with (informational); `hot_weight`/`cold_weight` are the
+/// configured Goose weights the hot-request fraction is derived from.
+#[must_use]
+pub fn tier_miss_report(
+    rows: &[JourneyRow],
+    corpus_size: u64,
+    hot_working_set_size: u64,
+    hot_tier_capacity: Option<u64>,
+    hot_weight: usize,
+    cold_weight: usize,
+) -> TierMissReport {
+    let find = |name: &str| rows.iter().find(|r| r.journey == name);
+    let hot = find("lookup_hot");
+    let cold = find("lookup_cold");
+
+    let total_weight = hot_weight + cold_weight;
+    let hot_request_fraction = if total_weight == 0 {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            hot_weight as f64 / total_weight as f64
+        }
+    };
+
+    let expected_cold_miss_rate = hot_tier_capacity.map(|cap| {
+        if corpus_size == 0 {
+            0.0
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let resident = (cap as f64 / corpus_size as f64).min(1.0);
+            1.0 - resident
+        }
+    });
+
+    TierMissReport {
+        corpus_size,
+        hot_working_set_size,
+        hot_tier_capacity,
+        hot_request_fraction,
+        expected_cold_miss_rate,
+        // A journey with no recorded requests reports None rather than a bogus 0.
+        hot_p99_ms: hot.filter(|r| r.requests > 0).map(|r| r.p99_ms),
+        cold_p99_ms: cold.filter(|r| r.requests > 0).map(|r| r.p99_ms),
+        hot_max_us: hot.and_then(|r| r.max_us),
+        cold_max_us: cold.and_then(|r| r.max_us),
+    }
+}
+
 /// The full report serialized to `report.json`.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadReport {
@@ -238,6 +338,10 @@ pub struct LoadReport {
     /// Soak time-buckets for drift inspection (soak mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub soak_buckets: Option<Vec<SoakBucket>>,
+    /// Per-tier lookup latency split (tier-miss mode only, HEA-1801). Additive:
+    /// omitted for every other mode so existing consumers are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier_miss: Option<TierMissReport>,
     /// Overall pass: every budgeted journey stayed within its HTTP budget.
     pub pass: bool,
 }
@@ -602,6 +706,7 @@ mod tests {
             ramp_steps: None,
             knee_rps: None,
             soak_buckets: None,
+            tier_miss: None,
             pass: true,
         };
         let json = serde_json::to_string(&report).expect("serialize");
@@ -609,10 +714,11 @@ mod tests {
         assert!(json.contains("\"git_sha\":\"abc123\""));
         assert!(json.contains("\"summary\""));
         assert!(json.contains("\"pass\":true"));
-        // steady-mode report omits ramp/soak-only fields.
+        // steady-mode report omits ramp/soak/tier-only fields.
         assert!(!json.contains("knee_rps"));
         assert!(!json.contains("ramp_steps"));
         assert!(!json.contains("soak_buckets"));
+        assert!(!json.contains("tier_miss"));
     }
 
     #[test]
@@ -640,10 +746,63 @@ mod tests {
             }]),
             knee_rps: Some(123.5),
             soak_buckets: None,
+            tier_miss: None,
             pass: false,
         };
         let json = serde_json::to_string(&report).expect("serialize");
         assert!(json.contains("\"knee_rps\":123.5"));
         assert!(json.contains("\"mode\":\"ramp\""));
+    }
+
+    #[test]
+    fn tier_miss_report_splits_hot_and_cold_p99() {
+        // The corpus-scale proof: hot working set resident (fast p99) vs uniform
+        // cold draw through the SST tier (slow p99). The delta is the signal.
+        let mut requests: GooseRequestMetrics = std::collections::HashMap::new();
+        let (k, v) = agg("lookup_hot", GooseMethod::Post, timing(&[(2, 100)]));
+        requests.insert(k, v);
+        let (k, v) = agg("lookup_cold", GooseMethod::Post, timing(&[(9, 100)]));
+        requests.insert(k, v);
+
+        let mut latency: HashMap<&'static str, LatencyExtremes> = HashMap::new();
+        latency.insert(
+            "lookup_hot",
+            LatencyExtremes {
+                min_us: 800,
+                max_us: 2_100,
+            },
+        );
+        latency.insert(
+            "lookup_cold",
+            LatencyExtremes {
+                min_us: 3_000,
+                max_us: 9_400,
+            },
+        );
+
+        let rows = journey_rows(&requests, &latency);
+        let tm = tier_miss_report(&rows, 1_000_000, 1_000, Some(100_000), 50, 50);
+
+        assert_eq!(tm.corpus_size, 1_000_000);
+        assert_eq!(tm.hot_working_set_size, 1_000);
+        assert_eq!(tm.hot_tier_capacity, Some(100_000));
+        assert!((tm.hot_request_fraction - 0.5).abs() < f64::EPSILON);
+        // 100k resident of 1M → 90% of a uniform cold draw misses.
+        assert!((tm.expected_cold_miss_rate.unwrap() - 0.9).abs() < 1e-9);
+        assert_eq!(tm.hot_p99_ms, Some(2));
+        assert_eq!(tm.cold_p99_ms, Some(9));
+        assert_eq!(tm.hot_max_us, Some(2_100));
+        assert_eq!(tm.cold_max_us, Some(9_400));
+    }
+
+    #[test]
+    fn tier_miss_report_without_capacity_omits_miss_rate() {
+        let rows = journey_rows(&std::collections::HashMap::new(), &HashMap::new());
+        let tm = tier_miss_report(&rows, 10_000, 500, None, 30, 70);
+        assert_eq!(tm.expected_cold_miss_rate, None);
+        // No journeys recorded → per-tier p99 is absent, not a bogus 0.
+        assert_eq!(tm.hot_p99_ms, None);
+        assert_eq!(tm.cold_p99_ms, None);
+        assert!((tm.hot_request_fraction - 0.3).abs() < f64::EPSILON);
     }
 }

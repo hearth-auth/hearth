@@ -23,7 +23,7 @@
 //! from the JSON seed-handle produced by the seed step (HEA-1789); it inherently
 //! carries **live bearer tokens**, so it is never logged.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -444,6 +444,201 @@ async fn expect_active(
     }
 }
 
+// ===== Tier-miss lookup profile (HEA-1801) =====
+
+/// Process-global tier-miss corpus, published by [`set_tier_context`] before a
+/// tier-miss attack starts. Separate from [`CONTEXT`] because the tier-miss
+/// profile addresses the server-seeded bulk demo corpus by index rather than a
+/// seed-handle's live tokens.
+static TIER_CONTEXT: OnceLock<Arc<TierMissContext>> = OnceLock::new();
+
+/// The bulk demo corpus a tier-miss run draws lookups from, addressed by index.
+///
+/// Every seeded bulk user shares one password and has a deterministic email
+/// `user<7-digit-index>@<domain>` (see `examples/large-scale-demo/`), so the
+/// generator can address any point in the corpus by index and know **by
+/// construction** whether a request is a resident "hot" hit or a uniform "cold"
+/// draw. Holds the shared demo password; it MUST NOT be logged (no `Debug`).
+pub struct TierMissContext {
+    /// Realm every lookup targets (`X-Realm-ID`); a real (v4) UUID string.
+    realm_id: String,
+    /// Public OAuth client owning the ROPC password grant (`bulk-app`).
+    client_id: String,
+    /// Email domain of the bulk corpus (`user<idx>@<domain>`).
+    email_domain: String,
+    /// Shared password every bulk user authenticates with.
+    password: String,
+    /// Total addressable corpus size — the cold draw spans `1..=corpus_size`.
+    corpus_size: u64,
+    /// Size of the resident hot working set — hot draws span `1..=hot_set_size`.
+    hot_set_size: u64,
+    /// Monotonic counter driving deterministic index selection.
+    cursor: AtomicU64,
+}
+
+impl TierMissContext {
+    /// Builds a tier-miss context. `corpus_size` and `hot_set_size` are assumed
+    /// validated by the caller ([`crate::load`]): both `>= 1` and
+    /// `hot_set_size <= corpus_size`.
+    #[must_use]
+    pub fn new(
+        realm_id: String,
+        client_id: String,
+        email_domain: String,
+        password: String,
+        corpus_size: u64,
+        hot_set_size: u64,
+    ) -> Self {
+        Self {
+            realm_id,
+            client_id,
+            email_domain,
+            password,
+            corpus_size,
+            hot_set_size,
+            cursor: AtomicU64::new(0),
+        }
+    }
+
+    /// Deterministic email for the bulk user at 1-based `index`, matching the
+    /// bulk seeder's `user<7-digit-index>@<domain>` format.
+    fn email(&self, index: u64) -> String {
+        format!("user{index:07}@{}", self.email_domain)
+    }
+
+    /// Next hot-working-set index: cycles through `1..=hot_set_size`, so the
+    /// same small set of users is hit repeatedly and stays resident in the hot
+    /// tier.
+    fn hot_index(&self) -> u64 {
+        let n = self.cursor.fetch_add(1, Ordering::Relaxed);
+        (n % self.hot_set_size) + 1
+    }
+
+    /// Next cold index: a splitmix-spread draw across the whole `1..=corpus_size`
+    /// corpus, so with a hot tier sized below the corpus most cold draws fall
+    /// through to the cold/SST read path. Deterministic (seeded by the cursor),
+    /// so a run is reproducible without a RNG dependency.
+    fn cold_index(&self) -> u64 {
+        let n = self.cursor.fetch_add(1, Ordering::Relaxed);
+        (splitmix64(n) % self.corpus_size) + 1
+    }
+
+    /// The ROPC `/token` body for a bulk user at `index`.
+    fn ropc_body(&self, index: u64) -> serde_json::Value {
+        serde_json::json!({
+            "grant_type": "password",
+            "client_id": self.client_id,
+            "username": self.email(index),
+            "password": self.password,
+        })
+    }
+}
+
+/// Publishes the tier-miss corpus. Call once before the tier-miss attack starts.
+pub fn set_tier_context(ctx: Arc<TierMissContext>) {
+    let _ = TIER_CONTEXT.set(ctx);
+}
+
+/// Reads the process-global tier-miss corpus.
+#[allow(clippy::expect_used)]
+fn tier_ctx() -> &'static Arc<TierMissContext> {
+    // INVARIANT: `set_tier_context` is called in `crate::load::run_tier_miss`
+    // before `GooseAttack::execute`, so the cell is populated when a tier
+    // transaction runs.
+    TIER_CONTEXT
+        .get()
+        .expect("tier-miss context must be set before the attack starts")
+}
+
+/// Dependency-free deterministic bit mixer (Vigna's splitmix64), used to spread
+/// cold draws uniformly across the corpus without pulling in a RNG crate.
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Runs one ROPC `/token` lookup for the bulk user at `index` and asserts a 2xx
+/// with an `access_token`, recording its latency under `name` (`lookup_hot` or
+/// `lookup_cold`). The first step of the password grant is `lookup_user` — the
+/// storage lookup whose tier (hot vs cold/SST) this profile isolates.
+async fn tier_lookup(user: &mut GooseUser, index: u64, name: &'static str) -> TransactionResult {
+    let ctx = tier_ctx();
+    let rb = user
+        .get_request_builder(&GooseMethod::Post, "/token")?
+        .header(REALM_HEADER, &ctx.realm_id)
+        .json(&ctx.ropc_body(index));
+    let req = GooseRequest::builder()
+        .set_request_builder(rb)
+        .name(name)
+        .build();
+    let GooseResponse {
+        mut request,
+        response,
+    } = request_timed(user, req, name).await?;
+    match response {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => {
+            let status = resp.status();
+            user.set_failure(&format!("{name}: HTTP {status}"), &mut request, None, None)
+        }
+        Err(e) => user.set_failure(
+            &format!("{name}: transport error: {e}"),
+            &mut request,
+            None,
+            None,
+        ),
+    }
+}
+
+/// Hot-tier journey: repeatedly hits the small resident working set.
+async fn journey_lookup_hot(user: &mut GooseUser) -> TransactionResult {
+    let index = tier_ctx().hot_index();
+    tier_lookup(user, index, "lookup_hot").await
+}
+
+/// Cold-tier journey: uniform draw across the whole corpus (mostly SST misses).
+async fn journey_lookup_cold(user: &mut GooseUser) -> TransactionResult {
+    let index = tier_ctx().cold_index();
+    tier_lookup(user, index, "lookup_cold").await
+}
+
+/// Builds the tier-miss scenario from the hot/cold request weights.
+///
+/// Registers only the tiers with weight > 0. A weight of `0` drops that tier
+/// (e.g. `--tier-miss-weight-hot 0` runs a pure cold sweep).
+///
+/// # Errors
+/// Returns a [`GooseError`] if both weights are `0` (nothing to run) or Goose
+/// rejects a weight.
+pub fn build_tier_scenario(hot_weight: usize, cold_weight: usize) -> Result<Scenario, GooseError> {
+    if hot_weight + cold_weight == 0 {
+        return Err(GooseError::InvalidWeight {
+            weight: 0,
+            detail: "both tier-miss weights are 0; at least one tier must have weight >= 1"
+                .to_string(),
+        });
+    }
+    let tiers: [(usize, Transaction, &str); 2] = [
+        (hot_weight, transaction!(journey_lookup_hot), "lookup_hot"),
+        (
+            cold_weight,
+            transaction!(journey_lookup_cold),
+            "lookup_cold",
+        ),
+    ];
+    let mut scenario = scenario!("HearthTierMiss");
+    for (weight, transaction, name) in tiers {
+        if weight == 0 {
+            continue;
+        }
+        scenario = scenario.register_transaction(transaction.set_name(name).set_weight(weight)?);
+    }
+    Ok(scenario)
+}
+
 // ===== Scenario assembly =====
 
 /// Per-journey weights (Goose relative transaction weights). A weight of `0`
@@ -663,5 +858,88 @@ mod tests {
             revoke: 0,
         };
         assert!(build_scenario(&w).is_err(), "empty run must be rejected");
+    }
+
+    fn tier_ctx_for(corpus: u64, hot: u64) -> TierMissContext {
+        TierMissContext::new(
+            "realm-1".into(),
+            "bulk-app".into(),
+            "bulk.demo".into(),
+            "DemoPassw0rd!".into(),
+            corpus,
+            hot,
+        )
+    }
+
+    #[test]
+    fn tier_email_matches_the_bulk_seeder_format() {
+        let ctx = tier_ctx_for(1_000_000, 1_000);
+        assert_eq!(ctx.email(1), "user0000001@bulk.demo");
+        assert_eq!(ctx.email(1_000_000), "user1000000@bulk.demo");
+    }
+
+    #[test]
+    fn hot_index_stays_within_the_resident_working_set() {
+        let ctx = tier_ctx_for(1_000_000, 4);
+        // Every hot draw must land in 1..=hot_set_size, and the set must cycle so
+        // the same users are hit repeatedly (stay resident).
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let idx = ctx.hot_index();
+            assert!((1..=4).contains(&idx), "hot index {idx} out of working set");
+            seen.insert(idx);
+        }
+        assert_eq!(seen.len(), 4, "hot draw should cycle the whole working set");
+    }
+
+    #[test]
+    fn cold_index_spans_the_whole_corpus() {
+        let ctx = tier_ctx_for(1_000_000, 1_000);
+        // Cold draws must stay in-range and spread widely (not clustered in the
+        // resident hot set), so most fall outside a below-corpus hot tier.
+        let mut max_seen = 0;
+        for _ in 0..2_000 {
+            let idx = ctx.cold_index();
+            assert!(
+                (1..=1_000_000).contains(&idx),
+                "cold index {idx} out of range"
+            );
+            max_seen = max_seen.max(idx);
+        }
+        assert!(
+            max_seen > 1_000,
+            "cold draw should reach well past the hot working set, got max {max_seen}"
+        );
+    }
+
+    #[test]
+    fn ropc_body_addresses_a_bulk_user_by_index() {
+        let ctx = tier_ctx_for(1_000_000, 1_000);
+        let body = ctx.ropc_body(42);
+        assert_eq!(body["grant_type"], "password");
+        assert_eq!(body["client_id"], "bulk-app");
+        assert_eq!(body["username"], "user0000042@bulk.demo");
+        assert_eq!(body["password"], "DemoPassw0rd!");
+    }
+
+    #[test]
+    fn tier_scenario_registers_both_tiers_by_default() {
+        let scenario = build_tier_scenario(50, 50).expect("scenario");
+        assert_eq!(scenario.transactions.len(), 2);
+    }
+
+    #[test]
+    fn tier_scenario_drops_a_zero_weight_tier() {
+        // A pure cold sweep drops the hot tier.
+        let scenario = build_tier_scenario(0, 100).expect("scenario");
+        assert_eq!(scenario.transactions.len(), 1);
+    }
+
+    #[test]
+    fn tier_scenario_rejects_all_zero_weights() {
+        assert!(
+            build_tier_scenario(0, 0).is_err(),
+            "an empty tier-miss run must be rejected"
+        );
     }
 }

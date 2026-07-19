@@ -186,11 +186,107 @@ schema (below); ramp/soak add their extra sections.
 | `steady` (default) | `--mode steady` | Fixed `--users` for `--run-time`. The primary report. | — |
 | `ramp` | `--mode ramp` | Steps the user ladder upward and records the **saturation knee** — the first step where a budgeted journey's p99 breaches its HTTP budget. Stops early at the knee. | `--ramp-start-users` (10), `--ramp-step-users` (10), `--ramp-steps` (8) |
 | `soak` | `--mode soak` | Long fixed-user run split into equal buckets, surfacing latency **drift** over time. Total time ≈ `soak_buckets × run_time`. | `--soak-buckets` (6) |
+| `tier-miss` | `--mode tier-miss` | Corpus-scale `lookup_user` sweep split into a resident **hot** working set and a uniform **cold** draw, so the report splits hot-tier-hit from cold/SST-miss tail latency. Needs no seed-handle. | see the [tier-miss section](#tier-miss-mode-corpus-scale-per-tier-lookup-latency-hea-1801) |
 
 ```bash
 make loadtest ARGS="run --mode ramp --ramp-start-users 20 --ramp-step-users 20 --ramp-steps 6"
 make loadtest ARGS="run --mode soak --run-time 3m --soak-buckets 6"   # ≈ 18 min
 ```
+
+## Tier-miss mode: corpus-scale per-tier lookup latency (HEA-1801)
+
+The tier-miss profile proves the storage-engine claim that **lookup latency stays
+flat as the corpus grows** — the counterpart to the high-concurrency rework
+(HEA-1796, which stresses request *concurrency*). It drives the `lookup_user` hot
+path via ROPC `POST /token` against the large bulk demo corpus, and self-attributes
+every request to a storage tier **by construction**:
+
+- **hot** — a small fixed working set (`--tier-miss-hot-set-size`, default 1000)
+  of user indices, hit repeatedly, so they stay resident in the hot tier.
+- **cold** — a uniform draw across the whole corpus (`--tier-miss-corpus-size`).
+  With the hot tier sized *below* the corpus (`storage.hot_tier_capacity`, see
+  HEA-1800), most cold draws fall through to the cold/SST read path.
+
+The proof is the **hot-vs-cold p99 delta** and its stability across a corpus-size
+sweep (`10000 → 100000 → 1000000`): if lookups are corpus-size independent, both
+per-tier tails stay flat as the corpus grows.
+
+### 1. Boot a below-working-set instance
+
+Boot the demo config whose hot tier is deliberately capped below the working set
+(streams 1M users on first boot; instant thereafter via a per-realm sentinel):
+
+```bash
+HEARTH_DEV_DATA_DIR=./data/tier-miss cargo run --release -- serve --dev \
+    --config examples/large-scale-demo/hearth-tier-miss.yaml
+```
+
+Every seeded user shares one password (`demo.password`, default `DemoPassw0rd!`)
+and has a deterministic email `user<7-digit-index>@bulk.demo`, so the generator
+addresses any point in the corpus by index.
+
+### 2. Find the realm UUID
+
+Config-declared realms get a **random** v4 UUID at first boot (unlike deterministic
+client IDs), so it must be discovered once, not defaulted. Bootstrap an admin token
+and list realms, then pick the `bulk` realm's `id`:
+
+```bash
+TOKEN=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap | jq -r .access_token)
+REALM_ID=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+    http://127.0.0.1:8420/admin/realms | jq -r '.items[] | select(.name=="bulk") | .id')
+```
+
+The client is the deterministic `bulk-app` client declared in the config.
+
+### 3. Run the tier-miss sweep
+
+```bash
+# Single run at 1M, hot tier capped at 100k (≈90% cold miss rate):
+make loadtest ARGS="run --mode tier-miss \
+    --tier-miss-realm-id $REALM_ID --tier-miss-client-id bulk-app \
+    --tier-miss-corpus-size 1000000 --tier-miss-hot-tier-capacity 100000"
+
+# Corpus-size sweep — run three times, the flat per-tier curve is the proof:
+for N in 10000 100000 1000000; do
+  make loadtest ARGS="run --mode tier-miss --report-dir loadtest/reports/tier-$N \
+      --tier-miss-realm-id $REALM_ID --tier-miss-client-id bulk-app \
+      --tier-miss-corpus-size $N --tier-miss-hot-tier-capacity 100000"
+done
+```
+
+Key knobs (all `--tier-miss-*`, env `HEARTH_LOADTEST_TIER_*`): `realm-id` and
+`client-id` (required), `corpus-size` (1M), `hot-set-size` (1000),
+`hot-tier-capacity` (informational — recorded and used to estimate the cold miss
+rate), `email-domain` (`bulk.demo`), `password` (`DemoPassw0rd!`), and
+`weight-hot` / `weight-cold` (50/50; set `--tier-miss-weight-hot 0` for a pure
+cold sweep).
+
+### 4. Read the per-tier split
+
+Tier-miss runs add an additive `tier_miss` block to `report.json` (omitted for
+every other mode, so existing consumers are unaffected):
+
+```jsonc
+"tier_miss": {
+  "corpus_size": 1000000,
+  "hot_working_set_size": 1000,
+  "hot_tier_capacity": 100000,
+  "hot_request_fraction": 0.5,       // by construction (weight_hot / total)
+  "expected_cold_miss_rate": 0.9,    // 1 - min(1, capacity/corpus); an estimate,
+                                     // not a server-observed counter
+  "hot_p99_ms": 2,                   // hot-tier-hit tail
+  "cold_p99_ms": 9,                  // cold/SST-miss tail — the delta is the signal
+  "hot_max_us": 2100,
+  "cold_max_us": 9400
+}
+```
+
+The `lookup_hot` / `lookup_cold` journeys also appear as normal rows in the
+`journeys` table (with the issuance budget, since each is a full `/token` call).
+`expected_cold_miss_rate` is a **by-construction estimate** from capacity ÷ corpus,
+not a per-request server signal — the HTTP client cannot see which tier served a
+given lookup.
 
 ## Reading the report
 

@@ -31,7 +31,7 @@ use goose::prelude::*;
 use crate::handle::SeedHandle;
 use crate::latency::{self, LatencyExtremes};
 use crate::report::{self, LoadReport, RampStep, RunMetadata, SoakBucket, SCHEMA_VERSION};
-use crate::scenarios::{self, ContextError, LoadContext, Weights};
+use crate::scenarios::{self, ContextError, LoadContext, TierMissContext, Weights};
 use crate::seed::{DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD};
 
 /// Run mode selecting the load profile.
@@ -43,6 +43,9 @@ pub enum Mode {
     Ramp,
     /// Long fixed-user run in buckets, surfacing latency drift.
     Soak,
+    /// Corpus-scale `lookup_user` sweep with tier-attributed hot/cold draws,
+    /// proving lookup latency stays flat as the corpus grows (HEA-1801).
+    TierMiss,
 }
 
 impl Mode {
@@ -52,6 +55,7 @@ impl Mode {
             Self::Steady => "steady",
             Self::Ramp => "ramp",
             Self::Soak => "soak",
+            Self::TierMiss => "tier-miss",
         }
     }
 }
@@ -76,8 +80,9 @@ pub struct LoadParams {
     #[arg(long, env = "HEARTH_LOADTEST_TARGET_HOST")]
     pub host: Option<String>,
 
-    /// Run mode: `steady` (fixed users), `ramp` (saturation knee), or `soak`
-    /// (long-window drift).
+    /// Run mode: `steady` (fixed users), `ramp` (saturation knee), `soak`
+    /// (long-window drift), or `tier-miss` (corpus-scale lookup with per-tier
+    /// hot/cold latency split).
     #[arg(long, env = "HEARTH_LOADTEST_MODE", value_enum, default_value_t = Mode::Steady)]
     pub mode: Mode,
 
@@ -146,6 +151,73 @@ pub struct LoadParams {
     /// Weight of journey 5 — revoke → re-validate.
     #[arg(long, env = "HEARTH_LOADTEST_WEIGHT_REVOKE", default_value_t = 2)]
     pub weight_revoke: usize,
+
+    // ── Tier-miss profile (HEA-1801) — only used when `--mode tier-miss`. ──
+    /// `tier-miss` mode: realm UUID of the bulk demo corpus (`X-Realm-ID`).
+    ///
+    /// Config-declared realms get a **random** v4 UUID at first boot (unlike
+    /// deterministic client IDs), so it cannot be defaulted — obtain it once
+    /// after boot (see the README "tier-miss" section) and pass it here.
+    /// Required in tier-miss mode.
+    #[arg(long, env = "HEARTH_LOADTEST_TIER_REALM_ID")]
+    pub tier_miss_realm_id: Option<String>,
+
+    /// `tier-miss` mode: public OAuth client owning the bulk corpus's ROPC
+    /// password grant. Deterministic per `(realm_name, app_key)`; for
+    /// `examples/large-scale-demo/hearth-tier-miss.yaml` this is the `bulk-app`
+    /// client. Required in tier-miss mode.
+    #[arg(long, env = "HEARTH_LOADTEST_TIER_CLIENT_ID")]
+    pub tier_miss_client_id: Option<String>,
+
+    /// `tier-miss` mode: email domain of the bulk corpus (`user<idx>@<domain>`).
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_TIER_EMAIL_DOMAIN",
+        default_value = "bulk.demo"
+    )]
+    pub tier_miss_email_domain: String,
+
+    /// `tier-miss` mode: shared password every bulk user authenticates with
+    /// (`demo.password`). Defaults to the demo config's value.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_TIER_PASSWORD",
+        default_value = "DemoPassw0rd!"
+    )]
+    pub tier_miss_password: String,
+
+    /// `tier-miss` mode: total addressable corpus size. The cold draw spans
+    /// `1..=corpus_size`. Sweep this (`10000 → 100000 → 1000000`) to prove the
+    /// per-tier tail stays flat as the corpus grows.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_TIER_CORPUS_SIZE",
+        default_value_t = 1_000_000
+    )]
+    pub tier_miss_corpus_size: u64,
+
+    /// `tier-miss` mode: size of the resident hot working set. Hot draws span
+    /// `1..=hot_set_size`, hit repeatedly so they stay in the hot tier.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_TIER_HOT_SET_SIZE",
+        default_value_t = 1_000
+    )]
+    pub tier_miss_hot_set_size: u64,
+
+    /// `tier-miss` mode: hot-tier capacity (entries) the instance was booted
+    /// with (`storage.hot_tier_capacity`). Informational — recorded in the
+    /// report and used to estimate the expected cold miss rate. Optional.
+    #[arg(long, env = "HEARTH_LOADTEST_TIER_HOT_TIER_CAPACITY")]
+    pub tier_miss_hot_tier_capacity: Option<u64>,
+
+    /// `tier-miss` mode: Goose weight of the hot-tier lookup tier.
+    #[arg(long, env = "HEARTH_LOADTEST_TIER_WEIGHT_HOT", default_value_t = 50)]
+    pub tier_miss_weight_hot: usize,
+
+    /// `tier-miss` mode: Goose weight of the cold/SST-miss lookup tier.
+    #[arg(long, env = "HEARTH_LOADTEST_TIER_WEIGHT_COLD", default_value_t = 50)]
+    pub tier_miss_weight_cold: usize,
 }
 
 /// Errors from preparing or running a load run.
@@ -161,6 +233,8 @@ pub enum LoadError {
     Goose(GooseError),
     /// The JSON report could not be serialized or written.
     Report(std::io::Error),
+    /// A tier-miss run was misconfigured (missing/invalid required knob).
+    TierMissConfig(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -171,6 +245,7 @@ impl std::fmt::Display for LoadError {
             Self::Context(e) => write!(f, "seed corpus unusable: {e}"),
             Self::Goose(e) => write!(f, "goose: {e}"),
             Self::Report(e) => write!(f, "writing report: {e}"),
+            Self::TierMissConfig(m) => write!(f, "tier-miss configuration: {m}"),
         }
     }
 }
@@ -214,6 +289,31 @@ impl LoadParams {
 /// unusable, Goose fails to configure or run an attack, or the report cannot be
 /// written.
 pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
+    let report_dir = PathBuf::from(&params.report_dir);
+    std::fs::create_dir_all(&report_dir).map_err(LoadError::Report)?;
+
+    // The tier-miss profile addresses a server-seeded bulk corpus by index, so
+    // it needs no seed-handle; every other mode draws its corpus from one.
+    let report = if params.mode == Mode::TierMiss {
+        run_tier_miss(params, &report_dir).await?
+    } else {
+        run_journey_modes(params, &report_dir).await?
+    };
+
+    let json_path = report_dir.join("report.json");
+    let json = serde_json::to_string_pretty(&report)
+        .map_err(|e| LoadError::Report(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+    std::fs::write(&json_path, json).map_err(LoadError::Report)?;
+    println!("  report: {} (pass={})", json_path.display(), report.pass);
+    Ok(())
+}
+
+/// Runs one of the seed-handle-backed journey modes (`steady` / `ramp` /
+/// `soak`), loading the corpus from the seed-handle first.
+async fn run_journey_modes(
+    params: &LoadParams,
+    report_dir: &Path,
+) -> Result<LoadReport, LoadError> {
     let raw = std::fs::read_to_string(&params.seed_handle).map_err(LoadError::Io)?;
     let handle: SeedHandle = serde_json::from_str(&raw).map_err(LoadError::Parse)?;
 
@@ -227,8 +327,6 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     scenarios::set_context(Arc::new(context));
 
     let weights = params.weights();
-    let report_dir = PathBuf::from(&params.report_dir);
-    std::fs::create_dir_all(&report_dir).map_err(LoadError::Report)?;
 
     println!(
         "hearth-loadtest run: mode={} host={host} run_time={} hatch_rate={} (corpus: {})",
@@ -242,18 +340,13 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
         weights.validate, weights.session, weights.user, weights.issuance, weights.revoke,
     );
 
-    let report = match params.mode {
-        Mode::Steady => run_steady(params, &host, &weights, &handle, &report_dir).await?,
-        Mode::Ramp => run_ramp(params, &host, &weights, &handle, &report_dir).await?,
-        Mode::Soak => run_soak(params, &host, &weights, &handle, &report_dir).await?,
-    };
-
-    let json_path = report_dir.join("report.json");
-    let json = serde_json::to_string_pretty(&report)
-        .map_err(|e| LoadError::Report(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    std::fs::write(&json_path, json).map_err(LoadError::Report)?;
-    println!("  report: {} (pass={})", json_path.display(), report.pass);
-    Ok(())
+    match params.mode {
+        Mode::Steady => run_steady(params, &host, &weights, &handle, report_dir).await,
+        Mode::Ramp => run_ramp(params, &host, &weights, &handle, report_dir).await,
+        Mode::Soak => run_soak(params, &host, &weights, &handle, report_dir).await,
+        // TierMiss is dispatched before this function is reached.
+        Mode::TierMiss => unreachable!("tier-miss is handled in run_load"),
+    }
 }
 
 /// Runs a single fixed-user attack and returns its metrics plus the generator's
@@ -307,6 +400,7 @@ async fn run_steady(
         ramp_steps: None,
         knee_rps: None,
         soak_buckets: None,
+        tier_miss: None,
         pass,
     })
 }
@@ -357,6 +451,7 @@ async fn run_ramp(
         ramp_steps: Some(steps),
         knee_rps,
         soak_buckets: None,
+        tier_miss: None,
         pass,
     })
 }
@@ -401,7 +496,143 @@ async fn run_soak(
         ramp_steps: None,
         knee_rps: None,
         soak_buckets: Some(buckets),
+        tier_miss: None,
         pass: all_pass,
+    })
+}
+
+/// The validated inputs a tier-miss run needs, resolved from [`LoadParams`].
+struct TierMissPlan {
+    realm_id: String,
+    client_id: String,
+    corpus_size: u64,
+    hot_set_size: u64,
+    hot_w: usize,
+    cold_w: usize,
+    host: String,
+}
+
+/// Validates and resolves the tier-miss knobs from `params`. Pure (no I/O) so
+/// the validation branches are unit-testable without a running server.
+///
+/// # Errors
+/// Returns [`LoadError::TierMissConfig`] naming the first invalid/missing knob.
+fn tier_miss_plan(params: &LoadParams) -> Result<TierMissPlan, LoadError> {
+    let realm_id = params.tier_miss_realm_id.clone().ok_or_else(|| {
+        LoadError::TierMissConfig(
+            "--tier-miss-realm-id (or HEARTH_LOADTEST_TIER_REALM_ID) is required in tier-miss mode"
+                .to_string(),
+        )
+    })?;
+    let client_id = params.tier_miss_client_id.clone().ok_or_else(|| {
+        LoadError::TierMissConfig(
+            "--tier-miss-client-id (or HEARTH_LOADTEST_TIER_CLIENT_ID) is required in tier-miss mode"
+                .to_string(),
+        )
+    })?;
+    let corpus_size = params.tier_miss_corpus_size;
+    let hot_set_size = params.tier_miss_hot_set_size;
+    if corpus_size == 0 {
+        return Err(LoadError::TierMissConfig(
+            "--tier-miss-corpus-size must be at least 1".to_string(),
+        ));
+    }
+    if hot_set_size == 0 || hot_set_size > corpus_size {
+        return Err(LoadError::TierMissConfig(format!(
+            "--tier-miss-hot-set-size ({hot_set_size}) must be in 1..=corpus-size ({corpus_size})"
+        )));
+    }
+    let (hot_w, cold_w) = (params.tier_miss_weight_hot, params.tier_miss_weight_cold);
+    if hot_w + cold_w == 0 {
+        return Err(LoadError::TierMissConfig(
+            "at least one of --tier-miss-weight-hot / --tier-miss-weight-cold must be >= 1"
+                .to_string(),
+        ));
+    }
+    let host = params
+        .host
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8420".to_string());
+    Ok(TierMissPlan {
+        realm_id,
+        client_id,
+        corpus_size,
+        hot_set_size,
+        hot_w,
+        cold_w,
+        host,
+    })
+}
+
+/// Tier-miss mode: a corpus-scale `lookup_user` sweep split into a resident hot
+/// working set and a uniform cold draw, so `report.json` can split hot-tier-hit
+/// from cold/SST-miss tail latency (HEA-1801). No seed-handle — the bulk corpus
+/// is addressed by index against a server-seeded demo instance.
+async fn run_tier_miss(params: &LoadParams, report_dir: &Path) -> Result<LoadReport, LoadError> {
+    let plan = tier_miss_plan(params)?;
+    let TierMissPlan {
+        realm_id,
+        client_id,
+        corpus_size,
+        hot_set_size,
+        hot_w,
+        cold_w,
+        host,
+    } = plan;
+
+    println!(
+        "hearth-loadtest tier-miss: host={host} corpus={corpus_size} hot_set={hot_set_size} \
+         hot_tier_capacity={:?} weights(hot={hot_w} cold={cold_w}) run_time={} users={}",
+        params.tier_miss_hot_tier_capacity, params.run_time, params.users,
+    );
+
+    let ctx = TierMissContext::new(
+        realm_id,
+        client_id,
+        params.tier_miss_email_domain.clone(),
+        params.tier_miss_password.clone(),
+        corpus_size,
+        hot_set_size,
+    );
+    scenarios::set_tier_context(Arc::new(ctx));
+
+    let scenario = scenarios::build_tier_scenario(hot_w, cold_w)?;
+    let config = build_config(
+        params,
+        host.clone(),
+        params.users,
+        &report_dir.join("tier-miss.html"),
+    );
+    latency::reset();
+    let metrics = GooseAttack::initialize_with_config(config)?
+        .register_scenario(scenario)
+        .execute()
+        .await?;
+    let latency = latency::snapshot();
+
+    let journeys = report::journey_rows(&metrics.requests, &latency);
+    let rps = requests_per_second(&metrics);
+    let pass = report::overall_pass(&journeys);
+    let summary = report::summarize(&journeys, params.users, rps);
+    let tier_miss = report::tier_miss_report(
+        &journeys,
+        corpus_size,
+        hot_set_size,
+        params.tier_miss_hot_tier_capacity,
+        hot_w,
+        cold_w,
+    );
+
+    Ok(LoadReport {
+        schema: SCHEMA_VERSION,
+        metadata: tier_metadata(params, &host, corpus_size, hot_set_size),
+        summary,
+        journeys,
+        ramp_steps: None,
+        knee_rps: None,
+        soak_buckets: None,
+        tier_miss: Some(tier_miss),
+        pass,
     })
 }
 
@@ -427,6 +658,30 @@ fn metadata(params: &LoadParams, host: &str, mode: Mode, handle: &SeedHandle) ->
         host: host.to_string(),
         seed: handle.seed,
         dataset_shape: handle.dataset_shape.clone(),
+        users: params.users,
+        run_time: params.run_time.clone(),
+        hatch_rate: params.hatch_rate.clone(),
+    }
+}
+
+/// Report metadata for a tier-miss run. There is no seed-handle, so `seed` is
+/// `0` and `dataset_shape` describes the corpus/tier construction instead.
+fn tier_metadata(
+    params: &LoadParams,
+    host: &str,
+    corpus_size: u64,
+    hot_set_size: u64,
+) -> RunMetadata {
+    RunMetadata {
+        git_sha: git_sha(),
+        timestamp_unix: now_unix(),
+        mode: Mode::TierMiss.as_str().to_string(),
+        host: host.to_string(),
+        seed: 0,
+        dataset_shape: format!(
+            "tier-miss corpus={corpus_size} hot_set={hot_set_size} domain={}",
+            params.tier_miss_email_domain,
+        ),
         users: params.users,
         run_time: params.run_time.clone(),
         hatch_rate: params.hatch_rate.clone(),
@@ -553,6 +808,93 @@ mod tests {
         assert_eq!(parse(&[]).mode, Mode::Steady);
         assert_eq!(parse(&["--mode", "ramp"]).mode, Mode::Ramp);
         assert_eq!(parse(&["--mode", "soak"]).mode, Mode::Soak);
+        assert_eq!(parse(&["--mode", "tier-miss"]).mode, Mode::TierMiss);
+    }
+
+    fn tier_args() -> Vec<&'static str> {
+        vec![
+            "--mode",
+            "tier-miss",
+            "--tier-miss-realm-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--tier-miss-client-id",
+            "bulk-app",
+        ]
+    }
+
+    #[test]
+    fn tier_miss_defaults_and_plan_resolve() {
+        let p = parse(&tier_args());
+        assert_eq!(p.tier_miss_corpus_size, 1_000_000);
+        assert_eq!(p.tier_miss_hot_set_size, 1_000);
+        assert_eq!(p.tier_miss_email_domain, "bulk.demo");
+        assert_eq!(p.tier_miss_password, "DemoPassw0rd!");
+        let plan = tier_miss_plan(&p).expect("valid tier-miss plan");
+        assert_eq!(plan.corpus_size, 1_000_000);
+        assert_eq!(plan.client_id, "bulk-app");
+        // No --host → the loopback dev default.
+        assert_eq!(plan.host, "http://127.0.0.1:8420");
+    }
+
+    #[test]
+    fn tier_miss_requires_realm_and_client() {
+        let no_realm = parse(&["--mode", "tier-miss", "--tier-miss-client-id", "bulk-app"]);
+        assert!(matches!(
+            tier_miss_plan(&no_realm),
+            Err(LoadError::TierMissConfig(_))
+        ));
+        let no_client = parse(&[
+            "--mode",
+            "tier-miss",
+            "--tier-miss-realm-id",
+            "11111111-1111-1111-1111-111111111111",
+        ]);
+        assert!(matches!(
+            tier_miss_plan(&no_client),
+            Err(LoadError::TierMissConfig(_))
+        ));
+    }
+
+    #[test]
+    fn tier_miss_rejects_hot_set_larger_than_corpus() {
+        let mut args = tier_args();
+        args.extend_from_slice(&[
+            "--tier-miss-corpus-size",
+            "1000",
+            "--tier-miss-hot-set-size",
+            "5000",
+        ]);
+        let p = parse(&args);
+        assert!(matches!(
+            tier_miss_plan(&p),
+            Err(LoadError::TierMissConfig(_))
+        ));
+    }
+
+    #[test]
+    fn tier_miss_rejects_all_zero_weights() {
+        let mut args = tier_args();
+        args.extend_from_slice(&[
+            "--tier-miss-weight-hot",
+            "0",
+            "--tier-miss-weight-cold",
+            "0",
+        ]);
+        let p = parse(&args);
+        assert!(matches!(
+            tier_miss_plan(&p),
+            Err(LoadError::TierMissConfig(_))
+        ));
+    }
+
+    #[test]
+    fn tier_miss_hot_tier_capacity_is_optional_and_parses() {
+        let p = parse(&tier_args());
+        assert_eq!(p.tier_miss_hot_tier_capacity, None);
+        let mut args = tier_args();
+        args.extend_from_slice(&["--tier-miss-hot-tier-capacity", "100000"]);
+        let p = parse(&args);
+        assert_eq!(p.tier_miss_hot_tier_capacity, Some(100_000));
     }
 
     #[test]

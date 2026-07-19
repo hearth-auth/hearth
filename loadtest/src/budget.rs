@@ -94,7 +94,13 @@ pub fn budget_for(journey_name: &str) -> Option<Budget> {
             HTTP_BUDGET_P99_SESSION_US,
         ),
         "user_lookup" => (SPEC_P99_ENGINE_USER_LOOKUP_US, HTTP_BUDGET_P99_USER_US),
-        "issuance" => (
+        // The tier-miss profile (HEA-1801) drives `lookup_user` over the corpus
+        // via ROPC `POST /token`, split into a resident "hot" working set and a
+        // uniform "cold" draw. Both are full `/token` issuances, so both map to
+        // the issuance budget — the tier *delta* (cold p99 vs hot p99), not the
+        // absolute pass, is the corpus-scale proof (see the `tier_miss` report
+        // block).
+        "issuance" | "lookup_hot" | "lookup_cold" => (
             SPEC_P99_ENGINE_TOKEN_ISSUANCE_US,
             HTTP_BUDGET_P99_ISSUANCE_US,
         ),
@@ -186,6 +192,18 @@ mod tests {
         );
         assert!(budget_for("user_lookup").is_some());
         assert!(budget_for("issuance").is_some());
+    }
+
+    #[test]
+    fn tier_miss_lookup_journeys_map_to_the_issuance_budget() {
+        // Regression (HEA-1801): the hot/cold tier-miss lookups are ROPC
+        // `/token` issuances and must carry the issuance budget so the run has a
+        // pass verdict; the corpus-scale proof is the hot-vs-cold p99 delta.
+        for name in ["lookup_hot", "lookup_cold"] {
+            let b = budget_for(name).unwrap_or_else(|| panic!("{name} must have a budget"));
+            assert_eq!(b.http_p99_us, HTTP_BUDGET_P99_ISSUANCE_US);
+            assert_eq!(b.spec_engine_p99_us, SPEC_P99_ENGINE_TOKEN_ISSUANCE_US);
+        }
     }
 
     #[test]
