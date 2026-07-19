@@ -60,8 +60,7 @@ pub const HTTP_BUDGET_P99_SESSION_US: u64 =
     SPEC_P99_ENGINE_SESSION_LOOKUP_US + LOOPBACK_ENVELOPE_P99_US;
 
 /// HTTP p99 budget — user-lookup journey (`GET /admin/users/{id}`).
-pub const HTTP_BUDGET_P99_USER_US: u64 =
-    SPEC_P99_ENGINE_USER_LOOKUP_US + LOOPBACK_ENVELOPE_P99_US;
+pub const HTTP_BUDGET_P99_USER_US: u64 = SPEC_P99_ENGINE_USER_LOOKUP_US + LOOPBACK_ENVELOPE_P99_US;
 
 /// HTTP p99 budget — issuance journey (`POST /token`).
 pub const HTTP_BUDGET_P99_ISSUANCE_US: u64 =
@@ -90,7 +89,10 @@ pub fn budget_for(journey_name: &str) -> Option<Budget> {
             SPEC_P99_ENGINE_TOKEN_VALIDATION_US,
             HTTP_BUDGET_P99_VALIDATE_US,
         ),
-        "session_lookup" => (SPEC_P99_ENGINE_SESSION_LOOKUP_US, HTTP_BUDGET_P99_SESSION_US),
+        "session_lookup" => (
+            SPEC_P99_ENGINE_SESSION_LOOKUP_US,
+            HTTP_BUDGET_P99_SESSION_US,
+        ),
         "user_lookup" => (SPEC_P99_ENGINE_USER_LOOKUP_US, HTTP_BUDGET_P99_USER_US),
         "issuance" => (
             SPEC_P99_ENGINE_TOKEN_ISSUANCE_US,
@@ -205,7 +207,7 @@ mod tests {
     #[test]
     fn passes_requires_both_latency_and_low_failure_rate() {
         let b = budget_for("validate").unwrap(); // 1.5 ms budget
-        // Fast + all successful → pass.
+                                                 // Fast + all successful → pass.
         assert!(passes(1, 0, 1000, b));
         // Fast but every request failed → must NOT pass.
         assert!(!passes(1, 1000, 1000, b));

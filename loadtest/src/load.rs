@@ -250,11 +250,7 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     let json = serde_json::to_string_pretty(&report)
         .map_err(|e| LoadError::Report(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     std::fs::write(&json_path, json).map_err(LoadError::Report)?;
-    println!(
-        "  report: {} (pass={})",
-        json_path.display(),
-        report.pass
-    );
+    println!("  report: {} (pass={})", json_path.display(), report.pass);
     Ok(())
 }
 
@@ -546,10 +542,7 @@ mod tests {
     #[test]
     fn report_dir_has_a_default_and_overrides() {
         assert_eq!(parse(&[]).report_dir, "loadtest/reports");
-        assert_eq!(
-            parse(&["--report-dir", "/tmp/lt"]).report_dir,
-            "/tmp/lt"
-        );
+        assert_eq!(parse(&["--report-dir", "/tmp/lt"]).report_dir, "/tmp/lt");
     }
 
     #[test]

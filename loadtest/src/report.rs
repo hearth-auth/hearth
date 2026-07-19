@@ -229,7 +229,11 @@ mod tests {
         }
     }
 
-    fn agg(name: &str, method: GooseMethod, t: GooseRequestMetricTimingData) -> (String, GooseRequestMetricAggregate) {
+    fn agg(
+        name: &str,
+        method: GooseMethod,
+        t: GooseRequestMetricTimingData,
+    ) -> (String, GooseRequestMetricAggregate) {
         let key = format!("{method} {name}");
         let success = t.counter;
         (
@@ -325,10 +329,30 @@ mod tests {
     #[test]
     fn knee_is_first_breaching_step() {
         let steps = vec![
-            RampStep { users: 10, rps: 100.0, breached: false, journeys: vec![] },
-            RampStep { users: 20, rps: 200.0, breached: false, journeys: vec![] },
-            RampStep { users: 30, rps: 280.0, breached: true, journeys: vec![] },
-            RampStep { users: 40, rps: 300.0, breached: true, journeys: vec![] },
+            RampStep {
+                users: 10,
+                rps: 100.0,
+                breached: false,
+                journeys: vec![],
+            },
+            RampStep {
+                users: 20,
+                rps: 200.0,
+                breached: false,
+                journeys: vec![],
+            },
+            RampStep {
+                users: 30,
+                rps: 280.0,
+                breached: true,
+                journeys: vec![],
+            },
+            RampStep {
+                users: 40,
+                rps: 300.0,
+                breached: true,
+                journeys: vec![],
+            },
         ];
         assert_eq!(find_knee(&steps), Some(280.0));
     }
@@ -336,8 +360,18 @@ mod tests {
     #[test]
     fn knee_none_when_no_step_breaches() {
         let steps = vec![
-            RampStep { users: 10, rps: 100.0, breached: false, journeys: vec![] },
-            RampStep { users: 20, rps: 200.0, breached: false, journeys: vec![] },
+            RampStep {
+                users: 10,
+                rps: 100.0,
+                breached: false,
+                journeys: vec![],
+            },
+            RampStep {
+                users: 20,
+                rps: 200.0,
+                breached: false,
+                journeys: vec![],
+            },
         ];
         assert_eq!(find_knee(&steps), None);
     }

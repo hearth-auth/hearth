@@ -85,13 +85,119 @@ make loadtest ARGS="run --weight-validate 40 --weight-issuance 40 --weight-revok
 Other run knobs: `--users`, `--run-time`, `--hatch-rate`, and `--throttle N`
 (cap total requests/sec — useful against an instance with per-client token rate
 limits, where an unthrottled run is dominated by `429`s rather than the hot
-path). A weight of `0` drops that journey entirely; at least one journey must be
-weighted.
+path — see [Rate limits](#rate-limits-on-a-dev-instance-why-you-throttle)). A
+weight of `0` drops that journey entirely; at least one journey must be weighted.
 
-> **Scope:** run modes (steady/ramp-knee/soak), the JSON/HTML report writers,
-> and the sourced latency budgets are a follow-up (HEA-1791). This step
-> establishes the journeys + weighting; Goose's built-in metrics table is the
-> current output.
+## Run modes (HEA-1791)
+
+`--mode` selects the load profile. All modes write the same `report.json`
+schema (below); ramp/soak add their extra sections.
+
+| Mode | Flag | What it does | Extra flags |
+|---|---|---|---|
+| `steady` (default) | `--mode steady` | Fixed `--users` for `--run-time`. The primary report. | — |
+| `ramp` | `--mode ramp` | Steps the user ladder upward and records the **saturation knee** — the first step where a budgeted journey's p99 breaches its HTTP budget. Stops early at the knee. | `--ramp-start-users` (10), `--ramp-step-users` (10), `--ramp-steps` (8) |
+| `soak` | `--mode soak` | Long fixed-user run split into equal buckets, surfacing latency **drift** over time. Total time ≈ `soak_buckets × run_time`. | `--soak-buckets` (6) |
+
+```bash
+make loadtest ARGS="run --mode ramp --ramp-start-users 20 --ramp-step-users 20 --ramp-steps 6"
+make loadtest ARGS="run --mode soak --run-time 3m --soak-buckets 6"   # ≈ 18 min
+```
+
+## Reading the report
+
+Every run writes two artifacts into `--report-dir` (default `loadtest/reports/`,
+which is **git-ignored**):
+
+- `report.json` — the machine-readable report (schema below). This is the
+  artifact a nightly diff consumes.
+- `steady.html` / `ramp-{N}u.html` / `soak-bucket-{N}.html` — Goose's own HTML
+  report(s) for eyeball inspection (traces, per-request timelines).
+
+`report.json` shape (`schema` is [`report::SCHEMA_VERSION`](src/report.rs) —
+bumped on any breaking change so a nightly diff refuses to compare across
+incompatible schemas):
+
+| Field | Meaning |
+|---|---|
+| `metadata.git_sha` | Build commit (`HEARTH_GIT_SHA` env override, else `git rev-parse`, else `"unknown"`). |
+| `metadata.timestamp_unix` | Wall-clock the report was produced. |
+| `metadata.{mode,host,seed,dataset_shape,users,run_time,hatch_rate}` | Run configuration + the corpus it ran against. |
+| `journeys[]` | Per-journey rows (sorted by name for diff-stable output). |
+| `journeys[].{p50,p95,p99,p999}_ms` | Response-time percentiles (whole ms — Goose's granularity). |
+| `journeys[].{requests,failures,failure_rate}` | Volume + non-2xx fraction. A journey that is fast-but-erroring is **not** a pass. |
+| `journeys[].spec_engine_p99_us` | The in-process engine p99 target this journey maps to (informational floor). |
+| `journeys[].http_budget_p99_us` | The HTTP p99 budget asserted against = engine target + 1 ms loopback envelope. |
+| `journeys[].pass` | `true`/`false` vs the HTTP budget **and** failure rate; absent for the compound revoke journey (no atomic target). |
+| `ramp_steps[]`, `knee_rps` | ramp mode only — per-step rows and the saturation-knee RPS. |
+| `soak_buckets[]` | soak mode only — per-bucket rows for drift inspection. |
+| `pass` | Overall: every *budgeted* journey stayed within budget. |
+
+### Budgets — sourced, and why sub-ms budgets read `pass:false` on a dev box
+
+Budgets are **sourced**, not invented (see [src/budget.rs](src/budget.rs)):
+each journey's engine p99 target is lifted verbatim from
+`docs/specs/TESTING.md`, and the HTTP budget adds a CTO-approved ~1 ms loopback
+envelope (axum routing + (de)serialization + loopback syscalls), per the
+HEA-1787 plan §6/§9.
+
+| Journey | Engine p99 (spec) | HTTP p99 budget |
+|---|---|---|
+| `validate` (`/introspect`) | 500 µs | 1.5 ms |
+| `session_lookup` (`/userinfo`) | 100 µs | 1.1 ms |
+| `user_lookup` (`/admin/users/{id}`) | 200 µs | 1.2 ms |
+| `issuance` (`/token`) | 5 ms | 6 ms |
+
+A pass also requires the journey's failure rate to stay at or below
+`MAX_FAILURE_RATE` (5%) — a 1 ms journey that 100%-errors must not read green.
+
+**Expect `pass:false` for the sub-ms journeys on a normal dev machine.** Goose
+records response times in whole milliseconds, so the smallest non-zero p99 it
+can report is 1 ms; ordinary loopback scheduling jitter puts observed p99 at
+2–3 ms, which exceeds the sub-ms `session`/`user`/`validate` budgets even though
+the engine itself is well under target. `issuance` likewise blows its 6 ms
+budget because the HTTP path runs a **real Argon2id** password hash (10–22 ms)
+that the in-process engine bench does not. The committed
+[baseline](#the-committed-baseline) is a clean, zero-failure run that still
+reports `pass:false` for exactly these reasons — the budgets are an aspirational
+engine-level ceiling, and this HTTP harness is a **drift detector and capacity
+probe**, not a sub-ms pass gate. Sub-ms verification lives in the in-process
+`make bench-gate`, not here.
+
+## Rate limits on a dev instance (why you throttle)
+
+A dev boot enforces per-client rate limits that an unthrottled load run trips
+immediately, because every journey authenticates as the **single** dev client:
+
+- **Token endpoint** (`/token`, `/introspect`, `/revoke`): 200 req/min per
+  client (`TOKEN_RATE_LIMIT`). `validate` + `issuance` + `revoke` share it.
+- **Admin writes** (`/admin/users`, …): 100 req/min per admin
+  (`ADMIN_RATE_LIMIT`). Bounds both the seed (≤ ~90 users/boot) and
+  `user_lookup`.
+- **Per-IP request shaper**: 100 req/s per source IP by default.
+
+An unthrottled run is therefore dominated by `429`s rather than the hot path.
+Two ways to get a clean run:
+
+1. **Throttle under the limit** (single-subject boot-local corpus): keep the
+   token-bucket journeys under ~3.3 req/s combined, e.g.
+   `--throttle 3`. This is what the committed baseline uses.
+2. **Raise the shaper for a loopback-only run.** Boot with a config that lifts
+   `security.request_shaper` (the admin/token per-client caps are compile-time
+   constants and are *not* raised by this — they still bound a single-subject
+   run):
+
+   ```yaml
+   # hearth-loadtest.yaml — loopback dev only, never production
+   security:
+     request_shaper: { ip_rps: 500000, realm_rps: 5000000 }
+   ```
+   ```bash
+   hearth serve --dev --config hearth-loadtest.yaml
+   ```
+
+For a realistic *high-throughput* run the per-client caps must be spread across
+**many** subjects — use the multi-subject attach path below.
 
 ## ⚠️ Security warnings (read before running)
 
@@ -144,9 +250,73 @@ Wiring per-subject ROPC across the demo users (so live tokens span many
 subjects) is a follow-up; the deterministic per-user credential API
 (`SeedParams::user_password`) already exists for it.
 
-## Status
+## The committed baseline
 
-Seed step implemented (HEA-1789). The five closed-loop Goose journeys +
-configurable weighting are implemented (HEA-1790). Run modes
-(steady/ramp/soak), JSON/HTML reporters, and sourced latency budgets are the
-next step (HEA-1791).
+[`baseline/steady-baseline.json`](baseline/steady-baseline.json) is a committed
+`report.json` from a clean, zero-failure `steady` run so a future nightly diff
+has a reference to compare against. It lives outside the git-ignored
+`reports/` directory precisely so it can be tracked.
+
+How it was captured (reproducible):
+
+```bash
+# 1. Boot a dev instance with the shaper raised (see Rate limits above):
+hearth serve --dev --config hearth-loadtest.yaml
+# 2. Seed under the 100/min admin-write cap:
+make seed ARGS="--users-per-realm 80 --sessions-frac 0.5 --revoked-frac 0.1"
+# 3. Wait ~65 s for the admin-write window to reset, then run throttled:
+make loadtest ARGS="run --mode steady --users 20 --run-time 90s --hatch-rate 5 --throttle 3"
+# 4. Copy the fresh report over the baseline (zero out volatile metadata):
+#    cp loadtest/reports/report.json loadtest/baseline/steady-baseline.json
+#    then set metadata.timestamp_unix to 0 and metadata.git_sha to the capture commit.
+```
+
+### Updating the baseline
+
+Re-capture with the steps above whenever an **intended** perf change moves the
+numbers (and note why in the commit). Normalise the two volatile metadata fields
+before committing so the diff stays clean:
+
+- `metadata.timestamp_unix` → `0`
+- `metadata.git_sha` → the short SHA the baseline was captured at
+
+Everything else (journey percentiles, budgets, `pass`) is the signal.
+
+### Nightly CI consumption + diff sketch (out of scope to wire here)
+
+The intended (not-yet-wired) nightly job would:
+
+1. Boot a dev instance + seed a fixed `--seed` corpus (deterministic).
+2. Run `make loadtest ARGS="run --mode steady …"`, producing `report.json`.
+3. Diff the fresh `report.json` against `baseline/steady-baseline.json`,
+   **ignoring** `metadata.timestamp_unix` and `metadata.git_sha`, comparing
+   `journeys[].{p50,p95,p99}_ms` per journey and flagging a regression when a
+   percentile grows beyond a tolerance (e.g. `p99` up > 25% or > 1 ms). Refuse
+   to compare if `schema` differs.
+4. Post the delta as a nightly report; **it is advisory**, not a PR gate.
+
+A minimal diff is a `jq`/small-script comparison — no bespoke tooling. Wiring
+the CI job itself is deliberately out of scope for this crate (see below).
+
+## Explicitly out of scope
+
+- **Not a per-PR gate.** `make loadtest` needs a booted, seeded instance and
+  minutes of wall-clock; it is a nightly/on-demand probe, never a blocking PR
+  check. Sub-ms hot-path regression gating lives in the in-process
+  `make bench-gate`.
+- **Budgets are sourced, not tuned here.** They come verbatim from
+  `docs/specs/TESTING.md` + a fixed loopback envelope (see
+  [src/budget.rs](src/budget.rs)); this crate does not invent or relax them.
+- **No CI wiring.** The nightly job + baseline-diff automation above is a
+  sketch; wiring it into GitHub Actions is a separate ticket.
+- **No production/remote targets.** Loopback dev only; the seed refuses
+  non-loopback targets without an explicit opt-in.
+
+## Status — DoD (HEA-1792)
+
+Seed (HEA-1789), the five closed-loop journeys + weighting (HEA-1790), and run
+modes + JSON/HTML reporters + sourced budgets (HEA-1791) are all implemented.
+DoD verified: `make loadtest` runs clean end-to-end (seed → steady run →
+`report.json` + HTML, zero request failures), the baseline is committed, and the
+crate is `clippy`/`fmt` clean. The workspace `cargo nextest run` is unaffected
+because this crate is workspace-excluded.

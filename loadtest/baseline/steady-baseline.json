@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "metadata": {
+    "git_sha": "ad61fdf5",
+    "timestamp_unix": 0,
+    "mode": "steady",
+    "host": "http://127.0.0.1:8420",
+    "seed": 1,
+    "dataset_shape": "realms=5 users/realm=80 sessions/realm=40 revoked/realm=4 (sessions_frac=0.5 revoked_frac=0.1 seed=1)",
+    "users": 20,
+    "run_time": "90s",
+    "hatch_rate": "5"
+  },
+  "journeys": [
+    {
+      "journey": "issuance",
+      "method": "POST",
+      "requests": 44,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 13,
+      "p95_ms": 21,
+      "p99_ms": 22,
+      "p999_ms": 22,
+      "spec_engine_p99_us": 5000,
+      "http_budget_p99_us": 6000,
+      "pass": false
+    },
+    {
+      "journey": "revoke",
+      "method": "POST",
+      "requests": 20,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 5,
+      "p95_ms": 7,
+      "p99_ms": 9,
+      "p999_ms": 9
+    },
+    {
+      "journey": "revoke_mint",
+      "method": "POST",
+      "requests": 20,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 11,
+      "p95_ms": 17,
+      "p99_ms": 18,
+      "p999_ms": 18
+    },
+    {
+      "journey": "revoke_revalidate",
+      "method": "POST",
+      "requests": 20,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 2,
+      "p95_ms": 2,
+      "p99_ms": 2,
+      "p999_ms": 2
+    },
+    {
+      "journey": "session_lookup",
+      "method": "GET",
+      "requests": 58,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 1,
+      "p95_ms": 2,
+      "p99_ms": 3,
+      "p999_ms": 3,
+      "spec_engine_p99_us": 100,
+      "http_budget_p99_us": 1100,
+      "pass": false
+    },
+    {
+      "journey": "user_lookup",
+      "method": "GET",
+      "requests": 53,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 1,
+      "p95_ms": 2,
+      "p99_ms": 2,
+      "p999_ms": 3,
+      "spec_engine_p99_us": 200,
+      "http_budget_p99_us": 1200,
+      "pass": false
+    },
+    {
+      "journey": "validate",
+      "method": "POST",
+      "requests": 55,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "p50_ms": 2,
+      "p95_ms": 2,
+      "p99_ms": 2,
+      "p999_ms": 3,
+      "spec_engine_p99_us": 500,
+      "http_budget_p99_us": 1500,
+      "pass": false
+    }
+  ],
+  "pass": false
+}
