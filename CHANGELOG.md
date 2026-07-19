@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Runtime-visible signal when rate limiters are disabled** — when
+  `security.load_test_unthrottled` resolves to active, the server now exposes a
+  `hearth_rate_limiters_disabled{reason="load_test"} 1` Prometheus gauge (absent
+  during normal operation) and prints a `RATE LIMITERS DISABLED (load test mode)`
+  banner in the startup panel, so operators and dashboards can detect the
+  unthrottled state on a live process instead of only from the boot WARN log
+  (HEA-1799).
 - **`security.load_test_unthrottled` config flag (loopback-gated)** — when `true`
   and the server binds a loopback address, disables all request-rate limiters
   (token endpoint, admin API, export, and the per-IP/per-realm request shaper) so

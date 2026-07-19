@@ -21,7 +21,9 @@
 
 use std::sync::OnceLock;
 
-use prometheus::{Counter, CounterVec, Gauge, HistogramOpts, HistogramVec, Opts, Registry};
+use prometheus::{
+    Counter, CounterVec, Gauge, GaugeVec, HistogramOpts, HistogramVec, Opts, Registry,
+};
 
 /// HTTP request latency histogram buckets (seconds).
 ///
@@ -123,6 +125,16 @@ pub struct Metrics {
     ///
     /// Labels: `realm` (realm UUID), `op` (`issued` | `consumed` | `replayed`).
     pub agent_txn_token_total: CounterVec,
+
+    /// Runtime signal that request-rate limiters are globally disabled.
+    ///
+    /// Label: `reason` (currently only `load_test`). Set to `1` at boot when
+    /// the `security.load_test_unthrottled` escape hatch resolves to `Enabled`
+    /// (HEA-1799). The time series is **absent** during normal operation —
+    /// its mere presence on a live scrape means brute-force / abuse protection
+    /// is off, so dashboards and alerts can detect the state even if the
+    /// boot-time WARN log has scrolled past.
+    pub rate_limiters_disabled: GaugeVec,
 }
 
 impl Metrics {
@@ -273,6 +285,18 @@ impl Metrics {
             .register(Box::new(agent_txn_token_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let rate_limiters_disabled = GaugeVec::new(
+            Opts::new(
+                "hearth_rate_limiters_disabled",
+                "Set to 1 when all request-rate limiters are disabled (load-test escape hatch)",
+            ),
+            &["reason"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(rate_limiters_disabled.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         Self {
             registry,
             http_request_duration_seconds,
@@ -288,7 +312,19 @@ impl Metrics {
             agent_aat_issued_total,
             agent_aat_revoked_total,
             agent_txn_token_total,
+            rate_limiters_disabled,
         }
+    }
+
+    /// Marks the `hearth_rate_limiters_disabled{reason=…}` gauge as active (`1`).
+    ///
+    /// Call once at boot when the load-test unthrottle escape hatch resolves to
+    /// `Enabled`. Before the first call the time series is absent from scrapes,
+    /// so `reason` only ever appears when limiters are genuinely off.
+    pub fn mark_rate_limiters_disabled(&self, reason: &str) {
+        self.rate_limiters_disabled
+            .with_label_values(&[reason])
+            .set(1.0);
     }
 
     /// Renders all collected metrics in Prometheus text exposition format.
@@ -306,6 +342,35 @@ impl Metrics {
         }
         // Prometheus text format is always valid UTF-8.
         String::from_utf8(buf).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Metrics;
+
+    /// HEA-1799: the `hearth_rate_limiters_disabled` time series is absent from
+    /// a scrape during normal operation and appears (set to `1`) only after the
+    /// load-test escape hatch marks it.
+    #[test]
+    fn rate_limiters_disabled_gauge_absent_until_marked() {
+        let metrics = Metrics::new();
+
+        // Off (never marked) — the family must not appear in the render output,
+        // so a scrape cannot false-positive during normal operation.
+        let before = metrics.render();
+        assert!(
+            !before.contains("hearth_rate_limiters_disabled"),
+            "gauge must be absent before the escape hatch marks it, got:\n{before}"
+        );
+
+        // Enabled — mark it, then the labelled series must be present at value 1.
+        metrics.mark_rate_limiters_disabled("load_test");
+        let after = metrics.render();
+        assert!(
+            after.contains("hearth_rate_limiters_disabled{reason=\"load_test\"} 1"),
+            "gauge must read 1 for reason=load_test once marked, got:\n{after}"
+        );
     }
 }
 

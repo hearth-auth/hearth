@@ -1937,6 +1937,11 @@ async fn run_serve(
                  (token endpoint, admin API, export, request shaper) are DISABLED. \
                  Load-test-only mode; never enable on a production bind."
             );
+            // HEA-1799: publish a runtime-visible signal so the disabled state is
+            // detectable on a live process (Prometheus scrape / dashboard alert)
+            // even after the boot WARN log has scrolled past. The startup panel
+            // gains a matching row below.
+            hearth::metrics::metrics().mark_rate_limiters_disabled("load_test");
             true
         }
         LoadtestUnthrottle::RefusedNonLoopback => {
@@ -2352,6 +2357,7 @@ async fn run_serve(
             sst_count,
             data_dir_bytes,
             startup_ms: u64::try_from(serve_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            rate_limiters_disabled: load_test_unthrottled,
         };
         print_startup_panel(
             addr,
@@ -2457,6 +2463,9 @@ struct StartupStats {
     sst_count: usize,
     data_dir_bytes: u64,
     startup_ms: u64,
+    /// Whether all request-rate limiters are disabled by the load-test escape
+    /// hatch (`security.load_test_unthrottled` resolved to `Enabled`, HEA-1799).
+    rate_limiters_disabled: bool,
 }
 
 // Prints the logo + consolidated startup info panel to stdout (raw — never
@@ -2468,43 +2477,65 @@ fn print_startup_panel(
     mailcatcher: Option<(&str, &str)>,
     stats: &StartupStats,
 ) {
+    for line in build_startup_panel(addr, dev_mode, setup_token, mailcatcher, stats) {
+        tracing::info!("{line}");
+    }
+}
+
+// Builds the logo + consolidated startup info panel as ordered display lines.
+// Split out from `print_startup_panel` so the content (notably the HEA-1799
+// unthrottled-rate-limiter banner) is unit-testable without a tracing sink.
+fn build_startup_panel(
+    addr: std::net::SocketAddr,
+    dev_mode: bool,
+    setup_token: Option<&str>,
+    mailcatcher: Option<(&str, &str)>,
+    stats: &StartupStats,
+) -> Vec<String> {
     let base = format!("http://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
-    tracing::info!("");
-    tracing::info!("{HEARTH_LOGO}");
-    tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    tracing::info!(
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(String::new());
+    lines.push(HEARTH_LOGO.to_string());
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
+    lines.push(format!(
         "  Identity · Auth · RBAC   v{}{}",
         env!("CARGO_PKG_VERSION"),
         dev_badge
-    );
-    tracing::info!("  ─────────────────────────────────────────────────");
+    ));
+    // HEA-1799: unmissable banner when the load-test escape hatch has turned off
+    // every request-rate limiter. Placed at the top of the panel so an operator
+    // attaching after boot cannot miss that abuse protection is disabled.
+    if stats.rate_limiters_disabled {
+        lines.push("  ⚠  RATE LIMITERS DISABLED (load test mode)".to_string());
+    }
+    lines.push("  ─────────────────────────────────────────────────".to_string());
     // URL links — labels padded to 7 chars so values align at column 11.
-    tracing::info!("  API:     {base}");
-    tracing::info!("  Admin:   {base}/ui");
+    lines.push(format!("  API:     {base}"));
+    lines.push(format!("  Admin:   {base}/ui"));
     if let Some(issuer) = &stats.oidc_issuer {
-        tracing::info!("  Issuer:  {issuer}");
+        lines.push(format!("  Issuer:  {issuer}"));
     }
     if let Some(token) = setup_token {
         if dev_mode {
             let preview: String = token.chars().take(8).collect();
-            tracing::info!(
+            lines.push(format!(
                 "  Setup:   {base}/ui/setup  (token prefix: {preview}… — read .setup_token for full token)"
-            );
+            ));
         } else {
-            tracing::info!(
+            lines.push(format!(
                 "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
-            );
+            ));
         }
     }
     if let Some((inbox_url, password)) = mailcatcher {
         if dev_mode {
-            tracing::info!("  Mail:    {inbox_url}  pw: {password}");
+            lines.push(format!("  Mail:    {inbox_url}  pw: {password}"));
         } else {
-            tracing::info!("  Mail:    {inbox_url}");
+            lines.push(format!("  Mail:    {inbox_url}"));
         }
     }
-    tracing::info!("  ─────────────────────────────────────────────────");
+    lines.push("  ─────────────────────────────────────────────────".to_string());
     // Environment stats
     let mut env_line = format!(
         "  Realms: {}   ·   Email: {}   ·   TLS: {}",
@@ -2522,7 +2553,7 @@ fn print_startup_panel(
             if peers == 1 { "" } else { "s" }
         ));
     }
-    tracing::info!("{env_line}");
+    lines.push(env_line);
     // Storage stats
     let mut storage_parts: Vec<String> = Vec::new();
     if let Some(wal) = stats.wal_size {
@@ -2536,9 +2567,10 @@ fn print_startup_panel(
     if stats.data_dir_bytes > 0 {
         storage_parts.push(fmt_bytes(stats.data_dir_bytes));
     }
-    tracing::info!("  Storage: {}", storage_parts.join("  ·  "));
-    tracing::info!("  Startup: {} ms", stats.startup_ms);
-    tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    lines.push(format!("  Storage: {}", storage_parts.join("  ·  ")));
+    lines.push(format!("  Startup: {} ms", stats.startup_ms));
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n".to_string());
+    lines
 }
 
 fn collect_storage_stats(data_dir: &std::path::Path) -> (Option<u64>, usize, u64) {
@@ -4241,6 +4273,46 @@ mod tests {
         assert_eq!(
             loadtest_unthrottle_decision(true, false, "0.0.0.0", Some("0.0.0.0")),
             LoadtestUnthrottle::RefusedNotDev
+        );
+    }
+
+    // ── build_startup_panel unthrottle banner (HEA-1799) ──────────────────
+
+    fn panel_stats(rate_limiters_disabled: bool) -> StartupStats {
+        StartupStats {
+            realm_count: 1,
+            federation_count: 0,
+            email_transport: "log",
+            tls: false,
+            oidc_issuer: None,
+            cluster_peers: None,
+            wal_size: None,
+            sst_count: 0,
+            data_dir_bytes: 0,
+            startup_ms: 1,
+            rate_limiters_disabled,
+        }
+    }
+
+    #[test]
+    fn startup_panel_shows_banner_when_rate_limiters_disabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, None, None, &panel_stats(true));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("RATE LIMITERS DISABLED (load test mode)")),
+            "panel must carry the unthrottled banner when the escape hatch is enabled: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn startup_panel_omits_banner_when_rate_limiters_enabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, None, None, &panel_stats(false));
+        assert!(
+            !lines.iter().any(|l| l.contains("RATE LIMITERS DISABLED")),
+            "panel must not mention disabled limiters during normal operation: {lines:?}"
         );
     }
 
