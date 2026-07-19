@@ -241,6 +241,7 @@ echo "==> Running load (mode=${MODE}, users=${USERS}, run-time=${RUN_TIME}, thro
   --users "${USERS}" \
   --run-time "${RUN_TIME}" \
   --hatch-rate "${HATCH_RATE}" \
+  --resident-corpus-size "${CORPUS_TOTAL}" \
   ${THROTTLE_ARG} \
   ${EXTRA_RUN_ARGS}
 

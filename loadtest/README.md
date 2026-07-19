@@ -50,6 +50,15 @@ realistically-large storage engine, not a toy DB.
 - Only `make loadtest` gets the large corpus by default. The standalone
   `make seed` / `seed` subcommand keep their small, explicit defaults — the big
   dataset is opt-in there (see [Seed step](#seed-step-hea-1789)).
+
+> **Reading the report — two different "users":** the report's `users` field is
+> the **Goose load-generator concurrency** (`USERS`, default `200`), *not* the
+> seeded population. The resident corpus is surfaced separately in the report's
+> `dataset_shape` as `resident_corpus=<N>` (wired via `--resident-corpus-size`,
+> which `make loadtest` passes automatically as the sum of the `CORPUS_*` knobs).
+> So a report showing `users: 200` and `dataset_shape: "… resident_corpus=1200000"`
+> drove 200 concurrent generators against a 1.2M-user store — the `200` is the
+> attack width, the `1200000` is the corpus.
 - **Fast pipeline smoke:** shrink the corpus with the `CORPUS_*` knobs, e.g.
   `CORPUS_ACME=200 CORPUS_GLOBEX=0 CORPUS_INITECH=0 CORPUS_UMBRELLA=0 make loadtest`.
 

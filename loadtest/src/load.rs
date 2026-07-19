@@ -112,6 +112,19 @@ pub struct LoadParams {
     )]
     pub report_dir: String,
 
+    /// Total users resident in the server's storage engine for this run, if
+    /// known (the `make loadtest` large corpus; HEA-1787 §2).
+    ///
+    /// This is **not** the concurrency (`--users`) and **not** the seed-handle
+    /// token pool: it is the size of the demo corpus the server was booted with
+    /// so the hot path is exercised against a realistically-large store. When
+    /// set it is appended to the report's `dataset_shape` (`resident_corpus=N`)
+    /// so a report can never be misread as "only N users seeded" when N is the
+    /// load-generator concurrency. Omitted (`None`) for a bare seed-handle run
+    /// against an instance whose corpus size the harness does not know.
+    #[arg(long, env = "HEARTH_LOADTEST_RESIDENT_CORPUS_SIZE")]
+    pub resident_corpus_size: Option<u64>,
+
     /// Concurrent Goose users (steady + soak; ramp uses its own ladder).
     #[arg(long, env = "HEARTH_LOADTEST_USERS", default_value_t = 50)]
     pub users: usize,
@@ -733,6 +746,21 @@ fn requests_per_second(metrics: &GooseMetrics) -> f64 {
     }
 }
 
+/// Composes the report's `dataset_shape` from the seed-handle's token-pool
+/// description plus, when known, the resident large-corpus size.
+///
+/// The seed-handle describes only the small token pool the journeys log in as;
+/// on a `make loadtest` run the server is separately booted with a much larger
+/// demo corpus. Appending `resident_corpus=N` keeps the report from being
+/// misread as "only <pool> users" when the hot path was actually driven against
+/// N resident records (HEA-1787 §2 — the board's "why 200 users?" follow-up).
+fn compose_dataset_shape(base: &str, resident_corpus_size: Option<u64>) -> String {
+    match resident_corpus_size {
+        Some(n) => format!("{base} resident_corpus={n}"),
+        None => base.to_string(),
+    }
+}
+
 /// Builds the report metadata header, capturing git SHA + wall-clock timestamp.
 fn metadata(params: &LoadParams, host: &str, mode: Mode, handle: &SeedHandle) -> RunMetadata {
     RunMetadata {
@@ -741,7 +769,7 @@ fn metadata(params: &LoadParams, host: &str, mode: Mode, handle: &SeedHandle) ->
         mode: mode.as_str().to_string(),
         host: host.to_string(),
         seed: handle.seed,
-        dataset_shape: handle.dataset_shape.clone(),
+        dataset_shape: compose_dataset_shape(&handle.dataset_shape, params.resident_corpus_size),
         users: params.users,
         run_time: params.run_time.clone(),
         hatch_rate: params.hatch_rate.clone(),
@@ -893,6 +921,28 @@ mod tests {
         assert_eq!(parse(&["--mode", "ramp"]).mode, Mode::Ramp);
         assert_eq!(parse(&["--mode", "soak"]).mode, Mode::Soak);
         assert_eq!(parse(&["--mode", "tier-miss"]).mode, Mode::TierMiss);
+    }
+
+    #[test]
+    fn resident_corpus_size_is_optional_and_parses() {
+        // Omitted by default — a bare seed-handle run does not know the corpus.
+        assert_eq!(parse(&[]).resident_corpus_size, None);
+        let p = parse(&["--resident-corpus-size", "1200000"]);
+        assert_eq!(p.resident_corpus_size, Some(1_200_000));
+    }
+
+    #[test]
+    fn dataset_shape_surfaces_resident_corpus_when_known() {
+        // The seed-handle only ever describes the small token pool; the report
+        // must additionally state the resident corpus so "users=200" (Goose
+        // concurrency) is never mistaken for the seeded population.
+        let base = "realms=1 users/realm=80 sessions/realm=40";
+        assert_eq!(
+            compose_dataset_shape(base, Some(1_200_000)),
+            "realms=1 users/realm=80 sessions/realm=40 resident_corpus=1200000"
+        );
+        // Unknown corpus → unchanged shape (no misleading zero).
+        assert_eq!(compose_dataset_shape(base, None), base);
     }
 
     fn tier_args() -> Vec<&'static str> {
