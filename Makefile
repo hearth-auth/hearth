@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -79,6 +79,16 @@ loadtest:
 ## Typecheck the excluded loadtest crate so it cannot silently rot out of tree.
 loadtest-check:
 	PROTOC=$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
+
+## Seed a deterministic, parameterized corpus onto a running dev Hearth and
+## write a JSON seed-handle (HEA-1789). Requires a dev instance already running
+## (`make dev`); pass params via ARGS, e.g.
+## `make seed ARGS="--realms 1 --users-per-realm 500 --sessions-frac 0.5"`.
+## For a large multi-subject corpus, boot `make seed-large` first, then attach
+## with `make seed ARGS="--target-host http://127.0.0.1:8420 ..."`.
+## The seed-handle holds live tokens — keep it out of git (loadtest/reports/).
+seed:
+	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- seed $(ARGS)
 
 fmt:
 	cargo fmt --check
