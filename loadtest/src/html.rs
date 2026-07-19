@@ -150,6 +150,61 @@ pub fn rewrite_response_percentiles(report: &str, percentiles: &PercentileSnapsh
     format!("{}{}{}", &report[..start], rewritten, &report[end..])
 }
 
+/// Matches the Goose report's overview `<p>Users: <span>N</span></p>` line — the
+/// single most-prominent number at the top of the report. `N` is the Goose
+/// *load-generator concurrency* (`--users`), which readers repeatedly misread as
+/// "N users were seeded" (the board's recurring "why 200 users?" complaint). The
+/// capture lets us relabel it and, when known, state the resident corpus.
+fn users_line_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?s)<p>Users:\s*<span>(?P<n>\d+)</span>\s*</p>")
+            .expect("static users-line regex is valid")
+    })
+}
+
+/// Relabels the Goose overview's `<p>Users: <span>N</span></p>` line so the
+/// most-visible number in the report can no longer be misread as the seeded
+/// population: `N` is the **load-generator concurrency** (`--users`), not the
+/// corpus. When `resident_corpus_size` is known it is stated alongside, making
+/// the seeded-accounts-under-test count equally prominent (HEA-1788 board
+/// follow-up — "it's still saying 200 users").
+///
+/// Pure and total: an HTML string with no such line is returned unchanged.
+#[must_use]
+pub fn rewrite_users_label(report: &str, resident_corpus_size: Option<u64>) -> String {
+    users_line_regex()
+        .replace(report, |caps: &Captures| {
+            let n = &caps["n"];
+            match resident_corpus_size {
+                Some(size) => format!(
+                    "<p>Load-generator users (concurrency): <span>{n}</span> \
+                     &mdash; resident corpus under test: <span>{}</span> seeded accounts</p>",
+                    group_thousands(size),
+                ),
+                None => {
+                    format!("<p>Load-generator users (concurrency): <span>{n}</span></p>")
+                }
+            }
+        })
+        .into_owned()
+}
+
+/// Formats an integer with comma thousands separators (e.g. `1200000` →
+/// `"1,200,000"`) so a seven-figure corpus reads clearly in the report header.
+fn group_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
 /// Renders a ten-cell percentile row with our microsecond figures formatted as
 /// milliseconds, matching Goose's cell layout.
 fn format_percentile_row(method: &str, name: &str, p: LatencyPercentiles) -> String {
@@ -432,5 +487,58 @@ mod tests {
         assert_eq!(format_ms(1_450), "1.450");
         assert_eq!(format_ms(5_068_000), "5068.000");
         assert_eq!(format_ms(0), "0.000");
+    }
+
+    #[test]
+    fn group_thousands_separates_every_three_digits() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(200), "200");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(1_200_000), "1,200,000");
+        assert_eq!(group_thousands(12_345_678), "12,345,678");
+    }
+
+    /// The Goose overview line as rendered at the top of every report.
+    fn overview_users_line(n: &str) -> String {
+        format!("        <div class=\"info\">\n            <p>Users: <span>{n}</span> </p>\n")
+    }
+
+    #[test]
+    fn users_label_relabels_and_states_resident_corpus() {
+        let html = overview_users_line("200");
+        let out = rewrite_users_label(&html, Some(1_200_000));
+        // The bare "Users: 200" that reads as a seeded population is gone.
+        assert!(
+            !out.contains("<p>Users: <span>200</span>"),
+            "bare Users line must be relabeled: {out}"
+        );
+        assert!(
+            out.contains("Load-generator users (concurrency): <span>200</span>"),
+            "concurrency relabel missing: {out}"
+        );
+        assert!(
+            out.contains("resident corpus under test: <span>1,200,000</span> seeded accounts"),
+            "resident corpus not surfaced: {out}"
+        );
+    }
+
+    #[test]
+    fn users_label_relabels_without_corpus_when_unknown() {
+        let html = overview_users_line("200");
+        let out = rewrite_users_label(&html, None);
+        assert!(
+            out.contains("Load-generator users (concurrency): <span>200</span></p>"),
+            "concurrency relabel missing: {out}"
+        );
+        assert!(
+            !out.contains("resident corpus"),
+            "no corpus clause when size unknown: {out}"
+        );
+    }
+
+    #[test]
+    fn users_label_no_line_returns_input_unchanged() {
+        let html = "<html><body>no overview here</body></html>";
+        assert_eq!(rewrite_users_label(html, Some(999)), html);
     }
 }

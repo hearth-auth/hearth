@@ -59,6 +59,12 @@ realistically-large storage engine, not a toy DB.
 > So a report showing `users: 200` and `dataset_shape: "… resident_corpus=1200000"`
 > drove 200 concurrent generators against a 1.2M-user store — the `200` is the
 > attack width, the `1200000` is the corpus.
+>
+> The **HTML report** makes this explicit too: Goose's overview line, which it
+> renders as a bare `Users: 200`, is rewritten to
+> `Load-generator users (concurrency): 200 — resident corpus under test:
+> 1,200,000 seeded accounts`, so the most-prominent number can no longer be
+> mistaken for the seeded population.
 - **Fast pipeline smoke:** shrink the corpus with the `CORPUS_*` knobs, e.g.
   `CORPUS_ACME=200 CORPUS_GLOBEX=0 CORPUS_INITECH=0 CORPUS_UMBRELLA=0 make loadtest`.
 

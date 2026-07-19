@@ -21,6 +21,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   subcommand keep their small explicit defaults (HEA-1787).
 
 ### Fixed
+- **`hearth-loadtest` HTML report no longer misreads load concurrency as the seeded
+  population** — the Goose overview's most-prominent number, `Users: 200`, is the
+  load-generator *concurrency* (`--users`), not the seeded corpus, but readers
+  repeatedly took it as "only 200 users were seeded." The harness now relabels
+  that line to `Load-generator users (concurrency): 200` and, when the resident
+  corpus size is known, states it alongside (`resident corpus under test:
+  1,200,000 seeded accounts`) — for tier-miss runs the bulk corpus, for
+  steady/ramp/soak the `--resident-corpus-size` value (HEA-1788).
 - **`hearth-loadtest` HTML report shows un-rounded latency in µs resolution** —
   Goose measures every response time in whole milliseconds, so its Request
   Metrics `Min`/`Max` columns and its entire Response Time Metrics percentile
