@@ -171,6 +171,12 @@ pipeline's `THROTTLE=0` default, to run unthrottled and let `--users` decide the
 load). A weight of `0` drops that journey entirely; at least one journey must be
 weighted.
 
+> **Loopback guard (HEA-1807).** Like the seed step, `run` refuses a non-loopback
+> `--host` by default — a load run drives sustained traffic, so a remote target
+> is a deliberate opt-in via `--allow-remote-target`
+> (`HEARTH_LOADTEST_ALLOW_REMOTE_TARGET`), never the silent default. Use it only
+> for an isolated lab instance you control.
+
 > The default profile weights `validate` ≫ `session`/`user` ≫ `issuance` ≫
 > `revoke`, so an unthrottled run pours load onto the `validate_token` hot path
 > with issuance/revoke as small weighted slices — exactly the shape HEA-1796
@@ -266,9 +272,16 @@ done
 Key knobs (all `--tier-miss-*`, env `HEARTH_LOADTEST_TIER_*`): `realm-id` and
 `client-id` (required), `corpus-size` (1M), `hot-set-size` (10000),
 `hot-tier-capacity` (informational — recorded and used to estimate the cold miss
-rate), `email-domain` (`bulk.demo`), `password` (`DemoPassw0rd!`), and
-`weight-hot` / `weight-cold` (50/50; set `--tier-miss-weight-hot 0` for a pure
-cold sweep).
+rate), `email-domain` (`bulk.demo`), and `weight-hot` / `weight-cold` (50/50;
+set `--tier-miss-weight-hot 0` for a pure cold sweep).
+
+For the shared corpus password, **prefer the `HEARTH_LOADTEST_TIER_PASSWORD` env
+var over the `--tier-miss-password` flag** (HEA-1807) so the credential does not
+land in shell history — e.g. `export HEARTH_LOADTEST_TIER_PASSWORD=…` before the
+`make loadtest` line. The flag defaults to the demo config's well-known
+`DemoPassw0rd!` purely so a zero-arg dev run works; override it via the env var
+for any non-default corpus. (The value never spills to logs regardless — its
+holder has no `Debug`.)
 
 ### 4. Read the per-tier split
 
@@ -473,6 +486,11 @@ attach path below for a more representative corpus.
   users and tokens and could exhaust admin rate limits. (Production servers
   fail closed anyway: `/admin/bootstrap` is disabled outside `--dev` mode, so
   the flow dies at step 1 before any credential is sent.)
+- **`run` refuses a non-loopback `--host` too (HEA-1807).** A load run drives
+  sustained traffic, so — like `seed` — a remote target requires the explicit
+  `--allow-remote-target` opt-in (isolated lab only). Prefer sourcing
+  `--tier-miss-password` from `HEARTH_LOADTEST_TIER_PASSWORD` so the corpus
+  credential stays out of shell history.
 - **Deterministic passwords are derivable from the seed.** `--seed` is not a
   secret: anyone who knows (or guesses the default) seed can derive every
   seeded password. That is fine for a loopback dev corpus and is exactly why

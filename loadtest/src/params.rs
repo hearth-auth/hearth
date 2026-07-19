@@ -158,6 +158,40 @@ impl std::fmt::Display for ParamError {
 
 impl std::error::Error for ParamError {}
 
+/// Classification of a parsed target host by the shared loopback guard.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HostClass {
+    /// A loopback IP (`127.0.0.0/8`, `::1`) or the literal host `localhost`.
+    Loopback,
+    /// A routable/non-loopback host; carries the extracted host for the error.
+    Remote(String),
+}
+
+/// Failure-closed loopback classifier shared by the `seed` guard (HEA-1794) and
+/// the `run` guard (HEA-1807).
+///
+/// Parses `target` with the same `url` parser the HTTP clients connect with (no
+/// hand-rolled host extraction → no parser differential), rejecting the
+/// userinfo-trick host `http://127.0.0.1@evil.example`. Returns the host
+/// classification, or `Err(())` if `target` is not a valid `http`/`https` URL.
+pub(crate) fn host_is_loopback(target: &str) -> Result<HostClass, ()> {
+    let parsed = url::Url::parse(target).map_err(|_| ())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(());
+    }
+    let host = parsed.host().ok_or(())?;
+    let loopback = match host {
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+    };
+    if loopback {
+        Ok(HostClass::Loopback)
+    } else {
+        Ok(HostClass::Remote(host.to_string()))
+    }
+}
+
 impl SeedParams {
     /// Validates the parameter combination. Call before any seeding I/O.
     ///
@@ -186,23 +220,11 @@ impl SeedParams {
     /// anything that is not a loopback IP or the literal `localhost`, unless
     /// `--allow-remote-target` was explicitly set.
     fn validate_target_host(&self) -> Result<(), ParamError> {
-        let parsed = url::Url::parse(&self.target_host)
-            .map_err(|_| ParamError::InvalidTargetHost(self.target_host.clone()))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(ParamError::InvalidTargetHost(self.target_host.clone()));
-        }
-        let host = parsed
-            .host()
-            .ok_or_else(|| ParamError::InvalidTargetHost(self.target_host.clone()))?;
-        let loopback = match host {
-            url::Host::Ipv4(ip) => ip.is_loopback(),
-            url::Host::Ipv6(ip) => ip.is_loopback(),
-            url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
-        };
-        if loopback || self.allow_remote_target {
-            Ok(())
-        } else {
-            Err(ParamError::NonLoopbackTarget(host.to_string()))
+        match host_is_loopback(&self.target_host) {
+            Ok(HostClass::Loopback) => Ok(()),
+            Ok(HostClass::Remote(_)) if self.allow_remote_target => Ok(()),
+            Ok(HostClass::Remote(host)) => Err(ParamError::NonLoopbackTarget(host)),
+            Err(()) => Err(ParamError::InvalidTargetHost(self.target_host.clone())),
         }
     }
 

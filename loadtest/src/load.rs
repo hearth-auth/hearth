@@ -79,9 +79,24 @@ pub struct LoadParams {
     pub seed_handle: String,
 
     /// Base URL to drive load against. Defaults to the seed-handle's
-    /// `target_host` (the instance the corpus was seeded on).
+    /// `target_host` (the instance the corpus was seeded on), or the loopback
+    /// dev address in `tier-miss` mode.
     #[arg(long, env = "HEARTH_LOADTEST_TARGET_HOST")]
     pub host: Option<String>,
+
+    /// Allow a non-loopback `--host` (HEA-1807).
+    ///
+    /// A load run drives sustained traffic at its target, so by default `run`
+    /// refuses any host that is not loopback (`127.0.0.0/8`, `::1`, or the
+    /// literal `localhost`) — the same failure-closed guard the `seed` step
+    /// applies (HEA-1794). Set this flag only for an isolated lab instance you
+    /// control; never for a shared or production host.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_ALLOW_REMOTE_TARGET",
+        default_value_t = false
+    )]
+    pub allow_remote_target: bool,
 
     /// Run mode: `steady` (fixed users), `ramp` (saturation knee), `soak`
     /// (long-window drift), or `tier-miss` (corpus-scale lookup with per-tier
@@ -181,7 +196,14 @@ pub struct LoadParams {
     pub tier_miss_email_domain: String,
 
     /// `tier-miss` mode: shared password every bulk user authenticates with
-    /// (`demo.password`). Defaults to the demo config's value.
+    /// (`demo.password`).
+    ///
+    /// Prefer sourcing this from the `HEARTH_LOADTEST_TIER_PASSWORD` env var
+    /// rather than the `--tier-miss-password` flag, so the corpus credential
+    /// does not land in shell history (HEA-1807). The flag default is the demo
+    /// config's well-known value purely so a zero-arg dev run works; override it
+    /// via the env var for any non-default corpus. The value holder has no
+    /// `Debug`, so it never spills to logs regardless.
     #[arg(
         long,
         env = "HEARTH_LOADTEST_TIER_PASSWORD",
@@ -242,6 +264,8 @@ pub enum LoadError {
     Report(std::io::Error),
     /// A tier-miss run was misconfigured (missing/invalid required knob).
     TierMissConfig(String),
+    /// The resolved `--host` failed the loopback guard (HEA-1807).
+    HostGuard(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -253,6 +277,7 @@ impl std::fmt::Display for LoadError {
             Self::Goose(e) => write!(f, "goose: {e}"),
             Self::Report(e) => write!(f, "writing report: {e}"),
             Self::TierMissConfig(m) => write!(f, "tier-miss configuration: {m}"),
+            Self::HostGuard(m) => write!(f, "host guard: {m}"),
         }
     }
 }
@@ -315,6 +340,31 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     Ok(())
 }
 
+/// Failure-closed loopback guard on a resolved run target (HEA-1807).
+///
+/// Mirrors the `seed` guard (HEA-1794): a `run` against a non-loopback host is
+/// a deliberate opt-in (`--allow-remote-target`), never the silent default, so
+/// a stray remote target does not drive sustained load at a shared instance.
+/// Pure (no I/O) so every branch is unit-testable.
+///
+/// # Errors
+/// Returns [`LoadError::HostGuard`] if `host` is not a valid http(s) URL, or is
+/// non-loopback and `allow_remote` was not set.
+fn guard_run_host(host: &str, allow_remote: bool) -> Result<(), LoadError> {
+    match crate::params::host_is_loopback(host) {
+        Ok(crate::params::HostClass::Loopback) => Ok(()),
+        Ok(crate::params::HostClass::Remote(_)) if allow_remote => Ok(()),
+        Ok(crate::params::HostClass::Remote(h)) => Err(LoadError::HostGuard(format!(
+            "run target {h} is not loopback; a load run drives sustained traffic, so \
+             remote targets require the explicit --allow-remote-target opt-in \
+             (isolated lab instances only)"
+        ))),
+        Err(()) => Err(LoadError::HostGuard(format!(
+            "run target {host} is not a valid http(s) URL"
+        ))),
+    }
+}
+
 /// Runs one of the seed-handle-backed journey modes (`steady` / `ramp` /
 /// `soak`), loading the corpus from the seed-handle first.
 async fn run_journey_modes(
@@ -328,6 +378,7 @@ async fn run_journey_modes(
         .host
         .clone()
         .unwrap_or_else(|| handle.target_host.clone());
+    guard_run_host(&host, params.allow_remote_target)?;
 
     let context = LoadContext::from_handle(&handle, DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD)
         .map_err(LoadError::Context)?;
@@ -560,6 +611,7 @@ fn tier_miss_plan(params: &LoadParams) -> Result<TierMissPlan, LoadError> {
         .host
         .clone()
         .unwrap_or_else(|| "http://127.0.0.1:8420".to_string());
+    guard_run_host(&host, params.allow_remote_target)?;
     Ok(TierMissPlan {
         realm_id,
         client_id,
@@ -902,6 +954,64 @@ mod tests {
         args.extend_from_slice(&["--tier-miss-hot-tier-capacity", "100000"]);
         let p = parse(&args);
         assert_eq!(p.tier_miss_hot_tier_capacity, Some(100_000));
+    }
+
+    /// Regression (HEA-1807): the `run` loopback guard mirrors the seed guard —
+    /// loopback hosts pass, remote hosts are rejected unless `--allow-remote-target`
+    /// is set, and a malformed URL is rejected outright.
+    #[test]
+    fn run_host_guard_accepts_loopback_and_rejects_remote() {
+        for host in [
+            "http://127.0.0.1:8420",
+            "http://localhost:9999",
+            "http://[::1]:8420",
+            "https://127.0.0.53",
+        ] {
+            guard_run_host(host, false)
+                .unwrap_or_else(|e| panic!("loopback host {host} must pass the guard: {e}"));
+        }
+        for host in [
+            "http://10.0.0.5:8420",
+            "https://hearth.example.com",
+            // Userinfo trick: the connect host is evil.example, not 127.0.0.1.
+            "http://127.0.0.1@evil.example:8420",
+        ] {
+            assert!(
+                matches!(guard_run_host(host, false), Err(LoadError::HostGuard(_))),
+                "remote host {host} must be rejected without opt-in"
+            );
+            guard_run_host(host, true)
+                .unwrap_or_else(|e| panic!("explicit opt-in must pass for {host}: {e}"));
+        }
+        // Malformed / non-http targets are rejected even with the opt-in.
+        for host in ["not a url", "ftp://127.0.0.1", ""] {
+            assert!(
+                matches!(guard_run_host(host, true), Err(LoadError::HostGuard(_))),
+                "invalid target {host:?} must be rejected"
+            );
+        }
+    }
+
+    /// The tier-miss plan runs the loopback guard on the resolved host: a
+    /// non-loopback `--host` is rejected unless `--allow-remote-target` is set.
+    #[test]
+    fn tier_miss_plan_enforces_loopback_guard() {
+        let mut args = tier_args();
+        args.extend_from_slice(&["--host", "http://10.0.0.5:8420"]);
+        let p = parse(&args);
+        assert!(matches!(tier_miss_plan(&p), Err(LoadError::HostGuard(_))));
+
+        let mut args = tier_args();
+        args.extend_from_slice(&[
+            "--host",
+            "http://10.0.0.5:8420",
+            "--allow-remote-target",
+        ]);
+        let p = parse(&args);
+        assert_eq!(
+            tier_miss_plan(&p).expect("opt-in must pass").host,
+            "http://10.0.0.5:8420"
+        );
     }
 
     #[test]
