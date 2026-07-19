@@ -65,7 +65,10 @@ impl Mode {
 /// Every per-journey weight has a CLI flag and an env fallback; a weight of `0`
 /// drops that journey. Standard load knobs (`--users`, `--run-time`,
 /// `--hatch-rate`) map onto Goose's own configuration.
-#[derive(Debug, Clone, Args)]
+///
+/// Holds the tier-miss corpus password (`tier_miss_password`), so no `Debug` —
+/// parity with [`TierMissContext`] and the `SeedParams` redaction (HEA-1795).
+#[derive(Clone, Args)]
 pub struct LoadParams {
     /// Path to the JSON seed-handle produced by the `seed` step.
     #[arg(
