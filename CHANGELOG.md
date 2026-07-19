@@ -69,6 +69,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the scoped and admin login surfaces (HEA-1763).
 
 ### Security
+- **`hearth-loadtest seed` params redact the admin token in `Debug` output** —
+  `SeedParams` now hand-implements `Debug` so a panic or error-context print can
+  never spill a `--admin-token` / `HEARTH_LOADTEST_ADMIN_TOKEN` bearer token into
+  logs; the README's attach flow now leads with the env var because `make`
+  echoes expanded `ARGS` (flag form lands in terminal/CI logs and `ps`)
+  (HEA-1795).
 - **Single-node `put_if_absent` is now atomic, closing the capability-JTI TOCTOU
   window** — the `StorageEngine::put_if_absent` trait default is a non-atomic
   get-then-put, and `EmbeddedStorageEngine` did not override it, so the

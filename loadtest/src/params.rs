@@ -16,7 +16,7 @@ use clap::Args;
 /// Defaults mirror the plan (HEA-1787 §6). Every field has a CLI flag and an
 /// environment-variable fallback so `make seed` / `make seed-large` can drive
 /// it without long argument lists.
-#[derive(Debug, Clone, Args)]
+#[derive(Clone, Args)]
 pub struct SeedParams {
     /// Base URL of a running Hearth instance to seed against.
     ///
@@ -95,6 +95,28 @@ pub struct SeedParams {
     /// this.
     #[arg(long, env = "HEARTH_LOADTEST_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
+}
+
+// Manual Debug so a `{:?}` of the params (e.g. in an error or a panic) never
+// spills the admin bearer token into logs — same treatment as
+// `handle::SeededToken`.
+impl std::fmt::Debug for SeedParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeedParams")
+            .field("target_host", &self.target_host)
+            .field("realms", &self.realms)
+            .field("users_per_realm", &self.users_per_realm)
+            .field("sessions_frac", &self.sessions_frac)
+            .field("revoked_frac", &self.revoked_frac)
+            .field("seed", &self.seed)
+            .field("seed_out", &self.seed_out)
+            .field("allow_remote_target", &self.allow_remote_target)
+            .field(
+                "admin_token",
+                &self.admin_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Errors from validating [`SeedParams`].
@@ -455,6 +477,16 @@ mod tests {
         assert_eq!(p.admin_token, None);
         let p = parse(&["--admin-token", "secret-bearer"]);
         assert_eq!(p.admin_token.as_deref(), Some("secret-bearer"));
+    }
+
+    /// Regression (HEA-1795): a `{:?}` of the params must never spill the admin
+    /// bearer token — the same redaction contract as `handle::SeededToken`.
+    #[test]
+    fn debug_of_params_redacts_admin_token() {
+        let p = parse(&["--admin-token", "secret-bearer-value"]);
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("secret-bearer-value"));
+        assert!(dbg.contains("<redacted>"));
     }
 
     #[test]

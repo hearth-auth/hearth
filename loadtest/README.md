@@ -68,13 +68,17 @@ long-lived dev server you (or the CLAUDE.md quickstart's manual
 against the same instance. Note the dev-realm is **persistent across restarts**
 when `HEARTH_DEV_DATA_DIR` is set, so restarting alone does not clear it.
 
-Pass the admin token from your first bootstrap to re-bootstrap and attach:
+Pass the admin token from your first bootstrap to re-bootstrap and attach.
+Prefer the environment variable: `make` echoes each expanded recipe line, so a
+token passed via `--admin-token` inside `ARGS` is printed to the terminal (and
+any CI log) and is visible in `ps` while the seed runs. The env var avoids both.
 
 ```bash
 # Grab the token once (first bootstrap returns it; re-bootstrap needs it):
 ADMIN_TOKEN=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap | jq -r '.access_token')
-make seed ARGS="--admin-token $ADMIN_TOKEN --users-per-realm 80 --sessions-frac 0.5 --revoked-frac 0.1"
-# …or export HEARTH_LOADTEST_ADMIN_TOKEN and omit the flag.
+HEARTH_LOADTEST_ADMIN_TOKEN=$ADMIN_TOKEN \
+  make seed ARGS="--users-per-realm 80 --sessions-frac 0.5 --revoked-frac 0.1"
+# --admin-token also works, but lands in the make echo / ps output — dev-only.
 ```
 
 `make loadtest` boots its **own** fresh instance and never needs this. Access
