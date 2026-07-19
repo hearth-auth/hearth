@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`make loadtest` is now a one-command pipeline** — with no `ARGS` it boots a
+  fresh throwaway dev Hearth on loopback, seeds a deterministic corpus, runs the
+  Goose journeys, writes `report.json` + HTML, and tears the server down — no
+  manual bootstrap/seed/attach steps. Tunable via env vars
+  (`MODE`, `USERS`, `RUN_TIME`, `THROTTLE`, `SETTLE`, …; see
+  `loadtest/scripts/run-loadtest.sh`). `make loadtest ARGS="…"` still invokes the
+  binary directly for advanced/attach usage (HEA-1787).
 - **`make loadtest` / `make loadtest-check`** — new load-testing harness crate
   (`hearth-loadtest`, goose-based) for exercising Hearth under concurrent load.
   The crate is excluded from the Cargo workspace so it does not slow the unit

@@ -69,12 +69,21 @@ test:
 clippy:
 	PROTOC=$(PROTOC) cargo clippy --all-targets $(CARGO_FLAGS) -- -D warnings
 
-## Build and run the load-testing harness (hearth-loadtest). This crate is
-## excluded from the workspace (goose is heavy), so it is invoked via its own
-## manifest (`-p` cannot resolve a non-member). Pass goose flags via ARGS,
-## e.g. `make loadtest ARGS="--help"`.
+## Run the WHOLE load-test pipeline with one command: `make loadtest` boots a
+## fresh throwaway dev Hearth on loopback, seeds a deterministic corpus, runs
+## the Goose journeys, writes report.json + HTML, and tears the server down.
+## No manual bootstrap/seed/attach steps. Tune it with env vars (see
+## loadtest/scripts/run-loadtest.sh header), e.g. `make loadtest MODE=ramp`.
+##
+## For advanced/attach usage, pass ARGS to invoke the binary directly instead
+## of the pipeline, e.g. `make loadtest ARGS="run --weight-revoke 0"` or
+## `make loadtest ARGS="--help"` (see loadtest/README.md).
 loadtest:
+ifeq ($(strip $(ARGS)),)
+	PROTOC=$(PROTOC) loadtest/scripts/run-loadtest.sh
+else
 	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- $(ARGS)
+endif
 
 ## Typecheck the excluded loadtest crate so it cannot silently rot out of tree.
 loadtest-check:

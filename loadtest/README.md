@@ -15,10 +15,43 @@ built/run explicitly instead.
 
 ## Building and running
 
+**The one-liner.** With no `ARGS`, `make loadtest` runs the *whole* pipeline —
+it boots a fresh throwaway dev Hearth on loopback, seeds a deterministic corpus,
+runs the Goose journeys, writes `report.json` + HTML into `reports/`, and tears
+the server down. No manual bootstrap / seed / attach steps:
+
 ```bash
-make loadtest              # cargo run --release -p hearth-loadtest -- ...
-make loadtest-check        # cargo check (keeps it from rotting)
-make seed ARGS="..."       # run the seed step (see below)
+make loadtest                          # boot → seed → run → report → teardown
+make loadtest MODE=ramp                # env vars tune it (see below)
+make loadtest USERS=50 RUN_TIME=3m THROTTLE=3
+```
+
+The pipeline lives in [`scripts/run-loadtest.sh`](scripts/run-loadtest.sh); every
+knob is an env var (defaults in brackets):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `PORT` | `8420` | Loopback port for the throwaway server |
+| `MODE` | `steady` | `steady` \| `ramp` \| `soak` |
+| `USERS` | `20` | Concurrent Goose users |
+| `RUN_TIME` | `90s` | Per-run duration |
+| `HATCH_RATE` | `5` | Users spawned per second |
+| `THROTTLE` | `3` | Cap total req/s (stays under dev rate limits) |
+| `USERS_PER_REALM` | `80` | Seeded user records |
+| `SESSIONS_FRAC` | `0.5` | Fraction of users given a live token |
+| `REVOKED_FRAC` | `0.1` | Fraction of live tokens pre-revoked |
+| `SEED` | `1` | Determinism seed |
+| `SETTLE` | `65` | Seconds to wait after seeding so the 100/min admin-write window resets (set `0` to skip) |
+| `EXTRA_RUN_ARGS` | — | Extra flags appended to the `run` subcommand |
+
+**Advanced / attach usage.** Passing `ARGS` bypasses the pipeline and invokes the
+binary directly (for driving an instance you booted/seeded yourself):
+
+```bash
+make loadtest ARGS="run --weight-revoke 0"  # raw binary, no auto boot/seed
+make loadtest ARGS="--help"
+make loadtest-check                          # cargo check (keeps it from rotting)
+make seed ARGS="..."                         # run just the seed step (see below)
 ```
 
 Or directly:
