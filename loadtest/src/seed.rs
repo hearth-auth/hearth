@@ -32,9 +32,10 @@ use crate::params::SeedParams;
 /// Well-known dev-realm admin created by `POST /admin/bootstrap` in `--dev`
 /// mode. These are fixed dev constants baked into the server (not secrets); we
 /// ROPC as this user to mint live tokens because admin-created users have no
-/// password.
-const DEV_ADMIN_EMAIL: &str = "admin@dev.local";
-const DEV_ADMIN_PASSWORD: &str = "HearthDev123!";
+/// password. The load journeys (`crate::scenarios`) reuse them to drive the
+/// issuance and revoke→re-validate flows against the same dev subject.
+pub(crate) const DEV_ADMIN_EMAIL: &str = "admin@dev.local";
+pub(crate) const DEV_ADMIN_PASSWORD: &str = "HearthDev123!";
 
 /// Runs the full seed flow and returns the persisted handle.
 ///

@@ -60,6 +60,39 @@ The dataset shape is echoed to stdout and stored in the seed-handle so every
 report can describe the corpus it ran against. The same `--seed` always
 produces the same emails and (ephemeral, never-persisted) passwords.
 
+## Load run — the five journeys (HEA-1790)
+
+Once an instance is seeded, `run` drives five **closed-loop** Goose journeys
+(not endpoint hammering) against it, drawing real credentials from the
+seed-handle. Weights default to the plan (HEA-1787 §4) and are all overridable.
+
+```bash
+# Attach to the same instance the handle was seeded on (host taken from the handle):
+make loadtest ARGS="run --users 50 --run-time 60s --hatch-rate 5"
+
+# Re-weight the mix (e.g. push issuance harder), or drop a journey with weight 0:
+make loadtest ARGS="run --weight-validate 40 --weight-issuance 40 --weight-revoke 0"
+```
+
+| # | Journey | Weight flag (default) | HTTP calls |
+|---|---|---|---|
+| 1 | Validate | `--weight-validate` (70) | `POST /introspect` on a live token, asserts `active:true` |
+| 2 | Session lookup | `--weight-session` (12) | `GET /userinfo` (CTO-approved Option A proxy — no public get-session route) |
+| 3 | User lookup | `--weight-user` (8) | `GET /admin/users/{id}` with a seeded admin token |
+| 4 | Issuance | `--weight-issuance` (8) | `POST /token` (ROPC password grant) |
+| 5 | Revoke→re-validate | `--weight-revoke` (2) | `POST /token` → `POST /revoke` → `POST /introspect` asserts `active:false` (exercises the 64-shard revoke cache) |
+
+Other run knobs: `--users`, `--run-time`, `--hatch-rate`, and `--throttle N`
+(cap total requests/sec — useful against an instance with per-client token rate
+limits, where an unthrottled run is dominated by `429`s rather than the hot
+path). A weight of `0` drops that journey entirely; at least one journey must be
+weighted.
+
+> **Scope:** run modes (steady/ramp-knee/soak), the JSON/HTML report writers,
+> and the sourced latency budgets are a follow-up (HEA-1791). This step
+> establishes the journeys + weighting; Goose's built-in metrics table is the
+> current output.
+
 ## ⚠️ Security warnings (read before running)
 
 - **Dev / loopback only — enforced at runtime.** The seed step calls
@@ -113,5 +146,7 @@ subjects) is a follow-up; the deterministic per-user credential API
 
 ## Status
 
-Seed step implemented (HEA-1789). Auth-flow, token-validation, session-lookup,
-and RBAC-check Goose scenarios are added in follow-up issues under HEA-1787.
+Seed step implemented (HEA-1789). The five closed-loop Goose journeys +
+configurable weighting are implemented (HEA-1790). Run modes
+(steady/ramp/soak), JSON/HTML reporters, and sourced latency budgets are the
+next step (HEA-1791).

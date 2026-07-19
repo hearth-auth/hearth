@@ -11,6 +11,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`hearth-loadtest`, goose-based) for exercising Hearth under concurrent load.
   The crate is excluded from the Cargo workspace so it does not slow the unit
   test gate; run it explicitly via `make loadtest ARGS="…"` (HEA-1788).
+- **`hearth-loadtest run` — five closed-loop load journeys with configurable
+  weighting** — the harness now drives validate (`POST /introspect`), session
+  lookup (`GET /userinfo`), user lookup (`GET /admin/users/{id}`), issuance
+  (`POST /token`), and revoke→re-validate (`POST /revoke` then `POST /introspect`
+  expecting `active:false`) against a seeded instance. Per-journey weights,
+  `--users`, `--run-time`, `--hatch-rate`, and `--throttle` are all CLI/env
+  configurable; a weight of `0` drops a journey. Run via
+  `make loadtest ARGS="run …"` (HEA-1790).
 
 ### Changed
 - **Expired-session eviction moved off the token-validation read path** — the
