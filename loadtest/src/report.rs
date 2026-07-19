@@ -13,10 +13,13 @@
 //! using the same cumulative-count algorithm Goose reports with, plus p999
 //! which Goose does not surface directly.
 
+use std::collections::HashMap;
+
 use goose::metrics::{GooseRequestMetricTimingData, GooseRequestMetrics};
 use serde::Serialize;
 
 use crate::budget::{self, Budget};
+use crate::latency::LatencyExtremes;
 
 /// Report schema version. Bump on any breaking shape change so a nightly diff
 /// job can refuse to compare across incompatible schemas.
@@ -68,6 +71,15 @@ pub struct JourneyRow {
     pub p99_ms: usize,
     /// p999 response time (ms).
     pub p999_ms: usize,
+    /// Fastest observed request latency (µs), measured by the generator at
+    /// microsecond resolution — Goose's own min rounds sub-ms samples to whole
+    /// ms (a 0.1 ms request reads as `0`). `None` if no sample was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_us: Option<u64>,
+    /// Slowest observed request latency (µs), microsecond resolution. `None` if
+    /// no sample was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_us: Option<u64>,
     /// In-process engine p99 target (µs), if this journey maps to one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_engine_p99_us: Option<u64>,
@@ -256,10 +268,15 @@ pub fn percentile_ms(timing: &GooseRequestMetricTimingData, percent: f32) -> usi
 ///
 /// The metrics map is keyed `"METHOD name"` (e.g. `"POST validate"`); the name
 /// after the first space is the Goose transaction name we set, which maps to a
-/// sourced budget via [`budget::budget_for`]. Rows are sorted by journey name
-/// for stable, diff-friendly output.
+/// sourced budget via [`budget::budget_for`]. `latency` is the generator's own
+/// microsecond min/max keyed by the same journey name (see [`crate::latency`]);
+/// a journey absent from it simply carries `None` min/max. Rows are sorted by
+/// journey name for stable, diff-friendly output.
 #[must_use]
-pub fn journey_rows(requests: &GooseRequestMetrics) -> Vec<JourneyRow> {
+pub fn journey_rows(
+    requests: &GooseRequestMetrics,
+    latency: &HashMap<&'static str, LatencyExtremes>,
+) -> Vec<JourneyRow> {
     let mut rows: Vec<JourneyRow> = requests
         .iter()
         .map(|(key, agg)| {
@@ -268,6 +285,7 @@ pub fn journey_rows(requests: &GooseRequestMetrics) -> Vec<JourneyRow> {
             let p99 = percentile_ms(t, 0.99);
             let budget: Option<Budget> = budget::budget_for(name);
             let pass = budget.map(|b| budget::passes(p99, agg.fail_count, t.counter, b));
+            let extremes = latency.get(name);
             JourneyRow {
                 journey: name.to_string(),
                 method: agg.method.to_string(),
@@ -278,6 +296,8 @@ pub fn journey_rows(requests: &GooseRequestMetrics) -> Vec<JourneyRow> {
                 p95_ms: percentile_ms(t, 0.95),
                 p99_ms: p99,
                 p999_ms: percentile_ms(t, 0.999),
+                min_us: extremes.map(|e| e.min_us),
+                max_us: extremes.map(|e| e.max_us),
                 spec_engine_p99_us: budget.map(|b| b.spec_engine_p99_us),
                 http_budget_p99_us: budget.map(|b| b.http_p99_us),
                 pass,
@@ -384,7 +404,7 @@ mod tests {
         let (k, v) = agg("revoke", GooseMethod::Post, timing(&[(9, 100)]));
         requests.insert(k, v);
 
-        let rows = journey_rows(&requests);
+        let rows = journey_rows(&requests, &HashMap::new());
         assert_eq!(rows.len(), 3);
         // Sorted by name: revoke, session_lookup, validate.
         assert_eq!(rows[0].journey, "revoke");
@@ -409,7 +429,7 @@ mod tests {
         v.success_count = 0;
         v.fail_count = 1000;
         requests.insert(key, v);
-        let rows = journey_rows(&requests);
+        let rows = journey_rows(&requests, &HashMap::new());
         assert_eq!(rows[0].failures, 1000);
         assert!((rows[0].failure_rate - 1.0).abs() < f64::EPSILON);
         assert_eq!(rows[0].pass, Some(false), "all-erroring journey must fail");
@@ -423,9 +443,40 @@ mod tests {
         requests.insert(k, v);
         let (k, v) = agg("issuance", GooseMethod::Post, timing(&[(4, 100)]));
         requests.insert(k, v);
-        let rows = journey_rows(&requests);
+        let rows = journey_rows(&requests, &HashMap::new());
         assert!(overall_pass(&rows));
         assert!(!any_breach(&rows));
+    }
+
+    #[test]
+    fn rows_carry_submillisecond_min_max_from_the_latency_snapshot() {
+        // Regression (HEA-1796 board comment): min/max must be reported at
+        // microsecond resolution, not rounded to Goose's whole-ms grid.
+        let mut requests: GooseRequestMetrics = std::collections::HashMap::new();
+        let (k, v) = agg("validate", GooseMethod::Post, timing(&[(1, 100)]));
+        requests.insert(k, v);
+
+        let mut latency: HashMap<&'static str, LatencyExtremes> = HashMap::new();
+        latency.insert(
+            "validate",
+            LatencyExtremes {
+                min_us: 90, // 0.09 ms — rounds to 0 ms in Goose
+                max_us: 1_450,
+            },
+        );
+
+        let rows = journey_rows(&requests, &latency);
+        assert_eq!(rows[0].journey, "validate");
+        assert_eq!(rows[0].min_us, Some(90));
+        assert_eq!(rows[0].max_us, Some(1_450));
+
+        // A journey with no latency sample carries None, not a bogus 0.
+        let (k, v) = agg("session_lookup", GooseMethod::Get, timing(&[(2, 10)]));
+        requests.insert(k, v);
+        let rows = journey_rows(&requests, &latency);
+        let session = rows.iter().find(|r| r.journey == "session_lookup").unwrap();
+        assert_eq!(session.min_us, None);
+        assert_eq!(session.max_us, None);
     }
 
     /// Minimal [`JourneyRow`] for summary tests: only the fields `summarize`
@@ -441,6 +492,8 @@ mod tests {
             p95_ms: 0,
             p99_ms: 0,
             p999_ms: 0,
+            min_us: None,
+            max_us: None,
             spec_engine_p99_us: None,
             http_budget_p99_us: None,
             pass,

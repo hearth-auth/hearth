@@ -25,11 +25,13 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use goose::goose::GooseResponse;
 use goose::prelude::*;
 
 use crate::handle::SeedHandle;
+use crate::latency;
 
 /// Realm-scoping header every Hearth request carries.
 const REALM_HEADER: &str = "X-Realm-ID";
@@ -173,6 +175,20 @@ fn ctx() -> &'static Arc<LoadContext> {
         .expect("load context must be set before the attack starts")
 }
 
+/// Issues `req` and records its wall-clock latency under `name` at microsecond
+/// resolution ([`crate::latency`]) before returning Goose's response, so the
+/// report can surface a sub-ms min/max that Goose's whole-ms aggregation loses.
+async fn request_timed(
+    user: &mut GooseUser,
+    req: GooseRequest<'_>,
+    name: &str,
+) -> Result<GooseResponse, Box<TransactionError>> {
+    let start = Instant::now();
+    let result = user.request(req).await;
+    latency::record(name, start.elapsed());
+    result
+}
+
 // ===== Journey 1 — Validate (introspect a live token) =====
 
 /// `POST /introspect` on a pre-seeded live token, asserting `active:true`.
@@ -191,7 +207,7 @@ async fn journey_validate(user: &mut GooseUser) -> TransactionResult {
         .set_request_builder(rb)
         .name("validate")
         .build();
-    let goose = user.request(req).await?;
+    let goose = request_timed(user, req, "validate").await?;
     expect_active(user, goose, true, "validate").await
 }
 
@@ -209,7 +225,7 @@ async fn journey_session_lookup(user: &mut GooseUser) -> TransactionResult {
         .set_request_builder(rb)
         .name("session_lookup")
         .build();
-    let goose = user.request(req).await?;
+    let goose = request_timed(user, req, "session_lookup").await?;
     expect_ok(user, goose, "session_lookup").await
 }
 
@@ -228,7 +244,7 @@ async fn journey_user_lookup(user: &mut GooseUser) -> TransactionResult {
         .set_request_builder(rb)
         .name("user_lookup")
         .build();
-    let goose = user.request(req).await?;
+    let goose = request_timed(user, req, "user_lookup").await?;
     expect_ok(user, goose, "user_lookup").await
 }
 
@@ -264,7 +280,7 @@ async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
         .set_request_builder(rb)
         .name("revoke")
         .build();
-    let goose = user.request(req).await?;
+    let goose = request_timed(user, req, "revoke").await?;
     expect_ok(user, goose, "revoke").await?;
 
     // 3. Re-validate — the token must now read `active:false`.
@@ -277,7 +293,7 @@ async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
         .set_request_builder(rb)
         .name("revoke_revalidate")
         .build();
-    let goose = user.request(req).await?;
+    let goose = request_timed(user, req, "revoke_revalidate").await?;
     expect_active(user, goose, false, "revoke_revalidate").await
 }
 
@@ -305,7 +321,7 @@ async fn mint_token(
     let GooseResponse {
         mut request,
         response,
-    } = user.request(req).await?;
+    } = request_timed(user, req, name).await?;
 
     let resp = match response {
         Ok(r) => r,

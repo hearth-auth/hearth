@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`hearth-loadtest` report: microsecond min/max latency** — each `report.json`
+  journey row now carries `min_us` / `max_us`, the fastest and slowest observed
+  request in **microseconds**. The generator times each request itself, so these
+  keep the sub-ms precision Goose's whole-ms aggregation rounds away (a 0.1 ms
+  request reads `100`, not `0`); the `p50/p95/p99/p999_ms` percentiles remain
+  Goose's whole-ms figures. Additive optional fields (omitted when a journey
+  recorded no sample); the committed steady baseline gains them on its next
+  regeneration (HEA-1796).
 - **Runtime-visible signal when rate limiters are disabled** — when
   `security.load_test_unthrottled` resolves to active, the server now exposes a
   `hearth_rate_limiters_disabled{reason="load_test"} 1` Prometheus gauge (absent

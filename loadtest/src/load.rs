@@ -17,6 +17,7 @@
 //! Every mode emits a Goose HTML report per sub-run plus one versioned
 //! machine-readable `report.json` ([`crate::report`]).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use goose::metrics::GooseMetrics;
 use goose::prelude::*;
 
 use crate::handle::SeedHandle;
+use crate::latency::{self, LatencyExtremes};
 use crate::report::{self, LoadReport, RampStep, RunMetadata, SoakBucket, SCHEMA_VERSION};
 use crate::scenarios::{self, ContextError, LoadContext, Weights};
 use crate::seed::{DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD};
@@ -254,22 +256,28 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Runs a single fixed-user attack and returns its metrics. `html` is the Goose
-/// HTML report path for this sub-run.
+/// Runs a single fixed-user attack and returns its metrics plus the generator's
+/// microsecond per-journey latency extremes ([`crate::latency`]). `html` is the
+/// Goose HTML report path for this sub-run.
+///
+/// The latency registry is reset before the attack so a per-step report (ramp /
+/// soak run several attacks) reflects only its own sub-run, and snapshotted
+/// after `execute` returns — at which point no transactions are in flight.
 async fn run_attack(
     params: &LoadParams,
     host: &str,
     weights: &Weights,
     users: usize,
     html: &Path,
-) -> Result<GooseMetrics, LoadError> {
+) -> Result<(GooseMetrics, HashMap<&'static str, LatencyExtremes>), LoadError> {
     let scenario = scenarios::build_scenario(weights)?;
     let config = build_config(params, host.to_string(), users, html);
+    latency::reset();
     let metrics = GooseAttack::initialize_with_config(config)?
         .register_scenario(scenario)
         .execute()
         .await?;
-    Ok(metrics)
+    Ok((metrics, latency::snapshot()))
 }
 
 /// Steady mode: one attack, one HTML, primary percentile table.
@@ -280,7 +288,7 @@ async fn run_steady(
     handle: &SeedHandle,
     report_dir: &Path,
 ) -> Result<LoadReport, LoadError> {
-    let metrics = run_attack(
+    let (metrics, latency) = run_attack(
         params,
         host,
         weights,
@@ -288,7 +296,7 @@ async fn run_steady(
         &report_dir.join("steady.html"),
     )
     .await?;
-    let journeys = report::journey_rows(&metrics.requests);
+    let journeys = report::journey_rows(&metrics.requests, &latency);
     let pass = report::overall_pass(&journeys);
     let summary = report::summarize(&journeys, params.users, requests_per_second(&metrics));
     Ok(LoadReport {
@@ -315,8 +323,8 @@ async fn run_ramp(
     let mut steps: Vec<RampStep> = Vec::new();
     for users in params.ramp_ladder() {
         let html = report_dir.join(format!("ramp-{users}u.html"));
-        let metrics = run_attack(params, host, weights, users, &html).await?;
-        let journeys = report::journey_rows(&metrics.requests);
+        let (metrics, latency) = run_attack(params, host, weights, users, &html).await?;
+        let journeys = report::journey_rows(&metrics.requests, &latency);
         let rps = requests_per_second(&metrics);
         let breached = report::any_breach(&journeys);
         println!("  ramp step: users={users} rps={rps:.1} breached={breached}");
@@ -366,8 +374,8 @@ async fn run_soak(
     let mut last_rps = 0.0;
     for bucket in 0..params.soak_buckets.max(1) {
         let html = report_dir.join(format!("soak-bucket-{bucket}.html"));
-        let metrics = run_attack(params, host, weights, params.users, &html).await?;
-        let journeys = report::journey_rows(&metrics.requests);
+        let (metrics, latency) = run_attack(params, host, weights, params.users, &html).await?;
+        let journeys = report::journey_rows(&metrics.requests, &latency);
         last_rps = requests_per_second(&metrics);
         all_pass &= report::overall_pass(&journeys);
         println!(

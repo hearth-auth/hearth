@@ -219,6 +219,7 @@ incompatible schemas):
 | `summary.ceiling_reason` | Human-readable rationale for the `ceiling` verdict. |
 | `journeys[]` | Per-journey rows (sorted by name for diff-stable output). |
 | `journeys[].{p50,p95,p99,p999}_ms` | Response-time percentiles (whole ms — Goose's granularity). |
+| `journeys[].{min_us,max_us}` | Fastest / slowest observed request, in **microseconds**. The generator times each request itself, so these keep sub-ms precision Goose's whole-ms min/max rounds away (a 0.1 ms request is `100`, not `0`). Omitted for a journey with no recorded sample. |
 | `journeys[].{requests,failures,failure_rate}` | Volume + non-2xx fraction. A journey that is fast-but-erroring is **not** a pass. |
 | `journeys[].spec_engine_p99_us` | The in-process engine p99 target this journey maps to (informational floor). |
 | `journeys[].http_budget_p99_us` | The HTTP p99 budget asserted against = engine target + 1 ms loopback envelope. |
@@ -247,7 +248,9 @@ A pass also requires the journey's failure rate to stay at or below
 
 **Expect `pass:false` for the sub-ms journeys on a normal dev machine.** Goose
 records response times in whole milliseconds, so the smallest non-zero p99 it
-can report is 1 ms; ordinary loopback scheduling jitter puts observed p99 at
+can report is 1 ms (the percentile columns therefore only ever resolve to whole
+ms — for sub-ms extremes read `min_us` / `max_us`, which the generator measures
+at microsecond resolution); ordinary loopback scheduling jitter puts observed p99 at
 2–3 ms, which exceeds the sub-ms `session`/`user`/`validate` budgets even though
 the engine itself is well under target. `issuance` likewise blows its 6 ms
 budget because the HTTP path runs a **real Argon2id** password hash (10–22 ms)
