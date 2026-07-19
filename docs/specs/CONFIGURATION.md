@@ -78,7 +78,7 @@ Embedded storage engine tuning. These control WAL, memtable, and hot tier behavi
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `data_dir` | string | `"./data"` | Directory for WAL files, SSTs, and metadata. Created if it does not exist. |
+| `data_dir` | string | `"./data"` | Directory for WAL files, SSTs, and metadata. Created if it does not exist. In `--dev` mode the effective data directory follows a three-level precedence rule — see [`--dev` mode and `HEARTH_DEV_DATA_DIR`](#--dev-mode-and-hearth_dev_data_dir) below. |
 | `wal_max_size_bytes` | integer | `268435456` (256 MiB) | WAL file rotation threshold. |
 | `memtable_flush_bytes` | integer | `67108864` (64 MiB) | Memtable size threshold before flushing to an SST file. |
 | `hot_tier_capacity` | integer | auto | When set, uses this exact number of hot tier entries. When omitted, auto-sizes from system memory (or `hot_tier_max_memory` if set). |
@@ -94,6 +94,44 @@ storage:
   # Option B: memory budget (triggers auto-sizing, ignored when capacity is set)
   hot_tier_max_memory: 4294967296  # 4 GiB
 ```
+
+#### `--dev` mode and `HEARTH_DEV_DATA_DIR`
+
+When Hearth starts with `--dev` (or `make dev`), the effective `data_dir` is
+resolved by `resolve_dev_data_dir` (`src/config/validate.rs`) using the
+following three-level precedence rule:
+
+1. **`HEARTH_DEV_DATA_DIR` env var** — highest priority. If set, this path is
+   used unconditionally, regardless of any `storage.data_dir` value in the
+   config file. Use this to share a persistent cold-tier directory across dev
+   restarts without committing a path to `hearth.yaml`.
+
+2. **Explicit `storage.data_dir` in config** — if `storage.data_dir` is set to
+   a value other than the compile-time default (`./data`), that path is
+   honoured in dev mode and cold-tier SSTs are persisted there.
+
+3. **Ephemeral temp directory** — fallback when neither of the above applies
+   (bare `make dev` with default config). A temporary directory is created at
+   startup and removed on process exit. Cold-tier data is **not** persisted
+   across restarts in this case, which matches the historical dev-mode
+   behaviour.
+
+```bash
+# Option A: env var override (recommended for repeated tier-miss testing)
+HEARTH_DEV_DATA_DIR=/tmp/hearth-dev-data make dev
+
+# Option B: explicit config (hearth.yaml)
+storage:
+  data_dir: "/tmp/hearth-dev-data"
+
+# Option C: ephemeral (default bare make dev — no SST persistence)
+make dev
+```
+
+> **Note:** Prior to HEA-1805, `--dev` unconditionally blanked `storage.data_dir`
+> in memory, so any `storage.data_dir` setting in `hearth.yaml` was silently
+> ignored. Upgrade to the HEA-1805 build or later to pick up the new precedence
+> behaviour.
 
 ### `cluster`
 
@@ -445,6 +483,7 @@ Global security hardening options.
 | `jwks_rps_limit` | integer | `60` | Maximum JWKS / discovery requests per source IP per second (A-10). Applies to all unauthenticated key-discovery endpoints. Requests beyond this limit receive `429 Too Many Requests`. |
 | `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
 | `slug_cooldown_days` | integer | `30` | Days a slug is held in reserve after its realm or organization is deleted, before it may be reused. |
+| `load_test_unthrottled` | bool | `false` | Load-test escape hatch — disables **all** request-rate limiters when `true`. Requires `--dev` mode **and** every bind address must be loopback; refused otherwise. Never enable in production. See [`security.load_test_unthrottled`](#securityload_test_unthrottled). |
 
 ```yaml
 security:
@@ -650,6 +689,48 @@ security:
     crl_paths:
       - "/etc/hearth/crl/ca.crl"
 ```
+
+---
+
+#### `security.load_test_unthrottled`
+
+Load-test escape hatch that disables all request-rate limiters so a single-node
+throughput or soak test can saturate the `validate_token` hot path instead of
+measuring the rate limiter.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `load_test_unthrottled` | bool | `false` | When `true`, disables ALL request-rate limiters: token endpoint, admin API, export, and the per-IP/per-realm request shaper. Refused at startup unless **both** conditions are met: the server is running in `--dev` mode (`hearth serve --dev`) **and** every bind address (HTTP and gRPC) is loopback (127.0.0.0/8 or ::1). |
+
+> **Security warning:** Never enable on a production or externally-reachable
+> bind. This removes brute-force, credential-stuffing, and abuse protection.
+> The server enforces **two hard safety gates**, not config hints:
+>
+> 1. **`--dev` mode required.** A loopback-bound server behind a reverse proxy
+>    (nginx, Caddy, Cloudflare) is still reachable from the internet. Requiring
+>    `--dev` ensures unthrottled load testing is impossible on any binary
+>    started with a production config.
+> 2. **Every bind must be loopback.** Both the HTTP listener (`server.bind_address`)
+>    and the gRPC listener (`server.grpc_bind_address`, when enabled) must resolve
+>    to 127.0.0.0/8 or ::1. A wildcard (`0.0.0.0` / `::`) is not loopback and
+>    causes the server to refuse the flag and keep all limiters on.
+
+When `load_test_unthrottled` is active the server emits an observable signal so
+operators and dashboards can detect the unthrottled state at runtime:
+
+- **Prometheus gauge**: `hearth_rate_limiters_disabled{reason="load_test"} 1`
+  (absent during normal operation).
+- **Startup banner**: `RATE LIMITERS DISABLED (load test mode)` printed in the
+  server startup panel.
+
+```yaml
+security:
+  load_test_unthrottled: true   # loopback bind only; never in production
+```
+
+> **See also:** `loadtest/README.md` for the full load-test harness, seed
+> pipeline, and `make loadtest` one-command runner that sets this flag
+> automatically.
 
 ---
 
@@ -1572,6 +1653,7 @@ Every field's default value at a glance.
 | `security.ip_reputation` | `action` | `"log"` |
 | `security.ip_reputation.spamhaus` | `refresh_interval_secs` | `86400` (24 h) |
 | `security.grpc` | `reflection_enabled` | `false` (prod), `true` (--dev) |
+| `security` | `load_test_unthrottled` | `false` |
 | `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
 | `security.rate_limiting.login_per_account` | `max_failures` | `5` |
