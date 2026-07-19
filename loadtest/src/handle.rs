@@ -132,13 +132,37 @@ impl SeedHandle {
         let json = self
             .to_json()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)?;
+        write_owner_only(path, &json)?;
         restrict_permissions(path)?;
         Ok(())
     }
 }
 
-/// Sets `0600` on the handle file (owner read/write only). No-op on non-Unix.
+/// Creates (or truncates) the file with `0600` set at open time, so the handle
+/// never exists on disk with umask-default permissions — not even between
+/// create and chmod. On non-Unix this is a plain write; see
+/// [`restrict_permissions`].
+#[cfg(unix)]
+fn write_owner_only(path: &Path, contents: &str) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, contents: &str) -> io::Result<()> {
+    std::fs::write(path, contents)
+}
+
+/// Sets `0600` on the handle file (owner read/write only). `mode(0o600)` at
+/// open time only applies to newly created files, so this fixes up a
+/// pre-existing handle written with looser permissions. No-op on non-Unix.
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -234,6 +258,35 @@ mod tests {
                 mode & 0o777
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (HEA-1794): a pre-existing handle with loose permissions must
+    /// be tightened to `0600` on rewrite — `mode(0o600)` at open time only
+    /// applies to newly created files.
+    #[test]
+    #[cfg(unix)]
+    fn write_to_tightens_a_preexisting_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hearth-loadtest-test-loose-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let path = dir.join("seed-handle.json");
+        std::fs::write(&path, "{}").expect("pre-create");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen perms");
+
+        sample_handle().write_to(&path).expect("rewrite handle");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "rewrite must tighten a loose pre-existing handle, got {:o}",
+            mode & 0o777
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
