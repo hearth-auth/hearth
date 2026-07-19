@@ -132,6 +132,20 @@ impl StorageConfig {
         }
     }
 
+    /// Overrides the hot-tier entry capacity on an already-built config.
+    ///
+    /// `--dev` mode builds storage via [`StorageConfig::dev`], which uses
+    /// [`TieredConfig::default`] (100k entries). For most dev corpora the whole
+    /// working set fits in that hot tier, so every lookup is a hot-tier hit and
+    /// tail latency is corpus-size-independent. Corpus-scale lookup profiles
+    /// (HEA-1800) call this to size the hot tier *below* the working set so a
+    /// known fraction of lookups fall through to the cold/SST tier, exposing the
+    /// real lookup-cost-vs-`n` curve. Production sizes capacity through
+    /// [`StorageConfig::production`] instead.
+    pub fn set_hot_tier_capacity(&mut self, capacity: usize) {
+        self.tiered_config.hot_tier_capacity = capacity;
+    }
+
     /// Creates a test configuration with fast sync and small thresholds.
     #[cfg(test)]
     pub(crate) fn test_config(data_dir: PathBuf) -> Self {
@@ -1404,6 +1418,60 @@ mod tests {
             // Second read should hit hot tier (faster path)
             let val2 = engine.get(&realm, b"cold-0000").expect("hot read");
             assert_eq!(val2, Some(b"cold-value".to_vec()));
+        }
+    }
+
+    // HEA-1800: a corpus-scale load profile sizes the dev hot tier *below* the
+    // working set via `set_hot_tier_capacity` so lookups spill to the cold/SST
+    // tier. The override must take effect (bounded hot tier) while every record
+    // still reads back correctly — the tier miss is a latency event, not a
+    // correctness one.
+    #[test]
+    fn dev_hot_tier_capacity_override_forces_misses_but_stays_correct() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        let mut config = StorageConfig::dev(dir.path().to_path_buf());
+        // Force flushes so records leave the memtable, and cap the hot tier well
+        // below the record count so most reads must miss it.
+        config.memtable_config = MemtableConfig {
+            flush_threshold_bytes: 256,
+        };
+        config.set_hot_tier_capacity(16);
+        assert_eq!(
+            config.tiered_config.hot_tier_capacity, 16,
+            "override must be reflected in the tiered config"
+        );
+
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+        const N: u32 = 500;
+        for i in 0..N {
+            let key = format!("rec-{i:05}");
+            let val = format!("val-{i:05}");
+            engine
+                .put(&realm, key.as_bytes(), val.as_bytes())
+                .expect("put");
+        }
+
+        // The hot tier can never hold more than its capacity, so a corpus this
+        // much larger than the cap guarantees cold/SST misses on most keys.
+        assert!(
+            engine.hot_tier.len() <= 16,
+            "hot tier ({}) must stay within the overridden capacity",
+            engine.hot_tier.len()
+        );
+
+        // Every record still reads back correctly regardless of tier residency.
+        for i in 0..N {
+            let key = format!("rec-{i:05}");
+            let expected = format!("val-{i:05}");
+            let got = engine.get(&realm, key.as_bytes()).expect("get");
+            assert_eq!(
+                got,
+                Some(expected.into_bytes()),
+                "record {i} must survive a hot-tier miss"
+            );
         }
     }
 

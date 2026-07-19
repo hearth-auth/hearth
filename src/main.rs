@@ -793,6 +793,16 @@ async fn run_serve(
         };
         info!(path = %data_path.display(), "using data directory (dev mode)");
         let mut storage_config = StorageConfig::dev(data_path);
+        // Dev mode otherwise uses the default 100k-entry hot tier. An explicit
+        // `storage.hot_tier_capacity` lets a corpus-scale load profile size the
+        // hot tier below the working set so cold/SST tier misses fire (HEA-1800).
+        if let Some(cap) = config.storage.hot_tier_capacity {
+            storage_config.set_hot_tier_capacity(cap);
+            info!(
+                capacity = cap,
+                "hot tier capacity overridden from config (dev mode)"
+            );
+        }
         storage_config.compaction = CompactionConfig {
             enabled: config.storage.compaction.enabled,
             interval_secs: config.storage.compaction.interval_secs,

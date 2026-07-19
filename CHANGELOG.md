@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`--dev` honors `storage.hot_tier_capacity`** — dev mode previously always
+  used the default 100k-entry hot tier and ignored the configured capacity, so
+  the whole working set fit in the hot tier and every lookup was a hot-tier hit.
+  A `--config` that sets `storage.hot_tier_capacity` now sizes the dev hot tier
+  explicitly (logged at startup), letting a corpus-scale load profile size the
+  hot tier *below* the working set so a known fraction of lookups fall through to
+  the cold/SST tier and the real lookup-cost-vs-`n` curve is measurable. Records
+  still read back correctly through a tier miss — it is a latency event, not a
+  correctness one. Production continues to size capacity via
+  `storage.hot_tier_capacity` / auto-sizing as before (HEA-1800).
 - **`hearth-loadtest` report: microsecond min/max latency** — each `report.json`
   journey row now carries `min_us` / `max_us`, the fastest and slowest observed
   request in **microseconds**. The generator times each request itself, so these
