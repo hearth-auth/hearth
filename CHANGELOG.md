@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`--dev` now honors `storage.data_dir`** — dev mode previously ignored the
+  configured `storage.data_dir` and always used an ephemeral temp directory
+  unless `HEARTH_DEV_DATA_DIR` was set, so cold-tier SSTs vanished between runs
+  and the tier-miss load profile required an otherwise-redundant env var. A
+  `--config` that sets a non-default `storage.data_dir` now persists WAL/SSTs
+  there in `--dev`. `HEARTH_DEV_DATA_DIR` still takes precedence, and a bare
+  `--dev` run (default `./data`, no env override) keeps the ephemeral-temp
+  behavior (HEA-1805).
+
 ### Added
 - **`hearth-loadtest` tier-miss run mode + per-tier lookup latency reporting** —
   a new `run --mode tier-miss` profile drives the corpus-scale `lookup_user` hot

@@ -8,7 +8,9 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, SmsTransport, TlsMinVersionYaml, ValidationIssue};
+use hearth::config::{
+    Config, EmailTransport, SmsTransport, StorageSection, TlsMinVersionYaml, ValidationIssue,
+};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -675,6 +677,31 @@ fn loadtest_unthrottle_decision(
     }
 }
 
+/// Resolves the dev-mode on-disk data directory, if one is explicitly
+/// configured (HEA-1805).
+///
+/// Precedence: the `HEARTH_DEV_DATA_DIR` env override wins; otherwise a
+/// non-default `storage.data_dir` from the config file is honored. Returns
+/// `None` when neither is set — signalling the caller to fall back to an
+/// ephemeral temp directory (the historical `--dev` default).
+///
+/// Pure (takes the env value as a parameter, no I/O) so the precedence is
+/// unit-testable. A blank env value is treated as unset. An empty
+/// `config_data_dir` (the programmatic `Config::dev()` default) or one equal
+/// to [`StorageSection::DEFAULT_DATA_DIR`] counts as "not explicitly set" — a
+/// dev instance that leaves `storage.data_dir` at its default keeps the
+/// ephemeral-temp behavior rather than silently persisting to `./data`.
+fn resolve_dev_data_dir(env_override: Option<&str>, config_data_dir: &str) -> Option<PathBuf> {
+    if let Some(dir) = env_override.map(str::trim).filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let config_data_dir = config_data_dir.trim();
+    if !config_data_dir.is_empty() && config_data_dir != StorageSection::DEFAULT_DATA_DIR {
+        return Some(PathBuf::from(config_data_dir));
+    }
+    None
+}
+
 /// Runs the `hearth serve` command.
 #[allow(clippy::too_many_lines)]
 async fn run_serve(
@@ -785,12 +812,17 @@ async fn run_serve(
     let (inner_storage, app_storage_config): (Arc<EmbeddedStorageEngine>, StorageConfig) = if config
         .dev_mode
     {
-        let data_path = if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
-            PathBuf::from(dir)
-        } else {
-            let temp_dir = tempfile::tempdir()?;
-            temp_dir.keep()
-        };
+        // Precedence: HEARTH_DEV_DATA_DIR env override, then a non-default
+        // `storage.data_dir` from config, else an ephemeral temp dir (HEA-1805).
+        let env_override = std::env::var("HEARTH_DEV_DATA_DIR").ok();
+        let data_path =
+            match resolve_dev_data_dir(env_override.as_deref(), &config.storage.data_dir) {
+                Some(dir) => dir,
+                None => {
+                    let temp_dir = tempfile::tempdir()?;
+                    temp_dir.keep()
+                }
+            };
         info!(path = %data_path.display(), "using data directory (dev mode)");
         let mut storage_config = StorageConfig::dev(data_path);
         // Dev mode otherwise uses the default 100k-entry hot tier. An explicit
@@ -1254,11 +1286,12 @@ async fn run_serve(
     // make is_first_run() return false and prevent the setup URL from being
     // logged on a truly fresh instance.
     let data_dir: PathBuf = if config.dev_mode {
-        if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
-            PathBuf::from(dir)
-        } else {
-            std::env::temp_dir().join("hearth-dev-onboarding")
-        }
+        // Same precedence as the storage engine above (HEA-1805) so the setup
+        // token's on-disk marker lives beside the WAL/SSTs; ephemeral temp dir
+        // only when neither env override nor config data_dir is set.
+        let env_override = std::env::var("HEARTH_DEV_DATA_DIR").ok();
+        resolve_dev_data_dir(env_override.as_deref(), &config.storage.data_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("hearth-dev-onboarding"))
     } else {
         PathBuf::from(&config.storage.data_dir)
     };
@@ -4283,6 +4316,52 @@ mod tests {
         assert_eq!(
             loadtest_unthrottle_decision(true, false, "0.0.0.0", Some("0.0.0.0")),
             LoadtestUnthrottle::RefusedNotDev
+        );
+    }
+
+    // ── resolve_dev_data_dir precedence (HEA-1805) ────────────────────────
+
+    #[test]
+    fn dev_data_dir_env_override_wins() {
+        // HEARTH_DEV_DATA_DIR takes precedence over any config data_dir.
+        assert_eq!(
+            resolve_dev_data_dir(Some("/srv/env"), "./data/config"),
+            Some(PathBuf::from("/srv/env"))
+        );
+    }
+
+    #[test]
+    fn dev_data_dir_honors_non_default_config() {
+        // No env override, but config sets a non-default data_dir → honor it.
+        // This is the HEA-1805 bug: previously ignored in --dev, forcing an
+        // otherwise-redundant HEARTH_DEV_DATA_DIR to persist cold-tier SSTs.
+        assert_eq!(
+            resolve_dev_data_dir(None, "./data/tier-miss"),
+            Some(PathBuf::from("./data/tier-miss"))
+        );
+    }
+
+    #[test]
+    fn dev_data_dir_default_config_is_ephemeral() {
+        // Neither env override nor a non-default data_dir → None, so the caller
+        // keeps the historical ephemeral-temp behavior for a bare `--dev` run.
+        assert_eq!(
+            resolve_dev_data_dir(None, StorageSection::DEFAULT_DATA_DIR),
+            None
+        );
+    }
+
+    #[test]
+    fn dev_data_dir_blank_env_falls_through_to_config() {
+        // A blank/whitespace env value is treated as unset, so config wins.
+        assert_eq!(
+            resolve_dev_data_dir(Some("   "), "./data/tier-miss"),
+            Some(PathBuf::from("./data/tier-miss"))
+        );
+        // ...and with a default config that means ephemeral temp.
+        assert_eq!(
+            resolve_dev_data_dir(Some(""), StorageSection::DEFAULT_DATA_DIR),
+            None
         );
     }
 

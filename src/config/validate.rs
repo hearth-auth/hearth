@@ -177,13 +177,18 @@ impl Config {
     }
 
     /// Loads a file in dev mode: parses without validation, applies dev
-    /// settings (`dev_mode = true`, `fsync = false`, empty `data_dir`), then
-    /// validates with the relaxed dev-mode rules.
+    /// settings (`dev_mode = true`, `fsync = false`), then validates with the
+    /// relaxed dev-mode rules.
+    ///
+    /// A configured `storage.data_dir` is preserved so `--dev` can persist the
+    /// WAL/SSTs to a real directory (HEA-1805); the dev-mode wiring in
+    /// `main.rs` decides whether to honor it or fall back to an ephemeral temp
+    /// dir. Historically this was blanked to `String::new()`, which made dev
+    /// mode ignore the config value entirely.
     pub fn from_file_as_dev(path: &Path) -> Result<Self, ConfigError> {
         let mut config = Self::from_file_unchecked(path)?;
         config.dev_mode = true;
         config.storage.fsync = false;
-        config.storage.data_dir = String::new();
         config.validate()?;
         Ok(config)
     }
@@ -1859,6 +1864,28 @@ mod tests {
             transport: SmsTransport::Log,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn from_file_as_dev_preserves_configured_data_dir() {
+        // HEA-1805 regression: `--dev` (from_file_as_dev) previously blanked
+        // storage.data_dir to String::new(), so a configured cold-tier data
+        // directory was silently ignored. It must now survive the dev-mode
+        // transform so main.rs can persist WAL/SSTs to the real directory.
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(
+            f,
+            "storage:\n  data_dir: \"/tmp/hea1805-regression\"\n  hot_tier_capacity: 100000\n"
+        )
+        .expect("write config");
+        let config = Config::from_file_as_dev(f.path()).expect("dev config loads");
+        assert!(config.dev_mode);
+        assert!(!config.storage.fsync, "dev mode disables fsync");
+        assert_eq!(
+            config.storage.data_dir, "/tmp/hea1805-regression",
+            "configured data_dir must be preserved in dev mode"
+        );
     }
 
     #[test]

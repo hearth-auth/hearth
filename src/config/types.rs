@@ -190,8 +190,13 @@ pub struct StorageSection {
 }
 
 impl StorageSection {
+    /// Default on-disk data directory (WAL, SSTs) when `storage.data_dir`
+    /// is not set. Exposed so dev-mode wiring can distinguish an explicit
+    /// override from the default (HEA-1805).
+    pub const DEFAULT_DATA_DIR: &'static str = "./data";
+
     fn default_data_dir() -> String {
-        "./data".to_string()
+        Self::DEFAULT_DATA_DIR.to_string()
     }
 
     const fn default_wal_max_size_bytes() -> u64 {
