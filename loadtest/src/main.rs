@@ -10,10 +10,12 @@
 //! Run via `make loadtest` / `make seed` (see the repo Makefile) or directly:
 //! `cargo run --release -p hearth-loadtest -- seed --help`.
 
+mod budget;
 mod client;
 mod handle;
 mod load;
 mod params;
+mod report;
 mod scenarios;
 mod seed;
 

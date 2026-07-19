@@ -19,6 +19,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--users`, `--run-time`, `--hatch-rate`, and `--throttle` are all CLI/env
   configurable; a weight of `0` drops a journey. Run via
   `make loadtest ARGS="run …"` (HEA-1790).
+- **`hearth-loadtest run` — steady/ramp/soak run modes + sourced budgets +
+  HTML/JSON reporters** — `--mode` selects `steady` (fixed users), `ramp` (walks
+  a user ladder and records the **saturation knee**: the achieved RPS at the
+  first step where a journey's p99 breaches its HTTP budget), or `soak` (long
+  fixed-user run in buckets, surfacing latency drift). Every mode writes a Goose
+  HTML report per sub-run plus a versioned (`"schema": 1`) machine-readable
+  `report.json` to `--report-dir` — run metadata (git SHA, timestamp, dataset
+  params, mode, host), a per-journey p50/p95/p99/p999 table, the knee RPS, and
+  pass/fail against HTTP p99 budgets. Budgets are sourced, not invented: engine
+  targets are cited verbatim from `docs/specs/TESTING.md` and the HTTP budgets
+  add a CTO-approved loopback envelope. A journey passes only when it is both
+  within its latency budget and actually succeeding (failure rate ≤ 5%), so a
+  fast-but-erroring run never reads as a pass (HEA-1791).
 
 ### Changed
 - **Expired-session eviction moved off the token-validation read path** — the
