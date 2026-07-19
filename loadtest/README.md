@@ -201,15 +201,23 @@ flat as the corpus grows** — the counterpart to the high-concurrency rework
 path via ROPC `POST /token` against the large bulk demo corpus, and self-attributes
 every request to a storage tier **by construction**:
 
-- **hot** — a small fixed working set (`--tier-miss-hot-set-size`, default 1000)
+- **hot** — a fixed working set (`--tier-miss-hot-set-size`, default 10000)
   of user indices, hit repeatedly, so they stay resident in the hot tier.
 - **cold** — a uniform draw across the whole corpus (`--tier-miss-corpus-size`).
   With the hot tier sized *below* the corpus (`storage.hot_tier_capacity`, see
   HEA-1800), most cold draws fall through to the cold/SST read path.
 
-The proof is the **hot-vs-cold p99 delta** and its stability across a corpus-size
+The proof is the **hot-vs-cold delta** and its stability across a corpus-size
 sweep (`10000 → 100000 → 1000000`): if lookups are corpus-size independent, both
-per-tier tails stay flat as the corpus grows.
+per-tier percentiles stay flat as the corpus grows.
+
+> **Read the delta at p50/p95, not p99.** Every request pays a full ROPC Argon2id
+> verify, which dwarfs the sub-ms storage lookup, so the storage-tier signal is a
+> small slice of each timing. At the **p99 tail** the hot/cold ordering can even
+> *invert* under Argon2id lock contention when many concurrent users hash the same
+> resident accounts (HEA-1804) — which is why the default hot set is `10000` (keep
+> it comfortably above `--users`). `hot_p50_ms`/`cold_p50_ms` and the p95 pair keep
+> the correct ordering and are the fields to compare across the sweep.
 
 ### 1. Boot a below-working-set instance
 
@@ -256,7 +264,7 @@ done
 ```
 
 Key knobs (all `--tier-miss-*`, env `HEARTH_LOADTEST_TIER_*`): `realm-id` and
-`client-id` (required), `corpus-size` (1M), `hot-set-size` (1000),
+`client-id` (required), `corpus-size` (1M), `hot-set-size` (10000),
 `hot-tier-capacity` (informational — recorded and used to estimate the cold miss
 rate), `email-domain` (`bulk.demo`), `password` (`DemoPassw0rd!`), and
 `weight-hot` / `weight-cold` (50/50; set `--tier-miss-weight-hot 0` for a pure
@@ -270,15 +278,19 @@ every other mode, so existing consumers are unaffected):
 ```jsonc
 "tier_miss": {
   "corpus_size": 1000000,
-  "hot_working_set_size": 1000,
+  "hot_working_set_size": 10000,
   "hot_tier_capacity": 100000,
   "hot_request_fraction": 0.5,       // by construction (weight_hot / total)
   "expected_cold_miss_rate": 0.9,    // 1 - min(1, capacity/corpus); an estimate,
                                      // not a server-observed counter
-  "hot_p99_ms": 2,                   // hot-tier-hit tail
-  "cold_p99_ms": 9,                  // cold/SST-miss tail — the delta is the signal
-  "hot_max_us": 2100,
-  "cold_max_us": 9400
+  "hot_p50_ms": 2,                   // hot-tier-hit  ┐ compare these: the median
+  "cold_p50_ms": 4,                  // cold/SST-miss ┘ delta is the storage signal
+  "hot_p95_ms": 3,                   // p95 keeps the ordering too
+  "cold_p95_ms": 6,
+  "hot_p99_ms": 8,                   // tail — can invert under Argon2id contention;
+  "cold_p99_ms": 7,                  //        do NOT read the tier delta here
+  "hot_max_us": 9100,
+  "cold_max_us": 8400
 }
 ```
 

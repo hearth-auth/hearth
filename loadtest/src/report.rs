@@ -223,8 +223,14 @@ pub fn summarize(rows: &[JourneyRow], achieved_users: usize, achieved_rps: f64) 
 /// corpus-scale proof is the **hot-vs-cold p99 delta**: a hot working set that
 /// stays resident in the size-capped hot tier vs a uniform draw across the whole
 /// corpus that mostly falls through to the cold/SST read path. If lookup latency
-/// is corpus-size independent, `hot_p99_ms` and `cold_p99_ms` stay flat as the
-/// corpus grows across a `10k → 100k → 1M` sweep.
+/// is corpus-size independent, the per-tier percentiles stay flat as the corpus
+/// grows across a `10k → 100k → 1M` sweep.
+///
+/// Read the hot-vs-cold delta at **p50/p95**, not p99: every request pays a full
+/// ROPC Argon2id verify, so the sub-ms storage delta is only a small slice of the
+/// total, and the p99 tail can invert under Argon2id hot-set lock contention when
+/// many concurrent users hash the same small resident set (HEA-1804). p50/p95
+/// keep the correct ordering; the tail is reported for completeness.
 #[derive(Debug, Clone, Serialize)]
 pub struct TierMissReport {
     /// Total addressable corpus the cold draw spanned (`1..=corpus_size`).
@@ -247,8 +253,27 @@ pub struct TierMissReport {
     /// cannot see which tier served a given lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_cold_miss_rate: Option<f64>,
-    /// Hot-tier-hit p99 (ms), from the `lookup_hot` journey. `None` if the hot
+    /// Hot-tier-hit p50 (ms), from the `lookup_hot` journey. `None` if the hot
+    /// journey recorded no requests. Both tiers pay a full ROPC Argon2id verify,
+    /// so the storage-tier delta is clearest at p50/p95 — the tail (p99) can
+    /// invert under Argon2id hot-set contention (HEA-1804); read the delta here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_p50_ms: Option<usize>,
+    /// Cold/SST-miss p50 (ms), from the `lookup_cold` journey. `None` if the
+    /// cold journey recorded no requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_p50_ms: Option<usize>,
+    /// Hot-tier-hit p95 (ms), from the `lookup_hot` journey. `None` if the hot
     /// journey recorded no requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_p95_ms: Option<usize>,
+    /// Cold/SST-miss p95 (ms), from the `lookup_cold` journey. `None` if the
+    /// cold journey recorded no requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_p95_ms: Option<usize>,
+    /// Hot-tier-hit p99 (ms), from the `lookup_hot` journey. `None` if the hot
+    /// journey recorded no requests. See the p50/p95 caveat above: at p99 the
+    /// hot/cold ordering can invert under Argon2id hot-set lock contention.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hot_p99_ms: Option<usize>,
     /// Cold/SST-miss p99 (ms), from the `lookup_cold` journey. `None` if the
@@ -309,6 +334,10 @@ pub fn tier_miss_report(
         hot_request_fraction,
         expected_cold_miss_rate,
         // A journey with no recorded requests reports None rather than a bogus 0.
+        hot_p50_ms: hot.filter(|r| r.requests > 0).map(|r| r.p50_ms),
+        cold_p50_ms: cold.filter(|r| r.requests > 0).map(|r| r.p50_ms),
+        hot_p95_ms: hot.filter(|r| r.requests > 0).map(|r| r.p95_ms),
+        cold_p95_ms: cold.filter(|r| r.requests > 0).map(|r| r.p95_ms),
         hot_p99_ms: hot.filter(|r| r.requests > 0).map(|r| r.p99_ms),
         cold_p99_ms: cold.filter(|r| r.requests > 0).map(|r| r.p99_ms),
         hot_max_us: hot.and_then(|r| r.max_us),
@@ -755,9 +784,10 @@ mod tests {
     }
 
     #[test]
-    fn tier_miss_report_splits_hot_and_cold_p99() {
-        // The corpus-scale proof: hot working set resident (fast p99) vs uniform
-        // cold draw through the SST tier (slow p99). The delta is the signal.
+    fn tier_miss_report_splits_hot_and_cold_percentiles() {
+        // The corpus-scale proof: hot working set resident (fast) vs uniform cold
+        // draw through the SST tier (slow). The per-tier delta is the signal, read
+        // at p50/p95 (the tail can invert under Argon2id contention, HEA-1804).
         let mut requests: GooseRequestMetrics = std::collections::HashMap::new();
         let (k, v) = agg("lookup_hot", GooseMethod::Post, timing(&[(2, 100)]));
         requests.insert(k, v);
@@ -789,6 +819,13 @@ mod tests {
         assert!((tm.hot_request_fraction - 0.5).abs() < f64::EPSILON);
         // 100k resident of 1M → 90% of a uniform cold draw misses.
         assert!((tm.expected_cold_miss_rate.unwrap() - 0.9).abs() < 1e-9);
+        // p50/p95 are the primary read: a single timing bucket per tier makes all
+        // percentiles resolve to that bucket, so the hot < cold ordering holds at
+        // every percentile the report surfaces.
+        assert_eq!(tm.hot_p50_ms, Some(2));
+        assert_eq!(tm.cold_p50_ms, Some(9));
+        assert_eq!(tm.hot_p95_ms, Some(2));
+        assert_eq!(tm.cold_p95_ms, Some(9));
         assert_eq!(tm.hot_p99_ms, Some(2));
         assert_eq!(tm.cold_p99_ms, Some(9));
         assert_eq!(tm.hot_max_us, Some(2_100));
@@ -800,7 +837,11 @@ mod tests {
         let rows = journey_rows(&std::collections::HashMap::new(), &HashMap::new());
         let tm = tier_miss_report(&rows, 10_000, 500, None, 30, 70);
         assert_eq!(tm.expected_cold_miss_rate, None);
-        // No journeys recorded → per-tier p99 is absent, not a bogus 0.
+        // No journeys recorded → every per-tier percentile is absent, not a bogus 0.
+        assert_eq!(tm.hot_p50_ms, None);
+        assert_eq!(tm.cold_p50_ms, None);
+        assert_eq!(tm.hot_p95_ms, None);
+        assert_eq!(tm.cold_p95_ms, None);
         assert_eq!(tm.hot_p99_ms, None);
         assert_eq!(tm.cold_p99_ms, None);
         assert!((tm.hot_request_fraction - 0.3).abs() < f64::EPSILON);

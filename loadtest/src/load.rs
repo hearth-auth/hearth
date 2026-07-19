@@ -200,11 +200,15 @@ pub struct LoadParams {
     pub tier_miss_corpus_size: u64,
 
     /// `tier-miss` mode: size of the resident hot working set. Hot draws span
-    /// `1..=hot_set_size`, hit repeatedly so they stay in the hot tier.
+    /// `1..=hot_set_size`, hit repeatedly so they stay in the hot tier. Defaults
+    /// to `10_000`: a set that is too small concentrates every concurrent ROPC
+    /// user onto the same few accounts, and the Argon2id verify contention on
+    /// those accounts inflates the hot-tier tail above the cold tail (HEA-1804).
+    /// Keep this comfortably above `--users` so hot draws spread across accounts.
     #[arg(
         long,
         env = "HEARTH_LOADTEST_TIER_HOT_SET_SIZE",
-        default_value_t = 1_000
+        default_value_t = 10_000
     )]
     pub tier_miss_hot_set_size: u64,
 
@@ -829,7 +833,7 @@ mod tests {
     fn tier_miss_defaults_and_plan_resolve() {
         let p = parse(&tier_args());
         assert_eq!(p.tier_miss_corpus_size, 1_000_000);
-        assert_eq!(p.tier_miss_hot_set_size, 1_000);
+        assert_eq!(p.tier_miss_hot_set_size, 10_000);
         assert_eq!(p.tier_miss_email_domain, "bulk.demo");
         assert_eq!(p.tier_miss_password, "DemoPassw0rd!");
         let plan = tier_miss_plan(&p).expect("valid tier-miss plan");
