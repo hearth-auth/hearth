@@ -16,6 +16,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   block preserves the prior no-pepper behaviour (HEA-1838).
 
 ### Security
+- **OAuth client-auth failures now return the RFC 6749 `invalid_client` code** —
+  the endpoint-client authentication path (used by `client_credentials`,
+  token-exchange, `/revoke`, and `/introspect`) previously returned a
+  non-registered error body `{"error":"invalid client credentials"}`. It now
+  returns `{"error":"invalid_client"}`, matching the code/refresh arms so strict
+  OAuth clients recognize the failure and keeping the client-auth error code
+  uniform (avoids an enumeration oracle). 401 status is unchanged (HEA-1847).
 - **SCIM PATCH now enforces the per-request operation cap** — a `PATCH`
   to `/scim/v2/Users/{id}` or `/scim/v2/Groups/{id}` whose `Operations` array
   exceeds `MAX_SCIM_OPERATIONS` (1000) is rejected with `413 Payload Too Large`

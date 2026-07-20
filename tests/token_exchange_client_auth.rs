@@ -139,14 +139,14 @@ async fn m2_01_token_exchange_without_client_auth_is_rejected() {
 
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    // The 401 must carry the specific client-authentication error the handler
-    // emits, not merely "some error string". (Note: this token-exchange path
-    // returns the human string "invalid client credentials" rather than the OAuth
-    // `invalid_client` code used elsewhere — asserting the real production value.)
+    // The 401 must carry the RFC 6749 §5.2 registered `invalid_client` code
+    // (HEA-1847). The token-exchange client-auth path previously emitted the
+    // non-registered human string "invalid client credentials"; it now matches
+    // the code/refresh arms so strict OAuth clients recognize the failure.
     assert_eq!(
         json["error"].as_str(),
-        Some("invalid client credentials"),
-        "401 must carry the client-auth failure error; got: {json}"
+        Some("invalid_client"),
+        "401 must carry the RFC 6749 invalid_client code; got: {json}"
     );
 }
 
