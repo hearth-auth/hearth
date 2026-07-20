@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **ROPC runtime path removed from both token endpoints (HEA-1816)** —
+  `grant_type=password` dispatch arms have been deleted from `token_exchange_impl`
+  and `realm_token_exchange` in `src/protocol/http.rs`. Both endpoints now return
+  `400 unsupported_grant_type` for any ROPC request regardless of caller credentials,
+  closing the credential-stuffing and MFA-bypass surface identified in HEA-1816.
+  Two integration tests in `tests/error_codes.rs` assert this rejection on both
+  `/token` and `/realms/{name}/token`. Completes the HEA-1814 guardrail at the
+  runtime layer.
+
 - **ROPC guardrail: `"password"` grant permanently banned from config (HEA-1814)** —
   three unit tests in `src/config/mod.rs` now assert that (a) `VALID_GRANT_TYPES` never
   contains `"password"`, (b) a realm application declaring `grant_types: ["password"]` is

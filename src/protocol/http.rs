@@ -31,7 +31,7 @@ use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::{
-    IdentityEngine, PasswordGrantRequest, StepUpMfaGrantRequest, UpdateRealmRequest,
+    IdentityEngine, StepUpMfaGrantRequest, UpdateRealmRequest,
 };
 use crate::protocol::admin_auth::{
     AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
@@ -1911,12 +1911,12 @@ async fn token_exchange_impl(
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the ROPC password grant and step-up-mfa grant.
+    // Per-IP rate limiting for the step-up-mfa grant.
     // In production traffic goes through a reverse proxy so the real IP
     // arrives via X-Forwarded-For; FALLBACK_PEER is used when ConnectInfo is
     // unavailable (e.g. tower::ServiceExt::oneshot in tests).
     let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
-    if (grant_type == "password" || grant_type == "urn:hearth:params:grant-type:step-up-mfa")
+    if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
         && state
             .identity
             .check_ip_login_rate_limit(&realm_id, &client_ip)
@@ -2094,56 +2094,6 @@ async fn token_exchange_impl(
                         Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
                     )
                         .into_response()
-                }
-                Err(e) => identity_error_to_response(&e).into_response(),
-            }
-        }
-        "password" => {
-            let (Some(email), Some(password)) = (body.username, body.password) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "username and password required for password grant"})),
-                )
-                    .into_response();
-            };
-            let request = PasswordGrantRequest {
-                email,
-                password,
-                scope: body.scope,
-                client_ip: Some(client_ip.clone()),
-                user_agent: headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string),
-            };
-            let realm_str = realm_id.as_uuid().to_string();
-            match state.identity.password_grant_token(&realm_id, &request) {
-                Ok(response) => {
-                    crate::metrics::metrics()
-                        .tokens_issued_total
-                        .with_label_values(&[realm_str.as_str(), "password"])
-                        .inc();
-                    crate::metrics::metrics().active_sessions.inc();
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "access_token": response.access_token(),
-                            "refresh_token": response.refresh_token(),
-                            "token_type": response.token_type,
-                            "expires_in": response.expires_in,
-                        })),
-                    )
-                        .into_response()
-                }
-                Err(
-                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
-                    | crate::identity::IdentityError::RateLimited),
-                ) => {
-                    // Record the failed attempt against the IP for credential failures.
-                    state
-                        .identity
-                        .record_ip_login_attempt(&realm_id, &client_ip);
-                    identity_error_to_response(e).into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -5954,10 +5904,10 @@ async fn realm_token_exchange(
     }
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the ROPC password grant and step-up-mfa grant.
+    // Per-IP rate limiting for the step-up-mfa grant.
     // Real IP arrives via X-Forwarded-For in production; FALLBACK_PEER used in tests.
     let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
-    if (grant_type == "password" || grant_type == "urn:hearth:params:grant-type:step-up-mfa")
+    if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
         && state
             .identity
             .check_ip_login_rate_limit(&realm_id, &client_ip)
@@ -6084,47 +6034,6 @@ async fn realm_token_exchange(
                     Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
                 )
                     .into_response(),
-                Err(e) => identity_error_to_response(&e).into_response(),
-            }
-        }
-        "password" => {
-            let (Some(email), Some(password)) = (body.username, body.password) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "username and password required for password grant"})),
-                )
-                    .into_response();
-            };
-            let request = PasswordGrantRequest {
-                email,
-                password,
-                scope: body.scope,
-                client_ip: Some(client_ip.clone()),
-                user_agent: headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string),
-            };
-            match state.identity.password_grant_token(&realm_id, &request) {
-                Ok(response) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "access_token": response.access_token(),
-                        "refresh_token": response.refresh_token(),
-                        "token_type": response.token_type,
-                        "expires_in": response.expires_in,
-                    })),
-                )
-                    .into_response(),
-                Err(
-                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
-                    | crate::identity::IdentityError::RateLimited),
-                ) => {
-                    state
-                        .identity
-                        .record_ip_login_attempt(&realm_id, &client_ip);
-                    identity_error_to_response(e).into_response()
-                }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }

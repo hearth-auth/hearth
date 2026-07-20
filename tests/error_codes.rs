@@ -259,3 +259,73 @@ async fn token_exchange_unknown_grant_type_returns_error_code() {
         "expected HEARTH_UNSUPPORTED_GRANT_TYPE, got: {body}"
     );
 }
+
+// ─── Scenario 6: ROPC grant_type=password rejected at protocol layer ─────────
+
+/// `grant_type=password` (ROPC, RFC 6749 §4.3) must be rejected by the server
+/// with `unsupported_grant_type` regardless of caller credentials.
+///
+/// Guardrail: verifies that the runtime token path closes the ROPC surface even
+/// when config validation is bypassed (HEA-1816 / HEA-1814).
+#[tokio::test]
+async fn token_exchange_password_grant_returns_unsupported() {
+    let (base, _identity, _shutdown) = start_server().await;
+    let (realm_id, _) = bootstrap(&base).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/token"))
+        .header("X-Realm-ID", &realm_id)
+        .json(&serde_json::json!({
+            "grant_type": "password",
+            "client_id": uuid::Uuid::new_v4().to_string(),
+            "username": "user@example.com",
+            "password": "hunter2"
+        }))
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "ROPC password grant must be rejected"
+    );
+    let body: Value = resp.json().await.expect("parse body");
+    assert_eq!(
+        body["error"].as_str(),
+        Some("unsupported_grant_type"),
+        "expected unsupported_grant_type, got: {body}"
+    );
+}
+
+/// Same ROPC rejection on the realm-scoped token endpoint (`/realms/{name}/token`).
+#[tokio::test]
+async fn realm_token_exchange_password_grant_returns_unsupported() {
+    let (base, _identity, _shutdown) = start_server().await;
+    let _ = bootstrap(&base).await;
+
+    // dev bootstrap always creates a realm named "dev-realm".
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/realms/dev-realm/token"))
+        .json(&serde_json::json!({
+            "grant_type": "password",
+            "client_id": uuid::Uuid::new_v4().to_string(),
+            "username": "user@example.com",
+            "password": "hunter2"
+        }))
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "ROPC password grant must be rejected on realm-scoped endpoint"
+    );
+    let body: Value = resp.json().await.expect("parse body");
+    let error = body["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("unsupported"),
+        "expected unsupported error, got: {body}"
+    );
+}
