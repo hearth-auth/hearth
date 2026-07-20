@@ -64,11 +64,10 @@ realistically-large storage engine, not a toy DB.
 > renders as a bare `Users: 200`, is rewritten to
 > `Load-generator users (concurrency): 200 — resident corpus under test:
 > 1,200,000 seeded accounts`, so the most-prominent number can no longer be
-> mistaken for the seeded population. The same clarification is applied to the
-> report's dedicated **User Metrics** section — whose active-users graph likewise
-> peaks at the `--users` concurrency — which is retitled `Load-generator
-> concurrency (active users)` with a note that the graph is the attack width, not
-> the seeded population.
+> mistaken for the seeded population. Goose's dedicated **User Metrics** section —
+> a flat active-concurrency line that only ever peaks at `--users` and carries no
+> useful signal — is **removed** from the HTML report entirely, so there is no
+> longer a second "users" number to misread.
 - **Fast pipeline smoke:** shrink the corpus with the `CORPUS_*` knobs, e.g.
   `CORPUS_ACME=200 CORPUS_GLOBEX=0 CORPUS_INITECH=0 CORPUS_UMBRELLA=0 make loadtest`.
 
@@ -377,9 +376,17 @@ which is **git-ignored**):
   as a flat `1`. The harness records a per-journey microsecond histogram and
   post-processes each report to rewrite those two tables — Request `Min`/`Max` and
   every percentile column (50/60/70/80/90/95/99/100), per journey and aggregate —
-  at microsecond resolution. All other tables (transactions, scenarios, status
-  codes) and the `Users:` count are Goose's own; `Users:` is the `--users`
-  concurrency the run used (default 50).
+  at microsecond resolution. It also **prunes the panels that carry no useful
+  signal**: the whole **User Metrics** section (a flat active-concurrency line),
+  and the **Scenario Metrics**, **Transaction Metrics**, and **Response Time**
+  *time-series graphs* — the first two just retrace the requests-per-second curve
+  at a constant closed-loop rate, and the last is plotted from Goose's whole-ms
+  samples, so it renders the sub-ms hot path as a flat ~1 ms line that contradicts
+  the microsecond percentile table. What remains is the signal worth reading: the
+  requests-per-second and errors-per-second graphs and every metrics table
+  (requests, responses with the injected µs figures, status codes, transactions,
+  scenarios). The `Users:` count is Goose's own, relabeled to the `--users`
+  load-generator concurrency the run used (default 50).
 
 `report.json` shape (`schema` is [`report::SCHEMA_VERSION`](src/report.rs) —
 bumped on any breaking change so a nightly diff refuses to compare across

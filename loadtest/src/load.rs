@@ -452,10 +452,12 @@ async fn run_attack(
 /// Metrics `Min`/`Max` columns from `latency`, and the Response Time Metrics
 /// percentile table from `percentiles`. Goose measures response times in whole
 /// ms, so without this both tables render Hearth's sub-ms hot path as `1`. Also
-/// relabels both the overview `Users:` line and the dedicated `User Metrics`
-/// section heading (Goose's load-generator concurrency) and, when
-/// `resident_corpus_size` is known, states the seeded population under test so
-/// neither number can be misread as "only N users".
+/// relabels the overview `Users:` line (Goose's load-generator concurrency) and,
+/// when `resident_corpus_size` is known, states the seeded population under test
+/// so the number can't be misread as "only N users"; then prunes the panels the
+/// board flagged as uninformative (the flat User Metrics section and the
+/// whole-ms / redundant time-series graphs) via
+/// [`crate::html::prune_uninformative_panels`].
 /// Best-effort on the read: if Goose wrote no report (e.g. an attack recorded
 /// zero requests) the file is simply absent and there is nothing to fix. A
 /// failed write is a real I/O error and is propagated.
@@ -471,7 +473,7 @@ fn rewrite_html_extremes(
     let rewritten = crate::html::rewrite_request_extremes(&original, latency);
     let rewritten = crate::html::rewrite_response_percentiles(&rewritten, percentiles);
     let rewritten = crate::html::rewrite_users_label(&rewritten, resident_corpus_size);
-    let rewritten = crate::html::rewrite_user_metrics_label(&rewritten, resident_corpus_size);
+    let rewritten = crate::html::prune_uninformative_panels(&rewritten);
     if rewritten != original {
         std::fs::write(html, rewritten).map_err(LoadError::Report)?;
     }

@@ -14,6 +14,12 @@
 //! (found by locating the first `<table>` after the section marker and its
 //! closing `</table>`), so the echarts `<script>` blocks and every other table —
 //! transactions, scenarios, status codes — are left byte-for-byte intact.
+//!
+//! This module also curates *which* panels appear at all
+//! ([`prune_uninformative_panels`]): Goose emits a flat active-concurrency **User
+//! Metrics** section and several time-series graphs that carry no useful signal
+//! for a sub-ms hot path, and those are removed so the report shows only
+//! meaningful data.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -190,53 +196,107 @@ pub fn rewrite_users_label(report: &str, resident_corpus_size: Option<u64>) -> S
         .into_owned()
 }
 
-/// Matches the Goose report's dedicated `<div class="users">` section heading
-/// `<h2>User Metrics</h2>`. Goose plots **load-generator concurrency** here — the
-/// number of active `--users` over the run, whose graph peaks at the configured
-/// concurrency (e.g. 200) — under a heading that reads as the seeded population.
-/// This is the section the board keeps reporting as "still showing 200 users":
-/// the earlier fix only relabeled the top-of-report overview line, not this one.
-/// The capture preserves the opening `<div>` so only the heading is rewritten.
-fn user_metrics_heading_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"(?s)(?P<pre><div class="users">\s*)<h2>User Metrics</h2>"#)
-            .expect("static user-metrics-heading regex is valid")
-    })
+/// Removes the entire `<div class="{div_class}">…</div>` section from the report,
+/// balancing nested `<div>`s so the section's own closing tag is found even
+/// through the echarts `<div class="graph">` it wraps. `<script>…</script>` runs
+/// are skipped whole so a `<div`/`</div>` substring inside echarts option JSON
+/// cannot throw off the depth count. Trailing blank lines left by the removal are
+/// trimmed so the surrounding report stays tidy.
+///
+/// Pure and total: an HTML string without the section is returned unchanged.
+fn remove_section(report: &str, div_class: &str) -> String {
+    let marker = format!(r#"<div class="{div_class}">"#);
+    let Some(start) = report.find(&marker) else {
+        return report.to_string();
+    };
+    let end = match section_end(report, start + marker.len()) {
+        Some(e) => e,
+        None => return report.to_string(),
+    };
+    // Trim the whitespace/newlines the removed block left behind.
+    let tail = report[end..].trim_start_matches([' ', '\t', '\r', '\n']);
+    format!("{}{}", &report[..start], tail)
 }
 
-/// Relabels the Goose `User Metrics` section heading (the `<div class="users">`
-/// block) so its graph — which peaks at the load-generator concurrency
-/// (`--users`) — can no longer be misread as the seeded population, and inserts a
-/// clarifying note. When `resident_corpus_size` is known the seeded-accounts
-/// count is stated alongside (HEA-1788 board follow-up — "the User Metrics
-/// section is still showing 200 users"). The echarts graph itself is untouched:
-/// its concurrency-over-time data is correct.
+/// Removes a single echarts graph identified by its `<div id="{graph_id}">` — the
+/// enclosing `<div class="graph">…</div>` wrapper and its `<script>` — while
+/// leaving that section's metrics table (and every other graph) intact. Used to
+/// drop time-series graphs that carry no useful signal for Hearth's sub-ms hot
+/// path (whole-ms-rounded response-time curve, redundant per-second scenario /
+/// transaction lines) without discarding the tables beside them.
 ///
-/// Pure and total: an HTML string with no such section is returned unchanged.
+/// Pure and total: an HTML string without that graph is returned unchanged.
+fn remove_graph(report: &str, graph_id: &str) -> String {
+    let id_marker = format!(r#"id="{graph_id}""#);
+    let Some(id_pos) = report.find(&id_marker) else {
+        return report.to_string();
+    };
+    // Back up to the enclosing `<div class="graph">` wrapper.
+    let wrapper = r#"<div class="graph">"#;
+    let Some(rel) = report[..id_pos].rfind(wrapper) else {
+        return report.to_string();
+    };
+    let end = match section_end(report, rel + wrapper.len()) {
+        Some(e) => e,
+        None => return report.to_string(),
+    };
+    let tail = report[end..].trim_start_matches([' ', '\t', '\r', '\n']);
+    format!("{}{}", &report[..rel], tail)
+}
+
+/// Given a byte offset just past an opening `<div …>`, returns the offset just
+/// past that div's matching `</div>`, balancing nested divs and skipping
+/// `<script>…</script>` bodies wholesale. `None` if the div is never closed.
+fn section_end(report: &str, after_open: usize) -> Option<usize> {
+    let mut i = after_open;
+    let mut depth = 1usize;
+    while depth > 0 {
+        let rest = report.get(i..)?;
+        if let Some(script) = rest.strip_prefix("<script") {
+            // Jump past the whole script body so its contents never affect depth.
+            let close = script.find("</script>")?;
+            i += "<script".len() + close + "</script>".len();
+        } else if rest.starts_with("</div>") {
+            depth -= 1;
+            i += "</div>".len();
+        } else if rest.starts_with("<div") {
+            depth += 1;
+            i += "<div".len();
+        } else {
+            // Advance one char (respecting UTF-8 boundaries).
+            i += rest.chars().next()?.len_utf8();
+        }
+    }
+    Some(i)
+}
+
+/// Ids of the time-series echarts graphs that carry no useful signal for a sub-ms
+/// hot path and are dropped from every report (HEA-1788 board follow-up — "make
+/// sure the data and graphs we present is actually useful"):
+/// - `graph-avg-response-time` — plotted from Goose's whole-ms samples, so it
+///   renders Hearth's µs latencies as a flat ~1 ms line that contradicts the
+///   microsecond percentile table this module rewrites in.
+/// - `graph-sps` / `graph-tps` — per-second scenario / transaction lines that
+///   just retrace the requests-per-second curve at a constant closed-loop rate.
+const UNINFORMATIVE_GRAPH_IDS: [&str; 3] = ["graph-avg-response-time", "graph-sps", "graph-tps"];
+
+/// Prunes the panels the board flagged as uninformative: the entire
+/// `<div class="users">` **User Metrics** section (a flat active-concurrency line
+/// that only ever peaks at `--users`) and the whole-ms / redundant time-series
+/// graphs in [`UNINFORMATIVE_GRAPH_IDS`]. Every metrics table — requests,
+/// responses (with our injected µs figures), status codes, transactions,
+/// scenarios — and the genuinely useful requests-per-second and errors-per-second
+/// graphs are left intact.
+///
+/// Pure and total: sections/graphs already absent are skipped; a report with none
+/// of them is returned unchanged.
 #[must_use]
-pub fn rewrite_user_metrics_label(report: &str, resident_corpus_size: Option<u64>) -> String {
-    user_metrics_heading_regex()
-        .replace(report, |caps: &Captures| {
-            let pre = &caps["pre"];
-            let note = match resident_corpus_size {
-                Some(size) => format!(
-                    "<p>Active load-generator users (concurrency) over time &mdash; this graph \
-                     peaks at the configured <code>--users</code> value, <strong>not</strong> the \
-                     seeded population. Resident corpus under test: <span>{}</span> seeded \
-                     accounts.</p>",
-                    group_thousands(size),
-                ),
-                None => {
-                    "<p>Active load-generator users (concurrency) over time &mdash; this graph \
-                         peaks at the configured <code>--users</code> value, <strong>not</strong> \
-                         the seeded population.</p>"
-                        .to_string()
-                }
-            };
-            format!("{pre}<h2>Load-generator concurrency (active users)</h2>\n            {note}")
-        })
-        .into_owned()
+pub fn prune_uninformative_panels(report: &str) -> String {
+    let mut out = remove_section(report, "users");
+    for id in UNINFORMATIVE_GRAPH_IDS {
+        out = remove_graph(&out, id);
+    }
+    out
 }
 
 /// Formats an integer with comma thousands separators (e.g. `1200000` →
@@ -591,56 +651,120 @@ mod tests {
         assert_eq!(rewrite_users_label(html, Some(999)), html);
     }
 
-    /// The Goose `User Metrics` section as rendered (heading + echarts graph div).
-    fn user_metrics_section(graph: &str) -> String {
+    /// A Goose echarts graph block as rendered: the `.graph` wrapper, the inner
+    /// `<div id="…"></div>` target (which itself carries a `</div>`), and a
+    /// `<script>` whose option JSON contains a `</div>`-lookalike substring to
+    /// prove the depth balancer skips script bodies.
+    fn graph_block(id: &str) -> String {
         format!(
-            "        <div class=\"users\">\n        <h2>User Metrics</h2>\n            {graph}\n        </div>"
+            r#"<div class="graph">
+                <div id="{id}" style="width: 1000px; height:500px; background: white;"></div>
+                <script type="text/javascript">var o = {{tooltip: "</div>"}};</script>
+            </div>"#
+        )
+    }
+
+    /// The Goose `User Metrics` section as rendered (heading + active-users graph).
+    fn user_metrics_section() -> String {
+        format!(
+            "        <div class=\"users\">\n        <h2>User Metrics</h2>\n            {}\n        </div>",
+            graph_block("graph-active-users"),
         )
     }
 
     #[test]
-    fn user_metrics_heading_relabeled_and_states_corpus() {
-        // Regression (board follow-up): the "User Metrics" section — whose graph
-        // peaks at the --users concurrency — kept reading as "200 users".
-        let graph = r#"<div class="graph"><div id="graph-users"></div><script>var u=[["t",200]];</script></div>"#;
-        let html = user_metrics_section(graph);
-        let out = rewrite_user_metrics_label(&html, Some(1_200_000));
-        // The bare "User Metrics" heading that reads as a seeded population is gone.
-        assert!(
-            !out.contains("<h2>User Metrics</h2>"),
-            "User Metrics heading must be relabeled: {out}"
+    fn user_metrics_section_is_removed_entirely() {
+        // Board follow-up: the User Metrics panel is a flat active-concurrency
+        // line that tells us nothing — drop the whole section, graph and all.
+        let html = format!(
+            "<div class=\"scenarios\"><table>keep me</table></div>\n{}\n<div class=\"errors\">tail</div>",
+            user_metrics_section(),
         );
+        let out = prune_uninformative_panels(&html);
         assert!(
-            out.contains("<h2>Load-generator concurrency (active users)</h2>"),
-            "concurrency relabel missing: {out}"
+            !out.contains(r#"<div class="users">"#),
+            "users section must be gone: {out}"
         );
+        assert!(!out.contains("User Metrics"), "heading must be gone: {out}");
         assert!(
-            out.contains("Resident corpus under test: <span>1,200,000</span> seeded accounts"),
-            "resident corpus not surfaced: {out}"
+            !out.contains("graph-active-users"),
+            "active-users graph must be gone: {out}"
         );
-        // The echarts graph is left byte-for-byte intact.
-        assert!(out.contains(graph), "graph must be untouched: {out}");
+        // Neighbouring sections survive intact.
+        assert!(out.contains("keep me"), "prior section clobbered: {out}");
+        assert!(
+            out.contains(r#"<div class="errors">tail"#),
+            "tail clobbered: {out}"
+        );
     }
 
     #[test]
-    fn user_metrics_heading_relabeled_without_corpus_when_unknown() {
-        let graph = r#"<div class="graph"><div id="graph-users"></div></div>"#;
-        let html = user_metrics_section(graph);
-        let out = rewrite_user_metrics_label(&html, None);
-        assert!(
-            out.contains("<h2>Load-generator concurrency (active users)</h2>"),
-            "concurrency relabel missing: {out}"
+    fn uninformative_time_series_graphs_are_dropped_but_tables_survive() {
+        // The scenarios/transactions/response-time time-series graphs carry no
+        // useful signal for a sub-ms hot path; their tables must remain.
+        let html = format!(
+            r#"<div class="responses">
+            <h2>Response Time Metrics</h2>
+            {avg}
+            <table>responses table</table>
+        </div>
+        <div class="transactions">
+            <h2>Transaction Metrics</h2>
+            {tps}
+            <table>transactions table</table>
+        </div>
+        <div class="scenarios">
+            <h2>Scenario Metrics</h2>
+            {sps}
+            <table>scenarios table</table>
+        </div>"#,
+            avg = graph_block("graph-avg-response-time"),
+            tps = graph_block("graph-tps"),
+            sps = graph_block("graph-sps"),
         );
+        let out = prune_uninformative_panels(&html);
+        for id in ["graph-avg-response-time", "graph-tps", "graph-sps"] {
+            assert!(!out.contains(id), "{id} must be dropped: {out}");
+        }
+        for table in ["responses table", "transactions table", "scenarios table"] {
+            assert!(out.contains(table), "{table} must survive: {out}");
+        }
+        // Section wrappers and their headings are untouched.
         assert!(
-            !out.contains("Resident corpus"),
-            "no corpus clause when size unknown: {out}"
+            out.contains("<h2>Scenario Metrics</h2>"),
+            "heading lost: {out}"
         );
-        assert!(out.contains(graph), "graph must be untouched: {out}");
     }
 
     #[test]
-    fn user_metrics_no_section_returns_input_unchanged() {
-        let html = "<html><body>no user metrics section</body></html>";
-        assert_eq!(rewrite_user_metrics_label(html, Some(999)), html);
+    fn useful_graphs_are_kept() {
+        // The requests-per-second and errors-per-second graphs carry real signal
+        // and must be preserved.
+        let html = format!(
+            "<div class=\"requests\">{rps}<table>t</table></div><div class=\"errors\">{eps}</div>",
+            rps = graph_block("graph-rps"),
+            eps = graph_block("graph-eps"),
+        );
+        let out = prune_uninformative_panels(&html);
+        assert!(out.contains("graph-rps"), "rps graph must be kept: {out}");
+        assert!(out.contains("graph-eps"), "eps graph must be kept: {out}");
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_panels_absent() {
+        let html = "<html><body><div class=\"requests\"><table>t</table></div></body></html>";
+        assert_eq!(prune_uninformative_panels(html), html);
+    }
+
+    #[test]
+    fn section_end_balances_nested_divs_across_scripts() {
+        // A section wrapping a graph (two extra `</div>` plus a script with a
+        // `</div>` lookalike) must close at its own tag, not the inner one.
+        let html = format!(
+            "<div class=\"users\">{}\n</div>TAIL",
+            graph_block("graph-active-users")
+        );
+        let out = remove_section(&html, "users");
+        assert_eq!(out, "TAIL", "did not balance to the section close: {out}");
     }
 }
