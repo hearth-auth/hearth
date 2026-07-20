@@ -275,7 +275,7 @@ fn gate_validate_token_allocs(state: &BenchState) {
     let per_call = total.div_ceil(ALLOC_ROUNDS);
 
     assert!(
-        per_call <= MAX_ALLOCS_PER_CALL,
+        per_call == MAX_ALLOCS_PER_CALL,
         "validate_token averaged {per_call} heap allocations per call \
          (limit: {MAX_ALLOCS_PER_CALL}). \
          A new format!(), clone(), or boxing was added to the hot path. \

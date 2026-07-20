@@ -1028,8 +1028,10 @@ mod oauth_proptests {
                             prop_assert!(
                                 matches!(
                                     result,
-                                    Err(IdentityError::TokenRevoked)
-                                        | Err(IdentityError::SessionNotFound)
+                                    Err(
+                                        IdentityError::TokenRevoked
+                                            | IdentityError::SessionNotFound
+                                    )
                                 ),
                                 "refresh of a revoked-session token must fail with a \
                                  revoked-class error (TokenRevoked/SessionNotFound), \

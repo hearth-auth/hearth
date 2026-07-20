@@ -20,8 +20,8 @@
 //! the source of truth and this module carries a `// A-N: covered by …` marker
 //! rather than a duplicate test. Controls that are specified but **not yet
 //! implemented** (A-1 unified `AbuseGuard` facade, A-51 external attestation)
-//! are `#[ignore]`d with a tracking note — an honest red-skip rather than a
-//! green vacuous pass.
+//! are skipped with a tracking note referencing the issue — an honest red-skip
+//! rather than a green vacuous pass.
 
 mod common;
 

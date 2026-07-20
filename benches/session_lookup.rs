@@ -256,7 +256,7 @@ fn gate_session_lookup_allocs(state: &BenchState) {
     let per_call = total.div_ceil(ALLOC_ROUNDS);
 
     assert!(
-        per_call <= MAX_ALLOCS_PER_CALL,
+        per_call == MAX_ALLOCS_PER_CALL,
         "session_lookup averaged {per_call} heap allocations per call \
          (limit: {MAX_ALLOCS_PER_CALL}). \
          A new format!(), clone(), read-path syscall, or boxing was added to the \

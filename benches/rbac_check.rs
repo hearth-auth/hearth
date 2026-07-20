@@ -260,7 +260,7 @@ fn gate_has_permission_allocs() {
     let per_call = total.div_ceil(ALLOC_ROUNDS);
 
     assert!(
-        per_call <= MAX_ALLOCS_PER_CALL,
+        per_call == MAX_ALLOCS_PER_CALL,
         "hasPermission averaged {per_call} heap allocations per call \
          (limit: {MAX_ALLOCS_PER_CALL}). \
          A new format!(), to_string(), or owned-key construction was added to \

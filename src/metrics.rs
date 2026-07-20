@@ -345,6 +345,16 @@ impl Metrics {
     }
 }
 
+/// Process-global [`Metrics`] singleton backing storage.
+static INSTANCE: OnceLock<Metrics> = OnceLock::new();
+
+/// Returns the process-global [`Metrics`] singleton, initialising it on first call.
+///
+/// Uses [`OnceLock`] (not `lazy_static!`) per the project policy.
+pub fn metrics() -> &'static Metrics {
+    INSTANCE.get_or_init(Metrics::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Metrics;
@@ -372,14 +382,4 @@ mod tests {
             "gauge must read 1 for reason=load_test once marked, got:\n{after}"
         );
     }
-}
-
-/// Process-global [`Metrics`] singleton backing storage.
-static INSTANCE: OnceLock<Metrics> = OnceLock::new();
-
-/// Returns the process-global [`Metrics`] singleton, initialising it on first call.
-///
-/// Uses [`OnceLock`] (not `lazy_static!`) per the project policy.
-pub fn metrics() -> &'static Metrics {
-    INSTANCE.get_or_init(Metrics::new)
 }
