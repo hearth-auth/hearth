@@ -139,9 +139,14 @@ async fn m2_01_token_exchange_without_client_auth_is_rejected() {
 
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(
-        json["error"].as_str().is_some(),
-        "401 response must include an error field; got: {json}"
+    // The 401 must carry the specific client-authentication error the handler
+    // emits, not merely "some error string". (Note: this token-exchange path
+    // returns the human string "invalid client credentials" rather than the OAuth
+    // `invalid_client` code used elsewhere — asserting the real production value.)
+    assert_eq!(
+        json["error"].as_str(),
+        Some("invalid client credentials"),
+        "401 must carry the client-auth failure error; got: {json}"
     );
 }
 
@@ -283,5 +288,24 @@ async fn m2_04_token_exchange_via_basic_auth_succeeds() {
         resp.status(),
         StatusCode::OK,
         "token-exchange with HTTP Basic Auth must succeed"
+    );
+
+    // The issued token must bind the actor to the *Basic-Auth-authenticated* client,
+    // proving the credentials were actually consumed (not just a 200 shell).
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let access_token = json["access_token"]
+        .as_str()
+        .expect("access_token must be present");
+    let parts: Vec<&str> = access_token.splitn(3, '.').collect();
+    assert_eq!(parts.len(), 3);
+    let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("decode claims");
+    let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).expect("parse claims");
+    assert_eq!(
+        claims["act"]["sub"].as_str(),
+        Some(client_id.as_str()),
+        "act.sub must be the Basic-Auth-authenticated client_id"
     );
 }

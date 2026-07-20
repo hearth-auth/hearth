@@ -160,19 +160,43 @@ async fn role_crud_round_trip() {
         .expect("get")
         .into_inner();
     assert_eq!(fetched.id, created.id);
+    // The round-trip must preserve the role's content, not merely its id.
+    assert_eq!(fetched.name, "grpc.editor", "name must round-trip");
+    assert_eq!(
+        fetched.permissions,
+        vec!["docs.view".to_string()],
+        "permissions must round-trip"
+    );
 
-    let _ = ctx
-        .svc
+    ctx.svc
         .delete_role(req(
             &ctx,
             pb::DeleteRoleRequest {
                 realm_id: ctx.realm.as_uuid().to_string(),
-                role_id: created.id,
+                role_id: created.id.clone(),
                 cascade: false,
             },
         ))
         .await
         .expect("delete");
+
+    // After deletion the role must be gone: get_role returns NOT_FOUND.
+    let after = ctx
+        .svc
+        .get_role(req(
+            &ctx,
+            pb::GetRoleRequest {
+                realm_id: ctx.realm.as_uuid().to_string(),
+                role_id: created.id,
+            },
+        ))
+        .await
+        .expect_err("deleted role must not be retrievable");
+    assert_eq!(
+        after.code(),
+        tonic::Code::NotFound,
+        "get_role after delete must be NotFound, got: {after:?}"
+    );
 }
 
 #[tokio::test]
@@ -194,18 +218,36 @@ async fn group_crud_round_trip() {
         .expect("create")
         .into_inner();
     assert_eq!(created.slug, "grpc-group");
+    assert_eq!(created.name, "Grpc Group", "name must round-trip");
 
-    let _ = ctx
-        .svc
+    ctx.svc
         .delete_group(req(
             &ctx,
             pb::DeleteGroupRequest {
+                realm_id: ctx.realm.as_uuid().to_string(),
+                group_id: created.id.clone(),
+            },
+        ))
+        .await
+        .expect("delete");
+
+    // After deletion the group must be gone: get_group returns NOT_FOUND.
+    let after = ctx
+        .svc
+        .get_group(req(
+            &ctx,
+            pb::GetGroupRequest {
                 realm_id: ctx.realm.as_uuid().to_string(),
                 group_id: created.id,
             },
         ))
         .await
-        .expect("delete");
+        .expect_err("deleted group must not be retrievable");
+    assert_eq!(
+        after.code(),
+        tonic::Code::NotFound,
+        "get_group after delete must be NotFound, got: {after:?}"
+    );
 }
 
 #[tokio::test]
@@ -224,12 +266,12 @@ async fn admin_bearer_required_returns_unauthenticated() {
         .list_roles(r)
         .await
         .expect_err("must require bearer");
-    assert!(
-        matches!(
-            status.code(),
-            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
-        ),
-        "unexpected status: {status:?}"
+    // A wholly missing bearer is an authentication failure — the interceptor must
+    // reject it with UNAUTHENTICATED before any permission check runs.
+    assert_eq!(
+        status.code(),
+        tonic::Code::Unauthenticated,
+        "missing bearer must be UNAUTHENTICATED, got: {status:?}"
     );
 }
 

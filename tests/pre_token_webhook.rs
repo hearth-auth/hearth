@@ -699,8 +699,13 @@ async fn webhook_with_empty_hmac_secret_is_rejected_by_update_realm() {
     );
 
     assert!(
-        result.is_err(),
-        "update_realm must reject a webhook config with an empty hmac_secret"
+        matches!(
+            &result,
+            Err(hearth::identity::IdentityError::InvalidInput { reason })
+                if reason.contains("hmac_secret")
+        ),
+        "update_realm must reject a webhook config with an empty hmac_secret via an \
+         InvalidInput error naming hmac_secret, got: {result:?}"
     );
 }
 
