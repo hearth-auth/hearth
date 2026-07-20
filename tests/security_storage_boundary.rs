@@ -28,8 +28,9 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 /// Opens a fresh embedded engine backed by a temp dir. Returns the guard so the
 /// directory outlives the engine (and can be inspected on disk).
 fn open_engine(dir: &std::path::Path) -> Arc<dyn StorageEngine> {
-    Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(dir.to_path_buf())).expect("open engine"))
-        as Arc<dyn StorageEngine>
+    Arc::new(
+        EmbeddedStorageEngine::open(StorageConfig::dev(dir.to_path_buf())).expect("open engine"),
+    ) as Arc<dyn StorageEngine>
 }
 
 /// Recursively collects every regular file's bytes under `dir`.
@@ -106,9 +107,7 @@ fn scan_does_not_leak_across_realms() {
 
     for i in 0..5u8 {
         let key = [b"user:", &[b'0' + i][..]].concat();
-        engine
-            .put(&realm_a, &key, b"a-value")
-            .expect("put realm a");
+        engine.put(&realm_a, &key, b"a-value").expect("put realm a");
     }
     // Realm B has a single, distinct entry in the same key range.
     engine
@@ -147,9 +146,7 @@ fn values_are_not_stored_as_plaintext_on_disk() {
     {
         let engine = open_engine(dir.path());
         let realm = RealmId::generate();
-        engine
-            .put(&realm, b"at-rest-key", plaintext)
-            .expect("put");
+        engine.put(&realm, b"at-rest-key", plaintext).expect("put");
         // Drop the engine so all buffers are flushed to the WAL on disk.
     }
 
@@ -186,7 +183,9 @@ fn encrypted_data_survives_crash_recovery() {
     {
         let engine = open_engine(dir.path());
         assert_eq!(
-            engine.get(&realm, b"durable-key").expect("get after recovery"),
+            engine
+                .get(&realm, b"durable-key")
+                .expect("get after recovery"),
             Some(value.to_vec()),
             "encrypted value must survive crash recovery and decrypt correctly"
         );

@@ -174,7 +174,10 @@ async fn verify_integrity_reports_ok_and_count() {
         .expect("verify_integrity over gRPC transport");
     let out = resp.into_inner();
 
-    assert!(out.ok, "intact hash chain must verify ok over the transport");
+    assert!(
+        out.ok,
+        "intact hash chain must verify ok over the transport"
+    );
     assert!(
         out.broken_at_event_id.is_none(),
         "no broken event id on an intact chain"
