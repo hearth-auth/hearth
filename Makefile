@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality security-gate ci-fast bench-gate cluster-route-check ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -116,8 +116,19 @@ sdk-test:
 
 # ── CI Tiers ──────────────────────────────────────────
 
-## CI fast tier: lint + fmt + proto lint + css freshness + test-quality (every commit).
-ci-fast: fmt clippy proto-lint css-check test-quality
+## Security grep gate: asserts that prohibited OAuth grant types (ROPC "password") are not
+## present in the VALID_GRANT_TYPES constant. Runs before tests so regressions surface at
+## the earliest CI tier. See HEA-1814.
+security-gate:
+	@awk '/^const VALID_GRANT_TYPES/,/^];/' src/config/mod.rs | \
+	  grep -q '"password"' && { \
+	    echo "SECURITY VIOLATION: 'password' (ROPC) found in VALID_GRANT_TYPES in src/config/mod.rs"; \
+	    echo "Remove it — use authorization_code+PKCE or client_credentials instead (HEA-1814)."; \
+	    exit 1; \
+	  } || echo "✓ VALID_GRANT_TYPES: ROPC 'password' grant absent"
+
+## CI fast tier: lint + fmt + proto lint + css freshness + test-quality + security gate (every commit).
+ci-fast: fmt clippy proto-lint css-check test-quality security-gate
 
 ## CI benchmark gate: compile and run hot-path perf threshold gates.
 ##

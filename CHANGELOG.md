@@ -7,7 +7,31 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **ROPC guardrail: `"password"` grant permanently banned from config (HEA-1814)** —
+  three unit tests in `src/config/mod.rs` now assert that (a) `VALID_GRANT_TYPES` never
+  contains `"password"`, (b) a realm application declaring `grant_types: ["password"]` is
+  rejected at config validation time, and (c) the `oauth_clients:` alias is equally
+  gated. A new `make security-gate` grep rule (wired into `ci-fast`) fails immediately if
+  the ROPC grant string reappears in `VALID_GRANT_TYPES`, so the regression surfaces at the
+  earliest CI tier without waiting for tests. The `client_credentials` alternative continues
+  to parse cleanly (verified by a fourth regression test). No ROPC code was present in the
+  committed tree; these guards close the reintroduction path.
+
 ### Added
+
+- **Full-stack demo: session-version logout + group/org claim probe (HEA-1300)** —
+  two new demo components in `examples/full-stack-demo/frontend/src/App.tsx`:
+  `<UserMenu>` adds a **"Sign out everywhere"** button that revokes the stored
+  refresh token via `POST /realms/{realm}/revoke`, clears the in-memory access
+  token, and hard-reloads so all open tabs fall back to `LoginPrompt` on their
+  next silent-refresh cycle. `<ClaimProbe>` wires `useInGroup("demo-team")` /
+  `useInOrg("acme")` to real seeded values: `hearth.yaml` now declares a
+  `demo-team` group and `acme` org under the `default` realm; once
+  `admin@hearth.test` is added to both via the Admin UI the probe lights up
+  `true`. Four new `ClaimProbe` unit tests in `Dashboard.test.tsx` verify the
+  hooks via `MockHearthProvider`.
 
 - **Full-stack demo (HEA-1273–1276, HEA-1309)** — new `examples/full-stack-demo/` showing
   end-to-end Hearth integration: Vite/React SPA with `@hearth/sdk` (zero custom auth code) backed
@@ -118,14 +142,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 ### Changed
 
 - **Demo SPA refactored to use full SDK ergonomics (HEA-1309)** —
-  `examples/react-spa/src/App.tsx` now demonstrates all seven SDK additions:
-  `useUser()` for identity (no manual JWT decoding), `useSession()` for session
-  restore, `<RequireAuth>` and `<Authorized>` for auth gates, `<HearthCallback>`
-  for the OAuth callback route, `useApiClient()` for authenticated fetch, single
-  `createHearth()` facade, and `VITE_REALM` as the one realm env var. Zero custom
-  auth code. Imports come exclusively from `@hearth/sdk`, `react`, and
-  `react-router-dom`. `Dashboard.test.tsx` updated to test `useUser()` integration
-  and `<Authorized role>` via `MockHearthProvider`.
+  `examples/react-spa/src/App.tsx` now demonstrates all SDK additions: `useUser()`
+  for identity (no manual JWT decoding), `useSession()` for session restore,
+  `<RequireAuth>` and `<Authorized>` for auth gates, `<HearthCallback>` for the
+  OAuth callback route, `useApiClient()` for authenticated fetch, single
+  `createHearth()` facade, `VITE_REALM` as the one realm env var, `<UserMenu>`
+  with "Sign out everywhere" RT revocation, and `<ClaimProbe>` wiring
+  `useInGroup` / `useInOrg` to seeded `hearth.yaml` values. Zero custom auth
+  code. `Dashboard.test.tsx` covers all auth gates and the group/org claim probes
+  via `MockHearthProvider`.
 
 ### Security
 

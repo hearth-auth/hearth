@@ -2301,4 +2301,93 @@ storage:
         let err = validate_sms(&config.sms).expect_err("empty region should error");
         assert!(err.to_string().contains("region"), "error: {err}");
     }
+
+    // === Security guardrail: ROPC / password grant MUST be rejected (HEA-1814) ===
+    //
+    // RFC 6749 §4.3 Resource Owner Password Credentials grant is prohibited in
+    // Hearth. These tests are a compile-and-run guardrail: any agent or developer
+    // who re-adds "password" to VALID_GRANT_TYPES will break these tests immediately.
+
+    #[test]
+    fn valid_grant_types_does_not_contain_password_ropc() {
+        // Guardrail: VALID_GRANT_TYPES must never include the ROPC "password" grant.
+        // If this assertion fails, ROPC has been re-introduced — revert immediately.
+        assert!(
+            !VALID_GRANT_TYPES.contains(&"password"),
+            "SECURITY: 'password' (ROPC, RFC 6749 §4.3) must not appear in \
+             VALID_GRANT_TYPES — remove it and use client_credentials or auth-code+PKCE instead"
+        );
+    }
+
+    #[test]
+    fn config_rejects_ropc_password_grant_in_applications() {
+        let yaml = r#"
+oidc:
+  issuer: "https://auth.example.com"
+realms:
+  myrealm:
+    applications:
+      my-app:
+        name: "My App"
+        grant_types:
+          - "password"
+"#;
+        let err = Config::from_yaml_str(yaml)
+            .expect_err("ROPC 'password' grant must be rejected by config validation");
+        let display = format!("{err}");
+        assert!(
+            display.contains("grant_types"),
+            "error must name the grant_types field; got: {display}"
+        );
+        assert!(
+            display.contains("password"),
+            "error must name the rejected grant 'password'; got: {display}"
+        );
+    }
+
+    #[test]
+    fn config_rejects_ropc_password_grant_in_oauth_clients() {
+        let yaml = r#"
+oidc:
+  issuer: "https://auth.example.com"
+realms:
+  myrealm:
+    oauth_clients:
+      my-client:
+        name: "My Client"
+        grant_types:
+          - "password"
+"#;
+        let err = Config::from_yaml_str(yaml)
+            .expect_err("ROPC 'password' grant must be rejected via oauth_clients alias");
+        let display = format!("{err}");
+        assert!(
+            display.contains("grant_types"),
+            "error must name the grant_types field; got: {display}"
+        );
+        assert!(
+            display.contains("password"),
+            "error must name the rejected grant 'password'; got: {display}"
+        );
+    }
+
+    #[test]
+    fn config_accepts_client_credentials_grant() {
+        // Regression guard: the safe alternative to ROPC must still parse cleanly.
+        let yaml = r#"
+oidc:
+  issuer: "https://auth.example.com"
+realms:
+  myrealm:
+    applications:
+      my-service:
+        name: "My Service"
+        grant_types:
+          - "client_credentials"
+        confidential: true
+        client_secret: "a-sufficiently-long-secret-value"
+"#;
+        Config::from_yaml_str(yaml)
+            .expect("client_credentials grant must remain a valid configuration");
+    }
 }
