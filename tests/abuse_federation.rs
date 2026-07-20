@@ -19,6 +19,7 @@ use hearth::identity::federation::saml::response::{
     ValidateParams,
 };
 use hearth::identity::federation::saml::xml::find_element_range;
+use hearth::identity::federation::saml::SamlError;
 use hearth::identity::federation::types::ExternalIdentity;
 use hearth::identity::federation::verify_iss_param;
 use hearth::identity::IdentityError;
@@ -218,16 +219,14 @@ fn a29c_saml_multiple_assertions_rejected() {
             clock_skew_secs: 60,
         },
     );
+    let err = result.expect_err("multiple assertions must be rejected, got Ok");
+    // XSW multi-assertion injection must reject as a Parse error whose reason
+    // names the multiple-assertion condition — not a bare is_err that would
+    // also pass on an unrelated failure.
     assert!(
-        result.is_err(),
-        "multiple assertions must be rejected, got Ok"
-    );
-    let err_msg = result.expect_err("must error").to_string();
-    assert!(
-        err_msg.to_lowercase().contains("multiple")
-            || err_msg.to_lowercase().contains("assert")
-            || err_msg.to_lowercase().contains("parse"),
-        "error must mention multiple assertions: {err_msg}"
+        matches!(&err, IdentityError::Saml(SamlError::Parse { reason })
+            if reason.contains("multiple assertions")),
+        "multi-assertion XSW must reject as SamlError::Parse(multiple assertions), got: {err:?}"
     );
 }
 
@@ -317,5 +316,126 @@ fn a29d_saml_doctype_in_find_element_range_rejected() {
     assert!(
         result.is_err(),
         "DOCTYPE in XML must be rejected by find_element_range"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A-29e — NotOnOrAfter clock-skew boundary + InResponseTo forgery
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `extract_and_validate_assertion` enforces the assertion validity window with
+// `noa.as_micros() <= now - skew` (upper edge *inclusive* of rejection) and the
+// solicited-flow `InResponseTo` binding. These tests pin the exact reject
+// variants at the boundary rather than asserting bare is_err, so an off-by-one
+// (`<` vs `<=`) or a dropped `InResponseTo` check is caught.
+
+/// Parses `xml` and validates the single assertion at the given wall clock,
+/// skew, and expected `InResponseTo`. Returns the raw validation result.
+fn validate_saml_at(
+    xml: &str,
+    now_secs: i64,
+    skew_secs: i64,
+    expected_in_response_to: Option<&'static str>,
+) -> Result<(), IdentityError> {
+    let resp = parse_response(xml.as_bytes()).expect("sample SAML response must parse");
+    extract_and_validate_assertion(
+        &resp,
+        &ValidateParams {
+            sp_entity_id: "https://sp.example",
+            acs_url: "https://sp.example/acs",
+            idp_entity_id: "https://idp.example",
+            expected_in_response_to,
+            now: Timestamp::from_micros(now_secs * 1_000_000),
+            clock_skew_secs: skew_secs,
+        },
+    )
+    .map(|_| ())
+}
+
+/// Sanity: the sample response validates in the middle of its window.
+#[test]
+fn a29e_sample_response_validates_in_window() {
+    let (xml, _) = sample_builder_params();
+    // noa = 1_700_000_300, nb = 1_699_999_990; now = 1_700_000_000 is well inside.
+    validate_saml_at(&xml, 1_700_000_000, 60, None)
+        .expect("assertion inside its validity window must validate");
+}
+
+/// At exactly `NotOnOrAfter + clock_skew` the assertion is expired. The guard
+/// is `noa <= now - skew`, so the upper edge is inclusive of rejection: with
+/// noa = 1_700_000_300 and skew = 60, `now = 1_700_000_360` yields
+/// `now - skew == noa` → reject. This is the case a `<`-instead-of-`<=`
+/// regression would wrongly accept.
+#[test]
+fn a29e_not_on_or_after_at_skew_boundary_expired() {
+    let (xml, _) = sample_builder_params();
+    let res = validate_saml_at(&xml, 1_700_000_360, 60, None);
+    assert!(
+        matches!(res, Err(IdentityError::Saml(SamlError::Expired))),
+        "assertion exactly at NotOnOrAfter+skew must be Expired, got: {res:?}"
+    );
+}
+
+/// One second inside the upper edge (`now - skew < noa`) the assertion is still
+/// valid — proves the window is not over-strict.
+#[test]
+fn a29e_not_on_or_after_just_inside_skew_boundary_ok() {
+    let (xml, _) = sample_builder_params();
+    // now = 1_700_000_359 → now - skew = 1_700_000_299 < noa(1_700_000_300) → valid.
+    validate_saml_at(&xml, 1_700_000_359, 60, None)
+        .expect("assertion one second inside NotOnOrAfter+skew must validate");
+}
+
+/// Solicited flow: a matching `InResponseTo` is accepted.
+#[test]
+fn a29e_in_response_to_match_ok() {
+    let (xml, _) = sample_builder_params();
+    validate_saml_at(&xml, 1_700_000_000, 60, Some("_req1"))
+        .expect("matching InResponseTo must validate");
+}
+
+/// Forged `InResponseTo`: the Response names a request ID we never issued.
+/// Must be rejected as `InvalidAuthnRequest` (not silently accepted).
+#[test]
+fn a29e_in_response_to_forged_rejected() {
+    let (xml, _) = sample_builder_params();
+    let res = validate_saml_at(&xml, 1_700_000_000, 60, Some("_never_issued"));
+    assert!(
+        matches!(
+            res,
+            Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
+        ),
+        "forged InResponseTo must be rejected, got: {res:?}"
+    );
+}
+
+/// Unsolicited Response (no `InResponseTo` element) presented against a pending
+/// solicited request (we expected a specific ID) must be rejected — an
+/// unsolicited assertion cannot satisfy a solicited-only SP flow.
+#[test]
+fn a29e_unsolicited_response_rejected_when_request_expected() {
+    let attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let xml = build_response_xml(&ResponseBuilder {
+        response_id: "_resp1",
+        in_response_to: None,
+        issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        destination: "https://sp.example/acs",
+        issuer: "https://idp.example",
+        audience: "https://sp.example",
+        assertion_id: "_assert1",
+        subject_name_id: "alice@example.com",
+        subject_name_id_format: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+        session_index: "sess1",
+        not_before: Timestamp::from_micros(1_699_999_990 * 1_000_000),
+        not_on_or_after: Timestamp::from_micros(1_700_000_300 * 1_000_000),
+        attributes: &attrs,
+    });
+    let res = validate_saml_at(&xml, 1_700_000_000, 60, Some("_req1"));
+    assert!(
+        matches!(
+            res,
+            Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
+        ),
+        "unsolicited Response must be rejected when a request ID was expected, got: {res:?}"
     );
 }
