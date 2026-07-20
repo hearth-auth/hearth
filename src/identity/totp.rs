@@ -678,27 +678,43 @@ mod tests {
     }
 
     // ===== Scenario B2: Recovery code redemption =====
+    //
+    // `verify_recovery_code` is a pure function: it returns the matched index
+    // but does not mutate the hash slice.  The caller (the engine's
+    // `IdentityEngine::verify_recovery_code`) is responsible for setting
+    // `state.recovery_code_hashes[i] = None` to mark the code used and then
+    // persisting the updated state.  This test exercises that contract by
+    // manually simulating the caller's mark-as-used step, proving:
+    //   (a) a valid code produces `Some(i)`,
+    //   (b) once the slot is nulled (as the engine does), the same code is
+    //       rejected with `None`, and
+    //   (c) a different code whose slot is intact is still accepted.
+    //
+    // The full engine-level redemption path — including rate-limit checks,
+    // state persistence, and audit emission — is covered by the integration
+    // test `tests/mfa.rs::mfa_recovery_code_flow`.
 
     #[test]
     fn recovery_code_redemption_valid_succeeds_reused_rejected() {
         let codes = generate_recovery_codes().expect("generate");
         let config = CredentialConfig::fast_for_testing();
 
-        // Hash all codes
+        // Hash all codes.
         let mut hashes = hash_recovery_codes(&codes, &config).expect("hash");
 
-        // Verify first code succeeds
+        // (a) Verify first code succeeds.
         let idx = verify_recovery_code(&codes[0], &hashes).expect("verify");
         assert_eq!(idx, Some(0), "first code should match index 0");
 
-        // Mark as used (set slot to None)
+        // Simulate the engine caller marking slot 0 as used — this is exactly
+        // `state.recovery_code_hashes[i] = None` in IdentityEngine::verify_recovery_code.
         hashes[0] = None;
 
-        // Same code should now fail
+        // (b) Same code must now be rejected (slot is consumed).
         let idx = verify_recovery_code(&codes[0], &hashes).expect("verify");
         assert!(idx.is_none(), "used code should not match");
 
-        // Different code still works
+        // (c) A different code whose slot is still intact must be accepted.
         let idx = verify_recovery_code(&codes[1], &hashes).expect("verify");
         assert_eq!(idx, Some(1), "second code should still match");
     }
