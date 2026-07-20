@@ -14,7 +14,6 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 #[test]
 fn simulation_crash_during_memtable_flush() {
     let seed = 45u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();
@@ -67,7 +66,6 @@ fn simulation_crash_during_memtable_flush() {
 #[test]
 fn simulation_crash_during_compaction() {
     let seed = 46u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();
@@ -133,7 +131,6 @@ fn simulation_crash_during_compaction() {
 #[test]
 fn simulation_power_loss() {
     let seed = 47u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();

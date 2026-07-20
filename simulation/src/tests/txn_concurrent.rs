@@ -100,7 +100,6 @@ fn make_realm_and_agents(engine: &EmbeddedIdentityEngine) -> (RealmId, AgentId, 
 #[test]
 fn simulation_txn_issue_concurrent_exactly_one_wins() {
     let seed = 70u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (_storage, engine) = open_engine(dir.path());
@@ -171,7 +170,6 @@ fn simulation_txn_issue_concurrent_exactly_one_wins() {
 #[test]
 fn simulation_txn_consume_concurrent_exactly_one_wins() {
     let seed = 71u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let (_storage, engine) = open_engine(dir.path());

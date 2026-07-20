@@ -13,8 +13,6 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 #[test]
 fn simulation_tier_transitions_concurrent() {
     let seed = 48u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();
@@ -81,8 +79,6 @@ fn simulation_tier_transitions_concurrent() {
 #[test]
 fn simulation_crash_during_promotion() {
     let seed = 49u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();

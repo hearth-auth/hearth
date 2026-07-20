@@ -3,8 +3,9 @@
 //! Oracle invariant: after crash recovery, all committed WAL entries survive.
 //! No partial entries appear in the recovered log.
 //!
-//! Seeds are documented per-test for deterministic replay when madsim is
-//! enabled via `RUSTFLAGS='--cfg madsim'` in a future phase.
+//! Tests run on real threads against real temp directories (no madsim). Each
+//! test's `seed` constant is a static diagnostic label echoed in assertion
+//! messages, not a driver of deterministic replay.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -51,8 +52,6 @@ fn make_entry(key: &[u8], value: &[u8]) -> WalEntry {
 #[test]
 fn simulation_crash_mid_write() {
     let seed = 42u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_path = dir.path().join("test.wal");
@@ -117,8 +116,6 @@ fn simulation_crash_mid_write() {
 #[test]
 fn simulation_crash_mid_fsync() {
     let seed = 43u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_path = dir.path().join("test.wal");
@@ -172,8 +169,6 @@ fn simulation_crash_mid_fsync() {
 #[test]
 fn simulation_disk_io_failure() {
     let seed = 44u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_path = dir.path().join("test.wal");
@@ -222,7 +217,6 @@ fn simulation_disk_io_failure() {
 #[test]
 fn simulation_wal_mid_record_truncation() {
     let seed = 45u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_path = dir.path().join("test.wal");
@@ -280,7 +274,6 @@ fn simulation_wal_mid_record_truncation() {
 #[test]
 fn simulation_wal_tail_corruption() {
     let seed = 46u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_path = dir.path().join("test.wal");

@@ -1,8 +1,16 @@
-//! Deterministic simulation tests for Hearth storage and identity engines.
+//! Simulation tests for Hearth storage and identity engines.
 //!
-//! Uses `madsim` for deterministic scheduling and seed-based reproducibility.
-//! Uses `FaultFs` (an implementation of Hearth's [`Fs`] trait) for controlled
-//! I/O fault injection during crash-recovery tests.
+//! These tests run on **real OS threads** (`std::thread`) against **real
+//! temporary directories** (`tempfile`); they do NOT use `madsim` or any
+//! deterministic scheduler. Concurrency interleavings are therefore
+//! nondeterministic across runs. Where a test declares a fixed `seed`, that
+//! value is a static diagnostic label surfaced in assertion messages — it does
+//! not drive scheduling or reproducible replay.
+//!
+//! Controlled I/O timing jitter, when needed, comes from [`FaultFs`] (an
+//! implementation of Hearth's [`Fs`] trait), whose `latency_seed` deterministically
+//! perturbs per-op sleep durations via splitmix64. This is independent of the
+//! per-test `seed` constants.
 //!
 //! # Oracle Traits
 //!

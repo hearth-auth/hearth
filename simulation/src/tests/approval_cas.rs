@@ -119,7 +119,6 @@ fn make_request(agent_id: AgentId) -> CreateApprovalRequestInput {
 #[test]
 fn simulation_approval_cas_create_crash_discards_partial_record() {
     let seed = 60u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut request_ids = Vec::new();
@@ -211,7 +210,6 @@ fn simulation_approval_cas_create_crash_discards_partial_record() {
 #[test]
 fn simulation_approval_cas_transition_crash_leaves_recoverable_state() {
     let seed = 61u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm_id;
@@ -319,7 +317,6 @@ fn simulation_approval_cas_transition_crash_leaves_recoverable_state() {
 #[test]
 fn simulation_approval_webhook_outbox_survives_crash_before_delivery() {
     let seed = 62u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm_id;
@@ -404,7 +401,6 @@ fn simulation_approval_webhook_outbox_survives_crash_before_delivery() {
 #[test]
 fn simulation_approval_cas_concurrent_approve_deny_exactly_one_wins() {
     let seed = 63u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
 
