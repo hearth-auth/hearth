@@ -578,6 +578,46 @@ For a realistic *high-throughput* run the token cap (now disabled) is no longer
 the constraint; spread live tokens across many subjects via the multi-subject
 attach path below for a more representative corpus.
 
+## Measured single-node ceiling (HEA-1812)
+
+The two headline numbers, measured by sweeping `steady` concurrency against the
+large demo corpus and reading `summary.ceiling` / `failure_rate` at each step.
+**These are single-node limits and are hardware-sensitive** — multi-node/Raft
+horizontal scale is a separate axis and is *not* measured here.
+
+| Number | Value | What it means |
+|--------|-------|---------------|
+| **Max comfortable RPS (knee)** | **≈ 1664 RPS @ 500 concurrent users** | Last clean step: **0** request failures; hot-path journeys (`session_lookup` / `user_lookup` / `validate`) p99 = **1 ms**, within budget. |
+| **Failure ceiling (cliff)** | **collapse by 1000 concurrent users** | 100% request failures, every journey pinned at the 30 s client timeout. The cliff sits between 500u (clean) and 1000u (total collapse). |
+
+- **Hardware:** AMD Ryzen 7 7840HS, 16 vCPU, 55 GiB RAM — server **and** the Goose
+  load generator co-resident on one loopback host.
+- **Corpus:** `resident_corpus=300000` seeded users (5 realms; sessions + revoked
+  per realm; `seed=1`).
+- **Why "comfortable" ≠ `pass:true`:** the Argon2id-bound `issuance` / `revoke_mint`
+  journeys breach their 6 ms HTTP budget by design (password-hash cost), so the
+  overall run reports `pass:false` even at the knee while the **hot path stays
+  sub-millisecond**. The knee is defined by the hot-path budget + zero failures,
+  not by the whole-run `pass` flag.
+- **The cliff is abrupt.** There is no clean step between 500u (1664 RPS, 0 fail)
+  and 1000u (100% fail at 30 s timeout); the sweep at 1000/2000/3500/6000 users all
+  collapse identically. Narrowing the exact breaking point (e.g. 600–900u) is a
+  follow-up if a precise cliff RPS is ever required.
+
+Both numbers are also carried in the committed baseline JSON under
+[`single_node_ceiling`](baseline/steady-baseline.json).
+
+**Reproduce:**
+
+```bash
+# Knee — the max comfortable RPS (clean, hot path sub-ms):
+make loadtest MODE=steady USERS=500 RUN_TIME=45s HATCH_RATE=500
+# Cliff — push past the knee until failures dominate:
+make loadtest MODE=steady USERS=1000 RUN_TIME=45s HATCH_RATE=500
+# Unthrottled ceiling attribution (confirms summary.ceiling=server):
+make loadtest MODE=steady USERS=6000 RUN_TIME=60s HATCH_RATE=600
+```
+
 ## ⚠️ Security warnings (read before running)
 
 - **Dev / loopback only — enforced at runtime.** The seed step calls
@@ -641,13 +681,16 @@ subjects) is a follow-up; the deterministic per-user credential API
 has a reference to compare against. It lives outside the git-ignored
 `reports/` directory precisely so it can be tracked.
 
-> **Note (HEA-1796, HEA-1811):** the committed baseline is a `schema:1`,
-> throttled 20-user run. The report schema is now `3` (`2` added the
-> `summary`/ceiling block; `3` adds the server `resources` block) and the
-> pipeline now runs **unthrottled**, so that baseline is stale and the nightly
-> diff refuses to compare across schema versions by design. The canonical
-> current-schema baseline is regenerated from a high-concurrency verification run
-> using the steps below.
+> **Note (HEA-1812):** the committed baseline is now the **500-user knee** run —
+> the max-comfortable point (≈1664 RPS, 0 failures, hot path sub-ms) on the
+> `resident_corpus=300000` demo corpus. It carries the measured single-node
+> knee + failure-ceiling numbers in a top-level `single_node_ceiling` block (see
+> [Measured single-node ceiling](#measured-single-node-ceiling-hea-1812)); the
+> nightly diff ignores that block and unknown keys, comparing `journeys[]`
+> percentiles as before. It is `schema:2`; the runtime schema is now `3` (`3`
+> adds the server `resources` block), and the nightly diff refuses to compare
+> across schema versions by design — re-capture at the current schema with the
+> steps below when an intended perf change moves the numbers.
 
 How it is captured (reproducible — the pipeline sets `load_test_unthrottled`
 itself, so no manual config or settle wait):
