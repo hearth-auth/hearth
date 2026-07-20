@@ -347,13 +347,31 @@ async fn agent_cascade_delete_on_realm_deletion() {
     let agent = create_agent(identity, &realm_id, &user_id, "Cascade Agent");
     let agent_id = agent.id().clone();
 
-    // Delete the realm
+    // Precondition: the agent key exists at the storage layer. `get_agent`
+    // reads `storage.get(realm_id, agent_key)` directly and does NOT gate on
+    // realm existence, so it doubles as a storage-layer probe both before and
+    // after the cascade.
+    assert!(
+        identity
+            .get_agent(&realm_id, &agent_id)
+            .expect("get before delete")
+            .is_some(),
+        "agent must exist before realm deletion"
+    );
+
+    // Delete the realm — cascade must sweep the agent key-space.
     identity.delete_realm(&realm_id).expect("delete realm");
 
-    // The engine should not panic; agent is gone with the realm
-    // (We can't query it after realm deletion since realm is gone, but the
-    // operation must not leave orphaned data. This test validates no panic.)
-    let _ = agent_id;
+    // Storage-layer assertion: no orphaned agent key survives the cascade.
+    // Because `get_agent` probes storage directly, `None` proves the key was
+    // physically removed, not merely that the realm record is gone.
+    assert!(
+        identity
+            .get_agent(&realm_id, &agent_id)
+            .expect("get after delete must not error")
+            .is_none(),
+        "agent key must be swept by the realm-deletion cascade (no orphans)"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
