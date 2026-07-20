@@ -155,11 +155,13 @@ async fn multi_realm_token_isolation() {
     // Token claims store the user ID with prefix ("user_{uuid}")
     assert_eq!(claims.sub, user_a.id().to_string());
 
-    // Token should NOT validate in realm B (different realm namespace)
+    // Token should NOT validate in realm B (different realm namespace).
+    // Must reject as InvalidToken — a generic is_err() would pass even if
+    // the call failed for an unrelated reason (e.g. storage error).
     let result_b = identity.validate_token(realm_b.id(), tokens_a.access_token());
     assert!(
-        result_b.is_err(),
-        "token from realm A should not validate in realm B"
+        matches!(result_b, Err(hearth::identity::IdentityError::InvalidToken)),
+        "token from realm A must be rejected with InvalidToken in realm B, got: {result_b:?}"
     );
 
     // Each realm should have different JWKS keys
@@ -327,8 +329,11 @@ async fn adversarial_realm_id_spoofing() {
         &hearth::identity::SessionContext::default(),
     );
     assert!(
-        session_result.is_err(),
-        "creating session with forged realm should fail"
+        matches!(
+            session_result,
+            Err(hearth::identity::IdentityError::RealmNotFound)
+        ),
+        "create_session with forged realm must return RealmNotFound, got: {session_result:?}"
     );
 
     // Cannot issue tokens via forged realm
@@ -340,9 +345,17 @@ async fn adversarial_realm_id_spoofing() {
         )
         .expect("real session");
     let token_result = identity.issue_tokens(&forged_realm, user.id(), fake_session.id());
+    // issue_tokens looks up the user under the forged realm and finds nothing,
+    // returning UserNotFound (the engine does not check realm existence first).
+    // Either UserNotFound or RealmNotFound is a valid rejection; pinning to
+    // the observed variant prevents a regression where the call succeeds.
     assert!(
-        token_result.is_err(),
-        "issuing tokens with forged realm should fail"
+        matches!(
+            token_result,
+            Err(hearth::identity::IdentityError::UserNotFound
+                | hearth::identity::IdentityError::RealmNotFound)
+        ),
+        "issue_tokens with forged realm must be rejected, got: {token_result:?}"
     );
 }
 

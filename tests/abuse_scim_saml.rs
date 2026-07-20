@@ -66,21 +66,12 @@ fn a35b_oversized_saml_xml_rejected() {
         </samlp:Response>"#
     );
     let result = parse_response(xml.as_bytes());
-    assert!(
-        result.is_err(),
-        "oversized SAML XML must be rejected, got Ok"
-    );
-    let err = result.expect_err("result must be Err for oversized SAML XML");
+    let err = result.expect_err("oversized SAML XML must be rejected, got Ok");
     // The event-cap trip is a *parse* rejection, never a semantic variant that
     // might mask the cap regressing into unbounded expansion.
     assert!(
         matches!(err, IdentityError::Saml(SamlError::Parse { .. })),
         "oversized SAML XML must reject as SamlError::Parse, got: {err:?}"
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("exceed") || msg.contains("limit") || msg.contains("parse"),
-        "error must mention the limit: {msg}"
     );
 }
 

@@ -303,11 +303,15 @@ async fn invitation_e2e_flow() {
         .expect("membership should exist");
     assert_eq!(m.role(), OrganizationRole::Member);
 
-    // 6. Verify token can't be reused
+    // 6. Verify token can't be reused — must fail with InvitationInvalid (same
+    // opaque error as an entirely fake token to prevent replay enumeration).
     let reuse_result = identity.accept_invitation(&realm_id, &token);
     assert!(
-        reuse_result.is_err(),
-        "token should not be reusable (already accepted)"
+        matches!(
+            reuse_result,
+            Err(hearth::identity::IdentityError::InvitationInvalid)
+        ),
+        "already-used token must reject with InvitationInvalid, got: {reuse_result:?}"
     );
 }
 

@@ -313,9 +313,12 @@ fn a29d_saml_doctype_in_find_element_range_rejected() {
         "Assertion",
         None,
     );
+    // Must reject as SamlError::Parse — a bare is_err() would pass even if
+    // XXE was somehow silently ignored without returning an error.
+    let err = result.expect_err("DOCTYPE in XML must be rejected by find_element_range");
     assert!(
-        result.is_err(),
-        "DOCTYPE in XML must be rejected by find_element_range"
+        matches!(err, IdentityError::Saml(SamlError::Parse { .. })),
+        "DOCTYPE rejection must be SamlError::Parse, got: {err:?}"
     );
 }
 
