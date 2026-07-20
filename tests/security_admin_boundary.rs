@@ -18,6 +18,7 @@
 //! *coarse* gross-oracle guard (generous ratio bound) to catch a regression
 //! that short-circuits auth work on a miss — it is intentionally loose, not a
 //! constant-time proof.
+#![allow(clippy::unwrap_used)] // test-only request builders, mirrors tests/abuse_phase0.rs
 
 mod common;
 

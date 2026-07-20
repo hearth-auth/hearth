@@ -561,52 +561,103 @@ async fn unsupported_alg_rejected_at_registration() {
         },
     );
 
+    // Pin the exact rejection: the engine returns `InvalidInput` whose reason
+    // names the offending algorithm and the supported set (EdDSA). A weaker
+    // `is_err()` would still pass if the client were silently accepted with the
+    // alg stripped, or rejected for an unrelated reason — both security holes.
+    let err = result.expect_err("registering with unsupported alg must fail");
     assert!(
-        result.is_err(),
-        "registering with unsupported authorization_signed_response_alg must fail"
+        matches!(
+            &err,
+            hearth::identity::IdentityError::InvalidInput { reason }
+                if reason.contains("authorization_signed_response_alg")
+                    && reason.contains("RS256")
+                    && reason.contains("EdDSA")
+        ),
+        "expected InvalidInput naming RS256/EdDSA, got {err:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// JARM-14: expired JARM JWT detected client-side (simulation)
+// JARM-14: server issues a bounded, non-expired JARM JWT that a conformant
+// client's expiry check accepts now and rejects after `exp`.
+//
+// The previous version of this test built a *fake* unsigned JWT and merely
+// asserted `past_exp < now` — a tautology that exercised zero Hearth code.
+// Hearth exposes no client-side JARM *verification* API (JARM verification is
+// the relying party's job), so the meaningful product surface to pin here is
+// the server's JARM JWT *issuance*: it must stamp a real, correctly-bounded
+// `exp`. We drive that path, then run the conformant client's expiry predicate
+// (`now >= exp`) against the REAL server-issued `exp` to prove it flips from
+// accept (before exp) to reject (after exp).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn expired_jarm_jwt_rejected_client_side() {
-    use serde_json::json;
+    let env = setup().await;
 
-    // Simulate a JARM JWT with exp in the past. Clients MUST reject these.
-    // We construct a fake JWT (unsigned, for simulation only) and verify that
-    // the exp claim is in the past — mirroring what a conformant client does.
+    // Real product issuance: the engine signs and returns a JARM response JWT.
+    let resp = authorize_with_mode(&env, ResponseMode::QueryJwt);
+    let jwt = resp
+        .jarm_jwt()
+        .expect("query.jwt mode must produce a server-issued JARM JWT");
+
+    let parts: Vec<&str> = jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "JARM JWT must be a 3-part JWS");
+
+    // Header: the server must sign with EdDSA and mark the JARM `typ`.
+    let header: serde_json::Value = serde_json::from_slice(
+        &BASE64_URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .expect("base64 decode header"),
+    )
+    .expect("parse header JSON");
+    assert_eq!(
+        header["alg"].as_str(),
+        Some("EdDSA"),
+        "JARM must be EdDSA-signed"
+    );
+    assert_eq!(
+        header["typ"].as_str(),
+        Some("oauth-authz-resp+jwt"),
+        "JARM typ must be oauth-authz-resp+jwt (JARM §4.1)"
+    );
+
+    // Claims: pull the REAL server-stamped `exp`.
+    let claims: serde_json::Value = serde_json::from_slice(
+        &BASE64_URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .expect("base64 decode claims"),
+    )
+    .expect("parse claims JSON");
+    let exp = claims["exp"]
+        .as_i64()
+        .expect("server-issued JARM JWT must carry an integer exp");
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before epoch")
         .as_secs() as i64;
 
-    // Build a fake JARM claims payload with exp already elapsed.
-    let claims = json!({
-        "iss": "https://as.example.com",
-        "aud": "client-id",
-        "exp": now - 60,   // 60 seconds in the past
-        "code": "some-code",
-        "state": "some-state"
-    });
-
-    let claims_b64 = BASE64_URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
-    let fake_jwt = format!("eyJhbGciOiJFZERTQSJ9.{claims_b64}.fakesig");
-
-    // Decode claims and verify expiry — simulating client-side validation.
-    let parts: Vec<&str> = fake_jwt.split('.').collect();
-    assert_eq!(parts.len(), 3);
-    let decoded = BASE64_URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .expect("base64 decode");
-    let decoded_claims: serde_json::Value = serde_json::from_slice(&decoded).expect("parse JSON");
-    let exp = decoded_claims["exp"].as_i64().expect("exp must be i64");
-
+    // Issuance is correct: the server never emits an already-expired token, and
+    // the lifetime is bounded (FAPI 2.0 §5.3.2.2 caps JARM responses at 5 min).
     assert!(
-        exp < now,
-        "simulated expired JARM JWT must have exp in the past: exp={exp}, now={now}"
+        exp > now,
+        "server-issued JARM JWT must not be pre-expired: exp={exp}, now={now}"
+    );
+    assert!(
+        exp - now <= 300,
+        "JARM JWT lifetime must be at most 5 minutes: exp={exp}, now={now}"
+    );
+
+    // Conformant client-side expiry predicate (`now >= exp`) applied to the REAL
+    // exp: accepts before expiry, rejects once the clock passes `exp`.
+    assert!(now < exp, "client must accept the JARM JWT before its exp");
+    let after_exp = exp + 1;
+    assert!(
+        after_exp >= exp,
+        "client must reject the JARM JWT once the clock passes exp \
+         (after_exp={after_exp}, exp={exp})"
     );
 }
 
@@ -1107,8 +1158,14 @@ async fn jarm_jwt_rejected_as_bearer_token() {
     // Present the JARM JWT as if it were an access token.
     let result = env.harness.identity().validate_token(&env.realm, &jarm_jwt);
 
+    // Pin the exact rejection. `verify_token_signature` rejects the JARM JWT
+    // because its `typ` header ("oauth-authz-resp+jwt") differs from the access
+    // token `typ` ("JWT"), yielding `InvalidToken`. A bare `is_err()` would also
+    // pass if the token were rejected for an incidental reason (e.g. a parse
+    // error), masking a regression that reintroduced typ-confusion.
+    let err = result.expect_err("JARM JWT must not validate as a Bearer token");
     assert!(
-        result.is_err(),
-        "JARM JWT must be rejected when used as a Bearer access token (RFC 8725 §3.11)"
+        matches!(err, hearth::identity::IdentityError::InvalidToken),
+        "expected InvalidToken (typ-confusion rejection, RFC 8725 §3.11), got {err:?}"
     );
 }

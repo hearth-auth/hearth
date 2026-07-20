@@ -30,7 +30,7 @@ use hearth::rbac::{AssignRoleRequest, Scope as RbacScope, Subject};
 use tonic::{Code, Request};
 
 struct GrpcCtx {
-    _h: common::TestHarness,
+    h: common::TestHarness,
     realm: RealmId,
     token: String,
     svc: AuditSvc,
@@ -91,7 +91,7 @@ async fn grpc_ctx_with_admin(with_admin: bool) -> GrpcCtx {
     let svc = AuditSvc::new(state);
 
     GrpcCtx {
-        _h: h,
+        h,
         realm,
         token,
         svc,
@@ -101,7 +101,7 @@ async fn grpc_ctx_with_admin(with_admin: bool) -> GrpcCtx {
 /// Appends `n` audit events to the context realm so `ListEvents` has data.
 fn seed_events(ctx: &GrpcCtx, actions: &[AuditAction]) {
     for (i, action) in actions.iter().enumerate() {
-        ctx._h
+        ctx.h
             .audit()
             .append(&CreateAuditEvent {
                 realm_id: ctx.realm.clone(),
