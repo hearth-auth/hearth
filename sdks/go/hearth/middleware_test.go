@@ -99,11 +99,17 @@ func TestMiddlewareDecisionAllowed(t *testing.T) {
 }
 
 func TestMiddlewareDecisionDenied(t *testing.T) {
+	// The token carries no permissions claim, so a 403 alone does not prove the
+	// decision path ran — embedded fail-closed would also 403. Count the calls
+	// to /oauth/authorize to prove the middleware actually consulted the
+	// decision endpoint and denied on its Allowed=false verdict.
+	decisionCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/oauth/authorize" {
+		if r.URL.Path != "/oauth/authorize" || r.Method != "POST" {
 			http.NotFound(w, r)
 			return
 		}
+		decisionCalls++
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(CheckPermissionResponse{Allowed: false})
 	}))
@@ -114,6 +120,9 @@ func TestMiddlewareDecisionDenied(t *testing.T) {
 	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeDecision}, token)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+	if decisionCalls != 1 {
+		t.Fatalf("decision endpoint must be consulted exactly once, got %d calls", decisionCalls)
 	}
 }
 

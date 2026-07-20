@@ -465,10 +465,16 @@ func TestVerifyToken(t *testing.T) {
 		t.Fatal("expiry is zero")
 	}
 
-	// 4. A tampered token must be rejected with a typed error.
+	// 4. A tampered token must be rejected with a typed error and nil claims.
 	badToken := tokens.AccessToken[:len(tokens.AccessToken)-4] + "XXXX"
-	_, err = srv.client.VerifyToken(ctx, badToken)
+	badClaims, err := srv.client.VerifyToken(ctx, badToken)
 	if err == nil {
 		t.Fatal("expected error for tampered token")
+	}
+	if _, ok := err.(*hearth.TokenInvalidError); !ok {
+		t.Fatalf("expected *hearth.TokenInvalidError for tampered token, got %T: %v", err, err)
+	}
+	if badClaims != nil {
+		t.Fatalf("expected nil claims for tampered token, got %+v", badClaims)
 	}
 }
