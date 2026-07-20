@@ -948,12 +948,15 @@ async fn token_enumeration_resistance() {
     );
 }
 
-/// Adversarial: members cannot escalate their own role or assign roles
-/// they don't have. (The engine doesn't enforce caller roles — that's the
-/// authorization layer's job — but we verify that role changes go through
-/// properly and last-owner protection cannot be bypassed.)
+/// Adversarial: last-owner protection cannot be bypassed via role changes.
+///
+/// The identity engine deliberately does NOT enforce caller roles (that is the
+/// authorization layer's job), so this test does not — and must not claim to —
+/// cover privilege escalation. It pins the one org invariant the engine *does*
+/// enforce: the sole `Owner` cannot be demoted to `Member`/`Admin` or removed,
+/// each of which must fail with `IdentityError::LastOwner`.
 #[tokio::test]
-async fn role_escalation_prevention() {
+async fn last_owner_cannot_be_demoted_or_removed() {
     let harness = common::TestHarness::embedded().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
@@ -1041,8 +1044,11 @@ async fn slug_injection_rejected() {
             },
         );
         assert!(
-            result.is_err(),
-            "slug '{slug}' should be rejected but was accepted"
+            matches!(
+                result,
+                Err(hearth::identity::IdentityError::InvalidInput { .. })
+            ),
+            "slug '{slug}' should be rejected with InvalidInput, got: {result:?}"
         );
     }
 }
