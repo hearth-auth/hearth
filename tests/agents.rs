@@ -1306,3 +1306,180 @@ async fn agent_credential_audit_actor_attributed() {
         "credential-revoked resource_id must match the revoked credential"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HEA-1836 — Positive HTTP-layer Agent REST CRUD + Agent Card
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Full happy-path CRUD exercised through the HTTP surface (not just the
+/// engine): TEST_SCENARIOS §A.4 (Agent Card) and §A.7 (Agent REST endpoints)
+/// previously had only engine-level CRUD plus an unauthenticated BOLA matrix,
+/// so the positive 201/200/204 boxes were not backed. This walks
+/// create → get → list → patch → issue-key → list-creds → agent-card → delete
+/// against a running server with a valid admin token, asserting status codes
+/// and response bodies at each step.
+#[tokio::test]
+async fn agent_rest_crud_positive_http() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
+    let h = common::TestHarness::server_with_agent_auth()
+        .await
+        .expect("server harness");
+    let base = h.base_url().expect("base_url");
+    let client = reqwest::Client::new();
+
+    // Bootstrap the dev realm → admin token (has hearth.admin, which satisfies
+    // the hearth.agents.admin gate) + the admin user id we use as agent owner.
+    let boot: serde_json::Value = client
+        .post(format!("{base}/admin/bootstrap"))
+        .send()
+        .await
+        .expect("bootstrap")
+        .json()
+        .await
+        .expect("bootstrap json");
+    let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
+    let owner_id = boot["user_id"].as_str().expect("user_id").to_string();
+    let token = boot["access_token"].as_str().expect("access_token").to_string();
+
+    let auth = |req: reqwest::RequestBuilder| {
+        req.header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", &realm_id)
+    };
+
+    // ── CREATE → 201 ─────────────────────────────────────────────────────────
+    let create_resp = auth(client.post(format!("{base}/v1/agents")))
+        .json(&serde_json::json!({
+            "display_name": "Rest CRUD Agent",
+            "description": "created via HTTP",
+            "owner_type": "user",
+            "owner_id": owner_id,
+            "capabilities": ["urn:hearth:capability:email:send"],
+            "max_delegation_depth": 2,
+        }))
+        .send()
+        .await
+        .expect("create request");
+    assert_eq!(
+        create_resp.status().as_u16(),
+        201,
+        "POST /v1/agents must return 201 Created"
+    );
+    let created: serde_json::Value = create_resp.json().await.expect("create json");
+    let agent_id = created["id"].as_str().expect("agent id").to_string();
+    assert!(agent_id.starts_with("agt_"), "agent id must be prefixed");
+    assert_eq!(created["display_name"], "Rest CRUD Agent");
+    assert_eq!(created["status"], "active");
+    assert_eq!(created["owner"]["type"], "user");
+    assert_eq!(created["owner"]["id"], owner_id);
+    assert_eq!(created["max_delegation_depth"], 2);
+
+    // ── GET → 200 ────────────────────────────────────────────────────────────
+    let got = auth(client.get(format!("{base}/v1/agents/{agent_id}")))
+        .send()
+        .await
+        .expect("get request");
+    assert_eq!(got.status().as_u16(), 200, "GET /v1/agents/{{id}} must return 200");
+    let got_body: serde_json::Value = got.json().await.expect("get json");
+    assert_eq!(got_body["id"], agent_id);
+    assert_eq!(got_body["display_name"], "Rest CRUD Agent");
+
+    // ── LIST → 200, contains the new agent ───────────────────────────────────
+    let list = auth(client.get(format!("{base}/v1/agents")))
+        .send()
+        .await
+        .expect("list request");
+    assert_eq!(list.status().as_u16(), 200, "GET /v1/agents must return 200");
+    let list_body: serde_json::Value = list.json().await.expect("list json");
+    let items = list_body["items"].as_array().expect("items array");
+    assert!(
+        items.iter().any(|a| a["id"] == serde_json::json!(agent_id)),
+        "listed agents must include the newly created agent"
+    );
+
+    // ── PATCH → 200, display_name updated ────────────────────────────────────
+    let patched = auth(client.patch(format!("{base}/v1/agents/{agent_id}")))
+        .json(&serde_json::json!({ "display_name": "Renamed Agent" }))
+        .send()
+        .await
+        .expect("patch request");
+    assert_eq!(patched.status().as_u16(), 200, "PATCH must return 200");
+    let patched_body: serde_json::Value = patched.json().await.expect("patch json");
+    assert_eq!(
+        patched_body["display_name"], "Renamed Agent",
+        "PATCH must update the display_name"
+    );
+
+    // ── ISSUE API KEY → 201 with show-once secret ────────────────────────────
+    let key_resp = auth(client.post(format!("{base}/v1/agents/{agent_id}/credentials/keys")))
+        .json(&serde_json::json!({ "label": "ci-key" }))
+        .send()
+        .await
+        .expect("create key request");
+    assert_eq!(key_resp.status().as_u16(), 201, "POST credentials/keys must return 201");
+    let key_body: serde_json::Value = key_resp.json().await.expect("key json");
+    assert!(
+        key_body["key"].as_str().is_some_and(|k| !k.is_empty()),
+        "issued API key must include a non-empty show-once secret"
+    );
+    let cred_id = key_body["credential"]["id"]
+        .as_str()
+        .expect("credential id")
+        .to_string();
+    assert_eq!(key_body["credential"]["kind"], "api_key");
+
+    // ── LIST CREDENTIALS → 200, contains the issued key ──────────────────────
+    let creds = auth(client.get(format!("{base}/v1/agents/{agent_id}/credentials")))
+        .send()
+        .await
+        .expect("list creds request");
+    assert_eq!(creds.status().as_u16(), 200, "GET credentials must return 200");
+    let creds_body: serde_json::Value = creds.json().await.expect("creds json");
+    let cred_items = creds_body["items"]
+        .as_array()
+        .or_else(|| creds_body.as_array())
+        .expect("credential list");
+    assert!(
+        cred_items.iter().any(|c| c["id"] == serde_json::json!(cred_id)),
+        "credential list must include the issued key"
+    );
+
+    // ── AGENT CARD (A.4) → 200 with authenticated request ────────────────────
+    let card = auth(client.get(format!(
+        "{base}/.well-known/agent.json?agent_id={agent_id}"
+    )))
+    .send()
+    .await
+    .expect("agent card request");
+    assert_eq!(card.status().as_u16(), 200, "authenticated Agent Card must return 200");
+    let card_body: serde_json::Value = card.json().await.expect("card json");
+    assert_eq!(card_body["name"], "Renamed Agent", "card reflects current name");
+    assert!(
+        card_body["capabilities"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "agent card must advertise capabilities"
+    );
+
+    // ── DELETE → 204, then GET → 404 ─────────────────────────────────────────
+    let deleted = auth(client.delete(format!("{base}/v1/agents/{agent_id}")))
+        .send()
+        .await
+        .expect("delete request");
+    assert_eq!(deleted.status().as_u16(), 204, "DELETE must return 204 No Content");
+
+    let after = auth(client.get(format!("{base}/v1/agents/{agent_id}")))
+        .send()
+        .await
+        .expect("get-after-delete request");
+    assert_eq!(
+        after.status().as_u16(),
+        404,
+        "GET after DELETE must return 404 Not Found"
+    );
+}

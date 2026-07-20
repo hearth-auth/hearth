@@ -296,3 +296,128 @@ async fn cli_app_create_against_running_server() {
         "client_name should match"
     );
 }
+
+// === TEST_SCENARIOS: CLI config + completions subcommands (HEA-1836) ===
+//
+// These cover the deterministic, no-storage subcommands that previously had no
+// integration coverage: `completions <shell>`, `config example`, and
+// `config validate` (both the accept and reject paths). The storage/server
+// backed subcommands (`migrate`, `backup`, `rbac orphans`, `config reload`)
+// remain follow-up work — they need a seeded data dir or a running process.
+
+/// Writes `content` to a uniquely-named temp file and returns its path.
+/// The caller is responsible for the file living long enough for the child
+/// process to read it; callers keep it around and let the OS reclaim temp.
+fn write_temp_config(tag: &str, content: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    path.push(format!("hearth-cli-{tag}-{pid}-{nanos}.yaml"));
+    std::fs::write(&path, content).expect("write temp config");
+    path
+}
+
+#[test]
+fn cli_completions_zsh_generates_script() {
+    let output = Command::new(hearth_bin())
+        .args(["completions", "zsh"])
+        .output()
+        .expect("run hearth completions zsh");
+    assert!(
+        output.status.success(),
+        "completions zsh should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("#compdef hearth") || stdout.contains("_hearth"),
+        "zsh completion must reference the hearth command; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn cli_completions_bash_generates_script() {
+    let output = Command::new(hearth_bin())
+        .args(["completions", "bash"])
+        .output()
+        .expect("run hearth completions bash");
+    assert!(
+        output.status.success(),
+        "completions bash should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hearth"),
+        "bash completion must reference the hearth command"
+    );
+}
+
+#[test]
+fn cli_config_example_prints_yaml() {
+    let output = Command::new(hearth_bin())
+        .args(["config", "example"])
+        .output()
+        .expect("run hearth config example");
+    assert!(
+        output.status.success(),
+        "config example should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("server:") && stdout.contains("storage:"),
+        "example config must contain the documented top-level sections"
+    );
+}
+
+#[test]
+fn cli_config_validate_accepts_valid_file() {
+    // `dev_mode: true` relaxes data_dir / oidc-issuer requirements, so this
+    // minimal file validates cleanly.
+    let path = write_temp_config(
+        "valid",
+        "dev_mode: true\nserver:\n  bind_address: \"127.0.0.1\"\n  port: 8420\n",
+    );
+    let output = Command::new(hearth_bin())
+        .args(["config", "validate"])
+        .arg(&path)
+        .output()
+        .expect("run hearth config validate");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        output.status.success(),
+        "config validate should exit 0 for a valid file; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("valid"),
+        "success output must confirm the config is valid; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn cli_config_validate_rejects_invalid_file() {
+    // port 0 is out of range (and, in non-dev mode, data_dir is required) — the
+    // validator must collect at least one issue and exit non-zero.
+    let path = write_temp_config("invalid", "server:\n  port: 0\n");
+    let output = Command::new(hearth_bin())
+        .args(["config", "validate"])
+        .arg(&path)
+        .output()
+        .expect("run hearth config validate");
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        !output.status.success(),
+        "config validate must exit non-zero for an invalid file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid") || stderr.contains("error"),
+        "failure output must explain the validation error; got:\n{stderr}"
+    );
+}

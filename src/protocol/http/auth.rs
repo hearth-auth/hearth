@@ -999,3 +999,68 @@ pub(crate) fn resolve_realm_by_name(
         }
     }
 }
+
+#[cfg(test)]
+mod proto_json_tests {
+    //! Unit coverage for [`proto_to_rest_json`] int64-as-string coercion
+    //! (HEA-1836; the §763 P0 "int64 REST coercion" box). pbjson follows the
+    //! proto3 JSON mapping and serializes int64/uint64 fields as JSON strings;
+    //! the helper must convert them back to numbers for REST clients without
+    //! losing precision.
+    use super::proto_to_rest_json;
+    use crate::protocol::proto::identity::v1 as pb;
+
+    #[test]
+    fn coerces_proto_int64_field_to_json_number() {
+        // ClientCredentialsResponse.expires_in is `int64` — pbjson serializes
+        // it as the string "3600"; the REST helper must emit a JSON number.
+        let resp = pb::ClientCredentialsResponse {
+            access_token: "tok".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: 3600,
+            scope: Some("openid".to_string()),
+        };
+        let v = proto_to_rest_json(&resp);
+        let expires = v.get("expiresIn").or_else(|| v.get("expires_in"));
+        let expires = expires.expect("expires_in field present in serialized proto");
+        assert!(
+            expires.is_number(),
+            "int64 field must be coerced to a JSON number, got: {expires:?}"
+        );
+        assert_eq!(expires.as_i64(), Some(3600));
+    }
+
+    #[test]
+    fn preserves_large_int64_without_precision_loss() {
+        // 2^53 + 1 is not exactly representable as f64; coercion must keep the
+        // exact integer value (the whole reason pbjson strings int64 fields).
+        let big: i64 = 9_007_199_254_740_993;
+        let v = proto_to_rest_json(&serde_json::json!({ "n": big.to_string() }));
+        assert_eq!(v["n"].as_i64(), Some(big));
+        assert!(v["n"].is_number());
+    }
+
+    #[test]
+    fn recurses_into_nested_objects_and_arrays() {
+        let v = proto_to_rest_json(&serde_json::json!({
+            "outer": { "inner": "42" },
+            "list": ["1", "2", "-3"],
+        }));
+        assert_eq!(v["outer"]["inner"].as_i64(), Some(42));
+        assert_eq!(v["list"][0].as_i64(), Some(1));
+        assert_eq!(v["list"][2].as_i64(), Some(-3));
+    }
+
+    #[test]
+    fn leaves_non_integer_strings_untouched() {
+        // Non-numeric strings (tokens, UUIDs) and booleans must be preserved.
+        let v = proto_to_rest_json(&serde_json::json!({
+            "token": "abc123def",
+            "flag": true,
+            "empty": "",
+        }));
+        assert_eq!(v["token"].as_str(), Some("abc123def"));
+        assert_eq!(v["flag"].as_bool(), Some(true));
+        assert_eq!(v["empty"].as_str(), Some(""));
+    }
+}
