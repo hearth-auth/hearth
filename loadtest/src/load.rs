@@ -129,6 +129,17 @@ pub struct LoadParams {
     #[arg(long, env = "HEARTH_LOADTEST_USERS", default_value_t = 50)]
     pub users: usize,
 
+    /// PID of the Hearth server to sample RSS/CPU from during the run (HEA-1811).
+    ///
+    /// When set, a background sampler polls `/proc/<pid>` once a second and folds
+    /// peak/mean RSS + CPU% into the report's `resources` block (and the HTML
+    /// report), so "saturation" means p99 in budget **and** the server not
+    /// resource-starved. The `make loadtest` pipeline passes the server it boots;
+    /// omit for a run against an instance whose pid the harness does not know (no
+    /// `resources` block is then emitted). Linux-only; loopback by construction.
+    #[arg(long, env = "HEARTH_LOADTEST_SERVER_PID")]
+    pub server_pid: Option<u32>,
+
     /// Per-step steady duration (Goose timespan, e.g. `60s`, `5m`). In `soak`
     /// mode this is the duration of each bucket.
     #[arg(long, env = "HEARTH_LOADTEST_RUN_TIME", default_value = "60s")]
@@ -337,19 +348,73 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     let report_dir = PathBuf::from(&params.report_dir);
     std::fs::create_dir_all(&report_dir).map_err(LoadError::Report)?;
 
+    // Sample the server's RSS/CPU for the whole run when its pid was supplied
+    // (HEA-1811). Starts before the first attack and stops after the last, so
+    // the `resources` block spans every sub-run (ramp ladder / soak buckets).
+    let sampler = params
+        .server_pid
+        .map(crate::resources::ResourceSampler::start);
+
     // The tier-miss profile addresses a server-seeded bulk corpus by index, so
     // it needs no seed-handle; every other mode draws its corpus from one.
-    let report = if params.mode == Mode::TierMiss {
+    let mut report = if params.mode == Mode::TierMiss {
         run_tier_miss(params, &report_dir).await?
     } else {
         run_journey_modes(params, &report_dir).await?
     };
+
+    if let Some(sampler) = sampler {
+        report.resources = sampler.stop().await;
+        if let Some(res) = report.resources.as_ref() {
+            println!(
+                "  server (pid {}): RSS peak {} / mean {}; CPU peak {:.1}% / mean {:.1}% ({} samples)",
+                res.pid,
+                format_mib(res.rss_peak_bytes),
+                format_mib(res.rss_mean_bytes),
+                res.cpu_peak_pct,
+                res.cpu_mean_pct,
+                res.samples,
+            );
+            inject_resources_into_html(&report_dir, res)?;
+        }
+    }
 
     let json_path = report_dir.join("report.json");
     let json = serde_json::to_string_pretty(&report)
         .map_err(|e| LoadError::Report(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     std::fs::write(&json_path, json).map_err(LoadError::Report)?;
     println!("  report: {} (pass={})", json_path.display(), report.pass);
+    Ok(())
+}
+
+/// Formats a byte count as MiB with one decimal, for the run's console line.
+fn format_mib(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    format!("{mib:.1} MiB")
+}
+
+/// Injects the server resource-consumption panel into every `*.html` report in
+/// `report_dir` (HEA-1811). The sampler spans the whole run, so the same panel
+/// is added to each per-step HTML (steady's `steady.html`, the ramp ladder, the
+/// soak buckets). Best-effort per file on read; a failed write is a real error.
+fn inject_resources_into_html(
+    report_dir: &Path,
+    res: &crate::resources::ResourceReport,
+) -> Result<(), LoadError> {
+    for entry in std::fs::read_dir(report_dir).map_err(LoadError::Report)? {
+        let path = entry.map_err(LoadError::Report)?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let Ok(original) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rewritten = crate::html::inject_resources_panel(&original, res);
+        if rewritten != original {
+            std::fs::write(&path, rewritten).map_err(LoadError::Report)?;
+        }
+    }
     Ok(())
 }
 
@@ -508,6 +573,7 @@ async fn run_steady(
         knee_rps: None,
         soak_buckets: None,
         tier_miss: None,
+        resources: None,
         pass,
     })
 }
@@ -559,6 +625,7 @@ async fn run_ramp(
         knee_rps,
         soak_buckets: None,
         tier_miss: None,
+        resources: None,
         pass,
     })
 }
@@ -604,6 +671,7 @@ async fn run_soak(
         knee_rps: None,
         soak_buckets: Some(buckets),
         tier_miss: None,
+        resources: None,
         pass: all_pass,
     })
 }
@@ -740,6 +808,7 @@ async fn run_tier_miss(params: &LoadParams, report_dir: &Path) -> Result<LoadRep
         knee_rps: None,
         soak_buckets: None,
         tier_miss: Some(tier_miss),
+        resources: None,
         pass,
     })
 }

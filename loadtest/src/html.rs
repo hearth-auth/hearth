@@ -27,6 +27,7 @@ use std::sync::OnceLock;
 use regex::{Captures, Regex};
 
 use crate::latency::{LatencyExtremes, LatencyPercentiles, PercentileSnapshot};
+use crate::resources::ResourceReport;
 
 /// Formats a microsecond value as milliseconds with microsecond precision (three
 /// decimals) — exact for our `u64` µs samples and unit-matched to the report's
@@ -297,6 +298,63 @@ pub fn prune_uninformative_panels(report: &str) -> String {
         out = remove_graph(&out, id);
     }
     out
+}
+
+/// Formats a byte count as MiB with one decimal, matching the JSON report's
+/// byte-precise `rss_*_bytes` fields in a human-readable unit for the HTML.
+fn format_mib(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    format!("{mib:.1} MiB")
+}
+
+/// Injects a **Server Resource Consumption** panel (peak/mean RSS + CPU%) into
+/// the report, so the server-side saturation signal sits alongside the
+/// client-observed latency table (HEA-1811). Goose measures only the client;
+/// this panel is the only place the server's own resource use appears.
+///
+/// The panel is inserted immediately before the `<div class="requests">`
+/// section (the top of the metrics tables). If that anchor is absent — a report
+/// that recorded no requests — it is appended before `</body>` instead; if
+/// neither exists the report is returned unchanged.
+///
+/// Pure and total.
+#[must_use]
+pub fn inject_resources_panel(report: &str, res: &ResourceReport) -> String {
+    let panel = format!(
+        concat!(
+            "<div class=\"resources\">\n",
+            "            <h2>Server Resource Consumption</h2>\n",
+            "            <p>Sampled from <code>/proc/{pid}</code> every {interval} ms ",
+            "({samples} samples). Client-side latency is below; this is the server ",
+            "under test.</p>\n",
+            "            <table>\n",
+            "                <thead><tr><td>Metric</td><td>Peak</td><td>Mean</td></tr></thead>\n",
+            "                <tbody>\n",
+            "                    <tr><td>RSS</td><td>{rss_peak}</td><td>{rss_mean}</td></tr>\n",
+            "                    <tr><td>CPU (% of one core)</td><td>{cpu_peak:.1}%</td>",
+            "<td>{cpu_mean:.1}%</td></tr>\n",
+            "                </tbody>\n",
+            "            </table>\n",
+            "        </div>\n        "
+        ),
+        pid = res.pid,
+        interval = res.interval_ms,
+        samples = res.samples,
+        rss_peak = format_mib(res.rss_peak_bytes),
+        rss_mean = format_mib(res.rss_mean_bytes),
+        cpu_peak = res.cpu_peak_pct,
+        cpu_mean = res.cpu_mean_pct,
+    );
+
+    let anchor = r#"<div class="requests">"#;
+    if let Some(pos) = report.find(anchor) {
+        return format!("{}{panel}{}", &report[..pos], &report[pos..]);
+    }
+    if let Some(pos) = report.find("</body>") {
+        return format!("{}{panel}{}", &report[..pos], &report[pos..]);
+    }
+    report.to_string()
 }
 
 /// Formats an integer with comma thousands separators (e.g. `1200000` →
@@ -754,6 +812,52 @@ mod tests {
     fn prune_is_a_noop_when_panels_absent() {
         let html = "<html><body><div class=\"requests\"><table>t</table></div></body></html>";
         assert_eq!(prune_uninformative_panels(html), html);
+    }
+
+    fn sample_resources() -> ResourceReport {
+        ResourceReport {
+            pid: 4242,
+            samples: 90,
+            interval_ms: 1000,
+            rss_peak_bytes: 512 * 1024 * 1024,
+            rss_mean_bytes: 400 * 1024 * 1024,
+            cpu_peak_pct: 187.5,
+            cpu_mean_pct: 92.3,
+        }
+    }
+
+    #[test]
+    fn resources_panel_injected_before_requests_section() {
+        let html = "<html><body><div class=\"requests\"><table>t</table></div></body></html>";
+        let out = inject_resources_panel(html, &sample_resources());
+        assert!(out.contains("Server Resource Consumption"));
+        assert!(out.contains("512.0 MiB"), "peak RSS in MiB: {out}");
+        assert!(out.contains("187.5%"), "peak CPU%: {out}");
+        assert!(out.contains("/proc/4242"));
+        // Panel sits before the requests table, not after it.
+        let panel_at = out.find("Server Resource Consumption").unwrap();
+        let requests_at = out.find(r#"<div class="requests">"#).unwrap();
+        assert!(
+            panel_at < requests_at,
+            "panel must precede the requests table"
+        );
+    }
+
+    #[test]
+    fn resources_panel_falls_back_to_body_when_no_requests() {
+        let html = "<html><body>no metrics recorded</body></html>";
+        let out = inject_resources_panel(html, &sample_resources());
+        assert!(out.contains("Server Resource Consumption"));
+        assert!(
+            out.find("Server Resource Consumption").unwrap() < out.find("</body>").unwrap(),
+            "panel must land before </body>"
+        );
+    }
+
+    #[test]
+    fn resources_panel_noop_without_anchor() {
+        let html = "just some text, no html structure";
+        assert_eq!(inject_resources_panel(html, &sample_resources()), html);
     }
 
     #[test]

@@ -386,7 +386,10 @@ which is **git-ignored**):
   requests-per-second and errors-per-second graphs and every metrics table
   (requests, responses with the injected µs figures, status codes, transactions,
   scenarios). The `Users:` count is Goose's own, relabeled to the `--users`
-  load-generator concurrency the run used (default 50).
+  load-generator concurrency the run used (default 50). When `--server-pid` was
+  supplied, a **Server Resource Consumption** panel (peak/mean RSS + CPU%) is
+  injected above the request table (HEA-1811) so the server-side saturation
+  signal sits next to the client-observed latency.
 
 `report.json` shape (`schema` is [`report::SCHEMA_VERSION`](src/report.rs) —
 bumped on any breaking change so a nightly diff refuses to compare across
@@ -394,7 +397,7 @@ incompatible schemas):
 
 | Field | Meaning |
 |---|---|
-| `schema` | Report schema version (currently `2`; a nightly diff refuses to compare across versions). |
+| `schema` | Report schema version (currently `3`; a nightly diff refuses to compare across versions). |
 | `metadata.git_sha` | Build commit (`HEARTH_GIT_SHA` env override, else `git rev-parse`, else `"unknown"`). |
 | `metadata.timestamp_unix` | Wall-clock the report was produced. |
 | `metadata.{mode,host,seed,dataset_shape,users,run_time,hatch_rate}` | Run configuration + the corpus it ran against. |
@@ -412,7 +415,41 @@ incompatible schemas):
 | `journeys[].pass` | `true`/`false` vs the HTTP budget **and** failure rate; absent for the compound revoke journey (no atomic target). |
 | `ramp_steps[]`, `knee_rps` | ramp mode only — per-step rows and the saturation-knee RPS. |
 | `soak_buckets[]` | soak mode only — per-bucket rows for drift inspection. |
+| `resources` | **Server resource consumption** (HEA-1811), present only when `--server-pid` was supplied and ≥2 samples were gathered (Linux `/proc`). Omitted otherwise. See below. |
+| `resources.{pid,samples,interval_ms}` | The sampled pid, the number of samples folded, and the poll interval (1000 ms). |
+| `resources.{rss_peak_bytes,rss_mean_bytes}` | Peak and mean resident set size of the server process, in bytes (`VmRSS`). |
+| `resources.{cpu_peak_pct,cpu_mean_pct}` | Peak (per single sample interval) and mean (whole window) CPU utilisation, as a percentage of **one core** — a multi-threaded server can exceed `100`. |
 | `pass` | Overall: every *budgeted* journey stayed within budget. |
+
+#### Server resource consumption (`resources`, HEA-1811)
+
+Goose measures only what the **client** sees — latency, throughput, response
+codes. It has no visibility into the Hearth server's own resource use, so a run
+whose p99 is in budget but whose server is pinned at 100% CPU or climbing toward
+an OOM looks identical to a healthy one. The `resources` block closes that gap: a
+background sampler reads `/proc/<pid>/stat` + `/proc/<pid>/status` once a second
+during the run and folds peak/mean RSS + CPU% into the report (and a **Server
+Resource Consumption** panel in the HTML, above the latency table). With it, a
+saturation verdict means "p99 in budget **and** the server was not
+resource-starved."
+
+`make loadtest` wires this automatically — it passes the pid of the release
+`hearth` it boots. For an attach-path run against a server you started yourself,
+pass `--server-pid <pid>` (or `HEARTH_LOADTEST_SERVER_PID`); omit it and the
+block is simply absent. Sampling is Linux-only and loopback-by-construction; the
+1 s interval keeps it off the hot path. CPU% assumes the kernel `USER_HZ` of
+`100` (universal on Linux) rather than pulling in `libc` for one `sysconf` call.
+
+A nightly diff consumes these the same way it consumes the latency rows: compare
+`resources.rss_peak_bytes` and `resources.cpu_mean_pct` against the committed
+baseline and flag a regression (e.g. peak RSS up >20%, or mean CPU crossing a
+headroom threshold) even when latency stayed in budget — a memory leak or a
+CPU-hungry regression shows up here before it shows up as a p99 breach.
+
+> **Flush-stall / tier-churn signals** are **out of scope** here: the server
+> does not currently expose storage flush-stall or tier-promotion counters via a
+> metrics endpoint, so there is nothing to sample. If such counters are added
+> later, fold them into this block (bump `schema`).
 
 ### Budgets — sourced, and why sub-ms budgets read `pass:false` on a dev box
 
@@ -604,12 +641,13 @@ subjects) is a follow-up; the deterministic per-user credential API
 has a reference to compare against. It lives outside the git-ignored
 `reports/` directory precisely so it can be tracked.
 
-> **Note (HEA-1796):** the committed baseline is a `schema:1`, throttled 20-user
-> run. The report schema is now `2` (adds the `summary`/ceiling block) and the
+> **Note (HEA-1796, HEA-1811):** the committed baseline is a `schema:1`,
+> throttled 20-user run. The report schema is now `3` (`2` added the
+> `summary`/ceiling block; `3` adds the server `resources` block) and the
 > pipeline now runs **unthrottled**, so that baseline is stale and the nightly
 > diff refuses to compare across schema versions by design. The canonical
-> `schema:2` baseline is regenerated from a high-concurrency verification run
-> (owned by the HEA-1796 QA child) using the steps below.
+> current-schema baseline is regenerated from a high-concurrency verification run
+> using the steps below.
 
 How it is captured (reproducible — the pipeline sets `load_test_unthrottled`
 itself, so no manual config or settle wait):

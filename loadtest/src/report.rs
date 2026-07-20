@@ -20,10 +20,13 @@ use serde::Serialize;
 
 use crate::budget::{self, Budget};
 use crate::latency::LatencyExtremes;
+use crate::resources::ResourceReport;
 
 /// Report schema version. Bump on any breaking shape change so a nightly diff
 /// job can refuse to compare across incompatible schemas.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// * `3` — added the optional `resources` block (server RSS/CPU, HEA-1811).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Run metadata stamped into every report header.
 #[derive(Debug, Clone, Serialize)]
@@ -371,6 +374,14 @@ pub struct LoadReport {
     /// omitted for every other mode so existing consumers are unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier_miss: Option<TierMissReport>,
+    /// Server resource consumption (peak/mean RSS + CPU%) sampled during the
+    /// run (HEA-1811). Additive and optional: present only when `--server-pid`
+    /// was supplied and at least two samples were gathered, so a report can
+    /// state "p99 in budget **and** the server was not resource-starved".
+    /// Omitted for every run that did not sample, leaving existing consumers
+    /// unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceReport>,
     /// Overall pass: every budgeted journey stayed within its HTTP budget.
     pub pass: bool,
 }
@@ -736,10 +747,11 @@ mod tests {
             knee_rps: None,
             soak_buckets: None,
             tier_miss: None,
+            resources: None,
             pass: true,
         };
         let json = serde_json::to_string(&report).expect("serialize");
-        assert!(json.contains("\"schema\":2"));
+        assert!(json.contains("\"schema\":3"));
         assert!(json.contains("\"git_sha\":\"abc123\""));
         assert!(json.contains("\"summary\""));
         assert!(json.contains("\"pass\":true"));
@@ -748,6 +760,8 @@ mod tests {
         assert!(!json.contains("ramp_steps"));
         assert!(!json.contains("soak_buckets"));
         assert!(!json.contains("tier_miss"));
+        // no sampling → the resources block is omitted, not null.
+        assert!(!json.contains("resources"));
     }
 
     #[test]
@@ -776,6 +790,7 @@ mod tests {
             knee_rps: Some(123.5),
             soak_buckets: None,
             tier_miss: None,
+            resources: None,
             pass: false,
         };
         let json = serde_json::to_string(&report).expect("serialize");

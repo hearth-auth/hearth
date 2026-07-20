@@ -18,6 +18,7 @@ mod latency;
 mod load;
 mod params;
 mod report;
+mod resources;
 mod scenarios;
 mod seed;
 

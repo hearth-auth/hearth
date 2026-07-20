@@ -60,6 +60,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   behavior (HEA-1805).
 
 ### Added
+- **`hearth-loadtest` server resource sampling (RSS/CPU) in reports** — `run
+  --server-pid <pid>` (or `HEARTH_LOADTEST_SERVER_PID`) samples the Hearth
+  process's `/proc` stats once a second during the run and folds peak/mean RSS +
+  peak/mean CPU% into a new, additive `resources` block in `report.json` (schema
+  bumped `2` → `3`) and a **Server Resource Consumption** panel in the HTML
+  report. A saturation verdict now means "p99 in budget **and** the server was
+  not resource-starved." `make loadtest` passes the pid automatically; the block
+  is omitted when no pid is supplied or off Linux. Flush-stall/tier-churn signals
+  are out of scope (no server metrics endpoint exposes them yet) (HEA-1811).
 - **`hearth-loadtest` tier-miss run mode + per-tier lookup latency reporting** —
   a new `run --mode tier-miss` profile drives the corpus-scale `lookup_user` hot
   path (ROPC `POST /token`) against the bulk demo corpus, splitting every request

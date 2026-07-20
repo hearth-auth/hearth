@@ -235,6 +235,10 @@ if [[ -n "${THROTTLE}" && "${THROTTLE}" != "0" ]]; then
 fi
 echo "==> Running load (mode=${MODE}, users=${USERS}, run-time=${RUN_TIME}, throttle=${THROTTLE:-0})"
 # shellcheck disable=SC2086
+# --server-pid: the release hearth we booted above (SERVER_PID). The harness
+# samples its RSS/CPU from /proc during the run and folds peak/mean into the
+# report's `resources` block (HEA-1811), so a pass means p99 in budget AND the
+# server was not resource-starved.
 "${LOADTEST_BIN}" run \
   --seed-handle "${SEED_HANDLE}" \
   --mode "${MODE}" \
@@ -242,6 +246,7 @@ echo "==> Running load (mode=${MODE}, users=${USERS}, run-time=${RUN_TIME}, thro
   --run-time "${RUN_TIME}" \
   --hatch-rate "${HATCH_RATE}" \
   --resident-corpus-size "${CORPUS_TOTAL}" \
+  --server-pid "${SERVER_PID}" \
   ${THROTTLE_ARG} \
   ${EXTRA_RUN_ARGS}
 
