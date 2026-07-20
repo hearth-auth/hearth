@@ -1,5 +1,6 @@
 import { test, expect, type Browser } from '@playwright/test';
 import { AUTH_DIR } from '../helpers/actions';
+import { instrumentPage, assertPageClean } from '../helpers/assertions';
 import * as path from 'path';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
@@ -55,6 +56,14 @@ test.describe('Empty state partials', () => {
     emptyRealm = await createEmptyRealm(browser, Date.now().toString());
   });
 
+  test.beforeEach(async ({ page }) => {
+    instrumentPage(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    assertPageClean(page);
+  });
+
   test('users list shows _empty.html partial when realm has no users', async ({ page }) => {
     await page.goto(`${BASE_URL}/ui/admin/realms/${emptyRealm}/users`);
 
@@ -67,29 +76,31 @@ test.describe('Empty state partials', () => {
   test('applications list shows _empty.html partial when realm has no apps', async ({ page }) => {
     await page.goto(`${BASE_URL}/ui/admin/realms/${emptyRealm}/applications`);
 
-    // _empty.html content is visible
-    const main = page.locator('#main');
-    await expect(main).not.toBeEmpty();
-    // Page has meaningful content (not a blank body)
-    const text = await main.innerText();
-    expect(text.trim().length).toBeGreaterThan(10);
+    // _empty.html renders "No applications yet"
+    await expect(page.locator('#main')).toContainText('No applications yet', { timeout: 10_000 });
+    // And offers a "create first" CTA — not a blank page
+    await expect(
+      page.locator(`a[href="/ui/admin/realms/${emptyRealm}/applications/new"]`).first(),
+    ).toBeVisible();
   });
 
   test('organizations list shows _empty.html partial when realm has no orgs', async ({ page }) => {
     await page.goto(`${BASE_URL}/ui/admin/realms/${emptyRealm}/organizations`);
 
-    const main = page.locator('#main');
-    await expect(main).not.toBeEmpty();
-    const text = await main.innerText();
-    expect(text.trim().length).toBeGreaterThan(10);
+    // _empty.html renders "No organizations yet"
+    await expect(page.locator('#main')).toContainText('No organizations yet', { timeout: 10_000 });
+    await expect(
+      page.locator(`a[href="/ui/admin/realms/${emptyRealm}/organizations/new"]`).first(),
+    ).toBeVisible();
   });
 
   test('groups list shows empty state when realm has no groups', async ({ page }) => {
     await page.goto(`${BASE_URL}/ui/admin/realms/${emptyRealm}/groups`);
 
-    const main = page.locator('#main');
-    await expect(main).not.toBeEmpty();
-    const text = await main.innerText();
-    expect(text.trim().length).toBeGreaterThan(10);
+    // list.html empty branch renders "No groups yet"
+    await expect(page.locator('#main')).toContainText('No groups yet', { timeout: 10_000 });
+    await expect(
+      page.locator(`a[href="/ui/admin/realms/${emptyRealm}/groups/new"]`).first(),
+    ).toBeVisible();
   });
 });
