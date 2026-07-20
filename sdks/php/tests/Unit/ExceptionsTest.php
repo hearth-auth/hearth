@@ -109,8 +109,14 @@ final class ExceptionsTest extends TestCase
 
     public function testExceptionMessagesDoNotLeakSensitiveData(): void
     {
-        $e = new TokenInvalidException('Token signature verification failed');
-        // The message must not contain any raw token value
+        $rawToken = 'eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl';
+        $e        = new TokenInvalidException('Token signature verification failed');
+
+        // The developer-facing message is preserved verbatim...
+        self::assertSame('Token signature verification failed', $e->getMessage());
+        // ...and never embeds a raw JWT value (checked against an actual token string).
+        self::assertStringNotContainsString($rawToken, $e->getMessage());
         self::assertStringNotContainsString('eyJ', $e->getMessage());
+        self::assertInstanceOf(HearthException::class, $e);
     }
 }

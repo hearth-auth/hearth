@@ -90,9 +90,11 @@ final class JwksClientTest extends TestCase
             ->method('sendRequest')
             ->willReturn(new Response(200, [], $jwks));
 
-        // Should not throw even though an RSA key is present — it is simply skipped
+        // The RSA key is skipped and the Ed25519 (OKP) key is selected: the
+        // returned value must be the exact 32 decoded public-key bytes of FAKE_X.
         $key = $this->jwksClient->getKey(self::FAKE_KID);
-        self::assertNotEmpty($key);
+        self::assertSame(SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES, strlen($key));
+        self::assertSame(sodium_base642bin(self::FAKE_X, SODIUM_BASE64_VARIANT_URLSAFE_NO_PADDING), $key);
     }
 
     public function testRespectsCacheControlMaxAge(): void

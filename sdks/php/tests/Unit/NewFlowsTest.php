@@ -324,13 +324,22 @@ final class NewFlowsTest extends TestCase
 
     public function testRequestMagicLinkSucceedsOn202(): void
     {
-        $client = $this->makeClient([
+        $mock    = new CapturingMockClient([
             new Response(202, [], json_encode(['message' => 'If an account exists, a magic link has been sent'])),
         ]);
+        $factory = new HttpFactory();
+        $client  = new HearthClient('https://auth.example.com/realms/test', httpClient: $mock, requestFactory: $factory, streamFactory: $factory);
 
-        // Must not throw
+        // A 202 response is a success and must not throw.
         $client->requestMagicLink('user@example.com');
-        self::assertTrue(true); // reached here without exception
+
+        // Exactly one request was dispatched, carrying the requested email.
+        self::assertCount(1, $mock->requests);
+        self::assertSame('POST', $mock->requests[0]->getMethod());
+        self::assertSame(
+            ['email' => 'user@example.com'],
+            json_decode((string) $mock->requests[0]->getBody(), true),
+        );
     }
 
     public function testRequestMagicLinkThrowsRateLimitExceptionOn429(): void
