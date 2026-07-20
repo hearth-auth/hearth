@@ -537,6 +537,14 @@ impl SecurityYaml {
             match (pepper.previous_version, pepper.previous_key_hex.as_ref()) {
                 (None, None) => (None, None),
                 (Some(v), Some(hex)) => {
+                    if v == pepper.version {
+                        return Err(invalid(
+                            "security.password.pepper.previous_version",
+                            "must differ from the active version — credentials hashed under \
+                             the previous key would only be verified against the active key \
+                             and fail to log in",
+                        ));
+                    }
                     let key = decode_pepper_key("security.password.pepper.previous_key_hex", hex)?;
                     (Some(v), Some(key))
                 }
@@ -2389,6 +2397,43 @@ mod tests {
         assert!(
             err.to_string().contains("previous_key_hex is required"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_pepper_rejects_previous_version_equal_to_active() {
+        // HEA-1839: same version number for both keys would make old-key
+        // credentials unverifiable (active arm wins on version match).
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 2,
+            key_hex: PEPPER_HEX.to_string(),
+            previous_version: Some(2),
+            previous_key_hex: Some(PEPPER_HEX_2.to_string()),
+        }));
+        let err = sec
+            .resolve_pepper()
+            .expect_err("colliding versions rejected");
+        assert!(
+            err.to_string().contains("differ from the active version"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn pepper_yaml_debug_redacts_keys() {
+        // HEA-1839: `{:?}` on a config struct must never reveal pepper key material.
+        let pepper = PepperYaml {
+            version: 1,
+            key_hex: PEPPER_HEX.to_string(),
+            previous_version: Some(0),
+            previous_key_hex: Some(PEPPER_HEX_2.to_string()),
+        };
+        let dbg = format!("{pepper:?}");
+        assert!(!dbg.contains(PEPPER_HEX), "active key leaked: {dbg}");
+        assert!(!dbg.contains(PEPPER_HEX_2), "previous key leaked: {dbg}");
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "expected redaction marker: {dbg}"
         );
     }
 

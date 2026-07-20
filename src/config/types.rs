@@ -915,7 +915,7 @@ pub struct PasswordSecurityYaml {
 /// The active pepper key is applied to every new or lazily-rehashed credential.
 /// The optional `previous_*` pair keeps a superseded pepper valid on login
 /// during an operator-controlled rotation grace window.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct PepperYaml {
     /// Active pepper version. Embedded in each new credential's
     /// `pepper_version` so rotations can be tracked and audited.
@@ -935,6 +935,22 @@ pub struct PepperYaml {
     /// `previous_version` is set.
     #[serde(default)]
     pub previous_key_hex: Option<String>,
+}
+
+/// Redacts `key_hex` / `previous_key_hex` — the pepper is a secret and MUST
+/// NOT be revealed if a containing config struct is ever `{:?}`-printed.
+impl std::fmt::Debug for PepperYaml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PepperYaml")
+            .field("version", &self.version)
+            .field("key_hex", &"[REDACTED]")
+            .field("previous_version", &self.previous_version)
+            .field(
+                "previous_key_hex",
+                &self.previous_key_hex.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl SecurityYaml {
