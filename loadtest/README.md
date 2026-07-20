@@ -578,44 +578,65 @@ For a realistic *high-throughput* run the token cap (now disabled) is no longer
 the constraint; spread live tokens across many subjects via the multi-subject
 attach path below for a more representative corpus.
 
-## Measured single-node ceiling (HEA-1812)
+## Measured single-node ceiling (HEA-1812 / HEA-1813)
 
-The two headline numbers, measured by sweeping `steady` concurrency against the
-large demo corpus and reading `summary.ceiling` / `failure_rate` at each step.
-**These are single-node limits and are hardware-sensitive** — multi-node/Raft
-horizontal scale is a separate axis and is *not* measured here.
+Measured by sweeping `steady` concurrency against the large demo corpus with a
+**fine bisect of the failure onset** and reading `summary.failure_rate` **plus
+per-step server RSS/CPU** (`resources`, HEA-1811) at each step. **These are
+single-node limits and are hardware-sensitive** — multi-node/Raft horizontal
+scale is a separate axis and is *not* measured here.
 
-| Number | Value | What it means |
-|--------|-------|---------------|
-| **Max comfortable RPS (knee)** | **≈ 1664 RPS @ 500 concurrent users** | Last clean step: **0** request failures; hot-path journeys (`session_lookup` / `user_lookup` / `validate`) p99 = **1 ms**, within budget. |
-| **Failure ceiling (cliff)** | **collapse by 1000 concurrent users** | 100% request failures, every journey pinned at the 30 s client timeout. The cliff sits between 500u (clean) and 1000u (total collapse). |
+There are **two independent ceilings — keep them separate:**
+
+| Ceiling | Value | What it means |
+|---------|-------|---------------|
+| **Hot-path read throughput** | **≈ 1677 RPS @ 500 users, p99 = 1 ms, 0 failures** | `validate` / `session_lookup` / `user_lookup` / `revoke_revalidate` stay p99 = 1–2 ms, well inside their 1.1–1.5 ms budgets. Server CPU here is **178% mean / 292% peak of 1600% available** — nowhere near saturated. |
+| **Argon2id login budget** | `issuance` / `revoke` / `revoke_mint` p99 = **4–7 s @ 500u** | These do a **real Argon2id** password hash (deliberately expensive, **off the hot path**). They breach the 6 ms HTTP budget **by design** — this is the *only* reason the run reports `pass:false`. It is a CPU-cost property of Argon2id, **not** hot-path latency and **not** server saturation. |
 
 - **Hardware:** AMD Ryzen 7 7840HS, 16 vCPU, 55 GiB RAM — server **and** the Goose
   load generator co-resident on one loopback host.
 - **Corpus:** `resident_corpus=300000` seeded users (5 realms; sessions + revoked
   per realm; `seed=1`).
-- **Why "comfortable" ≠ `pass:true`:** the Argon2id-bound `issuance` / `revoke_mint`
-  journeys breach their 6 ms HTTP budget by design (password-hash cost), so the
-  overall run reports `pass:false` even at the knee while the **hot path stays
-  sub-millisecond**. The knee is defined by the hot-path budget + zero failures,
-  not by the whole-run `pass` flag.
-- **The cliff is abrupt.** There is no clean step between 500u (1664 RPS, 0 fail)
-  and 1000u (100% fail at 30 s timeout); the sweep at 1000/2000/3500/6000 users all
-  collapse identically. Narrowing the exact breaking point (e.g. 600–900u) is a
-  follow-up if a precise cliff RPS is ever required.
 
-Both numbers are also carried in the committed baseline JSON under
-[`single_node_ceiling`](baseline/steady-baseline.json).
+### Failure onset (bisected, HEA-1813) — it is a *test-harness* ceiling, not a Hearth ceiling
+
+The old "collapse by 1000u" number conflated a load-generator artifact with server
+saturation. The bisect (`500 600 700 800 900 1000 1500 2000 u`, each with
+`--server-pid` RSS/CPU attribution) locates the onset **between 500u and 600u** and
+shows it is **not** the server hitting a wall:
+
+| Users | RPS | Failures | Server CPU (mean) |
+|-------|-----|----------|-------------------|
+| 500 | 1677 | **0%** | 178% |
+| 600 | ~13 | **100%** | **5.8%** ← collapses |
+| 700 | ~30 | 100% | **~0%** |
+| 800–2000 | — | 100% | ~0% |
+
+- **The server goes *idle* at the cliff, not saturated.** A CPU-bound server would
+  peg near 1600%; instead `cpu_mean` drops 178% → 5.8% → ~0% while RSS holds flat
+  (~3.9 GB, process alive). Requests are failing client-side (`error sending request
+  for url .../introspect`) at the 60 s client timeout — they never reach the server.
+- **Cause: co-resident load-generator starvation.** Once ~600 closed-loop Goose
+  users contend with the server for the same 16 vCPUs, the generator can't service
+  its connection pool and every request times out. This is a limit of the
+  single-host test rig, **not** of Hearth.
+- **To measure the true server cliff,** re-run with the Goose generator on a
+  **separate host** so the two don't share CPUs. Until then, treat ≥600u on this rig
+  as unmeasurable, not as a server ceiling.
+
+All of the above is carried in the committed baseline JSON under
+[`single_node_ceiling`](baseline/steady-baseline.json) (`hot_path`,
+`argon2id_login_budget`, `failure_onset`).
 
 **Reproduce:**
 
 ```bash
-# Knee — the max comfortable RPS (clean, hot path sub-ms):
-make loadtest MODE=steady USERS=500 RUN_TIME=45s HATCH_RATE=500
-# Cliff — push past the knee until failures dominate:
-make loadtest MODE=steady USERS=1000 RUN_TIME=45s HATCH_RATE=500
-# Unthrottled ceiling attribution (confirms summary.ceiling=server):
-make loadtest MODE=steady USERS=6000 RUN_TIME=60s HATCH_RATE=600
+# Full bisected curve (boots the 300k corpus once, sweeps 500..2000u with
+# per-step RSS/CPU attribution):
+bash loadtest/scripts/hea1812-curve.sh
+# Or the two anchor points by hand:
+make loadtest MODE=steady USERS=500 RUN_TIME=45s HATCH_RATE=500   # clean, hot path sub-ms
+make loadtest MODE=steady USERS=600 RUN_TIME=45s HATCH_RATE=500   # onset (load-gen-bound)
 ```
 
 ## ⚠️ Security warnings (read before running)
@@ -681,11 +702,12 @@ subjects) is a follow-up; the deterministic per-user credential API
 has a reference to compare against. It lives outside the git-ignored
 `reports/` directory precisely so it can be tracked.
 
-> **Note (HEA-1812):** the committed baseline is now the **500-user knee** run —
-> the max-comfortable point (≈1664 RPS, 0 failures, hot path sub-ms) on the
-> `resident_corpus=300000` demo corpus. It carries the measured single-node
-> knee + failure-ceiling numbers in a top-level `single_node_ceiling` block (see
-> [Measured single-node ceiling](#measured-single-node-ceiling-hea-1812)); the
+> **Note (HEA-1812 / HEA-1813):** the committed baseline is the **500-user clean**
+> run — the max hot-path point (≈1677 RPS, 0 failures, hot path sub-ms) on the
+> `resident_corpus=300000` demo corpus. It carries the reframed single-node
+> ceilings — separate `hot_path`, `argon2id_login_budget`, and bisected
+> `failure_onset` blocks — under a top-level `single_node_ceiling` key (see
+> [Measured single-node ceiling](#measured-single-node-ceiling-hea-1812--hea-1813)); the
 > nightly diff ignores that block and unknown keys, comparing `journeys[]`
 > percentiles as before. It is `schema:2`; the runtime schema is now `3` (`3`
 > adds the server `resources` block), and the nightly diff refuses to compare

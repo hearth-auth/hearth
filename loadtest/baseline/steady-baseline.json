@@ -1,18 +1,37 @@
 {
   "schema": 2,
   "single_node_ceiling": {
-    "note": "Measured single-node limits (HEA-1812). Numbers are hardware-sensitive — see hardware below. Single-node only; multi-node/Raft horizontal scale is a separate axis and is not measured here.",
+    "note": "Measured single-node limits (HEA-1812; failure onset bisected + verdict reframed in HEA-1813). Two independent ceilings are reported SEPARATELY: (1) hot-path read throughput, and (2) the Argon2id login budget. Do not conflate them. Numbers are hardware-sensitive — see hardware. Single-node only; multi-node/Raft horizontal scale is a separate axis and is not measured here.",
     "hardware": "AMD Ryzen 7 7840HS, 16 vCPU, 55 GiB RAM (server + Goose load generator co-resident on one host, loopback)",
     "corpus": "resident_corpus=300000 seeded users (realms=5, sessions+revoked per realm), see metadata.dataset_shape",
-    "max_comfortable_rps": 1664,
+
+    "hot_path": {
+      "max_clean_rps": 1677,
+      "at_users": 500,
+      "p99_ms": 1,
+      "failures": 0,
+      "note": "At 500 concurrent users / 1677 RPS the hot-path journeys (validate, session_lookup, user_lookup, revoke_revalidate) run at p99 = 1-2 ms with ZERO failures, comfortably inside their 1.1-1.5 ms HTTP budgets. Server CPU here is 178% mean / 292% peak of 1600% available (16 vCPU) — the host is far from saturated. The hot path is not the limiter at any sampled concurrency below the load-generator cliff."
+    },
+    "argon2id_login_budget": {
+      "note": "The issuance / revoke / revoke_mint journeys perform Argon2id password verification (deliberately expensive, OFF the hot path). At 500u their p99 is 4-7 s under concurrency and they breach the 6 ms HTTP budget BY DESIGN, which is the sole reason overall pass=false even though every request succeeds (0 failures). This is a CPU-cost property of Argon2id, NOT hot-path latency and NOT server saturation. Login throughput is Argon2id-bound; scale it with more cores or an Argon2id work-factor decision, independently of the hot path."
+    },
+
+    "max_comfortable_rps": 1677,
     "max_comfortable_at_users": 500,
-    "max_comfortable_reason": "Last clean steady step: 0 request failures; hot-path journeys (session_lookup / user_lookup / validate) p99 = 1 ms and within budget. The Argon2id-bound issuance/revoke_mint journeys breach their 6 ms HTTP budget by design (password-hash cost), so overall pass=false while the hot path stays sub-ms.",
-    "failure_ceiling_users": 1000,
-    "failure_ceiling_reason": "Total collapse observed by 1000 concurrent users: 100% request failures, all journeys at 30 s client-timeout. The cliff is between 500u (1664 RPS, clean) and 1000u (100% fail); no clean step exists above 500u. Unthrottled ceiling runs past the knee (6000u) confirm summary.ceiling=server.",
-    "reproduction": "make loadtest MODE=steady USERS=500 RUN_TIME=45s HATCH_RATE=500  (knee); then USERS=1000 for the cliff. Both against the large demo corpus (make loadtest default). See README § 'Measured single-node ceiling (HEA-1812)'."
+    "max_comfortable_reason": "Last clean steady step: 0 request failures; hot-path journeys p99 = 1 ms within budget; server CPU 178% mean / 292% peak of 1600% available. pass=false is attributable ENTIRELY to the Argon2id login budget (see argon2id_login_budget), not to hot-path or server saturation.",
+
+    "failure_onset": {
+      "measured_between_users": [500, 600],
+      "first_failing_step_users": 600,
+      "attribution": "load_generator / host_contention — NOT server saturation",
+      "evidence": "The 500->600u step flips from 0% to 100% request failures. Across the cliff server CPU COLLAPSES (cpu_mean 178% at 500u -> 5.8% at 600u -> ~0% at 700u+) while RSS stays flat (~3.9 GB, server alive). A saturated server would peg CPU near 1600%; instead it goes idle, which means requests are not reaching it. Failures are client-side 'error sending request for url .../introspect' plus the 60 s client timeout. Cause: the co-resident Goose generator starves for CPU/connections on the shared 16 vCPU host once ~600 closed-loop users contend with the server. This is a TEST-HARNESS ceiling, not a Hearth ceiling.",
+      "measured_curve": "500u=1677 RPS / 0% fail (CPU 178%); 600u=100% fail (CPU 5.8%); 700u..2000u=100% fail (CPU ~0%). Collapse is monotone past onset.",
+      "to_measure_true_server_cliff": "Re-run with the Goose load generator on a SEPARATE host from the server so the two do not contend for the same 16 vCPUs."
+    },
+    "reproduction": "bash loadtest/scripts/hea1812-curve.sh  (boots 300k corpus once, then sweeps 500 600 700 800 900 1000 1500 2000 u, each with --server-pid for per-step RSS/CPU attribution). Or: make loadtest MODE=steady USERS=500 RUN_TIME=45s HATCH_RATE=500 (clean) then USERS=600 (onset). See README § 'Measured single-node ceiling (HEA-1812/1813)'."
   },
   "metadata": {
-    "git_sha": "6f5b562a",
+    "git_sha": "dcd2b8c7",
     "timestamp_unix": 0,
     "mode": "steady",
     "host": "http://127.0.0.1:0",
@@ -24,117 +43,30 @@
   },
   "summary": {
     "achieved_users": 500,
-    "achieved_rps": 1664.088888888889,
-    "total_requests": 74884,
+    "achieved_rps": 1677.888888888889,
+    "total_requests": 75505,
     "total_failures": 0,
     "failure_rate": 0.0,
     "ceiling": "server",
     "ceiling_reason": "a budgeted journey's p99 breached its HTTP budget — server latency is the limiter; the observed ceiling is the server under test"
   },
+  "resources": {
+    "pid": 3098121,
+    "samples": 49,
+    "interval_ms": 1000,
+    "rss_peak_bytes": 3612413952,
+    "rss_mean_bytes": 2641865832,
+    "cpu_peak_pct": 291.97,
+    "cpu_mean_pct": 178.02
+  },
   "journeys": [
-    {
-      "journey": "issuance",
-      "method": "POST",
-      "requests": 6284,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 3000,
-      "p95_ms": 5000,
-      "p99_ms": 6000,
-      "p999_ms": 7000,
-      "min_us": 1587,
-      "max_us": 7573651,
-      "spec_engine_p99_us": 5000,
-      "http_budget_p99_us": 6000,
-      "pass": false
-    },
-    {
-      "journey": "revoke",
-      "method": "POST",
-      "requests": 1678,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 1000,
-      "p95_ms": 3000,
-      "p99_ms": 4000,
-      "p999_ms": 6000,
-      "min_us": 643,
-      "max_us": 7501272
-    },
-    {
-      "journey": "revoke_mint",
-      "method": "POST",
-      "requests": 1656,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 3000,
-      "p95_ms": 5000,
-      "p99_ms": 6000,
-      "p999_ms": 7000,
-      "min_us": 1477,
-      "max_us": 8179417
-    },
-    {
-      "journey": "revoke_revalidate",
-      "method": "POST",
-      "requests": 1678,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 1,
-      "p95_ms": 1,
-      "p99_ms": 2,
-      "p999_ms": 3,
-      "min_us": 189,
-      "max_us": 4383
-    },
-    {
-      "journey": "session_lookup",
-      "method": "GET",
-      "requests": 8668,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 1,
-      "p95_ms": 1,
-      "p99_ms": 1,
-      "p999_ms": 2,
-      "min_us": 91,
-      "max_us": 4180,
-      "spec_engine_p99_us": 100,
-      "http_budget_p99_us": 1100,
-      "pass": true
-    },
-    {
-      "journey": "user_lookup",
-      "method": "GET",
-      "requests": 5884,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 1,
-      "p95_ms": 1,
-      "p99_ms": 1,
-      "p999_ms": 1,
-      "min_us": 82,
-      "max_us": 4029,
-      "spec_engine_p99_us": 200,
-      "http_budget_p99_us": 1200,
-      "pass": true
-    },
-    {
-      "journey": "validate",
-      "method": "POST",
-      "requests": 49036,
-      "failures": 0,
-      "failure_rate": 0.0,
-      "p50_ms": 1,
-      "p95_ms": 1,
-      "p99_ms": 1,
-      "p999_ms": 1,
-      "min_us": 116,
-      "max_us": 9494,
-      "spec_engine_p99_us": 500,
-      "http_budget_p99_us": 1500,
-      "pass": true
-    }
+    {"journey":"issuance","method":"POST","requests":6327,"failures":0,"failure_rate":0.0,"p50_ms":2000,"p95_ms":5000,"p99_ms":6000,"p999_ms":7000,"min_us":1939,"max_us":8396884,"spec_engine_p99_us":5000,"http_budget_p99_us":6000,"pass":false},
+    {"journey":"revoke","method":"POST","requests":1676,"failures":0,"failure_rate":0.0,"p50_ms":1000,"p95_ms":3000,"p99_ms":4000,"p999_ms":5000,"min_us":1448,"max_us":5644896},
+    {"journey":"revoke_mint","method":"POST","requests":1656,"failures":0,"failure_rate":0.0,"p50_ms":3000,"p95_ms":5000,"p99_ms":7000,"p999_ms":7000,"min_us":2303,"max_us":7922750},
+    {"journey":"revoke_revalidate","method":"POST","requests":1676,"failures":0,"failure_rate":0.0,"p50_ms":1,"p95_ms":2,"p99_ms":2,"p999_ms":3,"min_us":188,"max_us":3560},
+    {"journey":"session_lookup","method":"GET","requests":8736,"failures":0,"failure_rate":0.0,"p50_ms":1,"p95_ms":1,"p99_ms":1,"p999_ms":2,"min_us":101,"max_us":3019,"spec_engine_p99_us":100,"http_budget_p99_us":1100,"pass":true},
+    {"journey":"user_lookup","method":"GET","requests":5924,"failures":0,"failure_rate":0.0,"p50_ms":1,"p95_ms":1,"p99_ms":1,"p999_ms":1,"min_us":82,"max_us":2845,"spec_engine_p99_us":200,"http_budget_p99_us":1200,"pass":true},
+    {"journey":"validate","method":"POST","requests":49510,"failures":0,"failure_rate":0.0,"p50_ms":1,"p95_ms":1,"p99_ms":1,"p999_ms":1,"min_us":111,"max_us":12785,"spec_engine_p99_us":500,"http_budget_p99_us":1500,"pass":true}
   ],
   "pass": false
 }
