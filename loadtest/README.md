@@ -64,7 +64,11 @@ realistically-large storage engine, not a toy DB.
 > renders as a bare `Users: 200`, is rewritten to
 > `Load-generator users (concurrency): 200 — resident corpus under test:
 > 1,200,000 seeded accounts`, so the most-prominent number can no longer be
-> mistaken for the seeded population.
+> mistaken for the seeded population. The same clarification is applied to the
+> report's dedicated **User Metrics** section — whose active-users graph likewise
+> peaks at the `--users` concurrency — which is retitled `Load-generator
+> concurrency (active users)` with a note that the graph is the attack width, not
+> the seeded population.
 - **Fast pipeline smoke:** shrink the corpus with the `CORPUS_*` knobs, e.g.
   `CORPUS_ACME=200 CORPUS_GLOBEX=0 CORPUS_INITECH=0 CORPUS_UMBRELLA=0 make loadtest`.
 

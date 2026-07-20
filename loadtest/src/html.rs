@@ -190,6 +190,55 @@ pub fn rewrite_users_label(report: &str, resident_corpus_size: Option<u64>) -> S
         .into_owned()
 }
 
+/// Matches the Goose report's dedicated `<div class="users">` section heading
+/// `<h2>User Metrics</h2>`. Goose plots **load-generator concurrency** here — the
+/// number of active `--users` over the run, whose graph peaks at the configured
+/// concurrency (e.g. 200) — under a heading that reads as the seeded population.
+/// This is the section the board keeps reporting as "still showing 200 users":
+/// the earlier fix only relabeled the top-of-report overview line, not this one.
+/// The capture preserves the opening `<div>` so only the heading is rewritten.
+fn user_metrics_heading_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?s)(?P<pre><div class="users">\s*)<h2>User Metrics</h2>"#)
+            .expect("static user-metrics-heading regex is valid")
+    })
+}
+
+/// Relabels the Goose `User Metrics` section heading (the `<div class="users">`
+/// block) so its graph — which peaks at the load-generator concurrency
+/// (`--users`) — can no longer be misread as the seeded population, and inserts a
+/// clarifying note. When `resident_corpus_size` is known the seeded-accounts
+/// count is stated alongside (HEA-1788 board follow-up — "the User Metrics
+/// section is still showing 200 users"). The echarts graph itself is untouched:
+/// its concurrency-over-time data is correct.
+///
+/// Pure and total: an HTML string with no such section is returned unchanged.
+#[must_use]
+pub fn rewrite_user_metrics_label(report: &str, resident_corpus_size: Option<u64>) -> String {
+    user_metrics_heading_regex()
+        .replace(report, |caps: &Captures| {
+            let pre = &caps["pre"];
+            let note = match resident_corpus_size {
+                Some(size) => format!(
+                    "<p>Active load-generator users (concurrency) over time &mdash; this graph \
+                     peaks at the configured <code>--users</code> value, <strong>not</strong> the \
+                     seeded population. Resident corpus under test: <span>{}</span> seeded \
+                     accounts.</p>",
+                    group_thousands(size),
+                ),
+                None => {
+                    "<p>Active load-generator users (concurrency) over time &mdash; this graph \
+                         peaks at the configured <code>--users</code> value, <strong>not</strong> \
+                         the seeded population.</p>"
+                        .to_string()
+                }
+            };
+            format!("{pre}<h2>Load-generator concurrency (active users)</h2>\n            {note}")
+        })
+        .into_owned()
+}
+
 /// Formats an integer with comma thousands separators (e.g. `1200000` →
 /// `"1,200,000"`) so a seven-figure corpus reads clearly in the report header.
 fn group_thousands(n: u64) -> String {
@@ -540,5 +589,58 @@ mod tests {
     fn users_label_no_line_returns_input_unchanged() {
         let html = "<html><body>no overview here</body></html>";
         assert_eq!(rewrite_users_label(html, Some(999)), html);
+    }
+
+    /// The Goose `User Metrics` section as rendered (heading + echarts graph div).
+    fn user_metrics_section(graph: &str) -> String {
+        format!(
+            "        <div class=\"users\">\n        <h2>User Metrics</h2>\n            {graph}\n        </div>"
+        )
+    }
+
+    #[test]
+    fn user_metrics_heading_relabeled_and_states_corpus() {
+        // Regression (board follow-up): the "User Metrics" section — whose graph
+        // peaks at the --users concurrency — kept reading as "200 users".
+        let graph = r#"<div class="graph"><div id="graph-users"></div><script>var u=[["t",200]];</script></div>"#;
+        let html = user_metrics_section(graph);
+        let out = rewrite_user_metrics_label(&html, Some(1_200_000));
+        // The bare "User Metrics" heading that reads as a seeded population is gone.
+        assert!(
+            !out.contains("<h2>User Metrics</h2>"),
+            "User Metrics heading must be relabeled: {out}"
+        );
+        assert!(
+            out.contains("<h2>Load-generator concurrency (active users)</h2>"),
+            "concurrency relabel missing: {out}"
+        );
+        assert!(
+            out.contains("Resident corpus under test: <span>1,200,000</span> seeded accounts"),
+            "resident corpus not surfaced: {out}"
+        );
+        // The echarts graph is left byte-for-byte intact.
+        assert!(out.contains(graph), "graph must be untouched: {out}");
+    }
+
+    #[test]
+    fn user_metrics_heading_relabeled_without_corpus_when_unknown() {
+        let graph = r#"<div class="graph"><div id="graph-users"></div></div>"#;
+        let html = user_metrics_section(graph);
+        let out = rewrite_user_metrics_label(&html, None);
+        assert!(
+            out.contains("<h2>Load-generator concurrency (active users)</h2>"),
+            "concurrency relabel missing: {out}"
+        );
+        assert!(
+            !out.contains("Resident corpus"),
+            "no corpus clause when size unknown: {out}"
+        );
+        assert!(out.contains(graph), "graph must be untouched: {out}");
+    }
+
+    #[test]
+    fn user_metrics_no_section_returns_input_unchanged() {
+        let html = "<html><body>no user metrics section</body></html>";
+        assert_eq!(rewrite_user_metrics_label(html, Some(999)), html);
     }
 }

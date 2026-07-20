@@ -28,7 +28,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that line to `Load-generator users (concurrency): 200` and, when the resident
   corpus size is known, states it alongside (`resident corpus under test:
   1,200,000 seeded accounts`) — for tier-miss runs the bulk corpus, for
-  steady/ramp/soak the `--resident-corpus-size` value (HEA-1788).
+  steady/ramp/soak the `--resident-corpus-size` value (HEA-1788). The same
+  relabel is now also applied to the report's dedicated **User Metrics** section
+  heading — whose active-users graph peaks at the `--users` concurrency — which
+  is retitled `Load-generator concurrency (active users)` with a note that the
+  graph is not the seeded population (HEA-1788).
 - **`hearth-loadtest` HTML report shows un-rounded latency in µs resolution** —
   Goose measures every response time in whole milliseconds, so its Request
   Metrics `Min`/`Max` columns and its entire Response Time Metrics percentile
