@@ -1229,20 +1229,12 @@ async fn run_serve(
 
     // A-43: Resolve effective reflection_enabled and apply the production guard.
     // `None` in the config means "use the mode default": true in --dev, false in prod.
-    let reflection_enabled = config
-        .security
-        .grpc
-        .reflection_enabled
-        .unwrap_or(config.dev_mode);
-    if reflection_enabled && !config.dev_mode && !allow_reflection_in_prod {
-        return Err(
-            "security.grpc.reflection_enabled = true is not allowed in production mode. \
-             gRPC reflection exposes the full API schema to unauthenticated callers. \
-             Pass --allow-reflection-in-prod to override (debugging only; never in real \
-             deployments)."
-                .into(),
-        );
-    }
+    let reflection_enabled = protocol::grpc::resolve_grpc_reflection(
+        config.security.grpc.reflection_enabled,
+        config.dev_mode,
+        allow_reflection_in_prod,
+    )
+    .map_err(|e| e.to_string())?;
 
     // In dev mode, upgrade Log and Smtp to mailcatcher so `make dev` works without
     // Docker or a real mail server. Production cloud transports (sendgrid, postmark,

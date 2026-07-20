@@ -185,6 +185,17 @@ fn check_admin_rate_limit(
     }
 }
 
+/// Returns `true` when the given permission set grants the `hearth.export`
+/// capability required for backup/export endpoints (A-30).
+///
+/// This is the single production predicate backing [`check_export_capability`];
+/// it is exposed so tests can pin the exact permission-model rule rather than
+/// re-implementing the membership check.
+#[must_use]
+pub fn has_export_capability(permissions: &[String]) -> bool {
+    permissions.iter().any(|p| p == "hearth.export")
+}
+
 /// Checks that the authenticated admin token carries the `hearth.export`
 /// permission required for backup/export endpoints (A-30).
 ///
@@ -194,8 +205,7 @@ fn check_admin_rate_limit(
 pub(crate) fn check_export_capability(
     auth: &AdminAuth,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let has_export = auth.permissions.iter().any(|p| p == "hearth.export");
-    if !has_export {
+    if !has_export_capability(&auth.permissions) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({
