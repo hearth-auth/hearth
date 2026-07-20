@@ -1071,9 +1071,25 @@ async fn run_serve(
     // by identity_config (it is moved on the non-dev_mode path).
     let audit_kek: Option<[u8; 32]> = storage_kek.as_ref().map(|k| *k.as_bytes());
 
+    // Resolve the optional Argon2id server-side pepper from
+    // `security.password.pepper`. Absent → `None` (unchanged default). The hex,
+    // length, all-zero, and rotation-pairing checks already ran in
+    // `Config::validate`, so this cannot fail here in practice.
+    let pepper = config.security.resolve_pepper()?;
+    if let Some(pepper) = pepper.as_ref() {
+        info!(
+            active_version = pepper.active_version,
+            rotating = pepper.previous_version.is_some(),
+            "argon2 pepper enabled from security.password.pepper"
+        );
+    }
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
-            credential: CredentialConfig::fast_for_testing(),
+            credential: CredentialConfig {
+                pepper,
+                ..CredentialConfig::fast_for_testing()
+            },
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -1084,6 +1100,10 @@ async fn run_serve(
         }
     } else {
         IdentityConfig {
+            credential: CredentialConfig {
+                pepper,
+                ..CredentialConfig::default()
+            },
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,

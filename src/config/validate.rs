@@ -14,6 +14,7 @@ use super::types::{
     SecurityYaml, ServerConfig, SmsConfig, SmsTransport, StorageSection, TokenYamlConfig,
     ValidationIssue,
 };
+use crate::identity::credentials::{PepperConfig, PepperKey};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Valid-value tables
@@ -507,8 +508,82 @@ impl Config {
             return Err(invalid(&issue.field, issue.reason));
         }
 
+        // Fail fast on a malformed `security.password.pepper` so the operator
+        // sees the error at config-load time rather than silently running
+        // without a pepper.
+        self.security.resolve_pepper()?;
+
         Ok(())
     }
+}
+
+impl SecurityYaml {
+    /// Resolves `security.password.pepper` into a [`PepperConfig`].
+    ///
+    /// Returns `Ok(None)` when no pepper is configured (the default), leaving
+    /// `CredentialConfig::pepper` as `None`. When a pepper is present, validates
+    /// that every key is a 64-character lowercase-hex 32-byte value that is not
+    /// the all-zero key, and that `previous_version` / `previous_key_hex` are
+    /// supplied together. Called both by [`Config::validate`] (fail-fast) and by
+    /// `main.rs` when building `CredentialConfig`.
+    pub fn resolve_pepper(&self) -> Result<Option<PepperConfig>, ConfigError> {
+        let Some(pepper) = self.password.pepper.as_ref() else {
+            return Ok(None);
+        };
+
+        let active_key = decode_pepper_key("security.password.pepper.key_hex", &pepper.key_hex)?;
+
+        let (previous_version, previous_key) =
+            match (pepper.previous_version, pepper.previous_key_hex.as_ref()) {
+                (None, None) => (None, None),
+                (Some(v), Some(hex)) => {
+                    let key = decode_pepper_key("security.password.pepper.previous_key_hex", hex)?;
+                    (Some(v), Some(key))
+                }
+                (Some(_), None) => {
+                    return Err(invalid(
+                        "security.password.pepper.previous_key_hex",
+                        "previous_key_hex is required when previous_version is set",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(invalid(
+                        "security.password.pepper.previous_version",
+                        "previous_version is required when previous_key_hex is set",
+                    ));
+                }
+            };
+
+        Ok(Some(PepperConfig {
+            active_version: pepper.version,
+            active_key,
+            previous_version,
+            previous_key,
+        }))
+    }
+}
+
+/// Decodes a hex-encoded pepper key, rejecting non-hex, short (< 32 byte), and
+/// all-zero values with an operator-facing [`ConfigError`].
+fn decode_pepper_key(field: &str, hex: &str) -> Result<PepperKey, ConfigError> {
+    let bytes =
+        hex::decode(hex).map_err(|e| invalid(field, format!("must be lowercase hex: {e}")))?;
+    if bytes.len() < 32 {
+        return Err(invalid(
+            field,
+            format!(
+                "must be at least 32 bytes (64 hex chars); got {} bytes",
+                bytes.len()
+            ),
+        ));
+    }
+    if bytes.iter().all(|b| *b == 0) {
+        return Err(invalid(
+            field,
+            "must not be the all-zero key — generate a random 32-byte (64 hex char) value",
+        ));
+    }
+    PepperKey::new(bytes).map_err(|e| invalid(field, e.to_string()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1846,7 +1921,8 @@ fn validate_realm_organizations_all(
 mod tests {
     use super::*;
     use crate::config::types::{
-        RealmAuthYaml, RealmYamlConfig, SmsConfig, SmsTransport, TwilioConfig,
+        PasswordSecurityYaml, PepperYaml, RealmAuthYaml, RealmYamlConfig, SmsConfig, SmsTransport,
+        TwilioConfig,
     };
 
     fn realm_with_mfa(methods: &[&str]) -> RealmYamlConfig {
@@ -2205,6 +2281,133 @@ mod tests {
                 .iter()
                 .any(|i| i.field == "oidc.require_pkce_for_confidential_clients"),
             "expected require_pkce_for_confidential_clients issue; got: {issues:?}"
+        );
+    }
+
+    // ── security.password.pepper wiring (HEA-1838) ───────────────────────────
+
+    /// A 64-char lowercase-hex, non-zero, 32-byte key.
+    const PEPPER_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const PEPPER_HEX_2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn security_with_pepper(pepper: Option<PepperYaml>) -> SecurityYaml {
+        SecurityYaml {
+            password: PasswordSecurityYaml { pepper },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_pepper_absent_is_none() {
+        // Unchanged default behaviour: no pepper section → CredentialConfig::pepper None.
+        let sec = SecurityYaml::default();
+        assert!(sec.resolve_pepper().expect("valid").is_none());
+    }
+
+    #[test]
+    fn resolve_pepper_active_only_wires_config() {
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 3,
+            key_hex: PEPPER_HEX.to_string(),
+            previous_version: None,
+            previous_key_hex: None,
+        }));
+        let resolved = sec.resolve_pepper().expect("valid").expect("some");
+        assert_eq!(resolved.active_version, 3);
+        assert_eq!(resolved.active_key.as_bytes(), &[0x11u8; 32]);
+        assert!(resolved.previous_version.is_none());
+        assert!(resolved.previous_key.is_none());
+    }
+
+    #[test]
+    fn resolve_pepper_rotation_pair_wires_both_keys() {
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 4,
+            key_hex: PEPPER_HEX.to_string(),
+            previous_version: Some(3),
+            previous_key_hex: Some(PEPPER_HEX_2.to_string()),
+        }));
+        let resolved = sec.resolve_pepper().expect("valid").expect("some");
+        assert_eq!(resolved.previous_version, Some(3));
+        assert_eq!(
+            resolved.previous_key.as_ref().expect("prev key").as_bytes(),
+            &[0x22u8; 32]
+        );
+    }
+
+    #[test]
+    fn resolve_pepper_rejects_zero_key() {
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 1,
+            key_hex: "0".repeat(64),
+            previous_version: None,
+            previous_key_hex: None,
+        }));
+        let err = sec.resolve_pepper().expect_err("zero key rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("all-zero"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn resolve_pepper_rejects_short_key() {
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 1,
+            key_hex: "11".repeat(16), // 16 bytes < 32
+            previous_version: None,
+            previous_key_hex: None,
+        }));
+        let err = sec.resolve_pepper().expect_err("short key rejected");
+        assert!(
+            err.to_string().contains("at least 32 bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_pepper_rejects_non_hex_key() {
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 1,
+            key_hex: "zz".repeat(32),
+            previous_version: None,
+            previous_key_hex: None,
+        }));
+        let err = sec.resolve_pepper().expect_err("non-hex rejected");
+        assert!(err.to_string().contains("hex"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn resolve_pepper_rejects_unpaired_previous_version() {
+        let sec = security_with_pepper(Some(PepperYaml {
+            version: 2,
+            key_hex: PEPPER_HEX.to_string(),
+            previous_version: Some(1),
+            previous_key_hex: None,
+        }));
+        let err = sec
+            .resolve_pepper()
+            .expect_err("unpaired previous rejected");
+        assert!(
+            err.to_string().contains("previous_key_hex is required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn config_from_yaml_parses_and_validates_pepper() {
+        // End-to-end: an operator YAML snippet parses, validates, and yields a
+        // resolvable pepper. A bad key is rejected at Config::validate time.
+        let ok_yaml = format!(
+            "dev_mode: true\nsecurity:\n  password:\n    pepper:\n      version: 7\n      key_hex: \"{PEPPER_HEX}\"\n"
+        );
+        let cfg = Config::from_yaml_str(&ok_yaml).expect("valid pepper config parses");
+        let resolved = cfg.security.resolve_pepper().expect("valid").expect("some");
+        assert_eq!(resolved.active_version, 7);
+
+        let bad_yaml =
+            "dev_mode: true\nsecurity:\n  password:\n    pepper:\n      version: 1\n      key_hex: \"0000000000000000000000000000000000000000000000000000000000000000\"\n";
+        assert!(
+            Config::from_yaml_str(bad_yaml).is_err(),
+            "zero-key pepper must be rejected at Config::validate"
         );
     }
 }

@@ -892,6 +892,49 @@ pub struct SecurityYaml {
     /// key `0000…` is rejected at startup.
     #[serde(default)]
     pub key_encryption_key: Option<String>,
+    /// Password-hashing hardening (`security.password`).
+    ///
+    /// Currently carries the optional Argon2id server-side pepper. Absent =
+    /// no pepper (unchanged default behaviour).
+    #[serde(default)]
+    pub password: PasswordSecurityYaml,
+}
+
+/// `security.password` — password-hashing hardening.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PasswordSecurityYaml {
+    /// Server-side Argon2id pepper. When present, all new password hashes are
+    /// peppered via `HMAC-SHA256(key, password)` before Argon2id. Absent = no
+    /// pepper is applied and `CredentialConfig::pepper` stays `None`.
+    #[serde(default)]
+    pub pepper: Option<PepperYaml>,
+}
+
+/// `security.password.pepper` — server-side Argon2id pepper (A-46).
+///
+/// The active pepper key is applied to every new or lazily-rehashed credential.
+/// The optional `previous_*` pair keeps a superseded pepper valid on login
+/// during an operator-controlled rotation grace window.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PepperYaml {
+    /// Active pepper version. Embedded in each new credential's
+    /// `pepper_version` so rotations can be tracked and audited.
+    pub version: u32,
+    /// Active pepper key as a 64-character lowercase hex string (32 bytes).
+    ///
+    /// The all-zero key `0000…` and keys shorter than 32 bytes are rejected at
+    /// startup.
+    pub key_hex: String,
+    /// Previous pepper version, set only while a rotation is in progress.
+    ///
+    /// Must be paired with `previous_key_hex`. Credentials carrying this
+    /// version are accepted on login and lazily re-hashed with the active key.
+    #[serde(default)]
+    pub previous_version: Option<u32>,
+    /// Previous pepper key (64-char lowercase hex). Required iff
+    /// `previous_version` is set.
+    #[serde(default)]
+    pub previous_key_hex: Option<String>,
 }
 
 impl SecurityYaml {

@@ -498,6 +498,42 @@ security:
   slug_cooldown_days: 30
 ```
 
+#### `security.password.pepper`
+
+Optional server-side Argon2id **pepper** (A-46). When configured, every new or
+lazily-rehashed password hash is first passed through
+`HMAC-SHA256(key = pepper_key, msg = password)` before Argon2id. The pepper is
+stored **only** in configuration (never in the WAL), so an attacker who exfiltrates
+the database still cannot mount an offline attack without the pepper key.
+
+When the `pepper` block is absent, no pepper is applied and behaviour is unchanged
+(`CredentialConfig::pepper = None`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `version` | integer | — (required) | Active pepper version. Embedded in each new credential's `pepper_version` so rotations can be tracked; run `hearth migrate rotate-pepper` to report how many credentials still carry an older version. |
+| `key_hex` | string | — (required) | Active pepper key: a 64-character lowercase hex string (32 bytes). The all-zero key (`0000…`) and keys shorter than 32 bytes are **rejected at startup**. Supply via env var (e.g. `${HEARTH_PASSWORD_PEPPER}`) to avoid storing the secret in the YAML file. |
+| `previous_version` | integer | — | Previous pepper version, set **only** during a rotation. Must be paired with `previous_key_hex`. Credentials carrying this version are still accepted on login and lazily re-hashed with the active key. |
+| `previous_key_hex` | string | — | Previous pepper key (64-char lowercase hex). Required iff `previous_version` is set. Remove both `previous_*` fields once the rotation grace window has elapsed. |
+
+```yaml
+security:
+  password:
+    pepper:
+      version: 1
+      key_hex: "${HEARTH_PASSWORD_PEPPER}"        # 64-char lowercase hex (32 bytes)
+      # During a rotation, keep the superseded key valid on login:
+      # previous_version: 0
+      # previous_key_hex: "${HEARTH_PASSWORD_PEPPER_PREV}"
+```
+
+**Rotation procedure:** move the current `version`/`key_hex` to
+`previous_version`/`previous_key_hex`, install the new key as `version`/`key_hex`,
+restart, then run `hearth migrate rotate-pepper --data-dir <dir>` to monitor how
+many credentials remain on the old pepper. Re-hashing happens lazily on each user's
+next successful login. Once the report reaches zero (or the grace window ends),
+drop the `previous_*` fields.
+
 #### `security.backup`
 
 Backup and restore hardening (A-30). When `verify_key` is set, the restore endpoint verifies that every uploaded archive's `manifest.json` carries a valid Ed25519 detached signature. Archives without a valid signature are rejected unconditionally (fail-closed). When absent, signature verification is skipped.

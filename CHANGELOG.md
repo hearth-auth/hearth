@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Argon2id password pepper is now configurable** — set `security.password.pepper`
+  (`version` + `key_hex`, plus optional `previous_version`/`previous_key_hex` for
+  rotation) in `hearth.yaml` to apply a server-side HMAC-SHA256 pepper before Argon2id
+  on all new password hashes. Previously the pepper engine existed but had no YAML
+  key, so `CredentialConfig::pepper` was always `None`. Malformed keys (non-hex,
+  shorter than 32 bytes, or the all-zero key) are rejected at startup; omitting the
+  block preserves the prior no-pepper behaviour (HEA-1838).
+
 ### Changed
 - **`make loadtest` now runs against the large corpus by default** — the
   `loadtest` Makefile target boots a demo-seeded, multi-hundred-thousand-user
