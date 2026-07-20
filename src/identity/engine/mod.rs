@@ -17520,7 +17520,9 @@ mod tests {
 
         // --- Case 4: absent → both return None. ---
         let missing = SessionId::generate();
-        let owned = engine.get_session(&realm_id, &missing).expect("get_session");
+        let owned = engine
+            .get_session(&realm_id, &missing)
+            .expect("get_session");
         let arc = engine
             .get_session_arc(&realm_id, &missing)
             .expect("get_session_arc");

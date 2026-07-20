@@ -194,11 +194,7 @@ mod tests {
         map.insert("new-key".to_string(), 42);
         let after = shard_ptrs(&map);
 
-        let changed = before
-            .iter()
-            .zip(&after)
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
         assert_eq!(
             changed, 1,
             "exactly one shard should be re-published per insert; \
@@ -219,11 +215,7 @@ mod tests {
         map.remove("seed:500");
         let after = shard_ptrs(&map);
 
-        let changed = before
-            .iter()
-            .zip(&after)
-            .filter(|(a, b)| a != b)
-            .count();
+        let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
         assert_eq!(changed, 1, "remove must not clone the full map");
         assert!(!map.contains_key("seed:500"));
     }

@@ -66,10 +66,7 @@ impl ResolutionCache {
     }
 
     /// Returns the cached resolution iff it matches the realm's current version.
-    fn get(
-        &self,
-        key: &(RealmId, UserId, Option<OrganizationId>),
-    ) -> Option<ResolvedPermissions> {
+    fn get(&self, key: &(RealmId, UserId, Option<OrganizationId>)) -> Option<ResolvedPermissions> {
         let current = self.generation(&key.0);
         match self.entries.get(key) {
             Some((version, value)) if *version == current => Some(value.clone()),

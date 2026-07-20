@@ -345,9 +345,12 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
     } = resolver.resolve_full_cached(user_id, realm_id, org_id)?;
 
     let permissions: Vec<Permission> = match requested_scope {
-        Some(scope_str) => {
-            narrow_by_scope(resolver, realm_id, scope_str, full_perms.into_iter().collect())?
-        }
+        Some(scope_str) => narrow_by_scope(
+            resolver,
+            realm_id,
+            scope_str,
+            full_perms.into_iter().collect(),
+        )?,
         None => full_perms,
     };
 

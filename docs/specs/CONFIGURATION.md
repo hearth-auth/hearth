@@ -725,7 +725,7 @@ operators and dashboards can detect the unthrottled state at runtime:
 
 ```yaml
 security:
-  load_test_unthrottled: true   # loopback bind only; never in production
+  load_test_unthrottled: true   # --dev mode + loopback bind required; never in production
 ```
 
 > **See also:** `loadtest/README.md` for the full load-test harness, seed
