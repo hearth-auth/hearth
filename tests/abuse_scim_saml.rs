@@ -22,18 +22,13 @@ fn a35a_max_scim_operations_is_1000() {
     );
 }
 
-/// The cap is enforced at the handler level (HTTP integration test needed for
-/// full black-box coverage).  The unit assertion here confirms the constant
-/// is reachable from the test surface and has the right value.
-///
-/// Full integration coverage lives in the server-mode harness tests that send
-/// real HTTP PATCH requests; see `make ci-local-fast` for the gate.
-#[test]
-fn a35a_scim_ops_constant_exported() {
-    // Verify the constant is exactly 1000 — any future change must also
-    // update the ABUSE.md spec and the CHANGELOG entry.
-    assert_eq!(MAX_SCIM_OPERATIONS, 1_000);
-}
+// NOTE: the handler-level enforcement of `MAX_SCIM_OPERATIONS` — a PATCH whose
+// `Operations` array exceeds the cap is rejected with 413 *before* any op is
+// applied — is exercised end-to-end by
+// `scim_bearer_auth::scim_patch_over_operation_cap_rejected`. The former
+// constant-only `a35a_scim_ops_constant_exported` test here gave false
+// confidence (it asserted the constant but never the enforcement) and was
+// removed in favour of that real integration test.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A-35b — SAML XML event cap

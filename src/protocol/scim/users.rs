@@ -9,6 +9,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::abuse::MAX_SCIM_OPERATIONS;
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
@@ -464,6 +465,14 @@ pub async fn patch_user(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // A-35a: bound PATCH work per request to avoid a single call fanning out
+    // into unbounded per-operation processing.
+    if body.operations.len() > MAX_SCIM_OPERATIONS {
+        return ScimError::payload_too_large(format!(
+            "PATCH Operations count exceeds maximum of {MAX_SCIM_OPERATIONS}"
+        ))
+        .into_response();
+    }
     let Ok(uuid) = id.parse::<uuid::Uuid>() else {
         return ScimError::not_found("user not found").into_response();
     };

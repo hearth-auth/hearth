@@ -212,9 +212,14 @@ fn link_mode_default_is_confirm() {
     assert_eq!(LinkMode::default(), LinkMode::Confirm);
 }
 
-// Regression guard for an #[allow(unused)] on UserId in this file:
-// force the type to be referenced via a trivially-true assertion.
+// Guards the invariants federation link tests rely on from `UserId::generate`:
+// each call yields a fresh, non-nil identifier (collisions would make the
+// per-subject link uniqueness assertions above vacuous).
 #[test]
-fn user_id_is_usable() {
-    let _u = UserId::generate();
+fn user_id_generate_is_unique_and_non_nil() {
+    let a = UserId::generate();
+    let b = UserId::generate();
+    assert_ne!(a, b, "UserId::generate must not repeat");
+    assert!(!a.as_uuid().is_nil(), "generated UserId must be non-nil");
+    assert!(!b.as_uuid().is_nil(), "generated UserId must be non-nil");
 }

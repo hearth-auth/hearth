@@ -98,6 +98,14 @@ impl ScimError {
         Self::bad_request("invalidPath", detail)
     }
 
+    /// 413 — request carries more items than the server will process in one
+    /// call (e.g. a PATCH `Operations` array over [`MAX_SCIM_OPERATIONS`]).
+    ///
+    /// [`MAX_SCIM_OPERATIONS`]: crate::abuse::MAX_SCIM_OPERATIONS
+    pub fn payload_too_large(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, detail)
+    }
+
     /// 500 — internal error. Detail is fixed ("internal error") to avoid
     /// leaking implementation details; real cause is logged via `tracing`.
     pub fn internal() -> Self {

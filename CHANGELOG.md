@@ -15,6 +15,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shorter than 32 bytes, or the all-zero key) are rejected at startup; omitting the
   block preserves the prior no-pepper behaviour (HEA-1838).
 
+### Security
+- **SCIM PATCH now enforces the per-request operation cap** — a `PATCH`
+  to `/scim/v2/Users/{id}` or `/scim/v2/Groups/{id}` whose `Operations` array
+  exceeds `MAX_SCIM_OPERATIONS` (1000) is rejected with `413 Payload Too Large`
+  before any operation is applied. The cap constant existed but was never wired
+  into the handlers, so a single PATCH could request unbounded per-operation
+  work (HEA-1830).
+
 ### Changed
 - **`make loadtest` now runs against the large corpus by default** — the
   `loadtest` Makefile target boots a demo-seeded, multi-hundred-thousand-user
