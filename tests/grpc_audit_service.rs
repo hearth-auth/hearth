@@ -14,6 +14,8 @@
 //! | `VerifyIntegrity` reports ok + event count over the transport | `verify_integrity_reports_ok_and_count` |
 //! | `ListEvents` requires a bearer token | `list_events_without_token_unauthenticated` |
 //! | `ListEvents` requires the admin permission | `list_events_without_admin_permission_denied` |
+//! | Granular admin lacking `hearth.realm.admin` is denied | `list_events_granular_admin_without_realm_admin_denied` |
+//! | Body `realm_id` is ignored in favour of `x-realm-id` | `list_events_ignores_body_realm_id` |
 
 mod common;
 
@@ -37,6 +39,17 @@ struct GrpcCtx {
 }
 
 async fn grpc_ctx_with_admin(with_admin: bool) -> GrpcCtx {
+    grpc_ctx_with_role(with_admin.then_some("realm.admin")).await
+}
+
+/// Builds a gRPC test context whose caller is assigned `role_name` (if any).
+///
+/// `Some("realm.admin")` grants the full admin bundle (incl. `hearth.realm.admin`).
+/// `Some("hearth.users.admin")` grants only the granular user-admin permission —
+/// it clears the coarse `authenticate_admin` gate but NOT the per-RPC
+/// `grpc_require_permission("hearth.realm.admin")` refinement.
+/// `None` leaves the caller with no roles at all.
+async fn grpc_ctx_with_role(role_name: Option<&str>) -> GrpcCtx {
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
@@ -53,10 +66,10 @@ async fn grpc_ctx_with_admin(with_admin: bool) -> GrpcCtx {
             },
         )
         .expect("user");
-    if with_admin {
+    if let Some(role_name) = role_name {
         let role = h
             .rbac()
-            .get_role_by_name(&realm, "realm.admin")
+            .get_role_by_name(&realm, role_name)
             .expect("lookup")
             .expect("seed");
         h.rbac()
@@ -178,10 +191,10 @@ async fn verify_integrity_reports_ok_and_count() {
         out.ok,
         "intact hash chain must verify ok over the transport"
     );
-    assert!(
-        out.broken_at_event_id.is_none(),
-        "no broken event id on an intact chain"
-    );
+    // NOTE: `broken_at_event_id` is not asserted here — the product hardcodes it
+    // to `None` (`src/protocol/grpc/audit.rs`), so any assertion on it would be
+    // vacuous (TESTING.md anti-pattern). Re-add a meaningful check once the RPC
+    // populates the field on a genuinely broken chain (HEA-1842 finding 1).
     assert!(
         out.event_count >= 3,
         "event_count must reflect the seeded events, got {}",
@@ -218,5 +231,66 @@ async fn list_events_without_admin_permission_denied() {
         err.code(),
         Code::PermissionDenied,
         "non-admin ListEvents must map to gRPC PermissionDenied, got {err:?}"
+    );
+}
+
+/// A caller holding only `hearth.users.admin` clears the coarse
+/// `authenticate_admin` gate (which accepts any granular sub-admin permission)
+/// but must still be denied `ListEvents`, which requires the per-RPC
+/// `grpc_require_permission("hearth.realm.admin")` refinement. This binds the
+/// second-stage authorization check, which the no-roles negative test above
+/// cannot reach (that one is stopped at the coarse gate). (HEA-1842 finding 2.)
+#[tokio::test]
+async fn list_events_granular_admin_without_realm_admin_denied() {
+    let ctx = grpc_ctx_with_role(Some("hearth.users.admin")).await;
+    let err = ctx
+        .svc
+        .list_events(admin_req(&ctx, pb::AuditQuery::default()))
+        .await
+        .expect_err("granular users.admin without realm.admin must be denied");
+    assert_eq!(
+        err.code(),
+        Code::PermissionDenied,
+        "users.admin-only caller must be denied ListEvents, got {err:?}"
+    );
+}
+
+/// Defence in depth: the realm the events are read from is bound to the
+/// `x-realm-id` metadata, NOT to the `realm_id` field of the request body.
+/// A caller authenticated against realm A who stuffs a foreign realm id into
+/// the `AuditQuery` body must still see only realm A's events. Binds the
+/// `proto_query_to_domain` guard that discards `q.realm_id`. (HEA-1842 finding 3.)
+#[tokio::test]
+async fn list_events_ignores_body_realm_id() {
+    let ctx = grpc_ctx_with_admin(true).await;
+    seed_events(
+        &ctx,
+        &[AuditAction::UserCreated, AuditAction::SessionCreated],
+    );
+
+    // Foreign realm id in the body — must be ignored.
+    let foreign = uuid::Uuid::new_v4().to_string();
+    assert_ne!(
+        foreign,
+        ctx.realm.as_uuid().to_string(),
+        "test fixture: foreign id must differ from the auth realm"
+    );
+    let query = pb::AuditQuery {
+        realm_id: foreign,
+        ..Default::default()
+    };
+
+    let page = ctx
+        .svc
+        .list_events(admin_req(&ctx, query))
+        .await
+        .expect("list_events must succeed and ignore the body realm_id")
+        .into_inner();
+
+    // The body's foreign realm has no events; the auth realm has the seeded
+    // ones. Non-empty proves the query resolved against `x-realm-id`, not body.
+    assert!(
+        page.events.iter().any(|e| e.actor == "actor-0"),
+        "events must resolve against x-realm-id, not the body realm_id"
     );
 }
