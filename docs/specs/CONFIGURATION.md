@@ -513,7 +513,7 @@ When the `pepper` block is absent, no pepper is applied and behaviour is unchang
 |-------|------|---------|-------------|
 | `version` | integer | — (required) | Active pepper version. Embedded in each new credential's `pepper_version` so rotations can be tracked; run `hearth migrate rotate-pepper` to report how many credentials still carry an older version. |
 | `key_hex` | string | — (required) | Active pepper key: a 64-character lowercase hex string (32 bytes). The all-zero key (`0000…`) and keys shorter than 32 bytes are **rejected at startup**. Supply via env var (e.g. `${HEARTH_PASSWORD_PEPPER}`) to avoid storing the secret in the YAML file. |
-| `previous_version` | integer | — | Previous pepper version, set **only** during a rotation. Must be paired with `previous_key_hex`. Credentials carrying this version are still accepted on login and lazily re-hashed with the active key. |
+| `previous_version` | integer | — | Previous pepper version, set **only** during a rotation. Must be paired with `previous_key_hex`, and must differ from `version` (setting them equal is **rejected at startup**). Credentials carrying this version are still accepted on login and lazily re-hashed with the active key. |
 | `previous_key_hex` | string | — | Previous pepper key (64-char lowercase hex). Required iff `previous_version` is set. Remove both `previous_*` fields once the rotation grace window has elapsed. |
 
 ```yaml
