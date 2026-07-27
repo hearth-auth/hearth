@@ -1030,14 +1030,23 @@ mod tests {
         assert_eq!(entries, expected);
     }
 
+    /// Verifies a WAL written with [`SyncMode::EveryWrite`] is fully readable
+    /// after the writer is dropped and the file re-opened.
+    ///
+    /// NOTE: this is a *persistence-across-reopen* check, not a proof of
+    /// fsync-before-ack. Both writer and reader live in the same process, so the
+    /// bytes would be served from the OS page cache even if `fsync` were never
+    /// called. The fsync-before-ack durability invariant (surviving a real
+    /// `kill -9` where the page cache is lost) is exercised by the
+    /// `hearth-simulation` crate's `wal_crash` real-thread/tempfile crash loop.
     #[test]
-    fn wal_fsync_durability_across_restart() {
+    fn wal_data_persists_across_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal_path = dir.path().join("test.wal");
 
         let entry = make_entry(b"durable-key", b"durable-val", WalOperation::Put);
 
-        // Write and drop (simulates process exit)
+        // Write and drop (closes the file handle; does NOT drop the page cache)
         {
             let wal = open_test_wal(
                 &wal_path,

@@ -47,9 +47,22 @@ pub(crate) fn apply_migrations(
     from_version: u16,
     target_version: u16,
 ) -> Result<Vec<u8>, StorageError> {
+    apply_chain(MIGRATIONS, content, from_version, target_version)
+}
+
+/// Core migration walk, parameterised over the migration table so both the
+/// gap and incomplete-chain error branches are exercisable in isolation.
+/// Production always drives this with the static [`MIGRATIONS`] table via
+/// [`apply_migrations`].
+fn apply_chain(
+    migrations: &[WalMigration],
+    content: &[u8],
+    from_version: u16,
+    target_version: u16,
+) -> Result<Vec<u8>, StorageError> {
     let mut data = content.to_vec();
     let mut ver = from_version;
-    for m in MIGRATIONS {
+    for m in migrations {
         if m.from < from_version || m.from >= target_version {
             continue;
         }
@@ -109,5 +122,50 @@ mod tests {
         // from == target => no migrations run
         let result = apply_migrations(content, 1, 1).expect("noop migration");
         assert_eq!(result, content.as_ref());
+    }
+
+    /// Negative: the incomplete-chain branch. The real `MIGRATIONS` table tops
+    /// out at v1, so a request to reach v2 leaves `ver` at 1 and must surface
+    /// `DeserializationFailed` rather than silently returning under-migrated
+    /// bytes.
+    #[test]
+    fn apply_migrations_errors_when_target_beyond_table() {
+        let content = b"v0-content";
+        let err = apply_migrations(content, 0, 2).expect_err("target beyond table must fail");
+        match err {
+            StorageError::DeserializationFailed { reason } => {
+                assert!(
+                    reason.contains("reached v1") && reason.contains("target is v2"),
+                    "reason should name reached/target versions, got: {reason}"
+                );
+            }
+            other => panic!("expected DeserializationFailed, got {other:?}"),
+        }
+    }
+
+    /// Negative: the gap-in-chain branch. A table whose first applicable step
+    /// starts at v1 while `from_version` is v0 has no way to reach v1, so
+    /// `apply_chain` must reject with `DeserializationFailed` rather than
+    /// applying a step out of order. This branch is unreachable through the
+    /// single-step production table, hence the injected table here.
+    #[test]
+    fn apply_chain_errors_on_gap_in_migration_table() {
+        static GAPPED: &[WalMigration] = &[WalMigration {
+            from: 1,
+            to: 2,
+            apply: migrate_v0_to_v1,
+        }];
+        let content = b"v0-content";
+        let err =
+            apply_chain(GAPPED, content, 0, 2).expect_err("gap in migration chain must fail");
+        match err {
+            StorageError::DeserializationFailed { reason } => {
+                assert!(
+                    reason.contains("no WAL migration step available from v0"),
+                    "reason should name the missing step, got: {reason}"
+                );
+            }
+            other => panic!("expected DeserializationFailed, got {other:?}"),
+        }
     }
 }
