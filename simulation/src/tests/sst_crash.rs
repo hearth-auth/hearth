@@ -177,7 +177,10 @@ fn simulation_power_loss() {
         file.sync_all().expect("sync");
     }
 
-    // Phase 3: Recovery
+    // Phase 3: Recovery. Make the torn-tail *discard* load-bearing (it was
+    // previously only implied by survival): after replay the recovered view must
+    // be EXACTLY the 10 committed keys — no more (the garbage tail must not be
+    // decoded into a phantom key) and no fewer.
     {
         let config = StorageConfig::dev(dir.path().to_path_buf());
         let engine = EmbeddedStorageEngine::open(config).expect("recovery after power loss");
@@ -192,7 +195,30 @@ fn simulation_power_loss() {
                 "key {key} must survive power-loss recovery (seed={seed})"
             );
         }
+
+        // The garbage tail must not have been decoded as a committed record: a
+        // scan of the whole realm returns exactly the 10 keys, nothing more.
+        let recovered = engine
+            .scan(&realm, b"", &[0xFFu8; 8])
+            .expect("scan after recovery");
+        assert_eq!(
+            recovered.len(),
+            10,
+            "torn tail must be discarded, not decoded into phantom keys: got {} entries (seed={seed})",
+            recovered.len()
+        );
     }
+
+    // NOTE (durability caveat — see HEA-1832 follow-up): this test deliberately
+    // does NOT write new data after recovery and reopen. Doing so currently loses
+    // the post-recovery write, because `Wal::open` seeks to physical EOF (after
+    // the garbage tail) rather than truncating at the last valid record boundary
+    // (src/storage/wal.rs — `file.seek(SeekFrom::End(0))` in the recovery path).
+    // The next replay then stops at the still-present corruption before reaching
+    // the appended record. That is a latent durability gap under the
+    // corruption-then-crash double fault; it is escalated separately rather than
+    // asserted here so this test stays green while the discard invariant above
+    // remains load-bearing.
 }
 
 /// KEK-present body corruption: an SST whose `kek_id` resolves to a registered
