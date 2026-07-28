@@ -1,8 +1,8 @@
 # Hearth — Performance Report 1.0
 
 **Status:** `v1 — GRADED. 13 PASS / 6 MISS / 4 NOT-MEASURABLE / 7 NOT-MEASURED across 30 rows`
-**Owner:** CTO (HEA-1867) · **Joined by:** HEA-1901 (TechnicalWriter) · **Parent:** HEA-1867
-**Last updated:** 2026-07-28 · **Branch:** `feature/perf-updates-7-28-26` · **Head SHA:** `3429ce43`
+**Owner:** CTO (HEA-1867) · **Joined by:** HEA-1901 (TechnicalWriter) · **CTO-reviewed:** 2026-07-28 · **Parent:** HEA-1867
+**Last updated:** 2026-07-28 · **Branch:** `feature/perf-updates-7-28-26` · **Head SHA at join:** `c0954f6b`
 
 > **Board-facing caveat 1 — hardware:** Every figure in this report was measured on
 > `dev-ryzen-7840hs` (AMD Ryzen 7 7840HS mobile, 8 physical cores / 16 threads, governor
@@ -51,6 +51,22 @@ K2 (10M+ sessions) is NOT-MEASURABLE (ROPC grant removed by HEA-1862; no session
 exists). T1–T4 over HTTP at 10k+ concurrent clients require an isolated generator host — C4 proved
 the generator can sustain 10k connections but the server-side HTTP throughput measurement is
 NOT-MEASURABLE on this box.
+
+### 0.0 CTO review record (2026-07-28)
+
+The v1 join was reviewed against its own non-negotiables. Every cited SHA, source doc and artifact
+resolves. Six defects were found and corrected in-place; **no verdict changed** as a result:
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | K4/K5/K6 totals (22,980 MB / 234 GB / 2,341 GB) appear in **no** source artifact and do not reproduce from the 24,141 B/user slope in either SI or binary units. | Recomputed from the fitted slope in binary units; unit convention footnoted under §3.3. MISS multiples unchanged (they are C0's per-user ratios). |
+| 2 | All seven C5 citations pointed at `37abbc19`, which is the **C2 CTO-triage** commit. C5's doc and artifact landed in `b2aa7cb9`. | Repointed to `b2aa7cb9`. |
+| 3 | §4's max-corpus formula (`÷ 24.141 KB/user`) does not yield its own stated answer (609,000). | Restated using C0's actual KiB-based arithmetic, with the decimal-units figure given alongside. |
+| 4 | Axis E rows graded PASS with an empty 95% CI column, which admissibility rule 2 requires. | Disclosed as a named rule-2 shortfall under §3.4 rather than left silent. |
+| 5 | E2/E3 graded PASS on E1's curve without their own ladder, unlabelled. | Marked **proxy**, with the inheritance argument and its limits stated. |
+| 6 | §3.5 forwards the "no admission control" finding to "R4 in §6"; R4 is record encoding. | Repointed to R1, noting HEA-1887 covers only the KDF path. |
+
+Header **Head SHA** was also stale (`3429ce43`); the join actually sits on `c0954f6b`.
 
 ### 0.1 Verdict vocabulary (unchanged from v0)
 
@@ -136,11 +152,11 @@ production scale is NOT-MEASURABLE in this environment — it is not folded into
 | L2 | Session lookup by ID | < 10 µs | < 100 µs | n/a | ≈ 0.13 µs (C7, 7.45 M ops/s, 1T hot) | not explicitly captured | `dev-ryzen-7840hs` | **PASS** (engine; HTTP NOT-MEASURABLE) | C7 `b29e57dd` |
 | L3 | Permission check (in-process claim lookup) | < 1 µs | < 5 µs | n/a | ≈ 67 ns (C7, 14.8 M ops/s, 1T) | not explicitly captured | `dev-ryzen-7840hs` | **PASS** (engine; HTTP NOT-MEASURABLE) | C7 `b29e57dd` |
 | L4 | Permission resolution at token-issue (RBAC traversal) | < 100 µs | < 1 ms | < 10 ms | ≈ 67 ns (C7, cache-hit path) | not explicitly captured | `dev-ryzen-7840hs` | **PASS** (engine, cache-hit; miss path not separately benchmarked) | C7 `b29e57dd` |
-| L5 | User lookup by email/ID | < 50 µs | < 500 µs | < 5 ms | 0.06–0.08 µs (C5 hot); ≈ 0.61 µs (C7 user_lookup hot) | 0.10–0.63 µs (C5 hot, across 10k–320k corpus) | `dev-ryzen-7840hs` | **PASS** (engine; HTTP NOT-MEASURABLE) | C5 `37abbc19`, C7 `b29e57dd` |
+| L5 | User lookup by email/ID | < 50 µs | < 500 µs | < 5 ms | 0.06–0.08 µs (C5 hot); ≈ 0.61 µs (C7 user_lookup hot) | 0.10–0.63 µs (C5 hot, across 10k–320k corpus) | `dev-ryzen-7840hs` | **PASS** (engine; HTTP NOT-MEASURABLE) | C5 `b2aa7cb9`, C7 `b29e57dd` |
 | L6a | Token minting (authorization_code / refresh / client_credentials — no KDF) | < 1 ms | < 5 ms | < 10 ms | — | — | — | `NOT-MEASURED` | C7/C4; needs isolated host |
 | L6b | Interactive password issuance (password grant / browser login — one Argon2id verify) | < 50 ms | < 100 ms | N/A (KDF-dominated) | KDF floor: 12.5–29 ms (C9, in-process, no generator) | 127–954 ms ungated → 66–213 ms gated (C9/HEA-1887, `dev-ryzen-7840hs`) | `dev-ryzen-7840hs` | `NOT-MEASURABLE` (rule 3/5 on this host; KDF floor and queue fix established) | C9 `235e3342`, HEA-1887 |
 | L7 | User creation (with credential hashing) | < 50 ms | < 100 ms | n/a | — | — | — | `NOT-MEASURED` | C9 gives KDF floor ~29 ms p50; full path not attempted at low concurrency |
-| L8 | Cold-tier read (NVMe) | — | < 5 ms | — | 0.77–1.32 µs (C5, cold-natural p50) | 97.5–512 µs (C5, cold-natural p99, 10k–320k corpus, warm nvme-XFS) | `dev-ryzen-7840hs` | **PASS** (engine, warm cache, ≤320k corpus; large-corpus extrapolation yields ~2.2 ms, within budget) | C5 `37abbc19` |
+| L8 | Cold-tier read (NVMe) | — | < 5 ms | — | 0.77–1.32 µs (C5, cold-natural p50) | 97.5–512 µs (C5, cold-natural p99, 10k–320k corpus, warm nvme-XFS) | `dev-ryzen-7840hs` | **PASS** (engine, warm cache, ≤320k corpus; large-corpus extrapolation yields ~2.2 ms, within budget) | C5 `b2aa7cb9` |
 
 > **L6 split rationale.** The v0 report carried a standing red flag: baseline issuance p99 = 6000 ms
 > against a 5 ms target. C9 (`docs/perf/HEA-1879-C9-issuance-triage.md`, `235e3342`) discharged that
@@ -207,10 +223,10 @@ All engine-level. HTTP delta NOT-MEASURABLE on this host — see §0 scope note.
 | K1 | Users per node (total managed) | 100M+ | — | — | `NOT-MEASURED` | C8 all rungs swap-voided; this host holds ~600k users |
 | K2 | Active sessions per node | 10M+ | — | — | `NOT-MEASURABLE` | ROPC (`grant_type=password`) removed by HEA-1862; seed binary cannot create sessions; no alternative seeding path |
 | K3 | Role assignments per node | 100M+ | — | — | `NOT-MEASURABLE` | RBAC seeder does not exist; seed binary creates no per-user role assignments |
-| K4 | Memory footprint (idle, 1M hot users) | < 500 MB | **≈ 22,980 MB** (24,141 B/user × 1M + 37.6 MB overhead, extrapolated) | `dev-ryzen-7840hs` | **MISS (46×)** | C0 `docs/perf/HEA-1868-C0-MEMORY-COST.md` |
-| K5 | Memory footprint (idle, 10M hot users) | < 8 GB | **≈ 234 GB** (extrapolated) | `dev-ryzen-7840hs` | **MISS (29×)** | C0, extrapolated from 24,141 B/user slope |
-| K6 | Memory footprint (idle, 100M hot users) | < 50 GB | **≈ 2,341 GB** (extrapolated) | `dev-ryzen-7840hs` | **MISS (46×)** | C0, extrapolated; note §5 H1c: SST full-RAM residency makes this Θ(corpus) regardless |
-| K7 | Disk footprint (100M total users) | < 200 GB | **≈ 436 GB** (4,573 B/user × 100M, extrapolated) | `dev-ryzen-7840hs` | **MISS (2.1×)** | C0 `docs/perf/HEA-1868-C0-MEMORY-COST.md` |
+| K4 | Memory footprint (idle, 1M hot users) | < 500 MB | **≈ 22.5 GiB** (24,141 B/user × 1M + 37.6 MB intercept, extrapolated) | `dev-ryzen-7840hs` | **MISS (46×)** | C0 `docs/perf/HEA-1868-C0-MEMORY-COST.md` |
+| K5 | Memory footprint (idle, 10M hot users) | < 8 GB | **≈ 225 GiB** (extrapolated) | `dev-ryzen-7840hs` | **MISS (29×)** | C0, extrapolated from 24,141 B/user slope |
+| K6 | Memory footprint (idle, 100M hot users) | < 50 GB | **≈ 2,248 GiB (2.2 TiB)** (extrapolated) | `dev-ryzen-7840hs` | **MISS (46×)** | C0, extrapolated; note §5 H4: SST full-RAM residency makes this Θ(corpus) regardless |
+| K7 | Disk footprint (100M total users) | < 200 GB | **≈ 426 GiB** (4,573 B/user × 100M, extrapolated; C0 headline states "~436 GB") | `dev-ryzen-7840hs` | **MISS (2.1×)** | C0 `docs/perf/HEA-1868-C0-MEMORY-COST.md` |
 | K8 | Binary size | < 50 MB | **41.39 MB** (39.47 MiB) | `dev-ryzen-7840hs` | **PASS** | C10 `6e6a24c4`; artifact `docs/perf/artifacts/c10-artifact-facts.json` |
 | K9 | Cold start to serving requests | < 2 s | **70 ms** worst-of-5 (min 59 ms) | `dev-ryzen-7840hs` | **PASS** | C10 `6e6a24c4`; artifact `docs/perf/artifacts/c10-artifact-facts.json` |
 | K10 | Cold-to-hot promotion latency | < 5 ms | — | — | `NOT-MEASURED` | C1 shipped promotion telemetry (HEA-1869); promotion p50/p99 not separately benchmarked |
@@ -225,6 +241,14 @@ All engine-level. HTTP delta NOT-MEASURABLE on this host — see §0 scope note.
 > only reached after compaction plus a read-sweep to populate the hot tier. Until Layers B and C are
 > fixed, K4–K7 remain MISS even at the hot-tier estimate (673 B vs. 524 B budget — marginal miss).
 > Remediation in HEA-1896–HEA-1900.
+
+> **K4–K7 units convention (CTO review, HEA-1901).** All four totals are recomputed here directly
+> from C0's fitted slopes in **binary units (GiB = 2³⁰ B)**, so that every cell reproduces from
+> `slope × N`. C0's own headline for K7 reads "~436 GB"; that figure divides by 1024 one step short
+> and is really 436,000 MiB ≈ 426 GiB. The discrepancy is ~2% and changes no verdict — the MISS
+> multiples (46× / 29× / 46× / 2.1×) are C0's per-user-byte ratios (e.g. 24,141 B vs. the 524 B
+> budget) and are unaffected by the unit convention. In SI units the same slopes give 24.1 GB /
+> 241 GB / 2,414 GB / 457 GB.
 
 > **K8/K9 build provenance note (carried from v0).** The K8/K9 binary was measured from a working tree
 > at base `6e6a24c4` with C1's uncommitted telemetry present. Both PASSes are robust to that
@@ -244,18 +268,36 @@ Graded per plan §1a: regress `log(p99)` on `log(n)`. **PASS = slope ≤ O(log n
 
 All C5 measurements: in-process `EmbeddedStorageEngine::get`, AMD Ryzen 7 7840HS, powersave,
 warm nvme-XFS, hot/cold purity confirmed via C1 telemetry (`hearth_storage_get_total{outcome}`).
-Corpus ladder: 10k → 320k (32×). Source: `docs/perf/HEA-1873-C5-complexity-sweep.md`, SHA `37abbc19`,
+Corpus ladder: 10k → 320k (32×). Source: `docs/perf/HEA-1873-C5-complexity-sweep.md`, SHA `b2aa7cb9`,
 artifact `docs/perf/artifacts/c5-complexity-sweep-raw.json`.
 
 | # | Curve | Fitted exponent | 95% CI | R² | Target | Verdict | Source |
 |---|---|---|---|---|---|---|---|
-| E1 | user lookup p99 vs corpus size | **+0.281 (hot); +0.281 (cold-compacted)** | — | 0.25 (hot); 0.76 (cold-compacted) | ≤ O(log n) | **PASS** (conditional; hot O(1); cold ≤ O(log n) when compacted) | C5 `37abbc19` |
-| E2 | session lookup p99 vs corpus size | Same engine path as E1 | — | — | ≤ O(log n) | **PASS** (conditional; same analysis as E1 — engine get() is the shared term) | C5 `37abbc19` |
-| E3 | validate_token p99 vs corpus size | Same engine path as E1 (storage dominates at scale) | — | — | ≤ O(log n) | **PASS** (conditional; same analysis as E1) | C5 `37abbc19` |
+| E1 | user lookup p99 vs corpus size | **+0.281 (hot); +0.281 (cold-compacted)** | — | 0.25 (hot); 0.76 (cold-compacted) | ≤ O(log n) | **PASS** (conditional; hot O(1); cold ≤ O(log n) when compacted) | C5 `b2aa7cb9` |
+| E2 | session lookup p99 vs corpus size | not independently fitted — inherits E1 | — | — | ≤ O(log n) | **PASS** (conditional, **proxy**; engine `get()` is the shared term — see note) | C5 `b2aa7cb9` |
+| E3 | validate_token p99 vs corpus size | not independently fitted — inherits E1 | — | — | ≤ O(log n) | **PASS** (conditional, **proxy**; same inheritance as E2) | C5 `b2aa7cb9` |
 | E4 | SST file count vs corpus size | **+1.0000 (default config); +0.0376 (lever-1 ON)** | — | 1.0000; 0.713 | ≤ O(log n) | **MISS** (default; PASS with `storage.compaction.max_sst_count > 0` per HEA-1885) | C2 `docs/perf/HEA-1870-C2-sst-growth.md`; HEA-1885 `709ed183` |
-| E5 | p99 vs hot-set/capacity ratio (0.1×→10×, fixed corpus=160k) | — (no latency breach observed at any ratio) | — | — | no cliff | `NOT-MEASURED` at production scale (160k corpus shows no latency breach, even at 0% hit rate; hit-ratio cliff at ratio ≈ 1× is real but latency stays within budget on this host) | C5 Axis B `37abbc19` |
+| E5 | p99 vs hot-set/capacity ratio (0.1×→10×, fixed corpus=160k) | — (no latency breach observed at any ratio) | — | — | no cliff | `NOT-MEASURED` at production scale (160k corpus shows no latency breach, even at 0% hit rate; hit-ratio cliff at ratio ≈ 1× is real but latency stays within budget on this host) | C5 Axis B `b2aa7cb9` |
 | E6 | Ratio at which p99 first breaches §7.1 budget | — | — | — | stated, not graded | `NOT-MEASURED` | C5: no breach at 160k corpus; production-scale measurement pending |
 | E7 | Overload behaviour at 2× / 5× / 10× sustainable | — | — | — | bounded, honest failure | `NOT-MEASURABLE` | C6 reviewed and rejected (§3.5); C3 confirmed server-owned ceiling but Argon2id path now addressed by HEA-1887 |
+
+> **Rule-2 shortfall, disclosed (CTO review, HEA-1901).** Admissibility rule 2 requires Axis E
+> verdicts to be *fitted exponents with a confidence interval*. The C5 harness
+> (`examples/complexity_sweep.rs`) emitted slope and R² but **no confidence intervals**, which is why
+> the 95% CI column reads "—" on every row. The E1/E4 exponents are therefore fitted-but-un-bounded.
+> This is a shortfall against our own contract, recorded rather than papered over. It does not move
+> E1's verdict — the hot-path PASS rests on the absolute observation (p99 ≤ 0.63 µs, corpus-independent
+> across 32×) rather than on the slope, whose R² of 0.25 the C5 author explicitly calls noise. Emitting
+> CIs is a one-line harness change for any re-run.
+
+> **E2/E3 are proxy-graded, not independently fitted (CTO review, HEA-1901).** C5 measured
+> `EmbeddedStorageEngine::get` only, on the stated ground that this single call *is* the shared
+> storage term inside `validate_token` / `lookup_session` / `lookup_user`
+> (`docs/perf/HEA-1873-C5-complexity-sweep.md` L22–25). The E2/E3 PASSes therefore inherit E1's curve
+> by architectural argument; no separate session-lookup or validate-token corpus ladder was run. The
+> argument is sound for the *storage* term and unsound for anything above it (JWT verify, claim
+> decode) — those are corpus-independent by construction, so the inheritance is safe, but it is an
+> inference and is labelled as one.
 
 > **E1–E3 conditionality.** The ≤ O(log n) verdict holds in the **compacted** steady state.
 > Uncompacted (post-seed, pre-compaction), the cold path fans out over a flat `sst_readers` Vec
@@ -295,8 +337,9 @@ three different build SHAs; (3) RSS "flat" sub-grades at 5× and 10× carry `rss
 
 **What C6 does establish (kept):** on code inspection, Hearth has no admission control — `tower`
 compiled with only `util`, `tower-http` with only `trace`, zero hits for `LoadShed` /
-`ConcurrencyLimit` / `TimeoutLayer` in `src/`. Carried as R4 in §6 (now partially addressed by
-HEA-1887 for the KDF path).
+`ConcurrencyLimit` / `TimeoutLayer` in `src/`. Carried as **R1** in §6 (the KDF-path admission gate,
+HEA-1887, addresses this for password hashing only; the general HTTP-layer admission control C6
+identified as absent remains absent).
 
 **To settle E7:** re-run the 2×/5×/10× ladder on a single build with generator isolation confirmed
 (C3 now done), resource sampling non-null at every rung, and raw artifacts committed.
@@ -337,7 +380,9 @@ post-compaction read-sweep measurement was not part of C0's scope and has not be
 both figures are correct for their respective measurement states — the 24 KB is the honest working-set
 cost under any write-heavy workload; the 673 B is the floor reachable after compaction + promotion.
 
-**Max corpus on this host:** (14,055 MB available − 37.6 MB overhead) ÷ 24.141 KB/user ≈ **609,000 users**.
+**Max corpus on this host:** (14,055 MiB available − 38 MiB overhead) ÷ 23.6 KiB/user ≈ **609,000 users**
+— C0's arithmetic, reproduced verbatim (24,141 B = 23.6 KiB). Stated in decimal KB (24.141 kB/user)
+the same headroom gives ≈ 581,000 users; the two differ only by the KiB/kB convention.
 
 ---
 
