@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "child_issue": "HEA-1878",
+  "axis": "K8,K9",
+  "git_sha": "a397d86b",
+  "timestamp_utc": "2026-07-28T17:18:01Z",
+  "host": {
+    "profile": "dev-ryzen-7840hs",
+    "cpu_model": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+    "cores_physical": 8,
+    "threads": 16,
+    "governor": "powersave",
+    "ram_total_gib": 54,
+    "ram_available_gib": 11,
+    "generator_placement": "n/a"
+  },
+  "swap": {
+    "swap_in_pages": 10477606,
+    "swap_out_pages": 18749252,
+    "void_due_to_swap": false,
+    "note": "Cumulative host counters since boot, not deltas over the window. K8/K9 are not load-generated and are insensitive to swap pressure; recorded for schema conformance."
+  },
+  "ceiling": {
+    "attribution": "n/a",
+    "reason": "K8/K9 are artifact and startup properties, not load-generated figures. Rule 3 does not apply."
+  },
+  "measurements": [
+    { "name": "binary_size_bytes", "value": 41389976, "unit": "bytes" },
+    { "name": "binary_size_mb_decimal", "value": 41.39, "unit": "MB" },
+    { "name": "binary_size_mib", "value": 39.47, "unit": "MiB" },
+    { "name": "cold_start_to_serving_max_ms", "value": 70, "unit": "ms" },
+    { "name": "cold_start_to_serving_min_ms", "value": 59, "unit": "ms" }
+  ],
+  "cold_start_samples_ms": [70,69,66,64,59],
+  "verdicts": { "K8": "PASS", "K9": "PASS" },
+  "verdict_reason": "K8: release binary 41.39 MB vs < 50 MB target. K9: worst-of-5 cold start 70 ms vs < 2000 ms target; measured as exec -> first successful GET /health on a fresh empty data dir, --dev (in-memory storage), no corpus. A cold start against a large on-disk corpus is a DIFFERENT measurement and is NOT graded here — it belongs to C8.",
+  "reproduction": "bash docs/perf/scripts/c10-artifact-facts.sh"
+}
