@@ -434,6 +434,167 @@ pub struct Wal {
     pre_rotate_fn: Option<Arc<dyn Fn() -> Result<(), StorageError> + Send + Sync>>,
 }
 
+/// Outcome of scanning the record region of a WAL segment.
+struct RecordScan {
+    /// Entries that replayed cleanly, in file order.
+    entries: Vec<WalEntry>,
+    /// Number of entries recovered — the next record's nonce counter value.
+    count: u64,
+    /// Byte length of the valid record prefix, relative to the region start.
+    /// Anything beyond this is a torn or corrupt tail.
+    valid_len: usize,
+}
+
+/// Scans the record region of a WAL segment, stopping at the first record that
+/// is torn, CRC-invalid, or undecodable.
+///
+/// Both replay ([`Wal::read_all`]) and recovery ([`Wal::open_with_fs`]) go
+/// through this function so the "last valid record" boundary they compute can
+/// never diverge. A divergence is exactly what let post-recovery appends land
+/// beyond a corrupt tail and then vanish on the next restart (HEA-1853).
+fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, StorageError> {
+    let mut entries = Vec::new();
+    let mut pos: usize = 0;
+    let mut valid_len: usize = 0;
+    let mut record_num: u64 = 0;
+
+    while pos + 4 <= region.len() {
+        let record_start = pos;
+
+        // Read payload length
+        let len_bytes: [u8; 4] = match region[pos..pos + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+        let payload_len = u32::from_le_bytes(len_bytes) as usize;
+        pos += 4;
+
+        // Check we have enough data for payload + CRC.
+        // Torn writes (incomplete record with partial ciphertext
+        // or missing CRC) are intentionally silent truncation:
+        // the process crashed mid-write, and we return the valid
+        // prefix from before the crash.
+        if pos + payload_len + 4 > region.len() {
+            break;
+        }
+
+        let ciphertext = &region[pos..pos + payload_len];
+        pos += payload_len;
+
+        // Read and verify CRC (over ciphertext)
+        let crc_bytes: [u8; 4] = match region[pos..pos + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => break,
+        };
+        let stored_crc = u32::from_le_bytes(crc_bytes);
+        let computed_crc = crc32fast::hash(ciphertext);
+        pos += 4;
+
+        if stored_crc != computed_crc {
+            // CRC mismatch at any position means the record was not
+            // durably written. Stop replay here and discard everything
+            // that follows — entries after a corrupt record cannot be
+            // applied safely since they may depend on state that the
+            // corrupt entry would have established.
+            //
+            // This covers both the tail-truncation case (process crashed
+            // mid-write, no records follow) and the concurrent write-fault
+            // case (another thread appended records after the crash, so
+            // bytes follow the corrupt entry). Both require the same
+            // response: truncate to the last fully-verified record.
+            if pos < region.len() {
+                tracing::warn!(
+                    offset = record_start,
+                    "WAL replay: CRC mismatch with trailing data — \
+                     truncating to last good record (possible concurrent \
+                     write fault or unclean shutdown)"
+                );
+            }
+            break;
+        }
+
+        // Decrypt payload — AEAD tag failure surfaces as error
+        // unconditionally. GCM authentication failure means the
+        // ciphertext was tampered with (or the wrong key/nonce/
+        // AAD was used). None of those happen during clean
+        // truncation.
+        let nonce = counter_nonce(record_num);
+        let aad = record_num.to_le_bytes();
+        let plaintext = encryption::decrypt_section(ciphertext, dek, &nonce, &aad)?;
+
+        match WalEntry::deserialize(&plaintext) {
+            Ok(entry) => entries.push(entry),
+            Err(_) => break, // Deserialization failure — stop
+        }
+
+        record_num += 1;
+        valid_len = pos;
+    }
+
+    Ok(RecordScan {
+        entries,
+        count: record_num,
+        valid_len,
+    })
+}
+
+/// Rewrites a WAL segment so it contains only `entries`, discarding a corrupt
+/// or torn tail, and returns the segment's new DEK and encryption header.
+///
+/// Without this, recovery would park the append cursor at physical EOF — behind
+/// the garbage — so the next replay would stop before reaching anything written
+/// after recovery, silently losing it under a corruption-then-crash double
+/// fault (HEA-1853).
+///
+/// The rebuild re-keys (fresh DEK, nonce counter restarting at zero) for the
+/// same reason `Wal::rotate_locked` does (HEA-SEC-08): discarding records while
+/// keeping the old DEK would encrypt a new record under the (DEK, nonce) pair
+/// the discarded corrupt record already consumed.
+///
+/// The new segment is staged and renamed into place, so a crash partway through
+/// leaves the original file intact and recovery stays retryable.
+fn rebuild_truncated_segment(
+    path: &Path,
+    fs: &dyn Fs,
+    kek: &encryption::KeyEncryptionKey,
+    kek_id: KekId,
+    entries: &[WalEntry],
+    size_hint: usize,
+) -> Result<(DataEncryptionKey, EncryptionHeader), StorageError> {
+    let new_dek = encryption::generate_dek()?;
+    let new_header = encryption::wrap_dek(&new_dek, kek, kek_id)?;
+
+    let mut rebuilt = Vec::with_capacity(size_hint);
+    rebuilt.extend_from_slice(&WAL_MAGIC);
+    rebuilt.extend_from_slice(&WAL_VERSION_CURRENT.to_le_bytes());
+    rebuilt.extend_from_slice(&new_header.to_bytes());
+
+    for (i, entry) in entries.iter().enumerate() {
+        let record_num = u64::try_from(i).map_err(|_| StorageError::Crypto {
+            reason: "WAL record count exceeds u64".to_string(),
+        })?;
+        let plaintext = entry.serialize();
+        let nonce = counter_nonce(record_num);
+        let aad = record_num.to_le_bytes();
+        let ciphertext = encryption::encrypt_section(&plaintext, &new_dek, &nonce, &aad)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let payload_len = ciphertext.len() as u32;
+        rebuilt.extend_from_slice(&payload_len.to_le_bytes());
+        rebuilt.extend_from_slice(&ciphertext);
+        rebuilt.extend_from_slice(&crc32fast::hash(&ciphertext).to_le_bytes());
+    }
+
+    let staging = path.with_extension("wal-recovering");
+    {
+        let mut staged = fs.create(&staging)?;
+        staged.write_all(&rebuilt)?;
+        staged.sync_all()?;
+    }
+    fs.rename(&staging, path)?;
+
+    Ok((new_dek, new_header))
+}
+
 impl Wal {
     /// Opens or creates a WAL file at the given path using a custom filesystem.
     ///
@@ -504,25 +665,37 @@ impl Wal {
             let enc_header = EncryptionHeader::from_bytes(&header_arr);
             let dek = encryption::unwrap_dek(&enc_header, kek)?;
 
-            // Count existing records for the nonce counter.
-            let mut count = 0u64;
+            // Replay the record region with exactly the validation `read_all`
+            // uses, so the append cursor lands on the same boundary replay
+            // stops at.
             let record_data = &all_data[enc_end..];
-            let mut pos = 0usize;
-            while pos + 4 <= record_data.len() {
-                let len_bytes: [u8; 4] = match record_data[pos..pos + 4].try_into() {
-                    Ok(b) => b,
-                    Err(_) => break,
-                };
-                let payload_len = u32::from_le_bytes(len_bytes) as usize;
-                if pos + 4 + payload_len + 4 > record_data.len() {
-                    break;
-                }
-                pos += 4 + payload_len + 4;
-                count += 1;
-            }
+            let scan = scan_records(record_data, &dek)?;
 
-            file.seek(SeekFrom::End(0))?;
-            (dek, enc_header, count)
+            if scan.valid_len == record_data.len() {
+                file.seek(SeekFrom::End(0))?;
+                (dek, enc_header, scan.count)
+            } else {
+                // Corrupt or torn tail (HEA-1853) — rebuild the segment from
+                // the surviving prefix. See `rebuild_truncated_segment`.
+                tracing::warn!(
+                    discarded_bytes = record_data.len() - scan.valid_len,
+                    recovered_records = scan.count,
+                    "WAL recovery: truncating corrupt tail and re-keying segment"
+                );
+
+                let (new_dek, new_header) = rebuild_truncated_segment(
+                    path,
+                    fs.as_ref(),
+                    kek,
+                    kek_id,
+                    &scan.entries,
+                    enc_end + scan.valid_len,
+                )?;
+
+                file = fs.open_append(path)?;
+                file.seek(SeekFrom::End(0))?;
+                (new_dek, new_header, scan.count)
+            }
         };
 
         Ok(Self {
@@ -667,83 +840,7 @@ impl Wal {
         file.seek(SeekFrom::Start(self.record_start))?;
         file.read_to_end(&mut all_data)?;
 
-        let mut entries = Vec::new();
-        let mut pos: usize = 0;
-        let mut record_num: u64 = 0;
-
-        while pos + 4 <= all_data.len() {
-            let record_start = pos;
-
-            // Read payload length
-            let len_bytes: [u8; 4] = match all_data[pos..pos + 4].try_into() {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-            let payload_len = u32::from_le_bytes(len_bytes) as usize;
-            pos += 4;
-
-            // Check we have enough data for payload + CRC.
-            // Torn writes (incomplete record with partial ciphertext
-            // or missing CRC) are intentionally silent truncation:
-            // the process crashed mid-write, and we return the valid
-            // prefix from before the crash.
-            if pos + payload_len + 4 > all_data.len() {
-                break;
-            }
-
-            let ciphertext = &all_data[pos..pos + payload_len];
-            pos += payload_len;
-
-            // Read and verify CRC (over ciphertext)
-            let crc_bytes: [u8; 4] = match all_data[pos..pos + 4].try_into() {
-                Ok(b) => b,
-                Err(_) => break,
-            };
-            let stored_crc = u32::from_le_bytes(crc_bytes);
-            let computed_crc = crc32fast::hash(ciphertext);
-            pos += 4;
-
-            if stored_crc != computed_crc {
-                // CRC mismatch at any position means the record was not
-                // durably written. Stop replay here and discard everything
-                // that follows — entries after a corrupt record cannot be
-                // applied safely since they may depend on state that the
-                // corrupt entry would have established.
-                //
-                // This covers both the tail-truncation case (process crashed
-                // mid-write, no records follow) and the concurrent write-fault
-                // case (another thread appended records after the crash, so
-                // bytes follow the corrupt entry). Both require the same
-                // response: truncate to the last fully-verified record.
-                if pos < all_data.len() {
-                    tracing::warn!(
-                        offset = record_start,
-                        "WAL replay: CRC mismatch with trailing data — \
-                         truncating to last good record (possible concurrent \
-                         write fault or unclean shutdown)"
-                    );
-                }
-                break;
-            }
-
-            // Decrypt payload — AEAD tag failure surfaces as error
-            // unconditionally. GCM authentication failure means the
-            // ciphertext was tampered with (or the wrong key/nonce/
-            // AAD was used). None of those happen during clean
-            // truncation.
-            let nonce = counter_nonce(record_num);
-            let aad = record_num.to_le_bytes();
-            let plaintext = encryption::decrypt_section(ciphertext, &dek, &nonce, &aad)?;
-
-            match WalEntry::deserialize(&plaintext) {
-                Ok(entry) => entries.push(entry),
-                Err(_) => break, // Deserialization failure — stop
-            }
-
-            record_num += 1;
-        }
-
-        Ok(entries)
+        Ok(scan_records(&all_data, &dek)?.entries)
     }
 
     /// Forces an fsync of the WAL file.
@@ -1100,6 +1197,91 @@ mod tests {
             assert_eq!(entries.len(), 2);
             assert_eq!(entries[0], entry1);
             assert_eq!(entries[1], entry2);
+        }
+    }
+
+    /// HEA-1853: recovering from a corrupt tail MUST truncate that tail, so a
+    /// record appended to the recovered WAL is still replayable after the next
+    /// restart.
+    ///
+    /// Before the fix the append cursor was placed at physical EOF — *after* the
+    /// garbage — so the following replay halted at the still-present corruption
+    /// and silently dropped every post-recovery write (corruption-then-crash
+    /// double fault).
+    #[test]
+    fn corrupt_tail_truncated_so_post_recovery_appends_survive_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+
+        let entry1 = make_entry(b"good1", b"val1", WalOperation::Put);
+        let entry2 = make_entry(b"good2", b"val2", WalOperation::Put);
+        let post = make_entry(b"post-recovery", b"must-survive", WalOperation::Put);
+
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            wal.append(&entry1).expect("append 1");
+            wal.append(&entry2).expect("append 2");
+        }
+
+        let original = std::fs::read(&wal_path).expect("read wal file");
+        let original_header: Vec<u8> = original
+            [WAL_VERSION_HEADER_SIZE..WAL_VERSION_HEADER_SIZE + ENCRYPTION_HEADER_SIZE]
+            .to_vec();
+
+        const GARBAGE: &[u8] = b"POWER_LOSS_GARBAGE_PARTIAL_RECORD";
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&wal_path)
+                .expect("open for corruption");
+            file.write_all(GARBAGE).expect("write garbage");
+            file.sync_all().expect("sync");
+        }
+
+        let corrupt_size = std::fs::metadata(&wal_path).expect("stat").len();
+
+        // Recovery pass: the valid prefix replays, and the garbage tail is
+        // physically removed from the file rather than merely skipped.
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            let entries = wal.read_all().expect("read after recovery");
+            assert_eq!(entries, vec![entry1.clone(), entry2.clone()]);
+        }
+
+        let recovered = std::fs::read(&wal_path).expect("read wal file");
+        assert!(
+            (recovered.len() as u64) < corrupt_size,
+            "corrupt tail must be truncated on recovery: {corrupt_size} -> {} bytes",
+            recovered.len()
+        );
+        assert!(
+            !recovered.windows(GARBAGE.len()).any(|w| w == GARBAGE),
+            "the corrupt tail bytes must not remain in the recovered segment"
+        );
+        // Truncation re-keys the segment: the surviving prefix is re-encrypted
+        // under a fresh DEK so no (DEK, nonce) pair is reused for the record
+        // slot the discarded corrupt record occupied.
+        assert_ne!(
+            &recovered[WAL_VERSION_HEADER_SIZE..WAL_VERSION_HEADER_SIZE + ENCRYPTION_HEADER_SIZE],
+            &original_header[..],
+            "recovery must install a fresh wrapped DEK"
+        );
+
+        // A write made against the recovered segment.
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            wal.append(&post).expect("append after recovery");
+        }
+
+        // The double fault: reopen again. The post-recovery record must replay.
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            let entries = wal.read_all().expect("read after second open");
+            assert_eq!(
+                entries,
+                vec![entry1, entry2, post],
+                "post-recovery append must survive the next restart"
+            );
         }
     }
 

@@ -15,6 +15,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shorter than 32 bytes, or the all-zero key) are rejected at startup; omitting the
   block preserves the prior no-pepper behaviour (HEA-1838).
 
+### Fixed
+- **WAL recovery now truncates a corrupt tail instead of appending behind it** —
+  after recovering from a torn or corrupt WAL tail (e.g. power loss), the append
+  cursor was positioned at physical end-of-file, *after* the surviving garbage.
+  Records written after that recovery therefore sat behind the corruption, and
+  the next restart's replay stopped at the corruption before reaching them —
+  silently losing every post-recovery write under a corruption-then-crash double
+  fault. Recovery now rebuilds the segment from the last valid record boundary
+  (staged file + atomic rename, re-keyed with a fresh DEK so no nonce is reused)
+  before accepting writes. Single-fault durability is unchanged; a WAL whose
+  records fail AEAD authentication still fails the open closed and is never
+  rewritten (HEA-1853).
+
 ### Security
 - **OAuth client-auth failures now return the RFC 6749 `invalid_client` code** —
   the endpoint-client authentication path (used by `client_credentials`,

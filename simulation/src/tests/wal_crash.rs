@@ -364,13 +364,26 @@ fn simulation_aead_detects_tampered_ciphertext_with_valid_crc() {
         std::fs::write(&wal_path, &data).expect("write tampered");
     }
 
-    // Reopen and read. AEAD failure must surface as Crypto error — not
-    // silent truncation that returns [].
-    let wal = open_test_wal(&wal_path, config);
-    let result = wal.read_all();
+    let tampered_bytes = std::fs::read(&wal_path).expect("read tampered wal");
+
+    // Reopen. AEAD failure must surface as a Crypto error — not silent
+    // truncation that returns []. Since HEA-1853 recovery replays the record
+    // region during `open`, tampering is caught there rather than at the first
+    // `read_all`; either way it is fail-closed and never silently dropped.
+    let (kek, kek_id) = test_kek();
+    let result = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id);
     assert!(
         matches!(result, Err(StorageError::Crypto { .. })),
         "tampered ciphertext must be rejected with Crypto error; got {:?}",
-        result
+        result.map(|_| "opened")
+    );
+
+    // Fail-closed means fail-closed: an authentication failure must NOT be
+    // mistaken for a torn tail and "repaired" by truncating the segment. The
+    // file must be byte-identical to what was on disk before the open attempt.
+    assert_eq!(
+        std::fs::read(&wal_path).expect("re-read wal"),
+        tampered_bytes,
+        "a failed open must not rewrite or truncate the segment"
     );
 }
