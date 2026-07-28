@@ -4,7 +4,7 @@
 //! - Policy CRUD (create / get / list / delete)
 //! - Capability check returns true when policy permits
 //! - Adversarial: capability not in policy returns false (trust bypass)
-//! - Expired policy is not respected
+//! - Adversarial: expired policy is not respected (see D.4.9 below)
 
 mod common;
 
@@ -245,5 +245,47 @@ async fn check_cross_realm_policy_returns_false_when_no_policy_exists() {
     assert!(
         !allowed,
         "no policy must mean no access (no implicit trust)"
+    );
+}
+
+// ── D.4.9: Expired policy is not respected ───────────────────────────────────
+
+/// A cross-realm policy that has already expired must NOT grant access, even
+/// when it would otherwise permit the requested capability.
+///
+/// The module doc claimed this was covered but no test existed. The engine's
+/// `check_cross_realm_policy_inner` enforces `now >= exp → skip`; this test
+/// exercises that branch with `expires_in_secs: 0` (expires at creation time,
+/// so any subsequent check sees `now >= exp` as true).
+#[tokio::test]
+async fn check_cross_realm_policy_returns_false_for_expired_policy() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let target = make_realm(&h, "target");
+    let source = make_realm(&h, "source");
+
+    // Create a policy that expires the instant it is created (secs = 0).
+    h.identity()
+        .create_cross_realm_policy(
+            &target,
+            &CreateCrossRealmPolicyRequest {
+                source_realm_id: source.clone(),
+                allowed_capabilities: vec!["data:read".to_string()],
+                // expires_at = clock.now() + 0 → immediately expired for any
+                // subsequent call where clock.now() >= expires_at.
+                expires_in_secs: Some(0),
+            },
+        )
+        .expect("create expired policy");
+
+    // The capability IS listed in the policy, but the policy is expired — must
+    // return false rather than granting access.
+    let allowed = h
+        .identity()
+        .check_cross_realm_policy(&target, &source, "data:read")
+        .expect("check");
+
+    assert!(
+        !allowed,
+        "expired policy must not grant access even for a listed capability"
     );
 }

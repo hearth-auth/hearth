@@ -1,5 +1,10 @@
 [workspace]
 members = [".", "simulation"]
+# `loadtest` is deliberately excluded, not a member: it depends on goose (a
+# heavy async load-testing framework). Including it would compile goose and its
+# transitive tree on every `cargo nextest run --workspace`, slowing the unit
+# gate. Build/run it explicitly via `make loadtest` / `make loadtest-check`.
+exclude = ["loadtest"]
 
 [package]
 name = "hearth"

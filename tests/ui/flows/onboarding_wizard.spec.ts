@@ -14,7 +14,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { test, expect } from '@playwright/test';
 import type { SeedFixtures } from '../fixtures/seed';
-import { mailcatcherLogin, waitForEmail, extractLinkFromEmail } from '../helpers/mailcatcher';
+import { mailcatcherLogin, waitForEmail, fetchEmailBody, extractFirstLink } from '../helpers/mailcatcher';
+import { newInstrumentedPage, assertPageClean } from '../helpers/assertions';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 const AUTH_DIR = path.join(__dirname, '..', '.auth');
@@ -32,7 +33,7 @@ function loadSeed(): SeedFixtures {
 test.describe('Onboarding wizard — already configured', () => {
   test('GET /ui/admin/onboarding redirects to dashboard when realms exist', async ({ browser }) => {
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     const resp = await page.goto(`${BASE_URL}/ui/admin/onboarding`, {
       waitUntil: 'domcontentloaded',
@@ -40,6 +41,7 @@ test.describe('Onboarding wizard — already configured', () => {
 
     // The wizard gate redirects — the final settled URL should be /ui, not /ui/admin/onboarding
     expect(page.url()).not.toContain('/onboarding');
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -52,7 +54,7 @@ test.describe('Onboarding wizard — step 2: app registration', () => {
   test('renders app registration form with realm param', async ({ browser }) => {
     const seed = loadSeed();
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/app?realm=${encodeURIComponent(seed.realmName)}`,
@@ -63,20 +65,23 @@ test.describe('Onboarding wizard — step 2: app registration', () => {
     // Form must be present
     await expect(page.locator('input[name="app_name"]')).toBeVisible();
     await expect(page.locator('input[name="redirect_uri"]')).toBeVisible();
+    assertPageClean(page);
     await ctx.close();
   });
 
   test('submitting step 2 creates an OAuth app and redirects to step 3', async ({ browser }) => {
     const seed = loadSeed();
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/app?realm=${encodeURIComponent(seed.realmName)}`,
       { waitUntil: 'domcontentloaded' },
     );
 
-    await page.fill('input[name="app_name"]', 'wizard-test-app');
+    // Unique app name so the downstream list assertion is unambiguous across runs.
+    const appName = `wizard-test-app-${Date.now()}`;
+    await page.fill('input[name="app_name"]', appName);
     await page.fill('input[name="redirect_uri"]', 'https://wizard.test/callback');
 
     await Promise.all([
@@ -84,7 +89,19 @@ test.describe('Onboarding wizard — step 2: app registration', () => {
       page.click('#main button[type="submit"]'),
     ]);
 
+    // Landed on the invite step (step 3), not an error page.
     expect(page.url()).toContain('/onboarding/invite');
+    await expect(page.locator('#main')).toContainText('Invite a team member', { timeout: 10_000 });
+
+    // The OAuth app was actually created — it must now appear in the realm's
+    // applications list, not merely have produced a redirect.
+    await page.goto(
+      `${BASE_URL}/ui/admin/realms/${encodeURIComponent(seed.realmName)}/applications`,
+      { waitUntil: 'domcontentloaded' },
+    );
+    await expect(page.locator('#main')).toContainText(appName, { timeout: 10_000 });
+
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -97,7 +114,7 @@ test.describe('Onboarding wizard — step 3: invite', () => {
   test('renders invite form with realm param', async ({ browser }) => {
     const seed = loadSeed();
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/invite?realm=${encodeURIComponent(seed.realmName)}`,
@@ -107,13 +124,14 @@ test.describe('Onboarding wizard — step 3: invite', () => {
     expect(page.url()).toContain('/onboarding/invite');
     await expect(page.locator('input[name="email"]')).toBeVisible();
     await expect(page.locator('select[name="role"]')).toBeVisible();
+    assertPageClean(page);
     await ctx.close();
   });
 
   test('submitting step 3 sends invite and redirects to step 4', async ({ browser }) => {
     const seed = loadSeed();
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/invite?realm=${encodeURIComponent(seed.realmName)}`,
@@ -130,7 +148,19 @@ test.describe('Onboarding wizard — step 3: invite', () => {
       page.click('#main button[type="submit"]'),
     ]);
 
+    // Landed on the email step (step 4), not an error page.
     expect(page.url()).toContain('/onboarding/email');
+    await expect(page.locator('#main')).toContainText('Test email delivery', { timeout: 10_000 });
+
+    // The invited user was actually created — it must now appear in the realm's
+    // users list, not merely have produced a redirect.
+    await page.goto(
+      `${BASE_URL}/ui/admin/realms/${encodeURIComponent(seed.realmName)}/users?q=${encodeURIComponent(email)}`,
+      { waitUntil: 'domcontentloaded' },
+    );
+    await expect(page.locator('#main')).toContainText(email, { timeout: 10_000 });
+
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -143,7 +173,7 @@ test.describe('Onboarding wizard — step 4: email config', () => {
   test('renders email test form with realm param', async ({ browser }) => {
     const seed = loadSeed();
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/email?realm=${encodeURIComponent(seed.realmName)}`,
@@ -151,9 +181,10 @@ test.describe('Onboarding wizard — step 4: email config', () => {
     );
 
     expect(page.url()).toContain('/onboarding/email');
-    // Page must have some visible content
-    const text = await page.evaluate(() => document.body.innerText.trim());
-    expect(text.length).toBeGreaterThan(10);
+    // Assert the actual step-4 copy renders — not merely a non-empty (possibly error) body.
+    await expect(page.locator('#main')).toContainText('Test email delivery', { timeout: 10_000 });
+    await expect(page.locator('input[name="email"], input[type="email"]').first()).toBeVisible();
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -166,17 +197,19 @@ test.describe('Onboarding wizard — complete page', () => {
   test('renders completion summary', async ({ browser }) => {
     const seed = loadSeed();
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/complete?realm=${encodeURIComponent(seed.realmName)}`,
       { waitUntil: 'domcontentloaded' },
     );
 
-    // Completion page should not be an error
+    // Completion page renders its specific summary copy — not merely a non-empty
+    // (possibly error) body.
     expect(page.url()).toContain('/onboarding/complete');
-    const text = await page.evaluate(() => document.body.innerText.trim());
-    expect(text.length).toBeGreaterThan(10);
+    await expect(page.locator('#main')).toContainText("You're all set", { timeout: 10_000 });
+    await expect(page.locator('#main')).toContainText('Quick start', { timeout: 10_000 });
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -197,7 +230,7 @@ test.describe('Email flow — invite via mailcatcher', () => {
 
     // Navigate to invite step and send an invite
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(
       `${BASE_URL}/ui/admin/onboarding/invite?realm=${encodeURIComponent(seed.realmName)}`,
@@ -213,12 +246,22 @@ test.describe('Email flow — invite via mailcatcher', () => {
       page.click('#main button[type="submit"]'),
     ]);
 
-    // Wait for the invite email to appear in mailcatcher
-    const found = await waitForEmail(mcAuth, (e) => e.subject.toLowerCase().includes('invite') || true, 10_000);
+    // Wait for the invite/setup email to appear in mailcatcher. The wizard invite
+    // sends a "<product> setup required" message (identity/email/templates.rs) — match
+    // that specific subject, not "any email".
+    const found = await waitForEmail(
+      mcAuth,
+      (e) => e.subject.toLowerCase().includes('setup required'),
+      10_000,
+    );
     expect(found.id).toBeTruthy();
 
-    // Extract the setup link from the email body
-    const link = await extractLinkFromEmail(mcAuth, found.id);
+    // Bind the captured email to the freshly-invited recipient and extract the
+    // setup link from its body — proving the invite for THIS user was delivered.
+    const body = await fetchEmailBody(mcAuth, found.id);
+    expect(body).toContain(email);
+    const link = extractFirstLink(body);
+    if (!link) throw new Error('No setup link found in the captured invite email body');
     expect(link).toMatch(/https?:\/\//);
 
     // Follow the link — should render the password-setup page, not a 404/500
@@ -226,6 +269,7 @@ test.describe('Email flow — invite via mailcatcher', () => {
     const status = await page.evaluate(() => document.title);
     expect(status).not.toMatch(/error|not found/i);
 
+    assertPageClean(page);
     await ctx.close();
   });
 });

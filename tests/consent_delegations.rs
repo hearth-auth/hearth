@@ -341,14 +341,41 @@ async fn revoke_delegation_is_idempotent() {
         .expect("list should succeed");
     let delegation_id = grants[0].delegation_id.clone();
 
+    // Precondition: the grant is present (listing excludes revoked grants).
+    assert!(
+        grants.iter().any(|g| g.delegation_id == delegation_id),
+        "grant must be present before revocation"
+    );
+
     identity
         .revoke_delegation_grant(&realm_id, &delegation_id, &user_sub)
         .expect("first revoke should succeed");
 
-    // Second revoke — idempotent
+    // After the first revoke the grant is gone: idempotency is proven by
+    // observing the grant transition present -> absent, not merely by the
+    // second call returning Ok (which would also hold if revoke were a no-op).
+    let after_first = identity
+        .list_delegation_grants(&realm_id, &user_sub)
+        .expect("list after first revoke");
+    assert!(
+        !after_first.iter().any(|g| g.delegation_id == delegation_id),
+        "grant must be absent after the first revoke"
+    );
+
+    // Second revoke — idempotent (grant already absent, must still succeed).
     identity
         .revoke_delegation_grant(&realm_id, &delegation_id, &user_sub)
         .expect("second revoke should be idempotent");
+
+    let after_second = identity
+        .list_delegation_grants(&realm_id, &user_sub)
+        .expect("list after second revoke");
+    assert!(
+        !after_second
+            .iter()
+            .any(|g| g.delegation_id == delegation_id),
+        "grant must remain absent after the idempotent second revoke"
+    );
 }
 
 /// Empty sub returns empty list without error.

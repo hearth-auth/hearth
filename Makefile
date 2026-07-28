@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -69,6 +69,36 @@ test:
 clippy:
 	PROTOC=$(PROTOC) cargo clippy --all-targets $(CARGO_FLAGS) -- -D warnings
 
+## `make loadtest` — that's the whole contract. Nothing else is required: no
+## running server, no bootstrap, no seed, no ARGS, no env vars, no free port.
+## It builds a release Hearth, boots a throwaway instance on a free loopback
+## port, seeds a deterministic corpus, runs the Goose journeys, writes
+## report.json + HTML, and tears the server down.
+##
+## Optional env-var tuning only (defaults always produce a valid report):
+## `make loadtest MODE=ramp`. Optional advanced/attach usage via ARGS invokes
+## the binary directly: `make loadtest ARGS="--help"` (see loadtest/README.md).
+loadtest:
+ifeq ($(strip $(ARGS)),)
+	PROTOC=$(PROTOC) loadtest/scripts/run-loadtest.sh
+else
+	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- $(ARGS)
+endif
+
+## Typecheck the excluded loadtest crate so it cannot silently rot out of tree.
+loadtest-check:
+	PROTOC=$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
+
+## Seed a deterministic, parameterized corpus onto a running dev Hearth and
+## write a JSON seed-handle (HEA-1789). Requires a dev instance already running
+## (`make dev`); pass params via ARGS, e.g.
+## `make seed ARGS="--realms 1 --users-per-realm 500 --sessions-frac 0.5"`.
+## For a large multi-subject corpus, boot `make seed-large` first, then attach
+## with `make seed ARGS="--target-host http://127.0.0.1:8420 ..."`.
+## The seed-handle holds live tokens — keep it out of git (loadtest/reports/).
+seed:
+	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- seed $(ARGS)
+
 fmt:
 	cargo fmt --check
 
@@ -93,6 +123,13 @@ abuse-check:
 ## src/protocol/http/admin.rs and src/protocol/grpc/*.rs.
 auth-discard-check: ## Lint for discarded authentication results (HEA-1657)
 	@bash scripts/check-auth-discard.sh
+
+## Guard: RBAC-graph mutations in src/rbac/engine.rs must route through the
+## invalidating write_* helpers so the resolution decision cache is bumped
+## (HEA-1781, follow-up to HEA-1777). A raw self.storage.put/delete call would
+## leave a stale cached resolution live — a privilege-escalation bug.
+rbac-storage-check: ## Lint for un-invalidating RBAC storage writes (HEA-1781)
+	@bash scripts/check-rbac-storage-writes.sh
 
 # ── Proto ─────────────────────────────────────────────
 
@@ -197,12 +234,20 @@ ci-fast: fmt clippy proto-lint css-check test-quality abuse-check
 
 ## CI benchmark gate: compile and run hot-path perf threshold gates.
 ##
-## Four bench binaries run in sequence; each asserts p50/p99 targets
-## before Criterion sampling begins. Non-zero exit fails the Standard CI tier.
+## Five bench binaries run in sequence; each asserts p50/p99 and (where
+## applicable) per-call allocation targets before Criterion sampling begins.
+## Non-zero exit fails the Standard CI tier. Together they lock the §2 Big-O
+## endpoint baseline (E1/E2/E7) in CI so hot-path regressions are caught
+## automatically (HEA-1776).
 ##
-## rbac_check gates:
+## rbac_check gates (E7):
 ##   resolve_permissions p99 ≤ 1 ms
 ##   hasPermission p99       ≤ 1 µs
+##   hasPermission allocs    ≤ 0 allocs/call (zero-alloc proof)
+##
+## session_lookup gates (E2, HEA-1776):
+##   session lookup p99      ≤ 1 ms  (1×runner headroom over 100 µs prod target)
+##   session lookup allocs   ≤ 0 allocs/call (warm-path zero-alloc proof)
 ##
 ## storage_gate gates:
 ##   storage hot-tier lookup   p50 ≤ 10 µs, p99 ≤ 100 µs
@@ -220,6 +265,7 @@ ci-fast: fmt clippy proto-lint css-check test-quality abuse-check
 ##   validate_token allocs     ≤ 64 allocs/call (regression ceiling)
 bench-gate:
 	PROTOC=$(PROTOC) cargo bench --bench rbac_check $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo bench --bench session_lookup $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench storage_gate $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench demotion_latency $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench validate_token $(CARGO_FLAGS)
@@ -257,6 +303,7 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> test-quality"              && $(MAKE) test-quality
 	@echo "==> abuse-check (§3.41)"       && $(MAKE) abuse-check
 	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
+	@echo "==> rbac-storage-check (HEA-1781)" && $(MAKE) rbac-storage-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check

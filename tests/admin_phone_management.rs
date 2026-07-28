@@ -401,6 +401,33 @@ async fn remove_phone_idempotent_when_no_phone_set() {
             },
         )
         .expect("remove-phone when no phone must succeed");
+
+    // Verify the persisted user state after an idempotent remove-phone: no phone,
+    // unverified, and ENROLL_PHONE_OTP present exactly once.
+    let updated = h
+        .identity()
+        .get_user(&realm, user.id())
+        .expect("get_user")
+        .expect("user exists after update");
+    assert!(
+        updated.phone_number().is_none(),
+        "phone number must remain unset"
+    );
+    assert!(
+        !updated.phone_verified(),
+        "phone_verified must be false after remove-phone"
+    );
+    let enroll_count = updated
+        .required_actions()
+        .iter()
+        .filter(|a| **a == RequiredAction::EnrollPhoneOtp)
+        .count();
+    assert_eq!(
+        enroll_count,
+        1,
+        "ENROLL_PHONE_OTP must be present exactly once; got {:?}",
+        updated.required_actions()
+    );
 }
 
 #[tokio::test]

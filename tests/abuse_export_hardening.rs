@@ -193,17 +193,17 @@ async fn backup_endpoint_allows_admin_with_export_capability() {
 /// which bootstraps a user whose role includes both.
 #[test]
 fn permission_set_without_hearth_export_fails_capability_check() {
+    use hearth::protocol::http::has_export_capability;
+
     let perms_no_export = ["hearth.admin".to_string()];
-    let has = perms_no_export.iter().any(|p| p == "hearth.export");
     assert!(
-        !has,
+        !has_export_capability(&perms_no_export),
         "token with only hearth.admin must fail the hearth.export capability check"
     );
 
     let perms_with_export = ["hearth.admin".to_string(), "hearth.export".to_string()];
-    let has = perms_with_export.iter().any(|p| p == "hearth.export");
     assert!(
-        has,
+        has_export_capability(&perms_with_export),
         "token with hearth.export must pass the capability check"
     );
 }
@@ -308,10 +308,12 @@ async fn backup_endpoint_emits_watermark_audit_event() {
 /// is blocked on every call — the rate limiter is never reached.
 #[test]
 fn adversarial_admin_only_token_blocked_at_capability_gate() {
+    use hearth::protocol::http::has_export_capability;
+
     // Simulate an AdminAuth from a token that only has hearth.admin.
     let permissions = ["hearth.admin".to_string()];
     let blocked: Vec<_> = (0..50)
-        .filter(|_| permissions.iter().any(|p| p == "hearth.export"))
+        .filter(|_| has_export_capability(&permissions))
         .collect();
     assert_eq!(
         blocked.len(),

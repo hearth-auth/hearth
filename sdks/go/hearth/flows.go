@@ -8,14 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 )
 
 // ClientCredentials performs the OAuth 2.0 client credentials grant (RFC 6749 §4.4).
 //
 // Requires the client to be configured with WithClientCredentials.
-// Credentials are sent as application/x-www-form-urlencoded per RFC 6749 §2.3.1.
-// Optional scope may be passed as a single argument.
+// The request is sent as an application/json body: Hearth's token endpoint
+// parses the body with an axum `Json` extractor and rejects a form-encoded
+// body with HTTP 415. Optional scope may be passed as a single argument.
 func (c *Client) ClientCredentials(ctx context.Context, scope ...string) (*TokenResponse, error) {
 	if c.clientID == "" {
 		return nil, &ConfigurationError{Field: "client_id", Message: "required for client credentials grant"}
@@ -33,7 +33,7 @@ func (c *Client) ClientCredentials(ctx context.Context, scope ...string) (*Token
 	}
 
 	var result TokenResponse
-	if err := c.postForm(ctx, "/token", body, &result); err != nil {
+	if err := c.postTokenRequest(ctx, "/token", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -56,7 +56,7 @@ func (c *Client) StartDeviceFlow(ctx context.Context, scope ...string) (*DeviceA
 	}
 
 	var result DeviceAuthorizationResponse
-	if err := c.postForm(ctx, "/device_authorization", body, &result); err != nil {
+	if err := c.postTokenRequest(ctx, "/device_authorization", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -171,8 +171,8 @@ func (c *Client) RequestMagicLink(ctx context.Context, email string) error {
 //
 // Completes the passwordless flow started by RequestMagicLink: posts
 // grant_type=urn:hearth:grant-type:magic-link with the opaque token from the
-// magic-link URL to the token endpoint. The token is sent in the form body,
-// never the URL.
+// magic-link URL to the token endpoint. The token is sent in the JSON request
+// body, never the URL.
 func (c *Client) ExchangeMagicLink(ctx context.Context, token string) (*TokenResponse, error) {
 	body := url.Values{}
 	body.Set("grant_type", "urn:hearth:grant-type:magic-link")
@@ -182,25 +182,40 @@ func (c *Client) ExchangeMagicLink(ctx context.Context, token string) (*TokenRes
 	}
 
 	var result TokenResponse
-	if err := c.postForm(ctx, "/token", body, &result); err != nil {
+	if err := c.postTokenRequest(ctx, "/token", body, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-// postForm sends a POST with an application/x-www-form-urlencoded body and
-// decodes the JSON response into result.
-func (c *Client) postForm(ctx context.Context, path string, body url.Values, result any) error {
+// postTokenRequest sends a POST to a Hearth OAuth endpoint and decodes the JSON
+// response into result.
+//
+// Hearth's `/token` and `/device_authorization` endpoints parse their request
+// bodies with an axum `Json` extractor: a form-encoded body
+// (`application/x-www-form-urlencoded`) is rejected with HTTP 415 before any
+// grant dispatch. The values are therefore marshalled into a flat JSON object
+// (one value per key) and sent with `Content-Type: application/json`, matching
+// [Client.ExchangeCode] and [Client.RefreshTokens].
+func (c *Client) postTokenRequest(ctx context.Context, path string, body url.Values, result any) error {
+	obj := make(map[string]string, len(body))
+	for key := range body {
+		obj[key] = body.Get(key)
+	}
+	jsonBody, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
 		c.baseURL+path,
-		strings.NewReader(body.Encode()),
+		bytes.NewReader(jsonBody),
 	)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Realm-ID", c.realmID)
 	return doRequest(c.http, req, result)
 }

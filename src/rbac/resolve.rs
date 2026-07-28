@@ -79,6 +79,23 @@ pub(crate) fn should_emit_orphan(realm_id: &RealmId, ref_id: &str) -> bool {
 /// Abstracting over this keeps `resolve.rs` concrete-engine-free and makes
 /// test fakes trivial.
 pub(crate) trait Resolver {
+    /// Full (unnarrowed) effective resolution for `(user, realm, org?)`.
+    ///
+    /// The default computes fresh via [`resolve_full`]. The embedded engine
+    /// overrides this with a per-realm-versioned decision cache (HEA-1770) so
+    /// repeated token issuances for an unchanged graph avoid re-running the
+    /// N+1 storage fan-out. Any implementation MUST return a value consistent
+    /// with the current stored graph — a stale result is a privilege-escalation
+    /// bug.
+    fn resolve_full_cached(
+        &self,
+        user_id: &UserId,
+        realm_id: &RealmId,
+        org_id: Option<&OrganizationId>,
+    ) -> Result<ResolvedPermissions, RbacError> {
+        resolve_full(self, user_id, realm_id, org_id)
+    }
+
     /// Groups that directly contain the given member.
     fn parent_groups_of(
         &self,
@@ -167,14 +184,20 @@ pub(crate) trait Resolver {
     ) -> Result<Vec<String>, RbacError>;
 }
 
-/// Core algorithm: resolve `(user, realm, org?, scope?)` → `ResolvedPermissions`.
+/// Full (unnarrowed) effective resolution for `(user, realm, org?)`.
+///
+/// This is the expensive graph traversal — transitive group BFS, assignment
+/// collection, role-composition DFS, and group-slug materialization. Scope
+/// narrowing and token-size caps are layered on by [`resolve_permissions`], so
+/// the value here depends only on the stored RBAC graph. That is what lets the
+/// embedded engine memoize it keyed by a per-realm graph version (the decision
+/// cache, HEA-1770).
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
+pub(crate) fn resolve_full<R: Resolver + ?Sized>(
     resolver: &R,
     user_id: &UserId,
     realm_id: &RealmId,
     org_id: Option<&OrganizationId>,
-    requested_scope: Option<&str>,
 ) -> Result<ResolvedPermissions, RbacError> {
     // ----- Step 1: transitive group membership BFS -----
     let groups = bfs_groups(resolver, realm_id, user_id)?;
@@ -251,12 +274,6 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
         }
     }
 
-    let permissions: Vec<Permission> = if let Some(scope_str) = requested_scope {
-        narrow_by_scope(resolver, realm_id, scope_str, perms)?
-    } else {
-        perms.into_iter().collect()
-    };
-
     // ----- Step 5: group slugs for JWT claim -----
     let mut group_slugs: BTreeSet<String> = BTreeSet::new();
     for gid in &groups {
@@ -265,8 +282,23 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
         }
     }
 
-    // ----- Step 6: token-size caps (AUTHORIZATION.md § 2.6) -----
-    // Hard caps prevent oversized JWTs from escaping the issuance path.
+    // Scope narrowing and per-token size caps are applied by
+    // `resolve_permissions` on top of this full set.
+    Ok(ResolvedPermissions {
+        roles: role_names.into_iter().collect(),
+        groups: group_slugs.into_iter().collect(),
+        permissions: perms.into_iter().collect(),
+        granted_scopes: Vec::new(),
+    })
+}
+
+/// Enforces the per-token size caps (AUTHORIZATION.md § 2.6). Hard caps prevent
+/// oversized JWTs from escaping the issuance path.
+fn enforce_token_caps(
+    permissions: &[Permission],
+    roles: &[String],
+    groups: &[String],
+) -> Result<(), RbacError> {
     if permissions.len() > MAX_PERMISSIONS_PER_TOKEN {
         return Err(RbacError::TokenSizeExceeded {
             limit: "permissions_per_token".to_string(),
@@ -274,24 +306,59 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
             actual: permissions.len(),
         });
     }
-    if role_names.len() > MAX_ROLES_PER_TOKEN {
+    if roles.len() > MAX_ROLES_PER_TOKEN {
         return Err(RbacError::TokenSizeExceeded {
             limit: "roles_per_token".to_string(),
             limit_value: MAX_ROLES_PER_TOKEN,
-            actual: role_names.len(),
+            actual: roles.len(),
         });
     }
-    if group_slugs.len() > MAX_GROUPS_PER_TOKEN {
+    if groups.len() > MAX_GROUPS_PER_TOKEN {
         return Err(RbacError::TokenSizeExceeded {
             limit: "groups_per_token".to_string(),
             limit_value: MAX_GROUPS_PER_TOKEN,
-            actual: group_slugs.len(),
+            actual: groups.len(),
         });
     }
+    Ok(())
+}
+
+/// Core algorithm: resolve `(user, realm, org?, scope?)` → `ResolvedPermissions`.
+///
+/// Delegates the expensive graph traversal to [`Resolver::resolve_full_cached`]
+/// (memoized by the embedded engine), then applies optional OAuth-scope
+/// narrowing and the per-token size caps. Because narrowing and caps run here
+/// rather than inside the cached traversal, behavior is identical to the
+/// pre-cache single-pass implementation.
+pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
+    resolver: &R,
+    user_id: &UserId,
+    realm_id: &RealmId,
+    org_id: Option<&OrganizationId>,
+    requested_scope: Option<&str>,
+) -> Result<ResolvedPermissions, RbacError> {
+    let ResolvedPermissions {
+        roles,
+        groups,
+        permissions: full_perms,
+        ..
+    } = resolver.resolve_full_cached(user_id, realm_id, org_id)?;
+
+    let permissions: Vec<Permission> = match requested_scope {
+        Some(scope_str) => narrow_by_scope(
+            resolver,
+            realm_id,
+            scope_str,
+            full_perms.into_iter().collect(),
+        )?,
+        None => full_perms,
+    };
+
+    enforce_token_caps(&permissions, &roles, &groups)?;
 
     Ok(ResolvedPermissions {
-        roles: role_names.into_iter().collect(),
-        groups: group_slugs.into_iter().collect(),
+        roles,
+        groups,
         permissions,
         granted_scopes: Vec::new(),
     })

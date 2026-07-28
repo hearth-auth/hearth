@@ -13,6 +13,7 @@
     "test:visual:update": "bash ./pw-run.sh test --project=visual --update-snapshots",
     "test:cross-browser": "bash ./pw-run.sh test --project=smoke --project=flows --project=regression",
     "test:all": "bash ./pw-run.sh test --project=smoke --project=flows --project=regression --project=components --project=destructive --project=accessibility",
+    "test:unit": "node --import tsx --test fixtures/*.test.ts",
     "extract-routes": "tsx scripts/extract-routes.ts",
     "coverage-check": "tsx scripts/coverage-check.ts"
   },

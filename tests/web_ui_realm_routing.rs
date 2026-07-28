@@ -199,11 +199,19 @@ async fn bare_login_resolves_to_default_when_configured() {
     let rig = build_rig(&["public", "staff"], Some("public"));
     let (status, body) = get(&rig.app, "/ui/login").await;
     assert_eq!(status, StatusCode::OK);
-    // Form action should include the resolved realm so a subsequent POST
-    // binds to the same realm rather than re-walking.
+    // The server intentionally keeps `action="/ui/login"` on the bare URL
+    // even after resolving the default realm (realm-scoped rewrites would
+    // break bookmarks / federation redirects). The key invariant is that
+    // the default realm resolves to a real login form — NOT the 400 "realm
+    // required" error page that the multi-realm-no-default case returns.
     assert!(
-        body.contains("/ui/realms/public/login") || body.contains("action=\"/ui/login\""),
-        "login form should target the resolved default realm: {}",
+        body.contains("action=\"/ui/login\""),
+        "bare /ui/login with a configured default realm must render a login form: {}",
+        &body[..body.len().min(400)]
+    );
+    assert!(
+        !body.contains("realm required") && !body.contains("Realm required"),
+        "bare /ui/login must not return the realm-selection error when a default is configured: {}",
         &body[..body.len().min(400)]
     );
 }

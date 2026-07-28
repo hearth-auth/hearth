@@ -241,7 +241,7 @@ fn blocked_jkt_survives_engine_restart() {
         .expect("engine")
     };
 
-    // First engine: create realm, block a JKT.
+    // First engine: create realm, issue a JKT-bound token, block that JKT.
     let engine1 = open_engine(StorageConfig::dev(dir.path().to_path_buf()));
     let realm_id = engine1
         .create_realm(&CreateRealmRequest {
@@ -252,16 +252,64 @@ fn blocked_jkt_survives_engine_restart() {
         .id()
         .clone();
 
-    let jkt = "restart-test-thumbprint-xyz";
-    engine1.block_dpop_jkt(&realm_id, jkt).expect("block");
+    let client = engine1
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "restart-jkt-client".to_string(),
+                redirect_uris: vec![],
+                client_secret: Some("restart-secret-99!".to_string()),
+                grant_types: vec!["client_credentials".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+    let token = engine1
+        .client_credentials_token(
+            &realm_id,
+            &ClientCredentialsRequest {
+                client_id: client.client_id().clone(),
+                client_secret: Some("restart-secret-99!".to_string()),
+                scope: Some("openid".to_string()),
+                dpop_jkt: Some(DUMMY_JKT.to_string()),
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("client_credentials with dpop_jkt")
+        .access_token()
+        .to_string();
+
+    // Sanity: token is valid before the JKT is blocked.
+    engine1
+        .validate_token(&realm_id, &token)
+        .expect("token valid before block");
+
+    engine1.block_dpop_jkt(&realm_id, DUMMY_JKT).expect("block");
 
     // Simulate restart: drop old engine, open new one on same storage.
     drop(engine1);
     let engine2 = open_engine(StorageConfig::dev(dir.path().to_path_buf()));
 
-    // Unblocking must succeed — proving the blocklist entry was persisted and
-    // loaded into the in-memory projection on startup.
+    // The blocklist entry must survive the restart AND remain enforced: a token
+    // bound to the blocked JKT must be rejected with `DPopJktBlocked` after the
+    // startup storage scan re-hydrates the in-memory projection. Merely proving
+    // `unblock` returns `Ok` would not distinguish a live blocklist from a no-op.
+    let err = engine2
+        .validate_token(&realm_id, &token)
+        .expect_err("JKT-bound token must be rejected after restart");
+    assert!(
+        matches!(err, IdentityError::DPopJktBlocked),
+        "expected DPopJktBlocked after restart, got {err:?}"
+    );
+
+    // Unblocking must also succeed and restore validity — confirming the
+    // persisted entry is addressable, not a phantom.
     engine2
-        .unblock_dpop_jkt(&realm_id, jkt)
+        .unblock_dpop_jkt(&realm_id, DUMMY_JKT)
         .expect("unblock after restart — entry must survive from storage");
+    engine2
+        .validate_token(&realm_id, &token)
+        .expect("token valid after unblock");
 }

@@ -79,7 +79,7 @@ function parseInboxLinks(html: string): Array<{ id: string; subject: string }> {
 /**
  * Fetches the full email detail page and extracts the plain-text body.
  */
-async function fetchEmailBody(mcauthCookie: string, emailId: string): Promise<string> {
+export async function fetchEmailBody(mcauthCookie: string, emailId: string): Promise<string> {
   const resp = await fetch(`${BASE_URL}/dev/mail/${emailId}`, {
     headers: { Cookie: `mcauth=${mcauthCookie}` },
   });

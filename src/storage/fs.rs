@@ -61,6 +61,20 @@ pub trait Fs: Send + Sync {
 
     /// Renames a file.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+
+    /// Fsyncs a directory so that file creations, renames, and deletions within
+    /// it become durable — i.e. their directory entries are committed.
+    ///
+    /// A `create` or `rename` is not crash-durable until the containing
+    /// directory's metadata is itself synced. Without this, a power loss after
+    /// the file's data was `fsync`'d can still lose the directory entry, leaving
+    /// the restart to resolve the *old* inode (HEA-1855). Callers MUST invoke
+    /// this on the parent directory after creating a new WAL/SST segment and
+    /// after any rename that finalizes one.
+    ///
+    /// Implementations MAY treat this as a no-op on platforms where directory
+    /// fsync is unsupported or meaningless (e.g. non-unix).
+    fn sync_dir(&self, dir: &Path) -> io::Result<()>;
 }
 
 /// Production filesystem implementation delegating to `std::fs`.
@@ -138,5 +152,21 @@ impl Fs for RealFs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    #[cfg(unix)]
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        // Opening a directory read-only and calling fsync commits its metadata
+        // (the entries for files created/renamed/removed within it). This is the
+        // POSIX-portable way to make a rename durable.
+        let handle = std::fs::File::open(dir)?;
+        handle.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_dir(&self, _dir: &Path) -> io::Result<()> {
+        // Directory fsync is not portable outside unix; the durability contract
+        // there is provided by other platform mechanisms. Treat as a no-op.
+        Ok(())
     }
 }

@@ -4,6 +4,15 @@ All notable changes to `hearth-go` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Token endpoints now send JSON, not form-encoding** — `ClientCredentials`,
+  `StartDeviceFlow`, and `ExchangeMagicLink` previously posted
+  `application/x-www-form-urlencoded` bodies to `/token` and
+  `/device_authorization`. Hearth parses those endpoints with a JSON extractor
+  and rejected the form bodies with HTTP 415, so these flows never worked
+  against a real server. They now send `application/json`, matching
+  `ExchangeCode`/`CompleteLogin`/`RefreshTokens` (HEA-1766, D-08).
+
 ### Added
 - **Echo middleware adapter** — `sdks/go/hearth/echo` package (`hearthecho`) provides
   `HearthMiddleware`, `RequirePermission`, and `GetToken` for Echo v4 applications.

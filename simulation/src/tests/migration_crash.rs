@@ -250,6 +250,113 @@ fn simulation_crash_mid_migration_resumes_correctly() {
     );
 }
 
+/// Exercises the per-user progress-marker skip branch in isolation.
+///
+/// The main resume test above deletes already-migrated users from the source
+/// before restarting, so on resume they are skipped simply because they are
+/// *absent* from the source listing — the marker-skip code path
+/// (`cross_realm.rs`: "skip if already migrated") is never actually taken.
+/// This reproduces the crash window *after* the destination copy + progress
+/// marker but *before* the source delete: the user is still present in source,
+/// so a correct resume must skip it because of the **marker**, not absence.
+///
+/// Proof it was the marker: a sentinel is planted at the user's destination
+/// primary key. If migration re-ran for this user it would overwrite that key
+/// with the real record via `put_batch`; the sentinel surviving proves
+/// `build_user_batch`/`put_batch` were never reached — the user was skipped at
+/// the marker check, and the still-present source record was left untouched.
+#[test]
+fn simulation_resume_skips_user_by_progress_marker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (storage, identity, rbac) = open_engines(dir.path());
+    let sys = sys_realm_id();
+
+    let src = identity
+        .create_realm(&CreateRealmRequest {
+            name: "sim-marker-src".to_string(),
+            config: None,
+        })
+        .expect("create src realm")
+        .id()
+        .clone();
+    let dst = identity
+        .create_realm(&CreateRealmRequest {
+            name: "sim-marker-dst".to_string(),
+            config: None,
+        })
+        .expect("create dst realm")
+        .id()
+        .clone();
+
+    let user = identity
+        .create_user(
+            &src,
+            &CreateUserRequest {
+                email: "marker@crash.example.com".to_string(),
+                display_name: "Marker User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = *user.id().as_uuid();
+    let pk = user_primary_key(user_uuid);
+
+    // Post-crash durable state: the destination copy + progress marker committed,
+    // but the source delete did NOT (process died in between). The user is still
+    // in source; a sentinel stands in for the already-written destination record.
+    const SENTINEL: &[u8] = b"ALREADY_COPIED_SENTINEL";
+    storage
+        .put(&dst, &pk, SENTINEL)
+        .expect("plant destination sentinel");
+    storage
+        .put(&sys, &progress_key(SRC_SLUG, user_uuid), b"done")
+        .expect("write progress marker");
+
+    // Sanity: the user really is still present in the source realm, so anything
+    // that skips it below can only be doing so because of the marker.
+    assert!(
+        storage.get(&src, &pk).expect("get src").is_some(),
+        "user must still be present in source for the marker-skip path to be exercised"
+    );
+
+    let opts = CrossRealmMigrateOptions {
+        move_semantics: true,
+        users: true,
+        orgs: true,
+        on_conflict: MigrateConflictPolicy::Error,
+    };
+    let report = execute_cross_realm_migration(
+        &identity as &dyn IdentityEngine,
+        &rbac as &dyn RbacEngine,
+        &*storage as &dyn StorageEngine,
+        &src,
+        &dst,
+        SRC_SLUG,
+        &opts,
+    )
+    .expect("resume must not fail");
+
+    // The marker-skip branch counts the user as already migrated…
+    assert_eq!(
+        report.migrated, 1,
+        "the marker-skipped user must be counted as already migrated"
+    );
+    // …and must NOT re-run the copy: the sentinel survives untouched.
+    assert_eq!(
+        storage.get(&dst, &pk).expect("get dst").as_deref(),
+        Some(SENTINEL),
+        "destination record must be left as-is — a re-migration would overwrite the sentinel"
+    );
+    // The marker-skip path does not delete source data, so the still-present
+    // source record remains (absence was never the reason it was skipped).
+    assert!(
+        storage.get(&src, &pk).expect("get src after").is_some(),
+        "marker-skip must leave the untouched source record in place"
+    );
+}
+
 /// Verifies that the migration is a complete no-op when the `completed`
 /// marker is already present — covers the "server restarted after a
 /// successful migration" case without re-running any migration logic.

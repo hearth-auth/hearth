@@ -382,6 +382,12 @@ fn required_action_enroll_email_otp_path_segment() {
 
 // ---------------------------------------------------------------------------
 // AC-8: User.email_otp_enabled() starts false; enrollment sets it true
+//
+// The engine's verify_email_otp only validates the OTP — it does NOT flip the
+// flag.  The web layer calls update_user(email_otp_enabled: Some(true)) after
+// a successful verify.  This test drives the full three-step enrollment flow
+// (issue → verify → update_user) so we prove that each step is functional
+// and that the flag persists correctly.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -414,7 +420,25 @@ async fn user_email_otp_enabled_starts_false_and_set_on_enrollment() {
         "email_otp_enabled must be false on a fresh user"
     );
 
-    // Simulate enrollment completing: update the user's email_otp_enabled flag.
+    // Step 1: issue the OTP (simulates the web enrollment start).
+    let sender = CapturingEmailSender::new();
+    let svc = make_email_service(sender.clone());
+    let now = now_unix_ts();
+    let nonce = harness
+        .identity()
+        .issue_email_otp(realm.id(), user.email(), HMAC_KEY, &svc, None, now)
+        .expect("issue_email_otp");
+
+    // Step 2: verify the OTP (simulates the user submitting the code).
+    let code = sender
+        .last_otp_code()
+        .expect("CapturingEmailSender must have received the code");
+    harness
+        .identity()
+        .verify_email_otp(realm.id(), &nonce, &code, HMAC_KEY, now)
+        .expect("verify_email_otp must succeed with the correct code");
+
+    // Step 3: set the flag (the web layer's final enrollment step).
     let updated = harness
         .identity()
         .update_user(
@@ -429,6 +453,6 @@ async fn user_email_otp_enabled_starts_false_and_set_on_enrollment() {
 
     assert!(
         updated.email_otp_enabled(),
-        "email_otp_enabled must be true after enrollment"
+        "email_otp_enabled must be true after completing the enrollment flow"
     );
 }

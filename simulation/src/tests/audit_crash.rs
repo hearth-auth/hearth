@@ -57,7 +57,6 @@ fn open_audit(dir: &std::path::Path) -> (Arc<EmbeddedStorageEngine>, EmbeddedAud
 #[test]
 fn simulation_audit_crash_mid_batch_discards_partial_event() {
     let seed = 51u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();
@@ -120,7 +119,6 @@ fn simulation_audit_crash_mid_batch_discards_partial_event() {
 #[test]
 fn simulation_audit_crash_corrupt_crc_rolls_back_last_event() {
     let seed = 52u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm = RealmId::generate();
@@ -176,7 +174,6 @@ fn simulation_audit_crash_corrupt_crc_rolls_back_last_event() {
 #[test]
 fn simulation_audit_integrity_under_sustained_load() {
     let seed = 53u64;
-    let _ = seed;
 
     const THREADS: u32 = 8;
     const EVENTS_PER_THREAD: u32 = 250;

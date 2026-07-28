@@ -262,7 +262,7 @@ async fn delta_sync_initial_run_loads_all_users() {
 
 #[tokio::test]
 #[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
-async fn delta_sync_second_run_with_same_cursor_returns_no_new_users() {
+async fn delta_sync_second_run_with_advanced_cursor_returns_no_new_users() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
     let bind_password = require_env!("HEARTH_TEST_LDAP_BIND_PASSWORD");
@@ -280,17 +280,22 @@ async fn delta_sync_second_run_with_same_cursor_returns_no_new_users() {
         .expect("first delta_sync");
     assert!(first.checkpoint.cursor.is_some());
 
-    // Second run with the same cursor should return only users modified
-    // at or after the checkpoint — in a static test directory that means
-    // possibly the same set or fewer (depending on whether modifyTimestamp
-    // equality is included). The key assertion is that the connector does
-    // not error and the checkpoint is updated.
+    // Second run with a cursor advanced past the initial sync time should
+    // return only entries modified *after* that timestamp — in a static CI
+    // LDAP directory that means zero new users. Assert the delta is empty
+    // rather than just checking that the checkpoint advances, so a regression
+    // where the connector ignores the cursor is caught.
     let second = connector
         .delta_sync(&realm_id, 1_700_000_001)
         .await
         .expect("second delta_sync");
-    // Checkpoint must advance to a new timestamp.
     assert_eq!(second.checkpoint.last_sync_at, Some(1_700_000_001));
+    assert!(
+        second.upserted.is_empty(),
+        "second delta_sync with an advanced cursor must not return any entries \
+         in a static LDAP directory (got {} upserted)",
+        second.upserted.len()
+    );
 }
 
 #[tokio::test]

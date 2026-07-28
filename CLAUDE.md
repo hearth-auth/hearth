@@ -45,6 +45,8 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | `make ci-local-full` | Full container reproduction via `act` (~10-15 min) — use when `ci-local-fast` passes but CI fails, or when editing workflow files |
 | `make sdk-smoke-local` | Build hearth, boot `--dev`, run TS + Go SDK example smokes, tear down |
 | `cd sdks/php && composer test` | Run PHP SDK unit tests (smoke-test the PHP SDK locally) |
+| `make seed` | Seed a deterministic corpus onto a running dev instance for load tests — pass params via `ARGS` (see `loadtest/README.md`) |
+| `make loadtest` | Run the `hearth-loadtest` Goose harness against a seeded instance; writes JSON + HTML reports. Nightly/pre-release only, **not** a per-PR gate (`loadtest/README.md`) |
 
 ### UI Test Pre-commit Workflow
 

@@ -271,3 +271,38 @@ fn example_large_scale_demo_config_parses() {
         "example must seed at least 1M users across realms (got {total})"
     );
 }
+
+// ===== Scenario 6: the loadtest corpus config is a large corpus by default =====
+
+/// `make loadtest` boots this config so the harness runs against a
+/// multi-hundred-thousand-user corpus by default (HEA-1787). Guards the three
+/// invariants the pipeline relies on: demo seeding is enabled, the rate
+/// limiters are disabled (loopback-only), and the *default* (no env overrides)
+/// corpus is genuinely large — not the old 200-user REST seed.
+#[test]
+fn loadtest_corpus_config_is_large_by_default() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/loadtest/loadtest-corpus.yaml");
+    // Loaded via `serve --dev --config` by run-loadtest.sh, so validate under
+    // the same relaxed dev-mode rules. Env placeholders carry `:-` defaults, so
+    // this parses with no env set — the default corpus.
+    let config = Config::from_file_as_dev(std::path::Path::new(path))
+        .expect("loadtest/loadtest-corpus.yaml must parse and validate");
+
+    assert!(config.demo.enabled, "loadtest corpus must enable demo mode");
+    assert_eq!(
+        config.security.load_test_unthrottled,
+        Some(true),
+        "loadtest corpus must disable rate limiters (loopback-only)"
+    );
+
+    let realms = config.realms.expect("loadtest corpus must declare realms");
+    let total: u64 = realms
+        .values()
+        .filter_map(|r| r.seeding.as_ref())
+        .map(|s| s.users)
+        .sum();
+    assert!(
+        total >= 500_000,
+        "default loadtest corpus must seed a large dataset (got {total})"
+    );
+}

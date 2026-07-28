@@ -570,8 +570,16 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates an access token: verifies the Ed25519 signature, enforces
     /// `exp`, checks the realm binding (`tid`), and confirms the session is
     /// still active. Returns decoded claims only when all checks pass.
-    fn validate_token(&self, realm_id: &RealmId, token: &str)
-        -> Result<TokenClaims, IdentityError>;
+    ///
+    /// Returns `Arc<TokenClaims>` so the zero-allocation hot path can serve a
+    /// warm token-claims-cache hit by bumping a refcount rather than deep-cloning
+    /// every claim field (HEA-1771). `Arc<TokenClaims>` derefs to `TokenClaims`,
+    /// so callers reading claim fields need no change.
+    fn validate_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<std::sync::Arc<TokenClaims>, IdentityError>;
 
     /// Refreshes tokens: validates the refresh token, then issues a new pair.
     ///

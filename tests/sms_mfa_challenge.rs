@@ -6,8 +6,9 @@
 //! - `issue_sms_otp` → `verify_sms_otp` round-trip
 //! - `issue_authorization_code` with `amr_values: vec!["sms"]` produces
 //!   access and ID tokens carrying `amr: ["sms"]`
-//! - `SmsMfaChallengeSucceeded` and `SmsMfaChallengeFailed` audit events
-//!   are emitted at the correct call sites
+//! - `SmsMfaChallengeSucceeded` and `SmsMfaChallengeFailed` AuditAction
+//!   variants are storable and queryable (actual emission is in the web layer —
+//!   `src/protocol/web/sms_challenge.rs` — covered by HTTP integration tests)
 //!
 //! The web interstitial UI layer (`sms_challenge.rs`) is covered by the
 //! unit tests embedded in that module (cookie round-trip, cross-user
@@ -323,11 +324,19 @@ async fn no_sms_mfa_means_empty_amr() {
 }
 
 // ---------------------------------------------------------------------------
-// AC-5: SmsMfaChallengeSucceeded audit event is appendable and queryable
+// AC-5: SmsMfaChallengeSucceeded AuditAction is registered, storable, and
+//       queryable by the audit engine.
+//
+// NOTE: The actual emission of this event happens in the *web layer*
+// (`src/protocol/web/sms_challenge.rs:~462`) on a successful OTP verify
+// request. Testing it end-to-end requires a full HTTP WebState harness with
+// an SMS sender wired in — out of scope for these engine-level unit tests.
+// This test pins the AuditAction enum variant's storage contract: it can be
+// appended (no schema error) and retrieved with the correct actor and resource.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn sms_mfa_challenge_succeeded_audit_event() {
+async fn sms_mfa_challenge_succeeded_audit_action_is_storable_and_queryable() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = create_sms_realm(&h);
     let user_id = create_verified_phone_user(&h, &realm);
@@ -357,17 +366,38 @@ async fn sms_mfa_challenge_succeeded_audit_event() {
         })
         .expect("audit query");
 
-    assert_eq!(events.len(), 1, "expected 1 SmsMfaChallengeSucceeded event");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly 1 SmsMfaChallengeSucceeded event"
+    );
     assert_eq!(events[0].action, AuditAction::SmsMfaChallengeSucceeded);
-    assert_eq!(events[0].actor, user_id.as_uuid().to_string());
+    assert_eq!(
+        events[0].actor,
+        user_id.as_uuid().to_string(),
+        "actor must be the user who triggered the SMS MFA"
+    );
+    assert_eq!(
+        events[0].resource_type, "user",
+        "resource_type must be 'user'"
+    );
+    assert_eq!(
+        events[0].resource_id,
+        user_id.as_uuid().to_string(),
+        "resource_id must be the user's UUID"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// AC-6: SmsMfaChallengeFailed audit event is appendable and queryable
+// AC-6: SmsMfaChallengeFailed AuditAction is registered, storable, and
+//       queryable by the audit engine.
+//
+// NOTE: Same scope note as AC-5 — the web layer emits this on failed verify;
+// this test pins the storage contract only.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn sms_mfa_challenge_failed_audit_event() {
+async fn sms_mfa_challenge_failed_audit_action_is_storable_and_queryable() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = create_sms_realm(&h);
     let user_id = create_verified_phone_user(&h, &realm);
@@ -397,8 +427,21 @@ async fn sms_mfa_challenge_failed_audit_event() {
         })
         .expect("audit query");
 
-    assert_eq!(events.len(), 1, "expected 1 SmsMfaChallengeFailed event");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly 1 SmsMfaChallengeFailed event"
+    );
     assert_eq!(events[0].action, AuditAction::SmsMfaChallengeFailed);
+    assert_eq!(
+        events[0].actor,
+        user_id.as_uuid().to_string(),
+        "actor must be the user who attempted SMS MFA"
+    );
+    assert_eq!(
+        events[0].resource_type, "user",
+        "resource_type must be 'user'"
+    );
 }
 
 // ---------------------------------------------------------------------------

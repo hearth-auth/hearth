@@ -6,8 +6,9 @@
 //!
 //! Coverage:
 //! - `unauth_authorize_http_rejected` — no Bearer token → 401
-//! - `wrong_user_bearer_is_rejected` — Bearer for user A, user_id=B in body → code issued for A (not B)
-//! - `authed_authorize_succeeds` — valid Bearer → 200, code issued
+//! - `authed_authorize_issues_code_for_token_subject` — valid Bearer for user A
+//!   with a decoy `user_id=B` in the body → code issued for A (the token
+//!   subject), never B; proves the body `user_id` cannot impersonate
 //! - `grpc_unauth_authorize_rejected` — gRPC authorize without Authorization metadata → UNAUTHENTICATED
 
 #![allow(clippy::unwrap_used)]

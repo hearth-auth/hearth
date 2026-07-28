@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { test, expect } from '@playwright/test';
+import { newInstrumentedPage, assertPageClean } from '../helpers/assertions';
 import type { SeedFixtures } from '../fixtures/seed';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
@@ -89,25 +90,27 @@ async function pollDeviceToken(
 test.describe('Device auth — approval page', () => {
   test('GET /ui/device renders user-code entry form', async ({ browser }) => {
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(`${BASE_URL}/ui/device`, { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('input[name="user_code"]')).toBeVisible();
     await expect(page.locator('#main button[type="submit"]')).toBeVisible();
 
+    assertPageClean(page);
     await ctx.close();
   });
 
   test('unauthenticated visit to /ui/device redirects to login', async ({ browser }) => {
     const ctx = await browser.newContext();
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(`${BASE_URL}/ui/device`, { waitUntil: 'domcontentloaded' });
 
     expect(page.url()).not.toContain('/device');
     expect(page.url()).toMatch(/login/);
 
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -140,21 +143,25 @@ test.describe('Device auth — full flow', () => {
     // Step 2: browser approval — must use the realm-scoped session so that
     // device_approve_submit resolves session.realm_id == dev-realm.
     const ctx = await browser.newContext({ storageState: realmUserState });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(`${BASE_URL}/ui/device`, { waitUntil: 'domcontentloaded' });
     await expect(page.locator('input[name="user_code"]')).toBeVisible();
 
     await page.fill('input[name="user_code"]', deviceAuth.user_code);
-    await page.click('#main button[type="submit"]');
+    await Promise.all([
+      // Successful approval redirects to /ui/device?flash=approved (handlers.rs).
+      page.waitForURL(/\/ui\/device\?flash=approved/, { timeout: 15_000 }),
+      page.click('#main button[type="submit"]'),
+    ]);
 
-    // After approval the server redirects to a confirmation/success page
-    // (not an external redirect_uri — device grant uses polling)
-    await page.waitForLoadState('domcontentloaded');
-    // Page should NOT be an error page after successful approval
-    const bodyText = await page.evaluate(() => document.body.innerText.trim());
-    expect(bodyText.length, 'Response page must not be empty').toBeGreaterThan(0);
+    // Assert the specific success flash renders — not merely a non-empty body,
+    // which an error page would also satisfy.
+    await expect(page.locator('#main')).toContainText('Device approved successfully', {
+      timeout: 10_000,
+    });
 
+    assertPageClean(page);
     await ctx.close();
 
     // Step 3: poll for the token — should succeed now that the user approved
@@ -165,7 +172,13 @@ test.describe('Device auth — full flow', () => {
       (deviceAuth.interval ?? 1) * 1_000,
     );
 
+    // Validate the token structure — a JWS compact serialization has three
+    // non-empty base64url segments (header.payload.signature). "toBeTruthy" alone
+    // would accept any non-empty string.
     expect(accessToken, 'Expected access_token after device approval').toBeTruthy();
+    const segments = accessToken.split('.');
+    expect(segments, 'access_token must be a 3-part JWS').toHaveLength(3);
+    expect(segments.every((s) => /^[A-Za-z0-9_-]+$/.test(s))).toBe(true);
   });
 
   test('device_authorization response includes required RFC 8628 fields', async () => {

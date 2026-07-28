@@ -119,6 +119,8 @@ curl -X PATCH "http://127.0.0.1:8420/scim/v2/Users/<id>" \
 
 Setting `active: false` disables the Hearth account. The user cannot log in until re-enabled.
 
+A single PATCH request may contain at most **1,000 operations**. Requests with more than 1,000 entries in the `Operations` array are rejected with `413 Content Too Large` before any operation is applied.
+
 ### Deprovision a user
 
 ```bash

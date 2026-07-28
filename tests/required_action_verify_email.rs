@@ -296,9 +296,15 @@ async fn verify_email_page_renders_and_confirm_resumes_oidc() {
         "VERIFY_EMAIL page must return 200"
     );
     let body = body_text(resp2).await;
+    // Must render the actual "check your email" page addressed to this user — the
+    // prior `|| contains("email")` matched almost any HTML page.
     assert!(
-        body.contains("user@example.com") || body.contains("email"),
-        "page must reference the user's email or email verification: {body}"
+        body.contains("user@example.com"),
+        "page must show the user's email address: {body}"
+    );
+    assert!(
+        body.contains("Check your email"),
+        "page must be the verify-email prompt: {body}"
     );
     // 3. Get a fresh verification token directly (simulates clicking the email link).
     let token = rig

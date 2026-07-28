@@ -341,20 +341,32 @@ async fn refresh_token_rotation_e2e() {
     let reuse_result = harness
         .identity()
         .refresh_tokens(&realm, &original_refresh, None, None);
+    // Pin the reject: replaying a previously-rotated token is *theft*, and the
+    // engine responds by revoking the entire grant family and returning
+    // `TokenRevoked`. A bare `is_err()` would also pass on e.g. a plain
+    // `InvalidGrant`, hiding a regression where the family is NOT revoked and
+    // the still-current token below remains usable.
+    let reuse_err = reuse_result.expect_err("reusing a rotated refresh token must fail");
     assert!(
-        reuse_result.is_err(),
-        "reusing old refresh token after rotation must fail"
+        matches!(reuse_err, hearth::identity::IdentityError::TokenRevoked),
+        "expected TokenRevoked (theft detection revokes the family), got {reuse_err:?}"
     );
 
     // 6. After theft detection (step 5), the grant family is revoked,
-    // so even the current refresh token should also be invalid
+    // so even the current refresh token should also be invalid.
     let new_refresh = refreshed.refresh_token().to_string();
     let new_refresh_result = harness
         .identity()
         .refresh_tokens(&realm, &new_refresh, None, None);
+    let new_refresh_err =
+        new_refresh_result.expect_err("current refresh token must be revoked after theft");
     assert!(
-        new_refresh_result.is_err(),
-        "current refresh token should also be revoked after theft detection"
+        matches!(
+            new_refresh_err,
+            hearth::identity::IdentityError::TokenRevoked
+        ),
+        "expected TokenRevoked for the still-current token once the family is \
+         revoked, got {new_refresh_err:?}"
     );
 }
 

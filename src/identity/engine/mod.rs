@@ -39,6 +39,57 @@ fn hex_encode(bytes: &[u8]) -> String {
         })
 }
 
+/// Fixed-capacity stack buffer implementing [`std::fmt::Write`] for zero-alloc
+/// key formatting on the token-validation hot path.
+///
+/// Writing past the capacity sets an overflow flag and returns
+/// [`std::fmt::Error`], letting callers fall back to a heap allocation for the
+/// rare oversized input while keeping the common case allocation-free.
+struct StackKeyBuf {
+    buf: [u8; 128],
+    len: usize,
+    overflow: bool,
+}
+
+impl StackKeyBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0; 128],
+            len: 0,
+            overflow: false,
+        }
+    }
+
+    /// Returns the written bytes as `&str`, or `None` if a write overflowed the
+    /// buffer (in which case the contents are truncated and must not be used).
+    fn as_str(&self) -> Option<&str> {
+        if self.overflow {
+            return None;
+        }
+        // Bytes originate exclusively from `write_str(&str)`, so they are valid
+        // UTF-8 by construction; `from_utf8` re-verifies rather than using
+        // `unsafe`.
+        std::str::from_utf8(&self.buf[..self.len]).ok()
+    }
+}
+
+impl std::fmt::Write for StackKeyBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        let Some(end) = self.len.checked_add(bytes.len()) else {
+            self.overflow = true;
+            return Err(std::fmt::Error);
+        };
+        if end > self.buf.len() {
+            self.overflow = true;
+            return Err(std::fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(())
+    }
+}
+
 /// Validates capability list bounds: max 50 entries, max 256 chars each.
 fn validate_agent_capabilities(caps: &[String]) -> Result<(), crate::identity::IdentityError> {
     if caps.len() > 50 {
@@ -259,11 +310,14 @@ use crate::storage::StorageEngine;
 
 pub(super) mod approval;
 pub(super) mod oauth;
+mod sharded_cache;
 // Phase D engine modules
 pub(super) mod aat;
 pub(super) mod cross_realm;
 pub(super) mod spiffe;
 pub(super) mod txn;
+
+use sharded_cache::ShardedArcSwapMap;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
 /// influence which claims are embedded in the issued token pair.
@@ -461,9 +515,10 @@ pub struct EmbeddedIdentityEngine {
     /// validate in another.
     ///
     /// Hot-path readers call `load()` — one atomic fence, no locking.
-    /// Writers use `rcu()` to clone-and-CAS the map; realm key ops are rare.
+    /// Writers `rcu()` only the affected shard; realm key ops are rare.
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
-    realm_signing_keys: Arc<ArcSwap<HashMap<RealmId, Arc<SigningKey>>>>,
+    /// Sharded (HEA-1772) so an insert clones ~`1/N` of the map, not all of it.
+    realm_signing_keys: Arc<ShardedArcSwapMap<RealmId, Arc<SigningKey>>>,
     /// Wait-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -684,22 +739,24 @@ pub struct EmbeddedIdentityEngine {
     /// Key: JWK thumbprint string. Present = blocked; absent = allowed.
     ///
     /// Populated at startup by scanning `agt:dpop:block:jkt:*` across all realms.
-    /// Updated via `rcu()` by `block_dpop_jkt` / `unblock_dpop_jkt`.
-    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
-    blocked_dpop_jkt_cache: ArcSwap<std::collections::HashSet<String>>,
+    /// Updated by `block_dpop_jkt` / `unblock_dpop_jkt`; each write `rcu()`s a
+    /// single shard. Modelled as a set via `V = ()`.
+    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
+    blocked_dpop_jkt_cache: ShardedArcSwapMap<String, ()>,
     /// Hot-path JTI revocation projection (§10.5).
     ///
     /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
     /// for entries written before this projection existed (stored as `b"1"`).
     ///
     /// Populated at startup by scanning `oauth:revjti:*` across all realms.
-    /// Updated (via `rcu()`) whenever a sessionless token is revoked.
-    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
+    /// Updated whenever a sessionless token is revoked; each write `rcu()`s a
+    /// single shard (HEA-1772) rather than cloning the whole projection.
+    /// Hot-path readers call `contains_key()` — one atomic fence, no lock, no syscall.
     ///
-    /// Expired entries remain until the next `rcu()` eviction sweep; an expired
-    /// token is rejected by the `exp` claim check before we reach this cache,
-    /// so stale entries are harmless.
-    revoked_jti_cache: ArcSwap<HashMap<String, i64>>,
+    /// Expired entries remain until the next per-shard eviction sweep; an
+    /// expired token is rejected by the `exp` claim check before we reach this
+    /// cache, so stale entries are harmless.
+    revoked_jti_cache: ShardedArcSwapMap<String, i64>,
     // INVARIANT: guard released before method returns; no .await in scope.
     agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
     /// Per-code-hash advisory lock for single-use enforcement of authorization codes.
@@ -1010,7 +1067,7 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1061,8 +1118,8 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
-            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
+            revoked_jti_cache: ShardedArcSwapMap::new(),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1436,7 +1493,7 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        self.revoked_jti_cache.store(Arc::new(map));
+        self.revoked_jti_cache.replace_all(map);
         Ok(())
     }
 
@@ -1483,7 +1540,8 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        self.blocked_dpop_jkt_cache.store(Arc::new(set));
+        self.blocked_dpop_jkt_cache
+            .replace_all(set.into_iter().map(|jkt| (jkt, ())));
         Ok(())
     }
 
@@ -1494,16 +1552,11 @@ impl EmbeddedIdentityEngine {
     fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
         let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
         let now_secs = self.clock.now().as_micros() / 1_000_000;
-        self.revoked_jti_cache.rcu(|old| {
-            let mut next: HashMap<String, i64> = old
-                .iter()
-                // Evict expired entries while we hold the clone.
-                .filter(|(_, &exp)| exp == i64::MAX || now_secs < exp)
-                .map(|(k, &v)| (k.clone(), v))
-                .collect();
-            next.insert(cache_key.clone(), exp_secs);
-            next
-        });
+        // Evict expired entries in the target shard while we hold the clone.
+        self.revoked_jti_cache
+            .insert_retaining(cache_key, exp_secs, |_, &exp| {
+                exp == i64::MAX || now_secs < exp
+            });
     }
 
     /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
@@ -1520,12 +1573,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &key, b"")
             .map_err(Self::storage_err)?;
-        let jkt_owned = jkt.to_string();
-        self.blocked_dpop_jkt_cache.rcu(|old| {
-            let mut next = (**old).clone();
-            next.insert(jkt_owned.clone());
-            next
-        });
+        self.blocked_dpop_jkt_cache.insert(jkt.to_string(), ());
         Ok(())
     }
 
@@ -1543,12 +1591,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &key)
             .map_err(Self::storage_err)?;
-        let jkt_owned = jkt.to_string();
-        self.blocked_dpop_jkt_cache.rcu(|old| {
-            let mut next = (**old).clone();
-            next.remove(&jkt_owned);
-            next
-        });
+        self.blocked_dpop_jkt_cache.remove(jkt);
         Ok(())
     }
 
@@ -1577,7 +1620,7 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1628,8 +1671,8 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
-            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
-            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
+            revoked_jti_cache: ShardedArcSwapMap::new(),
             // INVARIANT: guard released before method returns; no .await in scope.
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
@@ -1749,15 +1792,8 @@ impl EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
-        {
-            let key_arc = Arc::new(realm_signing_key);
-            let sys_realm_id = sys_realm.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(sys_realm_id.clone(), Arc::clone(&key_arc));
-                new_map
-            });
-        }
+        self.realm_signing_keys
+            .insert(sys_realm.clone(), Arc::new(realm_signing_key));
 
         Ok(())
     }
@@ -3124,6 +3160,74 @@ impl EmbeddedIdentityEngine {
         });
     }
 
+    /// Hot-path session lookup that returns the cached `Arc<Session>` without
+    /// deep-cloning the session body.
+    ///
+    /// Mirrors [`IdentityEngine::get_session`] semantics — validity and A-18
+    /// policy eviction — but avoids the `Session` clone on the zero-allocation
+    /// token validation path. On a warm cache hit this bumps the `Arc` refcount
+    /// only (no heap allocation). Returns `Ok(None)` for missing, revoked or
+    /// expired, or policy-evicted sessions.
+    fn get_session_arc(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> Result<Option<Arc<Session>>, IdentityError> {
+        // Conditional span: only allocated when debug tracing is active to
+        // preserve the zero-allocation guarantee on the token validation path.
+        let _span = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+            tracing::debug_span!(
+                "hearth.auth.session_lookup",
+                "hearth.session_id" = %session_id,
+                "hearth.realm_id" = %realm_id,
+            )
+            .entered()
+        });
+
+        let now = self.clock.now();
+
+        // Hot path: check the in-process session cache (zero I/O, one atomic load).
+        let cache_key = (realm_id.clone(), session_id.clone());
+        {
+            let cache = self.session_cache.load();
+            if let Some(s) = cache.get(&cache_key) {
+                // Clone the Arc (refcount bump only) before dropping the guard.
+                let arc = Arc::clone(s);
+                drop(cache);
+                return if !arc.is_valid(now) {
+                    self.session_cache_evict(realm_id, session_id);
+                    Ok(None)
+                } else if arc.is_policy_expired(now) {
+                    // A-18: idle or absolute timeout. Reject fail-closed on the
+                    // read path; the eviction storage write + audit is deferred
+                    // to the background session GC sweep
+                    // (`sweep_expired_sessions`, driven by `sweep_expired`) so
+                    // token validation performs zero storage syscalls (C-5,
+                    // hot-path rule §"no read-path syscall").
+                    Ok(None)
+                } else {
+                    Ok(Some(arc))
+                };
+            }
+        }
+
+        // Cache miss: load from storage and warm the cache on a valid result.
+        let session = self.load_session_raw(realm_id, session_id)?;
+        match session {
+            Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
+                self.session_cache_insert(realm_id, &s);
+                Ok(Some(Arc::new(s)))
+            }
+            Some(s) if s.is_valid(now) => {
+                // Policy-expired (A-18): reject fail-closed. Eviction is
+                // deferred to the background GC sweep (C-5) — no storage write
+                // on the read path.
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Removes a session from the in-process cache after revocation or expiry.
     ///
     /// No-ops when the key is absent to avoid a pointless `rcu()` clone.
@@ -3317,11 +3421,8 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
     ) -> Result<Arc<SigningKey>, IdentityError> {
         // Wait-free read: one atomic load, no locking.
-        {
-            let map = self.realm_signing_keys.load();
-            if let Some(key) = map.get(realm_id) {
-                return Ok(Arc::clone(key));
-            }
+        if let Some(key) = self.realm_signing_keys.get(realm_id) {
+            return Ok(key);
         }
 
         // Cache miss: load key bytes from storage.
@@ -3341,15 +3442,10 @@ impl EmbeddedIdentityEngine {
 
         let signing_key = Arc::new(SigningKey::from_pkcs8(&key_bytes)?);
 
-        // Insert into cache via CAS loop — safe under concurrent loaders:
-        // the last writer wins but all produce equivalent keys.
-        let realm_id_owned = realm_id.clone();
-        let key_clone = Arc::clone(&signing_key);
-        self.realm_signing_keys.rcu(|current| {
-            let mut new_map = (**current).clone();
-            new_map.insert(realm_id_owned.clone(), Arc::clone(&key_clone));
-            new_map
-        });
+        // Insert into cache — safe under concurrent loaders: the last writer
+        // wins but all produce equivalent keys.
+        self.realm_signing_keys
+            .insert(realm_id.clone(), Arc::clone(&signing_key));
 
         Ok(signing_key)
     }
@@ -3608,10 +3704,20 @@ impl EmbeddedIdentityEngine {
         let Some(ref jti) = claims.jti else {
             return false;
         };
-        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-        self.revoked_jti_cache
-            .load()
-            .contains_key(cache_key.as_str())
+        use std::fmt::Write as _;
+        // Hot-path zero-alloc: format the `{realm_uuid}:{jti}` composite key into
+        // a fixed stack buffer. A hyphenated UUID is 36 bytes; the buffer holds
+        // the UUID + ':' + a jti of up to ~91 bytes without touching the heap.
+        let mut key = StackKeyBuf::new();
+        if write!(key, "{}:{}", realm_id.as_uuid(), jti).is_ok() {
+            if let Some(k) = key.as_str() {
+                return self.revoked_jti_cache.contains_key(k);
+            }
+        }
+        // Fallback (jti longer than the stack buffer, off the warm path): a
+        // single heap allocation keeps the check correct for oversized jtis.
+        let heap_key = format!("{}:{}", realm_id.as_uuid(), jti);
+        self.revoked_jti_cache.contains_key(heap_key.as_str())
     }
 
     /// Emits `LoginFailed` and, when the lockout threshold is first reached,
@@ -4386,15 +4492,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Cache signing key (wait-free reads on hot path).
-        {
-            let key_arc = Arc::new(realm_signing_key);
-            let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), Arc::clone(&key_arc));
-                new_map
-            });
-        }
+        self.realm_signing_keys
+            .insert(realm_id.clone(), Arc::new(realm_signing_key));
 
         // Cache realm status for wait-free validate_token reads.
         {
@@ -4798,11 +4897,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     let _ = audit.append(&audit_event);
 
                     // Remove from in-memory caches.
-                    signing_keys.rcu(|current| {
-                        let mut new_map = (**current).clone();
-                        new_map.remove(&realm_id_bg);
-                        new_map
-                    });
+                    signing_keys.remove(&realm_id_bg);
                     status_cache.rcu(|current| {
                         let mut new_map = (**current).clone();
                         new_map.remove(&realm_id_bg);
@@ -4840,11 +4935,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // happened above; this drops the cached Arc and status entry.
         {
             let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.remove(&id);
-                new_map
-            });
+            self.realm_signing_keys.remove(&id);
             self.realm_status_cache.rcu(|current| {
                 let mut new_map = (**current).clone();
                 new_map.remove(&id);
@@ -5140,14 +5231,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
-        {
-            let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.remove(&id);
-                new_map
-            });
-        }
+        self.realm_signing_keys.remove(realm_id);
 
         tracing::info!(
             realm = %realm_id.as_uuid(),
@@ -6150,55 +6234,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<Option<Session>, IdentityError> {
-        // Conditional span: only allocated when debug tracing is active to
-        // preserve the zero-allocation guarantee on the token validation path.
-        let _span = tracing::enabled!(tracing::Level::DEBUG).then(|| {
-            tracing::debug_span!(
-                "hearth.auth.session_lookup",
-                "hearth.session_id" = %session_id,
-                "hearth.realm_id" = %realm_id,
-            )
-            .entered()
-        });
-
-        let now = self.clock.now();
-
-        // Hot path: check the in-process session cache (zero I/O, one atomic load).
-        let cache_key = (realm_id.clone(), session_id.clone());
-        {
-            let cache = self.session_cache.load();
-            if let Some(s) = cache.get(&cache_key) {
-                // Clone before dropping the guard so no borrow crosses the drop.
-                let cloned = (**s).clone();
-                drop(cache);
-                return if !cloned.is_valid(now) {
-                    self.session_cache_evict(realm_id, session_id);
-                    Ok(None)
-                } else if cloned.is_policy_expired(now) {
-                    // A-18: idle or absolute timeout. Lazy eviction.
-                    self.session_cache_evict(realm_id, session_id);
-                    let _ = self.evict_session_by_policy(realm_id, &cloned, now);
-                    Ok(None)
-                } else {
-                    Ok(Some(cloned))
-                };
-            }
-        }
-
-        // Cache miss: load from storage and warm the cache on a valid result.
-        let session = self.load_session_raw(realm_id, session_id)?;
-        match session {
-            Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
-                self.session_cache_insert(realm_id, &s);
-                Ok(Some(s))
-            }
-            Some(s) if s.is_valid(now) => {
-                // Policy-expired (A-18) — evict lazily.
-                let _ = self.evict_session_by_policy(realm_id, &s, now);
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
+        // Single validity path: delegate to `get_session_arc` so validity /
+        // A-18 policy-eviction semantics are defined in exactly one place and
+        // cannot drift (LOW-1). The owned-`Session` return deep-clones the
+        // cached `Arc` body here — off the zero-alloc hot path, which uses
+        // `get_session_arc` directly. The debug span lives in `get_session_arc`
+        // so it covers both callers (LOW-2).
+        Ok(self
+            .get_session_arc(realm_id, session_id)?
+            .map(|arc| (*arc).clone()))
     }
 
     fn revoke_session(
@@ -6699,7 +6743,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         token: &str,
-    ) -> Result<TokenClaims, IdentityError> {
+    ) -> Result<Arc<TokenClaims>, IdentityError> {
         // Conditional span: only allocated when debug tracing is active.
         // validate_token is on the zero-allocation hot path; this guard
         // ensures no heap allocation occurs when debug is disabled.
@@ -6720,18 +6764,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // instance. All semantic checks (expiry, realm binding, session
         // validity) still run below — only the Ed25519 verify + serde parse
         // are skipped on a cache hit.
-        let claims = {
+        // `claims` is an `Arc<TokenClaims>`: a warm cache hit bumps the refcount
+        // (zero heap allocation) instead of deep-cloning ~15 String/Vec/Option
+        // fields. The `Arc` is returned to the caller unchanged (HEA-1771).
+        let claims: Arc<TokenClaims> = {
             let maybe_key = Self::token_cache_hash(token);
             let cached = maybe_key.and_then(|k| self.token_claims_cache.load().get(&k).cloned());
             match cached {
-                Some(arc) => (*arc).clone(),
+                Some(arc) => arc,
                 None => {
                     // Cache miss: full Ed25519 verify + serde_json parse.
                     let c = self.verify_token_signature_for_realm(realm_id, token)?;
+                    let arc = Arc::new(c);
                     if let Some(k) = maybe_key {
-                        self.token_claims_cache_insert(k, Arc::new(c.clone()));
+                        self.token_claims_cache_insert(k, Arc::clone(&arc));
                     }
-                    c
+                    arc
                 }
             }
         };
@@ -6812,7 +6860,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // §10.4 — DPoP JKT blocklist: reject tokens whose `cnf.jkt` thumbprint
         // is server-blocked. Hot-path safe: single atomic `load()`, no syscall.
         if let Some(ref cnf) = claims.cnf {
-            if self.blocked_dpop_jkt_cache.load().contains(&cnf.jkt) {
+            if self.blocked_dpop_jkt_cache.contains_key(cnf.jkt.as_str()) {
                 return Err(IdentityError::DPopJktBlocked);
             }
         }
@@ -6835,8 +6883,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // Look up session — this is the actual session-validity check.
+        // `get_session_arc` returns the cached `Arc<Session>` without deep-cloning
+        // the session body, preserving the zero-allocation hot path (HEA-1771).
         let session = self
-            .get_session(realm_id, &sid)?
+            .get_session_arc(realm_id, &sid)?
             .ok_or(IdentityError::InvalidToken)?;
 
         // Bind claims.sub to session owner (defense-in-depth against sub
@@ -9227,13 +9277,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         {
-            let key_arc = Arc::new(realm_signing_key);
             let id = realm_id.clone();
-            self.realm_signing_keys.rcu(|current| {
-                let mut new_map = (**current).clone();
-                new_map.insert(id.clone(), Arc::clone(&key_arc));
-                new_map
-            });
+            self.realm_signing_keys
+                .insert(id.clone(), Arc::new(realm_signing_key));
             self.realm_status_cache.rcu(|current| {
                 let mut new_map = (**current).clone();
                 new_map.insert(id.clone(), RealmStatus::Active);
@@ -12169,6 +12215,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        // C-5: evict A-18 idle/absolute-timeout sessions. Policy-expired
+        // sessions are rejected fail-closed on the read path with zero storage
+        // writes; the deferred eviction (revoke + audit + SV bump) happens here
+        // on the periodic sweep. Fail-open on error — the next tick retries.
+        match self.sweep_expired_sessions(realm_id) {
+            Ok(n) => stats.sessions_evicted += n,
+            Err(e) => {
+                stats.errors += 1;
+                tracing::warn!(
+                    realm = %realm_id,
+                    error = %e,
+                    "cleanup: expired-session sweep failed"
+                );
+            }
+        }
+
         // D.6: evict idle agent-rate windows to bound memory.
         self.agent_rate_monitor
             .prune_idle(std::time::Instant::now());
@@ -12180,6 +12242,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 "pending_tickets_deleted": stats.pending_tickets_deleted,
                 "grant_families_deleted": stats.grant_families_deleted,
                 "rate_trackers_pruned": stats.rate_trackers_pruned,
+                "sessions_evicted": stats.sessions_evicted,
                 "errors": stats.errors,
             }));
             let ctx = crate::audit::context::AuditContext {
@@ -17190,6 +17253,282 @@ mod tests {
         assert!(
             !engine.session_cache.load().contains_key(&key),
             "expired session must be lazily evicted after get_session"
+        );
+    }
+
+    /// Test-only storage decorator that counts mutating operations. Used to
+    /// assert that the token-validation read path issues zero storage writes
+    /// when it encounters an A-18 policy-expired session (C-5).
+    struct CountingWriteStorage {
+        inner: Arc<dyn StorageEngine>,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingWriteStorage {
+        fn new(inner: Arc<dyn StorageEngine>) -> Self {
+            Self {
+                inner,
+                writes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn writes(&self) -> usize {
+            self.writes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn bump(&self) {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl StorageEngine for CountingWriteStorage {
+        fn get(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+            self.inner.get(realm_id, key)
+        }
+        fn put(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.put(realm_id, key, value)
+        }
+        fn delete(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.delete(realm_id, key)
+        }
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
+            self.inner.scan(realm_id, start, end)
+        }
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.put_batch(realm_id, entries)
+        }
+        fn put_if_absent(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<bool, crate::storage::StorageError> {
+            self.bump();
+            self.inner.put_if_absent(realm_id, key, value)
+        }
+        fn write_batch(
+            &self,
+            realm_id: &RealmId,
+            puts: &[(Vec<u8>, Vec<u8>)],
+            deletes: &[Vec<u8>],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.bump();
+            self.inner.write_batch(realm_id, puts, deletes)
+        }
+    }
+
+    /// C-5: `validate_token`'s read path MUST NOT write to storage when it
+    /// encounters an A-18 policy-expired session. The session is still
+    /// rejected fail-closed on read; the eviction storage write is deferred to
+    /// the background GC sweep (`sweep_expired`).
+    #[test]
+    fn c5_policy_expired_read_path_performs_no_storage_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let counting = Arc::new(CountingWriteStorage::new(inner));
+        let storage = Arc::clone(&counting) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
+
+        // Realm with a 5-minute idle timeout. Kept below the 15-minute access
+        // token TTL so `validate_token` reaches the session policy-expiry check
+        // (rather than short-circuiting on JWT `exp`) after the clock advance.
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs: Some(300),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(
+            engine.session_cache.load().contains_key(&key),
+            "session must be cached before idle timeout"
+        );
+
+        // Advance 10 minutes: past the 5-minute idle timeout but within the
+        // 15-minute access-token TTL and the multi-day session TTL.
+        clock.advance(10 * 60 * 1_000_000);
+
+        // Read path MUST reject the session (fail-closed) with zero writes.
+        let writes_before = counting.writes();
+        let arc = engine
+            .get_session_arc(&realm_id, session.id())
+            .expect("get_session_arc must not error");
+        assert!(
+            arc.is_none(),
+            "policy-expired session must be rejected on read (fail-closed)"
+        );
+        assert_eq!(
+            counting.writes(),
+            writes_before,
+            "read path must perform zero storage writes for a policy-expired session"
+        );
+
+        // The full validate_token hot path must also reject fail-closed with no write.
+        let before_validate = counting.writes();
+        let err = engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect_err("policy-expired session must reject token");
+        assert!(
+            matches!(err, IdentityError::InvalidToken),
+            "expected InvalidToken for policy-expired session, got {err:?}"
+        );
+        assert_eq!(
+            counting.writes(),
+            before_validate,
+            "validate_token read path must perform zero storage writes"
+        );
+
+        // The deferred eviction is performed by the background sweep, which
+        // DOES write (persist revoke + audit + SV bump).
+        let before_sweep = counting.writes();
+        let stats = engine.sweep_expired(&realm_id).expect("sweep");
+        assert_eq!(
+            stats.sessions_evicted, 1,
+            "background sweep must evict the deferred policy-expired session"
+        );
+        assert!(
+            counting.writes() > before_sweep,
+            "background sweep must persist the eviction (storage write)"
+        );
+    }
+
+    /// HEA-1783 (LOW-1): `get_session` and `get_session_arc` MUST agree on
+    /// validity for every state — present/valid, revoked, and A-18
+    /// policy-expired — because `get_session` now delegates to
+    /// `get_session_arc` (single validity path, no drift). A future policy
+    /// check added to one path can no longer be missed by the other.
+    #[test]
+    fn get_session_and_arc_agree_on_validity() {
+        let (_dir, engine, clock) = setup_engine();
+
+        // Realm with a 5-minute idle timeout so we can drive A-18 policy expiry
+        // without exceeding the multi-day session TTL.
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs: Some(300),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+
+        // --- Case 1: present + valid → both return Some, identical body. ---
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let sid = session.id().clone();
+
+        let owned = engine.get_session(&realm_id, &sid).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &sid)
+            .expect("get_session_arc");
+        assert!(owned.is_some() && arc.is_some(), "valid session: both Some");
+        assert_eq!(
+            owned.as_ref(),
+            arc.as_deref(),
+            "valid session: both paths must return byte-identical Session"
+        );
+
+        // --- Case 2: A-18 policy-expired → both fail-closed with None. ---
+        clock.advance(10 * 60 * 1_000_000); // 10 min > 5 min idle timeout
+        let owned = engine.get_session(&realm_id, &sid).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &sid)
+            .expect("get_session_arc");
+        assert!(
+            owned.is_none() && arc.is_none(),
+            "policy-expired session: both paths must reject fail-closed"
+        );
+
+        // --- Case 3: revoked → both return None. ---
+        let session2 = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session 2");
+        let sid2 = session2.id().clone();
+        engine
+            .revoke_session(&realm_id, &sid2)
+            .expect("revoke session");
+        let owned = engine.get_session(&realm_id, &sid2).expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &sid2)
+            .expect("get_session_arc");
+        assert!(
+            owned.is_none() && arc.is_none(),
+            "revoked session: both paths must return None"
+        );
+
+        // --- Case 4: absent → both return None. ---
+        let missing = SessionId::generate();
+        let owned = engine
+            .get_session(&realm_id, &missing)
+            .expect("get_session");
+        let arc = engine
+            .get_session_arc(&realm_id, &missing)
+            .expect("get_session_arc");
+        assert!(
+            owned.is_none() && arc.is_none(),
+            "absent session: both paths must return None"
         );
     }
 

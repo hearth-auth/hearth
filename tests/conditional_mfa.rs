@@ -4,8 +4,9 @@
 //! - `mfa_required: true` on a registered client is stored and retrieved correctly.
 //! - `update_client` with `mfa_required` updates the stored value.
 //! - `RealmConfig::mfa_required_roles` is persisted and reloaded correctly.
-//! - Users in matching roles have `EnrollMfa` injected as a required action via
-//!   the identity engine path, confirming the enforcement hook is wired up.
+//! - Realm-wide `mfa_required: true` blocks engine-level `create_session`.
+//! - `mfa_required_roles` is a web-layer-only gate (requires `required_action_check`
+//!   via a full HTTP WebState); it does NOT gate engine `create_session` directly.
 
 mod common;
 
@@ -219,41 +220,82 @@ async fn realm_mfa_required_roles_update_persists() {
     );
 }
 
-// ─── injection: mfa_required_roles forces EnrollMfa ─────────────────────────
+// ─── realm-wide mfa_required vs. role-scoped mfa_required_roles ─────────────
 
-/// When a realm has `mfa_required_roles: ["realm.admin"]` and the user is
-/// assigned that role but has no MFA enrolled, the engine's `mfa_required`
-/// session creation path still blocks them — demonstrating the role-gate wires
-/// up. The web-layer injection test (via `required_action_check`) lives in the
-/// UI integration suite since it requires a full `WebState`.
+/// Realm-wide `mfa_required: true` blocks session creation for any user
+/// without MFA enrolled, regardless of their roles.
+///
+/// **Why this test was renamed:** the prior version was titled
+/// `realm_mfa_required_roles_blocks_session_for_matching_role_user`, but it
+/// configured the realm with `mfa_required: true` (the realm-wide flag), not
+/// `mfa_required_roles`. The role seeding and assignment were dead setup —
+/// they did not affect the outcome. The engine's `create_session` only checks
+/// `mfa_required: true`; the role-scoped gate lives in the web layer
+/// (`src/protocol/web/required_action.rs` `required_action_check`) and is
+/// covered by the web-layer integration tests there.
 #[tokio::test]
-async fn realm_mfa_required_roles_blocks_session_for_matching_role_user() {
+async fn realm_wide_mfa_required_blocks_session_for_any_user_without_mfa() {
     let harness = common::TestHarness::embedded().await.expect("test harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
-            name: format!("role-block-{}", uuid::Uuid::new_v4()),
+            name: format!("realm-mfa-block-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
-                // Use the realm-wide flag to block users who have the role but
-                // no MFA; the conditional injection is tested via realm policy.
                 mfa_required: Some(true),
                 ..Default::default()
             }),
         })
         .expect("create realm");
 
-    // Seed standard roles.
-    harness.rbac().seed_realm(realm.id()).expect("seed_realm");
-
     let user = create_user(&harness, realm.id());
 
-    // Assign the admin role to the user.
+    // Engine gate: MfaRequired is returned for any user when mfa_required=true.
+    let err = harness
+        .identity()
+        .create_session(
+            realm.id(),
+            user.id(),
+            &hearth::identity::SessionContext::default(),
+        )
+        .expect_err("create_session must fail when mfa_required is true and user has no MFA");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::MfaRequired),
+        "expected MfaRequired, got: {err:?}"
+    );
+}
+
+/// `mfa_required_roles` does NOT gate engine-level `create_session` — it is
+/// enforced by the web layer only. A user with a matching role can still
+/// create a session via the engine directly, while a user in a realm with
+/// `mfa_required: true` cannot.
+///
+/// This test draws the line between the two controls: `mfa_required_roles`
+/// is a web-layer injection gate (it pushes `EnrollMfa` into `RequiredAction`
+/// on the login flow), whereas `mfa_required` is an engine-level hard block.
+#[tokio::test]
+async fn mfa_required_roles_does_not_block_engine_create_session() {
+    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("role-gate-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                // Role-gate only — no realm-wide mfa_required flag.
+                mfa_required_roles: Some(vec!["realm.admin".to_string()]),
+                mfa_required: None,
+                ..Default::default()
+            }),
+        })
+        .expect("create realm");
+
+    // Seed standard roles and assign admin to the user.
+    harness.rbac().seed_realm(realm.id()).expect("seed_realm");
+    let user = create_user(&harness, realm.id());
     let admin_role = harness
         .rbac()
         .get_role_by_name(realm.id(), "realm.admin")
         .expect("get_role_by_name")
-        .expect("realm.admin role must exist after seed");
-
+        .expect("realm.admin must exist after seed");
     harness
         .rbac()
         .assign_role(
@@ -267,18 +309,20 @@ async fn realm_mfa_required_roles_blocks_session_for_matching_role_user() {
         )
         .expect("assign_role");
 
-    // User has no MFA; session creation should be blocked by mfa_required.
-    let err = harness
+    // The engine does NOT enforce mfa_required_roles — session creation
+    // succeeds even for a user with the matching role and no MFA enrolled.
+    // The web layer (`required_action_check`) injects EnrollMfa on the
+    // login flow; that path requires a full HTTP WebState harness and is
+    // tested in the web-layer integration suite.
+    harness
         .identity()
         .create_session(
             realm.id(),
             user.id(),
             &hearth::identity::SessionContext::default(),
         )
-        .expect_err("create_session must fail for user with no MFA when mfa_required is true");
-
-    assert!(
-        matches!(err, hearth::identity::IdentityError::MfaRequired),
-        "expected MfaRequired, got: {err:?}"
-    );
+        .expect(
+            "create_session must succeed via the engine when only mfa_required_roles is set \
+             (role-gate is enforced by the web layer, not the engine)",
+        );
 }

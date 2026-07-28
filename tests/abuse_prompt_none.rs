@@ -148,10 +148,22 @@ fn a37_probe_limit_resets_after_window() {
     // Advance past the 1-hour window.
     clock.advance(ONE_HOUR_MICROS + 1);
 
-    // First probe in new window must succeed.
-    engine
+    // The counter must have FULLY reset, not merely "not immediately fail":
+    // a whole fresh budget of 50 probes succeeds, and only the 51st in the new
+    // window trips again. A single success would not distinguish a real reset
+    // from an off-by-one carry-over.
+    for i in 0..50_u32 {
+        engine
+            .check_silent_auth_probe(&realm_id, &user_id, "client-456", "code_issued")
+            .unwrap_or_else(|e| panic!("probe {i} after reset should succeed, got {e}"));
+    }
+    let err = engine
         .check_silent_auth_probe(&realm_id, &user_id, "client-456", "code_issued")
-        .expect("first probe after window reset must succeed");
+        .expect_err("51st probe in the reset window must be rate-limited again");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::SilentAuthRateLimited),
+        "expected SilentAuthRateLimited after window reset, got {err}"
+    );
 }
 
 /// Each subject has an independent counter — exhausting one must not affect another.
@@ -198,8 +210,20 @@ fn a37_different_subjects_have_independent_counters() {
         let _ = engine.check_silent_auth_probe(&realm_id, &user_a, "c", "code_issued");
     }
 
-    // User B's first probe must still succeed.
-    engine
+    // User B must have its OWN full, independent budget: 50 successes then a
+    // rate-limit on the 51st — even though user A is already exhausted. A single
+    // success would not prove B's counter is independent rather than shared with
+    // A (which would already be over the shared limit).
+    for i in 0..50_u32 {
+        engine
+            .check_silent_auth_probe(&realm_id, &user_b, "c", "code_issued")
+            .unwrap_or_else(|e| panic!("user B probe {i} should succeed, got {e}"));
+    }
+    let err = engine
         .check_silent_auth_probe(&realm_id, &user_b, "c", "code_issued")
-        .expect("user B's counter must be independent of user A's");
+        .expect_err("user B's own 51st probe must be rate-limited");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::SilentAuthRateLimited),
+        "expected SilentAuthRateLimited for user B's independent counter, got {err}"
+    );
 }

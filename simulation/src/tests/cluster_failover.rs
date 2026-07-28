@@ -561,11 +561,14 @@ async fn simulation_leader_kill_and_election() {
     // AC-2(c): no duplication — each key has exactly one value.
     for &sidx in &survivors {
         for i in 0u8..6 {
-            let v = cluster.read_from(sidx, &[i]).unwrap_or_default();
+            // Compare the Option directly: `unwrap_or_default()` would fold a
+            // missing key into an empty vec, blurring "absent" and "wrong value".
+            let v = cluster.read_from(sidx, &[i]);
             assert_eq!(
                 v,
-                vec![i * 10],
-                "AC-2 FAIL: duplicate or corrupted value for token {i}"
+                Some(vec![i * 10]),
+                "AC-2 FAIL: missing, duplicate, or corrupted value for token {i} on node {}",
+                cluster.nodes[sidx].id
             );
         }
     }

@@ -162,7 +162,19 @@ async fn assignment_crud_happy_path() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let items = body["items"].as_array().expect("items");
-    assert!(!items.is_empty());
+    // The listed assignment must be exactly the one we just created, bound to the
+    // custom role — not merely "some non-empty list".
+    assert_eq!(items.len(), 1, "expected exactly one assignment: {body}");
+    assert_eq!(
+        items[0]["id"].as_str(),
+        Some(assignment_id.as_str()),
+        "listed assignment id must match the created assignment: {body}"
+    );
+    assert_eq!(
+        items[0]["role_id"].as_str(),
+        Some(docs.id.as_uuid().to_string().as_str()),
+        "listed assignment must reference the assigned role: {body}"
+    );
 
     // Delete.
     let (status, _) = send(

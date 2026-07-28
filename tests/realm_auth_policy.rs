@@ -9,8 +9,9 @@ mod common;
 
 use hearth::core::RealmId;
 use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, MagicLinkResponse,
-    PasswordPolicy, RealmConfig, SessionContext, UpdateRealmRequest,
+    AuthorizationRequest, CleartextPassword, CodeChallengeMethod, CreateRealmRequest,
+    CreateUserRequest, IdentityError, MagicLinkResponse, PasswordPolicy, RealmConfig,
+    RegisterClientRequest, SessionContext, TokenExchangeRequest, UpdateRealmRequest,
 };
 
 // ===== TOTP helper (mirrors tests/mfa.rs) =====
@@ -147,12 +148,23 @@ async fn magic_link_allowed_when_no_restriction() {
 
 // ===== per-realm token TTL enforcement =====
 
+/// Per-realm access/refresh TTL overrides are applied at **token issuance**,
+/// not just stored in config.
+///
+/// The previous version of this test only asserted that the TTL values
+/// round-tripped through `get_realm` — it never issued a token, so it could
+/// not detect a regression where TTL overrides are persisted but ignored during
+/// issuance. This version drives the full auth-code flow and decodes the real
+/// access token's `exp` claim, proving the per-realm TTL reaches the signed JWT.
 #[tokio::test]
 async fn token_ttl_overrides_applied_at_issuance() {
+    use base64::Engine as _;
+
     let harness = common::TestHarness::embedded().await.expect("harness");
 
-    // 5-minute access TTL / 1-day refresh TTL as per-realm override.
-    let access_ttl_micros: i64 = 5 * 60 * 1_000_000;
+    // 5-minute access TTL (tight, easily distinguishable from the default 60-min).
+    let access_ttl_secs: i64 = 5 * 60; // 300 s
+    let access_ttl_micros: i64 = access_ttl_secs * 1_000_000;
     let refresh_ttl_micros: i64 = 24 * 60 * 60 * 1_000_000;
 
     let realm = create_realm_with_config(
@@ -164,7 +176,7 @@ async fn token_ttl_overrides_applied_at_issuance() {
         },
     );
 
-    // Verify the config was persisted.
+    // Config round-trip — the TTL must survive storage.
     let loaded = harness
         .identity()
         .get_realm(realm.id())
@@ -172,11 +184,101 @@ async fn token_ttl_overrides_applied_at_issuance() {
         .expect("realm exists");
     assert_eq!(
         loaded.config().access_token_ttl_micros,
-        Some(access_ttl_micros)
+        Some(access_ttl_micros),
+        "access_token_ttl_micros must survive storage round-trip"
     );
-    assert_eq!(
-        loaded.config().refresh_token_ttl_micros,
-        Some(refresh_ttl_micros)
+
+    // === Issuance gate — the real assertion ===
+    // Register a minimal public client and run the full authorization_code
+    // flow so we get a real signed access token from this realm.
+    let user = create_user(&harness, realm.id());
+    let client = harness
+        .identity()
+        .register_client(
+            realm.id(),
+            &RegisterClientRequest {
+                client_name: "TTL-test app".to_string(),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    // PKCE verifier / challenge (S256).
+    let pkce_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let digest = ring::digest::digest(&ring::digest::SHA256, pkce_verifier.as_bytes());
+    let pkce_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref());
+
+    let auth = harness
+        .identity()
+        .authorize(
+            realm.id(),
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "https://app.example.com/cb".to_string(),
+                scope: "openid".to_string(),
+                state: "ttl-test-state".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(pkce_challenge),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize");
+
+    let tokens = harness
+        .identity()
+        .exchange_authorization_code(
+            realm.id(),
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth.code().to_string(),
+                redirect_uri: "https://app.example.com/cb".to_string(),
+                code_verifier: Some(pkce_verifier.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange code");
+
+    // Decode the real signed access token and extract `exp`.
+    let claims =
+        hearth::identity::tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs() as i64;
+
+    let lifetime_secs = claims.exp - claims.iat;
+
+    // The per-realm 5-minute TTL must reach the signed JWT.
+    // Allow a ±10 s tolerance for CPU scheduling jitter.
+    assert!(
+        (lifetime_secs - access_ttl_secs).abs() <= 10,
+        "access token lifetime must equal the per-realm 5-minute override \
+         (expected ~{access_ttl_secs}s, got {lifetime_secs}s = exp {} - iat {})",
+        claims.exp,
+        claims.iat,
+    );
+
+    // The token must be valid right now.
+    assert!(
+        claims.exp > now_secs,
+        "freshly issued access token must not already be expired: exp={}, now={}",
+        claims.exp,
+        now_secs
     );
 }
 

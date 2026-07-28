@@ -21,14 +21,15 @@
 //!
 //! # Allocation ceiling rationale
 //!
-//! `validate_token` is not strictly allocation-free: `serde_json` allocates
-//! owned `String` values for every `TokenClaims` field during JWT payload
-//! decoding (`sub`, `iss`, `sid`, `tid`, `token_type`, etc.).  The ceiling
-//! [`MAX_ALLOCS_PER_CALL`] is set to roughly 2× the HEA-736 baseline, giving
-//! headroom for minor dependency changes while still catching regressions:
-//! new `format!()` calls, unnecessary `clone()`, or boxing added to the hot
-//! path.  The gate is informational about *regression*, not a proof of zero
-//! allocations.
+//! The JWT `serde_json` decode (which allocates an owned `String` per
+//! `TokenClaims` field) runs only on a *cold* cache miss.  On the **warm** hot
+//! path exercised by this gate — token-claims cache hit + session cache hit —
+//! `validate_token` performs **zero heap allocations** after HEA-1771: the
+//! cached claims and session are returned as `Arc` refcount bumps, and the
+//! JTI-revocation key is formatted into a stack buffer rather than via
+//! `format!()`.  [`MAX_ALLOCS_PER_CALL`] is therefore `0`, making this gate a
+//! hard zero-allocation proof that trips on any re-introduced `clone()`,
+//! `format!()`, or boxing on the hot path.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -106,14 +107,20 @@ const VALIDATE_TOKEN_P99: Duration = Duration::from_millis(1);
 
 /// Maximum heap allocations per `validate_token` invocation.
 ///
-/// After S12-F1 (session cache) and S12-F2 (token claims cache), the warm
-/// hot path avoids both the `StorageEngine::get` call and the
-/// `serde_json::from_slice::<TokenClaims>` parse.  What remains is a
-/// `TokenClaims::clone()` from the Arc (≈5-6 String clones for the named
-/// fields) plus ArcSwap `load()` fence overhead — roughly 10-15 allocations.
-/// The ceiling is set to 20 to give headroom for minor dependency drift while
-/// catching regressions (new `format!()`, `clone()`, or boxing on the path).
-const MAX_ALLOCS_PER_CALL: usize = 20;
+/// After S12-F1 (session cache), S12-F2 (token claims cache), and the HEA-1771
+/// zero-alloc closure, the warm hot path performs **no heap allocations**:
+/// - the token-claims cache hit returns an `Arc<TokenClaims>` (refcount bump,
+///   no deep clone of the ~15 String/Vec/Option fields),
+/// - the session lookup returns a cached `Arc<Session>` via `get_session_arc`
+///   (refcount bump, no `Session` clone),
+/// - the JTI-revocation check formats its `{realm}:{jti}` key into a stack
+///   buffer (`StackKeyBuf`) instead of `format!()`,
+/// - ArcSwap `load()` uses thread-local debt slots (no allocation single-thread).
+///
+/// The ceiling is therefore **0**: any allocation on the warm path — a
+/// re-introduced deep `clone()`, a stray `format!()`, or new boxing — trips the
+/// gate. This is a hard zero-allocation proof, not merely a regression guard.
+const MAX_ALLOCS_PER_CALL: usize = 0;
 
 /// Samples collected per percentile gate.
 const GATE_SAMPLES: usize = 10_000;
@@ -268,7 +275,7 @@ fn gate_validate_token_allocs(state: &BenchState) {
     let per_call = total.div_ceil(ALLOC_ROUNDS);
 
     assert!(
-        per_call <= MAX_ALLOCS_PER_CALL,
+        per_call == MAX_ALLOCS_PER_CALL,
         "validate_token averaged {per_call} heap allocations per call \
          (limit: {MAX_ALLOCS_PER_CALL}). \
          A new format!(), clone(), or boxing was added to the hot path. \

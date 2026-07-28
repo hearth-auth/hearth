@@ -18,6 +18,7 @@ import * as crypto from 'crypto';
 import { test, expect } from '@playwright/test';
 import type { SeedFixtures } from '../fixtures/seed';
 import { loadCredentials } from '../helpers/actions';
+import { newInstrumentedPage, assertPageClean } from '../helpers/assertions';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 const AUTH_DIR = path.join(__dirname, '..', '.auth');
@@ -79,7 +80,7 @@ test.describe.serial('OAuth consent — page renders', () => {
     const state = crypto.randomBytes(8).toString('hex');
 
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     // Intercept the callback so the external redirect never fires
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
@@ -96,6 +97,7 @@ test.describe.serial('OAuth consent — page renders', () => {
     // The form must be present
     await expect(page.locator('[data-testid="consent-form"]')).toBeVisible();
 
+    assertPageClean(page);
     await ctx.close();
   });
 
@@ -109,7 +111,7 @@ test.describe.serial('OAuth consent — page renders', () => {
     u.searchParams.set('prompt', 'consent');
 
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
@@ -118,6 +120,7 @@ test.describe.serial('OAuth consent — page renders', () => {
     await expect(page.locator('[data-testid="approve-button"]')).toBeVisible();
     await expect(page.locator('[data-testid="deny-button"]')).toBeVisible();
 
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -143,7 +146,7 @@ test.describe.serial('OAuth consent — approve', () => {
     u.searchParams.set('prompt', 'consent');
 
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     // Abort navigation to callback so the browser stays on a local page
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
@@ -173,6 +176,7 @@ test.describe.serial('OAuth consent — approve', () => {
     expect(capturedCallbackUrl.searchParams.get('state')).toBe(state);
     expect(capturedCallbackUrl.searchParams.get('error')).toBeNull();
 
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -196,7 +200,7 @@ test.describe.serial('OAuth consent — deny', () => {
     u.searchParams.set('prompt', 'consent');
 
     const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
@@ -218,6 +222,7 @@ test.describe.serial('OAuth consent — deny', () => {
     expect(capturedCallbackUrl.searchParams.get('state')).toBe(state);
     expect(capturedCallbackUrl.searchParams.get('code')).toBeNull();
 
+    assertPageClean(page);
     await ctx.close();
   });
 });
@@ -234,7 +239,7 @@ test.describe('OAuth consent — unauthenticated', () => {
 
     // No storageState — anonymous browser context
     const ctx = await browser.newContext();
-    const page = await ctx.newPage();
+    const page = await newInstrumentedPage(ctx);
 
     await page.goto(buildAuthorizeUrl(seed.appClientId, challenge, state).toString(), {
       waitUntil: 'domcontentloaded',
@@ -244,6 +249,7 @@ test.describe('OAuth consent — unauthenticated', () => {
     expect(page.url()).not.toContain('/oauth/consent');
     expect(page.url()).toMatch(/login/);
 
+    assertPageClean(page);
     await ctx.close();
   });
 });

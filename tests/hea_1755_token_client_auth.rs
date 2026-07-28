@@ -24,7 +24,7 @@ use base64::Engine as _;
 use hearth::core::RealmId;
 use hearth::identity::{
     AuthorizationRequest, CodeChallengeMethod, CreateRealmRequest, CreateUserRequest,
-    RefreshBindContext, RegisterClientRequest,
+    IdentityError, RefreshBindContext, RegisterClientRequest,
 };
 use hearth::protocol::http::{router, AppState};
 use tower::ServiceExt as _;
@@ -401,8 +401,9 @@ async fn o1_refresh_token_bound_to_issuing_client() {
         .identity()
         .refresh_tokens(&realm_id, &refresh, None, Some(&bind));
     assert!(
-        cross.is_err(),
-        "refresh token issued to client_a must not be redeemable by client_b"
+        matches!(cross, Err(IdentityError::InvalidClient)),
+        "refresh token issued to client_a must be rejected with InvalidClient when \
+         redeemed by client_b, got: {cross:?}"
     );
 
     // Sanity: authenticating as the correct client succeeds.
@@ -444,7 +445,8 @@ async fn o1_refresh_confidential_engine_requires_authenticated_client() {
     // No authenticated client → rejected.
     let none = h.identity().refresh_tokens(&realm_id, &refresh, None, None);
     assert!(
-        none.is_err(),
-        "confidential grant family must reject refresh with no authenticated client"
+        matches!(none, Err(IdentityError::InvalidClient)),
+        "confidential grant family must reject refresh with InvalidClient when no \
+         authenticated client is present, got: {none:?}"
     );
 }

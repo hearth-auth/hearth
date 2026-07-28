@@ -5,7 +5,7 @@ package hearth
 // Tests cover:
 //   - JwksCache: TTL, cache-miss re-fetch, skip non-OKP keys, Cache-Control header
 //   - VerifyToken: signature, expiry, issuer, audience, algorithm guard
-//   - ClientCredentials: form encoding, required credentials, optional scope
+//   - ClientCredentials: JSON encoding, required credentials, optional scope
 //   - StartDeviceFlow / PollDeviceToken: response shapes, pending/slow_down handling
 //   - RequestMagicLink: correct path, email in body, 202 is success, 429 raises error
 //   - WebAuthn: registration and authentication round-trip shapes
@@ -421,24 +421,34 @@ func TestVerifyToken_RaisesTokenInvalidForWrongAlgorithm(t *testing.T) {
 }
 
 func TestVerifyToken_RaisesTokenInvalidForMalformedJWT(t *testing.T) {
-	priv, _, x := makeEd25519Key(t)
+	_, _, x := makeEd25519Key(t)
 	kid := "test-key"
 	issuer := "http://localhost:8420"
-	_ = priv
 
 	client, _ := verifyTestClient(t, x, kid, issuer)
 
-	_, err := client.VerifyToken(context.Background(), "not.a.valid.jwt.at.all.extra")
-	// The extra segment makes it not a valid 3-part JWT; any error is fine here.
-	// If somehow we get a 3-part one, it should still fail signature verification.
-	_ = err
+	// A seven-segment string is not a valid three-part JWT: VerifyToken must
+	// reject it with a typed *TokenInvalidError and return nil claims.
+	claims, err := client.VerifyToken(context.Background(), "not.a.valid.jwt.at.all.extra")
+	if err == nil {
+		t.Fatal("expected error for seven-segment token")
+	}
+	if _, ok := err.(*TokenInvalidError); !ok {
+		t.Fatalf("expected *TokenInvalidError, got %T: %v", err, err)
+	}
+	if claims != nil {
+		t.Fatalf("expected nil claims on malformed token, got %+v", claims)
+	}
 
-	_, err = client.VerifyToken(context.Background(), "bad")
+	claims, err = client.VerifyToken(context.Background(), "bad")
 	if err == nil {
 		t.Fatal("expected error for malformed JWT")
 	}
 	if _, ok := err.(*TokenInvalidError); !ok {
 		t.Fatalf("expected *TokenInvalidError, got %T: %v", err, err)
+	}
+	if claims != nil {
+		t.Fatalf("expected nil claims on malformed token, got %+v", claims)
 	}
 }
 
@@ -495,12 +505,16 @@ func TestClientCredentials_ReturnsTokenResponse(t *testing.T) {
 	}
 }
 
-func TestClientCredentials_SendsCredentialsInFormBody(t *testing.T) {
-	var capturedBody, capturedCT string
+func TestClientCredentials_SendsCredentialsInJSONBody(t *testing.T) {
+	// Hearth's /token endpoint parses the body with an axum Json extractor and
+	// rejects form-encoded bodies with HTTP 415, so the SDK must send JSON.
+	var capturedBody map[string]string
+	var capturedCT string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		capturedBody = r.Form.Encode()
 		capturedCT = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "t", "token_type": "Bearer", "expires_in": 3600,
@@ -515,25 +529,26 @@ func TestClientCredentials_SendsCredentialsInFormBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientCredentials: %v", err)
 	}
-	if !strings.Contains(capturedCT, "application/x-www-form-urlencoded") {
-		t.Fatalf("expected form content-type, got %q", capturedCT)
+	if !strings.Contains(capturedCT, "application/json") {
+		t.Fatalf("expected application/json content-type, got %q", capturedCT)
 	}
-	if !strings.Contains(capturedBody, "client_id=my-client") {
-		t.Fatalf("missing client_id in body: %q", capturedBody)
+	if capturedBody["client_id"] != "my-client" {
+		t.Fatalf("client_id: %q (body: %v)", capturedBody["client_id"], capturedBody)
 	}
-	if !strings.Contains(capturedBody, "client_secret=my-secret") {
-		t.Fatalf("missing client_secret in body: %q", capturedBody)
+	if capturedBody["client_secret"] != "my-secret" {
+		t.Fatalf("client_secret: %q (body: %v)", capturedBody["client_secret"], capturedBody)
 	}
-	if !strings.Contains(capturedBody, "grant_type=client_credentials") {
-		t.Fatalf("missing grant_type in body: %q", capturedBody)
+	if capturedBody["grant_type"] != "client_credentials" {
+		t.Fatalf("grant_type: %q (body: %v)", capturedBody["grant_type"], capturedBody)
 	}
 }
 
 func TestClientCredentials_SendsOptionalScope(t *testing.T) {
-	var capturedBody string
+	var capturedBody map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		capturedBody = r.Form.Encode()
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("request body was not valid JSON: %v", err)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "t", "token_type": "Bearer", "expires_in": 3600,
@@ -548,8 +563,8 @@ func TestClientCredentials_SendsOptionalScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientCredentials: %v", err)
 	}
-	if !strings.Contains(capturedBody, "scope=") {
-		t.Fatalf("missing scope in body: %q", capturedBody)
+	if capturedBody["scope"] != "read:users" {
+		t.Fatalf("scope: %q (body: %v)", capturedBody["scope"], capturedBody)
 	}
 }
 
@@ -583,11 +598,11 @@ func TestStartDeviceFlow_ReturnsResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"device_code":     "DEV123",
-			"user_code":       "ABCD-1234",
+			"device_code":      "DEV123",
+			"user_code":        "ABCD-1234",
 			"verification_uri": "https://auth.example.com/activate",
-			"expires_in":      300,
-			"interval":        5,
+			"expires_in":       300,
+			"interval":         5,
 		})
 	}))
 	defer srv.Close()
@@ -611,10 +626,13 @@ func TestStartDeviceFlow_ReturnsResponse(t *testing.T) {
 }
 
 func TestStartDeviceFlow_SendsClientID(t *testing.T) {
-	var capturedBody string
+	var capturedBody map[string]string
+	var capturedCT string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		capturedBody = r.Form.Encode()
+		capturedCT = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"device_code": "d", "user_code": "u",
@@ -630,8 +648,11 @@ func TestStartDeviceFlow_SendsClientID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartDeviceFlow: %v", err)
 	}
-	if !strings.Contains(capturedBody, "client_id=cli-app") {
-		t.Fatalf("missing client_id in body: %q", capturedBody)
+	if !strings.Contains(capturedCT, "application/json") {
+		t.Fatalf("expected application/json content-type, got %q", capturedCT)
+	}
+	if capturedBody["client_id"] != "cli-app" {
+		t.Fatalf("client_id: %q (body: %v)", capturedBody["client_id"], capturedBody)
 	}
 }
 
@@ -825,11 +846,15 @@ func TestRequestMagicLink_RaisesAPIErrorOn429(t *testing.T) {
 // ─── ExchangeMagicLink ──────────────────────────────────────────────────────────
 
 func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
-	var capturedBody, capturedCT string
+	// Passwordless login must send JSON: Hearth's /token endpoint rejects a
+	// form-encoded body with HTTP 415.
+	var capturedBody map[string]string
+	var capturedCT string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		capturedBody = r.Form.Encode()
 		capturedCT = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "eyJ...", "token_type": "Bearer", "expires_in": 3600,
@@ -845,14 +870,14 @@ func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
 	if resp.AccessToken != "eyJ..." {
 		t.Fatalf("access_token: %q", resp.AccessToken)
 	}
-	if !strings.Contains(capturedCT, "application/x-www-form-urlencoded") {
-		t.Fatalf("expected form content-type, got %q", capturedCT)
+	if !strings.Contains(capturedCT, "application/json") {
+		t.Fatalf("expected application/json content-type, got %q", capturedCT)
 	}
-	if !strings.Contains(capturedBody, "grant_type=urn%3Ahearth%3Agrant-type%3Amagic-link") {
-		t.Fatalf("missing magic-link grant_type in body: %q", capturedBody)
+	if capturedBody["grant_type"] != "urn:hearth:grant-type:magic-link" {
+		t.Fatalf("grant_type: %q (body: %v)", capturedBody["grant_type"], capturedBody)
 	}
-	if !strings.Contains(capturedBody, "token=magic-token-xyz") {
-		t.Fatalf("missing token in body: %q", capturedBody)
+	if capturedBody["token"] != "magic-token-xyz" {
+		t.Fatalf("token: %q (body: %v)", capturedBody["token"], capturedBody)
 	}
 }
 
@@ -878,7 +903,7 @@ func TestStartWebAuthnRegistration_ReturnsOptions(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"challenge":          "abc123",
+			"challenge":         "abc123",
 			"rp_id":             "example.com",
 			"rp_name":           "Example",
 			"user_id":           "user-1",
@@ -941,7 +966,7 @@ func TestStartWebAuthnAuthentication_ReturnsOptions(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"challenge":         "xyz789",
-			"rp_id":            "example.com",
+			"rp_id":             "example.com",
 			"allow_credentials": []map[string]any{},
 			"user_verification": "preferred",
 			"timeout":           uint64(60000),

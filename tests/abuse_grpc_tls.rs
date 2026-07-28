@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hearth::protocol::grpc::resolve_grpc_reflection;
 use hearth::protocol::tls::{build_server_config, load_crls, TlsConfigParams};
 use tempfile::TempDir;
 
@@ -88,28 +89,25 @@ fn base_params(dir: &Path) -> (TlsConfigParams, PathBuf, PathBuf) {
 /// Unit: `reflection_enabled = None` resolves to `false` in production (dev=false).
 #[test]
 fn a43_reflection_defaults_false_in_prod() {
-    let dev_mode = false;
-    let effective = dev_mode; // None config always uses dev_mode fallback
+    let effective = resolve_grpc_reflection(None, false, false)
+        .expect("None config in prod must not trigger the guard");
     assert!(!effective, "reflection must default to false in production");
 }
 
 /// Unit: `reflection_enabled = None` resolves to `true` in dev mode.
 #[test]
 fn a43_reflection_defaults_true_in_dev() {
-    let dev_mode = true;
-    let effective = dev_mode;
+    let effective =
+        resolve_grpc_reflection(None, true, false).expect("None config in dev must be allowed");
     assert!(effective, "reflection must default to true in dev mode");
 }
 
 /// Adversarial: explicit `Some(true)` in prod without escape hatch is refused.
 #[test]
 fn a43_reflection_true_in_prod_is_rejected() {
-    let dev_mode = false;
-    let allow_reflection_in_prod = false;
-    let reflection_enabled: bool = true; // Some(true) always unwraps to true
-    let guard_triggered = reflection_enabled && !dev_mode && !allow_reflection_in_prod;
+    let result = resolve_grpc_reflection(Some(true), false, false);
     assert!(
-        guard_triggered,
+        result.is_err(),
         "startup guard must fire when reflection=true in prod without --allow-reflection-in-prod"
     );
 }
@@ -117,13 +115,11 @@ fn a43_reflection_true_in_prod_is_rejected() {
 /// Unit: explicit `Some(true)` in prod WITH escape hatch is allowed.
 #[test]
 fn a43_reflection_true_in_prod_with_flag_is_allowed() {
-    let dev_mode = false;
-    let allow_reflection_in_prod = true;
-    let reflection_enabled: bool = true; // Some(true) always unwraps to true
-    let guard_triggered = reflection_enabled && !dev_mode && !allow_reflection_in_prod;
+    let effective = resolve_grpc_reflection(Some(true), false, true)
+        .expect("guard must NOT fire when --allow-reflection-in-prod is passed");
     assert!(
-        !guard_triggered,
-        "startup guard must NOT fire when --allow-reflection-in-prod is passed"
+        effective,
+        "reflection must be effectively enabled when explicitly on with the override"
     );
 }
 
@@ -131,11 +127,14 @@ fn a43_reflection_true_in_prod_with_flag_is_allowed() {
 #[test]
 fn a43_reflection_explicit_false_never_enabled() {
     for dev_mode in [true, false] {
-        let reflection_enabled = false; // Some(false).unwrap_or(x) = false
-        assert!(
-            !reflection_enabled,
-            "explicit false must disable reflection in any mode (dev={dev_mode})"
-        );
+        for allow in [true, false] {
+            let effective = resolve_grpc_reflection(Some(false), dev_mode, allow)
+                .expect("explicit false never triggers the guard");
+            assert!(
+                !effective,
+                "explicit false must disable reflection in any mode (dev={dev_mode}, allow={allow})"
+            );
+        }
     }
 }
 

@@ -126,7 +126,7 @@ async fn token_issuance_and_validation_roundtrip() {
         .expect("decode JWKS public key");
     let verified_claims = verify_token_signature(pair.access_token(), &pub_bytes)
         .expect("cryptographic verification should succeed");
-    assert_eq!(verified_claims, claims);
+    assert_eq!(verified_claims, *claims);
 }
 
 // ===== Scenario: Token refresh flow end-to-end =====

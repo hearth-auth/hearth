@@ -6,7 +6,7 @@
 mod common;
 
 use hearth::core::RealmId;
-use hearth::identity::{CleartextPassword, CreateUserRequest, User};
+use hearth::identity::{CleartextPassword, CreateUserRequest, IdentityError, User};
 
 /// Helper: creates a user with a unique email in the given realm.
 fn create_user(harness: &common::TestHarness, realm: &RealmId) -> User {
@@ -57,8 +57,8 @@ async fn credential_lifecycle_set_verify_change() {
         .verify_password(&realm, user.id(), &pw)
         .expect_err("should fail — no credential");
     assert!(
-        format!("{err}").contains("credential"),
-        "should indicate credential failure: {err}"
+        matches!(err, IdentityError::InvalidCredential { .. }),
+        "no credential should return generic InvalidCredential, got: {err}"
     );
 
     // 2. Set password
@@ -165,8 +165,8 @@ async fn change_password_flow() {
         .change_password(&realm, user.id(), &wrong_old, &bad_new)
         .expect_err("should fail");
     assert!(
-        format!("{err}").contains("invalid credential"),
-        "should indicate invalid credential: {err}"
+        matches!(err, IdentityError::InvalidCredential { .. }),
+        "wrong old password should return InvalidCredential, got: {err}"
     );
 }
 
@@ -197,8 +197,8 @@ async fn credentials_are_realm_isolated() {
         .verify_password(&realm_b, user_a.id(), &pw)
         .expect_err("should fail");
     assert!(
-        format!("{err}").contains("credential"),
-        "should indicate credential failure in different realm: {err}"
+        matches!(err, IdentityError::InvalidCredential { .. }),
+        "cross-realm verify should return generic InvalidCredential, got: {err}"
     );
 }
 
@@ -245,8 +245,8 @@ async fn not_username_policy_rejected() {
         )
         .expect_err("should reject password containing username");
     assert!(
-        format!("{err}").contains("username"),
-        "error should mention username: {err}"
+        matches!(&err, IdentityError::InvalidInput { reason } if reason.contains("username")),
+        "not_username violation should return InvalidInput mentioning username, got: {err}"
     );
 
     // Clean password (does not contain display name) — accepted
@@ -313,8 +313,8 @@ async fn not_email_policy_rejected() {
         )
         .expect_err("should reject password containing email");
     assert!(
-        format!("{err}").contains("email"),
-        "error should mention email: {err}"
+        matches!(&err, IdentityError::InvalidInput { reason } if reason.contains("email")),
+        "not_email violation should return InvalidInput mentioning email, got: {err}"
     );
 
     // Clean password — accepted
@@ -339,9 +339,7 @@ async fn not_email_policy_rejected() {
 
 #[tokio::test]
 async fn history_depth_prevents_reuse() {
-    use hearth::identity::{
-        CreateRealmRequest, IdentityError, PasswordPolicy, RealmConfig, RegistrationPolicy,
-    };
+    use hearth::identity::{CreateRealmRequest, PasswordPolicy, RealmConfig, RegistrationPolicy};
 
     let harness = common::TestHarness::embedded()
         .await
@@ -425,7 +423,7 @@ async fn password_expiry_enforced() {
     use hearth::core::{FakeClock, Timestamp};
     use hearth::identity::{
         CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig,
-        IdentityEngine, IdentityError, PasswordPolicy, RealmConfig, RegistrationPolicy,
+        IdentityEngine, PasswordPolicy, RealmConfig, RegistrationPolicy,
     };
     use hearth::rbac::EmbeddedRbacEngine;
     use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -646,9 +644,7 @@ async fn legacy_verify_rehash_uses_realm_argon2_parameters_and_keeps_age() {
 
 #[tokio::test]
 async fn change_and_reset_paths_enforce_realm_password_policy() {
-    use hearth::identity::{
-        CreateRealmRequest, IdentityError, PasswordPolicy, RealmConfig, RegistrationPolicy,
-    };
+    use hearth::identity::{CreateRealmRequest, PasswordPolicy, RealmConfig, RegistrationPolicy};
 
     let harness = common::TestHarness::embedded()
         .await
@@ -746,8 +742,8 @@ async fn delete_user_removes_credential() {
         .verify_password(&realm, user.id(), &pw)
         .expect_err("should fail");
     assert!(
-        format!("{err}").contains("credential"),
-        "should indicate credential failure after deletion: {err}"
+        matches!(err, IdentityError::InvalidCredential { .. }),
+        "verify after deletion should return generic InvalidCredential, got: {err}"
     );
 }
 

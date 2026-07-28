@@ -294,6 +294,16 @@ async fn unauthenticated_user_redirects_to_login() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // The redirect must actually point at the login page, not just be "some 303".
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .expect("redirect must carry a Location header");
+    assert!(
+        location.contains("login"),
+        "unauthenticated user must be redirected to login, got: {location}"
+    );
 }
 
 // ---------------------------------------------------------------------------

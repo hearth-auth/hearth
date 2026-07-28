@@ -499,7 +499,13 @@ The embedded engine uses the same `StorageEngine` trait as the identity layer. N
 
 ### 6.6 Cache strategy
 
-The engine does NOT maintain an internal permission cache. `resolve_permissions` is called at token issuance (off the hot path) and its result is embedded in the JWT. The JWT itself is the cache, valid for the token's lifetime. This avoids the cache-invalidation class of bugs while still delivering synchronous authorization on the client.
+Permission caching operates at two levels:
+
+**JWT-embedded permissions (caller-side cache).** `resolve_permissions` is called at token issuance (off the hot path) and its result is embedded in the JWT. The JWT itself acts as a cache valid for the token's lifetime, delivering synchronous authorization on the client with no server round-trip.
+
+**In-engine resolution cache (server-side, HEA-1770).** The RBAC engine maintains a `ResolutionCache` (`src/rbac/engine.rs`) that memoizes the full unnarrowed effective permission set per `(realm_id, user_id, org_id)`, keyed by a per-realm graph version counter. On a cache hit, `resolve_full_cached` returns the memoized set without touching storage. Scope narrowing (`requested_scope`) is applied on top of the cached full set on every call, so the cache stores only the unnarrowed result. Concurrent-write safety: the generation counter is captured before the storage fan-out; if a concurrent mutation bumps the counter during the read, the computed result is discarded rather than cached, ensuring no pre-mutation snapshot is ever stored as current.
+
+**Invalidation contract.** Any mutation to the RBAC graph for a realm — role grant/revoke, group member add/remove, or direct permission grant/revoke — routes through one of three write helpers (`write_put`, `write_put_batch`, `write_delete`) that call `invalidate_realm(realm_id)` strictly after the durable storage write. `invalidate_realm` increments the realm's per-realm generation counter; any cached entry whose stored version no longer matches the current counter is treated as a miss and recomputed from storage on the next call. This is a coarse-invalidation model: all cached entries for a realm become stale on any single mutation. The cache holds up to 50,000 entries; on overflow a new-key insertion clears the entire cache rather than evicting individual entries.
 
 ---
 

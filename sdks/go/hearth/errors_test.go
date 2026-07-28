@@ -49,7 +49,14 @@ func TestRequiredActionErrorImplementsError(t *testing.T) {
 }
 
 func TestRequiredActionErrorEmptyActions(t *testing.T) {
-	// Must not panic when RequiredActions is empty.
+	// Must not panic when RequiredActions is empty, and must still return the
+	// stable "required action pending: []" message.
 	e := &RequiredActionError{}
-	_ = e.Error()
+	msg := e.Error()
+	if msg == "" {
+		t.Fatal("Error() must return a non-empty message even with no actions")
+	}
+	if msg != "required action pending: []" {
+		t.Fatalf("unexpected message for empty actions: %q", msg)
+	}
 }

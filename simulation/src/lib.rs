@@ -1,8 +1,16 @@
-//! Deterministic simulation tests for Hearth storage and identity engines.
+//! Simulation tests for Hearth storage and identity engines.
 //!
-//! Uses `madsim` for deterministic scheduling and seed-based reproducibility.
-//! Uses `FaultFs` (an implementation of Hearth's [`Fs`] trait) for controlled
-//! I/O fault injection during crash-recovery tests.
+//! These tests run on **real OS threads** (`std::thread`) against **real
+//! temporary directories** (`tempfile`); they do NOT use `madsim` or any
+//! deterministic scheduler. Concurrency interleavings are therefore
+//! nondeterministic across runs. Where a test declares a fixed `seed`, that
+//! value is a static diagnostic label surfaced in assertion messages — it does
+//! not drive scheduling or reproducible replay.
+//!
+//! Controlled I/O timing jitter, when needed, comes from [`FaultFs`] (an
+//! implementation of Hearth's [`Fs`] trait), whose `latency_seed` deterministically
+//! perturbs per-op sleep durations via splitmix64. This is independent of the
+//! per-test `seed` constants.
 //!
 //! # Oracle Traits
 //!
@@ -214,6 +222,10 @@ pub struct FaultFs {
     pub config: FaultConfig,
     /// Tracks files that have been partially written (for crash simulation).
     partial_writes: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    /// Directories that have been `sync_dir`'d, in call order. Lets tests assert
+    /// that durability-critical paths fsync the parent directory after a create
+    /// or rename (HEA-1855).
+    dir_syncs: Mutex<Vec<PathBuf>>,
 }
 
 impl FaultFs {
@@ -222,7 +234,15 @@ impl FaultFs {
         Self {
             config: FaultConfig::default(),
             partial_writes: Mutex::new(HashMap::new()),
+            dir_syncs: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Returns the directories that have been `sync_dir`'d so far, in call
+    /// order. Used by durability tests to assert the parent directory is fsync'd
+    /// after a segment create or recovery rename (HEA-1855).
+    pub fn dir_syncs(&self) -> Vec<PathBuf> {
+        self.dir_syncs.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Creates a new `FaultFs` with a specific fault configuration.
@@ -230,6 +250,7 @@ impl FaultFs {
         Self {
             config,
             partial_writes: Mutex::new(HashMap::new()),
+            dir_syncs: Mutex::new(Vec::new()),
         }
     }
 
@@ -368,6 +389,16 @@ impl Fs for FaultFs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         hearth::storage::RealFs.rename(from, to)
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        // Record the invocation so durability tests can assert the parent
+        // directory was fsync'd after a create/rename (HEA-1855), then delegate
+        // to the real fsync so behaviour matches production.
+        if let Ok(mut g) = self.dir_syncs.lock() {
+            g.push(dir.to_path_buf());
+        }
+        hearth::storage::RealFs.sync_dir(dir)
     }
 }
 
