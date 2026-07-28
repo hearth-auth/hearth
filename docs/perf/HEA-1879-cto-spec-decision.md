@@ -74,9 +74,32 @@ queue delay. A p99 quoted without its offered-load condition is not a target.
 |---|---|---|
 | `docs/vision/VISION.md` | 352 | split as above |
 | `docs/specs/TESTING.md` | 152 | split row; regression budget +20% applies to each |
-| `docs/specs/TEST_SCENARIOS.md` | 328 | split the P0 scenario checkbox into two |
+| `docs/specs/TEST_SCENARIOS.md` | 328 | split the P0 scenario checkbox into two — **and reset both to `[ ]`** (see 2b) |
 | `docs/specs/TEST_SCENARIOS.md` | 878 | split table row |
 | `docs/perf/PERFORMANCE_REPORT_1_0.md` | 150 | L6 → **L6a** (minting) + **L6b** (password grant) |
+| `docs/perf/PERFORMANCE_REPORT_1_0.md` | 154 | rewrite the standing red-flag note as **discharged** (see 2b) |
+| `docs/perf/PERFORMANCE_REPORT_1_0.md` | 478 | C9 row: `HEA-1877` → `HEA-1879`, `todo` → `done` (see 2b) |
+
+### 2b. Patch-site verification — 2026-07-28, pre-acceptance
+
+The five sites above were re-verified line-exact against the working tree before the board vote
+(line offsets drift; the table is only useful if it is checked). All five match. The sweep also
+found **three sites the original table missed**, all of which must land in the same PR:
+
+1. **`TEST_SCENARIOS.md:328` is checked `[x]`.** The P0 scenario claims the sub-5 ms issuance target
+   is *satisfied*. It is not — C9 shows it is unreachable for the password path and unmeasured for
+   the minting path. Both split checkboxes must be written **`[ ]`**. Splitting the row while leaving
+   it ticked would launder a NOT-MEASURED into a PASS, which is the exact failure mode this decision
+   exists to remove.
+2. **`PERFORMANCE_REPORT_1_0.md:154`** carries the standing red-flag prose ("baseline records issuance
+   p99 = 6000 ms"). Patching only the table row at :150 leaves the report asserting an open red flag
+   that C9 has discharged. Rewrite it to state the decomposition result: queueing defect → HEA-1887;
+   compute floor → spec split.
+3. **`PERFORMANCE_REPORT_1_0.md:478`** still attributes C9 to `HEA-1877` with status `todo`. Per §3
+   HEA-1877 is cancelled in favour of HEA-1879; the row must read `HEA-1879` / `done`.
+
+Net: the doc PR touches **4 files / 8 sites**, not 5. Still one pass, still doc-only. This
+verification does not amend the decision or pre-empt the board — VISION remains unamended.
 
 ## 3. Grading consequence for C10 (HEA-1878)
 
