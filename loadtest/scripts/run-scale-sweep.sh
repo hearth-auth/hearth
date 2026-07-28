@@ -328,19 +328,17 @@ PY
 import sys, json
 try:
     with open(sys.argv[1]) as f: r = json.load(f)
-    journeys = r.get('journeys') or []
-    hot = next((j for j in journeys if 'hot' in (j.get('name') or '').lower()), {})
-    cold = next((j for j in journeys if 'cold' in (j.get('name') or '').lower()), {})
+    # tier_miss object is written directly by the Hearth reporter (not via journeys array)
     tm = r.get('tier_miss') or {}
     print(json.dumps({
-        'hot_p50_ms':  hot.get('p50_ms'),
-        'hot_p99_ms':  hot.get('p99_ms'),
-        'hot_p999_ms': hot.get('p999_ms'),
-        'hot_reqs':    hot.get('requests', 0),
-        'cold_p50_ms':  cold.get('p50_ms'),
-        'cold_p99_ms':  cold.get('p99_ms'),
-        'cold_p999_ms': cold.get('p999_ms'),
-        'cold_reqs':    cold.get('requests', 0),
+        'hot_p50_ms':  tm.get('hot_p50_ms'),
+        'hot_p99_ms':  tm.get('hot_p99_ms'),
+        'hot_p999_ms': tm.get('hot_p999_ms'),
+        'hot_reqs':    tm.get('hot_reqs'),
+        'cold_p50_ms':  tm.get('cold_p50_ms'),
+        'cold_p99_ms':  tm.get('cold_p99_ms'),
+        'cold_p999_ms': tm.get('cold_p999_ms'),
+        'cold_reqs':    tm.get('cold_reqs'),
         'achieved_rps':  r.get('summary', {}).get('achieved_rps'),
         'failure_rate':  r.get('summary', {}).get('failure_rate'),
         'ceiling':       r.get('summary', {}).get('ceiling'),
