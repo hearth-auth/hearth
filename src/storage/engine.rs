@@ -21,6 +21,18 @@ use crate::storage::tiered::{HotTier, TieredConfig, PRODUCTION_PROMOTE_SAMPLE_RA
 use crate::storage::wal::{BatchEntry, Wal, WalConfig, WalEntry, WalOperation};
 use crate::storage::{ScanEntry, StorageEngine};
 
+/// Publishes the live SST file count to the observability gauge (HEA-1869).
+///
+/// Called off the hot path after every swap of the SST reader set (initial
+/// open, memtable flush, WAL-rotation flush, compaction) so a scrape always
+/// reflects the current cold-tier fan-out width.
+fn record_sst_file_count(count: usize) {
+    #[allow(clippy::cast_precision_loss)]
+    crate::metrics::metrics()
+        .storage_sst_files
+        .set(count as f64);
+}
+
 /// Configuration for the embedded storage engine.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
@@ -144,6 +156,16 @@ impl StorageConfig {
     /// [`StorageConfig::production`] instead.
     pub fn set_hot_tier_capacity(&mut self, capacity: usize) {
         self.tiered_config.hot_tier_capacity = capacity;
+    }
+
+    /// Overrides the memtable flush threshold (bytes) on an already-built config.
+    ///
+    /// Lowering this forces the memtable to flush to SST files sooner, which
+    /// tests and cold-tier load profiles use to push records out of the
+    /// memtable and onto the SST read path without writing a production-sized
+    /// corpus. Production sizes this through [`StorageConfig::production`].
+    pub fn set_memtable_flush_bytes(&mut self, bytes: usize) {
+        self.memtable_config.flush_threshold_bytes = bytes;
     }
 
     /// Creates a test configuration with fast sync and small thresholds.
@@ -342,6 +364,7 @@ impl EmbeddedStorageEngine {
         // Arc-wrap the shared state needed by both the engine and the WAL's
         // pre-rotate flush callback.
         let active_memtable = Arc::new(memtable);
+        record_sst_file_count(sst_readers.len());
         let sst_readers = Arc::new(ArcSwap::from_pointee(sst_readers));
         let flush_lock = Arc::new(Mutex::new(()));
         let sst_counter = Arc::new(std::sync::atomic::AtomicU64::new(max_sst_num + 1));
@@ -417,6 +440,7 @@ impl EmbeddedStorageEngine {
                             rebuilt.push(reader);
                         }
                     }
+                    record_sst_file_count(rebuilt.len());
                     cb_sst_readers.store(Arc::new(rebuilt));
                     Ok(())
                 })?;
@@ -544,6 +568,7 @@ impl EmbeddedStorageEngine {
                     }
                 }
             }
+            record_sst_file_count(rebuilt_readers.len());
             self.sst_readers.store(Arc::new(rebuilt_readers));
 
             Ok(())
@@ -647,6 +672,7 @@ impl EmbeddedStorageEngine {
         self.fs.sync_dir(&self.data_dir)?;
 
         // Atomically swap reader list to just the compacted SST
+        record_sst_file_count(1);
         self.sst_readers.store(Arc::new(vec![new_reader]));
 
         // Delete old SST files (best-effort — warn on failure)
@@ -667,12 +693,25 @@ impl EmbeddedStorageEngine {
 
 impl StorageEngine for EmbeddedStorageEngine {
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        let metrics = crate::metrics::metrics();
+
         // 1. Hot tier (lock-free, O(1))
         // HotTier::get returns Arc<[u8]> to avoid a heap clone inside the hot tier.
         // We convert to Vec<u8> here at the StorageEngine trait boundary.
+        //
+        // The ONLY instrumentation on the hot-tier-hit path is a single
+        // lock-free atomic counter increment (HEA-1869). The hit is
+        // intentionally *not* timed: an `Instant::now()` here would be a clock
+        // read on the zero-syscall hot path and regress `bench-gate`. Hot-hit
+        // latency is covered by the `storage_hot_tier` bench gate instead.
         if let Some(arc_val) = self.hot_tier.get(realm_id, key) {
+            metrics.inc_get_hot_hit();
             return Ok(Some(arc_val.to_vec()));
         }
+
+        // Fall-through path — off the hot path. Time it and attribute the
+        // latency and SST-probe count to the tier that resolves the read.
+        let started = std::time::Instant::now();
 
         // 2. Active memtable — O(log n) BTreeMap lookup.
         // `get_entry` distinguishes a tombstone from an absent key so we can
@@ -684,10 +723,12 @@ impl StorageEngine for EmbeddedStorageEngine {
             Some(MemtableValue::Data(data)) => {
                 // Promote to hot tier on memtable hit
                 self.hot_tier.promote(realm_id, key, &data);
+                metrics.record_get_fallthrough("memtable_hit", started.elapsed(), 0);
                 return Ok(Some(data));
             }
             Some(MemtableValue::Tombstone) => {
                 // Key was deleted — stop searching deeper layers
+                metrics.record_get_fallthrough("miss", started.elapsed(), 0);
                 return Ok(None);
             }
             None => {}
@@ -695,22 +736,27 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         // 3. SST files newest-to-oldest (binary search)
         let sst_readers = self.sst_readers.load();
+        let mut ssts_probed: u64 = 0;
         for reader in sst_readers.iter() {
+            ssts_probed += 1;
             if let Some(value) = reader.get(realm_id, key) {
                 match value {
                     MemtableValue::Data(data) => {
                         // Cold hit — promote to hot tier
                         self.hot_tier.promote(realm_id, key, &data);
+                        metrics.record_get_fallthrough("sst_hit", started.elapsed(), ssts_probed);
                         return Ok(Some(data));
                     }
                     MemtableValue::Tombstone => {
                         // Tombstone in SST — stop searching older SSTs
+                        metrics.record_get_fallthrough("miss", started.elapsed(), ssts_probed);
                         return Ok(None);
                     }
                 }
             }
         }
 
+        metrics.record_get_fallthrough("miss", started.elapsed(), ssts_probed);
         Ok(None)
     }
 

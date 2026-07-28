@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Hot-tier / storage `get` observability** — the storage engine now exports
+  Prometheus metrics attributing every read to the tier that served it:
+  `hearth_storage_get_total{outcome="hot_hit|memtable_hit|sst_hit|miss"}`
+  (all four series present from the first scrape, so `hot_hit / sum` is an
+  *observed* hot-tier hit ratio), `hearth_storage_get_duration_seconds` (fall-through
+  latency by outcome), `hearth_storage_get_ssts_probed` (SST fan-out per cold read),
+  `hearth_storage_hot_tier_promotions_total`, `hearth_storage_hot_tier_evictions_total`,
+  and the live `hearth_storage_sst_files` gauge. The hot-tier-hit path adds only a
+  single lock-free counter increment and is deliberately not timed, preserving the
+  zero-syscall hot-path contract (no `bench-gate` regression) (HEA-1869).
 - **Argon2id password pepper is now configurable** — set `security.password.pepper`
   (`version` + `key_hex`, plus optional `previous_version`/`previous_key_hex` for
   rotation) in `hearth.yaml` to apply a server-side HMAC-SHA256 pepper before Argon2id

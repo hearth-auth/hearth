@@ -464,20 +464,24 @@ headline numbers are harness figures and are quarantined out of §3 per rule 3.
 As of 2026-07-28. C3, C4, C6, C7, C8 were dispatched by C10 this session — the plan called for
 eleven children and only five existed, so C10 could not have joined work that was never handed out.
 
-| Child | Title | Status | Feeds |
-|---|---|---|---|
-| C0 | Real per-user / per-session memory cost | in progress | §4, K4–K7, C8 |
-| C1 | Hot-tier observability | in progress (uncommitted in `src/`) | Axis E (all), K10, L8 |
-| C2 | SST-count growth vs corpus size | in progress (`examples/sst_growth.rs`) | **E4** — the load-bearing row |
-| C3 | Separate load generator from server | in progress (`loadtest/scripts/hea1871-isolated.sh`) | Axes C, D; C4, C6, C8 |
-| C4 | High-concurrency generator (10k+) | in progress | T1–T4 over HTTP, C6 |
-| C5 | Complexity-class sweep | todo | E1–E3, E5, E6 |
-| C6 | Graceful-overload behaviour | done (commit `a397d86b`) — **reviewed, E7 not accepted; re-run after C3** (§3.5) | E7 |
-| C7 | Saturation-throughput benches (§7.2) | todo | T1–T4, L1–L5 in-process |
-| C8 | Record- and session-scale sweep | in progress | K1–K3 |
-| C9 | Issuance/Argon2id: queueing vs compute | todo | L6, L7 |
-| C11 | `summary.ceiling` misattribution (filed by C10) | todo | **rule-3 enforcement, all load rows** |
-| **C10** | **This report** | **in progress** — K8/K9 settled, E7 reviewed and rejected, all other rows blocked | — |
+| Child | Issue | Title | Status | Feeds |
+|---|---|---|---|---|
+| C0 | HEA-1868 | Real per-user / per-session memory cost | in progress | §4, K4–K7, C8 |
+| C1 | HEA-1869 | Hot-tier observability | in progress (uncommitted in `src/`) | Axis E (all), K10, L8 |
+| C2 | HEA-1870 | SST-count growth vs corpus size | in progress (`examples/sst_growth.rs`) | **E4** — the load-bearing row |
+| C3 | HEA-1871 | Separate load generator from server | in progress (`loadtest/scripts/hea1871-isolated.sh`) | Axes C, D; C4, C6, C8 |
+| C4 | HEA-1872 | High-concurrency generator (10k+) | in progress | T1–T4 over HTTP, C6 |
+| C5 | HEA-1873 | Complexity-class sweep | todo | E1–E3, E5, E6 |
+| C6 | HEA-1874 | Graceful-overload behaviour | done (`a397d86b`) — **reviewed, E7 not accepted; re-run after C3** (§3.5) | E7 |
+| C7 | HEA-1875 | Saturation-throughput benches (§7.2) | todo | T1–T4, L1–L5 in-process |
+| C8 | HEA-1876 | Record- and session-scale sweep | in progress | K1–K3 |
+| C9 | HEA-1877 | Issuance/Argon2id: queueing vs compute | todo | L6, L7 |
+| C11 | HEA-1880 | `summary.ceiling` misattribution (filed by C10) | todo | **rule-3 enforcement, all load rows** |
+| **C10** | **HEA-1878** | **This report** | **blocked** on the above — K8/K9 settled, E7 reviewed and rejected | — |
+
+> **HEA-1879 is a duplicate of HEA-1877** (both C9, same assignee). Created by C10 from a stale
+> listing; HEA-1877 is the survivor. C10 cannot cancel it (CTO authorization boundary on
+> engineer-owned issues) — pending board action.
 
 **C6 landed and has been reviewed — see §3.5.** Its MISS verdict is **not** accepted into the
 conformance table: the server was at 0.0% CPU during every overload run, so the runs grade the

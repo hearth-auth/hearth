@@ -180,6 +180,9 @@ impl HotTier {
 
         // Admitted: this call takes the write lock and clones the map below.
         self.admitted_promotions.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::metrics()
+            .storage_hot_tier_promotions_total
+            .inc();
 
         let current = self.data.load_full();
 
@@ -260,6 +263,9 @@ impl HotTier {
                     let mut new_map = (*current).clone();
                     new_map.remove(&evicted_key);
                     self.data.store(Arc::new(new_map));
+                    crate::metrics::metrics()
+                        .storage_hot_tier_evictions_total
+                        .inc();
                     hand = (hand + 1) % len;
                     self.clock_hand.store(hand, Ordering::Relaxed);
                     return Some(evicted_key);
@@ -319,6 +325,9 @@ impl HotTier {
                 if !entry.reference_bit.load(Ordering::Relaxed) {
                     let evicted = key.clone();
                     map.remove(&evicted);
+                    crate::metrics::metrics()
+                        .storage_hot_tier_evictions_total
+                        .inc();
                     hand = (hand + 1) % len;
                     self.clock_hand.store(hand, Ordering::Relaxed);
                     return;
@@ -335,6 +344,9 @@ impl HotTier {
         // force-evict at current hand position.
         let key = keys[hand % len].clone();
         map.remove(&key);
+        crate::metrics::metrics()
+            .storage_hot_tier_evictions_total
+            .inc();
     }
 }
 
