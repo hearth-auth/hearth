@@ -33,6 +33,7 @@ use crate::latency::{self, LatencyExtremes};
 use crate::report::{self, LoadReport, RampStep, RunMetadata, SoakBucket, SCHEMA_VERSION};
 use crate::scenarios::{self, ContextError, LoadContext, TierMissContext, Weights};
 use crate::seed::{DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD};
+use crate::saturate;
 
 /// Run mode selecting the load profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -46,16 +47,55 @@ pub enum Mode {
     /// Corpus-scale `lookup_user` sweep with tier-attributed hot/cold draws,
     /// proving lookup latency stays flat as the corpus grows (HEA-1801).
     TierMiss,
+    /// Open-loop saturation driver: N concurrent TCP connections, independent
+    /// session-token pool. Separates connection concurrency from session
+    /// population and attributes the ceiling to server vs. generator (C4,
+    /// HEA-1872).
+    Saturate,
 }
 
 impl Mode {
     /// Lowercase name stamped into the report metadata.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Steady => "steady",
             Self::Ramp => "ramp",
             Self::Soak => "soak",
             Self::TierMiss => "tier-miss",
+            Self::Saturate => "saturate",
+        }
+    }
+}
+
+/// Which read-only hot-path journey the `saturate` mode hammers (C4, HEA-1872).
+///
+/// Only stateless read-only journeys are eligible: the open-loop driver fires
+/// requests in a tight loop without coordinating write-side state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SaturateJourney {
+    /// `POST /introspect` — token-validation hot path (default).
+    Validate,
+    /// `GET /userinfo` — session-lookup hot path.
+    Session,
+    /// `GET /admin/users/{id}` — user-lookup hot path.
+    User,
+}
+
+impl SaturateJourney {
+    /// Latency-registry and report-row name for this journey.
+    pub(crate) fn journey_name(self) -> &'static str {
+        match self {
+            Self::Validate => "validate",
+            Self::Session => "session_lookup",
+            Self::User => "user_lookup",
+        }
+    }
+
+    /// HTTP method label for the report row.
+    pub(crate) fn http_method(self) -> &'static str {
+        match self {
+            Self::Validate => "POST",
+            Self::Session | Self::User => "GET",
         }
     }
 }
@@ -271,6 +311,35 @@ pub struct LoadParams {
     /// `tier-miss` mode: Goose weight of the cold/SST-miss lookup tier.
     #[arg(long, env = "HEARTH_LOADTEST_TIER_WEIGHT_COLD", default_value_t = 50)]
     pub tier_miss_weight_cold: usize,
+
+    // ── Saturate profile (C4, HEA-1872) ─────────────────────────────────────
+
+    /// `saturate` mode: concurrent TCP connections to maintain.
+    ///
+    /// Each connection is a separate Tokio task in a tight request/response
+    /// loop. This knob controls *concurrency* (simultaneous connections),
+    /// independent from `--users` (Goose closed-loop users) and from the
+    /// seed-handle token-pool size. For example, 10 000 connections cycling
+    /// through 1 000 tokens tests the server's connection headroom without
+    /// requiring 10 000 distinct sessions.
+    ///
+    /// **OS pre-requisites for large counts:** `ulimit -n` ≥ connections + 64;
+    /// see the README "Driving high concurrency" section.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_SATURATE_CONNECTIONS",
+        default_value_t = 100
+    )]
+    pub saturate_connections: usize,
+
+    /// `saturate` mode: which read-only hot-path journey to hammer.
+    #[arg(
+        long,
+        env = "HEARTH_LOADTEST_SATURATE_JOURNEY",
+        value_enum,
+        default_value_t = SaturateJourney::Validate
+    )]
+    pub saturate_journey: SaturateJourney,
 }
 
 /// Errors from preparing or running a load run.
@@ -290,6 +359,8 @@ pub enum LoadError {
     TierMissConfig(String),
     /// The resolved `--host` failed the loopback guard (HEA-1807).
     HostGuard(String),
+    /// The open-loop saturate driver could not initialize (C4, HEA-1872).
+    Saturate(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -302,6 +373,7 @@ impl std::fmt::Display for LoadError {
             Self::Report(e) => write!(f, "writing report: {e}"),
             Self::TierMissConfig(m) => write!(f, "tier-miss configuration: {m}"),
             Self::HostGuard(m) => write!(f, "host guard: {m}"),
+            Self::Saturate(m) => write!(f, "saturate driver: {m}"),
         }
     }
 }
@@ -378,6 +450,12 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
             inject_resources_into_html(&report_dir, res)?;
         }
     }
+
+    // Post-correct the ceiling attribution now that resource data is available.
+    // `summarize` runs before the sampler stops, so the initial attribution has
+    // no CPU evidence. This call enforces two rules: (1) no samples → Unknown
+    // (inadmissible), (2) server CPU below utilisation floors → GeneratorSaturated.
+    report::correct_ceiling_with_resources(&mut report.summary, report.resources.as_ref());
 
     let json_path = report_dir.join("report.json");
     let json = serde_json::to_string_pretty(&report)
@@ -458,28 +536,40 @@ async fn run_journey_modes(
         .unwrap_or_else(|| handle.target_host.clone());
     guard_run_host(&host, params.allow_remote_target)?;
 
-    let context = LoadContext::from_handle(&handle, DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD)
-        .map_err(LoadError::Context)?;
-    scenarios::set_context(Arc::new(context));
+    let context = Arc::new(
+        LoadContext::from_handle(&handle, DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD)
+            .map_err(LoadError::Context)?,
+    );
+
+    // Saturate mode drives the corpus directly via Arc<LoadContext>; it does
+    // not go through Goose and does not need the process-global static.
+    if params.mode != Mode::Saturate {
+        scenarios::set_context(Arc::clone(&context));
+    }
 
     let weights = params.weights();
 
-    println!(
-        "hearth-loadtest run: mode={} host={host} run_time={} hatch_rate={} (corpus: {})",
-        params.mode.as_str(),
-        params.run_time,
-        params.hatch_rate,
-        handle.dataset_shape,
-    );
-    println!(
-        "  weights: validate={} session={} user={} issuance={} revoke={}",
-        weights.validate, weights.session, weights.user, weights.issuance, weights.revoke,
-    );
+    if params.mode != Mode::Saturate {
+        println!(
+            "hearth-loadtest run: mode={} host={host} run_time={} hatch_rate={} (corpus: {})",
+            params.mode.as_str(),
+            params.run_time,
+            params.hatch_rate,
+            handle.dataset_shape,
+        );
+        println!(
+            "  weights: validate={} session={} user={} issuance={} revoke={}",
+            weights.validate, weights.session, weights.user, weights.issuance, weights.revoke,
+        );
+    }
 
     match params.mode {
         Mode::Steady => run_steady(params, &host, &weights, &handle, report_dir).await,
         Mode::Ramp => run_ramp(params, &host, &weights, &handle, report_dir).await,
         Mode::Soak => run_soak(params, &host, &weights, &handle, report_dir).await,
+        Mode::Saturate => {
+            saturate::run_saturate(params, &host, context, &handle, report_dir).await
+        }
         // TierMiss is dispatched before this function is reached.
         Mode::TierMiss => unreachable!("tier-miss is handled in run_load"),
     }
@@ -882,7 +972,7 @@ fn tier_metadata(
 
 /// The short git SHA of the build, or `"unknown"`. Prefers the
 /// `HEARTH_GIT_SHA` env override (set by CI where `git` may be unavailable).
-fn git_sha() -> String {
+pub(crate) fn git_sha() -> String {
     if let Ok(sha) = std::env::var("HEARTH_GIT_SHA") {
         let sha = sha.trim().to_string();
         if !sha.is_empty() {
@@ -901,7 +991,7 @@ fn git_sha() -> String {
 }
 
 /// Wall-clock time as Unix epoch seconds (0 if the clock is before the epoch).
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

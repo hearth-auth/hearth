@@ -138,6 +138,12 @@ pub enum Ceiling {
     /// exhaustion, `ulimit -n`, `TIME_WAIT`). Tune the generator (README
     /// "Driving high concurrency") and re-run before trusting the numbers.
     GeneratorSaturated,
+    /// A latency breach was observed but the server resource data needed to
+    /// confirm it was absent (`--server-pid` not supplied, or fewer than two
+    /// samples were gathered). Cannot distinguish server saturation from
+    /// generator collapse — the run is inadmissible for grading
+    /// (`PERFORMANCE_REPORT_1_0.md §7`).
+    Unknown,
 }
 
 /// Aggregate run summary: achieved concurrency + throughput and the ceiling
@@ -165,6 +171,17 @@ pub struct RunSummary {
 /// generator rather than the server (connection resets from port/fd exhaustion
 /// show up as request failures, not slow-but-successful responses).
 const GENERATOR_SATURATION_FAILURE_RATE: f64 = 0.02;
+
+/// Mean server CPU below this floor during a run that produced a latency breach
+/// indicates the server was not the active bottleneck. Client-observed timeouts
+/// with an idle server are connection-level failures (ephemeral-port exhaustion,
+/// TIME_WAIT backpressure) rather than server processing failures.
+const SERVER_CPU_FLOOR_MEAN_PCT: f64 = 5.0;
+
+/// Peak server CPU below this floor (combined with the mean floor) confirms the
+/// server never meaningfully spun up during the measurement window, ruling out
+/// a brief saturation spike that subsequently collapsed the load generator.
+const SERVER_CPU_FLOOR_PEAK_PCT: f64 = 10.0;
 
 /// Builds the aggregate [`RunSummary`] + ceiling attribution from the primary
 /// journey rows and the achieved concurrency/throughput.
@@ -216,6 +233,68 @@ pub fn summarize(rows: &[JourneyRow], achieved_users: usize, achieved_rps: f64) 
         failure_rate,
         ceiling,
         ceiling_reason,
+    }
+}
+
+/// Corrects [`RunSummary::ceiling`] after server resource data becomes available.
+///
+/// `summarize` is called before the resource sampler stops (the sampler spans
+/// the full run and stops in the outer `run_load` after all sub-runs complete),
+/// so the initial attribution cannot see CPU/RSS figures. This function applies
+/// two post-hoc rules:
+///
+/// 1. **No samples → `Unknown`**: a `Server` verdict without resource evidence is
+///    inadmissible. The generator may have saturated before the server was ever
+///    meaningfully stressed; without CPU data we cannot tell the two apart.
+///    Programme rule 3 (`PERFORMANCE_REPORT_1_0.md §7`) rejects any row whose
+///    `ceiling.attribution` resolves to this variant.
+///
+/// 2. **Idle server → `GeneratorSaturated`**: when the server's mean and peak CPU
+///    are both below their respective floors ([`SERVER_CPU_FLOOR_MEAN_PCT`] /
+///    [`SERVER_CPU_FLOOR_PEAK_PCT`]), the server was demonstrably idle while
+///    request failures accumulated. Client timeouts at 30 s with 0 % server CPU
+///    are connection-level failures driven by port exhaustion or `TIME_WAIT`
+///    backpressure on the generator host — not server processing failures.
+///
+/// Only `Server` attributions are affected; `GeneratorSaturated` and
+/// `LoadGeneratorOrHeadroom` are derived from failure-rate patterns that remain
+/// valid regardless of resource data.
+pub fn correct_ceiling_with_resources(
+    summary: &mut RunSummary,
+    resources: Option<&ResourceReport>,
+) {
+    if summary.ceiling != Ceiling::Server {
+        return;
+    }
+    match resources {
+        None => {
+            summary.ceiling = Ceiling::Unknown;
+            summary.ceiling_reason =
+                "a latency breach was observed but no server resource samples were collected \
+                 (--server-pid not supplied, or fewer than two samples gathered); cannot \
+                 distinguish server saturation from generator collapse — this run is \
+                 inadmissible for grading (PERFORMANCE_REPORT_1_0.md §7)"
+                    .to_string();
+        }
+        Some(res)
+            if res.cpu_mean_pct < SERVER_CPU_FLOOR_MEAN_PCT
+                && res.cpu_peak_pct < SERVER_CPU_FLOOR_PEAK_PCT =>
+        {
+            summary.ceiling = Ceiling::GeneratorSaturated;
+            summary.ceiling_reason = format!(
+                "latency breach observed but server CPU mean {:.1}% and peak {:.1}% are both \
+                 below their utilisation floors ({:.0}% mean / {:.0}% peak) — the server was \
+                 idle while request failures accumulated; the bottleneck was the load generator \
+                 (ephemeral-port exhaustion, ulimit -n, TIME_WAIT backpressure), not the server \
+                 under test. Tune the generator (loadtest/README.md §\"Driving high \
+                 concurrency\") and re-run.",
+                res.cpu_mean_pct,
+                res.cpu_peak_pct,
+                SERVER_CPU_FLOOR_MEAN_PCT,
+                SERVER_CPU_FLOOR_PEAK_PCT,
+            );
+        }
+        Some(_) => {} // server CPU data confirms the server was active; attribution stands
     }
 }
 
@@ -860,5 +939,100 @@ mod tests {
         assert_eq!(tm.hot_p99_ms, None);
         assert_eq!(tm.cold_p99_ms, None);
         assert!((tm.hot_request_fraction - 0.3).abs() < f64::EPSILON);
+    }
+
+    fn resource_report(cpu_mean: f64, cpu_peak: f64) -> ResourceReport {
+        ResourceReport {
+            pid: 1,
+            samples: 63,
+            interval_ms: 1000,
+            rss_peak_bytes: 1024 * 1024,
+            rss_mean_bytes: 1024 * 1024,
+            cpu_peak_pct: cpu_peak,
+            cpu_mean_pct: cpu_mean,
+        }
+    }
+
+    // --- correct_ceiling_with_resources regression tests (HEA-1880) ---
+
+    #[test]
+    fn server_ceiling_without_resource_data_becomes_unknown() {
+        // A run with a latency breach but no --server-pid cannot claim server
+        // attribution — 0% CPU and 30-second client timeouts both look the same
+        // without evidence. Pin to Unknown (inadmissible for grading).
+        let rows = vec![row("session_lookup", 1_357, 1_357, Some(false))]; // breach
+        let mut s = summarize(&rows, 700, 30.0);
+        assert_eq!(s.ceiling, Ceiling::Server, "pre-condition: initial attribution");
+        correct_ceiling_with_resources(&mut s, None);
+        assert_eq!(s.ceiling, Ceiling::Unknown);
+        assert!(s.ceiling_reason.contains("inadmissible"));
+    }
+
+    #[test]
+    fn server_ceiling_with_zero_cpu_becomes_generator_saturated() {
+        // Reproduces steady-700u through steady-2000u from HEA-1812: 100% failure
+        // rate, latency breach (30 s timeout), server CPU mean=0.0% peak=0.0%.
+        // The server did no work — the generator saturated (port exhaustion /
+        // TIME_WAIT), not the server.
+        let rows = vec![row("session_lookup", 1_357, 1_357, Some(false))]; // breach
+        let mut s = summarize(&rows, 700, 30.0);
+        assert_eq!(s.ceiling, Ceiling::Server, "pre-condition: initial attribution");
+        let res = resource_report(0.0, 0.0);
+        correct_ceiling_with_resources(&mut s, Some(&res));
+        assert_eq!(s.ceiling, Ceiling::GeneratorSaturated);
+        assert!(
+            s.ceiling_reason.contains("idle"),
+            "reason should mention idle server: {}",
+            s.ceiling_reason
+        );
+    }
+
+    #[test]
+    fn server_ceiling_with_high_cpu_stays_server() {
+        // Reproduces steady-500u from HEA-1812: high CPU, legitimate breach.
+        // cpu_mean=178%, cpu_peak=292% — the server was the bottleneck.
+        let rows = vec![row("validate", 10_000, 0, Some(false))]; // breach
+        let mut s = summarize(&rows, 500, 1678.0);
+        assert_eq!(s.ceiling, Ceiling::Server, "pre-condition");
+        let res = resource_report(178.0, 292.0);
+        correct_ceiling_with_resources(&mut s, Some(&res));
+        assert_eq!(s.ceiling, Ceiling::Server, "high-CPU run must stay Server");
+    }
+
+    #[test]
+    fn non_server_ceiling_is_not_changed_by_correction() {
+        // GeneratorSaturated is derived from failure rate; resource data cannot
+        // promote it to Server, and Unknown only applies to Server attributions.
+        let rows = vec![row("validate", 100_000, 5_001, Some(true))]; // high failure, no breach
+        let mut s = summarize(&rows, 10_000, 30_000.0);
+        assert_eq!(
+            s.ceiling,
+            Ceiling::GeneratorSaturated,
+            "pre-condition: high failure without breach"
+        );
+        // Calling with None should NOT change a non-Server ceiling.
+        correct_ceiling_with_resources(&mut s, None);
+        assert_eq!(
+            s.ceiling,
+            Ceiling::GeneratorSaturated,
+            "correction must not mutate non-Server ceilings"
+        );
+    }
+
+    #[test]
+    fn cpu_just_above_floor_stays_server() {
+        // cpu_peak_pct=15% exceeds SERVER_CPU_FLOOR_PEAK_PCT (10%) so the override
+        // does not fire — we cannot rule out a brief server spike that collapsed the
+        // generator after a short burst.
+        let rows = vec![row("validate", 1_000, 1_000, Some(false))]; // breach
+        let mut s = summarize(&rows, 100, 10.0);
+        assert_eq!(s.ceiling, Ceiling::Server, "pre-condition");
+        let res = resource_report(3.0, 15.0); // mean below floor, peak above
+        correct_ceiling_with_resources(&mut s, Some(&res));
+        assert_eq!(
+            s.ceiling,
+            Ceiling::Server,
+            "peak above floor must prevent the generator-saturated override"
+        );
     }
 }

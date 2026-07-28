@@ -19,6 +19,7 @@ mod load;
 mod params;
 mod report;
 mod resources;
+mod saturate;
 mod scenarios;
 mod seed;
 
