@@ -161,9 +161,9 @@ fn concurrent_assign_unassign_converge_to_consistent_set() {
 }
 
 /// Same-key contention. The test above races assigns over four *distinct*
-/// roles, so no two writers touch the same assignment key — the A-28 write-lock
-/// + idempotency path (`engine.rs`: "if this exact (subject, role, scope)
-/// already exists, return it without creating a duplicate") is never exercised.
+/// roles, so no two writers touch the same assignment key, leaving the A-28
+/// write-lock idempotency path (`engine.rs`: "if this exact (subject, role,
+/// scope) already exists, return it without creating a duplicate") unexercised.
 /// Here eight threads race to assign the *same* role to the *same* user at the
 /// same scope; the invariant is that exactly one assignment record survives (no
 /// lost update, no duplicate index entries, no torn resolve).

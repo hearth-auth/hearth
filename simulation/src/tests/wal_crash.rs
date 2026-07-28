@@ -20,8 +20,8 @@ use hearth::storage::wal::{SyncMode, Wal, WalConfig, WalEntry, WalOperation};
 /// Deterministic test KEK for WAL crash tests.
 fn test_kek() -> (encryption::KeyEncryptionKey, encryption::KekId) {
     let mut kek_bytes = [0u8; 32];
-    for i in 0..32 {
-        kek_bytes[i] = (i * 13 + 7) as u8;
+    for (i, b) in kek_bytes.iter_mut().enumerate() {
+        *b = (i * 13 + 7) as u8;
     }
     let kek = encryption::KeyEncryptionKey::from_bytes(kek_bytes);
     let kek_id = [0x42u8; encryption::KEK_ID_SIZE];
