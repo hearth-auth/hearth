@@ -17,6 +17,8 @@ use hearth::storage::fs::RealFs;
 use hearth::storage::migrations::WAL_VERSION_HEADER_SIZE;
 use hearth::storage::wal::{SyncMode, Wal, WalConfig, WalEntry, WalOperation};
 
+use crate::FaultFs;
+
 /// Deterministic test KEK for WAL crash tests.
 fn test_kek() -> (encryption::KeyEncryptionKey, encryption::KekId) {
     let mut kek_bytes = [0u8; 32];
@@ -322,6 +324,82 @@ fn simulation_wal_tail_corruption() {
         assert_eq!(entries[0], entry1);
         assert_eq!(entries[1], entry2);
     }
+}
+
+/// Corrupt-tail recovery MUST fsync the parent directory after renaming the
+/// rebuilt segment into place (HEA-1855).
+///
+/// `rebuild_truncated_segment` stages the rebuilt WAL and renames it over the
+/// original (a new inode). A rename is not crash-durable until the containing
+/// directory's metadata is itself synced. Without the directory fsync, a power
+/// loss after post-recovery appends were fsync'd — but before the directory
+/// entry committed — would resolve the OLD inode on restart, replaying the
+/// corrupt tail and silently dropping those appends (the HEA-1853 loss class
+/// through a narrower window).
+///
+/// A fault-injecting `Fs` (`FaultFs`) records every `sync_dir` call; this test
+/// drives the recovery path and asserts the WAL's parent directory was among
+/// them.
+#[test]
+fn simulation_recovery_fsyncs_parent_dir_after_rename() {
+    let seed = 47u64;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("test.wal");
+    let config = WalConfig {
+        max_size: u64::MAX,
+        sync_mode: SyncMode::EveryWrite,
+    };
+
+    let entry1 = make_entry(b"dir-fsync-1", b"val-1");
+    let entry2 = make_entry(b"dir-fsync-2", b"val-2");
+
+    // Write two committed entries with the real Fs, then close.
+    {
+        let wal = open_test_wal(&wal_path, config.clone());
+        wal.append(&entry1).expect("append 1");
+        wal.append(&entry2).expect("append 2");
+    }
+
+    // Corrupt the tail so the next open takes the rebuild-and-rename path.
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .expect("open for corruption");
+        file.write_all(b"POWER_LOSS_GARBAGE_PARTIAL_RECORD")
+            .expect("write garbage tail");
+        file.sync_all().expect("sync");
+    }
+
+    // Reopen through a fresh FaultFs whose dir-sync log starts empty, so the
+    // only sync_dir it can record is the one on the recovery rename path.
+    let (kek, kek_id) = test_kek();
+    let fs = Arc::new(FaultFs::new());
+    let wal = Wal::open_with_fs(
+        &wal_path,
+        config,
+        Arc::<FaultFs>::clone(&fs) as Arc<dyn hearth::storage::fs::Fs>,
+        &kek,
+        kek_id,
+    )
+    .expect("reopen after corruption");
+
+    let entries = wal.read_all().expect("read after recovery");
+    assert_eq!(
+        entries,
+        vec![entry1, entry2],
+        "recovery must recover the committed prefix (seed={seed})"
+    );
+
+    let expected_parent = wal_path.parent().expect("wal has parent dir");
+    let synced = fs.dir_syncs();
+    assert!(
+        synced.iter().any(|p| p == expected_parent),
+        "recovery rename must fsync the WAL's parent dir; synced dirs were {synced:?} \
+         (expected to contain {}) (seed={seed})",
+        expected_parent.display()
+    );
 }
 
 /// Tampering: byte-flip in ciphertext with a recomputed CRC must be

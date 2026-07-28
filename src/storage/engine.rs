@@ -640,6 +640,11 @@ impl EmbeddedStorageEngine {
 
         // Atomic rename — crash-safe: partial writes leave a .tmp, not a corrupt .sst
         self.fs.rename(&tmp_path, &final_path)?;
+        // Fsync the data directory so the rename (the new inode becoming the
+        // canonical `.sst`) is durable. Without this a power loss before the
+        // directory update commits could resolve the tmp/old entries on restart
+        // (HEA-1855).
+        self.fs.sync_dir(&self.data_dir)?;
 
         // Atomically swap reader list to just the compacted SST
         self.sst_readers.store(Arc::new(vec![new_reader]));

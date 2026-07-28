@@ -27,6 +27,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   before accepting writes. Single-fault durability is unchanged; a WAL whose
   records fail AEAD authentication still fails the open closed and is never
   rewritten (HEA-1853).
+- **WAL and SST creation/rename now fsync the parent directory** — a freshly
+  created WAL or SST segment, and the atomic rename that finalizes a recovered
+  WAL segment or a compacted SST, previously did not fsync the containing
+  directory. Under the power-loss fault model, a rename or create is not durable
+  until the directory entry commits, so a crash in that window could resolve the
+  old inode on restart — losing a just-created file entirely, or (for recovery)
+  replaying a corrupt tail and dropping post-recovery writes (the HEA-1853 loss
+  class through a narrower window). The `Fs` abstraction gains `sync_dir`, now
+  called after WAL/SST create and after each finalizing rename (HEA-1855).
 
 ### Security
 - **OAuth client-auth failures now return the RFC 6749 `invalid_client` code** —

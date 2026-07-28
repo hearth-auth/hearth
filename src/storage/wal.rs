@@ -591,6 +591,14 @@ fn rebuild_truncated_segment(
         staged.sync_all()?;
     }
     fs.rename(&staging, path)?;
+    // Fsync the parent directory so the rename (new inode) is durable. Without
+    // this, a power loss after post-recovery appends are fsync'd but before the
+    // directory entry commits would resolve the OLD inode on restart, replaying
+    // the corrupt tail and losing those appends — the HEA-1853 loss class
+    // through a narrower window (HEA-1855).
+    if let Some(parent) = path.parent() {
+        fs.sync_dir(parent)?;
+    }
 
     Ok((new_dek, new_header))
 }
@@ -617,6 +625,13 @@ impl Wal {
             file.write_all(&WAL_VERSION_CURRENT.to_le_bytes())?;
             file.write_all(&enc_header.to_bytes())?;
             file.sync_all()?;
+            // Fsync the parent directory so the freshly created segment's
+            // directory entry is durable; otherwise a power loss before the dir
+            // update commits can make the whole file vanish on restart
+            // (HEA-1855).
+            if let Some(parent) = path.parent() {
+                fs.sync_dir(parent)?;
+            }
             (dek, enc_header, 0u64)
         } else {
             // Existing file: read all bytes, detect format version, migrate if needed.

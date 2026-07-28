@@ -257,6 +257,14 @@ impl SstWriter {
         file.write_all(&ciphertext)?;
 
         file.sync_all()?;
+        // Fsync the parent directory so the freshly created SST's directory
+        // entry is durable. A newly created file can otherwise vanish entirely
+        // if power is lost before the dir update commits (HEA-1855). Callers
+        // that finalize via rename (compaction) additionally fsync the dir after
+        // the rename.
+        if let Some(parent) = path.parent() {
+            fs.sync_dir(parent)?;
+        }
 
         let file_size = TOTAL_HEADER_SIZE as u64 + ciphertext.len() as u64;
 
