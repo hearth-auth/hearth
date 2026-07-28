@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Count-triggered partial (size-tiered) SST compaction** — two new
+  `storage.compaction` keys bound cold-read SST fan-out without the write
+  amplification of a full merge (HEA-1885). `max_sst_count` (default `0` = off)
+  is a count trigger: once the live SST file count reaches it after a flush, the
+  background task merges a single same-size tier of SSTs off the write path,
+  capping operational fan-out at roughly `merge_min * log(corpus)` instead of
+  growing linearly with corpus size. `merge_min` (default `4`) sets the per-tier
+  fan-in. Both default to the prior behaviour (periodic full compaction only);
+  enable `max_sst_count` after validating write-stall on your hardware. Measured
+  on the corpus ladder: peak fan-out flat (exponent ≈ 0 vs the linear baseline),
+  write amplification ≈ 4× (see `docs/perf/HEA-1885-partial-compaction.md`).
 - **Hot-tier / storage `get` observability** — the storage engine now exports
   Prometheus metrics attributing every read to the tier that served it:
   `hearth_storage_get_total{outcome="hot_hit|memtable_hit|sst_hit|miss"}`

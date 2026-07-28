@@ -839,6 +839,8 @@ async fn run_serve(
             enabled: config.storage.compaction.enabled,
             interval_secs: config.storage.compaction.interval_secs,
             min_sst_count: config.storage.compaction.min_sst_count,
+            max_sst_count: config.storage.compaction.max_sst_count,
+            merge_min: config.storage.compaction.merge_min,
         };
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
@@ -871,6 +873,8 @@ async fn run_serve(
             enabled: config.storage.compaction.enabled,
             interval_secs: config.storage.compaction.interval_secs,
             min_sst_count: config.storage.compaction.min_sst_count,
+            max_sst_count: config.storage.compaction.max_sst_count,
+            merge_min: config.storage.compaction.merge_min,
         };
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
@@ -1701,27 +1705,60 @@ async fn run_serve(
         });
     }
 
-    // Background periodic SST compaction.
-    if config.storage.compaction.enabled && config.storage.compaction.interval_secs > 0 {
+    // Background SST compaction: a periodic full sweep and/or a count-triggered
+    // partial (size-tiered) merge (HEA-1885). Both run off the write path via
+    // `spawn_blocking`; the partial merge is woken by the storage engine's
+    // count-trigger `Notify` rather than a timer.
+    let periodic_enabled =
+        config.storage.compaction.enabled && config.storage.compaction.interval_secs > 0;
+    let partial_enabled =
+        config.storage.compaction.enabled && config.storage.compaction.max_sst_count > 0;
+    if periodic_enabled || partial_enabled {
         let storage_engine = Arc::clone(&inner_storage);
         let interval_secs = config.storage.compaction.interval_secs;
         let min_sst_count = config.storage.compaction.min_sst_count;
+        let compaction_notify = inner_storage.compaction_notify();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            // A periodic ticker only when the interval sweep is enabled; otherwise
+            // a future that never fires, so the `select!` runs the notify arm only.
+            let mut interval = tokio::time::interval(Duration::from_secs(if periodic_enabled {
+                interval_secs
+            } else {
+                1
+            }));
             // Skip the immediate first tick so the server finishes warm-up.
             interval.tick().await;
             loop {
-                interval.tick().await;
+                #[derive(Clone, Copy)]
+                enum Wake {
+                    Periodic,
+                    Partial,
+                }
+                let wake = tokio::select! {
+                    _ = interval.tick(), if periodic_enabled => Wake::Periodic,
+                    () = compaction_notify.notified(), if partial_enabled => Wake::Partial,
+                };
                 let engine = Arc::clone(&storage_engine);
-                match tokio::task::spawn_blocking(move || engine.compact_ssts(min_sst_count)).await
-                {
-                    Ok(Ok(n)) if n > 0 => {
+                let result = match wake {
+                    Wake::Periodic => {
+                        tokio::task::spawn_blocking(move || engine.compact_ssts(min_sst_count))
+                            .await
+                    }
+                    Wake::Partial => {
+                        tokio::task::spawn_blocking(move || engine.compact_partial()).await
+                    }
+                };
+                match (wake, result) {
+                    (Wake::Periodic, Ok(Ok(n))) if n > 0 => {
                         info!(merged = n, "background SST compaction complete");
                     }
-                    Ok(Err(e)) => {
+                    (Wake::Partial, Ok(Ok(n))) if n > 0 => {
+                        info!(merged = n, "partial SST compaction complete");
+                    }
+                    (_, Ok(Err(e))) => {
                         warn!(error = %e, "background SST compaction failed");
                     }
-                    Err(join_err) => {
+                    (_, Err(join_err)) => {
                         warn!(error = %join_err, "compaction task panicked");
                     }
                     _ => {}

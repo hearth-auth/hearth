@@ -100,8 +100,16 @@ storage:
   fsync: true                             # MUST be true in production; dev mode disables this
   # compaction:                            # optional — all fields have defaults shown below
   #   enabled: true                       # whether background SST compaction runs
-  #   interval_secs: 3600                 # seconds between compaction sweeps
-  #   min_sst_count: 3                    # compact only when SST count >= this threshold
+  #   interval_secs: 3600                 # seconds between periodic FULL compaction sweeps
+  #   min_sst_count: 3                    # periodic full compaction only when SST count >= this
+  #   max_sst_count: 0                    # count trigger for PARTIAL (size-tiered) compaction:
+  #                                       #   when live SST files reach this many, merge one size
+  #                                       #   tier off the write path. 0 = OFF (default). Bounds
+  #                                       #   cold-read SST fan-out at ~merge_min*log(corpus)
+  #                                       #   without the write amplification of a full merge.
+  #                                       #   Validate write-stall on your hardware before enabling
+  #                                       #   (HEA-1885); a good starting value is 12.
+  #   merge_min: 4                        # same-size SSTs a partial compaction merges at once
 
 observability:
   log_level: "info"      # trace | debug | info | warn | error

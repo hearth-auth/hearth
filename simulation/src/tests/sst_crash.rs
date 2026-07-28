@@ -290,6 +290,8 @@ fn simulation_crash_kek_present_body_corruption_fails() {
             enabled: false,
             interval_secs: 0,
             min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
         };
         config.dev_mode = true;
         let engine = EmbeddedStorageEngine::open(config).expect("open");

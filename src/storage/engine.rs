@@ -63,10 +63,26 @@ pub struct StorageConfig {
 pub struct CompactionConfig {
     /// Whether automatic background compaction is enabled.
     pub enabled: bool,
-    /// Interval between compaction attempts in seconds.
+    /// Interval between periodic full-compaction sweeps in seconds. `0` disables
+    /// the periodic sweep (the count trigger below can still run partial
+    /// compactions).
     pub interval_secs: u64,
-    /// Minimum number of SST files before compaction is triggered.
+    /// Minimum number of SST files before a periodic **full** compaction runs.
     pub min_sst_count: usize,
+    /// Count trigger for **partial** (size-tiered) compaction. When the number of
+    /// live SST files reaches this value after a flush, a partial compaction is
+    /// scheduled on the background task — merging only one size-tier's worth of
+    /// SSTs, never the whole dataset. `0` disables the count trigger (the
+    /// reversible default), leaving only the periodic full sweep.
+    ///
+    /// Bounds cold-read fan-out at roughly `merge_min * log(corpus)` without the
+    /// quadratic write amplification a count-triggered *full* merge would incur
+    /// (HEA-1885 / HEA-1881).
+    pub max_sst_count: usize,
+    /// Minimum number of same-size-tier SST files that must accumulate before a
+    /// partial compaction merges them into one. Bounds per-tier fan-in (the
+    /// size-tiered `min_threshold`). Values below 2 are clamped to 2.
+    pub merge_min: usize,
 }
 
 impl Default for CompactionConfig {
@@ -75,6 +91,10 @@ impl Default for CompactionConfig {
             enabled: true,
             interval_secs: 3600,
             min_sst_count: 3,
+            // Count trigger OFF by default (reversible per HEA-1885): operators
+            // opt in after validating write-stall on their hardware.
+            max_sst_count: 0,
+            merge_min: 4,
         }
     }
 }
@@ -191,6 +211,8 @@ impl StorageConfig {
                 enabled: false,
                 interval_secs: 0,
                 min_sst_count: 2,
+                max_sst_count: 0,
+                merge_min: 4,
             },
             dev_mode: true,
         }
@@ -237,6 +259,12 @@ pub struct EmbeddedStorageEngine {
     key_registry: Arc<KeyRegistry>,
     /// System realm identifier used for file-level encryption.
     system_realm: RealmId,
+    /// Compaction policy (periodic sweep + partial count trigger).
+    compaction: CompactionConfig,
+    /// Signalled by [`Self::trigger_flush`] when the live SST count reaches
+    /// [`CompactionConfig::max_sst_count`], so the background task can run a
+    /// partial compaction off the flush path. Never awaited on the hot path.
+    compaction_notify: Arc<tokio::sync::Notify>,
 }
 
 impl EmbeddedStorageEngine {
@@ -460,6 +488,8 @@ impl EmbeddedStorageEngine {
             fs,
             key_registry,
             system_realm,
+            compaction: config.compaction,
+            compaction_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -509,72 +539,105 @@ impl EmbeddedStorageEngine {
             // Rebuild SST reader list from disk (re-open all files). This
             // registers the new SST *before* the memtable is emptied, so reads
             // never miss a just-flushed key.
-            let mut all_sst_paths: Vec<(PathBuf, u64)> = self
-                .fs
-                .read_dir(&self.data_dir)?
-                .into_iter()
-                .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
-                .filter_map(|p| {
-                    let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
-                    Some((p, num))
-                })
-                .collect();
-            all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
-
-            let mut rebuilt_readers = Vec::new();
-            for (path, sst_num) in &all_sst_paths {
-                let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "SST file skipped: failed to read encryption header"
-                        );
-                        continue;
-                    }
-                };
-                let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-                let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
-                    Some(k) => k,
-                    None => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            realm = %realm_for_kek,
-                            "SST file skipped: KEK not found"
-                        );
-                        continue;
-                    }
-                };
-                let dek = match encryption::unwrap_dek(&enc_header, &kek) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "SST file skipped: DEK unwrapping failed"
-                        );
-                        continue;
-                    }
-                };
-                match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
-                    Ok(reader) => rebuilt_readers.push(reader),
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "SST file skipped: failed to open reader"
-                        );
-                    }
-                }
-            }
-            record_sst_file_count(rebuilt_readers.len());
+            let rebuilt_readers = self.reload_sst_readers()?;
+            let live_count = rebuilt_readers.len();
+            record_sst_file_count(live_count);
             self.sst_readers.store(Arc::new(rebuilt_readers));
+
+            // Count trigger (HEA-1885): once the live SST count reaches the
+            // configured threshold, hand a *partial* (size-tiered) compaction to
+            // the background task. The merge itself never runs here on the flush
+            // path — `notify_one` is a cheap flag-set, safe outside a runtime.
+            if self.compaction.max_sst_count > 0 && live_count >= self.compaction.max_sst_count {
+                self.compaction_notify.notify_one();
+            }
 
             Ok(())
         })?;
 
         Ok(())
+    }
+
+    /// Re-opens every `*.sst` file in the data directory into a fresh, newest-first
+    /// reader list.
+    ///
+    /// This is the single source of truth for materialising the in-memory reader
+    /// Vec from on-disk state. Files are sorted by SST number descending so the
+    /// resulting Vec order matches the recency order that recovery
+    /// ([`Self::open_with_fs`]) reconstructs — the invariant reads rely on
+    /// (newest wins). Individual files that fail to open (missing KEK, corrupt
+    /// header) are skipped with a warning rather than aborting the rebuild.
+    ///
+    /// Callers MUST hold `flush_lock` so the directory scan cannot race a flush
+    /// writing a new file.
+    fn reload_sst_readers(&self) -> Result<Vec<SstReader>, StorageError> {
+        let mut all_sst_paths: Vec<(PathBuf, u64)> = self
+            .fs
+            .read_dir(&self.data_dir)?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+            .filter_map(|p| {
+                let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
+                Some((p, num))
+            })
+            .collect();
+        all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
+
+        let mut readers = Vec::with_capacity(all_sst_paths.len());
+        for (path, sst_num) in &all_sst_paths {
+            let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "SST file skipped: failed to read encryption header"
+                    );
+                    continue;
+                }
+            };
+            let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
+            let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
+                Some(k) => k,
+                None => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        realm = %realm_for_kek,
+                        "SST file skipped: KEK not found"
+                    );
+                    continue;
+                }
+            };
+            let dek = match encryption::unwrap_dek(&enc_header, &kek) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "SST file skipped: DEK unwrapping failed"
+                    );
+                    continue;
+                }
+            };
+            match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
+                Ok(reader) => readers.push(reader),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "SST file skipped: failed to open reader"
+                    );
+                }
+            }
+        }
+        Ok(readers)
+    }
+
+    /// Returns a handle the server wiring uses to await partial-compaction
+    /// requests raised by the count trigger (HEA-1885). The background
+    /// compaction task waits on this alongside its periodic timer.
+    pub fn compaction_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.compaction_notify)
     }
 }
 
@@ -689,6 +752,175 @@ impl EmbeddedStorageEngine {
 
         Ok(input_count)
     }
+
+    /// Runs one **partial (size-tiered)** compaction, bounding cold-read SST
+    /// fan-out without the quadratic write amplification of a full merge
+    /// (HEA-1885, the CTO-required shape for HEA-1881 lever 1).
+    ///
+    /// Selects a single *contiguous, same-size-tier* run of at least
+    /// [`CompactionConfig::merge_min`] SSTs (see [`select_partial_run`]) and
+    /// merges only those into one output, leaving every other SST untouched.
+    /// Returns the number of SSTs merged (0 if no tier has enough files yet).
+    ///
+    /// # Correctness — recency ordering
+    ///
+    /// Reads resolve by reader-Vec order (newest first) and recovery rebuilds
+    /// that Vec by sorting files by SST number descending. To keep the two in
+    /// lock-step, the merged output reuses the **highest number in the run** and
+    /// its file path. Because the run is contiguous in the number-sorted Vec, no
+    /// surviving SST has a number inside the run's band, so splicing the merged
+    /// output in at that number preserves the strictly-descending invariant —
+    /// across restarts as well as in memory.
+    ///
+    /// # Correctness — tombstones
+    ///
+    /// Tombstones are dropped only when the run reaches the *oldest* SST; a merge
+    /// that leaves older SSTs live keeps tombstones so a delete cannot be
+    /// resurrected from an un-merged older file.
+    ///
+    /// # Crash safety
+    ///
+    /// Same contract as [`Self::compact_ssts`]: the merge is written to a `.tmp`
+    /// path and atomically renamed over the run's newest file; a crash before the
+    /// rename leaves the original files intact, and a crash after it leaves the
+    /// merged (newer) output shadowing any not-yet-deleted older run members —
+    /// harmless orphans cleaned up on the next compaction.
+    ///
+    /// Acquires `flush_lock`, so like [`Self::compact_ssts`] async callers should
+    /// wrap it in `spawn_blocking`. The lock is held only for one tier's worth of
+    /// data, never the whole dataset.
+    pub fn compact_partial(&self) -> Result<usize, StorageError> {
+        let merge_min = self.compaction.merge_min.max(2);
+
+        let Ok(_guard) = self.flush_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "flush mutex poisoned",
+            )));
+        };
+
+        // Select under the lock so indices can't shift under a concurrent flush.
+        let sst_readers = self.sst_readers.load();
+        let Some((start, end)) = select_partial_run(&sst_readers, merge_min) else {
+            return Ok(0);
+        };
+
+        // `sst_readers` is newest-first; index `start` is the newest run member
+        // (highest number) and `end` the oldest. The merged output reuses the
+        // newest number/path so it splices back at the correct recency slot.
+        let run = &sst_readers[start..=end];
+        let target_num = run[0].sst_number();
+        let other_nums: Vec<u64> = run[1..].iter().map(SstReader::sst_number).collect();
+        let input_count = run.len();
+
+        // Merge inputs oldest-to-newest (newest value wins, matching read order).
+        let inputs_oldest_first: Vec<&SstReader> = run.iter().rev().collect();
+
+        // Tombstones may only be discarded when the oldest SST is part of the run;
+        // otherwise an older, un-merged SST could resurrect a deleted key.
+        let drop_tombstones = end == sst_readers.len() - 1;
+
+        // DEK + encryption header (same pattern as `compact_ssts`).
+        let system_kek = self
+            .key_registry
+            .get_kek_for_realm(&self.system_realm)
+            .ok_or_else(|| StorageError::Crypto {
+                reason: "system KEK not found".to_string(),
+            })?;
+        let system_kek_id = self.key_registry.kek_id_for_realm(&self.system_realm);
+        let dek = encryption::generate_dek()?;
+        let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+
+        let tmp_path = self
+            .data_dir
+            .join(format!("{target_num:06}.sst.partial.tmp"));
+        let final_path = self.data_dir.join(format!("{target_num:06}.sst"));
+
+        sst::compact_with_fs_opts(
+            &inputs_oldest_first,
+            &tmp_path,
+            &*self.fs,
+            target_num,
+            &dek,
+            &enc_header,
+            drop_tombstones,
+        )?;
+
+        // Drop the load guard before mutating the reader list (reload re-reads
+        // from disk). Everything needed for the splice is already captured.
+        drop(sst_readers);
+
+        // Atomically replace the run's newest file with the merged output, then
+        // fsync the directory so the rename is durable (HEA-1855).
+        self.fs.rename(&tmp_path, &final_path)?;
+        self.fs.sync_dir(&self.data_dir)?;
+
+        // Delete the other (older) run members. Best-effort: a leftover is a
+        // harmless orphan shadowed by the merged output.
+        for old_num in &other_nums {
+            let old_path = self.data_dir.join(format!("{old_num:06}.sst"));
+            if let Err(e) = self.fs.remove_file(&old_path) {
+                tracing::warn!(
+                    path = %old_path.display(),
+                    error = %e,
+                    "partial compaction: failed to delete merged-in SST file",
+                );
+            }
+        }
+
+        // Rematerialise the reader list from disk (newest-first). The merged file
+        // now sits at `target_num`, exactly where the run's newest member was.
+        let rebuilt = self.reload_sst_readers()?;
+        let live_count = rebuilt.len();
+        record_sst_file_count(live_count);
+        self.sst_readers.store(Arc::new(rebuilt));
+
+        Ok(input_count)
+    }
+}
+
+/// Selects a contiguous run of same-size-tier SSTs to merge, or `None` if no tier
+/// has accumulated `merge_min` files yet (HEA-1885).
+///
+/// `readers` is newest-first (index 0 = newest, highest number). A "tier" is a
+/// maximal contiguous span whose largest member is within [`SIZE_TIER_RATIO`] of
+/// its smallest (bucketing by entry count, a proxy for on-disk size). The first
+/// (newest) span reaching `merge_min` files is returned as an inclusive
+/// `(start, end)` index range. Restricting to a *contiguous* span guarantees the
+/// merged output's number band contains no surviving SST, which the splice in
+/// [`EmbeddedStorageEngine::compact_partial`] relies on for recovery-consistent
+/// ordering.
+fn select_partial_run(readers: &[SstReader], merge_min: usize) -> Option<(usize, usize)> {
+    /// Size spread (max/min entry count) tolerated within one tier. A merged SST
+    /// (~`merge_min`× the entries of a flush) sits in the next tier up, so it is
+    /// never re-merged with fresh flushes — this is what keeps write
+    /// amplification `O(log N)` instead of quadratic.
+    const SIZE_TIER_RATIO: f64 = 2.0;
+
+    let n = readers.len();
+    let mut i = 0;
+    while i < n {
+        let base = f64::from(readers[i].entry_count().max(1));
+        let mut lo = base;
+        let mut hi = base;
+        let mut j = i;
+        while j + 1 < n {
+            let next = f64::from(readers[j + 1].entry_count().max(1));
+            let nlo = lo.min(next);
+            let nhi = hi.max(next);
+            if nhi / nlo <= SIZE_TIER_RATIO {
+                lo = nlo;
+                hi = nhi;
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if j - i + 1 >= merge_min {
+            return Some((i, j));
+        }
+        i = j + 1;
+    }
+    None
 }
 
 impl StorageEngine for EmbeddedStorageEngine {
@@ -1740,6 +1972,8 @@ mod tests {
             enabled: false,
             interval_secs: 0,
             min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1799,6 +2033,8 @@ mod tests {
             enabled: false,
             interval_secs: 0,
             min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1822,6 +2058,8 @@ mod tests {
             enabled: false,
             interval_secs: 0,
             min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1877,6 +2115,8 @@ mod tests {
             enabled: false,
             interval_secs: 0,
             min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1932,6 +2172,102 @@ mod tests {
                 Some(format!("val-{i:04}").into_bytes()),
             );
         }
+    }
+
+    /// Counts `*.sst` files (ignoring `.tmp`) in a data directory.
+    fn count_sst_files(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count()
+    }
+
+    /// HEA-1885 — count-triggered PARTIAL (size-tiered) compaction must bound the
+    /// live SST fan-out at a small constant while preserving every key, including
+    /// one flushed into the *oldest* SST, and must never resurrect a deleted key.
+    #[test]
+    fn partial_compaction_bounds_sst_count_and_preserves_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        // Tiny flush threshold + large values => roughly one SST per put, so an
+        // uncapped run of 300 inserts would leave ~300 SSTs on disk.
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 50;
+        config.compaction = CompactionConfig {
+            enabled: true,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 8, // count trigger
+            merge_min: 3,     // per-tier fan-in
+        };
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+        let value = vec![b'x'; 80];
+
+        // Marker written first so it lands in the very oldest SST.
+        engine
+            .put(&realm, b"aaa-oldest-marker", b"oldest-value")
+            .expect("put marker");
+        // A key we will delete early, then keep writing past — its tombstone must
+        // never be shadowed away by a partial merge that leaves older SSTs live.
+        engine
+            .put(&realm, b"aaa-doomed", b"temp")
+            .expect("put doomed");
+        engine.delete(&realm, b"aaa-doomed").expect("delete doomed");
+
+        const N: u32 = 300;
+        let mut max_live: usize = 0;
+        for i in 0..N {
+            engine
+                .put(&realm, format!("k-{i:04}").as_bytes(), &value)
+                .expect("put");
+            // Emulate the background hand-off deterministically: whenever the live
+            // SST count reaches the trigger, run one partial compaction.
+            if count_sst_files(dir.path()) >= 8 {
+                engine.compact_partial().expect("compact_partial");
+            }
+            max_live = max_live.max(count_sst_files(dir.path()));
+        }
+
+        // The cap: fan-out is bounded by O(merge_min * log(N)), a small constant —
+        // NOT the ~300 an uncapped run would produce.
+        assert!(
+            max_live <= 24,
+            "partial compaction must cap SST fan-out at a small constant, peaked at {max_live}"
+        );
+
+        // Drain remaining partial merges.
+        loop {
+            if engine.compact_partial().expect("drain compact_partial") == 0 {
+                break;
+            }
+        }
+
+        // No key may be lost, including the one in the oldest SST.
+        assert_eq!(
+            engine
+                .get(&realm, b"aaa-oldest-marker")
+                .expect("get marker"),
+            Some(b"oldest-value".to_vec()),
+            "key in the oldest SST must survive partial compaction (no loss)"
+        );
+        for i in 0..N {
+            assert_eq!(
+                engine
+                    .get(&realm, format!("k-{i:04}").as_bytes())
+                    .expect("get"),
+                Some(value.clone()),
+                "k-{i:04} must survive partial compaction"
+            );
+        }
+        // The deleted key must stay deleted (no resurrection from older SSTs).
+        assert_eq!(
+            engine.get(&realm, b"aaa-doomed").expect("get doomed"),
+            None,
+            "partial compaction must not resurrect a deleted key"
+        );
     }
 
     /// Encryption-at-rest: raw SST and WAL bytes must not contain plaintext.

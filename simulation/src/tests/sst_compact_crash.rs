@@ -28,6 +28,8 @@ fn simulation_compaction_leaked_files_after_crash() {
             enabled: false,
             interval_secs: 0,
             min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
         };
         // Allow key auto-generation in tests; HEARTH_MASTER_KEY is not set in CI.
         // This test exercises compaction + crash recovery, not master-key handling.

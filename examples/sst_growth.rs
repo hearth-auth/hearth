@@ -104,6 +104,8 @@ fn measure_rung(n: usize) -> Result<Rung, Box<dyn std::error::Error>> {
         enabled: false,
         interval_secs: 0,
         min_sst_count: 2,
+        max_sst_count: 0,
+        merge_min: 4,
     };
     let engine = EmbeddedStorageEngine::open(config)?;
     let realm = RealmId::generate();

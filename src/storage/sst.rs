@@ -752,6 +752,10 @@ pub(crate) fn compact(
 }
 
 /// Compacts SST files using a custom filesystem implementation.
+///
+/// Drops tombstones — use only for a **full** merge where no older SST survives
+/// (see [`compact_with_fs_opts`] for the partial-merge variant that preserves
+/// them).
 pub(crate) fn compact_with_fs(
     input_ssts: &[&SstReader],
     output_path: &Path,
@@ -759,6 +763,34 @@ pub(crate) fn compact_with_fs(
     output_sst_number: u64,
     dek: &DataEncryptionKey,
     enc_header: &EncryptionHeader,
+) -> Result<SstMetadata, StorageError> {
+    compact_with_fs_opts(
+        input_ssts,
+        output_path,
+        fs,
+        output_sst_number,
+        dek,
+        enc_header,
+        true,
+    )
+}
+
+/// Compacts SST files, optionally preserving tombstones.
+///
+/// Input SSTs are ordered oldest-to-newest; for duplicate keys the newest value
+/// wins. When `drop_tombstones` is `true` the merged output omits tombstones
+/// entirely — correct only when the inputs include the oldest SST, so no older
+/// file can hold a shadowed value. A **partial** compaction that leaves older
+/// SSTs live MUST pass `false`, otherwise a delete could be resurrected from an
+/// un-merged older file (HEA-1885).
+pub(crate) fn compact_with_fs_opts(
+    input_ssts: &[&SstReader],
+    output_path: &Path,
+    fs: &dyn Fs,
+    output_sst_number: u64,
+    dek: &DataEncryptionKey,
+    enc_header: &EncryptionHeader,
+    drop_tombstones: bool,
 ) -> Result<SstMetadata, StorageError> {
     let mut merged = std::collections::BTreeMap::new();
     for sst in input_ssts {
@@ -769,7 +801,7 @@ pub(crate) fn compact_with_fs(
 
     let live_entries: Vec<(CompositeKey, MemtableValue)> = merged
         .into_iter()
-        .filter(|(_, v)| !matches!(v, MemtableValue::Tombstone))
+        .filter(|(_, v)| !(drop_tombstones && matches!(v, MemtableValue::Tombstone)))
         .collect();
 
     SstWriter::write_sst_with_fs(

@@ -352,6 +352,8 @@ fn open_engine(
         enabled: false,
         interval_secs: 0,
         min_sst_count: 2,
+        max_sst_count: 0,
+        merge_min: 4,
     };
     Ok(EmbeddedStorageEngine::open(config)?)
 }
