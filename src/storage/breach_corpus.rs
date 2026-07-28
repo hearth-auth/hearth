@@ -281,25 +281,46 @@ mod tests {
         assert!(!corpus.is_pwned(b"anything"));
     }
 
+    // These two exercise `binary_search` at the index-0 and index-(n-1) edges
+    // with synthetic hashes — a password whose SHA-1 equals an arbitrary
+    // constant is infeasible to construct, so the boundary positions can only be
+    // reached through the helper directly. Named for the helper, not `is_pwned`,
+    // to avoid overclaiming (the public path is covered end-to-end by
+    // `is_pwned_true_for_present_password` below).
     #[test]
-    fn is_pwned_finds_entry_at_beginning_of_corpus() {
+    fn binary_search_finds_smallest_hash_at_index_zero() {
         // Smallest hash ends up at index 0 after sort.
         let low_hash = [0x00u8; HASH_LEN];
         let high_hash = [0xFFu8; HASH_LEN];
         let f = write_corpus(&[low_hash, high_hash]);
         let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
-        // Create a password whose SHA-1 happens to equal low_hash would be
-        // infeasible; instead we test via binary_search directly.
         assert!(corpus.binary_search(&low_hash));
     }
 
     #[test]
-    fn is_pwned_finds_entry_at_end_of_corpus() {
+    fn binary_search_finds_largest_hash_at_last_index() {
         let low_hash = [0x00u8; HASH_LEN];
         let high_hash = [0xFFu8; HASH_LEN];
         let f = write_corpus(&[low_hash, high_hash]);
         let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert!(corpus.binary_search(&high_hash));
+    }
+
+    /// End-to-end positive path for the PUBLIC API: a password whose real SHA-1
+    /// digest is present in the corpus must be reported as pwned. This is the
+    /// counterpart to `is_pwned_returns_false_for_absent_password` and is the
+    /// only test that drives `is_pwned`'s hash-then-search flow to a `true`
+    /// result (the boundary tests above bypass the SHA-1 step).
+    #[test]
+    fn is_pwned_true_for_present_password() {
+        let present = sha1_of(b"hunter2");
+        let other = [0xFFu8; HASH_LEN];
+        let f = write_corpus(&[present, other]);
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
+        assert!(
+            corpus.is_pwned(b"hunter2"),
+            "a password whose SHA-1 is in the corpus must be reported pwned"
+        );
     }
 
     #[test]
