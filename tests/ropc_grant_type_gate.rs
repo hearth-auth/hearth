@@ -203,7 +203,9 @@ async fn ropc_refusal_is_identical_for_valid_and_invalid_passwords() {
     let f = fixture(&h, "oracle", &["password"]).await;
 
     let (good_status, good_body) = post_ropc(build_app(&h).await, &f, &f.password).await;
-    let (bad_status, bad_body) = post_ropc(build_app(&h).await, &f, "TotallyWrong!999").await;
+    let invalid_password = format!("invalid-for-{}", f.username);
+    let (bad_status, bad_body) =
+        post_ropc(build_app(&h).await, &f, invalid_password.as_str()).await;
 
     assert_eq!(
         good_status,
