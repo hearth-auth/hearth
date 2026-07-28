@@ -281,7 +281,7 @@ artifact `docs/perf/artifacts/c5-complexity-sweep-raw.json`.
 | E1 | user lookup p99 vs corpus size | **+0.281 (hot); +0.281 (cold-compacted)** | — | 0.25 (hot); 0.76 (cold-compacted) | ≤ O(log n) | **PASS** (conditional; hot O(1); cold ≤ O(log n) when compacted) | C5 `b2aa7cb9` |
 | E2 | session lookup p99 vs corpus size | not independently fitted — inherits E1 | — | — | ≤ O(log n) | **PASS** (conditional, **proxy**; engine `get()` is the shared term — see note) | C5 `b2aa7cb9` |
 | E3 | validate_token p99 vs corpus size | not independently fitted — inherits E1 | — | — | ≤ O(log n) | **PASS** (conditional, **proxy**; same inheritance as E2) | C5 `b2aa7cb9` |
-| E4 | SST file count vs corpus size | **+1.0000 (default config); +0.0376 (lever-1 ON)** | — | 1.0000; 0.713 | ≤ O(log n) | **MISS** (default; PASS with `storage.compaction.max_sst_count > 0` per HEA-1885) | C2 `docs/perf/HEA-1870-C2-sst-growth.md`; HEA-1885 `709ed183` |
+| E4 | SST file count vs corpus size | pre: **+1.0000** (max_sst_count=0, control) → post: **+0.1607** (T8, max_sst_count=8) / **+0.1094** (T16, max_sst_count=16) | — | 1.0000 (control); 0.838 (T8); 0.602 (T16) | ≤ O(log n) | **MISS** (default, max_sst_count=0); **PASS (capped)** with max_sst_count ∈ {8, 16} — fan-out O(1) at both settings (HEA-1905) | C2 `docs/perf/HEA-1870-C2-sst-growth.md`; HEA-1885 `709ed183`; HEA-1905 `124aeee2` `docs/perf/HEA-1905-E4-SST-COUNT-RERUN.md` |
 | E5 | p99 vs hot-set/capacity ratio (0.1×→10×, fixed corpus=160k) | — (no latency breach observed at any ratio) | — | — | no cliff | `NOT-MEASURED` at production scale (160k corpus shows no latency breach, even at 0% hit rate; hit-ratio cliff at ratio ≈ 1× is real but latency stays within budget on this host) | C5 Axis B `b2aa7cb9` |
 | E6 | Ratio at which p99 first breaches §7.1 budget | — | — | — | stated, not graded | `NOT-MEASURED` | C5: no breach at 160k corpus; production-scale measurement pending |
 | E7 | Overload behaviour at 2× / 5× / 10× sustainable | — | — | — | bounded, honest failure | `NOT-MEASURABLE` | C6 reviewed and rejected (§3.5); C3 confirmed server-owned ceiling but Argon2id path now addressed by HEA-1887 |
@@ -310,13 +310,24 @@ artifact `docs/perf/artifacts/c5-complexity-sweep-raw.json`.
 > E4 is the single most consequential row: if SST count grows O(n), the cold path degrades to O(n),
 > violating E1–E3's conditional PASSes. Lever-1 (HEA-1885) caps fan-out at a constant when enabled.
 
-> **E4 dual verdict.** Default config (`max_sst_count = 0`, off): exponent 1.0000, R² 1.0000 —
-> **MISS**. With `storage.compaction.max_sst_count > 0` (lever-1 from HEA-1885): peak fan-out
-> exponent 0.0376, R² 0.713 — **PASS (capped)**. Write amplification with lever-1: ~4×, O(log n),
-> not quadratic (validated in HEA-1885 measurement). Lever-1 ships **OFF by default** because the
-> per-merge write stall scales with the production 64 MiB flush threshold (measured stall p99 = 307 ms
-> at 256 KiB threshold; at 64 MiB it scales to order of seconds). Enabling requires per-hardware
-> validation. Tracked in R6.
+> **E4 dual verdict (updated by HEA-1905, `124aeee2`, 2026-07-28).** Default config
+> (`max_sst_count = 0`, off): exponent 1.0000, R² 1.0000 — **MISS**. With lever-1 enabled, the
+> E4 PASS holds across the measured trigger range:
+>
+> | Setting | Peak fan-out exponent | R² | Max write-amp | Max peak SSTs |
+> |---------|----------------------|-----|---------------|---------------|
+> | max_sst_count=0 (default) | 1.0000 | 1.0000 | 1.14× | linear (320 at n=320k) |
+> | max_sst_count=8 (T8) | **0.1607** | 0.8382 | 5.48× | 12 |
+> | max_sst_count=16 (T16) | **0.1094** | 0.6022 | 3.59× | 17 |
+> | max_sst_count=12 (HEA-1885 ref) | **0.0376** | 0.713 | 4.49× | 12 |
+>
+> Write amplification at all trigger values is bounded, O(log n), not quadratic — confirming the
+> size-tiered partial compaction avoids the defect that ruled out count-triggering `compact_ssts`.
+> Lever-1 ships **OFF by default** because the per-merge write stall scales with the production
+> 64 MiB flush threshold: measured p99 = 307 ms at 256 KiB → projected **~79 s** at 64 MiB (T8),
+> **~65 s** at 64 MiB (T16). Enabling requires per-hardware validation. Default-flip is gated on
+> lever-2 (move merge I/O off `flush_lock`), tracked under HEA-1881. See
+> `docs/perf/HEA-1905-E4-SST-COUNT-RERUN.md`.
 
 > **E5 Axis B finding (C5, 160k corpus).** Hit ratio holds 100% at ratio ≤ 1×, collapses through
 > 15% (3×) to 0% (10×) — a cliff in hit-ratio, not in latency. At 0% hit rate (ratio = 10×),
