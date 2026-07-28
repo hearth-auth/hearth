@@ -164,10 +164,16 @@ fn simulation_crash_mid_fsync() {
     }
 }
 
-/// Simulated disk I/O failure during append: partial writes do not
-/// corrupt subsequent recovery.
+/// Orphan length-prefix discard: a record whose 4-byte length header was
+/// written but whose body never was (process died between the two writes) must
+/// be discarded on recovery, leaving prior intact records readable.
+///
+/// NOTE: this injects the orphan prefix by appending to the file — it does not
+/// simulate an actual disk I/O fault (for FaultFs-driven I/O errors see
+/// `realm_concurrent_io.rs`). The name reflects the partial-record recovery
+/// behaviour it truly exercises.
 #[test]
-fn simulation_disk_io_failure() {
+fn simulation_orphan_length_prefix_discarded_on_recovery() {
     let seed = 44u64;
 
     let dir = tempfile::tempdir().expect("tempdir");

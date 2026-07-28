@@ -2438,6 +2438,37 @@ mod tests {
     }
 
     #[test]
+    fn security_yaml_debug_redacts_secret_key_material() {
+        // HEA-1841: `{:?}` on SecurityYaml must never reveal the storage KEK or
+        // the DPoP nonce HMAC secret — defense-in-depth against a future
+        // `debug!(?config)`. PEPPER_HEX/PEPPER_HEX_2 are convenient 64-char hex
+        // secrets standing in for real KEK / nonce material.
+        let sec = SecurityYaml {
+            key_encryption_key: Some(PEPPER_HEX.to_string()),
+            dpop_nonce_secret: Some(PEPPER_HEX_2.to_string()),
+            ..SecurityYaml::default()
+        };
+        let dbg = format!("{sec:?}");
+        assert!(
+            !dbg.contains(PEPPER_HEX),
+            "key_encryption_key leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains(PEPPER_HEX_2),
+            "dpop_nonce_secret leaked: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "expected redaction marker: {dbg}"
+        );
+        // Presence must still be visible so absent vs. configured is debuggable.
+        assert!(
+            !dbg.contains("key_encryption_key: None"),
+            "configured KEK must not render as None: {dbg}"
+        );
+    }
+
+    #[test]
     fn config_from_yaml_parses_and_validates_pepper() {
         // End-to-end: an operator YAML snippet parses, validates, and yields a
         // resolvable pepper. A bad key is rejected at Config::validate time.

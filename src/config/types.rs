@@ -792,7 +792,11 @@ pub struct TokenYamlConfig {
 // ===== Security / rate-limiting YAML config =====
 
 /// Global `security:` section in `hearth.yaml`.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `Debug` is hand-written (not derived) so the secret fields
+/// `dpop_nonce_secret` and `key_encryption_key` are redacted — see the
+/// `impl Debug` below. Any new secret field MUST be redacted there too.
+#[derive(Clone, Default, Deserialize)]
 pub struct SecurityYaml {
     /// Global rate-limiting thresholds (overrides compiled-in defaults).
     #[serde(default)]
@@ -898,6 +902,41 @@ pub struct SecurityYaml {
     /// no pepper (unchanged default behaviour).
     #[serde(default)]
     pub password: PasswordSecurityYaml,
+}
+
+/// Redacts `dpop_nonce_secret` and `key_encryption_key` — both are secret key
+/// material (a DPoP-nonce HMAC key and the storage KEK) and MUST NOT be
+/// revealed if `SecurityYaml`, or any struct containing it, is ever
+/// `{:?}`-printed (HEA-1841). Presence is preserved (`Some("[REDACTED]")`)
+/// so debug output still distinguishes configured from absent.
+impl std::fmt::Debug for SecurityYaml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityYaml")
+            .field("rate_limiting", &self.rate_limiting)
+            .field(
+                "dpop_nonce_secret",
+                &self.dpop_nonce_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("http2", &self.http2)
+            .field("request_shaper", &self.request_shaper)
+            .field("load_test_unthrottled", &self.load_test_unthrottled)
+            .field("allowed_return_to_origins", &self.allowed_return_to_origins)
+            .field("ip_reputation", &self.ip_reputation)
+            .field("captcha", &self.captcha)
+            .field("grpc", &self.grpc)
+            .field("tls", &self.tls)
+            .field("backup", &self.backup)
+            .field("reserved_slugs", &self.reserved_slugs)
+            .field("slug_cooldown_days", &self.slug_cooldown_days)
+            .field("jwks_rps_limit", &self.jwks_rps_limit)
+            .field(
+                "key_encryption_key",
+                &self.key_encryption_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("password", &self.password)
+            .finish()
+    }
 }
 
 /// `security.password` — password-hashing hardening.

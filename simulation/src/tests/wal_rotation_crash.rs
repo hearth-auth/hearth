@@ -37,6 +37,21 @@ fn simulation_memtable_flushed_before_wal_rotation() {
                 .put(&realm, key.as_bytes(), val.as_bytes())
                 .expect("put");
         }
+
+        // A rotation must actually have occurred, otherwise all 10 entries would
+        // still live in the single WAL and survive trivially — the flush-before-
+        // rotate path this test guards would never be exercised. The pre-rotation
+        // flush writes an SST, so at least one SST on disk is the proof that
+        // rotation (and its flush) happened.
+        let sst_count = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count();
+        assert!(
+            sst_count >= 1,
+            "WAL rotation must have triggered a memtable flush to SST (found {sst_count} SSTs)"
+        );
         // Drop without explicit flush — simulates process kill after rotation.
     }
 
