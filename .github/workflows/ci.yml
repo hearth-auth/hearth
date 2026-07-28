@@ -79,6 +79,8 @@ jobs:
               - 'benches/**'
               - 'simulation/**'
               - 'build.rs'
+              # HEA-1862: a PR that only weakens the ROPC gate must still run it.
+              - 'scripts/check-ropc-ban.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
@@ -237,6 +239,13 @@ jobs:
 
       - name: make test-quality (block false-confidence test patterns — HEA-571)
         run: make test-quality
+
+      # Asserts the ROPC (RFC 6749 §4.3) password grant stays unreachable, in both
+      # the config allowlist and the HTTP token dispatch. HEA-1862: the two drifted
+      # apart — config was clean while both token endpoints still served ROPC — so
+      # this gate checks the dispatch arm, not just the allowlist.
+      - name: make security-gate (assert ROPC password grant is unreachable — HEA-1862)
+        run: make security-gate
 
       - name: make check (clippy -D warnings + fmt --check + nextest --workspace)
         run: make check
