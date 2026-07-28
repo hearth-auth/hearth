@@ -2598,13 +2598,21 @@ impl EmbeddedIdentityEngine {
         }
 
         let user_bytes = Self::serialize_user(&user)?;
-        let user_id_bytes = user_id.as_uuid().to_string().into_bytes();
-        self.storage
-            .put(realm_id, &email_key, &user_id_bytes)
-            .map_err(Self::storage_err)?;
+        // 16 raw UUID bytes instead of the 36-char hex string: saves ~20 B/user.
+        let user_id_bytes = user_id.as_uuid().as_bytes().to_vec();
         let id_key = keys::encode_user_id(&user_id);
+        // Collapse the email index and primary record into one atomic batch.
+        // `Memtable::put` deep-clones the entire map per call, so two separate
+        // puts reallocate the whole memtable twice; a single `put_batch` clones
+        // it once (O(N+B) not O(B·N)) and also makes the index and record land
+        // together on recovery — a crash can never leave the email pointer
+        // without its user, or vice versa (HEA-1896). The audit append below
+        // is already a single `put_batch` inside the audit engine.
         self.storage
-            .put(realm_id, &id_key, &user_bytes)
+            .put_batch(
+                realm_id,
+                &[(email_key, user_id_bytes), (id_key, user_bytes)],
+            )
             .map_err(Self::storage_err)?;
 
         self.record_audit(
@@ -17446,6 +17454,165 @@ mod tests {
         assert!(
             counting.writes() > before_sweep,
             "background sweep must persist the eviction (storage write)"
+        );
+    }
+
+    /// Test-only storage decorator that counts individual `put` calls
+    /// separately from batched `put_batch` calls. Used to prove that
+    /// `create_user` collapses its two user-key writes into a single
+    /// `put_batch` (HEA-1896) — every `put` deep-clones the whole memtable, so
+    /// two puts reallocate it twice where one batch reallocates it once.
+    struct PutOpCountingStorage {
+        inner: Arc<dyn StorageEngine>,
+        puts: std::sync::atomic::AtomicUsize,
+        batches: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PutOpCountingStorage {
+        fn new(inner: Arc<dyn StorageEngine>) -> Self {
+            Self {
+                inner,
+                puts: std::sync::atomic::AtomicUsize::new(0),
+                batches: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn reset(&self) {
+            self.puts.store(0, std::sync::atomic::Ordering::SeqCst);
+            self.batches.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn puts(&self) -> usize {
+            self.puts.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn batches(&self) -> usize {
+            self.batches.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl StorageEngine for PutOpCountingStorage {
+        fn get(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+            self.inner.get(realm_id, key)
+        }
+        fn put(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put(realm_id, key, value)
+        }
+        fn delete(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
+            self.inner.scan(realm_id, start, end)
+        }
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put_batch(realm_id, entries)
+        }
+        fn put_if_absent(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<bool, crate::storage::StorageError> {
+            self.inner.put_if_absent(realm_id, key, value)
+        }
+        fn write_batch(
+            &self,
+            realm_id: &RealmId,
+            puts: &[(Vec<u8>, Vec<u8>)],
+            deletes: &[Vec<u8>],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.write_batch(realm_id, puts, deletes)
+        }
+    }
+
+    /// HEA-1896: `create_user` must persist its two user keys (the
+    /// `usr:email:` index and the `usr:id:` primary record) in a single
+    /// `put_batch`, not two individual `put`s. `Memtable::put` deep-clones the
+    /// entire `BTreeMap` on every call, so two puts reallocate the whole
+    /// memtable twice; one batch clones it once. This regression test fails
+    /// (puts == 2) before the batching change and passes (puts == 0) after.
+    #[test]
+    fn hea1896_create_user_batches_user_key_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let counting = Arc::new(PutOpCountingStorage::new(inner));
+        let storage = Arc::clone(&counting) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
+
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig::default()),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+
+        // Measure only the create_user write path.
+        counting.reset();
+
+        engine
+            .create_user(
+                &realm_id,
+                &CreateUserRequest {
+                    email: "batch@example.com".to_string(),
+                    display_name: "Batch User".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+
+        assert_eq!(
+            counting.puts(),
+            0,
+            "create_user must not issue individual put() calls for its user \
+             keys — each put deep-clones the whole memtable (HEA-1896); it must \
+             use put_batch instead"
+        );
+        assert!(
+            counting.batches() >= 1,
+            "create_user must persist its user keys through put_batch"
         );
     }
 
