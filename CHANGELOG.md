@@ -26,6 +26,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the scoped and admin login surfaces (HEA-1763).
 
 ### Security
+- **ROPC `grant_type=password` removed from both token endpoints** — `POST /token`
+  and `POST /realms/{name}/token` dispatched the RFC 6749 §4.3 Resource Owner
+  Password Credentials grant, so a valid username+password minted an access token
+  directly and bypassed interactive/step-up MFA. Neither endpoint applied a
+  grant-type allowlist, and the per-client grant check was skipped entirely when
+  `client_id` was omitted or did not resolve to a registered client, so the arm was
+  reachable unauthenticated. Both arms are deleted; both endpoints now return
+  `400 unsupported_grant_type` for any ROPC request regardless of caller
+  credentials. Integrators still using the password grant must migrate to
+  authorization-code + PKCE or `client_credentials`. A new `make security-gate`
+  CI check (`scripts/check-ropc-ban.sh`) asserts both that `password` is absent
+  from the config `VALID_GRANT_TYPES` allowlist and that no `"password" =>`
+  dispatch arm exists in the token handlers — the two had drifted apart, with
+  config already clean while the live dispatch remained (HEA-1814 / HEA-1816 /
+  HEA-1862).
 - **Single-node `put_if_absent` is now atomic, closing the capability-JTI TOCTOU
   window** — the `StorageEngine::put_if_absent` trait default is a non-atomic
   get-then-put, and `EmbeddedStorageEngine` did not override it, so the
