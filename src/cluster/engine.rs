@@ -561,7 +561,7 @@ async fn run_lag_monitor(
         interval.tick().await;
         let metrics = raft.metrics().borrow().clone();
         let lag = compute_lag_ms(&metrics);
-        let ok = lag <= threshold_ms;
+        let ok = reads_allowed_for_lag(lag, threshold_ms);
         reads_allowed.store(ok, Ordering::Relaxed);
         if !ok {
             warn!(
@@ -570,6 +570,14 @@ async fn run_lag_monitor(
             );
         }
     }
+}
+
+/// Read-fencing decision: follower reads are served only while replication lag
+/// stays at or below the configured threshold. Extracted from `run_lag_monitor`
+/// so both branches — allow when caught up, fence when lagging — are unit
+/// testable without standing up a multi-node Raft cluster.
+pub(crate) fn reads_allowed_for_lag(lag_ms: u64, threshold_ms: u64) -> bool {
+    lag_ms <= threshold_ms
 }
 
 /// Estimate replication lag in milliseconds from Raft metrics.
@@ -589,14 +597,24 @@ pub(crate) fn compute_lag_ms(metrics: &RaftMetrics<u64, HearthNode>) -> u64 {
 
 // ── Clock-skew check (§16.4) ──────────────────────────────────────────────────
 
+/// Absolute clock skew in milliseconds between a leader timestamp and the local
+/// clock, both in microseconds since the UNIX epoch. Pulled out as a pure
+/// function so the >1 s boundary is unit-testable without a live cluster.
+fn clock_skew_ms(leader_ts_micros: i64, now_micros: i64) -> u64 {
+    (now_micros - leader_ts_micros).unsigned_abs() / 1_000
+}
+
 /// Inspect an `AppendEntries` payload for embedded leader timestamps and warn
 /// if the clock skew between this node and the leader exceeds 1 second.
 ///
+/// Returns `Some(skew_ms)` for the first timestamped entry inspected, or `None`
+/// when the payload is unparseable or carries no usable leader timestamp — the
+/// return value exists so robustness tests can assert on the outcome rather than
+/// merely on the absence of a panic.
+///
 /// NTP synchronisation is a deployment prerequisite for cluster mode.
-fn check_clock_skew(payload: &[u8]) {
-    let Ok(req) = serde_json::from_slice::<AppendEntriesRequest<HearthRaftConfig>>(payload) else {
-        return;
-    };
+fn check_clock_skew(payload: &[u8]) -> Option<u64> {
+    let req = serde_json::from_slice::<AppendEntriesRequest<HearthRaftConfig>>(payload).ok()?;
     for entry in &req.entries {
         let leader_ts = match &entry.payload {
             EntryPayload::Normal(cmd) => match cmd {
@@ -622,15 +640,16 @@ fn check_clock_skew(payload: &[u8]) {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as i64;
-        let skew_ms = (now_micros - leader_ts).unsigned_abs() / 1_000;
+        let skew_ms = clock_skew_ms(leader_ts, now_micros);
         if skew_ms > 1_000 {
             warn!(
                 skew_ms,
                 "clock skew with leader exceeds 1 s — ensure NTP is configured"
             );
         }
-        break;
+        return Some(skew_ms);
     }
+    None
 }
 
 // ── ClusterStorageAdapter ─────────────────────────────────────────────────────
@@ -880,6 +899,38 @@ mod tests {
         assert!(engine.reads_ok(), "single-node never blocks reads");
     }
 
+    // ── Read-fencing decision (both branches) ─────────────────────────────────
+
+    #[test]
+    fn reads_allowed_when_lag_at_or_below_threshold() {
+        // Caught up and exactly at the threshold both keep reads flowing.
+        assert!(reads_allowed_for_lag(0, 500));
+        assert!(reads_allowed_for_lag(500, 500));
+    }
+
+    #[test]
+    fn reads_fenced_when_lag_exceeds_threshold() {
+        // The false branch the single-node test can never reach: a lagging
+        // follower must have reads disabled (one ms over the line is enough).
+        assert!(
+            !reads_allowed_for_lag(501, 500),
+            "reads must be fenced once replication lag exceeds the threshold"
+        );
+        assert!(!reads_allowed_for_lag(10_000, 500));
+    }
+
+    #[test]
+    fn lag_monitor_decision_fences_reads_for_lagged_metrics() {
+        // Compose the real monitor pipeline: metrics → compute_lag_ms → fence.
+        // 100 pending entries × 5 ms = 500 ms lag; with a 200 ms threshold the
+        // node must be fenced, and with a 600 ms threshold it must stay open.
+        let m = make_metrics(Some(120), Some(20));
+        let lag = compute_lag_ms(&m);
+        assert_eq!(lag, 500);
+        assert!(!reads_allowed_for_lag(lag, 200), "500 ms lag > 200 ms → fenced");
+        assert!(reads_allowed_for_lag(lag, 600), "500 ms lag ≤ 600 ms → open");
+    }
+
     // ── compute_lag_ms ────────────────────────────────────────────────────────
 
     #[test]
@@ -923,9 +974,21 @@ mod tests {
     // ── Clock-skew check ──────────────────────────────────────────────────────
 
     #[test]
-    fn check_clock_skew_does_not_panic_on_garbage_payload() {
-        check_clock_skew(b"not json");
-        check_clock_skew(b"{}");
-        check_clock_skew(b"");
+    fn check_clock_skew_returns_none_on_unparseable_payload() {
+        // Malformed / empty payloads must be rejected by the parser and yield
+        // None (no entry inspected) rather than panicking or reporting a skew.
+        assert_eq!(check_clock_skew(b"not json"), None);
+        assert_eq!(check_clock_skew(b"{}"), None);
+        assert_eq!(check_clock_skew(b""), None);
+    }
+
+    #[test]
+    fn clock_skew_ms_is_absolute_and_scaled() {
+        // Leader ahead or behind by the same amount yields the same magnitude.
+        assert_eq!(clock_skew_ms(1_000_000, 2_500_000), 1_500); // leader behind
+        assert_eq!(clock_skew_ms(2_500_000, 1_000_000), 1_500); // leader ahead
+        // Boundary: 1_000 ms is not "exceeds 1 s"; 1_001 ms is.
+        assert_eq!(clock_skew_ms(0, 1_000_000), 1_000);
+        assert!(clock_skew_ms(0, 1_001_000) > 1_000);
     }
 }

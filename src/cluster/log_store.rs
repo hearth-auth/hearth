@@ -478,9 +478,18 @@ mod tests {
         HearthLogStore::open(path).expect("open store")
     }
 
+    /// Exercises the redb-backed read path (`try_get_log_entries` over a range)
+    /// against directly-committed rows.
+    ///
+    /// NOTE: this does NOT drive `RaftLogStorage::append` — that trait method
+    /// requires a `LogFlushed` callback whose constructor is `pub(crate)` in
+    /// openraft and thus cannot be built outside the running Raft engine, so the
+    /// helper writes rows through redb directly. The real `append` implementation
+    /// (including its flush-callback signalling) is covered end-to-end by the
+    /// 3-node consensus test in `tests/cluster_grpc_loopback.rs`.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    async fn append_and_read_range() {
+    async fn read_range_returns_committed_entries_in_order() {
         let dir = tempdir().unwrap();
         let mut store = open_store(dir.path().join("raft.db").as_path());
 
@@ -490,6 +499,7 @@ mod tests {
         let got = store.try_get_log_entries(1u64..=3u64).await.unwrap();
         assert_eq!(got.len(), 3);
         assert_eq!(got[0].log_id.index, 1);
+        assert_eq!(got[1].log_id.index, 2);
         assert_eq!(got[2].log_id.index, 3);
     }
 
