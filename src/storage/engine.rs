@@ -1505,14 +1505,35 @@ mod tests {
         engine.put(&realm, b"ddd", b"mem-val").expect("put");
         engine.put(&realm, b"eee", b"mem-val").expect("put");
 
+        // The 100-byte flush threshold guarantees the first writes were flushed
+        // to at least one SST while the tail stayed in the memtable, so a correct
+        // scan must genuinely merge both layers rather than read a single tier.
+        assert!(
+            !engine.sst_readers.load().is_empty(),
+            "flush threshold must have produced ≥1 SST so the scan actually spans layers"
+        );
+
         // Scan the full range — should merge SST + memtable
         let results = engine.scan(&realm, b"aaa", b"fff").expect("scan");
 
-        // We should see all 5 keys, regardless of which layer they're in
-        assert!(
-            results.len() >= 4,
-            "scan should find keys across layers, got {}",
-            results.len()
+        // Every one of the 5 keys must appear with its exact value, regardless of
+        // which layer it lives in — a `>= 4` check silently tolerated a dropped key.
+        let found: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = results
+            .iter()
+            .map(|r| (r.key.clone(), r.value.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (b"aaa".to_vec(), b"sst-val".to_vec()),
+                (b"bbb".to_vec(), b"sst-val".to_vec()),
+                (b"ccc".to_vec(), b"sst-val".to_vec()),
+                (b"ddd".to_vec(), b"mem-val".to_vec()),
+                (b"eee".to_vec(), b"mem-val".to_vec()),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+            "cross-layer scan must return all 5 keys with their exact values"
         );
 
         // Results should be sorted
@@ -1526,6 +1547,10 @@ mod tests {
         }
     }
 
+    /// Compile-time guarantee (no runtime assertions by design): the engine must
+    /// stay `Send + Sync` so it can be shared across Tokio worker threads behind
+    /// an `Arc`. If a future field loses `Send`/`Sync`, this fails to *compile*,
+    /// which is the enforcement point — a runtime assert could not catch it.
     #[test]
     fn engine_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -1765,20 +1790,28 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
             .count();
 
-        if sst_before >= 2 {
-            let compacted = engine.compact_ssts(2).expect("compact_ssts");
-            assert_eq!(
-                compacted, sst_before,
-                "compaction at exact min_sst_count boundary should succeed"
-            );
+        // The 30 puts above (values ~5 bytes) at a 50-byte flush threshold must
+        // reliably produce at least `min_sst_count` SSTs, otherwise the boundary
+        // this test exists to cover is never reached — assert it unconditionally
+        // rather than silently no-op'ing the whole body behind an `if`.
+        assert!(
+            sst_before >= 2,
+            "setup must flush ≥2 SSTs to exercise the exact-min_sst_count boundary, got {sst_before}"
+        );
 
-            for i in 0u32..30 {
-                let key = format!("b-{i:04}");
-                assert_eq!(
-                    engine.get(&realm, key.as_bytes()).expect("get"),
-                    Some(format!("vb-{i:04}").into_bytes()),
-                );
-            }
+        let compacted = engine.compact_ssts(2).expect("compact_ssts");
+        assert_eq!(
+            compacted, sst_before,
+            "compaction at exact min_sst_count boundary should compact every SST"
+        );
+
+        for i in 0u32..30 {
+            let key = format!("b-{i:04}");
+            assert_eq!(
+                engine.get(&realm, key.as_bytes()).expect("get"),
+                Some(format!("vb-{i:04}").into_bytes()),
+                "value for {key} must survive compaction at the boundary"
+            );
         }
     }
 
@@ -1915,15 +1948,19 @@ mod tests {
             );
         }
 
-        // Raw WAL bytes must not contain the sentinel in plaintext.
+        // Raw WAL bytes must not contain the sentinel in plaintext. The WAL is
+        // always created on open, so require its presence — an `if exists` guard
+        // silently skipped the check if the on-disk name ever drifted.
         let wal_path = dir.path().join("hearth.wal");
-        if wal_path.exists() {
-            let raw = std::fs::read(&wal_path).expect("read wal");
-            assert!(
-                !raw.windows(sentinel.len()).any(|w| w == sentinel),
-                "WAL file contains plaintext sentinel — WAL encryption-at-rest not working"
-            );
-        }
+        assert!(
+            wal_path.exists(),
+            "WAL file {wal_path:?} must exist so its encryption-at-rest is actually checked"
+        );
+        let raw = std::fs::read(&wal_path).expect("read wal");
+        assert!(
+            !raw.windows(sentinel.len()).any(|w| w == sentinel),
+            "WAL file contains plaintext sentinel — WAL encryption-at-rest not working"
+        );
     }
 
     // ── F3 regression: production() must always fsync ─────────────────────────
@@ -1979,39 +2016,53 @@ mod tests {
     /// After WAL rotation, all data that was in the memtable must be readable
     /// from the SST layer. Before HEA-1180 the WAL was truncated without flushing,
     /// so a simulated kill after rotation would lose those writes.
+    ///
+    /// To make the crash-loss claim load-bearing (the original test only read
+    /// back through the live engine, where memtable-resident keys would answer
+    /// regardless of whether the flush happened), the engine is dropped and
+    /// re-opened from the same directory before the final reads. A key that was
+    /// truncated out of the rotated WAL without first being flushed to an SST
+    /// would be unrecoverable after reopen.
     #[test]
     fn wal_rotation_flushes_memtable_to_sst_before_truncating() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Use a tiny WAL (4 KiB) so rotation triggers quickly.
-        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
-        config.wal_config.max_size = 4 * 1024;
-        let engine = EmbeddedStorageEngine::open(config).expect("open");
         let realm = RealmId::generate();
-
-        // Write enough data to force WAL rotation; values are 512 bytes each.
+        // Values are 512 bytes each.
         let big_val = vec![0xABu8; 512];
-        for i in 0u32..16 {
-            engine
-                .put(&realm, format!("rot-key-{i:04}").as_bytes(), &big_val)
-                .expect("put");
+
+        {
+            // Use a tiny WAL (4 KiB) so rotation triggers quickly.
+            let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+            config.wal_config.max_size = 4 * 1024;
+            let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+            // Write enough data to force WAL rotation.
+            for i in 0u32..16 {
+                engine
+                    .put(&realm, format!("rot-key-{i:04}").as_bytes(), &big_val)
+                    .expect("put");
+            }
+
+            // After rotation the pre_rotate_fn must have produced at least one SST.
+            assert!(
+                !engine.sst_readers.load().is_empty(),
+                "WAL rotation must have triggered a memtable flush → at least one SST must exist"
+            );
         }
 
-        // After rotation the pre_rotate_fn must have produced at least one SST.
-        let sst_readers = engine.sst_readers.load();
-        assert!(
-            !sst_readers.is_empty(),
-            "WAL rotation must have triggered a memtable flush → at least one SST must exist"
-        );
-
-        // Every key we wrote must still be readable after rotation.
+        // Reopen from disk (simulates a restart): pre-rotation keys must be
+        // recoverable from SSTs and post-rotation keys from the new WAL segment.
+        let reopened =
+            EmbeddedStorageEngine::open(StorageConfig::test_config(dir.path().to_path_buf()))
+                .expect("reopen");
         for i in 0u32..16 {
-            let got = engine
+            let got = reopened
                 .get(&realm, format!("rot-key-{i:04}").as_bytes())
                 .expect("get");
             assert_eq!(
                 got.as_deref(),
                 Some(big_val.as_slice()),
-                "rot-key-{i:04} must be readable after WAL rotation"
+                "rot-key-{i:04} must survive WAL rotation + reopen (flushed, not truncated away)"
             );
         }
     }

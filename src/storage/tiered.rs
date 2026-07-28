@@ -657,6 +657,17 @@ mod tests {
     fn default_config_admits_every_promotion() {
         // Dev/embedded default keeps deterministic immediate caching.
         assert_eq!(TieredConfig::default().promote_sample_rate, 1);
+
+        // Exercise the contract the name claims: under the default config a
+        // single promotion is admitted immediately (no sampling gate), unlike
+        // the sampled production config where a lone promote may be skipped.
+        let tier = HotTier::new(TieredConfig::default());
+        let realm = RealmId::generate();
+        tier.promote(&realm, b"once", b"v");
+        assert!(
+            tier.contains(&realm, b"once"),
+            "default (sample_rate=1) config must admit every single promotion"
+        );
     }
 
     // ===== Phase B: P0 Extended Property Tests =====
@@ -729,11 +740,23 @@ mod tests {
                 }
             }
 
-            // Invariant: every entry in hot tier must have correct value in oracle
-            // (oracle tracks what should be there if not evicted)
-            // Since oracle removes on sweep/invalidate, this is a weaker check:
-            // tier.len() <= capacity
+            // Invariant 1: capacity is never exceeded regardless of op sequence.
             prop_assert!(tier.len() <= 20, "hot tier exceeded capacity: {}", tier.len());
+
+            // Invariant 2 (eviction *correctness*, not just count): every key that
+            // survived in the tier must still read back its most-recently-promoted
+            // value. Eviction may drop a key (→ None, allowed), but it must never
+            // corrupt a surviving entry or resurrect a stale value. The oracle holds
+            // the latest value written per still-live key.
+            for (k, expected) in &oracle {
+                if let Some(got) = tier.get(&realm, k) {
+                    prop_assert_eq!(
+                        got.as_ref(),
+                        expected.as_slice(),
+                        "surviving key {:?} must read its latest promoted value", k
+                    );
+                }
+            }
         }
     }
 
@@ -783,18 +806,27 @@ mod tests {
                 }
             }
 
-            // After steady state, count how many hot keys are in the tier
-            let hot_in_tier = hot_keys.iter().filter(|k| tier.contains(&realm, k)).count();
-
-            // At least 1 out of 5 hot keys should survive in the tier.
-            // With capacity=10, 50 keys, and clock-sweep eviction, certain PRNG
-            // sequences can evict a hot key just before the final check. Requiring
-            // >= 1 still proves convergence: hot keys (10% of keyspace) are
-            // over-represented vs. random chance.
-            prop_assert!(
-                hot_in_tier >= 1,
-                "no hot keys in tier after power-law access",
-            );
+            // Convergence to the active working set. The bare `hot_in_tier >= 1`
+            // this replaces was exactly random-chance level (hot keys are 10% of
+            // the keyspace, capacity is 10, so ≈1 is expected even with no
+            // locality) and proved nothing. Because the Zipfian phase interleaves
+            // clock sweeps, the count after it is genuinely PRNG-dependent (the
+            // report's flakiness note), so instead we drive the tier to steady
+            // state deterministically: a final burst touching only the 5 hot keys
+            // with no interleaved sweeps. Capacity 10 comfortably holds the
+            // 5-key working set, so a converging tier must end with all of them
+            // resident — this is what "converges to active working set" means.
+            for key in &hot_keys {
+                if tier.get(&realm, key).is_none() {
+                    tier.promote(&realm, key, &[42u8; 8]);
+                }
+            }
+            for key in &hot_keys {
+                prop_assert!(
+                    tier.contains(&realm, key),
+                    "hot key {:?} must be resident after converging on the working set", key,
+                );
+            }
         }
     }
 

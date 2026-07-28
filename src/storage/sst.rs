@@ -1214,30 +1214,39 @@ mod tests {
         }
     }
 
-    /// Unit: Bloom filter correctly rejects a key from a different realm.
-    /// Realm isolation is encoded into the hash, so a filter built for realm A
-    /// must not match realm B's key even if the raw key bytes are identical.
+    /// Unit: realm identity is folded into the Bloom hash, so identical key
+    /// bytes in two different realms probe different bit positions.
+    ///
+    /// The filter is probabilistic (a false positive on realm B's key is
+    /// permitted), so the realm-isolation contract cannot be asserted through
+    /// `might_contain` without flakiness. Instead this pins the *deterministic*
+    /// seam it rests on: `bloom_hashes(realm, key)` must differ between realms
+    /// for the same key. If realm were dropped from the hash both pairs would be
+    /// byte-identical and this assertion would fail — the property is therefore
+    /// load-bearing, not decorative. (Deterministic reject coverage through the
+    /// real reader path lives in `sst_get_bloom_rejects_wrong_realm_without_false_negative`.)
     #[test]
     fn bloom_filter_rejects_different_realm_same_key_bytes() {
         let realm_a = RealmId::generate();
         let realm_b = RealmId::generate();
-        let entries = vec![(
+
+        let hashes_a = bloom_hashes(&realm_a, b"shared-key");
+        let hashes_b = bloom_hashes(&realm_b, b"shared-key");
+        assert_ne!(
+            hashes_a, hashes_b,
+            "realm must participate in the bloom hash — identical key bytes in \
+             different realms must not hash to the same probe positions"
+        );
+
+        // Sanity: the realm the filter was built for is still present.
+        let filter = BloomFilter::build(&[(
             CompositeKey::new(realm_a.clone(), b"shared-key".to_vec()),
             MemtableValue::Data(b"v".to_vec()),
-        )];
-
-        let filter = BloomFilter::build(&entries);
-
-        // realm_a's key is present — must not be rejected
-        assert!(filter.might_contain(&realm_a, b"shared-key"));
-
-        // realm_b's key with identical bytes may or may not match (FP is OK),
-        // but inserting for realm_a should NOT guarantee realm_b returns true.
-        // We verify this probabilistically: with 10-bit/entry at k=7, FPR ≈ 1%.
-        // A single-entry filter being tested once having a collision is very unlikely.
-        // We don't assert false here to avoid a flaky test, but the unit still
-        // documents the realm-scoped hashing contract.
-        let _ = filter.might_contain(&realm_b, b"shared-key");
+        )]);
+        assert!(
+            filter.might_contain(&realm_a, b"shared-key"),
+            "the inserted realm/key must never be a false negative"
+        );
     }
 
     /// Unit: Bloom filter built from an empty entry set is empty and always passes.
