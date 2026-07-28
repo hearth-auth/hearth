@@ -7,6 +7,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Bounded KDF admission control on the Argon2id path (HEA-1887 / R1)** — password
+  verification/hashing now runs behind a bounded async admission gate so offered
+  concurrency past the core count is **shed, not queued unboundedly**. C9/HEA-1879
+  confirmed the multi-second token-issuance p99 was queueing under `spawn_blocking`
+  oversubscription, not Argon2id compute. New config block
+  `security.password.kdf`: `max_in_flight` (default = host core count — the
+  Little's-Law bound where Argon2id throughput saturates), `max_queue_wait_ms`
+  (default `250`), `retry_after_seconds` (default `1`). When the gate is saturated,
+  **login requests receive `503 Service Unavailable` with a `Retry-After` header**
+  instead of piling onto the blocking pool (this also collapses peak resident
+  memory from `offered × 19 MiB` to `permits × 19 MiB`). New Prometheus metrics on
+  a path that previously had **zero** telemetry: `hearth_kdf_in_flight`,
+  `hearth_kdf_permits`, `hearth_kdf_queue_wait_seconds`, `hearth_kdf_compute_seconds`,
+  `hearth_kdf_shed_total`. An explicit `max_in_flight: 0` is rejected at
+  config-load time. (Gated on C7/HEA-1875 calibration + SecurityAuditor review
+  before release.)
 - **`hearth-loadtest saturate` — open-loop high-concurrency driver (C4)** — a new
   `saturate` subcommand drives `N` concurrent TCP connections against a single
   read-only hot-path journey in an open loop, **decoupling connection concurrency

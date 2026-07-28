@@ -1088,6 +1088,19 @@ async fn run_serve(
         );
     }
 
+    // Install the bounded KDF admission gate (HEA-1887 / R1) from
+    // `security.password.kdf`. This caps concurrent Argon2id work so offered
+    // concurrency past the core count sheds (503) instead of oversubscribing the
+    // blocking pool and inflating p99 (C9/HEA-1879). Absent config → core-count
+    // bound. First-wins; safe to call before the engine is built.
+    let kdf_gate_cfg = config.security.resolve_kdf_gate();
+    hearth::identity::init_gate(kdf_gate_cfg);
+    info!(
+        max_in_flight = kdf_gate_cfg.max_in_flight,
+        max_queue_wait_ms = kdf_gate_cfg.max_queue_wait.as_millis() as u64,
+        "kdf admission gate installed from security.password.kdf"
+    );
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
             credential: CredentialConfig {

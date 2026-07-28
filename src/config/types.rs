@@ -965,6 +965,60 @@ pub struct PasswordSecurityYaml {
     /// pepper is applied and `CredentialConfig::pepper` stays `None`.
     #[serde(default)]
     pub pepper: Option<PepperYaml>,
+    /// Bounded admission control for the Argon2id KDF path (HEA-1887 / R1).
+    ///
+    /// Caps concurrent password-hash/verify operations so offered concurrency
+    /// past the core count sheds (`503`) instead of oversubscribing the blocking
+    /// pool and inflating p99 into the multi-second range (C9/HEA-1879).
+    #[serde(default)]
+    pub kdf: KdfAdmissionYaml,
+}
+
+/// `security.password.kdf` — bounded KDF admission control (HEA-1887 / R1).
+///
+/// The Argon2id verify/hash path runs on Tokio's blocking pool; without a bound,
+/// offered concurrency oversubscribes the CPU (and, at ~19 MiB per op, memory).
+/// This gate caps in-flight KDF work to `max_in_flight`, waits at most
+/// `max_queue_wait_ms` for a slot, then sheds with `503`/`Retry-After`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KdfAdmissionYaml {
+    /// Maximum concurrent Argon2id operations.
+    ///
+    /// `null`/absent (the default) resolves to the host **core count**
+    /// ([`std::thread::available_parallelism`]) — the Little's-Law bound at
+    /// which Argon2id throughput saturates. The calibrated production value is
+    /// refined by the C7/HEA-1875 saturation sweep. MUST be `>= 1` when set.
+    #[serde(default)]
+    pub max_in_flight: Option<usize>,
+    /// Maximum milliseconds a request waits for a KDF permit before it is shed
+    /// with `503 Service Unavailable` + `Retry-After`. Default: `250`.
+    #[serde(default = "KdfAdmissionYaml::default_max_queue_wait_ms")]
+    pub max_queue_wait_ms: u64,
+    /// `Retry-After` value (seconds) advertised on a shed response. Default: `1`.
+    #[serde(default = "KdfAdmissionYaml::default_retry_after_seconds")]
+    pub retry_after_seconds: u64,
+}
+
+impl Default for KdfAdmissionYaml {
+    fn default() -> Self {
+        Self {
+            max_in_flight: None,
+            max_queue_wait_ms: Self::default_max_queue_wait_ms(),
+            retry_after_seconds: Self::default_retry_after_seconds(),
+        }
+    }
+}
+
+impl KdfAdmissionYaml {
+    /// Default bounded queue-wait before shedding: 250 ms.
+    const fn default_max_queue_wait_ms() -> u64 {
+        250
+    }
+
+    /// Default `Retry-After` advertised on shed: 1 second.
+    const fn default_retry_after_seconds() -> u64 {
+        1
+    }
 }
 
 /// `security.password.pepper` — server-side Argon2id pepper (A-46).

@@ -513,11 +513,48 @@ impl Config {
         // without a pepper.
         self.security.resolve_pepper()?;
 
+        // Fail fast on a nonsensical `security.password.kdf` bound — a gate that
+        // can never admit is a self-inflicted outage on the auth path.
+        self.security.validate_kdf_admission()?;
+
         Ok(())
     }
 }
 
 impl SecurityYaml {
+    /// Validates `security.password.kdf`, rejecting `max_in_flight: 0`.
+    ///
+    /// An explicit bound of `0` would produce a gate that admits no Argon2id
+    /// work — every login would shed with `503`. That is never intended, so it
+    /// is a config error rather than a silent clamp. `null`/absent is valid and
+    /// resolves to the core count at boot.
+    pub fn validate_kdf_admission(&self) -> Result<(), ConfigError> {
+        if self.password.kdf.max_in_flight == Some(0) {
+            return Err(invalid(
+                "security.password.kdf.max_in_flight",
+                "must be >= 1 (a bound of 0 would shed every password verification); \
+                 omit the key to default to the host core count",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolves `security.password.kdf` into a [`crate::identity::KdfGateConfig`].
+    ///
+    /// `max_in_flight: null`/absent resolves to the host core count via
+    /// [`KdfGateConfig::default`](crate::identity::KdfGateConfig). Assumes
+    /// [`Self::validate_kdf_admission`] already ran (so `0` cannot reach here).
+    #[must_use]
+    pub fn resolve_kdf_gate(&self) -> crate::identity::KdfGateConfig {
+        let yaml = &self.password.kdf;
+        let default = crate::identity::KdfGateConfig::default();
+        crate::identity::KdfGateConfig {
+            max_in_flight: yaml.max_in_flight.unwrap_or(default.max_in_flight),
+            max_queue_wait: std::time::Duration::from_millis(yaml.max_queue_wait_ms),
+            retry_after: std::time::Duration::from_secs(yaml.retry_after_seconds),
+        }
+    }
+
     /// Resolves `security.password.pepper` into a [`PepperConfig`].
     ///
     /// Returns `Ok(None)` when no pepper is configured (the default), leaving
@@ -2300,7 +2337,10 @@ mod tests {
 
     fn security_with_pepper(pepper: Option<PepperYaml>) -> SecurityYaml {
         SecurityYaml {
-            password: PasswordSecurityYaml { pepper },
+            password: PasswordSecurityYaml {
+                pepper,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -2354,6 +2394,47 @@ mod tests {
         let err = sec.resolve_pepper().expect_err("zero key rejected");
         let msg = err.to_string();
         assert!(msg.contains("all-zero"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn kdf_admission_absent_resolves_to_core_count_default() {
+        // Default (no `security.password.kdf`) → core-count bound + 250ms/1s.
+        let sec = SecurityYaml::default();
+        sec.validate_kdf_admission().expect("default is valid");
+        let resolved = sec.resolve_kdf_gate();
+        let expected_cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        assert_eq!(resolved.max_in_flight, expected_cores);
+        assert_eq!(resolved.max_queue_wait, std::time::Duration::from_millis(250));
+        assert_eq!(resolved.retry_after, std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn kdf_admission_rejects_zero_max_in_flight() {
+        // An explicit bound of 0 would shed every login — must be a config error.
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.max_in_flight = Some(0);
+        let err = sec
+            .validate_kdf_admission()
+            .expect_err("zero bound rejected");
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn kdf_admission_explicit_values_resolve_through() {
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.max_in_flight = Some(8);
+        sec.password.kdf.max_queue_wait_ms = 100;
+        sec.password.kdf.retry_after_seconds = 2;
+        sec.validate_kdf_admission().expect("valid");
+        let resolved = sec.resolve_kdf_gate();
+        assert_eq!(resolved.max_in_flight, 8);
+        assert_eq!(resolved.max_queue_wait, std::time::Duration::from_millis(100));
+        assert_eq!(resolved.retry_after, std::time::Duration::from_secs(2));
     }
 
     #[test]

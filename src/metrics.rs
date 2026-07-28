@@ -71,6 +71,26 @@ const GET_BUCKETS: &[f64] = &[
 /// to 64 capture the tail without over-bucketing the common 0–2 probe case.
 const SST_PROBE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 
+/// KDF **queue-wait** histogram buckets (seconds) for the bounded Argon2id
+/// admission gate (HEA-1887 / R1).
+///
+/// Range: 100 µs → 1 s. A well-provisioned gate keeps the mass near zero (a
+/// permit is free); a saturated one pushes toward the configured
+/// `max_queue_wait` ceiling just before it sheds. The shape of this histogram
+/// is the direct, previously-invisible evidence of the Little's-Law queue that
+/// C9/HEA-1879 inferred only from end-to-end p99.
+const KDF_QUEUE_WAIT_BUCKETS: &[f64] =
+    &[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
+
+/// KDF **compute-time** histogram buckets (seconds) for one Argon2id operation.
+///
+/// Range: 5 ms → 2 s. Centred on the measured OWASP-parameter cost
+/// (≈12–120 ms on `dev-ryzen-7840hs`, C9/HEA-1879 §2) so the compute floor is
+/// separable from queue wait — the two histograms together decompose the tail
+/// that was a single opaque number before this change.
+const KDF_COMPUTE_BUCKETS: &[f64] =
+    &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0];
+
 /// All Prometheus metrics collected by the Hearth server.
 ///
 /// Obtain the process-global singleton via [`metrics()`].
@@ -216,6 +236,36 @@ pub struct Metrics {
     /// WAL-rotation flush, compaction). Bounds the worst-case probe fan-out of a
     /// cold `get`.
     pub storage_sst_files: Gauge,
+
+    // ── KDF admission control (HEA-1887 / R1) ───────────────────────────────
+    /// Argon2id operations currently executing on the blocking pool (holding a
+    /// permit). Bounded above by `hearth_kdf_permits`; if it sits pinned at the
+    /// permit ceiling the gate is saturated and `hearth_kdf_queue_wait_seconds`
+    /// / `hearth_kdf_shed_total` show the resulting back-pressure.
+    pub kdf_in_flight: Gauge,
+
+    /// Configured maximum concurrent Argon2id operations (permit count).
+    ///
+    /// Set once at boot from `security.password.kdf.max_in_flight` (default =
+    /// available parallelism / core count). Exported so a scrape can compute
+    /// `kdf_in_flight / kdf_permits` saturation without knowing the config.
+    pub kdf_permits: Gauge,
+
+    /// Time a request waited to acquire a KDF permit before its Argon2id op ran,
+    /// in seconds. Only successful (non-shed) acquisitions are observed.
+    pub kdf_queue_wait_seconds: Histogram,
+
+    /// Wall-clock cost of a single Argon2id operation (verify or hash), in
+    /// seconds — measured around the `spawn_blocking` body, excluding queue wait.
+    pub kdf_compute_seconds: Histogram,
+
+    /// Total Argon2id operations shed (rejected with `503`/`Retry-After`) because
+    /// no permit became free within the configured `max_queue_wait` budget.
+    ///
+    /// A non-zero and rising value means the KDF path is overloaded and honest
+    /// back-pressure is engaging instead of the unbounded queueing that produced
+    /// the multi-second p99 tail in C9/HEA-1879.
+    pub kdf_shed_total: Counter,
 }
 
 impl Metrics {
@@ -449,6 +499,57 @@ impl Metrics {
             .register(Box::new(storage_sst_files.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let kdf_in_flight = Gauge::new(
+            "hearth_kdf_in_flight",
+            "Argon2id operations currently executing (holding an admission permit)",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_in_flight.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let kdf_permits = Gauge::new(
+            "hearth_kdf_permits",
+            "Configured maximum concurrent Argon2id operations (permit count)",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_permits.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let kdf_queue_wait_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "hearth_kdf_queue_wait_seconds",
+                "Seconds spent waiting for a KDF admission permit (successful acquisitions only)",
+            )
+            .buckets(KDF_QUEUE_WAIT_BUCKETS.to_vec()),
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_queue_wait_seconds.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let kdf_compute_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "hearth_kdf_compute_seconds",
+                "Wall-clock seconds for one Argon2id operation (excludes queue wait)",
+            )
+            .buckets(KDF_COMPUTE_BUCKETS.to_vec()),
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_compute_seconds.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let kdf_shed_total = Counter::new(
+            "hearth_kdf_shed_total",
+            "Total Argon2id operations shed (503/Retry-After) due to a full KDF queue",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_shed_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         Self {
             registry,
             http_request_duration_seconds,
@@ -472,6 +573,11 @@ impl Metrics {
             storage_hot_tier_evictions_total,
             storage_hot_tier_promotions_total,
             storage_sst_files,
+            kdf_in_flight,
+            kdf_permits,
+            kdf_queue_wait_seconds,
+            kdf_compute_seconds,
+            kdf_shed_total,
         }
     }
 

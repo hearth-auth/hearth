@@ -36,15 +36,15 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
 
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
-    AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams, IdentityError,
-    SessionContext,
+    gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams, IdentityError,
+    KdfGateError, SessionContext,
 };
 use crate::protocol::client_info::build_session_context;
 
@@ -909,17 +909,49 @@ pub struct LoginForm {
     pub csrf: String,
 }
 
+/// Runs a blocking login closure under the bounded KDF admission gate
+/// (HEA-1887 / R1).
+///
+/// The login path's dominant cost is the inline Argon2id verify, so we acquire
+/// a KDF permit *before* the `spawn_blocking` rather than letting unbounded
+/// concurrent logins oversubscribe the blocking pool (the mechanism behind the
+/// C9/HEA-1879 multi-second p99). When the gate is saturated the request is
+/// shed with `503 Service Unavailable` + `Retry-After` instead of queueing.
+async fn run_login_gated<F>(f: F) -> Response
+where
+    F: FnOnce() -> Response + Send + 'static,
+{
+    match gate().run(f).await {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => kdf_shed_response(retry_after),
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Builds the `503 Service Unavailable` shed response for an overloaded KDF gate.
+///
+/// Carries a `Retry-After` header (seconds) so well-behaved clients back off
+/// instead of retrying immediately and deepening the overload.
+fn kdf_shed_response(retry_after: std::time::Duration) -> Response {
+    // Never advertise 0 — clients treat `Retry-After: 0` inconsistently.
+    let secs = retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Server is busy verifying credentials. Please retry shortly.\n",
+    )
+        .into_response();
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    resp
+}
+
 /// Handles login submission at the bare `/ui/login` URL.
 pub async fn login_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || {
-        login_submit_impl(state, headers, form, RealmSource::Path(None))
-    })
-    .await
-    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    run_login_gated(move || login_submit_impl(state, headers, form, RealmSource::Path(None))).await
 }
 
 /// Handles login submission at `/ui/realms/<name>/login`.
@@ -929,11 +961,10 @@ pub async fn login_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || {
+    run_login_gated(move || {
         login_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
     })
     .await
-    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Handles admin login submission at `/ui/admin/login`. On success,
@@ -943,9 +974,7 @@ pub async fn admin_login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || login_submit_impl(state, headers, form, RealmSource::Admin))
-        .await
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    run_login_gated(move || login_submit_impl(state, headers, form, RealmSource::Admin)).await
 }
 
 /// Shared login submit. On success: creates a session, issues the
@@ -4272,6 +4301,33 @@ pub async fn ra_verify_email_success(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HEA-1887 / R1: an overloaded KDF gate sheds with `503` + a non-zero
+    /// `Retry-After`, so login degrades honestly under saturation instead of
+    /// inflating p99 by queueing. Pairs with the primitive-level shed test in
+    /// `identity::kdf_gate` (which proves past-bound ops return `Overloaded`).
+    #[test]
+    fn kdf_shed_response_is_503_with_retry_after() {
+        let resp = kdf_shed_response(std::time::Duration::from_secs(3));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .expect("Retry-After header present");
+        assert_eq!(retry.to_str().expect("ascii"), "3");
+    }
+
+    /// A sub-second retry hint is floored to 1 — `Retry-After: 0` is handled
+    /// inconsistently by clients and would invite immediate retry storms.
+    #[test]
+    fn kdf_shed_response_floors_retry_after_to_one() {
+        let resp = kdf_shed_response(std::time::Duration::from_millis(200));
+        let retry = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .expect("Retry-After header present");
+        assert_eq!(retry.to_str().expect("ascii"), "1");
+    }
 
     #[test]
     fn derive_base_url_uses_configured_origin() {

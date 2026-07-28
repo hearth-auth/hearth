@@ -16,6 +16,7 @@ mod engine;
 pub mod error;
 pub mod federation;
 pub mod hibp;
+pub mod kdf_gate;
 pub mod key_encryption;
 pub(crate) mod keys;
 pub mod ldap;
@@ -71,6 +72,7 @@ pub use credentials::{
     hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,
     PepperKey, StoredCredential,
 };
+pub use kdf_gate::{gate, init_gate, KdfGate, KdfGateConfig, KdfGateError};
 pub use email::{
     ApiKey, EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
