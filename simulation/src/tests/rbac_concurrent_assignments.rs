@@ -106,8 +106,7 @@ fn concurrent_assign_unassign_converge_to_consistent_set() {
         .into_iter()
         .map(|h| h.join().expect("thread join"))
         .collect();
-    let legal: std::collections::HashSet<String> =
-        (0..4).map(|i| format!("p.r{i}")).collect();
+    let legal: std::collections::HashSet<String> = (0..4).map(|i| format!("p.r{i}")).collect();
     for h in resolve_handles {
         let observed = h.join().expect("thread join");
         for name in &observed {
@@ -166,8 +165,8 @@ fn concurrent_assign_unassign_converge_to_consistent_set() {
 /// + idempotency path (`engine.rs`: "if this exact (subject, role, scope)
 /// already exists, return it without creating a duplicate") is never exercised.
 /// Here eight threads race to assign the *same* role to the *same* user at the
-/// same scope; the invariant is that exactly one assignment record survives —
-/// no lost update, no duplicate index entries, no torn resolve.
+/// same scope; the invariant is that exactly one assignment record survives (no
+/// lost update, no duplicate index entries, no torn resolve).
 #[test]
 fn concurrent_same_role_assign_is_idempotent() {
     let (rbac, realm) = open();

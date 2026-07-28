@@ -927,8 +927,14 @@ mod tests {
         let m = make_metrics(Some(120), Some(20));
         let lag = compute_lag_ms(&m);
         assert_eq!(lag, 500);
-        assert!(!reads_allowed_for_lag(lag, 200), "500 ms lag > 200 ms → fenced");
-        assert!(reads_allowed_for_lag(lag, 600), "500 ms lag ≤ 600 ms → open");
+        assert!(
+            !reads_allowed_for_lag(lag, 200),
+            "500 ms lag > 200 ms → fenced"
+        );
+        assert!(
+            reads_allowed_for_lag(lag, 600),
+            "500 ms lag ≤ 600 ms → open"
+        );
     }
 
     // ── compute_lag_ms ────────────────────────────────────────────────────────
@@ -987,7 +993,7 @@ mod tests {
         // Leader ahead or behind by the same amount yields the same magnitude.
         assert_eq!(clock_skew_ms(1_000_000, 2_500_000), 1_500); // leader behind
         assert_eq!(clock_skew_ms(2_500_000, 1_000_000), 1_500); // leader ahead
-        // Boundary: 1_000 ms is not "exceeds 1 s"; 1_001 ms is.
+                                                                // Boundary: 1_000 ms is not "exceeds 1 s"; 1_001 ms is.
         assert_eq!(clock_skew_ms(0, 1_000_000), 1_000);
         assert!(clock_skew_ms(0, 1_001_000) > 1_000);
     }

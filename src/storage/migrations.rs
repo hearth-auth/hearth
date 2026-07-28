@@ -156,8 +156,7 @@ mod tests {
             apply: migrate_v0_to_v1,
         }];
         let content = b"v0-content";
-        let err =
-            apply_chain(GAPPED, content, 0, 2).expect_err("gap in migration chain must fail");
+        let err = apply_chain(GAPPED, content, 0, 2).expect_err("gap in migration chain must fail");
         match err {
             StorageError::DeserializationFailed { reason } => {
                 assert!(

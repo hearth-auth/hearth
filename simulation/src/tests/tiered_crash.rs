@@ -99,7 +99,10 @@ fn simulation_tier_transitions_concurrent() {
     for i in 0u32..50 {
         let key = format!("conc-{i:04}");
         assert_eq!(
-            reopened.get(&realm, key.as_bytes()).expect("get").as_deref(),
+            reopened
+                .get(&realm, key.as_bytes())
+                .expect("get")
+                .as_deref(),
             Some(expected(i)),
             "key {key} must survive crash + recovery from WAL+SST with its \
              committed value (seed={seed})"
