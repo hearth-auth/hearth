@@ -38,6 +38,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 crc32fast = "1"
 crossbeam-epoch = "0.9"
+crossbeam-skiplist = "0.1"
 data-encoding = "2"
 flate2 = "1"
 hyper = "1"

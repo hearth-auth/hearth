@@ -1,15 +1,39 @@
 //! In-memory sorted key-value store for recent writes.
 //!
-//! The memtable accepts writes and provides lock-free reads via `ArcSwap`.
-//! When it reaches its configured size threshold, it signals readiness for
-//! flushing to an SST (Step 5). Writes are serialized behind a `Mutex`;
-//! reads are wait-free through `ArcSwap::load()`.
+//! The memtable accepts writes and provides lock-free reads. It is backed by a
+//! `crossbeam_skiplist::SkipMap` — a lock-free, ordered, concurrent map — held
+//! behind an `ArcSwap` so a flush can atomically reset the map to empty. When it
+//! reaches its configured size threshold, it signals readiness for flushing to
+//! an SST (Step 5).
+//!
+//! ## Why a skiplist, not a copy-on-write `Arc<BTreeMap>` (HEA-1897)
+//!
+//! The original design cloned the *entire* backing `BTreeMap` on every `put`
+//! (`current.clone()` → mutate → `ArcSwap::store`). That made each write O(N) in
+//! the number of resident entries: at the 64 MiB default flush threshold, ~160k
+//! entries were reallocated on every single put, and because two full copies are
+//! live at once (and `arc_swap` defers freeing the old one) the glibc arena
+//! high-water grew and RSS never returned it. HEA-1867's record-size trace
+//! attributed ~22 of the observed 24 KB/user resident cost to exactly this
+//! clone, and the C0 seed ladder's rising ms/user (2.63 → 7.76) is its
+//! write-throughput signature.
+//!
+//! `SkipMap` inserts in O(log N) with no whole-map copy, so per-put cost is
+//! independent of occupancy. It preserves the storage hot-path contract
+//! (CLAUDE.md): **reads take no lock** (`SkipMap::get`/`range` are lock-free,
+//! epoch-reclaimed) and **do not yield**. Writes still hold a `Mutex` — not to
+//! protect the map (the skiplist is internally concurrent) but to keep the
+//! read-old-size / insert / size-delta sequence atomic against other writers and
+//! to give [`flush_under_lock`](Memtable::flush_under_lock) a barrier so its
+//! atomic swap-to-empty can never drop a concurrent put. Writes are off the hot
+//! path, so serializing them is acceptable; the defect was the O(N) clone under
+//! that lock, not the lock itself.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
+use crossbeam_skiplist::SkipMap;
 
 use crate::core::RealmId;
 use crate::storage::error::StorageError;
@@ -74,13 +98,17 @@ impl Default for MemtableConfig {
 
 /// In-memory sorted key-value store with lock-free reads.
 ///
-/// Uses `ArcSwap<BTreeMap>` for wait-free read access and a `Mutex`
-/// to serialize writes (clone-mutate-swap pattern). Writes are off the
-/// hot path, so the allocation from cloning is acceptable.
+/// Backed by a lock-free `SkipMap` so writes insert in O(log N) with no
+/// whole-map copy (HEA-1897); the map lives behind an `ArcSwap` purely so a
+/// flush can atomically replace it with a fresh empty map. A `Mutex` serializes
+/// writers (see the module docs) — reads never take it.
 pub(crate) struct Memtable {
-    /// The sorted key-value data, swapped atomically on writes.
-    data: ArcSwap<BTreeMap<CompositeKey, MemtableValue>>,
-    /// Serializes write operations (put, delete, clear).
+    /// The sorted key-value data. The skiplist itself is concurrently mutable;
+    /// the `ArcSwap` wrapper exists only so [`flush_under_lock`](Self::flush_under_lock)
+    /// and [`clear`](Self::clear) can atomically swap in an empty map.
+    data: ArcSwap<SkipMap<CompositeKey, MemtableValue>>,
+    /// Serializes write operations (put, delete, clear) so size accounting and
+    /// the flush swap-to-empty are race-free. Reads never acquire it.
     write_lock: Mutex<()>,
     /// Approximate total byte size of all entries.
     approximate_size: AtomicUsize,
@@ -92,7 +120,7 @@ impl Memtable {
     /// Creates a new empty memtable with the given configuration.
     pub(crate) fn new(config: MemtableConfig) -> Self {
         Self {
-            data: ArcSwap::from_pointee(BTreeMap::new()),
+            data: ArcSwap::from_pointee(SkipMap::new()),
             write_lock: Mutex::new(()),
             approximate_size: AtomicUsize::new(0),
             config,
@@ -120,28 +148,27 @@ impl Memtable {
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
-        let current = self.data.load_full();
-        let mut new_map = (*current).clone();
+        let map = self.data.load();
 
         let new_entry_size = Self::entry_size(key, &new_value);
-        let old_entry_size = new_map
+        let old_entry_size = map
             .get(&composite)
-            .map_or(0, |old_val| Self::entry_size(key, old_val));
+            .map_or(0, |old| Self::entry_size(key, old.value()));
 
-        new_map.insert(composite, new_value);
-        self.data.store(Arc::new(new_map));
+        map.insert(composite, new_value);
 
         self.update_size(old_entry_size, new_entry_size);
 
         Ok(())
     }
 
-    /// Inserts or updates many key-value pairs in a single copy-on-write cycle.
+    /// Inserts or updates many key-value pairs under a single write-lock hold.
     ///
     /// Equivalent to calling [`put`](Self::put) once per entry — same final map
-    /// contents and same `approximate_size` — but clones the backing `BTreeMap`
-    /// **once** for the whole batch instead of once per entry. This turns a bulk
-    /// insert of `B` entries from O(B · N) into O(N + B), which is essential for
+    /// contents and same `approximate_size` — but acquires the write lock once
+    /// for the whole batch instead of once per entry. Each individual insert is
+    /// O(log N) into the lock-free skiplist (HEA-1897), so a bulk insert of `B`
+    /// entries is O(B · log N) with no whole-map copy, which is essential for
     /// large bulk loads (e.g. the demo seeder writing millions of rows).
     pub(crate) fn put_batch(
         &self,
@@ -157,8 +184,7 @@ impl Memtable {
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
-        let current = self.data.load_full();
-        let mut new_map = (*current).clone();
+        let map = self.data.load();
 
         let mut old_total: usize = 0;
         let mut new_total: usize = 0;
@@ -170,14 +196,13 @@ impl Memtable {
             let new_value = MemtableValue::Data(value.clone());
 
             new_total += Self::entry_size(key, &new_value);
-            old_total += new_map
+            old_total += map
                 .get(&composite)
-                .map_or(0, |old_val| Self::entry_size(key, old_val));
+                .map_or(0, |old| Self::entry_size(key, old.value()));
 
-            new_map.insert(composite, new_value);
+            map.insert(composite, new_value);
         }
 
-        self.data.store(Arc::new(new_map));
         self.update_size(old_total, new_total);
 
         Ok(())
@@ -210,21 +235,21 @@ impl Memtable {
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
-        let current = self.data.load_full();
+        let current = self.data.load();
         if current.is_empty() {
             return Ok(false);
         }
 
         let entries: Vec<(CompositeKey, MemtableValue)> = current
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
 
         // Persist + register the SST while still holding the write lock. On
         // failure we return without resetting, so nothing is lost.
         write_sst(&entries)?;
 
-        self.data.store(Arc::new(BTreeMap::new()));
+        self.data.store(Arc::new(SkipMap::new()));
         self.approximate_size.store(0, Ordering::Relaxed);
 
         Ok(true)
@@ -246,16 +271,14 @@ impl Memtable {
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
-        let current = self.data.load_full();
-        let mut new_map = (*current).clone();
+        let map = self.data.load();
 
         let new_entry_size = Self::entry_size(key, &new_value);
-        let old_entry_size = new_map
+        let old_entry_size = map
             .get(&composite)
-            .map_or(0, |old_val| Self::entry_size(key, old_val));
+            .map_or(0, |old| Self::entry_size(key, old.value()));
 
-        new_map.insert(composite, new_value);
-        self.data.store(Arc::new(new_map));
+        map.insert(composite, new_value);
 
         self.update_size(old_entry_size, new_entry_size);
 
@@ -270,7 +293,8 @@ impl Memtable {
             key: key.to_vec(),
         };
         let snapshot = self.data.load();
-        match snapshot.get(&composite) {
+        let entry = snapshot.get(&composite);
+        match entry.as_ref().map(crossbeam_skiplist::map::Entry::value) {
             Some(MemtableValue::Data(v)) => Some(v.clone()),
             Some(MemtableValue::Tombstone) | None => None,
         }
@@ -287,7 +311,7 @@ impl Memtable {
             realm_id: realm_id.clone(),
             key: key.to_vec(),
         };
-        self.data.load().get(&composite).cloned()
+        self.data.load().get(&composite).map(|e| e.value().clone())
     }
 
     /// Returns whether the memtable has reached its flush threshold.
@@ -312,8 +336,8 @@ impl Memtable {
         };
         snapshot
             .range(start..)
-            .take_while(|(k, _)| k.realm_id == *realm_id)
-            .map(|(k, v)| (k.key.clone(), v.clone()))
+            .take_while(|entry| entry.key().realm_id == *realm_id)
+            .map(|entry| (entry.key().key.clone(), entry.value().clone()))
             .collect()
     }
 
@@ -335,8 +359,13 @@ impl Memtable {
         };
         snapshot
             .range(start_key..)
-            .take_while(|(k, _)| k.realm_id == *realm_id && k.key.as_slice() < end)
-            .map(|(k, v)| (k.key.clone(), matches!(v, MemtableValue::Data(_))))
+            .take_while(|entry| entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end)
+            .map(|entry| {
+                (
+                    entry.key().key.clone(),
+                    matches!(entry.value(), MemtableValue::Data(_)),
+                )
+            })
             .collect()
     }
 
@@ -347,7 +376,7 @@ impl Memtable {
         let snapshot = self.data.load();
         snapshot
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 
@@ -403,7 +432,7 @@ impl Memtable {
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
-        self.data.store(Arc::new(BTreeMap::new()));
+        self.data.store(Arc::new(SkipMap::new()));
         self.approximate_size.store(0, Ordering::Relaxed);
 
         Ok(())
@@ -838,6 +867,65 @@ mod tests {
     fn memtable_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Memtable>();
+    }
+
+    // ===== HEA-1897: put cost must not scale with memtable occupancy =====
+
+    /// Averages the wall-clock cost of a batch of `probe` distinct-key puts made
+    /// into a memtable already holding `prefill` distinct entries. The prefill
+    /// puts are **not** timed — only the probe batch is measured — so the return
+    /// value isolates the marginal cost of one put at the given occupancy.
+    fn avg_put_nanos(realm: &RealmId, prefill: u32, probe: u32) -> f64 {
+        use std::time::Instant;
+        let mt = Memtable::new(MemtableConfig {
+            // Large threshold so no flush fires mid-measurement and skews it.
+            flush_threshold_bytes: usize::MAX,
+        });
+        // Untimed prefill to establish occupancy.
+        let value = [0u8; 256];
+        for i in 0..prefill {
+            mt.put(realm, &i.to_be_bytes(), &value).expect("prefill put");
+        }
+        // Timed probe: fresh keys above the prefill range so every put is an
+        // insert (not an overwrite), matching the create-user write pattern.
+        let start = Instant::now();
+        for i in prefill..(prefill + probe) {
+            mt.put(realm, &i.to_be_bytes(), &value).expect("probe put");
+        }
+        let elapsed = start.elapsed();
+        #[allow(clippy::cast_precision_loss)]
+        let nanos = elapsed.as_nanos() as f64 / f64::from(probe);
+        nanos
+    }
+
+    /// TEST_SCENARIOS / HEA-1897: the marginal cost of a `put` MUST be
+    /// (approximately) independent of how many entries the memtable already
+    /// holds. The old copy-on-write `Arc<BTreeMap>` cloned the entire map on
+    /// every put, making per-put cost O(N) — an 8× larger memtable made each put
+    /// ~8× more expensive. A structure with sub-linear inserts holds the ratio
+    /// near constant. We assert the 8×-occupancy batch stays within 4× of the
+    /// baseline batch, which the O(N) clone cannot satisfy but O(log N) inserts
+    /// comfortably do (a generous bound chosen to avoid timing flakiness).
+    #[test]
+    fn put_cost_does_not_scale_with_occupancy() {
+        let realm = RealmId::generate();
+        const PROBE: u32 = 2_000;
+        const LOW_OCCUPANCY: u32 = 2_000;
+        const HIGH_OCCUPANCY: u32 = 16_000; // 8× the low mark
+
+        // Warm up allocator/caches so the first measured batch isn't penalised.
+        let _ = avg_put_nanos(&realm, 256, 256);
+
+        let low = avg_put_nanos(&realm, LOW_OCCUPANCY, PROBE);
+        let high = avg_put_nanos(&realm, HIGH_OCCUPANCY, PROBE);
+
+        assert!(
+            high < low * 4.0,
+            "put cost scales with occupancy: {high:.0} ns/put at {HIGH_OCCUPANCY} entries \
+             vs {low:.0} ns/put at {LOW_OCCUPANCY} entries (ratio {:.1}×, expected < 4×). \
+             This indicates an O(N)-per-put copy of the backing map.",
+            high / low
+        );
     }
 
     // ===== Phase B: P0 Extended Property Tests =====
