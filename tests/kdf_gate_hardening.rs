@@ -148,7 +148,7 @@ async fn saturate_shared_gate() -> tokio::task::JoinHandle<()> {
         let _ = hearth::identity::gate()
             .run(move || {
                 let _ = tx.send(());
-                std::thread::sleep(Duration::from_millis(1500));
+                std::thread::sleep(Duration::from_millis(1500)); // AUDIT: justified-sleep: holds the only admin KDF permit so the test can verify admin shed while the permit is occupied
             })
             .await;
     });

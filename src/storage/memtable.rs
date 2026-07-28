@@ -359,7 +359,9 @@ impl Memtable {
         };
         snapshot
             .range(start_key..)
-            .take_while(|entry| entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end)
+            .take_while(|entry| {
+                entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end
+            })
             .map(|entry| {
                 (
                     entry.key().key.clone(),
@@ -884,7 +886,8 @@ mod tests {
         // Untimed prefill to establish occupancy.
         let value = [0u8; 256];
         for i in 0..prefill {
-            mt.put(realm, &i.to_be_bytes(), &value).expect("prefill put");
+            mt.put(realm, &i.to_be_bytes(), &value)
+                .expect("prefill put");
         }
         // Timed probe: fresh keys above the prefill range so every put is an
         // insert (not an overwrite), matching the create-user write pattern.

@@ -2673,18 +2673,17 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Serializes a user to JSON bytes.
+    /// Serializes a user to binary bytes (postcard via [`UserStorageRecord`]).
     fn serialize_user(user: &User) -> Result<Vec<u8>, IdentityError> {
-        serde_json::to_vec(user).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::encode(&user.to_storage_record())
+            .map_err(|reason| IdentityError::Serialization { reason })
     }
 
-    /// Deserializes a user from JSON bytes.
+    /// Deserializes a user from binary bytes (postcard via [`UserStorageRecord`]).
     fn deserialize_user(bytes: &[u8]) -> Result<User, IdentityError> {
-        serde_json::from_slice(bytes).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::decode::<crate::identity::types::user::UserStorageRecord>(bytes)
+            .map(User::from_storage_record)
+            .map_err(|reason| IdentityError::Serialization { reason })
     }
 
     /// Wraps a storage error into an `IdentityError`.
@@ -2692,34 +2691,26 @@ impl EmbeddedIdentityEngine {
         IdentityError::Storage(Box::new(e))
     }
 
-    /// Serializes a stored credential to JSON bytes.
+    /// Serializes a stored credential to binary bytes (postcard).
     fn serialize_credential(cred: &StoredCredential) -> Result<Vec<u8>, IdentityError> {
-        serde_json::to_vec(cred).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::encode(cred).map_err(|reason| IdentityError::Serialization { reason })
     }
 
-    /// Deserializes a stored credential from JSON bytes.
+    /// Deserializes a stored credential from binary bytes (postcard).
     fn deserialize_credential(bytes: &[u8]) -> Result<StoredCredential, IdentityError> {
-        serde_json::from_slice(bytes).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::decode(bytes).map_err(|reason| IdentityError::Serialization { reason })
     }
 
     fn serialize_credential_history(
         history: &[StoredCredential],
     ) -> Result<Vec<u8>, IdentityError> {
-        serde_json::to_vec(history).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::encode(history).map_err(|reason| IdentityError::Serialization { reason })
     }
 
     fn deserialize_credential_history(
         bytes: &[u8],
     ) -> Result<Vec<StoredCredential>, IdentityError> {
-        serde_json::from_slice(bytes).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::decode(bytes).map_err(|reason| IdentityError::Serialization { reason })
     }
 
     /// Resolves per-realm password policy overrides.
@@ -2756,18 +2747,17 @@ impl EmbeddedIdentityEngine {
         Ok(cfg)
     }
 
-    /// Serializes a session to JSON bytes.
+    /// Serializes a session to binary bytes (postcard via [`SessionStorageRecord`]).
     fn serialize_session(session: &Session) -> Result<Vec<u8>, IdentityError> {
-        serde_json::to_vec(session).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::encode(&session.to_storage_record())
+            .map_err(|reason| IdentityError::Serialization { reason })
     }
 
-    /// Deserializes a session from JSON bytes.
+    /// Deserializes a session from binary bytes (postcard via [`SessionStorageRecord`]).
     fn deserialize_session(bytes: &[u8]) -> Result<Session, IdentityError> {
-        serde_json::from_slice(bytes).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        crate::codec::decode::<crate::identity::types::session::SessionStorageRecord>(bytes)
+            .map(Session::from_storage_record)
+            .map_err(|reason| IdentityError::Serialization { reason })
     }
 
     /// Loads a raw session from storage without validity checks.
@@ -3540,11 +3530,11 @@ impl EmbeddedIdentityEngine {
             return;
         };
         for entry in &entries {
-            if let Ok(mut session) = serde_json::from_slice::<Session>(&entry.value) {
+            if let Ok(mut session) = Self::deserialize_session(&entry.value) {
                 if !session.is_revoked() {
                     let session_id = session.id().clone();
                     session.revoke();
-                    if let Ok(bytes) = serde_json::to_vec(&session) {
+                    if let Ok(bytes) = Self::serialize_session(&session) {
                         let _ = storage.put(realm_id, &entry.key, &bytes);
                     }
                     // Drop the cached (still-valid) copy so subsequent
@@ -5387,7 +5377,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .delete(realm_id, &old_email_key)
                     .map_err(Self::storage_err)?;
 
-                // Write new email index
+                // Write new email index (16 raw UUID bytes).
                 let user_id_bytes = keys::encode_user_id_value(user_id);
                 self.storage
                     .put(realm_id, &new_email_key, &user_id_bytes)
@@ -6377,10 +6367,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .get(realm_id, &session_key)
                 .map_err(Self::storage_err)?
             {
-                let session: Session =
-                    serde_json::from_slice(&data).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
+                let session: Session = Self::deserialize_session(&data)?;
                 all.push(session);
             }
         }
@@ -6417,10 +6404,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Filter revoked sessions, then apply offset window on remaining.
         let mut all: Vec<Session> = Vec::new();
         for entry in &entries {
-            let session: Session =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let session: Session = Self::deserialize_session(&entry.value)?;
             if !session.is_revoked() {
                 all.push(session);
             }
@@ -8507,10 +8491,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
             user.set_email_verified(true);
             user.set_updated_at(self.clock.now());
-            let user_bytes =
-                serde_json::to_vec(&user).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let user_bytes = Self::serialize_user(&user)?;
             let user_key = keys::encode_user_id(&user_id);
             self.storage
                 .put(realm_id, &user_key, &user_bytes)
@@ -8803,10 +8784,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let mut items = Vec::with_capacity(entries.len());
         for entry in &entries {
-            let user: User =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let user: User = Self::deserialize_user(&entry.value)?;
             items.push(user);
         }
 
@@ -8839,10 +8817,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Filter using the compiled matcher (email or display name).
         let mut all_matching: Vec<User> = Vec::new();
         for entry in &entries {
-            let user: User =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let user: User = Self::deserialize_user(&entry.value)?;
             if matcher.matches_any(&[user.email(), user.display_name()]) {
                 all_matching.push(user);
             }
@@ -12538,7 +12513,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         let mut out = Vec::new();
         for entry in entries {
-            let Ok(stored) = serde_json::from_slice::<StoredCredential>(&entry.value) else {
+            let Ok(stored) = crate::codec::decode::<StoredCredential>(&entry.value) else {
                 continue;
             };
             let uuid_bytes = &entry.key[prefix.len()..];

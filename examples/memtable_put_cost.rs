@@ -65,8 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempfile::tempdir()?;
     let wal_max = 256 * 1024 * 1024;
     let hot_capacity = 100;
-    let mut config =
-        StorageConfig::production(PathBuf::from(tmp.path()), wal_max, NO_FLUSH_BYTES, hot_capacity);
+    let mut config = StorageConfig::production(
+        PathBuf::from(tmp.path()),
+        wal_max,
+        NO_FLUSH_BYTES,
+        hot_capacity,
+    );
     config.dev_mode = true;
     // No compaction: we only care about the in-memory memtable put path.
     config.compaction = CompactionConfig {
@@ -82,7 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Warm up allocator/caches so the first checkpoint isn't penalised.
     for i in 0..PROBE {
-        engine.put(&realm, format!("warm:{i:012}").into_bytes().as_slice(), &value)?;
+        engine.put(
+            &realm,
+            format!("warm:{i:012}").into_bytes().as_slice(),
+            &value,
+        )?;
     }
 
     let mut baseline_ns = 0.0_f64;

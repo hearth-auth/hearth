@@ -385,7 +385,7 @@ async fn a47_unknown_fields_in_request_body_rejected() {
 /// in `src/abuse/{shaper,detector,guards}.rs`. Ignored (not a vacuous pass)
 /// until the facade lands. See docs/plans/HEA-1114-abuse-prevention.md row A-1.
 #[test]
-#[ignore = "A-1 unified AbuseGuard facade not yet implemented (HEA-1114)"]
+#[ignore = "A-1 unified AbuseGuard facade blocked on HEA-1114 (facade not yet built)"]
 fn a1_abuse_guard_deny_decision_rejects_request() {
     unimplemented!("A-1 AbuseGuard facade pending (HEA-1114)");
 }
@@ -395,7 +395,7 @@ fn a1_abuse_guard_deny_decision_rejects_request() {
 ///
 /// A-1 — see docs/plans/HEA-1114-abuse-prevention.md row A-1.
 #[test]
-#[ignore = "A-1 unified AbuseGuard facade not yet implemented (HEA-1114)"]
+#[ignore = "A-1 unified AbuseGuard facade blocked on HEA-1114 (facade not yet built)"]
 fn a1_abuse_guard_challenge_decision_returns_challenge_required() {
     unimplemented!("A-1 AbuseGuard facade pending (HEA-1114)");
 }
@@ -410,7 +410,7 @@ fn a1_abuse_guard_challenge_decision_returns_challenge_required() {
 /// verified in `tests/audit.rs`. See docs/plans/HEA-1114-abuse-prevention.md
 /// row A-51.
 #[test]
-#[ignore = "A-51 external attestation not yet implemented (HEA-1114)"]
+#[ignore = "A-51 external attestation blocked on HEA-1114 (shipping not yet started)"]
 fn a51_tampered_row_between_attestations_detected() {
     unimplemented!("A-51 external attestation pending (HEA-1114)");
 }
@@ -420,7 +420,7 @@ fn a51_tampered_row_between_attestations_detected() {
 ///
 /// A-51 — see docs/plans/HEA-1114-abuse-prevention.md row A-51.
 #[test]
-#[ignore = "A-51 external attestation not yet implemented (HEA-1114)"]
+#[ignore = "A-51 external attestation blocked on HEA-1114 (shipping not yet started)"]
 fn a51_missing_prior_attestation_fails_closed() {
     unimplemented!("A-51 external attestation pending (HEA-1114)");
 }

@@ -64,7 +64,10 @@ fn audit_append(storage: &EmbeddedStorageEngine, realm: &RealmId, u: u64) {
     let primary_key = format!("aud:evt:{u:016x}").into_bytes();
     let entries = vec![
         (primary_key.clone(), blob(AUDIT_EVENT_BYTES, u)),
-        (format!("aud:actor:{u:016x}").into_bytes(), primary_key.clone()),
+        (
+            format!("aud:actor:{u:016x}").into_bytes(),
+            primary_key.clone(),
+        ),
         (format!("aud:action:{u:016x}").into_bytes(), primary_key),
         (b"aud:head".to_vec(), blob(120, u)),
     ];
@@ -75,8 +78,8 @@ fn audit_append(storage: &EmbeddedStorageEngine, realm: &RealmId, u: u64) {
 /// user keys, then the audit batch.
 fn seed_legacy(n: usize) -> f64 {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage = EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
-        .expect("open");
+    let storage =
+        EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf())).expect("open");
     let realm = RealmId::generate();
     let start = Instant::now();
     for u in 0..n as u64 {
@@ -97,8 +100,8 @@ fn seed_legacy(n: usize) -> f64 {
 /// user keys, then the audit batch (mirrors the HEA-1896 change).
 fn seed_batched(n: usize) -> f64 {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage = EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
-        .expect("open");
+    let storage =
+        EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf())).expect("open");
     let realm = RealmId::generate();
     let start = Instant::now();
     for u in 0..n as u64 {
@@ -121,7 +124,10 @@ fn seed_batched(n: usize) -> f64 {
 fn main() {
     println!("HEA-1896 create_user write-path ms/user ladder");
     println!("(EmbeddedStorageEngine, in-process, prod default 64 MiB flush)\n");
-    println!("{:>8} | {:>14} | {:>14}", "N", "legacy ms/user", "batched ms/user");
+    println!(
+        "{:>8} | {:>14} | {:>14}",
+        "N", "legacy ms/user", "batched ms/user"
+    );
     println!("{}", "-".repeat(44));
 
     let mut legacy = Vec::new();

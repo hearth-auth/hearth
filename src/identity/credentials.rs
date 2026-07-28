@@ -1243,6 +1243,63 @@ mod tests {
                 prop_assert!(matches, "peppered password should verify after hashing");
                 prop_assert!(!needs_rehash, "active pepper needs no rehash");
             }
+
+            /// Property: `StoredCredential` survives a postcard encode→decode round-trip.
+            #[test]
+            fn stored_credential_roundtrip(
+                alg_idx in 0_usize..4,
+                hash in ".*",
+                created_at in any::<i64>(),
+                pepper_version in proptest::option::of(any::<u32>()),
+            ) {
+                let algorithm = [
+                    PasswordAlgorithm::Argon2id,
+                    PasswordAlgorithm::Bcrypt,
+                    PasswordAlgorithm::Scrypt,
+                    PasswordAlgorithm::Pbkdf2Sha256,
+                ][alg_idx].clone();
+                let cred = StoredCredential { algorithm, hash, created_at, pepper_version };
+                let bytes = crate::codec::encode(&cred).expect("encode");
+                let dec: StoredCredential = crate::codec::decode(&bytes).expect("decode");
+                prop_assert_eq!(&cred.algorithm, &dec.algorithm);
+                prop_assert_eq!(&cred.hash, &dec.hash);
+                prop_assert_eq!(cred.created_at, dec.created_at);
+                prop_assert_eq!(cred.pepper_version, dec.pepper_version);
+            }
+
+            /// Property: a credential history slice (Vec<StoredCredential>) round-trips.
+            #[test]
+            fn credential_history_roundtrip(
+                items in proptest::collection::vec(
+                    (0_usize..4, ".*", any::<i64>(), proptest::option::of(any::<u32>())),
+                    0..5,
+                )
+            ) {
+                let algorithms = [
+                    PasswordAlgorithm::Argon2id,
+                    PasswordAlgorithm::Bcrypt,
+                    PasswordAlgorithm::Scrypt,
+                    PasswordAlgorithm::Pbkdf2Sha256,
+                ];
+                let history: Vec<StoredCredential> = items
+                    .into_iter()
+                    .map(|(alg_idx, hash, created_at, pepper_version)| StoredCredential {
+                        algorithm: algorithms[alg_idx].clone(),
+                        hash,
+                        created_at,
+                        pepper_version,
+                    })
+                    .collect();
+                let bytes = crate::codec::encode(history.as_slice()).expect("encode");
+                let decoded: Vec<StoredCredential> = crate::codec::decode(&bytes).expect("decode");
+                prop_assert_eq!(history.len(), decoded.len());
+                for (orig, dec) in history.iter().zip(decoded.iter()) {
+                    prop_assert_eq!(&orig.algorithm, &dec.algorithm);
+                    prop_assert_eq!(&orig.hash, &dec.hash);
+                    prop_assert_eq!(orig.created_at, dec.created_at);
+                    prop_assert_eq!(orig.pepper_version, dec.pepper_version);
+                }
+            }
         }
     }
 }

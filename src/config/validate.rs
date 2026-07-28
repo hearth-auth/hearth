@@ -2521,7 +2521,7 @@ mod tests {
         sec.validate_kdf_admission().expect("valid");
         assert_eq!(
             sec.resolve_admin_kdf_gate().max_queue_wait,
-            std::time::Duration::from_millis(5_000)
+            std::time::Duration::from_secs(5)
         );
         // The shared gate is unaffected.
         assert_eq!(

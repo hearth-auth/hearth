@@ -631,7 +631,15 @@ impl AuditEngine for EmbeddedAuditEngine {
             let all_start = keys::event_scan_prefix();
             let all_entries = self.storage.scan(realm_id, &all_start, &scan_start)?;
             if let Some(last) = all_entries.last() {
-                decode_event(&last.value)?.integrity_hash
+                match decode_event(&last.value) {
+                    Ok(ev) => ev.integrity_hash,
+                    Err(_) => {
+                        crate::metrics::metrics()
+                            .audit_integrity_failures_total
+                            .inc();
+                        return Ok(false);
+                    }
+                }
             } else {
                 GENESIS_HASH.to_string()
             }
@@ -639,7 +647,15 @@ impl AuditEngine for EmbeddedAuditEngine {
 
         let mut count: u64 = 0;
         for entry in entries {
-            let event = decode_event(&entry.value)?;
+            let event = match decode_event(&entry.value) {
+                Ok(ev) => ev,
+                Err(_) => {
+                    crate::metrics::metrics()
+                        .audit_integrity_failures_total
+                        .inc();
+                    return Ok(false);
+                }
+            };
 
             let expected_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
             if event.integrity_hash != expected_hash {
@@ -901,6 +917,21 @@ impl EmbeddedAuditEngine {
         }
 
         Ok(events)
+    }
+
+    /// Encodes an [`AuditEvent`] into its postcard storage format.
+    ///
+    /// Only used by integration tests that write tampered bytes directly to
+    /// storage (tamper-detection scenarios) and need the correct binary format.
+    pub fn encode_for_test(event: &AuditEvent) -> Result<Vec<u8>, AuditError> {
+        encode_event(event)
+    }
+
+    /// Decodes postcard storage bytes into an [`AuditEvent`].
+    ///
+    /// Counterpart to [`Self::encode_for_test`] for tamper-detection tests.
+    pub fn decode_for_test(bytes: &[u8]) -> Result<AuditEvent, AuditError> {
+        decode_event(bytes)
     }
 }
 

@@ -17,7 +17,7 @@ use serde::{de::DeserializeOwned, Serialize};
 /// Encodes `value` using `postcard` into a `Vec<u8>`.
 ///
 /// Returns the serialized byte vector, or an error string on failure.
-pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
+pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String> {
     postcard::to_allocvec(value).map_err(|e| e.to_string())
 }
 
@@ -25,6 +25,6 @@ pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, String
 ///
 /// Returns an error string if the bytes are invalid or the schema has changed
 /// in a backward-incompatible way.
-pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     postcard::from_bytes(bytes).map_err(|e| e.to_string())
 }

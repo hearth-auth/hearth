@@ -500,6 +500,7 @@ mod tests {
     /// shedding the F2 isolation exists to make alertable. We measure deltas
     /// because the metrics singleton is process-global.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::float_cmp)]
     async fn admin_shed_increments_admin_counter_not_shared() {
         let metrics = crate::metrics::metrics();
         let shared_before = metrics.kdf_shed_total.get();

@@ -266,7 +266,10 @@ fn verify_integrity_rejects_sha256_forgery() {
     tampered.integrity_hash = forged_hash;
 
     // Write the tampered bytes directly to storage, bypassing the engine.
-    let forged_bytes = serde_json::to_vec(&tampered).expect("serialize tampered event");
+    // Must use encode_for_test so the bytes are in the correct postcard format
+    // that decode_event expects (not JSON).
+    let forged_bytes =
+        EmbeddedAuditEngine::encode_for_test(&tampered).expect("encode tampered event");
     storage
         .put(&realm, &e2_key, &forged_bytes)
         .expect("put forged event");
@@ -278,5 +281,64 @@ fn verify_integrity_rejects_sha256_forgery() {
     assert!(
         !valid,
         "verify_integrity must detect SHA-256 forgery — HMAC tag will not match"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 4: byte-corrupted (non-decodable) record alarms, not Errs
+// ---------------------------------------------------------------------------
+
+/// A byte-corrupted audit record (one that fails postcard decoding entirely)
+/// must be treated as a tamper signal: `verify_integrity` must return
+/// `Ok(false)` and increment `audit_integrity_failures_total`.
+///
+/// Before HEA-1903 the `?` on `decode_event` propagated
+/// `Err(Serialization)` to the caller instead of returning the alarm signal,
+/// so dashboards keyed off `Ok(false)` / the metric would see nothing.
+#[test]
+fn verify_integrity_alarms_on_undecodable_record() {
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let (engine, storage, _dir) = make_engine(Arc::clone(&clock) as Arc<dyn Clock>);
+    let realm = RealmId::generate();
+
+    // Baseline delta counter before anything touches this global.
+    let failures_before = hearth::metrics::metrics()
+        .audit_integrity_failures_total
+        .get();
+
+    // Append one valid event so there is something in the chain to corrupt.
+    append(&*engine, &realm, "alice", AuditAction::UserCreated, "u1");
+
+    // Scan raw storage to locate the event key.
+    let entries = storage
+        .scan(&realm, b"audit:evt:", b"audit:evt;")
+        .expect("scan audit event keys");
+    assert!(!entries.is_empty(), "must have at least one event");
+
+    // Overwrite the event bytes with garbage that will not deserialise.
+    let garbage: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x01, 0x02, 0x03];
+    storage
+        .put(&realm, &entries[0].key, &garbage)
+        .expect("write corrupted bytes");
+
+    // verify_integrity must return Ok(false), not Err.
+    let result = engine.verify_integrity(&realm, None, None);
+    assert!(
+        result.is_ok(),
+        "verify_integrity must not propagate a decode error — got: {result:?}"
+    );
+    assert!(
+        !result.expect("verify_integrity returned Err on undecodable record"),
+        "verify_integrity must return false for an undecodable record"
+    );
+
+    // The integrity-failure counter must have been incremented.
+    let failures_after = hearth::metrics::metrics()
+        .audit_integrity_failures_total
+        .get();
+    assert!(
+        failures_after > failures_before,
+        "audit_integrity_failures_total must increment on undecodable record \
+         (before={failures_before}, after={failures_after})"
     );
 }

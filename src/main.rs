@@ -3464,7 +3464,7 @@ fn run_migrate_rotate_pepper(
 
         for cred_entry in &cred_entries {
             let cred_bytes = &cred_entry.value;
-            let cred: StoredCredential = match serde_json::from_slice(cred_bytes) {
+            let cred: StoredCredential = match hearth::codec::decode(cred_bytes) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
