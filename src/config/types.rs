@@ -990,6 +990,15 @@ pub struct KdfAdmissionYaml {
     /// refined by the C7/HEA-1875 saturation sweep. MUST be `>= 1` when set.
     #[serde(default)]
     pub max_in_flight: Option<usize>,
+    /// Maximum concurrent Argon2id operations reserved for the **admin** login
+    /// gate (HEA-1892 / F2).
+    ///
+    /// Admin login uses a separate, small permit pool so a flood against a
+    /// tenant realm's login form cannot exhaust the shared gate and lock the
+    /// operator out. `null`/absent (the default) resolves to
+    /// [`crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT`]. MUST be `>= 1` when set.
+    #[serde(default)]
+    pub admin_max_in_flight: Option<usize>,
     /// Maximum milliseconds a request waits for a KDF permit before it is shed
     /// with `503 Service Unavailable` + `Retry-After`. Default: `250`.
     #[serde(default = "KdfAdmissionYaml::default_max_queue_wait_ms")]
@@ -1003,6 +1012,7 @@ impl Default for KdfAdmissionYaml {
     fn default() -> Self {
         Self {
             max_in_flight: None,
+            admin_max_in_flight: None,
             max_queue_wait_ms: Self::default_max_queue_wait_ms(),
             retry_after_seconds: Self::default_retry_after_seconds(),
         }

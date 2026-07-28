@@ -1101,6 +1101,17 @@ async fn run_serve(
         "kdf admission gate installed from security.password.kdf"
     );
 
+    // Install the separate admin-reserved KDF gate (HEA-1892 / F2). Admin login
+    // draws from this small isolated pool so a flood against a tenant realm's
+    // login form cannot exhaust the shared gate and lock the operator out of the
+    // admin console.
+    let kdf_admin_gate_cfg = config.security.resolve_admin_kdf_gate();
+    hearth::identity::init_admin_gate(kdf_admin_gate_cfg);
+    info!(
+        admin_max_in_flight = kdf_admin_gate_cfg.max_in_flight,
+        "kdf admin-reserved admission gate installed from security.password.kdf"
+    );
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
             credential: CredentialConfig {

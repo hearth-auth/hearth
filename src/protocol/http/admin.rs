@@ -311,6 +311,33 @@ async fn admin_list_users(
         || params.attr.is_some();
 
     if has_field_filters {
+        // Fast path: exact email-index lookup (O(1)) when only ?email= is given.
+        // This exercises the hot-tier storage path without a full corpus scan,
+        // making it suitable for tier-miss latency profiling (HEA-1876).
+        if params.email.is_some()
+            && params.username.is_none()
+            && params.status.is_none()
+            && params.attr.is_none()
+        {
+            let email_raw = params.email.as_deref().unwrap_or("");
+            return match state.identity.get_user_by_email(&auth.realm_id, email_raw) {
+                Ok(Some(user)) => {
+                    let item = proto_to_rest_json(&pb::User::from(&user));
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"items": [item], "next_cursor": null, "total": 1})),
+                    )
+                        .into_response()
+                }
+                Ok(None) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"items": [], "next_cursor": null, "total": 0})),
+                )
+                    .into_response(),
+                Err(e) => identity_error_to_response(&e).into_response(),
+            };
+        }
+
         // Parse the status filter value if provided.
         let status_filter = if let Some(s) = &params.status {
             let parsed = match s.as_str() {
@@ -653,12 +680,21 @@ async fn admin_create_user(
 
     let identity = Arc::clone(&state.identity);
     let realm_id = auth.realm_id.clone();
-    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "admin_create_user spawn_blocking panicked");
+    // create_user hashes an Argon2id credential — route through the shared KDF
+    // admission gate so bulk provisioning can't oversubscribe the blocking pool
+    // and blow the peak-memory ceiling (HEA-1891 / F3).
+    let result = match super::run_kdf_gated_rest(
+        move || identity.create_user(&realm_id, &request),
+        |e| {
+            tracing::error!(error = %e, "admin_create_user KDF task failed");
             Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        });
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(shed) => return shed,
+    };
 
     match result {
         Ok(user) => {
@@ -2425,6 +2461,58 @@ async fn admin_get_user_effective_permissions(
 // === Dev Bootstrap Endpoint ===
 
 /// Generates a random 32-character alphanumeric password using the OS CSPRNG.
+/// `GET /dev/probe-user?realm_id={uuid}&email={email}` — dev-mode-only storage
+/// latency probe for the tier-miss load sweep (C8, HEA-1876).
+///
+/// Performs a hot-tier-aware indexed user lookup (`get_user_by_email`) and
+/// returns 200 OK whether or not the user exists. No bearer token is required;
+/// the route is unregistered in production so it cannot be fingerprinted or
+/// reached in a non-dev deployment. The loopback-only bind constraint (enforced
+/// at config validation) ensures only local processes can reach this endpoint.
+pub(super) async fn dev_probe_user(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let realm_str = match params.get("realm_id") {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing realm_id"})),
+            )
+                .into_response()
+        }
+    };
+    let email = match params.get("email") {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing email"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_uuid = match realm_str.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid realm_id"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = crate::core::RealmId::new(realm_uuid);
+    // Drive the same two-step indexed storage lookup that ROPC used, so the
+    // hot-vs-cold tier split is visible in the latency distribution.
+    let _result = state.identity.get_user_by_email(&realm_id, email);
+    // Return 200 regardless of found/not-found — the measurement is latency,
+    // not correctness. A missing user (e.g. index > corpus_size) contributes
+    // a fast cached-miss path, which is fine noise for the sweep.
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
 /// Fixed dev-mode password for `admin@hearth.test`.
 ///
 /// Using a stable value (rather than a random one) lets the Playwright UI

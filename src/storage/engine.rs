@@ -265,6 +265,16 @@ pub struct EmbeddedStorageEngine {
     /// [`CompactionConfig::max_sst_count`], so the background task can run a
     /// partial compaction off the flush path. Never awaited on the hot path.
     compaction_notify: Arc<tokio::sync::Notify>,
+    /// Cumulative count of records written *out* by compaction merges
+    /// (`compact_partial` + `compact_ssts`), i.e. the write-amplification
+    /// numerator. Off the hot path; incremented under `flush_lock` after each
+    /// successful merge. Exposed via [`Self::compaction_records_written`] so the
+    /// HEA-1881 write-amplification regression test can pin that size-tiered
+    /// partial compaction stays `O(N log N)`, not the `O(N²)` a naive
+    /// full-merge-on-trigger would incur. Not a Prometheus metric — kept purely
+    /// internal to avoid the global-registry cross-test interference that
+    /// process-wide counters suffer under parallel `nextest`.
+    compaction_records_written: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EmbeddedStorageEngine {
@@ -490,6 +500,7 @@ impl EmbeddedStorageEngine {
             system_realm,
             compaction: config.compaction,
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
+            compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -639,6 +650,18 @@ impl EmbeddedStorageEngine {
     pub fn compaction_notify(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.compaction_notify)
     }
+
+    /// Cumulative number of records written out by compaction merges since the
+    /// engine opened — the numerator of write amplification (HEA-1881 lever 1).
+    ///
+    /// Used by the write-amplification regression test to prove size-tiered
+    /// partial compaction rewrites `O(N log N)` records under a bulk import
+    /// rather than the `O(N²)` a naive full-merge-on-trigger would.
+    #[cfg(test)]
+    pub(crate) fn compaction_records_written(&self) -> u64 {
+        self.compaction_records_written
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl EmbeddedStorageEngine {
@@ -736,6 +759,10 @@ impl EmbeddedStorageEngine {
 
         // Atomically swap reader list to just the compacted SST
         record_sst_file_count(1);
+        self.compaction_records_written.fetch_add(
+            u64::from(new_reader.entry_count()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.sst_readers.store(Arc::new(vec![new_reader]));
 
         // Delete old SST files (best-effort — warn on failure)
@@ -872,6 +899,15 @@ impl EmbeddedStorageEngine {
         let rebuilt = self.reload_sst_readers()?;
         let live_count = rebuilt.len();
         record_sst_file_count(live_count);
+        // Attribute the merged output's record count to write amplification. The
+        // output reused `target_num`, so it is the reader now sitting at that
+        // number (see the recency-ordering contract above).
+        if let Some(merged) = rebuilt.iter().find(|r| r.sst_number() == target_num) {
+            self.compaction_records_written.fetch_add(
+                u64::from(merged.entry_count()),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         self.sst_readers.store(Arc::new(rebuilt));
 
         Ok(input_count)
@@ -2267,6 +2303,111 @@ mod tests {
             engine.get(&realm, b"aaa-doomed").expect("get doomed"),
             None,
             "partial compaction must not resurrect a deleted key"
+        );
+    }
+
+    /// HEA-1881 lever 1, **mandatory AC** — the count trigger MUST carry a
+    /// write-amplification debounce. This pins that size-tiered *partial*
+    /// compaction rewrites `O(N log N)` records under a sustained bulk import,
+    /// NOT the `O(N²)` that a naive "full-merge whenever count crosses the
+    /// threshold" trigger would incur (the quadratic case the CTO flagged as
+    /// non-optional to prevent).
+    ///
+    /// Method: run the identical bulk-import workload twice at two corpus sizes,
+    /// once servicing the count trigger with `compact_partial` (the shipped
+    /// size-tiered path) and once with `compact_ssts` (a full merge — the
+    /// strawman). We read the cumulative records-written counter for each and
+    /// compare the *shape* of the growth, not brittle absolute constants:
+    ///
+    /// * a full merge on every trigger rewrites the whole live set each time, so
+    ///   its per-record write cost grows with `N` — the quadratic signature;
+    /// * the size-tiered path re-merges a run only once per size tier, so its
+    ///   per-record write cost grows only `~log N` — effectively flat here.
+    // Record counts here are < 10_000, so u64->f64 is exact; the ratios are the
+    // whole point of the test.
+    #[allow(clippy::cast_precision_loss, clippy::similar_names)]
+    #[test]
+    fn partial_compaction_bounds_write_amplification_vs_full_merge() {
+        // Runs a bulk import of `n` puts with the periodic sweep disabled,
+        // servicing the count trigger deterministically (emulating the
+        // background hand-off) with either the size-tiered partial path or a
+        // full merge. Returns records written out by compaction (write-amp
+        // numerator).
+        fn write_amp(n: u32, size_tiered: bool) -> u64 {
+            const TRIGGER: usize = 8;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+            // ~one SST per put so the corpus is dominated by SST fan-out.
+            config.memtable_config.flush_threshold_bytes = 50;
+            config.compaction = CompactionConfig {
+                enabled: true,
+                interval_secs: 0, // periodic sweep OFF — we drive compaction by hand
+                min_sst_count: 2,
+                max_sst_count: TRIGGER,
+                merge_min: 4,
+            };
+            let engine = EmbeddedStorageEngine::open(config).expect("open");
+            let realm = RealmId::generate();
+            let value = vec![b'x'; 40];
+
+            for i in 0..n {
+                engine
+                    .put(&realm, format!("k-{i:05}").as_bytes(), &value)
+                    .expect("put");
+                // Drain to below the trigger, exactly as the background task
+                // would when notified that live count crossed `max_sst_count`.
+                while count_sst_files(dir.path()) >= TRIGGER {
+                    let merged = if size_tiered {
+                        engine.compact_partial().expect("compact_partial")
+                    } else {
+                        // Strawman: full merge of every live SST on each trigger.
+                        engine.compact_ssts(2).expect("compact_ssts")
+                    };
+                    if merged == 0 {
+                        break;
+                    }
+                }
+            }
+            engine.compaction_records_written()
+        }
+
+        const N: u32 = 100;
+        const N2: u32 = 200;
+
+        let partial_n = write_amp(N, true);
+        let partial_2n = write_amp(N2, true);
+        let full_n = write_amp(N, false);
+        let full_2n = write_amp(N2, false);
+
+        // Per-record write amplification (records rewritten per record ingested).
+        let partial_amp_n = partial_n as f64 / f64::from(N);
+        let partial_amp_2n = partial_2n as f64 / f64::from(N2);
+        let full_amp_n = full_n as f64 / f64::from(N);
+        let full_amp_2n = full_2n as f64 / f64::from(N2);
+
+        // The full-merge strawman must exhibit the quadratic signature: doubling
+        // the corpus meaningfully increases per-record write cost.
+        assert!(
+            full_amp_2n >= full_amp_n * 1.5,
+            "full-merge-on-trigger should show super-linear (quadratic) write amp: \
+             amp(N)={full_amp_n:.2} amp(2N)={full_amp_2n:.2}"
+        );
+
+        // The size-tiered path must NOT: per-record write cost stays ~flat
+        // (grows only ~log N) as the corpus doubles. This is the debounce.
+        assert!(
+            partial_amp_2n <= partial_amp_n * 1.4,
+            "size-tiered partial compaction must keep write amp ~flat (sub-quadratic): \
+             amp(N)={partial_amp_n:.2} amp(2N)={partial_amp_2n:.2}"
+        );
+
+        // And in absolute terms the debounce rewrites far fewer records than the
+        // full merge at the larger corpus.
+        assert!(
+            partial_2n * 2 <= full_2n,
+            "size-tiered partial compaction should rewrite far fewer records than \
+             full-merge-on-trigger at 2N: partial={partial_2n} full={full_2n}"
         );
     }
 

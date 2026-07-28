@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **KDF admission gate hardening (HEA-1892 / HEA-1889 F1+F2)** — two abuse-resistance
+  fixes over the R1 gate. **F1:** the allocation-free login abuse fast-rejects (CSRF
+  double-submit, cross-origin POST, and the per-IP login rate limit) now run
+  **before** a KDF permit is acquired, so a distributed sub-threshold flood of
+  soon-to-be-rejected requests can no longer saturate the Argon2id admission pool
+  with real verifies; every reject remains username-independent, so login
+  enumeration properties are unchanged. **F2:** admin login (`/ui/admin/login`) now
+  draws from a **separate reserved permit pool** (new `security.password.kdf.admin_max_in_flight`,
+  default `2`) instead of the shared gate, so a flood against one tenant realm can no
+  longer shed the operator out of the admin console. New metric
+  `hearth_kdf_admin_permits`; `admin_max_in_flight: 0` is rejected at config-load
+  time. (HEA-1892)
+
 ### Added
 - **Bounded KDF admission control on the Argon2id path (HEA-1887 / R1)** — password
   verification/hashing now runs behind a bounded async admission gate so offered
@@ -93,6 +107,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   called after WAL/SST create and after each finalizing rename (HEA-1855).
 
 ### Security
+- **KDF admission gate now fronts *every* Argon2id caller, not just login
+  (HEA-1891 / HEA-1889 F3)** — the original R1 gate (HEA-1887) only wrapped the
+  three login handlers, leaving self-service registration (`POST /ui/register`,
+  unauthenticated), password-reset confirm (`POST /ui/reset-password`), account
+  change-password, MFA step-up password verify, and the REST `create_user`
+  endpoints (`POST /users`, `POST /admin/users`) free to independently
+  oversubscribe the blocking pool. A flood on the unauthenticated
+  `/ui/register` alone could re-introduce the unbounded `offered × 19 MiB`
+  memory blowup the gate exists to prevent, so the true peak was
+  `(permits + concurrent registrations + resets + …) × 19 MiB` rather than the
+  advertised `permits × 19 MiB`. All of those callers now route through the
+  shared process-global gate; when it is saturated they are shed with
+  `503 Service Unavailable` + `Retry-After` (JSON body on the REST paths). The
+  `permits × 19 MiB` peak-memory ceiling now holds server-wide. Registration
+  and change-password hashing also no longer runs inline on the async worker
+  (HEA-1891).
 - **OAuth client-auth failures now return the RFC 6749 `invalid_client` code** —
   the endpoint-client authentication path (used by `client_credentials`,
   token-exchange, `/revoke`, and `/introspect`) previously returned a

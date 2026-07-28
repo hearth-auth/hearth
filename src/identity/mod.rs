@@ -72,7 +72,6 @@ pub use credentials::{
     hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,
     PepperKey, StoredCredential,
 };
-pub use kdf_gate::{gate, init_gate, KdfGate, KdfGateConfig, KdfGateError};
 pub use email::{
     ApiKey, EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
@@ -82,6 +81,10 @@ pub use engine::{
     EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
 };
 pub use error::IdentityError;
+pub use kdf_gate::{
+    admin_gate, gate, init_admin_gate, init_gate, KdfGate, KdfGateConfig, KdfGateError,
+    DEFAULT_ADMIN_MAX_IN_FLIGHT,
+};
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,

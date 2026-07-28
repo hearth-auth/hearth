@@ -43,8 +43,8 @@ use serde::Deserialize;
 
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
-    gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams, IdentityError,
-    KdfGateError, SessionContext,
+    admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
+    IdentityError, KdfGateError, SessionContext,
 };
 use crate::protocol::client_info::build_session_context;
 
@@ -909,15 +909,24 @@ pub struct LoginForm {
     pub csrf: String,
 }
 
-/// Runs a blocking login closure under the bounded KDF admission gate
-/// (HEA-1887 / R1).
+/// Runs a blocking Argon2id-bearing closure under the bounded KDF admission
+/// gate (HEA-1887 / R1, extended by HEA-1891).
 ///
-/// The login path's dominant cost is the inline Argon2id verify, so we acquire
-/// a KDF permit *before* the `spawn_blocking` rather than letting unbounded
-/// concurrent logins oversubscribe the blocking pool (the mechanism behind the
-/// C9/HEA-1879 multi-second p99). When the gate is saturated the request is
-/// shed with `503 Service Unavailable` + `Retry-After` instead of queueing.
-async fn run_login_gated<F>(f: F) -> Response
+/// Every UI handler whose engine call performs an Argon2id hash or verify —
+/// login, registration, password-reset confirm, account password change, and
+/// MFA step-up — MUST route through this helper so they share the *one*
+/// process-global permit pool. That shared bound is what makes the peak-memory
+/// guarantee real: total resident Argon2 memory is `permits × ~19 MiB` across
+/// **all** callers, not per-callsite. Gating only login (the original R1 scope)
+/// left registration/reset/change-password free to independently oversubscribe
+/// the blocking pool and blow the ceiling (HEA-1889 Finding 3).
+///
+/// We acquire the KDF permit *before* the `spawn_blocking`, so a request
+/// waiting for capacity holds neither a blocking-pool thread nor a 19 MiB
+/// allocation. When the gate is saturated the request is shed with
+/// `503 Service Unavailable` + `Retry-After` instead of queueing unboundedly
+/// (the mechanism behind the C9/HEA-1879 multi-second p99).
+pub(crate) async fn run_kdf_gated<F>(f: F) -> Response
 where
     F: FnOnce() -> Response + Send + 'static,
 {
@@ -932,7 +941,7 @@ where
 ///
 /// Carries a `Retry-After` header (seconds) so well-behaved clients back off
 /// instead of retrying immediately and deepening the overload.
-fn kdf_shed_response(retry_after: std::time::Duration) -> Response {
+pub(crate) fn kdf_shed_response(retry_after: std::time::Duration) -> Response {
     // Never advertise 0 — clients treat `Retry-After: 0` inconsistently.
     let secs = retry_after.as_secs().max(1);
     let mut resp = (
@@ -951,7 +960,7 @@ pub async fn login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    run_login_gated(move || login_submit_impl(state, headers, form, RealmSource::Path(None))).await
+    login_submit_gated(state, headers, form, RealmSource::Path(None)).await
 }
 
 /// Handles login submission at `/ui/realms/<name>/login`.
@@ -961,10 +970,7 @@ pub async fn login_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    run_login_gated(move || {
-        login_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
-    })
-    .await
+    login_submit_gated(state, headers, form, RealmSource::Path(Some(realm_name))).await
 }
 
 /// Handles admin login submission at `/ui/admin/login`. On success,
@@ -974,22 +980,140 @@ pub async fn admin_login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    run_login_gated(move || login_submit_impl(state, headers, form, RealmSource::Admin)).await
+    login_submit_gated(state, headers, form, RealmSource::Admin).await
 }
 
-/// Shared login submit. On success: creates a session, issues the
-/// `hearth_ui_session` and `hearth_ui_csrf` cookies, then redirects.
-/// When MFA is enabled, redirects to `/ui/mfa-challenge` with a
-/// pending cookie instead. All auth failures collapse into a single
-/// generic error (enumeration resistance).
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-fn login_submit_impl(
+/// Rendering inputs shared by every login error surface. Resolved once in the
+/// pre-gate phase ([`login_prepare`]) so both the pre-gate fast-rejects and the
+/// gated verify path render identical, enumeration-safe pages.
+struct LoginRenderCtx {
+    action_prefix: String,
+    return_to: Option<String>,
+    show_register: bool,
+    locale: &'static str,
+    product_name: String,
+    logo_url: String,
+    realm_theme: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+impl LoginRenderCtx {
+    /// Builds a login error page. `email` echoes the submitted address back
+    /// into the form (constant message ⇒ leaks nothing); pass `None` to leave it
+    /// blank.
+    fn error_page(&self, message: &str, status: StatusCode, email: Option<&str>) -> Response {
+        let mut tmpl = LoginTemplate::new(
+            Some(message.to_string()),
+            self.return_to.clone(),
+            &self.action_prefix,
+            self.show_register,
+            self.locale,
+            self.product_name.clone(),
+            self.logo_url.clone(),
+        );
+        if let Some(email) = email {
+            tmpl.email = email.to_string();
+        }
+        tmpl.realm_theme_url.clone_from(&self.realm_theme);
+        tmpl.inline_theme_css.clone_from(&self.inline_theme_css);
+        render_status(&tmpl, status)
+    }
+
+    /// The single generic "sign-in failed" page (401). The message is constant
+    /// regardless of whether the account exists (enumeration resistance).
+    fn generic_error(&self, submitted_email: &str) -> Response {
+        self.error_page(
+            "Sign-in failed. Check your credentials and try again.",
+            StatusCode::UNAUTHORIZED,
+            Some(submitted_email),
+        )
+    }
+
+    /// The CSRF failure page (422). No email is echoed.
+    fn csrf_error(&self) -> Response {
+        self.error_page(
+            "Invalid security token. Please reload the page and try again.",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            None,
+        )
+    }
+}
+
+/// Realm + render context carried across the KDF gate. Built by
+/// [`login_prepare`] in the async handler (outside the gate) and consumed by
+/// [`login_finish`] on the blocking pool (inside the gate).
+struct PreparedLogin {
+    realm: Realm,
+    render_ctx: LoginRenderCtx,
+    session_ctx: SessionContext,
+    client_ip: String,
+    /// Trimmed submitted email.
+    email: String,
+    /// `true` for the `/ui/admin/login` surface — routed to the reserved admin
+    /// gate (HEA-1892 / F2).
+    is_admin: bool,
+}
+
+/// Orchestrates a login submission across the bounded KDF admission gate
+/// (HEA-1887 / R1, hardened by HEA-1892).
+///
+/// The allocation-free abuse fast-rejects — CSRF double-submit, cross-origin
+/// POST, realm auth-method policy, and the per-IP login rate limit — run in
+/// [`login_prepare`] **before** a KDF permit is acquired (HEA-1892 / F1), so
+/// rejected traffic never consumes admission capacity: a distributed
+/// sub-threshold flood of bad-CSRF or rate-limited requests can no longer
+/// saturate the gate with soon-to-be-rejected work. Every reject is
+/// username-independent, so enumeration properties are unchanged.
+///
+/// Only the surviving request — whose dominant cost is the inline Argon2id
+/// verify — is admitted to the gate; on saturation it is shed with `503` +
+/// `Retry-After`. Admin logins draw from a *separate* reserved gate
+/// (HEA-1892 / F2) so a flood against a tenant realm cannot lock the operator
+/// out of the admin console.
+async fn login_submit_gated(
     state: Arc<WebState>,
     headers: HeaderMap,
     form: LoginForm,
     source: RealmSource,
 ) -> Response {
-    let email = form.email.trim();
+    let prepared = match login_prepare(&state, &headers, &form, source) {
+        Ok(prepared) => prepared,
+        // Rejected pre-gate: no KDF permit was ever acquired.
+        Err(response) => return response,
+    };
+
+    let is_admin = prepared.is_admin;
+    let run = move || login_finish(state, headers, form, prepared);
+    let gated = if is_admin {
+        admin_gate().run(run).await
+    } else {
+        gate().run(run).await
+    };
+    match gated {
+        Ok(response) => response,
+        Err(KdfGateError::Overloaded { retry_after }) => kdf_shed_response(retry_after),
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Pre-gate phase (HEA-1892 / F1): resolves the realm and render context, then
+/// runs the allocation-free abuse fast-rejects that MUST NOT consume a KDF
+/// permit — CSRF double-submit, cross-origin POST, realm auth-method policy,
+/// and the per-IP login rate limit.
+///
+/// Returns the [`PreparedLogin`] to admit to the gate, or the complete
+/// rejection response to return immediately (never touching the gate). Every
+/// reject is username-independent, so login enumeration properties are
+/// identical to the pre-split handler.
+#[allow(clippy::needless_pass_by_value)]
+fn login_prepare(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    form: &LoginForm,
+    source: RealmSource,
+) -> Result<PreparedLogin, Response> {
+    let is_admin = matches!(source, RealmSource::Admin);
+    let email = form.email.trim().to_string();
     let return_to = form.return_to.as_deref().and_then(sanitize_return_to);
     let locale = resolve_login_locale(
         form.locale.as_deref(),
@@ -997,75 +1121,43 @@ fn login_submit_impl(
             .get(header::ACCEPT_LANGUAGE)
             .and_then(|v| v.to_str().ok()),
     );
-    let session_ctx = build_session_context(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let session_ctx = build_session_context(headers, FALLBACK_PEER, &state.trusted_proxies);
 
-    let (realm, action_prefix) = match resolve_for_source(&state, source, true) {
+    let (realm, action_prefix) = match resolve_for_source(state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
         } => (realm, action_prefix),
-        PreAuthRealm::Handled(resp) => return resp,
+        PreAuthRealm::Handled(resp) => return Err(resp),
     };
 
-    let product_name = state.product_name_for(realm.id());
-    let logo_url = state.logo_url.clone();
-    let realm_theme = state.realm_theme_url_for(realm.id());
-    let inline_theme_css_val = state.inline_theme_css();
-    let show_register = registration_enabled(&realm);
+    let render_ctx = LoginRenderCtx {
+        action_prefix,
+        return_to,
+        show_register: registration_enabled(&realm),
+        locale,
+        product_name: state.product_name_for(realm.id()),
+        logo_url: state.logo_url.clone(),
+        realm_theme: state.realm_theme_url_for(realm.id()),
+        inline_theme_css: state.inline_theme_css(),
+    };
+
     // Extract the client IP once, after trusted-proxy stripping, for the
     // per-IP rate limiter. Empty string = no IP available (skipped by engine).
     let client_ip = session_ctx.ip_address.clone().unwrap_or_default();
 
-    let generic_error = {
-        let action_prefix = action_prefix.clone();
-        let return_to = return_to.clone();
-        let realm_theme = realm_theme.clone();
-        let inline_theme_css_val = inline_theme_css_val.clone();
-        let submitted_email = email.to_string();
-        let product_name = product_name.clone();
-        let logo_url = logo_url.clone();
-        move || {
-            let mut tmpl = LoginTemplate::new(
-                Some("Sign-in failed. Check your credentials and try again.".to_string()),
-                return_to.clone(),
-                &action_prefix,
-                show_register,
-                locale,
-                product_name.clone(),
-                logo_url.clone(),
-            );
-            // Echo the submitted email back into the form so the user
-            // doesn't have to retype it. The error message is constant
-            // regardless of whether the address matches a real account
-            // (enumeration resistance), so this leaks nothing.
-            tmpl.email.clone_from(&submitted_email);
-            tmpl.realm_theme_url.clone_from(&realm_theme);
-            tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
-            render_status(&tmpl, StatusCode::UNAUTHORIZED)
-        }
-    };
+    // --- Abuse fast-rejects, all BEFORE the KDF gate (HEA-1892 / F1) ---
 
     // F6: CSRF double-submit check — fail-closed in non-dev mode.
     // In production (dev_mode = false), an absent hearth_ui_csrf cookie is
     // treated as a CSRF failure (not a pass-through). In dev mode the bypass
     // is preserved so direct-POST tooling continues to work.
-    let csrf_ok = match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
     if !csrf_ok {
-        let mut tmpl = LoginTemplate::new(
-            Some("Invalid security token. Please reload the page and try again.".to_string()),
-            return_to.clone(),
-            &action_prefix,
-            show_register,
-            locale,
-            product_name.clone(),
-            logo_url.clone(),
-        );
-        tmpl.realm_theme_url.clone_from(&realm_theme);
-        tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
-        return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(render_ctx.csrf_error());
     }
 
     // Login CSRF guard: reject cross-origin POSTs.
@@ -1074,14 +1166,14 @@ fn login_submit_impl(
     // response from leaking whether the address or realm exists (enumeration
     // resistance).
     if let Some(origin_val) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let expected = state.public_origin_str(&headers);
+        let expected = state.public_origin_str(headers);
         if origin_val != expected {
             tracing::warn!(
                 origin = origin_val,
                 expected = %expected,
                 "login: CSRF origin mismatch"
             );
-            return generic_error();
+            return Err(render_ctx.generic_error(&email));
         }
     }
 
@@ -1089,23 +1181,60 @@ fn login_submit_impl(
     if let Some(ref methods) = realm.config().allowed_auth_methods {
         if !methods.iter().any(|m| m == "password") {
             tracing::warn!(realm = %realm.id(), "login: password auth blocked by realm policy");
-            return generic_error();
+            return Err(render_ctx.generic_error(&email));
         }
     }
 
     // Per-IP rate limit check. Must happen before user lookup so a blocked
-    // IP cannot probe which email addresses exist.
+    // IP cannot probe which email addresses exist — and before the gate so a
+    // flood cannot saturate admission with soon-to-be-rejected requests
+    // (HEA-1892 / F1).
     if state
         .identity
         .check_ip_login_rate_limit(realm.id(), &client_ip)
         .is_err()
     {
         tracing::warn!(ip = %client_ip, "login: IP rate limit exceeded");
-        return generic_error();
+        return Err(render_ctx.generic_error(&email));
     }
 
+    Ok(PreparedLogin {
+        realm,
+        render_ctx,
+        session_ctx,
+        client_ip,
+        email,
+        is_admin,
+    })
+}
+
+/// Gated phase (runs on the blocking pool under a KDF permit): the Argon2id
+/// verify and everything downstream — MFA gate, required-action gate, and
+/// session issuance. All abuse fast-rejects already passed in [`login_prepare`].
+///
+/// On success: creates a session, issues the `hearth_ui_session` and
+/// `hearth_ui_csrf` cookies, then redirects. When MFA is enabled, shows the
+/// inline TOTP form (or redirects to forced enrollment). All auth failures
+/// collapse into a single generic error (enumeration resistance).
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+fn login_finish(
+    state: Arc<WebState>,
+    headers: HeaderMap,
+    form: LoginForm,
+    prepared: PreparedLogin,
+) -> Response {
+    let PreparedLogin {
+        realm,
+        render_ctx,
+        session_ctx,
+        client_ip,
+        email,
+        is_admin: _,
+    } = prepared;
+    let return_to = render_ctx.return_to.clone();
+
     // Resolved realm → single targeted lookup. No walk.
-    let Ok(Some(user)) = state.identity.get_user_by_email(realm.id(), email) else {
+    let Ok(Some(user)) = state.identity.get_user_by_email(realm.id(), &email) else {
         // Run dummy hash so timing is indistinguishable from a real user lookup + failed verify.
         state
             .identity
@@ -1113,7 +1242,7 @@ fn login_submit_impl(
         state
             .identity
             .record_ip_login_attempt(realm.id(), &client_ip);
-        return generic_error();
+        return render_ctx.generic_error(&email);
     };
 
     let password = CleartextPassword::from_string(form.password.clone());
@@ -1126,14 +1255,14 @@ fn login_submit_impl(
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
-            return generic_error();
+            return render_ctx.generic_error(&email);
         }
         Err(e) => {
             tracing::warn!(error = %e, "login: password verification failed");
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
-            return generic_error();
+            return render_ctx.generic_error(&email);
         }
     }
 
@@ -1159,16 +1288,17 @@ fn login_submit_impl(
         let mut tmpl = LoginTemplate::new(
             None,
             return_to.clone(),
-            &action_prefix,
-            show_register,
-            locale,
-            product_name.clone(),
-            state.logo_url.clone(),
+            &render_ctx.action_prefix,
+            render_ctx.show_register,
+            render_ctx.locale,
+            render_ctx.product_name.clone(),
+            render_ctx.logo_url.clone(),
         );
         tmpl.show_totp = true;
-        tmpl.email = email.to_string();
-        tmpl.realm_theme_url.clone_from(&realm_theme);
-        tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
+        tmpl.email = email.clone();
+        tmpl.realm_theme_url.clone_from(&render_ctx.realm_theme);
+        tmpl.inline_theme_css
+            .clone_from(&render_ctx.inline_theme_css);
         let mut response = render(&tmpl);
         append_cookie(&mut response, &cookie);
         return response;
@@ -1239,28 +1369,15 @@ fn login_submit_impl(
             );
             response
         }
-        Err(IdentityError::UserNotVerified) => {
-            let mut tmpl = LoginTemplate::new(
-                Some(
-                    "Your email is not verified yet. Check your inbox (or the server \
-                     logs) for the verification link and click it before signing in."
-                        .to_string(),
-                ),
-                return_to.clone(),
-                &action_prefix,
-                show_register,
-                locale,
-                product_name.clone(),
-                state.logo_url.clone(),
-            );
-            tmpl.email = email.to_string();
-            tmpl.realm_theme_url = realm_theme;
-            tmpl.inline_theme_css = inline_theme_css_val;
-            render_status(&tmpl, StatusCode::FORBIDDEN)
-        }
+        Err(IdentityError::UserNotVerified) => render_ctx.error_page(
+            "Your email is not verified yet. Check your inbox (or the server \
+             logs) for the verification link and click it before signing in.",
+            StatusCode::FORBIDDEN,
+            Some(&email),
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "login: create_session failed");
-            generic_error()
+            render_ctx.generic_error(&email)
         }
     }
 }
@@ -2902,7 +3019,9 @@ pub async fn reset_password_submit(
     State(state): State<Arc<WebState>>,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    reset_password_submit_impl(state, form, None)
+    // Reset-confirm hashes the new Argon2id credential — gate it on the shared
+    // KDF admission bound (HEA-1891 / F3).
+    run_kdf_gated(move || reset_password_submit_impl(state, form, None)).await
 }
 
 /// Handles reset-password form submission at `/ui/realms/<name>/reset-password`.
@@ -2911,7 +3030,7 @@ pub async fn reset_password_submit_scoped(
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    reset_password_submit_impl(state, form, Some(realm_name))
+    run_kdf_gated(move || reset_password_submit_impl(state, form, Some(realm_name))).await
 }
 
 /// Shared implementation — validates the token against the resolved
@@ -3281,7 +3400,10 @@ pub async fn register_submit(
     Form(form): Form<RegisterForm>,
 ) -> Response {
     let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
-    register_submit_impl(state, headers, form, None, captcha_ok)
+    // Registration hashes an Argon2id credential — gate it on the shared KDF
+    // admission bound so a `/ui/register` flood cannot oversubscribe the
+    // blocking pool the way login is protected against (HEA-1891 / F3).
+    run_kdf_gated(move || register_submit_impl(state, headers, form, None, captcha_ok)).await
 }
 
 /// Handles registration form submission for `/ui/realms/<name>/register`.
@@ -3292,7 +3414,8 @@ pub async fn register_submit_scoped(
     Form(form): Form<RegisterForm>,
 ) -> Response {
     let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
-    register_submit_impl(state, headers, form, Some(realm_name), captcha_ok)
+    run_kdf_gated(move || register_submit_impl(state, headers, form, Some(realm_name), captcha_ok))
+        .await
 }
 
 /// Shared implementation for bare and realm-scoped register submits.

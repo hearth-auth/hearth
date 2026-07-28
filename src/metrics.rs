@@ -79,8 +79,9 @@ const SST_PROBE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 /// `max_queue_wait` ceiling just before it sheds. The shape of this histogram
 /// is the direct, previously-invisible evidence of the Little's-Law queue that
 /// C9/HEA-1879 inferred only from end-to-end p99.
-const KDF_QUEUE_WAIT_BUCKETS: &[f64] =
-    &[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
+const KDF_QUEUE_WAIT_BUCKETS: &[f64] = &[
+    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+];
 
 /// KDF **compute-time** histogram buckets (seconds) for one Argon2id operation.
 ///
@@ -88,8 +89,7 @@ const KDF_QUEUE_WAIT_BUCKETS: &[f64] =
 /// (≈12–120 ms on `dev-ryzen-7840hs`, C9/HEA-1879 §2) so the compute floor is
 /// separable from queue wait — the two histograms together decompose the tail
 /// that was a single opaque number before this change.
-const KDF_COMPUTE_BUCKETS: &[f64] =
-    &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0];
+const KDF_COMPUTE_BUCKETS: &[f64] = &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0];
 
 /// All Prometheus metrics collected by the Hearth server.
 ///
@@ -250,6 +250,15 @@ pub struct Metrics {
     /// available parallelism / core count). Exported so a scrape can compute
     /// `kdf_in_flight / kdf_permits` saturation without knowing the config.
     pub kdf_permits: Gauge,
+
+    /// Configured maximum concurrent Argon2id operations reserved for the
+    /// **admin** login gate (HEA-1892 / F2).
+    ///
+    /// Admin login runs under a separate, small permit pool so a flood against a
+    /// tenant realm's login form cannot exhaust the shared gate and lock the
+    /// operator out of the admin console. Exported separately so a scrape can
+    /// reason about admin capacity independently of the shared realm pool.
+    pub kdf_admin_permits: Gauge,
 
     /// Time a request waited to acquire a KDF permit before its Argon2id op ran,
     /// in seconds. Only successful (non-shed) acquisitions are observed.
@@ -517,6 +526,15 @@ impl Metrics {
             .register(Box::new(kdf_permits.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let kdf_admin_permits = Gauge::new(
+            "hearth_kdf_admin_permits",
+            "Configured maximum concurrent Argon2id operations reserved for admin login",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_admin_permits.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let kdf_queue_wait_seconds = Histogram::with_opts(
             HistogramOpts::new(
                 "hearth_kdf_queue_wait_seconds",
@@ -575,6 +593,7 @@ impl Metrics {
             storage_sst_files,
             kdf_in_flight,
             kdf_permits,
+            kdf_admin_permits,
             kdf_queue_wait_seconds,
             kdf_compute_seconds,
             kdf_shed_total,

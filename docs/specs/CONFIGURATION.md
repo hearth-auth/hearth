@@ -232,6 +232,7 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_storage_operation_duration_seconds` | histogram | `operation` | Storage write/scan latency |
 | `hearth_kdf_in_flight` | gauge | — | Argon2id operations currently executing (holding an admission permit) |
 | `hearth_kdf_permits` | gauge | — | Configured max concurrent Argon2id operations (`security.password.kdf.max_in_flight`) |
+| `hearth_kdf_admin_permits` | gauge | — | Configured max concurrent Argon2id operations reserved for admin login (`security.password.kdf.admin_max_in_flight`) |
 | `hearth_kdf_queue_wait_seconds` | histogram | — | Seconds spent waiting for a KDF permit (successful acquisitions only) |
 | `hearth_kdf_compute_seconds` | histogram | — | Wall-clock seconds for one Argon2id operation (excludes queue wait) |
 | `hearth_kdf_shed_total` | counter | — | Argon2id operations shed (`503`/`Retry-After`) due to a full KDF queue (HEA-1887) |
@@ -587,21 +588,29 @@ queueing unboundedly.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_in_flight` | integer | host **core count** | Maximum concurrent Argon2id operations. Omit (or `null`) to default to [`available_parallelism`] — the Little's-Law bound at which Argon2id throughput saturates, so higher values buy no throughput and only add queue latency. An explicit `0` is **rejected at startup**. Calibrate against your hardware using the C7/HEA-1875 saturation sweep. |
-| `max_queue_wait_ms` | integer | `250` | Milliseconds a request waits for a permit before it is shed with `503`. |
-| `retry_after_seconds` | integer | `1` | `Retry-After` value (seconds) advertised on a shed response. |
+| `admin_max_in_flight` | integer | `2` | Maximum concurrent Argon2id operations reserved for **admin login** (`/ui/admin/login`), in a *separate* permit pool (HEA-1892 / F2). Admin login never draws from the shared `max_in_flight` pool, so a flood against a tenant realm's login form cannot exhaust it and lock the operator out of the admin console. Omit to default to a small reserved lane; an explicit `0` is **rejected at startup**. |
+| `max_queue_wait_ms` | integer | `250` | Milliseconds a request waits for a permit before it is shed with `503`. Shared by both pools. |
+| `retry_after_seconds` | integer | `1` | `Retry-After` value (seconds) advertised on a shed response. Shared by both pools. |
 
 ```yaml
 security:
   password:
     kdf:
       max_in_flight: 16          # omit to default to the host core count
+      admin_max_in_flight: 2     # reserved pool for /ui/admin/login (HEA-1892)
       max_queue_wait_ms: 250
       retry_after_seconds: 1
 ```
 
+The allocation-free abuse fast-rejects on the login form — CSRF double-submit,
+cross-origin POST, and the per-IP login rate limit — run **before** a KDF permit
+is acquired (HEA-1892 / F1), so a flood of soon-to-be-rejected requests cannot
+saturate the admission pool with real Argon2id verifies.
+
 Observability: the gate exports `hearth_kdf_in_flight`, `hearth_kdf_permits`,
-`hearth_kdf_queue_wait_seconds`, `hearth_kdf_compute_seconds`, and
-`hearth_kdf_shed_total` (see the [`/metrics`](#metrics) families table). A rising
+`hearth_kdf_admin_permits`, `hearth_kdf_queue_wait_seconds`,
+`hearth_kdf_compute_seconds`, and `hearth_kdf_shed_total` (see the
+[`/metrics`](#metrics) families table). A rising
 `hearth_kdf_shed_total` or a `hearth_kdf_queue_wait_seconds` mass pushing toward
 `max_queue_wait_ms` means the KDF path is saturated — raise `max_in_flight` only if
 CPU/memory headroom exists, since the bound exists to protect them.
