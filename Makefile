@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -124,6 +124,12 @@ abuse-check:
 auth-discard-check: ## Lint for discarded authentication results (HEA-1657)
 	@bash scripts/check-auth-discard.sh
 
+## Guard: the ROPC (RFC 6749 §4.3) password grant must be absent from both the
+## config allowlist (VALID_GRANT_TYPES) and the HTTP token dispatch. Config and
+## dispatch drifted apart once already — see HEA-1862.
+security-gate: ## Assert the ROPC password grant is unreachable (HEA-1814/1816/1862)
+	@bash scripts/check-ropc-ban.sh
+
 ## Guard: RBAC-graph mutations in src/rbac/engine.rs must route through the
 ## invalidating write_* helpers so the resolution decision cache is bumped
 ## (HEA-1781, follow-up to HEA-1777). A raw self.storage.put/delete call would
@@ -230,7 +236,7 @@ sdk-test:
 # ── CI Tiers ──────────────────────────────────────────
 
 ## CI fast tier: lint + fmt + proto lint + css freshness + test-quality + §3.41 abuse gate (every commit).
-ci-fast: fmt clippy proto-lint css-check test-quality abuse-check
+ci-fast: fmt clippy proto-lint css-check test-quality abuse-check security-gate
 
 ## CI benchmark gate: compile and run hot-path perf threshold gates.
 ##
