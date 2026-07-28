@@ -487,20 +487,16 @@ static TIER_CONTEXT: OnceLock<Arc<TierMissContext>> = OnceLock::new();
 
 /// The bulk demo corpus a tier-miss run draws lookups from, addressed by index.
 ///
-/// Every seeded bulk user shares one password and has a deterministic email
-/// `user<7-digit-index>@<domain>` (see `examples/large-scale-demo/`), so the
-/// generator can address any point in the corpus by index and know **by
-/// construction** whether a request is a resident "hot" hit or a uniform "cold"
-/// draw. Holds the shared demo password; it MUST NOT be logged (no `Debug`).
+/// Every seeded bulk user has a deterministic email `user<7-digit-index>@<domain>`
+/// (see `examples/large-scale-demo/`), so the generator can address any point in
+/// the corpus by index and know **by construction** whether a request is a
+/// resident "hot" hit or a uniform "cold" draw.
+#[derive(Debug)]
 pub struct TierMissContext {
-    /// Realm every lookup targets (`X-Realm-ID`); a real (v4) UUID string.
+    /// Realm every lookup targets (`realm_id` query param); a real (v4) UUID string.
     realm_id: String,
-    /// Public OAuth client owning the ROPC password grant (`bulk-app`).
-    client_id: String,
     /// Email domain of the bulk corpus (`user<idx>@<domain>`).
     email_domain: String,
-    /// Shared password every bulk user authenticates with.
-    password: String,
     /// Total addressable corpus size — the cold draw spans `1..=corpus_size`.
     corpus_size: u64,
     /// Size of the resident hot working set — hot draws span `1..=hot_set_size`.
@@ -516,17 +512,13 @@ impl TierMissContext {
     #[must_use]
     pub fn new(
         realm_id: String,
-        client_id: String,
         email_domain: String,
-        password: String,
         corpus_size: u64,
         hot_set_size: u64,
     ) -> Self {
         Self {
             realm_id,
-            client_id,
             email_domain,
-            password,
             corpus_size,
             hot_set_size,
             cursor: AtomicU64::new(0),
@@ -556,15 +548,6 @@ impl TierMissContext {
         (splitmix64(n) % self.corpus_size) + 1
     }
 
-    /// The ROPC `/token` body for a bulk user at `index`.
-    fn ropc_body(&self, index: u64) -> serde_json::Value {
-        serde_json::json!({
-            "grant_type": "password",
-            "client_id": self.client_id,
-            "username": self.email(index),
-            "password": self.password,
-        })
-    }
 }
 
 /// Publishes the tier-miss corpus. Call once before the tier-miss attack starts.
@@ -593,16 +576,18 @@ fn splitmix64(mut x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Runs one ROPC `/token` lookup for the bulk user at `index` and asserts a 2xx
-/// with an `access_token`, recording its latency under `name` (`lookup_hot` or
-/// `lookup_cold`). The first step of the password grant is `lookup_user` — the
-/// storage lookup whose tier (hot vs cold/SST) this profile isolates.
+/// Runs one `GET /dev/probe-user?realm_id=…&email=…` probe for the bulk user at
+/// `index`, recording its latency under `name` (`lookup_hot` or `lookup_cold`).
+/// The dev-only probe endpoint calls `get_user_by_email()` — a two-step indexed
+/// storage lookup (email-index key → user-record key) that goes through the hot
+/// tier on both reads, making it the correct signal for hot-vs-cold tier latency
+/// (HEA-1876). ROPC was removed in HEA-1862; this dev probe replaces it.
 async fn tier_lookup(user: &mut GooseUser, index: u64, name: &'static str) -> TransactionResult {
     let ctx = tier_ctx();
+    let email = ctx.email(index);
     let rb = user
-        .get_request_builder(&GooseMethod::Post, "/token")?
-        .header(REALM_HEADER, &ctx.realm_id)
-        .json(&ctx.ropc_body(index));
+        .get_request_builder(&GooseMethod::Get, "/dev/probe-user")?
+        .query(&[("realm_id", ctx.realm_id.as_str()), ("email", email.as_str())]);
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name(name)
@@ -894,14 +879,7 @@ mod tests {
     }
 
     fn tier_ctx_for(corpus: u64, hot: u64) -> TierMissContext {
-        TierMissContext::new(
-            "realm-1".into(),
-            "bulk-app".into(),
-            "bulk.demo".into(),
-            "DemoPassw0rd!".into(),
-            corpus,
-            hot,
-        )
+        TierMissContext::new("realm-1".into(), "bulk.demo".into(), corpus, hot)
     }
 
     #[test]
@@ -943,16 +921,6 @@ mod tests {
             max_seen > 1_000,
             "cold draw should reach well past the hot working set, got max {max_seen}"
         );
-    }
-
-    #[test]
-    fn ropc_body_addresses_a_bulk_user_by_index() {
-        let ctx = tier_ctx_for(1_000_000, 1_000);
-        let body = ctx.ropc_body(42);
-        assert_eq!(body["grant_type"], "password");
-        assert_eq!(body["client_id"], "bulk-app");
-        assert_eq!(body["username"], "user0000042@bulk.demo");
-        assert_eq!(body["password"], "DemoPassw0rd!");
     }
 
     #[test]

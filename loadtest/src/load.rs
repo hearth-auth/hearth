@@ -106,8 +106,8 @@ impl SaturateJourney {
 /// drops that journey. Standard load knobs (`--users`, `--run-time`,
 /// `--hatch-rate`) map onto Goose's own configuration.
 ///
-/// Holds the tier-miss corpus password (`tier_miss_password`), so no `Debug` —
-/// parity with [`TierMissContext`] and the `SeedParams` redaction (HEA-1795).
+/// No `Debug` derive — parity with `SeedParams` to avoid accidentally printing
+/// sensitive fields if they are added later (HEA-1795).
 #[derive(Clone, Args)]
 pub struct LoadParams {
     /// Path to the JSON seed-handle produced by the `seed` step.
@@ -244,12 +244,6 @@ pub struct LoadParams {
     #[arg(long, env = "HEARTH_LOADTEST_TIER_REALM_ID")]
     pub tier_miss_realm_id: Option<String>,
 
-    /// `tier-miss` mode: public OAuth client owning the bulk corpus's ROPC
-    /// password grant. Deterministic per `(realm_name, app_key)`; for
-    /// `examples/large-scale-demo/hearth-tier-miss.yaml` this is the `bulk-app`
-    /// client. Required in tier-miss mode.
-    #[arg(long, env = "HEARTH_LOADTEST_TIER_CLIENT_ID")]
-    pub tier_miss_client_id: Option<String>,
 
     /// `tier-miss` mode: email domain of the bulk corpus (`user<idx>@<domain>`).
     #[arg(
@@ -258,22 +252,6 @@ pub struct LoadParams {
         default_value = "bulk.demo"
     )]
     pub tier_miss_email_domain: String,
-
-    /// `tier-miss` mode: shared password every bulk user authenticates with
-    /// (`demo.password`).
-    ///
-    /// Prefer sourcing this from the `HEARTH_LOADTEST_TIER_PASSWORD` env var
-    /// rather than the `--tier-miss-password` flag, so the corpus credential
-    /// does not land in shell history (HEA-1807). The flag default is the demo
-    /// config's well-known value purely so a zero-arg dev run works; override it
-    /// via the env var for any non-default corpus. The value holder has no
-    /// `Debug`, so it never spills to logs regardless.
-    #[arg(
-        long,
-        env = "HEARTH_LOADTEST_TIER_PASSWORD",
-        default_value = "DemoPassw0rd!"
-    )]
-    pub tier_miss_password: String,
 
     /// `tier-miss` mode: total addressable corpus size. The cold draw spans
     /// `1..=corpus_size`. Sweep this (`10000 → 100000 → 1000000`) to prove the
@@ -455,7 +433,16 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
     // `summarize` runs before the sampler stops, so the initial attribution has
     // no CPU evidence. This call enforces two rules: (1) no samples → Unknown
     // (inadmissible), (2) server CPU below utilisation floors → GeneratorSaturated.
-    report::correct_ceiling_with_resources(&mut report.summary, report.resources.as_ref());
+    //
+    // Saturate mode skips this correction: it samples generator CPU% in-process
+    // and uses that as the distinguishing evidence (gen_cpu < 30% AND latency
+    // breach → Server; gen_cpu > 80% → GeneratorSaturated). Applying the
+    // server-resource correction on top would overwrite that evidence with
+    // Unknown when no --server-pid is supplied, which is wrong for saturate runs
+    // where the generator's own idle CPU is already conclusive (HEA-1872).
+    if params.mode != Mode::Saturate {
+        report::correct_ceiling_with_resources(&mut report.summary, report.resources.as_ref());
+    }
 
     let json_path = report_dir.join("report.json");
     let json = serde_json::to_string_pretty(&report)
@@ -769,7 +756,6 @@ async fn run_soak(
 /// The validated inputs a tier-miss run needs, resolved from [`LoadParams`].
 struct TierMissPlan {
     realm_id: String,
-    client_id: String,
     corpus_size: u64,
     hot_set_size: u64,
     hot_w: usize,
@@ -786,12 +772,6 @@ fn tier_miss_plan(params: &LoadParams) -> Result<TierMissPlan, LoadError> {
     let realm_id = params.tier_miss_realm_id.clone().ok_or_else(|| {
         LoadError::TierMissConfig(
             "--tier-miss-realm-id (or HEARTH_LOADTEST_TIER_REALM_ID) is required in tier-miss mode"
-                .to_string(),
-        )
-    })?;
-    let client_id = params.tier_miss_client_id.clone().ok_or_else(|| {
-        LoadError::TierMissConfig(
-            "--tier-miss-client-id (or HEARTH_LOADTEST_TIER_CLIENT_ID) is required in tier-miss mode"
                 .to_string(),
         )
     })?;
@@ -821,7 +801,6 @@ fn tier_miss_plan(params: &LoadParams) -> Result<TierMissPlan, LoadError> {
     guard_run_host(&host, params.allow_remote_target)?;
     Ok(TierMissPlan {
         realm_id,
-        client_id,
         corpus_size,
         hot_set_size,
         hot_w,
@@ -838,7 +817,6 @@ async fn run_tier_miss(params: &LoadParams, report_dir: &Path) -> Result<LoadRep
     let plan = tier_miss_plan(params)?;
     let TierMissPlan {
         realm_id,
-        client_id,
         corpus_size,
         hot_set_size,
         hot_w,
@@ -854,9 +832,7 @@ async fn run_tier_miss(params: &LoadParams, report_dir: &Path) -> Result<LoadRep
 
     let ctx = TierMissContext::new(
         realm_id,
-        client_id,
         params.tier_miss_email_domain.clone(),
-        params.tier_miss_password.clone(),
         corpus_size,
         hot_set_size,
     );
@@ -1121,8 +1097,6 @@ mod tests {
             "tier-miss",
             "--tier-miss-realm-id",
             "11111111-1111-1111-1111-111111111111",
-            "--tier-miss-client-id",
-            "bulk-app",
         ]
     }
 
@@ -1132,29 +1106,18 @@ mod tests {
         assert_eq!(p.tier_miss_corpus_size, 1_000_000);
         assert_eq!(p.tier_miss_hot_set_size, 10_000);
         assert_eq!(p.tier_miss_email_domain, "bulk.demo");
-        assert_eq!(p.tier_miss_password, "DemoPassw0rd!");
         let plan = tier_miss_plan(&p).expect("valid tier-miss plan");
         assert_eq!(plan.corpus_size, 1_000_000);
-        assert_eq!(plan.client_id, "bulk-app");
+        assert_eq!(plan.realm_id, "11111111-1111-1111-1111-111111111111");
         // No --host → the loopback dev default.
         assert_eq!(plan.host, "http://127.0.0.1:8420");
     }
 
     #[test]
-    fn tier_miss_requires_realm_and_client() {
-        let no_realm = parse(&["--mode", "tier-miss", "--tier-miss-client-id", "bulk-app"]);
+    fn tier_miss_requires_realm_id() {
+        let no_realm = parse(&["--mode", "tier-miss"]);
         assert!(matches!(
             tier_miss_plan(&no_realm),
-            Err(LoadError::TierMissConfig(_))
-        ));
-        let no_client = parse(&[
-            "--mode",
-            "tier-miss",
-            "--tier-miss-realm-id",
-            "11111111-1111-1111-1111-111111111111",
-        ]);
-        assert!(matches!(
-            tier_miss_plan(&no_client),
             Err(LoadError::TierMissConfig(_))
         ));
     }

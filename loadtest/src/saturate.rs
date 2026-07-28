@@ -207,10 +207,29 @@ pub async fn run_saturate(
     let rows = vec![row];
     let mut summary = report::summarize(&rows, connections, achieved_rps);
 
-    // Augment with generator CPU% when available: CPU > 80% with no server
-    // latency breach means the generator itself is the bottleneck.
+    // Resolve ceiling with generator CPU evidence.
+    //
+    // `summarize()` returns `Ceiling::Unknown` when it detects a server latency
+    // breach but has no server-side CPU samples to confirm the server was
+    // actually busy (HEA-1880).  In the saturate mode we have a complementary
+    // measurement: generator CPU%.  When gen_cpu is low the generator is
+    // demonstrably idle, which means the generator is NOT the explanation for
+    // the latency breach — the server is.  Concretely:
+    //
+    //   - gen_cpu < 30% AND ceiling == Unknown  →  Server (generator is idle;
+    //     the bottleneck must be server-side processing or accept-queue depth).
+    //   - gen_cpu > 80% AND ceiling != Server   →  GeneratorSaturated (generator
+    //     is CPU-bound; the breach is a generator artefact).
+    //   - Otherwise: leave ceiling as-is.
     if let Some(cpu) = gen_cpu_pct {
-        if cpu > 80.0 && summary.ceiling != report::Ceiling::Server {
+        if cpu < 30.0 && summary.ceiling == report::Ceiling::Unknown {
+            summary.ceiling = report::Ceiling::Server;
+            summary.ceiling_reason = format!(
+                "generator CPU {cpu:.1}% < 30% with a server latency breach — \
+                 generator is idle; bottleneck is server-side processing or \
+                 connection accept-queue depth (HEA-1872)"
+            );
+        } else if cpu > 80.0 && summary.ceiling != report::Ceiling::Server {
             summary.ceiling = report::Ceiling::GeneratorSaturated;
             summary.ceiling_reason = format!(
                 "generator CPU {cpu:.1}% > 80% with no server latency breach — \
