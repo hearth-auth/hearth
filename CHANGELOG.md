@@ -7,6 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`hearth-loadtest saturate` — open-loop high-concurrency driver (C4)** — a new
+  `saturate` subcommand drives `N` concurrent TCP connections against a single
+  read-only hot-path journey in an open loop, **decoupling connection concurrency
+  from the session-token pool size**: 10 000 connections can cycle through 1 000
+  tokens because multiple connections share tokens. Each connection is a Tokio task
+  with its own `reqwest::Client` (one idle connection per host); no Goose per-task
+  overhead. The `report.json` ceiling block distinguishes `server` from
+  `generator_saturated` by correlating error rate, latency, and generator CPU%.
+  New CLI flags: `--saturate-connections` (env `HEARTH_LOADTEST_SATURATE_CONNECTIONS`,
+  default `100`), `--saturate-journey` (env `HEARTH_LOADTEST_SATURATE_JOURNEY`,
+  default `validate`). Verified ≥10 000 concurrent connections with ceiling
+  attribution `server` (HEA-1872).
+- **`--sessions-count` absolute session knob** — `hearth-loadtest seed
+  --sessions-count N` mints exactly `N` sessions per realm, overriding
+  `--sessions-frac`. Decouples the distinct-session-population axis from the
+  user-count axis so Axis B (session scale) is independently reachable without
+  inflating `--users-per-realm` to make a fraction work. Clamped to
+  `users_per_realm` if set higher; env `HEARTH_LOADTEST_SESSIONS_COUNT` (HEA-1872).
 - **Count-triggered partial (size-tiered) SST compaction** — two new
   `storage.compaction` keys bound cold-read SST fan-out without the write
   amplification of a full merge (HEA-1885). `max_sst_count` (default `0` = off)
