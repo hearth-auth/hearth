@@ -130,5 +130,38 @@ of which target L6 carries.
 
 - **Data:** settled and committed (artifact + this doc + harness). Hypothesis **confirmed: queueing.**
 - **Spec decision:** handed to CTO (§4). Engineer must **not** amend VISION §7.1.
-- **Fix:** bounded KDF admission control (§3) — **blocked on C7 (HEA-1875)** for the calibrated
-  default and on **SecurityAuditor** review before merge. Filed as the follow-up child.
+- **Fix:** bounded KDF admission control (§3) — **shipped** under HEA-1887 (§6 below);
+  **gated before merge** on C7 (HEA-1875) for the calibrated default and on **SecurityAuditor**
+  review (auth-path change).
+
+## 6. Fix delta — bounded KDF admission gate (HEA-1887 / R1)
+
+R1 (§3) shipped: an async semaphore acquired **before** `spawn_blocking` for every Argon2id op,
+`permits = core count` by default, bounded queue-wait then `503`/`Retry-After` shed, plus the
+`hearth_kdf_*` telemetry the tail was invisible for. Primitive: `src/identity/kdf_gate.rs`; wired
+into the web login handlers; config `security.password.kdf`.
+
+**Re-run through the gate** (`examples/argon2_gated_saturation.rs`, `permits=16`,
+`max_queue_wait=250ms`, host `dev-ryzen-7840hs`, governor `powersave`, **0 rungs void** — max 2
+swap-in pages, so admissible under rule 5). The ladder here is *offered* concurrency — the number of
+hash **requests** fired at once — vs the ungated §2 ladder of always-running workers:
+
+| Offered | admitted p99 (ms) — **gated** | §2 p99 (ms) — **ungated** | shed |
+|---:|---:|---:|---:|
+| 1  | 19.8  | 36.1  | 0 |
+| 8  | 32.1  | 52.3  | 0 |
+| 16 | 65.4  | 127.8 | 0 |
+| 32 | 112.5 | 511.5 | 0 |
+| 64 | **212.9** | **953.8** | 0 |
+
+**The p99 tail at C=64 collapses 953.8 → 212.9 ms (~4.5×)** and now tracks `compute_floor (≈20 ms) +
+a bounded queue of ⌈offered/permits⌉ waves` instead of inflating with depth — exactly the predicted
+behaviour. Memory follows suit: in-flight Argon2 allocations are capped at `permits × 19 MiB`
+(≈304 MiB) rather than `offered × 19 MiB` (≈1.2 GiB at C=64), removing the swap-pressure mode.
+
+`shed = 0` across the ladder because 250 ms absorbs the ~4-wave queue at C=64 (`4 × ~20 ms < 250 ms`);
+**shedding engages when `offered × compute > permits × max_queue_wait`** — the fast-reject path is
+proved deterministically by `identity::kdf_gate::offered_concurrency_past_bound_is_shed_not_queued`
+(saturated 2-permit gate, 20 ms budget → probe sheds in <150 ms). The absolute millisecond values
+remain host-relative (this box swaps); the **shape** — bounded tail + no throughput loss below the
+bound — is the citable result, and an isolated host (C3/HEA-1871) would sharpen the constants.
