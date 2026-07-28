@@ -8,7 +8,9 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, SmsTransport, TlsMinVersionYaml, ValidationIssue};
+use hearth::config::{
+    Config, EmailTransport, SmsTransport, StorageSection, TlsMinVersionYaml, ValidationIssue,
+};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -606,6 +608,100 @@ async fn main() {
     }
 }
 
+/// Outcome of evaluating the `security.load_test_unthrottled` escape hatch
+/// against the server's bind address.
+///
+/// The rate-limit-disable path (HEA-1796) is prod-gated on TWO conditions
+/// (HEA-1797): the process must run in `--dev` mode **and** every effective
+/// bind (HTTP and, when enabled, gRPC) must be loopback. If either check fails
+/// the request is refused and every limiter stays on, so a misconfigured
+/// production server — or a dev server whose gRPC listener diverges onto a
+/// public interface, or a prod-config binary behind a reverse proxy — can never
+/// silently ship with brute-force / abuse protection removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoadtestUnthrottle {
+    /// The flag is unset — limiters stay on (normal operation).
+    Off,
+    /// The flag is set, dev mode is on, and every bind is loopback — disable
+    /// all limiters.
+    Enabled,
+    /// The flag is set but at least one effective bind (HTTP or gRPC) is
+    /// non-loopback — refuse, keep limiters on.
+    RefusedNonLoopback,
+    /// The flag is set but the process is not in `--dev` mode — refuse, keep
+    /// limiters on. Guards the reverse-proxy topology where a prod server binds
+    /// loopback yet is reachable from the internet via nginx.
+    RefusedNotDev,
+}
+
+/// Decides whether the load-test unthrottle escape hatch applies. Gated on
+/// `--dev` mode AND every effective bind being loopback (HEA-1797). Pure (no
+/// logging / I/O) so the prod-safety gate is unit tested; the caller emits the
+/// operator-facing warn/error log.
+///
+/// `http_bind` is the raw `server.bind_address` and `grpc_bind` the effective
+/// gRPC bind (`None` when the gRPC listener is disabled), both already trimmed
+/// by the caller. A bare `localhost` is treated as loopback; anything that does
+/// not parse to a loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is
+/// non-loopback and refuses the request.
+fn loadtest_unthrottle_decision(
+    enabled: bool,
+    dev: bool,
+    http_bind: &str,
+    grpc_bind: Option<&str>,
+) -> LoadtestUnthrottle {
+    if !enabled {
+        return LoadtestUnthrottle::Off;
+    }
+    if !dev {
+        return LoadtestUnthrottle::RefusedNotDev;
+    }
+    let is_loopback = |bind: &str| {
+        bind.eq_ignore_ascii_case("localhost")
+            || bind
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    };
+    // Every effective bind must be loopback. A disabled gRPC listener (`None`)
+    // cannot be reached, so it does not gate the decision.
+    let all_loopback = is_loopback(http_bind)
+        && match grpc_bind {
+            Some(g) => is_loopback(g),
+            None => true,
+        };
+    if all_loopback {
+        LoadtestUnthrottle::Enabled
+    } else {
+        LoadtestUnthrottle::RefusedNonLoopback
+    }
+}
+
+/// Resolves the dev-mode on-disk data directory, if one is explicitly
+/// configured (HEA-1805).
+///
+/// Precedence: the `HEARTH_DEV_DATA_DIR` env override wins; otherwise a
+/// non-default `storage.data_dir` from the config file is honored. Returns
+/// `None` when neither is set — signalling the caller to fall back to an
+/// ephemeral temp directory (the historical `--dev` default).
+///
+/// Pure (takes the env value as a parameter, no I/O) so the precedence is
+/// unit-testable. A blank env value is treated as unset. An empty
+/// `config_data_dir` (the programmatic `Config::dev()` default) or one equal
+/// to [`StorageSection::DEFAULT_DATA_DIR`] counts as "not explicitly set" — a
+/// dev instance that leaves `storage.data_dir` at its default keeps the
+/// ephemeral-temp behavior rather than silently persisting to `./data`.
+fn resolve_dev_data_dir(env_override: Option<&str>, config_data_dir: &str) -> Option<PathBuf> {
+    if let Some(dir) = env_override.map(str::trim).filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let config_data_dir = config_data_dir.trim();
+    if !config_data_dir.is_empty() && config_data_dir != StorageSection::DEFAULT_DATA_DIR {
+        return Some(PathBuf::from(config_data_dir));
+    }
+    None
+}
+
 /// Runs the `hearth serve` command.
 #[allow(clippy::too_many_lines)]
 async fn run_serve(
@@ -716,14 +812,29 @@ async fn run_serve(
     let (inner_storage, app_storage_config): (Arc<EmbeddedStorageEngine>, StorageConfig) = if config
         .dev_mode
     {
-        let data_path = if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
-            PathBuf::from(dir)
-        } else {
-            let temp_dir = tempfile::tempdir()?;
-            temp_dir.keep()
-        };
+        // Precedence: HEARTH_DEV_DATA_DIR env override, then a non-default
+        // `storage.data_dir` from config, else an ephemeral temp dir (HEA-1805).
+        let env_override = std::env::var("HEARTH_DEV_DATA_DIR").ok();
+        let data_path =
+            match resolve_dev_data_dir(env_override.as_deref(), &config.storage.data_dir) {
+                Some(dir) => dir,
+                None => {
+                    let temp_dir = tempfile::tempdir()?;
+                    temp_dir.keep()
+                }
+            };
         info!(path = %data_path.display(), "using data directory (dev mode)");
         let mut storage_config = StorageConfig::dev(data_path);
+        // Dev mode otherwise uses the default 100k-entry hot tier. An explicit
+        // `storage.hot_tier_capacity` lets a corpus-scale load profile size the
+        // hot tier below the working set so cold/SST tier misses fire (HEA-1800).
+        if let Some(cap) = config.storage.hot_tier_capacity {
+            storage_config.set_hot_tier_capacity(cap);
+            info!(
+                capacity = cap,
+                "hot tier capacity overridden from config (dev mode)"
+            );
+        }
         storage_config.compaction = CompactionConfig {
             enabled: config.storage.compaction.enabled,
             interval_secs: config.storage.compaction.interval_secs,
@@ -960,9 +1071,25 @@ async fn run_serve(
     // by identity_config (it is moved on the non-dev_mode path).
     let audit_kek: Option<[u8; 32]> = storage_kek.as_ref().map(|k| *k.as_bytes());
 
+    // Resolve the optional Argon2id server-side pepper from
+    // `security.password.pepper`. Absent → `None` (unchanged default). The hex,
+    // length, all-zero, and rotation-pairing checks already ran in
+    // `Config::validate`, so this cannot fail here in practice.
+    let pepper = config.security.resolve_pepper()?;
+    if let Some(pepper) = pepper.as_ref() {
+        info!(
+            active_version = pepper.active_version,
+            rotating = pepper.previous_version.is_some(),
+            "argon2 pepper enabled from security.password.pepper"
+        );
+    }
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
-            credential: CredentialConfig::fast_for_testing(),
+            credential: CredentialConfig {
+                pepper,
+                ..CredentialConfig::fast_for_testing()
+            },
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -973,6 +1100,10 @@ async fn run_serve(
         }
     } else {
         IdentityConfig {
+            credential: CredentialConfig {
+                pepper,
+                ..CredentialConfig::default()
+            },
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -1098,20 +1229,12 @@ async fn run_serve(
 
     // A-43: Resolve effective reflection_enabled and apply the production guard.
     // `None` in the config means "use the mode default": true in --dev, false in prod.
-    let reflection_enabled = config
-        .security
-        .grpc
-        .reflection_enabled
-        .unwrap_or(config.dev_mode);
-    if reflection_enabled && !config.dev_mode && !allow_reflection_in_prod {
-        return Err(
-            "security.grpc.reflection_enabled = true is not allowed in production mode. \
-             gRPC reflection exposes the full API schema to unauthenticated callers. \
-             Pass --allow-reflection-in-prod to override (debugging only; never in real \
-             deployments)."
-                .into(),
-        );
-    }
+    let reflection_enabled = protocol::grpc::resolve_grpc_reflection(
+        config.security.grpc.reflection_enabled,
+        config.dev_mode,
+        allow_reflection_in_prod,
+    )
+    .map_err(|e| e.to_string())?;
 
     // In dev mode, upgrade Log and Smtp to mailcatcher so `make dev` works without
     // Docker or a real mail server. Production cloud transports (sendgrid, postmark,
@@ -1175,11 +1298,12 @@ async fn run_serve(
     // make is_first_run() return false and prevent the setup URL from being
     // logged on a truly fresh instance.
     let data_dir: PathBuf = if config.dev_mode {
-        if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
-            PathBuf::from(dir)
-        } else {
-            std::env::temp_dir().join("hearth-dev-onboarding")
-        }
+        // Same precedence as the storage engine above (HEA-1805) so the setup
+        // token's on-disk marker lives beside the WAL/SSTs; ephemeral temp dir
+        // only when neither env override nor config data_dir is set.
+        let env_override = std::env::var("HEARTH_DEV_DATA_DIR").ok();
+        resolve_dev_data_dir(env_override.as_deref(), &config.storage.data_dir)
+            .unwrap_or_else(|| std::env::temp_dir().join("hearth-dev-onboarding"))
     } else {
         PathBuf::from(&config.storage.data_dir)
     };
@@ -1833,14 +1957,82 @@ async fn run_serve(
     // wire it to BOTH the HTTP AppState and the gRPC GrpcState so that per-IP
     // counters accumulate across protocols — a caller cannot evade the limit by
     // switching from REST to gRPC.
-    let request_shaper = Arc::new(match config.security.request_shaper.as_ref() {
-        Some(cfg) => {
-            hearth::abuse::shaper::RequestShaper::with_config(hearth::abuse::shaper::ShaperConfig {
-                ip_rps: Some(cfg.ip_rps),
-                realm_rps: Some(cfg.realm_rps),
-            })
+    // Load-test escape hatch (`security.load_test_unthrottled`): when set AND
+    // the process runs in `--dev` mode AND every effective bind (HTTP + gRPC)
+    // is loopback, disable every request-rate limiter so a single-node
+    // throughput/soak test can saturate the hot path instead of measuring the
+    // rate limiter. Refused (fail-safe: limiters stay ON) when not in dev mode
+    // (guards reverse-proxy prod topologies) or when any bind — including the
+    // gRPC listener, which may diverge from the HTTP bind — is non-loopback, so
+    // this can never silently expose a public server (HEA-1797).
+    let bind = config.server.bind_address.trim();
+    // Effective gRPC bind: only relevant when the gRPC listener is enabled
+    // (`grpc_port` set); it inherits `bind_address` when `grpc_bind_address` is
+    // unset. Mirrors the resolution at the gRPC spawn site below.
+    let grpc_bind = config.server.grpc_port.map(|_| {
+        config
+            .server
+            .grpc_bind_address
+            .as_deref()
+            .unwrap_or(config.server.bind_address.as_str())
+            .trim()
+    });
+    let load_test_unthrottled = match loadtest_unthrottle_decision(
+        config.security.load_test_unthrottled.unwrap_or(false),
+        config.dev_mode,
+        bind,
+        grpc_bind,
+    ) {
+        LoadtestUnthrottle::Off => false,
+        LoadtestUnthrottle::Enabled => {
+            tracing::warn!(
+                bind_address = %bind,
+                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
+                "security.load_test_unthrottled=true — ALL request-rate limiters \
+                 (token endpoint, admin API, export, request shaper) are DISABLED. \
+                 Load-test-only mode; never enable on a production bind."
+            );
+            // HEA-1799: publish a runtime-visible signal so the disabled state is
+            // detectable on a live process (Prometheus scrape / dashboard alert)
+            // even after the boot WARN log has scrolled past. The startup panel
+            // gains a matching row below.
+            hearth::metrics::metrics().mark_rate_limiters_disabled("load_test");
+            true
         }
-        None => hearth::abuse::shaper::RequestShaper::new(),
+        LoadtestUnthrottle::RefusedNonLoopback => {
+            tracing::error!(
+                bind_address = %bind,
+                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
+                "security.load_test_unthrottled=true refused: every effective bind \
+                 (HTTP and gRPC) must be loopback; rate limiters remain ENABLED. \
+                 Bind both to 127.0.0.1 or ::1 to run an unthrottled load test."
+            );
+            false
+        }
+        LoadtestUnthrottle::RefusedNotDev => {
+            tracing::error!(
+                bind_address = %bind,
+                "security.load_test_unthrottled=true refused: only permitted in \
+                 --dev mode; rate limiters remain ENABLED. A loopback bind can \
+                 still be internet-reachable behind a reverse proxy, so unthrottled \
+                 load testing is dev-only."
+            );
+            false
+        }
+    };
+
+    let request_shaper = Arc::new(if load_test_unthrottled {
+        hearth::abuse::shaper::RequestShaper::disabled()
+    } else {
+        match config.security.request_shaper.as_ref() {
+            Some(cfg) => hearth::abuse::shaper::RequestShaper::with_config(
+                hearth::abuse::shaper::ShaperConfig {
+                    ip_rps: Some(cfg.ip_rps),
+                    realm_rps: Some(cfg.realm_rps),
+                },
+            ),
+            None => hearth::abuse::shaper::RequestShaper::new(),
+        }
     });
 
     let allowed_hosts = config.security.allowed_hosts.clone();
@@ -1864,6 +2056,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts.clone())
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limiters_disabled(load_test_unthrottled)
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
             // without manually setting every capability flag.
@@ -1887,6 +2080,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts)
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limiters_disabled(load_test_unthrottled)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced),
@@ -2218,6 +2412,7 @@ async fn run_serve(
             sst_count,
             data_dir_bytes,
             startup_ms: u64::try_from(serve_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            rate_limiters_disabled: load_test_unthrottled,
         };
         print_startup_panel(
             addr,
@@ -2323,6 +2518,9 @@ struct StartupStats {
     sst_count: usize,
     data_dir_bytes: u64,
     startup_ms: u64,
+    /// Whether all request-rate limiters are disabled by the load-test escape
+    /// hatch (`security.load_test_unthrottled` resolved to `Enabled`, HEA-1799).
+    rate_limiters_disabled: bool,
 }
 
 // Prints the logo + consolidated startup info panel to stdout (raw — never
@@ -2334,43 +2532,65 @@ fn print_startup_panel(
     mailcatcher: Option<(&str, &str)>,
     stats: &StartupStats,
 ) {
+    for line in build_startup_panel(addr, dev_mode, setup_token, mailcatcher, stats) {
+        tracing::info!("{line}");
+    }
+}
+
+// Builds the logo + consolidated startup info panel as ordered display lines.
+// Split out from `print_startup_panel` so the content (notably the HEA-1799
+// unthrottled-rate-limiter banner) is unit-testable without a tracing sink.
+fn build_startup_panel(
+    addr: std::net::SocketAddr,
+    dev_mode: bool,
+    setup_token: Option<&str>,
+    mailcatcher: Option<(&str, &str)>,
+    stats: &StartupStats,
+) -> Vec<String> {
     let base = format!("http://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
-    tracing::info!("");
-    tracing::info!("{HEARTH_LOGO}");
-    tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    tracing::info!(
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(String::new());
+    lines.push(HEARTH_LOGO.to_string());
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
+    lines.push(format!(
         "  Identity · Auth · RBAC   v{}{}",
         env!("CARGO_PKG_VERSION"),
         dev_badge
-    );
-    tracing::info!("  ─────────────────────────────────────────────────");
+    ));
+    // HEA-1799: unmissable banner when the load-test escape hatch has turned off
+    // every request-rate limiter. Placed at the top of the panel so an operator
+    // attaching after boot cannot miss that abuse protection is disabled.
+    if stats.rate_limiters_disabled {
+        lines.push("  ⚠  RATE LIMITERS DISABLED (load test mode)".to_string());
+    }
+    lines.push("  ─────────────────────────────────────────────────".to_string());
     // URL links — labels padded to 7 chars so values align at column 11.
-    tracing::info!("  API:     {base}");
-    tracing::info!("  Admin:   {base}/ui");
+    lines.push(format!("  API:     {base}"));
+    lines.push(format!("  Admin:   {base}/ui"));
     if let Some(issuer) = &stats.oidc_issuer {
-        tracing::info!("  Issuer:  {issuer}");
+        lines.push(format!("  Issuer:  {issuer}"));
     }
     if let Some(token) = setup_token {
         if dev_mode {
             let preview: String = token.chars().take(8).collect();
-            tracing::info!(
+            lines.push(format!(
                 "  Setup:   {base}/ui/setup  (token prefix: {preview}… — read .setup_token for full token)"
-            );
+            ));
         } else {
-            tracing::info!(
+            lines.push(format!(
                 "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
-            );
+            ));
         }
     }
     if let Some((inbox_url, password)) = mailcatcher {
         if dev_mode {
-            tracing::info!("  Mail:    {inbox_url}  pw: {password}");
+            lines.push(format!("  Mail:    {inbox_url}  pw: {password}"));
         } else {
-            tracing::info!("  Mail:    {inbox_url}");
+            lines.push(format!("  Mail:    {inbox_url}"));
         }
     }
-    tracing::info!("  ─────────────────────────────────────────────────");
+    lines.push("  ─────────────────────────────────────────────────".to_string());
     // Environment stats
     let mut env_line = format!(
         "  Realms: {}   ·   Email: {}   ·   TLS: {}",
@@ -2388,7 +2608,7 @@ fn print_startup_panel(
             if peers == 1 { "" } else { "s" }
         ));
     }
-    tracing::info!("{env_line}");
+    lines.push(env_line);
     // Storage stats
     let mut storage_parts: Vec<String> = Vec::new();
     if let Some(wal) = stats.wal_size {
@@ -2402,9 +2622,10 @@ fn print_startup_panel(
     if stats.data_dir_bytes > 0 {
         storage_parts.push(fmt_bytes(stats.data_dir_bytes));
     }
-    tracing::info!("  Storage: {}", storage_parts.join("  ·  "));
-    tracing::info!("  Startup: {} ms", stats.startup_ms);
-    tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    lines.push(format!("  Storage: {}", storage_parts.join("  ·  ")));
+    lines.push(format!("  Startup: {} ms", stats.startup_ms));
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n".to_string());
+    lines
 }
 
 fn collect_storage_stats(data_dir: &std::path::Path) -> (Option<u64>, usize, u64) {
@@ -4035,6 +4256,166 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────
+
+    #[test]
+    fn unthrottle_off_when_flag_unset() {
+        // Flag unset → limiters stay on regardless of dev/bind (even loopback).
+        assert_eq!(
+            loadtest_unthrottle_decision(false, true, "127.0.0.1", None),
+            LoadtestUnthrottle::Off
+        );
+    }
+
+    #[test]
+    fn unthrottle_enabled_on_loopback_binds() {
+        // Dev mode + loopback HTTP bind, gRPC disabled → enabled.
+        for bind in ["127.0.0.1", "127.0.0.53", "::1", "localhost", "LOCALHOST"] {
+            assert_eq!(
+                loadtest_unthrottle_decision(true, true, bind, None),
+                LoadtestUnthrottle::Enabled,
+                "{bind} must be treated as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn unthrottle_enabled_when_both_binds_loopback() {
+        // HEA-1797 Finding 1: an enabled gRPC listener must also be loopback.
+        assert_eq!(
+            loadtest_unthrottle_decision(true, true, "127.0.0.1", Some("::1")),
+            LoadtestUnthrottle::Enabled
+        );
+    }
+
+    #[test]
+    fn unthrottle_refused_on_non_loopback_binds() {
+        // Wildcard and routable HTTP binds MUST refuse — this is the production
+        // guard that keeps rate limiters on if the flag is set by mistake.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
+            assert_eq!(
+                loadtest_unthrottle_decision(true, true, bind, None),
+                LoadtestUnthrottle::RefusedNonLoopback,
+                "{bind} must refuse the unthrottle escape hatch"
+            );
+        }
+    }
+
+    #[test]
+    fn unthrottle_refused_on_divergent_grpc_bind() {
+        // HEA-1797 Finding 1: HTTP loopback but gRPC on a public interface must
+        // refuse — otherwise the disabled shaper + admin limiter leak onto a
+        // publicly reachable gRPC management endpoint.
+        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
+            assert_eq!(
+                loadtest_unthrottle_decision(true, true, "127.0.0.1", Some(grpc)),
+                LoadtestUnthrottle::RefusedNonLoopback,
+                "gRPC bind {grpc} must refuse even when HTTP is loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn unthrottle_refused_when_not_dev() {
+        // HEA-1797 Finding 2: a prod-config binary on loopback can still be
+        // internet-reachable behind a reverse proxy — refuse unless --dev.
+        assert_eq!(
+            loadtest_unthrottle_decision(true, false, "127.0.0.1", None),
+            LoadtestUnthrottle::RefusedNotDev
+        );
+        // Non-dev takes precedence over a bind check.
+        assert_eq!(
+            loadtest_unthrottle_decision(true, false, "0.0.0.0", Some("0.0.0.0")),
+            LoadtestUnthrottle::RefusedNotDev
+        );
+    }
+
+    // ── resolve_dev_data_dir precedence (HEA-1805) ────────────────────────
+
+    #[test]
+    fn dev_data_dir_env_override_wins() {
+        // HEARTH_DEV_DATA_DIR takes precedence over any config data_dir.
+        assert_eq!(
+            resolve_dev_data_dir(Some("/srv/env"), "./data/config"),
+            Some(PathBuf::from("/srv/env"))
+        );
+    }
+
+    #[test]
+    fn dev_data_dir_honors_non_default_config() {
+        // No env override, but config sets a non-default data_dir → honor it.
+        // This is the HEA-1805 bug: previously ignored in --dev, forcing an
+        // otherwise-redundant HEARTH_DEV_DATA_DIR to persist cold-tier SSTs.
+        assert_eq!(
+            resolve_dev_data_dir(None, "./data/tier-miss"),
+            Some(PathBuf::from("./data/tier-miss"))
+        );
+    }
+
+    #[test]
+    fn dev_data_dir_default_config_is_ephemeral() {
+        // Neither env override nor a non-default data_dir → None, so the caller
+        // keeps the historical ephemeral-temp behavior for a bare `--dev` run.
+        assert_eq!(
+            resolve_dev_data_dir(None, StorageSection::DEFAULT_DATA_DIR),
+            None
+        );
+    }
+
+    #[test]
+    fn dev_data_dir_blank_env_falls_through_to_config() {
+        // A blank/whitespace env value is treated as unset, so config wins.
+        assert_eq!(
+            resolve_dev_data_dir(Some("   "), "./data/tier-miss"),
+            Some(PathBuf::from("./data/tier-miss"))
+        );
+        // ...and with a default config that means ephemeral temp.
+        assert_eq!(
+            resolve_dev_data_dir(Some(""), StorageSection::DEFAULT_DATA_DIR),
+            None
+        );
+    }
+
+    // ── build_startup_panel unthrottle banner (HEA-1799) ──────────────────
+
+    fn panel_stats(rate_limiters_disabled: bool) -> StartupStats {
+        StartupStats {
+            realm_count: 1,
+            federation_count: 0,
+            email_transport: "log",
+            tls: false,
+            oidc_issuer: None,
+            cluster_peers: None,
+            wal_size: None,
+            sst_count: 0,
+            data_dir_bytes: 0,
+            startup_ms: 1,
+            rate_limiters_disabled,
+        }
+    }
+
+    #[test]
+    fn startup_panel_shows_banner_when_rate_limiters_disabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, None, None, &panel_stats(true));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("RATE LIMITERS DISABLED (load test mode)")),
+            "panel must carry the unthrottled banner when the escape hatch is enabled: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn startup_panel_omits_banner_when_rate_limiters_enabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, None, None, &panel_stats(false));
+        assert!(
+            !lines.iter().any(|l| l.contains("RATE LIMITERS DISABLED")),
+            "panel must not mention disabled limiters during normal operation: {lines:?}"
+        );
+    }
 
     // ── maybe_upgrade_email_transport ─────────────────────────────────────
 

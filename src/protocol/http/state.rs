@@ -335,4 +335,23 @@ impl AppState {
         self.request_shaper = shaper;
         self
     }
+
+    /// Disables the token, admin, and export rate limiters when `disabled` is
+    /// `true`.
+    ///
+    /// **Load-test use only.** Wired from `security.load_test_unthrottled` on a
+    /// loopback bind (see `main.rs`) so a single-node throughput test can drive
+    /// the hot path without the abuse caps acting as the bottleneck. The caller
+    /// is responsible for also swapping in a disabled [`RequestShaper`]. When
+    /// `disabled` is `false` this is a no-op and the production limiters remain
+    /// in force.
+    #[must_use]
+    pub fn with_rate_limiters_disabled(mut self, disabled: bool) -> Self {
+        if disabled {
+            self.admin_rate_limiter = Arc::new(AdminRateLimiter::disabled());
+            self.token_rate_limiter = Arc::new(TokenRateLimiter::disabled());
+            self.export_rate_limiter = Arc::new(ExportRateLimiter::disabled());
+        }
+        self
+    }
 }

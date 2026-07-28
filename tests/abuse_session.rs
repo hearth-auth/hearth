@@ -124,18 +124,23 @@ fn a18_session_evicted_in_all_actions() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The `SessionStore` trait must be usable as a trait object (dyn-safe).
-/// This test is a compilation check: if it compiles, the trait is object-safe.
 #[test]
 fn p7_session_store_trait_is_object_safe() {
+    // Compile-only: exercises the `SessionStore` trait's dyn-safety (P-7). If a
+    // non-dispatchable method were added the `&dyn`/`Box<dyn>` uses below would
+    // fail to compile. Runtime session-store behavior is covered by the A-18
+    // integration tests (e.g. a18_idle_timeout_evicts_session_on_get).
     fn _accepts_dyn(_store: &dyn SessionStore) {}
-    // If this compiles, SessionStore is dyn-safe (P-7 requirement).
     let _: Option<Box<dyn SessionStore>> = None;
 }
 
 /// `EmbeddedSessionStore` must implement `SessionStore`.
-/// Compilation test — if it builds, the impl exists.
 #[test]
 fn p7_embedded_session_store_implements_trait() {
+    // Compile-only: exercises the `EmbeddedSessionStore: SessionStore` bound. If
+    // the impl were dropped the `requires_session_store::<EmbeddedSessionStore>()`
+    // call would fail to compile. Runtime behavior of the embedded store is
+    // covered by the A-18 integration tests below.
     use hearth::identity::sessions::EmbeddedSessionStore;
     fn requires_session_store<T: SessionStore>() {}
     requires_session_store::<EmbeddedSessionStore>();

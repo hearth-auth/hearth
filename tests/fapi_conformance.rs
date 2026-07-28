@@ -431,17 +431,47 @@ async fn fapi_a02_authorize_without_jarm_client_rejected() {
     );
 }
 
-/// FAPI-A-03: Client without JWKS rejected in authorize under Advanced.
+/// FAPI-A-03: Client with JARM configured but without JWKS is rejected at
+/// authorize time under the Advanced profile.
 ///
-/// `private_key_jwt` requirement means the client MUST have a JWKS.
+/// FAPI 2.0 Advanced requires `private_key_jwt` client authentication, which
+/// mandates a registered JWKS. The engine enforces this in `authorize` after
+/// the JARM check passes, so the client here is registered WITH
+/// `authorization_signed_response_alg = EdDSA` (satisfying the JARM gate)
+/// but WITHOUT a JWKS (triggering the JWKS gate specifically).
+///
+/// **Why the prior version was imprecise:** the default client from
+/// `setup_with_profile` lacks both JARM and JWKS. The engine checks JARM
+/// first, so that version was pinning the JARM rejection, not the JWKS
+/// rejection the test name claimed.
 #[tokio::test]
 async fn fapi_a03_authorize_without_jwks_rejected() {
     let env = setup_with_profile(FapiProfile::Advanced).await;
 
-    // The default client (from setup_with_profile) has no JWKS.
-    // Attempt a via_par=true authorize — Advanced should reject lack of JWKS.
+    // Register a client that satisfies the JARM requirement (FAPI Advanced
+    // checks JARM before JWKS) but has no JWKS — so the JWKS gate fires.
+    let jarm_no_jwks_client = env
+        .harness
+        .identity()
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "FAPI-A-03 JARM-only Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                // JARM configured → satisfies the JARM gate.
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                // jwks deliberately absent → triggers the JWKS gate.
+                jwks: None,
+                ..Default::default()
+            },
+        )
+        .expect("register JARM-only client");
+
     let auth_req = AuthorizationRequest {
-        client_id: env.client_id.clone(),
+        client_id: jarm_no_jwks_client.client_id().clone(),
         redirect_uri: REDIRECT_URI.to_string(),
         response_type: "code".to_string(),
         scope: "openid".to_string(),
@@ -462,9 +492,13 @@ async fn fapi_a03_authorize_without_jwks_rejected() {
         .identity()
         .authorize(&env.realm, &auth_req)
         .expect_err("should reject: no JWKS (private_key_jwt required)");
+
+    // Pin the specific JWKS gate: the reason must name private_key_jwt / JWKS,
+    // distinguishing this from a JARM rejection.
     assert!(
-        matches!(err, IdentityError::FapiViolation { .. }),
-        "expected FapiViolation (no JWKS), got: {err:?}"
+        matches!(&err, IdentityError::FapiViolation { reason }
+            if reason.contains("private_key_jwt") || reason.contains("JWKS")),
+        "expected FapiViolation naming private_key_jwt/JWKS, got: {err:?}"
     );
 }
 

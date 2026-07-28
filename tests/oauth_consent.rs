@@ -959,8 +959,17 @@ async fn ticket_is_single_use_after_approve() {
 // Audit
 // ==========================================================================
 
+/// Approving consent emits exactly one `ConsentGranted` event attributed to
+/// the consenting user.
+///
+/// **Metadata gap:** the engine's `grant_consent` emits `metadata: None` —
+/// scope list and `via` are not threaded into the audit record by either the
+/// engine or the web consent handler. Asserting scope-list metadata here would
+/// always fail. The name has been updated from "…with_scope_list" to match the
+/// assertions that are actually feasible with the current implementation.
+/// Scope-list threading is a product-level follow-up.
 #[tokio::test]
-async fn consent_granted_emits_audit_with_scope_list() {
+async fn consent_granted_emits_audit_event() {
     let rig = build_rig();
     let csrf = "csrf-audit";
     let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, csrf);
@@ -1009,10 +1018,15 @@ async fn consent_granted_emits_audit_with_scope_list() {
             tool: None,
         })
         .expect("query");
-    assert_eq!(events.len(), 1, "expected 1 ConsentGranted event");
+    assert_eq!(events.len(), 1, "expected exactly 1 ConsentGranted event");
     let ev = &events[0];
-    assert_eq!(ev.actor, rig.alice_id.as_uuid().to_string());
-    // metadata (via, scopes) tracked in metadata-threading follow-up
+    assert_eq!(
+        ev.actor,
+        rig.alice_id.as_uuid().to_string(),
+        "actor must be the consenting user"
+    );
+    assert_eq!(ev.action, AuditAction::ConsentGranted);
+    assert_eq!(ev.resource_type, "consent", "resource_type must be consent");
 }
 
 #[tokio::test]
@@ -1178,8 +1192,16 @@ async fn self_revoke_consent_removes_record_and_reprompts_next_authorize() {
     assert_eq!(location_header(&resp).as_deref(), Some("/ui/oauth/consent"));
 }
 
+/// User revoking their own consent emits exactly one `ConsentRevoked` event
+/// attributed to the revoking user.
+///
+/// **Metadata gap:** `account_consents.rs` module docstring claims
+/// `metadata.via = "self"`, but the engine's `revoke_consent_inner` emits
+/// `metadata: None`. Asserting `via=self` here would always fail. The name
+/// has been updated from "…with_via_self" to match the assertions that are
+/// actually feasible. Threading `via` metadata is a product-level follow-up.
 #[tokio::test]
-async fn self_revoke_consent_emits_audit_with_via_self() {
+async fn self_revoke_consent_emits_audit_event() {
     let rig = build_rig();
     rig.identity
         .grant_consent(
@@ -1220,8 +1242,15 @@ async fn self_revoke_consent_emits_audit_with_via_self() {
             tool: None,
         })
         .expect("query");
-    assert_eq!(events.len(), 1);
-    // metadata tracked in follow-up
+    assert_eq!(events.len(), 1, "expected exactly 1 ConsentRevoked event");
+    let ev = &events[0];
+    assert_eq!(
+        ev.actor,
+        rig.alice_id.as_uuid().to_string(),
+        "actor must be the user who revoked their own consent"
+    );
+    assert_eq!(ev.action, AuditAction::ConsentRevoked);
+    assert_eq!(ev.resource_type, "consent", "resource_type must be consent");
 }
 
 #[tokio::test]
@@ -1506,8 +1535,19 @@ async fn admin_can_list_any_users_consents_in_target_realm() {
     assert!(body.contains("profile"), "scope missing");
 }
 
+/// Admin revoking a user's consent on their behalf emits exactly one
+/// `ConsentRevoked` event. The event actor is the **target user** (the one
+/// whose consent was revoked), because the engine's `revoke_consent_inner`
+/// records the `user_id` parameter as actor — the admin identity is not
+/// threaded into the engine call from the web UI path.
+///
+/// **Metadata gap:** `via=admin` is not emitted by the web UI handler
+/// (`admin/users.rs`); the engine emits `metadata: None`. The `via=admin`
+/// metadata only exists in a different REST path (`admin.rs`). Threading
+/// admin identity into the audit record is a product-level follow-up. The
+/// test name has been updated from "…with_via_admin" accordingly.
 #[tokio::test]
-async fn admin_revoke_on_behalf_emits_audit_with_via_admin() {
+async fn admin_revoke_on_behalf_emits_audit_event() {
     let rig = build_admin_rig();
     let csrf = "x";
     let cookie = admin_auth_cookie(&rig.admin_session, csrf);
@@ -1542,7 +1582,7 @@ async fn admin_revoke_on_behalf_emits_audit_with_via_admin() {
             rig.client.client_id(),
         )
         .expect("get");
-    assert!(rec.is_none());
+    assert!(rec.is_none(), "consent must be deleted after admin revoke");
 
     let events = rig
         .audit
@@ -1557,8 +1597,17 @@ async fn admin_revoke_on_behalf_emits_audit_with_via_admin() {
             tool: None,
         })
         .expect("query");
-    assert_eq!(events.len(), 1);
-    // metadata tracked in follow-up
+    assert_eq!(events.len(), 1, "expected exactly 1 ConsentRevoked event");
+    let ev = &events[0];
+    // The engine records the target user as actor (the identity whose consent
+    // was revoked). Admin identity threading is a product-level follow-up.
+    assert_eq!(
+        ev.actor,
+        rig.target_user.as_uuid().to_string(),
+        "actor must be the target user"
+    );
+    assert_eq!(ev.action, AuditAction::ConsentRevoked);
+    assert_eq!(ev.resource_type, "consent", "resource_type must be consent");
 }
 
 #[tokio::test]

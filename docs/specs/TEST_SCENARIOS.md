@@ -670,8 +670,8 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 #### Adversarial
 
 - [x] Privilege escalation: non-admin user accessing admin endpoints receives 403 with no data leak `P0` `fast`
-- [x] Admin endpoint rate limiting: excessive requests from single admin trigger throttling `P1` `fast`
-- [x] Mass enumeration via admin listing: response times constant regardless of result count (no timing leak) `P0` `fast`
+- [ ] Admin endpoint rate limiting: excessive requests from single admin trigger throttling `P1` `fast` <!-- HEA-1766 audit: was overclaimed; http_rate_limit.rs has no admin-scoped 429 test. Coverage dispatched in HEA-1834. -->
+- [ ] Mass enumeration via admin listing: response times constant regardless of result count (no timing leak) `P0` `fast` <!-- HEA-1766 audit: was overclaimed; no constant-time assertion on admin listing exists. Coverage dispatched in HEA-1834. -->
 
 ---
 
@@ -760,7 +760,7 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 - [x] `buf breaking` detects no backwards-incompatible proto changes vs main branch `P0` `fast`
 - [x] Generated SDK types (TypeScript + Go) are up-to-date with `.proto` definitions (`buf generate --diff`) `P0` `fast`
 - [x] Proto-to-domain conversion layer compiles after proto field changes (exhaustive struct construction catches drift) `P0` `fast`
-- [x] pbjson int64-as-string coercion: all HTTP responses pass through `proto_to_rest_json()` so REST clients receive numeric JSON `P0` `fast`
+- [ ] pbjson int64-as-string coercion: all HTTP responses pass through `proto_to_rest_json()` so REST clients receive numeric JSON `P0` `fast` <!-- HEA-1766 audit: was overclaimed; no unit test exists (buf lint/breaking/generate are CI-only). Coverage dispatched in HEA-1836. -->
 
 ---
 
@@ -813,6 +813,7 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 - [x] A.3: delete_user cascades owned agents (no orphans)
 
 **Integration (REST/Agent Card — via test harness)**
+<!-- HEA-1766 audit: intentionally left unchecked. agents.rs exercises agent CRUD at the engine level plus an unauth BOLA matrix, but there are no positive HTTP 201/200/204 assertions for these routes — flipping them would be an over-claim. Positive HTTP-layer coverage dispatched in HEA-1836. -->
 - [ ] A.4: GET /.well-known/agent.json?agent_id= returns name/description/capabilities
 - [ ] A.4: Agent Card does not expose credential hash or full permissions
 - [ ] A.7: POST /v1/agents returns 201 with agent body
@@ -832,13 +833,14 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 - [ ] A.3: verify_agent_api_key p99 < 1 ms on hot path
 - [ ] Non-agent token bytes byte-identical before and after M1 merge (regression guard)
 
-### Agent DPoP — Phase A.5–A.6 (blocked on HEA-1410)
+### Agent DPoP — Phase A.5–A.6 (shipped M1–M5; verified HEA-1766 audit)
 
-- [ ] DPoP proof parsing, signature verification, nonce, replay (Unit)
-- [ ] RFC 9449 test vector conformance (Conformance)
-- [ ] DPoP-bound token issuance full flow (Integration)
-- [ ] Token replay without proof rejected (Adversarial)
-- [ ] Proof reuse rejected (Adversarial)
+<!-- HEA-1766 audit: un-gated (HEA-1410 shipped per AGENT_AUTH.md). Backed by tests/dpop.rs, tests/dpop_refresh_binding.rs, tests/fapi2_conformance.rs, src/identity/dpop.rs. -->
+- [x] DPoP proof parsing, signature verification, nonce, replay (Unit)
+- [x] RFC 9449 test vector conformance (Conformance)
+- [x] DPoP-bound token issuance full flow (Integration)
+- [x] Token replay without proof rejected (Adversarial)
+- [x] Proof reuse rejected (Adversarial)
 
 ## Phases 2–3+
 

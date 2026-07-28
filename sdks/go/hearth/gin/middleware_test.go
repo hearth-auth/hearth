@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
 	"github.com/gin-gonic/gin"
+	hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 func init() {
@@ -189,17 +189,39 @@ func TestRequirePermissionDenied(t *testing.T) {
 }
 
 func TestRequirePermissionNoToken(t *testing.T) {
-	// RequirePermission without HearthMiddleware — no token in context.
+	// Exercise the full HearthMiddleware + RequirePermission chain against real
+	// requests: a missing token must be rejected with 401 before the protected
+	// handler runs, and a valid token carrying the permission must pass through
+	// and reach the handler. The previous version built a client and discarded
+	// it (`_ = client`), never exercising the middleware's use of it.
 	client := hearth.NewClient("http://localhost", "r1")
-	_ = client
 
+	handlerCalled := false
 	r := gin.New()
+	r.Use(HearthMiddleware(client))
 	r.Use(RequirePermission("docs.edit"))
-	r.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
+	r.GET("/test", func(c *gin.Context) {
+		handlerCalled = true
+		c.Status(http.StatusOK)
+	})
 
+	// Missing token → 401, protected handler must not run.
 	rr := serve(r, "")
 	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 when no token in context, got %d", rr.Code)
+		t.Fatalf("expected 401 when no token supplied, got %d", rr.Code)
+	}
+	if handlerCalled {
+		t.Fatal("protected handler must not run without a token")
+	}
+
+	// Valid token carrying docs.edit → 200, handler runs.
+	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
+	rr = serve(r, token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for permitted token, got %d", rr.Code)
+	}
+	if !handlerCalled {
+		t.Fatal("protected handler must run for a permitted token")
 	}
 }
 

@@ -1221,15 +1221,18 @@ realms:
 
 ### Enforcement contract
 
-| Mechanism | Trigger | Audit event |
-|-----------|---------|-------------|
-| Lazy eviction | `get_session()` or `refresh_session()` on a policy-expired session | `session_evicted` |
-| Proactive reaper | Background task runs alongside OAuth cleanup sweep | `session_evicted` |
+| Mechanism | Trigger | Effect on read path | Audit event |
+|-----------|---------|---------------------|-------------|
+| Read-path rejection | `get_session()` / `get_session_arc()` encounters a policy-expired session | Returns `None` (fail-closed); removes session from hot-tier in-process cache | None — audit is deferred |
+| Background eviction sweep | `sweep_expired_sessions()` driven by cleanup task | Marks session revoked in storage, bumps session version | `session_evicted` |
+| `refresh_session()` | Called on a policy-expired session | Returns error; no write | None |
 
-**Idle timeout**: Session evicted if `now ≥ last_refreshed_at + idle_timeout_secs`.
+**Important (HEA-1774):** The `session_evicted` audit event is emitted **only** by the background sweep, not by the read path. When `validate_token` or `lookup_session` rejects an A-18-expired session, the caller receives a `401` immediately (fail-closed), but the storage revocation record and audit entry arrive on the next background sweep cycle. This keeps the token-validation hot path free of storage writes.
+
+**Idle timeout**: Session rejected if `now ≥ last_refreshed_at + idle_timeout_secs`.
 Reset on each `refresh_session()` call.
 
-**Absolute timeout**: Session evicted if `now ≥ created_at + absolute_timeout_secs`.
+**Absolute timeout**: Session rejected if `now ≥ created_at + absolute_timeout_secs`.
 Never reset — unaffected by refreshes.
 
 Both deadlines are embedded in the `Session` record at creation time so the
@@ -1242,6 +1245,10 @@ existing sessions — sessions created with embedded deadlines continue to enfor
 those deadlines until they naturally expire via TTL or explicit revocation.
 
 ### `session.evicted` audit event
+
+Emitted by `sweep_expired_sessions()` (background cleanup loop), not by the
+read path. A rejected session may not have its audit record until the next sweep
+cycle (typically within seconds, depending on cleanup task cadence).
 
 - `reason`: `"idle_timeout"` | `"absolute_timeout"`
 - `session_id`: the evicted session UUID

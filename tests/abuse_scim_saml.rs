@@ -7,6 +7,8 @@
 
 use hearth::abuse::{MAX_SAML_XML_EVENTS, MAX_SCIM_OPERATIONS};
 use hearth::identity::federation::saml::response::parse_response;
+use hearth::identity::federation::saml::SamlError;
+use hearth::identity::IdentityError;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A-35a — SCIM PATCH operations cap
@@ -22,18 +24,13 @@ fn a35a_max_scim_operations_is_1000() {
     );
 }
 
-/// The cap is enforced at the handler level (HTTP integration test needed for
-/// full black-box coverage).  The unit assertion here confirms the constant
-/// is reachable from the test surface and has the right value.
-///
-/// Full integration coverage lives in the server-mode harness tests that send
-/// real HTTP PATCH requests; see `make ci-local-fast` for the gate.
-#[test]
-fn a35a_scim_ops_constant_exported() {
-    // Verify the constant is exactly 1000 — any future change must also
-    // update the ABUSE.md spec and the CHANGELOG entry.
-    assert_eq!(MAX_SCIM_OPERATIONS, 1_000);
-}
+// NOTE: the handler-level enforcement of `MAX_SCIM_OPERATIONS` — a PATCH whose
+// `Operations` array exceeds the cap is rejected with 413 *before* any op is
+// applied — is exercised end-to-end by
+// `scim_bearer_auth::scim_patch_over_operation_cap_rejected`. The former
+// constant-only `a35a_scim_ops_constant_exported` test here gave false
+// confidence (it asserted the constant but never the enforcement) and was
+// removed in favour of that real integration test.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A-35b — SAML XML event cap
@@ -69,15 +66,12 @@ fn a35b_oversized_saml_xml_rejected() {
         </samlp:Response>"#
     );
     let result = parse_response(xml.as_bytes());
+    let err = result.expect_err("oversized SAML XML must be rejected, got Ok");
+    // The event-cap trip is a *parse* rejection, never a semantic variant that
+    // might mask the cap regressing into unbounded expansion.
     assert!(
-        result.is_err(),
-        "oversized SAML XML must be rejected, got Ok"
-    );
-    let err = result.expect_err("result must be Err for oversized SAML XML");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("exceed") || msg.contains("limit") || msg.contains("parse"),
-        "error must mention the limit: {msg}"
+        matches!(err, IdentityError::Saml(SamlError::Parse { .. })),
+        "oversized SAML XML must reject as SamlError::Parse, got: {err:?}"
     );
 }
 
@@ -95,6 +89,41 @@ fn a35c_doctype_in_saml_response_rejected() {
                 </samlp:Response>";
     let result = parse_response(xml);
     let err = result.expect_err("DOCTYPE in SAML response must be rejected");
-    // Assert that the rejection is a parse/validation error (not a panic)
-    let _ = err; // error variant itself proves rejection
+    // XXE/DOCTYPE must reject as a *Parse* error specifically — the previous
+    // `let _ = err` was vacuous and would have passed even if the guard had
+    // regressed into silently accepting (and expanding) the DOCTYPE.
+    assert!(
+        matches!(err, IdentityError::Saml(SamlError::Parse { .. })),
+        "DOCTYPE/XXE must reject as SamlError::Parse, got: {err:?}"
+    );
+}
+
+/// Positive control for the XXE guard: the *same* Response skeleton WITHOUT a
+/// DOCTYPE parses cleanly. Paired with `a35c_doctype_in_saml_response_rejected`
+/// this proves the rejection is caused by the DOCTYPE, not the skeleton itself.
+#[test]
+fn a35c_response_without_doctype_parses() {
+    let xml = b"<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+                ID=\"_r1\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\">\
+                <samlp:Status><samlp:StatusCode \
+                Value=\"urn:oasis:names:tc:SAML:2.0:status:Success\"/></samlp:Status>\
+                </samlp:Response>";
+    parse_response(xml).expect("clean Response skeleton (no DOCTYPE) must parse");
+}
+
+/// A DOCTYPE that declares an external entity and *references* it in the body
+/// (classic file-disclosure XXE payload) must reject as Parse — the external
+/// entity must never be resolved or expanded.
+#[test]
+fn a35c_external_entity_reference_rejected() {
+    let xml = b"<!DOCTYPE samlp:Response [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\
+                <samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" \
+                ID=\"_r1\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\">\
+                <samlp:Status><samlp:StatusCode Value=\"&xxe;\"/></samlp:Status>\
+                </samlp:Response>";
+    let err = parse_response(xml).expect_err("external-entity XXE must be rejected");
+    assert!(
+        matches!(err, IdentityError::Saml(SamlError::Parse { .. })),
+        "external-entity XXE must reject as SamlError::Parse, got: {err:?}"
+    );
 }

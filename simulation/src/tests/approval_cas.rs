@@ -109,17 +109,25 @@ fn make_request(agent_id: AgentId) -> CreateApprovalRequestInput {
 // ── Test 1: create crash ─────────────────────────────────────────────────────
 
 /// A crash during `create_approval_request` must leave either a fully-intact
-/// record (primary + all three indexes in one atomic WAL batch) or nothing.
+/// record (primary + list + pending + outbox in one atomic WAL batch) or nothing.
+///
+/// Why the orphan-header injection is a faithful proxy: `create_approval_request`
+/// writes all four keys in a SINGLE `put_batch`, i.e. one WAL record. A crash
+/// mid-create therefore produces one torn record, which fails CRC and is
+/// discarded as a unit on replay — exactly the outcome an appended orphan length
+/// header reproduces. There is no intermediate "some keys written, others not"
+/// state to roll back, so trailing-record discard *is* the partial-create
+/// rollback here.
 ///
 /// Strategy:
 /// 1. Create two complete approval requests.
-/// 2. Inject an orphan WAL length header — this mimics a crash mid-create of a
-///    third request, where the WAL replay will discard the truncated record.
-/// 3. Reopen the engine. Verify exactly two requests exist and both are Pending.
+/// 2. Inject an orphan WAL length header — the torn tail of a would-be third
+///    create; WAL replay discards it.
+/// 3. Reopen the engine. Verify exactly two requests exist and both are Pending,
+///    and the pending index matches (no half-written index entries).
 #[test]
 fn simulation_approval_cas_create_crash_discards_partial_record() {
     let seed = 60u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut request_ids = Vec::new();
@@ -201,7 +209,11 @@ fn simulation_approval_cas_create_crash_discards_partial_record() {
 ///   2. `put(primary_key, Approved)` — WAL record N+1 (lost to crash)
 ///
 /// We simulate this by manually executing only the first write (via the raw
-/// storage layer) and then reopening the engine. The primary record is still
+/// storage layer) and then cleanly reopening the engine — a proxy for a crash
+/// between the two writes rather than an injected fault. This is sound because
+/// the reopen reconstructs the *exact* intermediate durable state a real crash
+/// would leave (primary still Pending, pending-index entry deleted); the
+/// recovery path can't tell the difference. The primary record is still
 /// Pending; the pending index entry is gone.
 ///
 /// After reopening, `approve_approval_request` must succeed because:
@@ -211,7 +223,6 @@ fn simulation_approval_cas_create_crash_discards_partial_record() {
 #[test]
 fn simulation_approval_cas_transition_crash_leaves_recoverable_state() {
     let seed = 61u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm_id;
@@ -319,7 +330,6 @@ fn simulation_approval_cas_transition_crash_leaves_recoverable_state() {
 #[test]
 fn simulation_approval_webhook_outbox_survives_crash_before_delivery() {
     let seed = 62u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let realm_id;
@@ -404,7 +414,6 @@ fn simulation_approval_webhook_outbox_survives_crash_before_delivery() {
 #[test]
 fn simulation_approval_cas_concurrent_approve_deny_exactly_one_wins() {
     let seed = 63u64;
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
 

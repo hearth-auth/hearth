@@ -181,6 +181,14 @@ jobs:
       - name: Auth-discard lint (check-auth-discard.sh)
         run: bash scripts/check-auth-discard.sh
 
+      # HEA-1781: prevent recurrence of the RBAC decision-cache invalidation
+      # bypass (HEA-1770 § febfe092, HEA-1777). Fails if any raw
+      # self.storage.put/put_batch/delete/delete_batch appears in
+      # src/rbac/engine.rs outside the invalidating write_* helpers.
+      # Runs on every PR — pure grep, no Rust build required.
+      - name: RBAC storage-write lint (check-rbac-storage-writes.sh)
+        run: bash scripts/check-rbac-storage-writes.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:

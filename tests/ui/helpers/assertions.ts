@@ -1,4 +1,4 @@
-import type { Page, Response } from '@playwright/test';
+import type { BrowserContext, Page, Response } from '@playwright/test';
 
 export interface ConsoleErrorCollector {
   readonly errors: string[];
@@ -45,6 +45,53 @@ export function assertNoFailedRequests(
         failures.map((r) => `  HTTP ${r.status()} ${r.url()}`).join('\n'),
     );
   }
+}
+
+interface PageDiagnostics {
+  errors: string[];
+  responses: Response[];
+}
+
+// Per-page diagnostics, keyed by the Page object so beforeEach/afterEach (or a
+// manual attach/assert pair) can share the same collector without threading a
+// variable through the test body. WeakMap lets closed pages be GC'd.
+const diagnostics = new WeakMap<Page, PageDiagnostics>();
+
+/**
+ * Instruments a page to collect console errors and every HTTP response.
+ * Call once per page (e.g. in `beforeEach` or right after `newPage()`), then
+ * call {@link assertPageClean} before the test ends to fail on JS errors or 5xx.
+ */
+export function instrumentPage(page: Page): void {
+  const collector: PageDiagnostics = { errors: [], responses: [] };
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') collector.errors.push(msg.text());
+  });
+  page.on('response', (r) => collector.responses.push(r));
+  diagnostics.set(page, collector);
+}
+
+/**
+ * Creates a new page in `ctx` and instruments it in one step. Convenience for
+ * specs that build their own contexts (so they can't use a `beforeEach` hook on
+ * the shared fixture page). Pair with {@link assertPageClean} before closing.
+ */
+export async function newInstrumentedPage(ctx: BrowserContext): Promise<Page> {
+  const page = await ctx.newPage();
+  instrumentPage(page);
+  return page;
+}
+
+/**
+ * Asserts the page saw no console errors and no failed (5xx) requests since
+ * {@link instrumentPage} was called. No-op if the page was never instrumented.
+ */
+export function assertPageClean(page: Page): void {
+  const collector = diagnostics.get(page);
+  if (!collector) return;
+  const url = page.url();
+  assertNoConsoleErrors({ errors: collector.errors }, url);
+  assertNoFailedRequests(collector.responses, url);
 }
 
 export async function assertPageNonEmpty(page: Page): Promise<void> {

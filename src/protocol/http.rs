@@ -42,6 +42,7 @@ mod users;
 
 // ── Public API (preserve existing import paths for external crates) ───────────
 
+pub use auth::has_export_capability;
 pub use serve::{serve, serve_redirect, serve_router, serve_tls, serve_tls_router};
 pub use state::AppState;
 

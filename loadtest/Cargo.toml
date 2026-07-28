@@ -1,0 +1,46 @@
+# Empty table marks this as its own workspace root: the crate is excluded from
+# the parent workspace (root Cargo.toml `exclude = ["loadtest"]`), and without
+# this cargo errors ("believes it's in a workspace when it's not").
+[workspace]
+
+[package]
+name = "hearth-loadtest"
+version = "0.1.0"
+edition = "2021"
+description = "Load-testing harness for the Hearth identity server (HEA-1787)"
+license = "Apache-2.0"
+publish = false
+
+# This crate is intentionally NOT a workspace member (see the root
+# Cargo.toml `[workspace] exclude`). Keeping goose and its heavy transitive
+# dependency tree out of `cargo nextest run --workspace` keeps the unit-test
+# gate fast. Build/run it explicitly via `make loadtest`.
+
+[[bin]]
+name = "hearth-loadtest"
+path = "src/main.rs"
+
+[dependencies]
+# rustls-tls (not the default native-tls/openssl): Hearth is rustls-only and
+# the build environment has no OpenSSL. `default-features = false` drops the
+# `reqwest/default-tls` default.
+goose = { version = "0.18", default-features = false, features = ["rustls-tls"] }
+
+# Seed step (HEA-1789). reqwest carries `default-features = false` for the same
+# rustls-only reason as goose above; `json` pulls serde_json integration.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `time` + `sync`: the resource sampler (HEA-1811) polls /proc on a Tokio
+# interval and stops via a oneshot channel.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+
+# Loopback guard on --target-host (HEA-1794). Already in the tree via reqwest;
+# using the same parser reqwest connects with avoids a parser differential.
+url = "2"
+
+# Post-processing the Goose HTML report to rewrite its whole-ms Min/Max cells
+# with our microsecond-resolution extremes (HEA-1788 board follow-up). Already
+# in the lock via goose's transitive tree, so no new audit surface.
+regex = "1"

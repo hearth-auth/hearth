@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { test, expect } from '@playwright/test';
 import { AUTH_DIR } from '../helpers/actions';
+import { instrumentPage, assertPageClean } from '../helpers/assertions';
 import type { SeedFixtures } from '../fixtures/seed';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
@@ -14,6 +15,14 @@ function loadSeed(): SeedFixtures {
 test.use({ storageState: path.join(AUTH_DIR, 'admin.json') });
 
 test.describe('Sidebar navigation', () => {
+  test.beforeEach(async ({ page }) => {
+    instrumentPage(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    assertPageClean(page);
+  });
+
   test('sidebar renders with main nav links', async ({ page }) => {
     await page.goto(`${BASE_URL}/ui`);
 

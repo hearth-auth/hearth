@@ -342,6 +342,14 @@ curl -s -X POST http://127.0.0.1:8420/token \
 Presenting a refresh token with the wrong client identity — or without any client
 credentials — returns `401 invalid_client`.
 
+### `grant_type=client_credentials` and other endpoint-authenticated grant types
+
+The `client_credentials` grant, RFC 8693 token exchange, `POST /revoke`, and
+`POST /introspect` all authenticate the **endpoint client** (the caller's `client_id`
+and `client_secret`) before processing the request. A missing, wrong, or unrecognized
+secret on any of these paths returns `401 invalid_client` — the same RFC 6749-registered
+code returned by the `authorization_code` and `refresh_token` arms.
+
 ### Realm-scoped token endpoint
 
 The realm-scoped endpoint (`POST /realms/<realm-name>/token`) enforces the same rules:

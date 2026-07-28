@@ -194,6 +194,21 @@ fn scope_intersection_result_is_subset_of_inputs() {
     let requested = "mcp:tools:invoke email";
 
     let result = intersect_three(subject, actor, Some(requested));
+
+    // The intersection of all three inputs contains exactly `mcp:tools:invoke`
+    // (the only scope common to subject, actor, AND requested). Assert it is
+    // non-empty and carries that scope — otherwise every subset check below
+    // would pass vacuously against an empty result.
+    let result_scopes: Vec<&str> = result.split_whitespace().collect();
+    assert!(
+        !result_scopes.is_empty(),
+        "intersection must be non-empty; got empty result"
+    );
+    assert!(
+        result_scopes.contains(&"mcp:tools:invoke"),
+        "intersection must retain the common `mcp:tools:invoke` scope; got: {result:?}"
+    );
+
     // Result must be a subset of subject
     for scope in result.split_whitespace() {
         assert!(

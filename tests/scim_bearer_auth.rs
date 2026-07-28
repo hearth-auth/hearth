@@ -113,11 +113,18 @@ fn setup_realm_with_admin(rig: &Rig, name: &str) -> (RealmId, String) {
             config: None,
         })
         .expect("create realm");
+    let jwt = provision_admin_in_realm(rig, realm.id(), name);
+    (realm.id().clone(), jwt)
+}
 
+/// Provision a `realm.admin` user in an *existing* realm and return an admin
+/// JWT for it. Lets tests obtain a same-realm admin token so a rejection can be
+/// attributed to the SCIM-token gate rather than a realm mismatch.
+fn provision_admin_in_realm(rig: &Rig, realm_id: &RealmId, name: &str) -> String {
     let user = rig
         .identity
         .create_user(
-            realm.id(),
+            realm_id,
             &CreateUserRequest {
                 email: format!("admin@{name}.test"),
                 display_name: "Admin".to_string(),
@@ -128,15 +135,15 @@ fn setup_realm_with_admin(rig: &Rig, name: &str) -> (RealmId, String) {
         )
         .expect("create admin user");
 
-    rig.authz.seed_realm(realm.id()).expect("seed realm");
+    rig.authz.seed_realm(realm_id).expect("seed realm");
     let admin_role = rig
         .authz
-        .get_role_by_name(realm.id(), "realm.admin")
+        .get_role_by_name(realm_id, "realm.admin")
         .expect("lookup")
         .expect("seed role present");
     rig.authz
         .assign_role(
-            realm.id(),
+            realm_id,
             &hearth::rbac::AssignRoleRequest {
                 subject: hearth::rbac::Subject::User(user.id().clone()),
                 role_id: admin_role.id.clone(),
@@ -148,13 +155,13 @@ fn setup_realm_with_admin(rig: &Rig, name: &str) -> (RealmId, String) {
 
     let session = rig
         .identity
-        .create_session(realm.id(), user.id(), &SessionContext::default())
+        .create_session(realm_id, user.id(), &SessionContext::default())
         .expect("session");
     let tokens = rig
         .identity
-        .issue_tokens(realm.id(), user.id(), session.id())
+        .issue_tokens(realm_id, user.id(), session.id())
         .expect("tokens");
-    (realm.id().clone(), tokens.access_token().to_string())
+    tokens.access_token().to_string()
 }
 
 async fn post_scim_user(
@@ -212,6 +219,10 @@ async fn scim_bearer_token_provisions_users() {
 
 /// Admin JWT is rejected with 401 when the realm has a `scim_bearer_token_hash`
 /// configured — realm-scoped token enforcement is active.
+///
+/// The admin JWT is minted for the *same* realm that enforces the SCIM token,
+/// so a 401 is attributable to the SCIM-token gate rather than a cross-realm
+/// mismatch (which `scim_jwt_fallback_rejects_cross_realm_jwt` covers).
 #[tokio::test]
 async fn admin_jwt_rejected_when_scim_token_enforced() {
     const PLAINTEXT_TOKEN: &str = "another-secret-scim-token-for-enforcement-test";
@@ -219,8 +230,10 @@ async fn admin_jwt_rejected_when_scim_token_enforced() {
     let rig = build_rig();
     let realm_id = setup_realm_with_scim_token(&rig, "scim-enforce-test", PLAINTEXT_TOKEN);
 
-    // Obtain a valid admin JWT from a separate realm.
-    let (_, admin_jwt) = setup_realm_with_admin(&rig, "scim-enforce-admin-realm");
+    // Mint a valid admin JWT for THIS realm. Because the realm enforces a SCIM
+    // bearer token, even a legitimate same-realm admin JWT must be rejected —
+    // isolating the SCIM-token gate from any realm-mismatch rejection.
+    let admin_jwt = provision_admin_in_realm(&rig, &realm_id, "scim-enforce-test");
 
     let admin_header = format!("Bearer {admin_jwt}");
     let (status, _) = post_scim_user(
@@ -234,7 +247,7 @@ async fn admin_jwt_rejected_when_scim_token_enforced() {
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
-        "Admin JWT must be rejected (401) when realm-scoped SCIM token is enforced (got {status})"
+        "Same-realm admin JWT must be rejected (401) when realm-scoped SCIM token is enforced (got {status})"
     );
 }
 
@@ -362,5 +375,94 @@ async fn scim_jwt_fallback_rejects_mismatched_realm_header() {
         bad_status.is_client_error(),
         "JWT for realm_a must be rejected when X-Realm-ID is realm_b (got {bad_status}); \
          expected 401 (tid mismatch) or 403 (SCIM realm guard)"
+    );
+}
+
+/// Send a SCIM PATCH with `op_count` operations to `/scim/v2/Users/{user_id}`.
+async fn patch_scim_user(
+    app: &axum::Router,
+    realm_id: &RealmId,
+    auth_header: &str,
+    user_id: &str,
+    op_count: usize,
+) -> (StatusCode, Value) {
+    let ops: Vec<Value> = (0..op_count)
+        .map(|_| json!({"op": "replace", "path": "displayName", "value": "x"}))
+        .collect();
+    let body = json!({
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": ops,
+    });
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/scim/v2/Users/{user_id}"))
+        .header("content-type", "application/scim+json")
+        .header("x-realm-id", realm_id.as_uuid().to_string())
+        .header("authorization", auth_header)
+        .body(Body::from(body.to_string()))
+        .expect("build request");
+
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let val: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
+/// A-35a: a SCIM PATCH whose `Operations` array exceeds `MAX_SCIM_OPERATIONS`
+/// is rejected with 413 *before* any operation is applied. Exercises the real
+/// handler-level cap, not just the exported constant.
+#[tokio::test]
+async fn scim_patch_over_operation_cap_rejected() {
+    use hearth::abuse::MAX_SCIM_OPERATIONS;
+
+    const PLAINTEXT_TOKEN: &str = "scim-token-for-patch-cap-enforcement-testing";
+
+    let rig = build_rig();
+    let realm_id = setup_realm_with_scim_token(&rig, "scim-patch-cap", PLAINTEXT_TOKEN);
+    let auth_header = format!("Bearer {PLAINTEXT_TOKEN}");
+
+    // Provision a user to PATCH.
+    let (create_status, created) =
+        post_scim_user(&rig.app, &realm_id, &auth_header, "patchee@example.com").await;
+    assert_eq!(
+        create_status,
+        StatusCode::CREATED,
+        "precondition: user must be provisioned (got {create_status}): {created}"
+    );
+    let user_id = created
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("created user must carry an id");
+
+    // Just under the cap: accepted (not a 413).
+    let (ok_status, _) = patch_scim_user(
+        &rig.app,
+        &realm_id,
+        &auth_header,
+        user_id,
+        MAX_SCIM_OPERATIONS,
+    )
+    .await;
+    assert_ne!(
+        ok_status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a PATCH at exactly the cap must not be rejected as too large (got {ok_status})"
+    );
+
+    // One over the cap: rejected with 413.
+    let (over_status, over_body) = patch_scim_user(
+        &rig.app,
+        &realm_id,
+        &auth_header,
+        user_id,
+        MAX_SCIM_OPERATIONS + 1,
+    )
+    .await;
+    assert_eq!(
+        over_status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "PATCH with {} operations must be rejected with 413 (got {over_status}): {over_body}",
+        MAX_SCIM_OPERATIONS + 1
     );
 }

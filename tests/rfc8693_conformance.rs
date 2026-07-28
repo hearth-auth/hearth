@@ -7,7 +7,7 @@
 //! - Response required fields: `access_token`, `issued_token_type`, `token_type`
 //! - `issued_token_type` is always `urn:ietf:params:oauth:token-type:access_token`
 //! - ERR-01: wrong `subject_token_type` → `invalid_request` OAuth error code
-//! - ERR-02: expired subject token → error
+//! - ERR-02: subject token with invalid signature → `invalid_grant` (sig check before expiry since HEA-1470)
 //! - ERR-03: requested scope wider than subject scope → `invalid_scope`
 //!
 //! Spec refs: RFC 8693, RFC 6749 §5.2
@@ -300,9 +300,22 @@ async fn rfc8693_err01_wrong_subject_token_type() {
     );
 }
 
-/// ERR-02: expired subject token → token-expired error.
+/// ERR-02: a subject token with an invalid signature (and a past `exp`) is
+/// rejected with `invalid_grant`.
+///
+/// **Why the name changed from "expired_subject_token":** since HEA-1470,
+/// `validate_token` checks the Ed25519 signature *before* inspecting `exp`.
+/// The `mock_subject_jwt` helper intentionally produces a "fakesig" signature,
+/// so the rejection is always signature-driven, not expiry-driven. The
+/// test correctly pins the `invalid_grant` outcome; the name now reflects
+/// the actual rejection path.
+///
+/// To test the *expiry* path specifically, the subject token would need to be a
+/// real signed token issued with a FakeClock-backed engine that is then
+/// advanced past `exp`; that variant belongs in an engine-level integration
+/// test with full clock control.
 #[tokio::test]
-async fn rfc8693_err02_expired_subject_token() {
+async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
     let harness = common::TestHarness::embedded().await.expect("test setup");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
@@ -319,7 +332,8 @@ async fn rfc8693_err02_expired_subject_token() {
         .id()
         .clone();
 
-    // Token expired 60 seconds ago.
+    // mock_subject_jwt produces a "fakesig" JWT — invalid signature + past exp.
+    // validate_token rejects on signature failure first → invalid_grant.
     let subject_token = mock_subject_jwt(
         &user_id.as_uuid().to_string(),
         "hearth",
@@ -344,10 +358,8 @@ async fn rfc8693_err02_expired_subject_token() {
                 dpop_jkt: None,
             },
         )
-        .expect_err("must reject expired subject token");
+        .expect_err("must reject subject token with invalid signature");
 
-    // After HEA-1470, validate_token verifies the signature first, so an expired
-    // subject_token (with invalid signature) is rejected as invalid_grant.
     assert!(
         matches!(
             err,
@@ -356,7 +368,7 @@ async fn rfc8693_err02_expired_subject_token() {
                 ..
             }
         ),
-        "ERR-02: expected invalid_grant for expired/invalid subject_token, got: {err}"
+        "ERR-02: expected invalid_grant for invalid-signature subject_token, got: {err}"
     );
 }
 

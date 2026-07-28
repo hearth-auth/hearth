@@ -361,8 +361,13 @@ async fn approval_webhook_http_url_rejected_at_registration() {
     });
 
     assert!(
-        result.is_err(),
-        "http:// approval webhook URL must be rejected at registration"
+        matches!(
+            &result,
+            Err(hearth::identity::IdentityError::InvalidInput { reason })
+                if reason.contains("https://")
+        ),
+        "http:// approval webhook URL must be rejected at registration with an \
+         InvalidInput scheme error, got: {result:?}"
     );
 }
 
@@ -432,12 +437,30 @@ async fn approval_webhook_ssrf_blocked_at_delivery() {
         },
     );
 
-    assert!(
-        result.is_ok(),
-        "create_approval_request must succeed even when webhook delivery is SSRF-blocked: {:?}",
-        result.err()
+    let approval = result
+        .expect("create_approval_request must succeed even when webhook delivery is SSRF-blocked");
+    // The request must be fully persisted with the expected content despite the
+    // blocked delivery: agent binding, tool, and Pending status all intact.
+    assert_eq!(
+        approval.agent_id,
+        *agent.id(),
+        "approval must be bound to the requesting agent"
     );
-    // Delivery failure is silent at the API level (outbox persists for retry).
-    // The guard is exercised; if the SSRF check were absent, ureq would attempt
-    // a real TCP connection to 169.254.169.254 instead.
+    assert_eq!(approval.tool, "metadata_steal", "tool must round-trip");
+    assert_eq!(
+        approval.status,
+        hearth::identity::ApprovalRequestStatus::Pending,
+        "a freshly created approval must be Pending"
+    );
+
+    // And it must be retrievable afterward (outbox persists for retry).
+    let fetched = h
+        .identity()
+        .get_approval_request(&realm_id, &approval.request_id)
+        .expect("approval request must be persisted despite SSRF-blocked delivery");
+    assert_eq!(fetched.request_id, approval.request_id);
+
+    // Compile/behavior note: SSRF-blocking of the delivery itself is silent at the
+    // API level (outbox persists for retry) and is not observable through a public
+    // return value here — the guard is exercised in the production transport path.
 }

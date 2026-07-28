@@ -17,8 +17,6 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 #[test]
 fn simulation_crash_recovery_sessions() {
     let seed = 50u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut session_ids = Vec::new();
@@ -122,8 +120,6 @@ fn simulation_crash_recovery_sessions() {
 #[test]
 fn simulation_ttl_clock_skew() {
     let seed = 51u64;
-    // Deterministic seed for future madsim integration.
-    let _ = seed;
 
     let dir = tempfile::tempdir().expect("tempdir");
 

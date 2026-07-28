@@ -81,16 +81,24 @@ fn concurrent_assign_unassign_converge_to_consistent_set() {
         }));
     }
 
-    // Concurrent resolves alongside the writes — must not panic or tear.
+    // Concurrent resolves alongside the writes — must not panic or tear. Each
+    // resolve returns its observed permission names so we can assert (post-join)
+    // that every in-race snapshot was a *consistent subset* of the legal set
+    // {p.r0..p.r3} — never a torn/dangling permission from a half-applied index
+    // write. The previous `let _ = ...` discarded these, so the in-race resolve
+    // was a no-op that only checked "did not panic".
     let mut resolve_handles = Vec::new();
     for _ in 0..8 {
         let rbac = Arc::clone(&rbac);
         let realm = realm.clone();
         let user = user.clone();
         resolve_handles.push(std::thread::spawn(move || {
-            let _ = rbac
-                .resolve_permissions(&user, &realm, None, None)
-                .expect("resolve ok");
+            rbac.resolve_permissions(&user, &realm, None, None)
+                .expect("resolve ok")
+                .permissions
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect::<Vec<_>>()
         }));
     }
 
@@ -98,8 +106,16 @@ fn concurrent_assign_unassign_converge_to_consistent_set() {
         .into_iter()
         .map(|h| h.join().expect("thread join"))
         .collect();
+    let legal: std::collections::HashSet<String> = (0..4).map(|i| format!("p.r{i}")).collect();
     for h in resolve_handles {
-        h.join().expect("thread join");
+        let observed = h.join().expect("thread join");
+        for name in &observed {
+            assert!(
+                legal.contains(name),
+                "in-race resolve returned an illegal/torn permission {name:?}; \
+                 legal set is {legal:?}"
+            );
+        }
     }
 
     // Post-quiescence: all four permissions visible.
@@ -141,5 +157,87 @@ fn concurrent_assign_unassign_converge_to_consistent_set() {
     assert!(
         resolved.roles.is_empty(),
         "no dangling roles should remain after unassign"
+    );
+}
+
+/// Same-key contention. The test above races assigns over four *distinct*
+/// roles, so no two writers touch the same assignment key, leaving the A-28
+/// write-lock idempotency path (`engine.rs`: "if this exact (subject, role,
+/// scope) already exists, return it without creating a duplicate") unexercised.
+/// Here eight threads race to assign the *same* role to the *same* user at the
+/// same scope; the invariant is that exactly one assignment record survives (no
+/// lost update, no duplicate index entries, no torn resolve).
+#[test]
+fn concurrent_same_role_assign_is_idempotent() {
+    let (rbac, realm) = open();
+
+    let role = rbac
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: "shared".to_string(),
+                description: None,
+                permissions: perms(&["p.shared"]),
+                parent_roles: vec![],
+                ..Default::default()
+            },
+        )
+        .expect("create role");
+
+    let user = UserId::generate();
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let rbac = Arc::clone(&rbac);
+        let realm = realm.clone();
+        let user = user.clone();
+        let role_id = role.id.clone();
+        handles.push(std::thread::spawn(move || {
+            rbac.assign_role(
+                &realm,
+                &AssignRoleRequest {
+                    subject: Subject::User(user),
+                    role_id,
+                    scope: Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("idempotent assign must succeed under contention")
+        }));
+    }
+
+    // Every winner must observe the *same* assignment id — idempotency collapses
+    // all eight racers onto one record rather than minting eight.
+    let ids: std::collections::HashSet<AssignmentId> = handles
+        .into_iter()
+        .map(|h| h.join().expect("thread join").id)
+        .collect();
+    assert_eq!(
+        ids.len(),
+        1,
+        "concurrent same-(subject,role,scope) assigns must yield exactly one \
+         assignment record, got {} distinct ids",
+        ids.len()
+    );
+
+    // Resolve must show the single permission exactly once and one effective role.
+    let resolved = rbac
+        .resolve_permissions(&user, &realm, None, None)
+        .expect("resolve");
+    let names: Vec<&str> = resolved
+        .permissions
+        .iter()
+        .map(Permission::as_str)
+        .collect();
+    assert_eq!(
+        names,
+        ["p.shared"],
+        "same-role contention must resolve to exactly one permission, got {names:?}"
+    );
+    assert_eq!(
+        resolved.roles.len(),
+        1,
+        "same-role contention must leave exactly one effective role, got {:?}",
+        resolved.roles
     );
 }

@@ -460,7 +460,10 @@ mod tests {
         let header = wrap_dek(&dek, &kek1, kek_id).expect("wrap");
         let result = unwrap_dek(&header, &kek2);
 
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "wrong KEK must fail DEK unwrap with Crypto"
+        );
     }
 
     #[test]
@@ -478,7 +481,10 @@ mod tests {
 
         // AAD mismatch should cause decryption failure
         let result = unwrap_dek(&tampered, &kek);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "AAD/kek_id mismatch must fail DEK unwrap with Crypto"
+        );
     }
 
     #[test]
@@ -506,7 +512,10 @@ mod tests {
 
         let wrong_aad = 99u64.to_le_bytes();
         let result = decrypt_section(&ciphertext, &dek, &nonce, &wrong_aad);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "wrong AAD must fail section decrypt with Crypto, got {result:?}"
+        );
     }
 
     #[test]
@@ -520,7 +529,10 @@ mod tests {
         let ciphertext = encrypt_section(plaintext, &dek1, &nonce, &aad).expect("encrypt");
 
         let result = decrypt_section(&ciphertext, &dek2, &nonce, &aad);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "wrong DEK must fail section decrypt with Crypto, got {result:?}"
+        );
     }
 
     #[test]
@@ -534,7 +546,10 @@ mod tests {
         let ciphertext = encrypt_section(plaintext, &dek, &nonce1, &aad).expect("encrypt");
 
         let result = decrypt_section(&ciphertext, &dek, &nonce2, &aad);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "wrong nonce must fail section decrypt with Crypto, got {result:?}"
+        );
     }
 
     #[test]
@@ -578,7 +593,10 @@ mod tests {
         let encrypted = encrypt_kek(&kek, &host_key1, kek_id).expect("encrypt");
         let result = decrypt_kek(&encrypted, &host_key2, kek_id);
 
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "wrong host key must fail KEK decrypt with Crypto"
+        );
     }
 
     #[test]
@@ -591,7 +609,10 @@ mod tests {
         let encrypted = encrypt_kek(&kek, &host_key, kek_id1).expect("encrypt");
         let result = decrypt_kek(&encrypted, &host_key, kek_id2);
 
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "wrong kek_id (AAD) must fail KEK decrypt with Crypto"
+        );
     }
 
     #[test]

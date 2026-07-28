@@ -272,17 +272,56 @@ async fn tampered_cookie_is_rejected() {
     );
 }
 
-// ── Adversarial: GET /dev/mail returns 404 when transport ≠ mailcatcher ───────
-// Verified by building a router without mailcatcher_router and expecting 404.
-
+// ── Adversarial: /dev/mail exists ONLY because mailcatcher_router mounts it ────
+//
+// In production (`src/main.rs`) the `/dev/mail*` routes are merged into the app
+// router *only* when the mailcatcher transport is active. When it is not, the
+// merge is skipped and those paths are unregistered. The previous version of
+// this test asserted that a hand-built router with an explicit `404` fallback
+// returns 404 — a tautology that never touched Hearth code.
+//
+// This version pins the real invariant on both sides:
+//   * Positive control — the REAL product `mailcatcher_router` serves
+//     `GET /dev/mail` (an unauthenticated request redirects to the login page,
+//     which is decidedly *not* a 404). This proves the route is real.
+//   * Negative control — a router that did NOT merge `mailcatcher_router` has no
+//     such route, so axum's own default handling (not a fabricated fallback)
+//     returns 404. This is exactly the "transport ≠ mailcatcher" case.
 #[tokio::test]
 async fn dev_mail_absent_without_mailcatcher_transport() {
-    let resp = axum::Router::new()
-        .fallback(|| async { StatusCode::NOT_FOUND })
+    // Negative control: no mailcatcher merge → axum's default 404 for /dev/mail.
+    let without = axum::Router::new()
         .oneshot(get("/dev/mail"))
         .await
         .expect("router oneshot should not fail");
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        without.status(),
+        StatusCode::NOT_FOUND,
+        "without the mailcatcher merge, /dev/mail must not be routed"
+    );
+
+    // Positive control: the real product router does register /dev/mail. An
+    // unauthenticated GET is redirected to the login form — proving the route
+    // exists and is handled by Hearth code, not by a 404 fallback.
+    let state = make_state("route-presence-pw");
+    let with = send_request(state, get("/dev/mail")).await;
+    assert_ne!(
+        with.status(),
+        StatusCode::NOT_FOUND,
+        "with the mailcatcher merge, /dev/mail must be routed"
+    );
+    assert!(
+        with.status().is_redirection(),
+        "unauthenticated /dev/mail must redirect to login, got {}",
+        with.status()
+    );
+    assert_eq!(
+        with.headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/dev/mail/login"),
+        "unauthenticated /dev/mail must redirect to the mailcatcher login"
+    );
 }
 
 // ── Integration: clear all emails ─────────────────────────────────────────────

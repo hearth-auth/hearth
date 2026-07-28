@@ -549,41 +549,68 @@ async fn app_state_with_dpop_nonce_secret_stores_value() {
     assert_eq!(state.dpop.current_nonce(now_secs), expected);
 }
 
-/// The auto-generated DPoP nonce secret must not be the zero key.
+/// Hearth's per-realm DPoP nonce secret generator must never produce the zero
+/// key and must be stable across calls for the same realm.
 ///
-/// This mirrors the main.rs startup path: when `security.dpop_nonce_secret`
-/// is absent the server generates a random key. If `ring`'s CSPRNG ever
-/// returned all-zeros we'd catch it here.
-#[test]
-fn auto_generated_dpop_nonce_secret_is_nonzero() {
-    use ring::rand::SecureRandom as _;
-    let rng = ring::rand::SystemRandom::new();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes).expect("ring CSPRNG must succeed");
+/// This drives the real `IdentityEngine::get_realm_dpop_nonce_secret` path
+/// (CSPRNG generation + encrypted persistence + in-memory cache) rather than
+/// exercising `ring::rand` in isolation. The zero-key guard and idempotence are
+/// Hearth invariants: `current_dpop_nonce` uses the secret as an HMAC key, so a
+/// zero or unstable secret would silently break DPoP-Nonce validation.
+#[tokio::test]
+async fn auto_generated_dpop_nonce_secret_is_nonzero() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let realm = h.create_realm();
+
+    let secret1 = h.identity().get_realm_dpop_nonce_secret(&realm).unwrap();
     assert_ne!(
-        bytes, [0u8; 32],
-        "auto-generated nonce secret must not be the zero key"
+        secret1, [0u8; 32],
+        "Hearth's auto-generated nonce secret must not be the zero key"
+    );
+
+    // Second call must return the identical secret (cache + persistence).
+    let secret2 = h.identity().get_realm_dpop_nonce_secret(&realm).unwrap();
+    assert_eq!(
+        secret1, secret2,
+        "the nonce secret for a realm must be stable across calls"
     );
 }
 
-/// A 64-char hex config value decodes to the expected bytes.
+/// The secret produced by Hearth is a working HMAC key for DPoP nonces and is
+/// independently generated per realm.
 ///
-/// Mirrors the hex-decode branch in main.rs.
-#[test]
-fn dpop_nonce_secret_hex_decodes_correctly() {
-    let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-    assert_eq!(hex.len(), 64);
-    let mut bytes = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let h = std::str::from_utf8(chunk).unwrap();
-        bytes[i] = u8::from_str_radix(h, 16).unwrap();
-    }
-    let expected: [u8; 32] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-        0x1f, 0x20,
-    ];
-    assert_eq!(bytes, expected);
+/// The previous version decoded a fixed hex string with `u8::from_str_radix`,
+/// asserting on `std` behaviour. This instead confirms that the secret Hearth
+/// generates round-trips through Hearth's own `current_dpop_nonce` /
+/// `is_valid_dpop_nonce`, and that two realms get distinct secrets (so nonces
+/// from one realm do not validate against another).
+#[tokio::test]
+async fn dpop_nonce_secret_hex_decodes_correctly() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let realm_a = h.create_realm();
+    let realm_b = h.create_realm();
+
+    let secret_a = h.identity().get_realm_dpop_nonce_secret(&realm_a).unwrap();
+    let secret_b = h.identity().get_realm_dpop_nonce_secret(&realm_b).unwrap();
+
+    // Distinct realms must get independent secrets.
+    assert_ne!(
+        secret_a, secret_b,
+        "each realm must receive an independent DPoP nonce secret"
+    );
+
+    // The secret must produce a nonce that Hearth validates as current.
+    let now_secs = 1_700_000_000_i64;
+    let nonce = hearth::identity::dpop::current_dpop_nonce(&secret_a, now_secs);
+    assert!(
+        hearth::identity::dpop::is_valid_dpop_nonce(&secret_a, &nonce, now_secs),
+        "a nonce minted from realm A's secret must validate against realm A"
+    );
+    // A nonce from realm A must NOT validate against realm B's secret.
+    assert!(
+        !hearth::identity::dpop::is_valid_dpop_nonce(&secret_b, &nonce, now_secs),
+        "realm A's nonce must not validate against realm B's independent secret"
+    );
 }
 
 /// Builds a DPoP proof for a resource server request — includes the `ath` claim
@@ -814,15 +841,26 @@ async fn dpop_cnf_bound_token_with_valid_proof_at_resource_endpoint_passes_auth(
     // DPoP enforcement must not reject the request. If 401, it must NOT have
     // an error_description (which would indicate DPoP rejection). Sub-parsing
     // failure for client_credentials tokens is a separate, expected limitation.
+    // Precondition: a client_credentials token has no `sub`, so authorization
+    // at the resource endpoint fails with 401 for that *separate, expected*
+    // reason. Assert it unconditionally so the branch below can never be
+    // skipped (which would let the DPoP-rejection check pass vacuously).
     let status = resp.status();
     let body_bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-    if status == StatusCode::UNAUTHORIZED {
-        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert!(
-            json.get("error_description").is_none(),
-            "valid DPoP proof must not be rejected by DPoP enforcement; got: {json}"
-        );
-    }
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "client_credentials token must reach the resource endpoint and 401 on sub-parsing; got {status}"
+    );
+
+    // Outcome: the 401 must NOT be a DPoP rejection. DPoP rejections carry an
+    // `error_description` naming the DPoP failure; a bare 401 (no
+    // `error_description`) proves the valid proof + `ath` passed DPoP enforcement.
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(
+        json.get("error_description").is_none(),
+        "valid DPoP proof must not be rejected by DPoP enforcement; got: {json}"
+    );
 }
 
 // ===== Scenario DP-6: htm mismatch rejected =====

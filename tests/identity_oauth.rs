@@ -757,16 +757,17 @@ fn adversarial_refresh_token_theft_detection() {
     clock.advance(1_000_000);
     let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh, None, None);
     assert!(
-        attack_result.is_err(),
-        "stolen refresh token must be rejected"
+        matches!(attack_result, Err(IdentityError::TokenRevoked)),
+        "stolen refresh token must be rejected with TokenRevoked, got: {attack_result:?}"
     );
 
     // Legitimate user's new refresh token should ALSO be revoked
     // (entire grant family revoked due to theft detection)
     let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh, None, None);
     assert!(
-        legitimate_result.is_err(),
-        "legitimate refresh token must also be revoked after theft detection"
+        matches!(legitimate_result, Err(IdentityError::TokenRevoked)),
+        "legitimate refresh token must also be TokenRevoked after theft detection, \
+         got: {legitimate_result:?}"
     );
 
     // The session should be revoked too
@@ -990,31 +991,73 @@ mod oauth_proptests {
                 refresh_tokens.push(tokens.refresh_token().to_string());
             }
 
+            // Independent oracle of expected active state.
+            //
+            // A session-bound access token is active iff its session is still
+            // valid (introspect_token step 4 rejects tokens whose session is
+            // gone). Revoking an access token (op 2) revokes that session and
+            // cascades to its grant family, so its access token — and any later
+            // refresh, which fails with TokenRevoked rather than re-activating —
+            // stays inactive. Refresh (op 1) of a live session rotates to a
+            // fresh, still-active access token and never toggles active state.
+            // So the expected active count is exactly the number of token
+            // indices that op 2 never targeted. This oracle is derived from the
+            // op stream alone, NOT from the engine's return values.
+            let mut oracle_revoked = vec![false; access_tokens.len()];
+
             // Apply operations: 0 = noop, 1 = refresh, 2 = revoke access
             for (i, op) in ops.iter().enumerate() {
                 let idx = i % access_tokens.len();
                 match op {
                     1 => {
-                        // Refresh — may fail if already revoked
-                        if let Ok(new_pair) = engine.refresh_tokens(
+                        // Refresh — a live session rotates; a revoked one must
+                        // fail rather than resurrect. Revoking the access token
+                        // (op 2) revokes both the grant family and the session,
+                        // so a later refresh is rejected with `TokenRevoked`
+                        // (family blocklist, checked first) or `SessionNotFound`
+                        // (session record gone) — either is a valid revoked-class
+                        // rejection; what must NEVER happen is a successful
+                        // rotation that re-activates a revoked token.
+                        let result = engine.refresh_tokens(
                             &realm_id,
                             &refresh_tokens[idx],
                             None,
                             None,
-                        ) {
+                        );
+                        if oracle_revoked[idx] {
+                            prop_assert!(
+                                matches!(
+                                    result,
+                                    Err(
+                                        IdentityError::TokenRevoked
+                                            | IdentityError::SessionNotFound
+                                    )
+                                ),
+                                "refresh of a revoked-session token must fail with a \
+                                 revoked-class error (TokenRevoked/SessionNotFound), \
+                                 got: {result:?}",
+                            );
+                        } else {
+                            prop_assert!(
+                                result.is_ok(),
+                                "refresh of a live-session token must succeed, got: {:?}",
+                                result,
+                            );
+                            let new_pair = result.expect("checked Ok above");
                             access_tokens[idx] = new_pair.access_token().to_string();
                             refresh_tokens[idx] = new_pair.refresh_token().to_string();
                         }
                     }
                     2 => {
-                        // Revoke access token
-                        let _ = engine.revoke_token(
+                        // Revoke access token — revokes the underlying session.
+                        engine.revoke_token(
                             &realm_id,
                             &TokenRevocationRequest {
                                 token: access_tokens[idx].clone(),
                                 token_type_hint: Some("access_token".to_string()),
                             },
-                        );
+                        ).expect("revoke");
+                        oracle_revoked[idx] = true;
                     }
                     _ => {} // noop
                 }
@@ -1036,12 +1079,16 @@ mod oauth_proptests {
                 }
             }
 
-            // Active count must be <= total issued
-            prop_assert!(
-                active_count <= access_tokens.len(),
-                "active count ({}) must not exceed total ({})",
+            // Assert the observed active count matches the independent oracle
+            // exactly — not merely that it is bounded by the total issued.
+            let expected_active =
+                oracle_revoked.iter().filter(|revoked| !**revoked).count();
+            prop_assert_eq!(
                 active_count,
-                access_tokens.len(),
+                expected_active,
+                "active count ({}) must equal the oracle's expected active count ({})",
+                active_count,
+                expected_active,
             );
         }
 

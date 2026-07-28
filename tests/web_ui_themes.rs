@@ -138,6 +138,23 @@ async fn theme_css_empty_returns_200() {
         .expect("build request");
     let resp = app.oneshot(req).await.expect("oneshot");
     assert_eq!(resp.status(), StatusCode::OK);
+    // Must be served as a stylesheet even with no custom CSS, and the body must be
+    // genuinely empty (not some fallback payload).
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-type header");
+    assert!(
+        content_type.starts_with("text/css"),
+        "theme.css must be served as text/css, got: {content_type}"
+    );
+    let body = body_bytes(resp, 4096).await;
+    assert!(
+        body.is_empty(),
+        "default theme.css body must be empty, got {} bytes",
+        body.len()
+    );
 }
 
 /// CSS set via `with_theme_css` appears verbatim in the 200 body.

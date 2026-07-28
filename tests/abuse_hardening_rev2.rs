@@ -217,30 +217,30 @@ fn a31_custom_leeway_120s_rejects_one_past_boundary() {
 
 #[test]
 fn a31_leeway_caps_at_300s_in_reconcile() {
-    use hearth::config::FederationProviderYaml;
+    use hearth::identity::reconcile::cap_federation_leeway;
 
-    // Construct a provider yaml with leeway_seconds = 301 and check that
-    // build_idp_config caps it at 300.
-    //
-    // We call the reconcile path via a minimal realm config and inspect the
-    // stored IdpConfig.  Since reconcile_federation_for_realm is pub(crate) we
-    // test the cap by directly constructing IdpConfig with provider.leeway_seconds
-    // and verifying the min() logic via the YAML struct.
-    let yaml = FederationProviderYaml {
-        kind: "oidc".to_string(),
-        leeway_seconds: Some(301),
-        client_id: Some("c".to_string()),
-        client_secret: Some("s".to_string()),
-        issuer: Some("https://idp.example.com".to_string()),
-        authorization_endpoint: Some("https://idp.example.com/auth".to_string()),
-        token_endpoint: Some("https://idp.example.com/token".to_string()),
-        jwks_uri: Some("https://idp.example.com/jwks".to_string()),
-        ..FederationProviderYaml::default_oidc()
-    };
-    // The min(301, 300) cap is applied in build_idp_config; we simulate it here
-    // since build_idp_config is not directly accessible from integration tests.
-    let effective = yaml.leeway_seconds.map(|s| s.min(300)).unwrap_or(60);
-    assert_eq!(effective, 300, "leeway_seconds=301 must be capped to 300");
+    // The real production cap lives in `cap_federation_leeway`, called from
+    // `build_idp_config` during federation reconcile. Pin its behaviour directly.
+    assert_eq!(
+        cap_federation_leeway(Some(301)),
+        300,
+        "leeway_seconds=301 must be capped to 300"
+    );
+    assert_eq!(
+        cap_federation_leeway(Some(300)),
+        300,
+        "leeway_seconds=300 is exactly at the ceiling"
+    );
+    assert_eq!(
+        cap_federation_leeway(Some(50)),
+        50,
+        "a below-ceiling value passes through unchanged"
+    );
+    assert_eq!(
+        cap_federation_leeway(None),
+        60,
+        "unset leeway falls back to the 60 s OIDC default"
+    );
 }
 
 #[test]

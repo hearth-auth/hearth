@@ -126,6 +126,45 @@ impl GrpcState {
 /// Max decoded message size (1 MiB), matches the HTTP `BODY_LIMIT_DEFAULT`.
 const MAX_DECODING_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// Error returned when gRPC reflection would be enabled in production without
+/// the explicit `--allow-reflection-in-prod` override (A-43).
+///
+/// Its `Display` text is the operator-facing startup refusal message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcReflectionError;
+
+impl std::fmt::Display for GrpcReflectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "security.grpc.reflection_enabled = true is not allowed in production mode. \
+             gRPC reflection exposes the full API schema to unauthenticated callers. \
+             Pass --allow-reflection-in-prod to override (debugging only; never in real \
+             deployments).",
+        )
+    }
+}
+
+impl std::error::Error for GrpcReflectionError {}
+
+/// Resolves the effective gRPC reflection setting and applies the production guard (A-43).
+///
+/// `configured` is `security.grpc.reflection_enabled` from config: `None` means
+/// "use the mode default" — enabled in `--dev`, disabled in production.
+///
+/// Returns the effective enabled flag, or [`GrpcReflectionError`] when reflection
+/// would be on in production (`dev_mode == false`) without `allow_in_prod`.
+pub fn resolve_grpc_reflection(
+    configured: Option<bool>,
+    dev_mode: bool,
+    allow_in_prod: bool,
+) -> Result<bool, GrpcReflectionError> {
+    let reflection_enabled = configured.unwrap_or(dev_mode);
+    if reflection_enabled && !dev_mode && !allow_in_prod {
+        return Err(GrpcReflectionError);
+    }
+    Ok(reflection_enabled)
+}
+
 /// Builds a fully-wired `tonic::transport::Server::router()` ready to serve.
 ///
 /// Includes all Hearth services plus `grpc.health.v1.Health` (reports SERVING

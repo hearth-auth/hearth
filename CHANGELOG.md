@@ -6,7 +6,225 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Argon2id password pepper is now configurable** — set `security.password.pepper`
+  (`version` + `key_hex`, plus optional `previous_version`/`previous_key_hex` for
+  rotation) in `hearth.yaml` to apply a server-side HMAC-SHA256 pepper before Argon2id
+  on all new password hashes. Previously the pepper engine existed but had no YAML
+  key, so `CredentialConfig::pepper` was always `None`. Malformed keys (non-hex,
+  shorter than 32 bytes, or the all-zero key) are rejected at startup; omitting the
+  block preserves the prior no-pepper behaviour (HEA-1838).
+
+### Fixed
+- **WAL recovery now truncates a corrupt tail instead of appending behind it** —
+  after recovering from a torn or corrupt WAL tail (e.g. power loss), the append
+  cursor was positioned at physical end-of-file, *after* the surviving garbage.
+  Records written after that recovery therefore sat behind the corruption, and
+  the next restart's replay stopped at the corruption before reaching them —
+  silently losing every post-recovery write under a corruption-then-crash double
+  fault. Recovery now rebuilds the segment from the last valid record boundary
+  (staged file + atomic rename, re-keyed with a fresh DEK so no nonce is reused)
+  before accepting writes. Single-fault durability is unchanged; a WAL whose
+  records fail AEAD authentication still fails the open closed and is never
+  rewritten (HEA-1853).
+- **WAL and SST creation/rename now fsync the parent directory** — a freshly
+  created WAL or SST segment, and the atomic rename that finalizes a recovered
+  WAL segment or a compacted SST, previously did not fsync the containing
+  directory. Under the power-loss fault model, a rename or create is not durable
+  until the directory entry commits, so a crash in that window could resolve the
+  old inode on restart — losing a just-created file entirely, or (for recovery)
+  replaying a corrupt tail and dropping post-recovery writes (the HEA-1853 loss
+  class through a narrower window). The `Fs` abstraction gains `sync_dir`, now
+  called after WAL/SST create and after each finalizing rename (HEA-1855).
+
+### Security
+- **OAuth client-auth failures now return the RFC 6749 `invalid_client` code** —
+  the endpoint-client authentication path (used by `client_credentials`,
+  token-exchange, `/revoke`, and `/introspect`) previously returned a
+  non-registered error body `{"error":"invalid client credentials"}`. It now
+  returns `{"error":"invalid_client"}`, matching the code/refresh arms so strict
+  OAuth clients recognize the failure and keeping the client-auth error code
+  uniform (avoids an enumeration oracle). 401 status is unchanged (HEA-1847).
+- **SCIM PATCH now enforces the per-request operation cap** — a `PATCH`
+  to `/scim/v2/Users/{id}` or `/scim/v2/Groups/{id}` whose `Operations` array
+  exceeds `MAX_SCIM_OPERATIONS` (1000) is rejected with `413 Payload Too Large`
+  before any operation is applied. The cap constant existed but was never wired
+  into the handlers, so a single PATCH could request unbounded per-operation
+  work (HEA-1830).
+
 ### Changed
+- **`make loadtest` now runs against the large corpus by default** — the
+  `loadtest` Makefile target boots a demo-seeded, multi-hundred-thousand-user
+  Hearth (~1.2M users across the `acme`/`globex`/`initech`/`umbrella` realms,
+  from the new `loadtest/loadtest-corpus.yaml`) instead of the prior ~200-user
+  REST seed, so the Goose journeys observe tail latency and saturation against a
+  realistically-large storage engine. The corpus is seeded in-server by the fast
+  batched demo seeder and the pipeline waits for it to finish before load
+  starts. New `CORPUS_ACME`/`CORPUS_GLOBEX`/`CORPUS_INITECH`/`CORPUS_UMBRELLA`,
+  `LOADTEST_DATA_DIR`, `HOT_TIER_CAPACITY`, and `SEED_WAIT` env knobs tune the
+  dataset (shrink the `CORPUS_*` counts for a fast pipeline smoke). This is
+  scoped to the `loadtest` target only — the standalone `make seed` / `seed`
+  subcommand keep their small explicit defaults (HEA-1787).
+
+### Fixed
+- **`hearth-loadtest` HTML report no longer misreads load concurrency as the seeded
+  population** — the Goose overview's most-prominent number, `Users: 200`, is the
+  load-generator *concurrency* (`--users`), not the seeded corpus, but readers
+  repeatedly took it as "only 200 users were seeded." The harness now relabels
+  that line to `Load-generator users (concurrency): 200` and, when the resident
+  corpus size is known, states it alongside (`resident corpus under test:
+  1,200,000 seeded accounts`) — for tier-miss runs the bulk corpus, for
+  steady/ramp/soak the `--resident-corpus-size` value (HEA-1788).
+- **`hearth-loadtest` HTML report drops uninformative panels** — the report now
+  presents only graphs and tables that carry real signal. The dedicated **User
+  Metrics** section (a flat active-concurrency line that only ever peaks at
+  `--users`) is removed entirely, and the **Scenario Metrics**, **Transaction
+  Metrics**, and **Response Time** *time-series graphs* are dropped — the first
+  two merely retrace the requests-per-second curve at a constant closed-loop
+  rate, and the last is plotted from whole-ms samples so it renders the sub-ms hot
+  path as a flat ~1 ms line that contradicts the microsecond percentile table.
+  The requests-per-second and errors-per-second graphs and every metrics table
+  are kept (HEA-1788).
+- **`hearth-loadtest` HTML report shows un-rounded latency in µs resolution** —
+  Goose measures every response time in whole milliseconds, so its Request
+  Metrics `Min`/`Max` columns and its entire Response Time Metrics percentile
+  table rendered Hearth's sub-ms hot path as a flat `1`. The harness now records
+  a lock-free per-journey microsecond histogram and post-processes the Goose HTML
+  to rewrite both tables — Request `Min`/`Max` and every percentile
+  (50/60/70/80/90/95/99/100), per journey and for the aggregate — with the real
+  microsecond figures. A prior fix targeted only the `Min`/`Max` cells but scoped
+  the rewrite by the first `</div>`, which in real Goose reports closes the nested
+  echarts chart before the table, so the rewrite silently no-op'd; scoping is now
+  anchored to each metrics `<table>` (HEA-1788).
+- **`--dev` now honors `storage.data_dir`** — dev mode previously ignored the
+  configured `storage.data_dir` and always used an ephemeral temp directory
+  unless `HEARTH_DEV_DATA_DIR` was set, so cold-tier SSTs vanished between runs
+  and the tier-miss load profile required an otherwise-redundant env var. A
+  `--config` that sets a non-default `storage.data_dir` now persists WAL/SSTs
+  there in `--dev`. `HEARTH_DEV_DATA_DIR` still takes precedence, and a bare
+  `--dev` run (default `./data`, no env override) keeps the ephemeral-temp
+  behavior (HEA-1805).
+
+### Added
+- **`hearth-loadtest` server resource sampling (RSS/CPU) in reports** — `run
+  --server-pid <pid>` (or `HEARTH_LOADTEST_SERVER_PID`) samples the Hearth
+  process's `/proc` stats once a second during the run and folds peak/mean RSS +
+  peak/mean CPU% into a new, additive `resources` block in `report.json` (schema
+  bumped `2` → `3`) and a **Server Resource Consumption** panel in the HTML
+  report. A saturation verdict now means "p99 in budget **and** the server was
+  not resource-starved." `make loadtest` passes the pid automatically; the block
+  is omitted when no pid is supplied or off Linux. Flush-stall/tier-churn signals
+  are out of scope (no server metrics endpoint exposes them yet) (HEA-1811).
+- **`hearth-loadtest` tier-miss run mode + per-tier lookup latency reporting** —
+  a new `run --mode tier-miss` profile drives the corpus-scale `lookup_user` hot
+  path (ROPC `POST /token`) against the bulk demo corpus, splitting every request
+  into a resident **hot** working set (`--tier-miss-hot-set-size`) hit repeatedly
+  and a uniform **cold** draw across the whole corpus (`--tier-miss-corpus-size`)
+  that mostly falls through to the cold/SST read path. `report.json` gains an
+  additive, back-compat `tier_miss` block splitting hot-tier-hit from
+  cold/SST-miss latency at p50/p95/p99 (`hot_p50_ms`/`cold_p50_ms`,
+  `hot_p95_ms`/`cold_p95_ms`, `hot_p99_ms`/`cold_p99_ms`), plus the achieved
+  corpus size, hot-tier capacity, and an estimated cold miss rate; the block is
+  omitted for every other mode so existing consumers are unaffected. Read the
+  storage-tier delta at p50/p95: every request also pays a full ROPC Argon2id
+  verify, so at the p99 tail the ordering can invert under Argon2id hot-set
+  contention (the default `--tier-miss-hot-set-size` is `10000` to spread that
+  load). New `--tier-miss-*` flags (env `HEARTH_LOADTEST_TIER_*`); sweep the
+  corpus size (`10k → 100k → 1M`) to prove the per-tier tail stays flat as the
+  corpus grows (HEA-1801).
+- **`--dev` honors `storage.hot_tier_capacity`** — dev mode previously always
+  used the default 100k-entry hot tier and ignored the configured capacity, so
+  the whole working set fit in the hot tier and every lookup was a hot-tier hit.
+  A `--config` that sets `storage.hot_tier_capacity` now sizes the dev hot tier
+  explicitly (logged at startup), letting a corpus-scale load profile size the
+  hot tier *below* the working set so a known fraction of lookups fall through to
+  the cold/SST tier and the real lookup-cost-vs-`n` curve is measurable. Records
+  still read back correctly through a tier miss — it is a latency event, not a
+  correctness one. Production continues to size capacity via
+  `storage.hot_tier_capacity` / auto-sizing as before (HEA-1800).
+- **`hearth-loadtest` report: microsecond min/max latency** — each `report.json`
+  journey row now carries `min_us` / `max_us`, the fastest and slowest observed
+  request in **microseconds**. The generator times each request itself, so these
+  keep the sub-ms precision Goose's whole-ms aggregation rounds away (a 0.1 ms
+  request reads `100`, not `0`); the `p50/p95/p99/p999_ms` percentiles remain
+  Goose's whole-ms figures. Additive optional fields (omitted when a journey
+  recorded no sample); the committed steady baseline gains them on its next
+  regeneration (HEA-1796).
+- **Runtime-visible signal when rate limiters are disabled** — when
+  `security.load_test_unthrottled` resolves to active, the server now exposes a
+  `hearth_rate_limiters_disabled{reason="load_test"} 1` Prometheus gauge (absent
+  during normal operation) and prints a `RATE LIMITERS DISABLED (load test mode)`
+  banner in the startup panel, so operators and dashboards can detect the
+  unthrottled state on a live process instead of only from the boot WARN log
+  (HEA-1799).
+- **`security.load_test_unthrottled` config flag (loopback-gated)** — when `true`
+  and the server binds a loopback address, disables all request-rate limiters
+  (token endpoint, admin API, export, and the per-IP/per-realm request shaper) so
+  a single-node load test can saturate the `validate_token` hot path instead of
+  measuring the limiter. **Prod-safe:** it is refused (fail-safe — limiters stay
+  on) on any non-loopback bind, logging a loud `WARN` when enabled and an `ERROR`
+  when refused. Defaults to `false`. Never enable on a production or
+  externally-reachable bind (HEA-1796).
+- **`hearth-loadtest` high-concurrency rework** — the `make loadtest` pipeline now
+  boots with `load_test_unthrottled` and runs **unthrottled** by default
+  (`THROTTLE=0`), with higher default concurrency (`USERS=200`, `HATCH_RATE=50`)
+  so `steady` mode at high `--users` drives concurrent fan-out onto the hot path.
+  The `report.json` schema bumps to `2`, adding a top-level `summary` block:
+  achieved concurrency + RPS, aggregate failure rate, and an explicit **ceiling
+  attribution** (`server` / `load_generator_or_headroom` / `generator_saturated`)
+  so a reader can tell the single-node ceiling from a load-generator bottleneck.
+  README documents the fan-out/ramp invocations and `ulimit -n` /
+  `ip_local_port_range` / `TIME_WAIT` generator tuning (HEA-1796).
+- **`make loadtest` is now a one-command pipeline** — with no `ARGS` it boots a
+  fresh throwaway dev Hearth on loopback, seeds a deterministic corpus, runs the
+  Goose journeys, writes `report.json` + HTML, and tears the server down — no
+  manual bootstrap/seed/attach steps. Tunable via env vars
+  (`MODE`, `USERS`, `RUN_TIME`, `THROTTLE`, `SETTLE`, …; see
+  `loadtest/scripts/run-loadtest.sh`). `make loadtest ARGS="…"` still invokes the
+  binary directly for advanced/attach usage (HEA-1787).
+- **`make loadtest` / `make loadtest-check`** — new load-testing harness crate
+  (`hearth-loadtest`, goose-based) for exercising Hearth under concurrent load.
+  The crate is excluded from the Cargo workspace so it does not slow the unit
+  test gate; run it explicitly via `make loadtest ARGS="…"` (HEA-1788).
+- **`hearth-loadtest run` — five closed-loop load journeys with configurable
+  weighting** — the harness now drives validate (`POST /introspect`), session
+  lookup (`GET /userinfo`), user lookup (`GET /admin/users/{id}`), issuance
+  (`POST /token`), and revoke→re-validate (`POST /revoke` then `POST /introspect`
+  expecting `active:false`) against a seeded instance. Per-journey weights,
+  `--users`, `--run-time`, `--hatch-rate`, and `--throttle` are all CLI/env
+  configurable; a weight of `0` drops a journey. Run via
+  `make loadtest ARGS="run …"` (HEA-1790).
+- **`hearth-loadtest run` — steady/ramp/soak run modes + sourced budgets +
+  HTML/JSON reporters** — `--mode` selects `steady` (fixed users), `ramp` (walks
+  a user ladder and records the **saturation knee**: the achieved RPS at the
+  first step where a journey's p99 breaches its HTTP budget), or `soak` (long
+  fixed-user run in buckets, surfacing latency drift). Every mode writes a Goose
+  HTML report per sub-run plus a versioned (`"schema": 1`) machine-readable
+  `report.json` to `--report-dir` — run metadata (git SHA, timestamp, dataset
+  params, mode, host), a per-journey p50/p95/p99/p999 table, the knee RPS, and
+  pass/fail against HTTP p99 budgets. Budgets are sourced, not invented: engine
+  targets are cited verbatim from `docs/specs/TESTING.md` and the HTTP budgets
+  add a CTO-approved loopback envelope. A journey passes only when it is both
+  within its latency budget and actually succeeding (failure rate ≤ 5%), so a
+  fast-but-erroring run never reads as a pass (HEA-1791).
+- **`hearth-loadtest seed --admin-token` / `HEARTH_LOADTEST_ADMIN_TOKEN`** — the
+  seed step can now attach to an **already-bootstrapped** dev instance by
+  supplying the admin bearer token from the first bootstrap, instead of failing
+  the anonymous re-bootstrap with `401 missing authorization header`. When the
+  token is omitted and that 401 occurs, the seed now prints an actionable hint
+  naming the flag/env var and alternatives (`make loadtest` boots its own fresh
+  instance) (HEA-1787).
+
+### Changed
+- **Expired-session eviction moved off the token-validation read path** — the
+  `validate_token` hot path previously performed a storage write (persist-revoke
+  + audit + session-version bump) when it encountered an idle/absolute-timeout
+  (A-18) session, violating the "no read-path syscall" hot-path rule. Such
+  sessions are still rejected fail-closed on read, but the eviction write is now
+  deferred to the periodic background cleanup sweep (`sweep_expired_sessions`,
+  driven by the existing cleanup task). This also wires the previously-unwired
+  session reaper into the cleanup loop; its count is reported as
+  `sessions_evicted` in the `Cleanup` audit event (HEA-1774).
 - **`hearth app create` now requires an admin `--token`** — client registration
   via `POST /clients` was gated behind admin authorization in HEA-1750, so the
   CLI's `app create` command now takes a mandatory `--token` flag carrying an
@@ -41,6 +259,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   dispatch arm exists in the token handlers — the two had drifted apart, with
   config already clean while the live dispatch remained (HEA-1814 / HEA-1816 /
   HEA-1862).
+- **`hearth-loadtest seed` params redact the admin token in `Debug` output** —
+  `SeedParams` now hand-implements `Debug` so a panic or error-context print can
+  never spill a `--admin-token` / `HEARTH_LOADTEST_ADMIN_TOKEN` bearer token into
+  logs; the README's attach flow now leads with the env var because `make`
+  echoes expanded `ARGS` (flag form lands in terminal/CI logs and `ps`)
+  (HEA-1795).
 - **Single-node `put_if_absent` is now atomic, closing the capability-JTI TOCTOU
   window** — the `StorageEngine::put_if_absent` trait default is a non-atomic
   get-then-put, and `EmbeddedStorageEngine` did not override it, so the

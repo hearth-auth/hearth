@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { test, expect } from '@playwright/test';
+import { instrumentPage, assertPageClean } from '../helpers/assertions';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 const AUTH_DIR = path.join(__dirname, '..', '.auth');
@@ -80,6 +81,14 @@ async function extractSecret(page: import('@playwright/test').Page): Promise<str
 // Serial ensures MFA state transitions (enable → disable) don't race
 test.describe.serial('MFA TOTP enrollment and disable cycle', () => {
   test.use({ storageState: path.join(AUTH_DIR, 'admin.json') });
+
+  test.beforeEach(async ({ page }) => {
+    instrumentPage(page);
+  });
+
+  test.afterEach(async ({ page }) => {
+    assertPageClean(page);
+  });
 
   test('enrollment page renders QR secret and recovery codes', async ({ page }) => {
     await navigateToTotpPage(page);
@@ -150,10 +159,12 @@ test.describe.serial('MFA TOTP enrollment and disable cycle', () => {
   test('wrong TOTP code shows error and does not enable MFA', async ({ page }) => {
     await navigateToTotpPage(page);
 
-    // Skip if MFA already enabled from a previous test run that didn't clean up
+    // Legitimate runtime state: a previous test left MFA enabled, so the
+    // enrollment form (and its code input) isn't shown. Skip with a descriptive
+    // reason rather than a silent skip that hides why.
     const bodyText = await page.evaluate(() => document.body.innerText);
     if (bodyText.match(/mfa.*enabled/i)) {
-      test.skip();
+      test.skip(true, 'MFA already enabled from a prior test — enrollment form not shown');
       return;
     }
 
@@ -166,6 +177,13 @@ test.describe.serial('MFA TOTP enrollment and disable cycle', () => {
       page.waitForURL(/\/account\/totp/, { timeout: 10_000 }),
       page.click('#main button[type="submit"]'),
     ]);
+
+    // An inline error must be shown — a silently-broken error-display UI would
+    // otherwise pass this test on the "MFA not enabled" check alone. The handler
+    // renders "Invalid authentication code." (account.rs render_totp_error).
+    await expect(page.locator('#main')).toContainText('Invalid authentication code', {
+      timeout: 10_000,
+    });
 
     const afterText = await page.evaluate(() => document.body.innerText);
     // MFA must NOT be enabled

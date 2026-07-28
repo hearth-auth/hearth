@@ -99,9 +99,9 @@ fn make_realm_and_agents(engine: &EmbeddedIdentityEngine) -> (RealmId, AgentId, 
 /// gets `TransactionTokenReplayed`.
 #[test]
 fn simulation_txn_issue_concurrent_exactly_one_wins() {
-    let seed = 70u64;
-    let _ = seed;
-
+    // No `seed` label here: this race is deterministically strong (exactly-one-
+    // winner is enforced by the per-txn advisory lock, not by a schedule), so a
+    // seed constant would only imply a reproducibility that does not exist.
     let dir = tempfile::tempdir().expect("tempdir");
     let (_storage, engine) = open_engine(dir.path());
     let (realm_id, agent_a, agent_b) = make_realm_and_agents(&engine);
@@ -149,16 +149,16 @@ fn simulation_txn_issue_concurrent_exactly_one_wins() {
         [r1, r2].into_iter().fold((0, 0), |(s, r), res| match res {
             Ok(_) => (s + 1, r),
             Err(IdentityError::TransactionTokenReplayed) => (s, r + 1),
-            Err(e) => panic!("unexpected error in concurrent issuance: {e:?} (seed={seed})"),
+            Err(e) => panic!("unexpected error in concurrent issuance: {e:?}"),
         });
 
     assert_eq!(
         successes, 1,
-        "exactly one concurrent issue_transaction_token must succeed (seed={seed})"
+        "exactly one concurrent issue_transaction_token must succeed"
     );
     assert_eq!(
         replayed, 1,
-        "the losing concurrent issue must return TransactionTokenReplayed (seed={seed})"
+        "the losing concurrent issue must return TransactionTokenReplayed"
     );
 }
 
@@ -170,9 +170,8 @@ fn simulation_txn_issue_concurrent_exactly_one_wins() {
 /// gets `TransactionTokenReplayed`.
 #[test]
 fn simulation_txn_consume_concurrent_exactly_one_wins() {
-    let seed = 71u64;
-    let _ = seed;
-
+    // No `seed` label — see the issue-race test above; the advisory lock, not a
+    // schedule, guarantees exactly-one-winner, so a seed would be dead decoration.
     let dir = tempfile::tempdir().expect("tempdir");
     let (_storage, engine) = open_engine(dir.path());
     let (realm_id, agent_a, agent_b) = make_realm_and_agents(&engine);
@@ -208,15 +207,15 @@ fn simulation_txn_consume_concurrent_exactly_one_wins() {
         [r1, r2].into_iter().fold((0, 0), |(s, r), res| match res {
             Ok(_) => (s + 1, r),
             Err(IdentityError::TransactionTokenReplayed) => (s, r + 1),
-            Err(e) => panic!("unexpected error in concurrent consume: {e:?} (seed={seed})"),
+            Err(e) => panic!("unexpected error in concurrent consume: {e:?}"),
         });
 
     assert_eq!(
         successes, 1,
-        "exactly one concurrent consume_transaction_token must succeed (seed={seed})"
+        "exactly one concurrent consume_transaction_token must succeed"
     );
     assert_eq!(
         replayed, 1,
-        "the losing concurrent consume must return TransactionTokenReplayed (seed={seed})"
+        "the losing concurrent consume must return TransactionTokenReplayed"
     );
 }

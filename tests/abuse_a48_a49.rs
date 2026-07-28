@@ -389,18 +389,16 @@ fn a49_full_context_replacement_exceeds_default_threshold() {
 #[test]
 fn a49_refresh_bind_context_struct_has_expected_fields() {
     use hearth::identity::RefreshBindContext;
-    let ctx = RefreshBindContext {
+    // Compile-only: exercises the `RefreshBindContext` field API (user_agent /
+    // asn / authenticated_client_id) that the HTTP layer populates to pass UA
+    // context down. There is no production transform to assert on here — the
+    // struct is a plain data carrier; a field-round-trip check would only read
+    // back what this test wrote. The runtime effect of a changed UA/ASN on the
+    // step-up decision is covered by
+    // a49_full_context_replacement_exceeds_default_threshold.
+    let _ctx = RefreshBindContext {
         user_agent: Some("Mozilla/5.0 (Attacker)".to_string()),
         asn: None,
         authenticated_client_id: None,
     };
-    assert_eq!(
-        ctx.user_agent.as_deref(),
-        Some("Mozilla/5.0 (Attacker)"),
-        "user_agent field must round-trip"
-    );
-    assert!(
-        ctx.asn.is_none(),
-        "asn field must be None when not supplied"
-    );
 }

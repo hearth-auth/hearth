@@ -257,6 +257,14 @@ impl SstWriter {
         file.write_all(&ciphertext)?;
 
         file.sync_all()?;
+        // Fsync the parent directory so the freshly created SST's directory
+        // entry is durable. A newly created file can otherwise vanish entirely
+        // if power is lost before the dir update commits (HEA-1855). Callers
+        // that finalize via rename (compaction) additionally fsync the dir after
+        // the rename.
+        if let Some(parent) = path.parent() {
+            fs.sync_dir(parent)?;
+        }
 
         let file_size = TOTAL_HEADER_SIZE as u64 + ciphertext.len() as u64;
 
@@ -321,6 +329,16 @@ pub(crate) struct SstReader {
     /// written before HEA-1626 are still read correctly; they just don't get
     /// the fast-reject optimisation.
     bloom_filter: Option<BloomFilter>,
+    /// Inclusive `(min, max)` `CompositeKey` bounds of the entries in this SST,
+    /// or `None` for an empty SST.
+    ///
+    /// Because entries are stored sorted, these are simply the first and last
+    /// keys. They enable O(1) range pruning (HEA-1773): a point or range lookup
+    /// whose realm-first `CompositeKey` falls entirely outside `[min, max]` can
+    /// skip this SST without touching the Bloom filter or binary search. This
+    /// bounds cold-read fan-out `S` when SSTs cover disjoint key ranges (e.g.
+    /// realm-partitioned data), independent of compaction cadence.
+    key_range: Option<(CompositeKey, CompositeKey)>,
 }
 
 impl SstReader {
@@ -401,12 +419,59 @@ impl SstReader {
             (Self::deserialize_entries(&plaintext, entry_count)?, None)
         };
 
+        // Precompute inclusive key-range bounds for O(1) pruning. Entries are
+        // sorted, so the first and last keys are the min and max.
+        let key_range = match (entries.first(), entries.last()) {
+            (Some((min, _)), Some((max, _))) => Some((min.clone(), max.clone())),
+            _ => None,
+        };
+
         Ok(Self {
             entries,
             entry_count,
             sst_number,
             bloom_filter,
+            key_range,
         })
+    }
+
+    /// Returns `true` if the point key `(realm_id, key)` could fall within this
+    /// SST's stored key range.
+    ///
+    /// This is an O(1) range check against the precomputed `[min, max]` bounds.
+    /// An empty SST covers nothing and always returns `false`. A `true` result
+    /// does not guarantee the key is present — it only means the key is not
+    /// provably outside the range, so callers still consult the Bloom filter
+    /// and binary search.
+    pub(crate) fn may_contain(&self, realm_id: &RealmId, key: &[u8]) -> bool {
+        let Some((min, max)) = &self.key_range else {
+            return false;
+        };
+        // Compare the (realm, key) tuple against min/max without allocating a
+        // CompositeKey: order by realm UUID first, then key bytes.
+        let cmp = |ck: &CompositeKey| ck.realm_id().cmp(realm_id).then_with(|| ck.key().cmp(key));
+        cmp(min).is_le() && cmp(max).is_ge()
+    }
+
+    /// Returns `true` if this SST's key range overlaps the half-open range
+    /// `[start_key, end_key)` within `realm_id`.
+    ///
+    /// O(1) prune used before a range scan to skip non-overlapping SSTs. An
+    /// empty SST never overlaps.
+    pub(crate) fn overlaps_range(
+        &self,
+        realm_id: &RealmId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> bool {
+        let Some((min, max)) = &self.key_range else {
+            return false;
+        };
+        let cmp = |ck: &CompositeKey, key: &[u8]| {
+            ck.realm_id().cmp(realm_id).then_with(|| ck.key().cmp(key))
+        };
+        // Overlap iff min < end (half-open upper bound) and max >= start.
+        cmp(min, end_key).is_lt() && cmp(max, start_key).is_ge()
     }
 
     /// Returns all entries in sorted order.
@@ -431,6 +496,12 @@ impl SstReader {
     /// allocation-free: `(realm_id, key)` bytes are compared directly against
     /// `CompositeKey` fields without constructing a new `CompositeKey`.
     pub(crate) fn get(&self, realm_id: &RealmId, key: &[u8]) -> Option<MemtableValue> {
+        // O(1) range prune: skip SSTs whose key range cannot contain the key
+        // (HEA-1773). Cheaper than the Bloom filter's k hashes and also rejects
+        // V1 SSTs that carry no filter.
+        if !self.may_contain(realm_id, key) {
+            return None;
+        }
         // Fast reject: if the bloom filter says "no", the key is definitely absent.
         if let Some(ref filter) = self.bloom_filter {
             if !filter.might_contain(realm_id, key) {
@@ -456,6 +527,10 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Vec<(Vec<u8>, MemtableValue)> {
+        // O(1) range prune: skip SSTs disjoint from the scan window (HEA-1773).
+        if !self.overlaps_range(realm_id, start_key, end_key) {
+            return Vec::new();
+        }
         let start = CompositeKey::new(realm_id.clone(), start_key.to_vec());
         let end = CompositeKey::new(realm_id.clone(), end_key.to_vec());
 
@@ -480,6 +555,10 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Vec<(Vec<u8>, bool)> {
+        // O(1) range prune: skip SSTs disjoint from the scan window (HEA-1773).
+        if !self.overlaps_range(realm_id, start_key, end_key) {
+            return Vec::new();
+        }
         let start = CompositeKey::new(realm_id.clone(), start_key.to_vec());
         let end = CompositeKey::new(realm_id.clone(), end_key.to_vec());
 
@@ -867,6 +946,90 @@ mod tests {
     }
 
     #[test]
+    fn may_contain_prunes_keys_outside_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("range.sst");
+        let realm = RealmId::generate();
+
+        // Entries span [key1, key3].
+        let entries = vec![
+            (
+                CompositeKey::new(realm.clone(), b"key1".to_vec()),
+                MemtableValue::Data(b"v1".to_vec()),
+            ),
+            (
+                CompositeKey::new(realm.clone(), b"key3".to_vec()),
+                MemtableValue::Data(b"v3".to_vec()),
+            ),
+        ];
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+
+        // Below min and above max are pruned; in-range keys are not.
+        assert!(!reader.may_contain(&realm, b"key0"), "below min pruned");
+        assert!(!reader.may_contain(&realm, b"key9"), "above max pruned");
+        assert!(reader.may_contain(&realm, b"key1"), "min boundary kept");
+        assert!(reader.may_contain(&realm, b"key3"), "max boundary kept");
+        assert!(reader.may_contain(&realm, b"key2"), "interior kept");
+
+        // A different realm is entirely out of this SST's range.
+        let other = RealmId::generate();
+        assert!(!reader.may_contain(&other, b"key2"));
+
+        // get() honours the prune: an out-of-range key returns None.
+        assert!(reader.get(&realm, b"key9").is_none());
+    }
+
+    #[test]
+    fn empty_sst_never_contains_or_overlaps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("empty_range.sst");
+        let entries: Vec<(CompositeKey, MemtableValue)> = vec![];
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+
+        let realm = RealmId::generate();
+        assert!(!reader.may_contain(&realm, b"anything"));
+        assert!(!reader.overlaps_range(&realm, b"a", b"z"));
+    }
+
+    #[test]
+    fn overlaps_range_prunes_disjoint_scan_windows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("scan_range.sst");
+        let realm = RealmId::generate();
+
+        // Entries span [key3, key6].
+        let entries = vec![
+            (
+                CompositeKey::new(realm.clone(), b"key3".to_vec()),
+                MemtableValue::Data(b"v3".to_vec()),
+            ),
+            (
+                CompositeKey::new(realm.clone(), b"key6".to_vec()),
+                MemtableValue::Data(b"v6".to_vec()),
+            ),
+        ];
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+
+        // Window entirely below the range (end_key is exclusive at key3).
+        assert!(!reader.overlaps_range(&realm, b"key0", b"key3"));
+        // Window entirely above the range.
+        assert!(!reader.overlaps_range(&realm, b"key7", b"key9"));
+        // Overlapping windows.
+        assert!(reader.overlaps_range(&realm, b"key0", b"key4"));
+        assert!(reader.overlaps_range(&realm, b"key5", b"key9"));
+
+        // Disjoint scan returns no rows; overlapping scan returns them.
+        assert!(reader.range_scan(&realm, b"key7", b"key9").is_empty());
+        assert_eq!(reader.range_scan(&realm, b"key0", b"zzz").len(), 2);
+    }
+
+    #[test]
     fn empty_memtable_flush_produces_valid_sst() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sst_path = dir.path().join("empty.sst");
@@ -1059,30 +1222,39 @@ mod tests {
         }
     }
 
-    /// Unit: Bloom filter correctly rejects a key from a different realm.
-    /// Realm isolation is encoded into the hash, so a filter built for realm A
-    /// must not match realm B's key even if the raw key bytes are identical.
+    /// Unit: realm identity is folded into the Bloom hash, so identical key
+    /// bytes in two different realms probe different bit positions.
+    ///
+    /// The filter is probabilistic (a false positive on realm B's key is
+    /// permitted), so the realm-isolation contract cannot be asserted through
+    /// `might_contain` without flakiness. Instead this pins the *deterministic*
+    /// seam it rests on: `bloom_hashes(realm, key)` must differ between realms
+    /// for the same key. If realm were dropped from the hash both pairs would be
+    /// byte-identical and this assertion would fail — the property is therefore
+    /// load-bearing, not decorative. (Deterministic reject coverage through the
+    /// real reader path lives in `sst_get_bloom_rejects_wrong_realm_without_false_negative`.)
     #[test]
     fn bloom_filter_rejects_different_realm_same_key_bytes() {
         let realm_a = RealmId::generate();
         let realm_b = RealmId::generate();
-        let entries = vec![(
+
+        let hashes_a = bloom_hashes(&realm_a, b"shared-key");
+        let hashes_b = bloom_hashes(&realm_b, b"shared-key");
+        assert_ne!(
+            hashes_a, hashes_b,
+            "realm must participate in the bloom hash — identical key bytes in \
+             different realms must not hash to the same probe positions"
+        );
+
+        // Sanity: the realm the filter was built for is still present.
+        let filter = BloomFilter::build(&[(
             CompositeKey::new(realm_a.clone(), b"shared-key".to_vec()),
             MemtableValue::Data(b"v".to_vec()),
-        )];
-
-        let filter = BloomFilter::build(&entries);
-
-        // realm_a's key is present — must not be rejected
-        assert!(filter.might_contain(&realm_a, b"shared-key"));
-
-        // realm_b's key with identical bytes may or may not match (FP is OK),
-        // but inserting for realm_a should NOT guarantee realm_b returns true.
-        // We verify this probabilistically: with 10-bit/entry at k=7, FPR ≈ 1%.
-        // A single-entry filter being tested once having a collision is very unlikely.
-        // We don't assert false here to avoid a flaky test, but the unit still
-        // documents the realm-scoped hashing contract.
-        let _ = filter.might_contain(&realm_b, b"shared-key");
+        )]);
+        assert!(
+            filter.might_contain(&realm_a, b"shared-key"),
+            "the inserted realm/key must never be a false negative"
+        );
     }
 
     /// Unit: Bloom filter built from an empty entry set is empty and always passes.

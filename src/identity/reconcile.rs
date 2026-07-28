@@ -1395,6 +1395,18 @@ pub(crate) fn reconcile_federation_for_realm(
     Ok(())
 }
 
+/// Resolves the effective JWT clock-skew leeway for a federation connector.
+///
+/// A requested value is capped at 300 s (the documented ceiling in the config
+/// reference); when unset, the standard OIDC RP default is used
+/// ([`IdpConfig::default_leeway_seconds`], 60 s).
+#[must_use]
+pub fn cap_federation_leeway(requested: Option<u32>) -> u32 {
+    requested
+        .map(|s| s.min(300)) // cap at 300 s per config docs
+        .unwrap_or_else(crate::identity::federation::IdpConfig::default_leeway_seconds)
+}
+
 fn build_idp_config(
     realm_id: &RealmId,
     idp_id: &crate::core::IdpId,
@@ -1495,10 +1507,7 @@ fn build_idp_config(
         client_id: provider.client_id.clone().unwrap_or_default(),
         client_secret: FederationSecret::new(provider.client_secret.clone().unwrap_or_default()),
         claim_mappings: provider.claim_mappings.clone().unwrap_or_default(),
-        leeway_seconds: provider
-            .leeway_seconds
-            .map(|s| s.min(300)) // cap at 300 s per config docs
-            .unwrap_or_else(crate::identity::federation::IdpConfig::default_leeway_seconds),
+        leeway_seconds: cap_federation_leeway(provider.leeway_seconds),
         // Non-SAML connectors don't consume this flag.
         want_assertions_signed: false,
         apple: None,

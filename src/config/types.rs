@@ -190,8 +190,13 @@ pub struct StorageSection {
 }
 
 impl StorageSection {
+    /// Default on-disk data directory (WAL, SSTs) when `storage.data_dir`
+    /// is not set. Exposed so dev-mode wiring can distinguish an explicit
+    /// override from the default (HEA-1805).
+    pub const DEFAULT_DATA_DIR: &'static str = "./data";
+
     fn default_data_dir() -> String {
-        "./data".to_string()
+        Self::DEFAULT_DATA_DIR.to_string()
     }
 
     const fn default_wal_max_size_bytes() -> u64 {
@@ -787,7 +792,11 @@ pub struct TokenYamlConfig {
 // ===== Security / rate-limiting YAML config =====
 
 /// Global `security:` section in `hearth.yaml`.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `Debug` is hand-written (not derived) so the secret fields
+/// `dpop_nonce_secret` and `key_encryption_key` are redacted — see the
+/// `impl Debug` below. Any new secret field MUST be redacted there too.
+#[derive(Clone, Default, Deserialize)]
 pub struct SecurityYaml {
     /// Global rate-limiting thresholds (overrides compiled-in defaults).
     #[serde(default)]
@@ -819,6 +828,17 @@ pub struct SecurityYaml {
     /// Global per-IP + per-realm request shaper (A-2).
     #[serde(default)]
     pub request_shaper: Option<RequestShaperYaml>,
+    /// **Load-test escape hatch.** When `true`, disables ALL request-rate
+    /// limiters (token endpoint, admin API, export, and the per-IP/per-realm
+    /// request shaper) so a single-node throughput/soak test can saturate the
+    /// hot path instead of measuring the rate limiter.
+    ///
+    /// Refused unless the server binds a loopback address (127.0.0.0/8 or ::1)
+    /// — see `main.rs`. Never enable on a production or externally-reachable
+    /// bind: it removes brute-force, credential-stuffing, and abuse protection.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub load_test_unthrottled: Option<bool>,
     /// Absolute origins permitted as `return_to` redirect targets (A-52).
     ///
     /// Relative paths (`/ui/…`) are always accepted.  Absolute URLs are only
@@ -876,6 +896,100 @@ pub struct SecurityYaml {
     /// key `0000…` is rejected at startup.
     #[serde(default)]
     pub key_encryption_key: Option<String>,
+    /// Password-hashing hardening (`security.password`).
+    ///
+    /// Currently carries the optional Argon2id server-side pepper. Absent =
+    /// no pepper (unchanged default behaviour).
+    #[serde(default)]
+    pub password: PasswordSecurityYaml,
+}
+
+/// Redacts `dpop_nonce_secret` and `key_encryption_key` — both are secret key
+/// material (a DPoP-nonce HMAC key and the storage KEK) and MUST NOT be
+/// revealed if `SecurityYaml`, or any struct containing it, is ever
+/// `{:?}`-printed (HEA-1841). Presence is preserved (`Some("[REDACTED]")`)
+/// so debug output still distinguishes configured from absent.
+impl std::fmt::Debug for SecurityYaml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityYaml")
+            .field("rate_limiting", &self.rate_limiting)
+            .field(
+                "dpop_nonce_secret",
+                &self.dpop_nonce_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("http2", &self.http2)
+            .field("request_shaper", &self.request_shaper)
+            .field("load_test_unthrottled", &self.load_test_unthrottled)
+            .field("allowed_return_to_origins", &self.allowed_return_to_origins)
+            .field("ip_reputation", &self.ip_reputation)
+            .field("captcha", &self.captcha)
+            .field("grpc", &self.grpc)
+            .field("tls", &self.tls)
+            .field("backup", &self.backup)
+            .field("reserved_slugs", &self.reserved_slugs)
+            .field("slug_cooldown_days", &self.slug_cooldown_days)
+            .field("jwks_rps_limit", &self.jwks_rps_limit)
+            .field(
+                "key_encryption_key",
+                &self.key_encryption_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("password", &self.password)
+            .finish()
+    }
+}
+
+/// `security.password` — password-hashing hardening.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PasswordSecurityYaml {
+    /// Server-side Argon2id pepper. When present, all new password hashes are
+    /// peppered via `HMAC-SHA256(key, password)` before Argon2id. Absent = no
+    /// pepper is applied and `CredentialConfig::pepper` stays `None`.
+    #[serde(default)]
+    pub pepper: Option<PepperYaml>,
+}
+
+/// `security.password.pepper` — server-side Argon2id pepper (A-46).
+///
+/// The active pepper key is applied to every new or lazily-rehashed credential.
+/// The optional `previous_*` pair keeps a superseded pepper valid on login
+/// during an operator-controlled rotation grace window.
+#[derive(Clone, Default, Deserialize)]
+pub struct PepperYaml {
+    /// Active pepper version. Embedded in each new credential's
+    /// `pepper_version` so rotations can be tracked and audited.
+    pub version: u32,
+    /// Active pepper key as a 64-character lowercase hex string (32 bytes).
+    ///
+    /// The all-zero key `0000…` and keys shorter than 32 bytes are rejected at
+    /// startup.
+    pub key_hex: String,
+    /// Previous pepper version, set only while a rotation is in progress.
+    ///
+    /// Must be paired with `previous_key_hex`. Credentials carrying this
+    /// version are accepted on login and lazily re-hashed with the active key.
+    #[serde(default)]
+    pub previous_version: Option<u32>,
+    /// Previous pepper key (64-char lowercase hex). Required iff
+    /// `previous_version` is set.
+    #[serde(default)]
+    pub previous_key_hex: Option<String>,
+}
+
+/// Redacts `key_hex` / `previous_key_hex` — the pepper is a secret and MUST
+/// NOT be revealed if a containing config struct is ever `{:?}`-printed.
+impl std::fmt::Debug for PepperYaml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PepperYaml")
+            .field("version", &self.version)
+            .field("key_hex", &"[REDACTED]")
+            .field("previous_version", &self.previous_version)
+            .field(
+                "previous_key_hex",
+                &self.previous_key_hex.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl SecurityYaml {

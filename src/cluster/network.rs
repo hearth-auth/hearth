@@ -310,9 +310,13 @@ mod tests {
             .vote(dummy, RPCOption::new(std::time::Duration::from_millis(100)))
             .await;
 
+        // Pin the variant (matching the AppendEntries sibling): a bare is_err()
+        // would also pass on an unrelated failure (e.g. a serialization error),
+        // masking a regression where connection loss stopped mapping to Network.
+        let e = result.expect_err("expected error on unreachable peer, got Ok");
         assert!(
-            result.is_err(),
-            "expected error on unreachable peer, got Ok"
+            matches!(e, RPCError::Network(_)),
+            "expected RPCError::Network on connection failure, got {e:?}"
         );
     }
 }

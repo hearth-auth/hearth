@@ -452,14 +452,19 @@ async fn oidc_pkce_s256_flow() {
         )
         .expect("authorize with PKCE");
 
-    // 2. Exchange WITHOUT verifier should fail
+    // 2. Exchange WITHOUT a verifier should fail. The authorization request
+    //    registered a `code_challenge`, so PKCE is mandatory for this code;
+    //    omitting `code_verifier` entirely must be rejected with InvalidGrant.
+    //    (Step 3 below covers the distinct *mismatched* verifier path — this
+    //    step exercises the *missing* verifier branch, which was previously
+    //    untested because the request supplied a verifier.)
     let no_verifier_result = harness.identity().exchange_authorization_code(
         &realm,
         &TokenExchangeRequest {
             client_id: client.client_id().clone(),
             code: auth_response.code().to_string(),
             redirect_uri: "https://app.example.com/callback".to_string(),
-            code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+            code_verifier: None,
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
@@ -467,7 +472,7 @@ async fn oidc_pkce_s256_flow() {
     );
     assert!(
         matches!(&no_verifier_result, Err(IdentityError::InvalidGrant { .. })),
-        "exchange with wrong verifier must return InvalidGrant"
+        "exchange with a missing PKCE verifier must return InvalidGrant, got: {no_verifier_result:?}"
     );
 
     // The code is now used, so we need a new one

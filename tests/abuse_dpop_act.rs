@@ -10,6 +10,7 @@
 
 mod common;
 
+use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
 use hearth::abuse::MAX_ACT_CHAIN_DEPTH;
 use hearth::identity::oidc::{ClientCredentialsRequest, ClientProfile, RegisterClientRequest};
 use hearth::identity::{CreateRealmRequest, FapiProfile, RealmConfig};
@@ -136,6 +137,23 @@ async fn a38a_fapi_realm_client_credentials_with_dpop_jkt_accepted() {
     assert!(
         !resp.access_token().is_empty(),
         "access token must be non-empty"
+    );
+
+    // The docstring claims the token carries `cnf.jkt`; decode the JWT payload
+    // and assert the confirmation claim actually binds the supplied thumbprint.
+    // Without decoding, a token with no `cnf` would pass the non-empty check
+    // vacuously.
+    let parts: Vec<&str> = resp.access_token().split('.').collect();
+    assert_eq!(parts.len(), 3, "access token must be a 3-part JWS");
+    let claims_json = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("base64 decode claims");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&claims_json).expect("parse claims JSON");
+    assert_eq!(
+        claims["cnf"]["jkt"].as_str(),
+        Some(DUMMY_JKT),
+        "token must carry cnf.jkt binding the supplied thumbprint; got: {claims}"
     );
 }
 

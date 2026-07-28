@@ -189,7 +189,19 @@ async fn a24_no_quota_unlimited_users() {
     for i in 0..10 {
         create_user(&harness, &realm, i);
     }
-    // No error — unlimited.
+
+    // Assert against production output (not just "no panic"): all 10 users must
+    // be persisted and countable via list_users. A regression that silently
+    // capped creates would show a total < 10 here.
+    let listed = harness
+        .identity()
+        .list_users(&realm, &hearth::core::PageRequest::new(0, 50))
+        .expect("list users");
+    assert_eq!(
+        listed.total, 10,
+        "all 10 creates must persist when no quota is configured, got {}",
+        listed.total
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

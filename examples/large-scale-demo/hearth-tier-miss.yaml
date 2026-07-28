@@ -1,0 +1,90 @@
+# hearth.yaml — Corpus-scale record-lookup / tier-miss profile (HEA-1800).
+#
+# Boots a single-realm, 1,000,000-user Hearth instance whose hot tier is sized
+# DELIBERATELY BELOW the working set, so a known fraction of `lookup_user` /
+# `lookup_session` / `validate_token` storage lookups fall through to the
+# cold/SST tier. This is the corpus-scale counterpart to the high-concurrency
+# rework (HEA-1796): that stresses request concurrency; this proves lookup
+# latency stays flat as the *corpus* grows.
+#
+# Run it exactly like `make seed-large`, but with this config:
+#
+#   cargo run --release -- serve --dev \
+#       --config examples/large-scale-demo/hearth-tier-miss.yaml
+#
+# `--dev` now honors `storage.data_dir` below (HEA-1805), so cold-tier SSTs
+# persist to ./data/tier-miss without also exporting HEARTH_DEV_DATA_DIR. The
+# env var still works and takes precedence if you want to override the path.
+#
+# First boot streams 1M users in via the resumable `put_batch` seeder (gated by
+# `demo.enabled: true`); a per-realm sentinel makes re-boots instant. Wipe
+# ./data/tier-miss to force a fresh re-seed.
+#
+# NOT for production. The mass seeder is gated by `demo.enabled: true`; a
+# production config omits this block so the seeder can never fire against real
+# data.
+#
+# Every seeded user shares ONE password (`demo.password`) and has a deterministic
+# email `user<7-digit-index>@bulk.demo` (e.g. `user0000001@bulk.demo` ..
+# `user1000000@bulk.demo`) — so a load generator can address any point in the
+# corpus by index and know, by construction, whether it is drawing from a small
+# repeatedly-hit "hot" working set or a uniform "cold" draw across all 1M.
+
+# ── Demo mode (master guard for the large-scale seeder) ──────────────────────
+demo:
+  enabled: true
+  password: "DemoPassw0rd!"
+
+server:
+  bind_address: "127.0.0.1"
+  port: 8420
+
+storage:
+  # `--dev` honors this in dev mode (HEA-1805); cold-tier SSTs persist here.
+  data_dir: "./data/tier-miss"
+  fsync: false
+  # THE KNOB (HEA-1800). `--dev` otherwise uses the default 100k-entry hot tier
+  # and ignores this value. Sizing it to 100,000 against a 1,000,000-user corpus
+  # (~3M storage entries) keeps ~90% of a uniform-random lookup sweep OUT of the
+  # hot tier, so those lookups exercise the cold/SST read path. Raise it toward
+  # the corpus size to shrink the miss rate; lower it to force more misses.
+  hot_tier_capacity: 100000
+
+oidc:
+  issuer: "http://localhost:8420"
+
+onboarding:
+  base_url: "http://localhost:8420"
+
+observability:
+  log_level: "info"
+  log_format: "text"
+
+security:
+  load_test_unthrottled: true   # dev+loopback only (gated by HEA-1797)
+
+email:
+  transport: mailcatcher
+  from: "Hearth <noreply@bulk.demo>"
+
+# ── Realms ───────────────────────────────────────────────────────────────────
+realms:
+  # ── Bulk — 1,000,000 users in a single realm ────────────────────────────────
+  bulk:
+    applications:
+      bulk-app:
+        name: "Bulk Load App"
+        confidential: false           # public client; PKCE required
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+          - password                  # ROPC drives the lookup_user hot path
+    seed_users:
+      - email: admin@bulk.demo
+        display_name: Bulk Admin
+        password: "DemoPassw0rd!"
+    seeding:
+      users: 1000000
+      email_domain: bulk.demo

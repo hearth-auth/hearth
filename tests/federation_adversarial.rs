@@ -146,7 +146,17 @@ async fn confirm_link_ticket_cannot_be_stolen_by_another_user() {
     let bob = UserId::generate();
     let ticket = "ticket-42";
     let tag = compute_confirm_ticket_mac(&secret, &alice, ticket);
-    assert!(!verify_confirm_ticket_mac(&secret, &bob, ticket, &tag));
+    // Positive: alice's own tag is valid — proves the function works at all
+    // and that a stolen-tag check cannot pass by always returning false.
+    assert!(
+        verify_confirm_ticket_mac(&secret, &alice, ticket, &tag),
+        "alice's own MAC must verify"
+    );
+    // Negative: bob cannot use alice's tag.
+    assert!(
+        !verify_confirm_ticket_mac(&secret, &bob, ticket, &tag),
+        "alice's MAC must not verify for bob's user id"
+    );
 }
 
 #[tokio::test]

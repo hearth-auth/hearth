@@ -755,16 +755,31 @@ mod tests {
         let engine_for_reader = Arc::clone(&sm.engine);
         let realm_for_reader = realm.clone();
 
+        // The reader runs concurrently with the snapshot build and must observe
+        // every already-committed pair with its exact value — a snapshot build
+        // must not block, corrupt, or transiently hide committed reads. Collect
+        // and return the observed values so the guarantee is actually asserted
+        // (the previous `let _ = ...` discarded them, so the read was a no-op).
         let read_handle = tokio::spawn(async move {
-            for (k, _) in &pairs {
-                let _ = engine_for_reader.get(&realm_for_reader, k).unwrap();
-            }
+            pairs
+                .iter()
+                .map(|(k, _)| engine_for_reader.get(&realm_for_reader, k).unwrap())
+                .collect::<Vec<_>>()
         });
 
         let mut builder = sm.get_snapshot_builder().await;
         let snap = builder.build_snapshot().await.unwrap();
 
-        read_handle.await.unwrap();
+        let observed = read_handle.await.unwrap();
+        for (i, got) in observed.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let expected = (i as u8) * 2;
+            assert_eq!(
+                got.as_deref(),
+                Some([expected].as_slice()),
+                "concurrent read of key {i} during snapshot build must return its committed value",
+            );
+        }
 
         // Snapshot must include all pairs.
         let payload = decompress_payload(&snap.snapshot.into_inner()).unwrap();

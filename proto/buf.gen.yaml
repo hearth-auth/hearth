@@ -9,7 +9,11 @@
 # bump it here and run `make proto-gen` in the same commit.
 version: v2
 plugins:
-  - remote: buf.build/bufbuild/es:v2.12.1
+  # Pin the remote plugin version so `buf generate` is deterministic across
+  # local and CI. Leaving it unpinned lets buf.build resolve to the latest
+  # release, which silently drifts the generated header (e.g. v2.12.1 → v2.13.0)
+  # and breaks `make proto-check` on unrelated PRs. Bump this deliberately.
+  - remote: buf.build/bufbuild/es:v2.13.0
     out: ../sdks/typescript/src/generated
     opt:
       - target=ts

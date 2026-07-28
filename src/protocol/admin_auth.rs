@@ -31,6 +31,13 @@ struct RateTracker {
 #[derive(Debug, Default)]
 pub struct AdminRateLimiter {
     trackers: Mutex<HashMap<String, RateTracker>>,
+    /// When `true`, [`check`](Self::check) always returns `Allowed`.
+    ///
+    /// Set **only** by the load-test unthrottled boot path
+    /// (`security.load_test_unthrottled`, loopback-gated). Never enable in
+    /// production — disabling this limiter removes the admin-API abuse cap.
+    /// Defaults to `false` (limiter active).
+    disabled: bool,
 }
 
 /// Outcome of an admin rate-limit check.
@@ -48,11 +55,27 @@ impl AdminRateLimiter {
         Self::default()
     }
 
+    /// Creates a limiter that never rate-limits.
+    ///
+    /// **Load-test use only** — wired from `security.load_test_unthrottled` on a
+    /// loopback bind so a single-node throughput test can push the hot path
+    /// without the abuse cap acting as the bottleneck. See the field docs for
+    /// the production warning.
+    pub fn disabled() -> Self {
+        Self {
+            disabled: true,
+            ..Self::default()
+        }
+    }
+
     /// Records a request from `user_id` and reports whether it is permitted.
     ///
     /// The caller supplies `now_micros` so tests can drive time deterministically;
     /// production callers pass the current Unix-microsecond clock.
     pub fn check(&self, user_id: &UserId, now_micros: i64) -> RateLimitOutcome {
+        if self.disabled {
+            return RateLimitOutcome::Allowed;
+        }
         let key = user_id.as_uuid().to_string();
         let mut trackers = self
             .trackers
@@ -121,6 +144,12 @@ pub const EXPORT_RATE_WINDOW_MICROS: i64 = 3_600 * 1_000_000;
 #[derive(Debug, Default)]
 pub struct ExportRateLimiter {
     trackers: Mutex<HashMap<String, RateTracker>>,
+    /// When `true`, [`check`](Self::check) always returns `Allowed`.
+    ///
+    /// Set **only** by the load-test unthrottled boot path
+    /// (`security.load_test_unthrottled`, loopback-gated). Never enable in
+    /// production. Defaults to `false` (limiter active).
+    disabled: bool,
 }
 
 /// Outcome of an export rate-limit check.
@@ -138,11 +167,25 @@ impl ExportRateLimiter {
         Self::default()
     }
 
+    /// Creates a limiter that never rate-limits.
+    ///
+    /// **Load-test use only** — wired from `security.load_test_unthrottled` on a
+    /// loopback bind. See the field docs for the production warning.
+    pub fn disabled() -> Self {
+        Self {
+            disabled: true,
+            ..Self::default()
+        }
+    }
+
     /// Records an export attempt from `user_id` and reports whether it is permitted.
     ///
     /// `now_micros` is the current Unix timestamp in microseconds; tests should
     /// pass a fixed value to drive time deterministically.
     pub fn check(&self, user_id: &UserId, now_micros: i64) -> ExportRateLimitOutcome {
+        if self.disabled {
+            return ExportRateLimitOutcome::Allowed;
+        }
         let key = user_id.as_uuid().to_string();
         let mut trackers = self
             .trackers
@@ -179,12 +222,32 @@ impl ExportRateLimiter {
 #[derive(Debug, Default)]
 pub struct TokenRateLimiter {
     trackers: Mutex<HashMap<String, RateTracker>>,
+    /// When `true`, [`check`](Self::check) always returns `Allowed`.
+    ///
+    /// Set **only** by the load-test unthrottled boot path
+    /// (`security.load_test_unthrottled`, loopback-gated). Never enable in
+    /// production — disabling this limiter removes brute-force / token-minting
+    /// abuse protection on the OAuth token endpoint. Defaults to `false`.
+    disabled: bool,
 }
 
 impl TokenRateLimiter {
     /// Creates an empty limiter.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a limiter that never rate-limits.
+    ///
+    /// **Load-test use only** — wired from `security.load_test_unthrottled` on a
+    /// loopback bind so token issuance under a throughput test is not gated by
+    /// the per-`(realm, client)` cap. See the field docs for the production
+    /// warning.
+    pub fn disabled() -> Self {
+        Self {
+            disabled: true,
+            ..Self::default()
+        }
     }
 
     /// Records a request and reports whether it is permitted.
@@ -197,6 +260,9 @@ impl TokenRateLimiter {
         client_id: &ClientId,
         now_micros: i64,
     ) -> TokenRateLimitOutcome {
+        if self.disabled {
+            return TokenRateLimitOutcome::Allowed;
+        }
         let key = format!("{}:{}", realm_id.as_uuid(), client_id.as_uuid());
         let mut trackers = self
             .trackers
@@ -498,6 +564,56 @@ mod tests {
             limiter.check(&b, 0),
             ExportRateLimitOutcome::Allowed,
             "different users must have independent quotas"
+        );
+    }
+
+    // --- disabled() load-test bypass ---
+
+    #[test]
+    fn admin_disabled_never_limits() {
+        let limiter = AdminRateLimiter::disabled();
+        let u = user();
+        // Far beyond ADMIN_RATE_LIMIT within a single window: every call allowed.
+        for _ in 0..(ADMIN_RATE_LIMIT * 10) {
+            assert_eq!(limiter.check(&u, 0), RateLimitOutcome::Allowed);
+        }
+    }
+
+    #[test]
+    fn token_disabled_never_limits() {
+        let limiter = TokenRateLimiter::disabled();
+        let r = realm();
+        let c = client();
+        for _ in 0..(TOKEN_RATE_LIMIT * 10) {
+            assert_eq!(limiter.check(&r, &c, 0), TokenRateLimitOutcome::Allowed);
+        }
+    }
+
+    #[test]
+    fn export_disabled_never_limits() {
+        let limiter = ExportRateLimiter::disabled();
+        let u = user();
+        for _ in 0..(EXPORT_RATE_LIMIT * 10) {
+            assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Allowed);
+        }
+    }
+
+    #[test]
+    fn new_default_is_enabled() {
+        // Regression guard: the load-test bypass must default OFF, so a
+        // freshly-constructed limiter still enforces its cap.
+        let limiter = TokenRateLimiter::new();
+        let r = realm();
+        let c = client();
+        for _ in 0..TOKEN_RATE_LIMIT {
+            let _ = limiter.check(&r, &c, 0);
+        }
+        assert!(
+            matches!(
+                limiter.check(&r, &c, 0),
+                TokenRateLimitOutcome::Exceeded { .. }
+            ),
+            "new() must be rate-limited; only disabled() bypasses"
         );
     }
 

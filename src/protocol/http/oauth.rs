@@ -364,10 +364,16 @@ fn verify_endpoint_client(
             .into_response());
     };
 
+    // RFC 6749 §5.2: the `error` field MUST be a registered code. Use
+    // `invalid_client` uniformly across every arm that authenticates the
+    // endpoint client (client_credentials, token-exchange, revoke, introspect)
+    // so strict OAuth clients recognize the failure and so this path matches the
+    // code/refresh arms — a single opaque code also avoids the enumeration
+    // oracle documented in `http::auth::identity_error_to_response`.
     let client_uuid = raw_id.parse::<uuid::Uuid>().map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid client credentials"})),
+            Json(serde_json::json!({"error": "invalid_client"})),
         )
             .into_response()
     })?;
@@ -380,7 +386,7 @@ fn verify_endpoint_client(
         .map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid client credentials"})),
+                Json(serde_json::json!({"error": "invalid_client"})),
             )
                 .into_response()
         })

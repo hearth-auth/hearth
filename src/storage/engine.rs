@@ -17,7 +17,7 @@ use crate::storage::fs::{Fs, RealFs};
 use crate::storage::key_registry::KeyRegistry;
 use crate::storage::memtable::{Memtable, MemtableConfig, MemtableValue};
 use crate::storage::sst::{self, SstReader, SstWriter};
-use crate::storage::tiered::{HotTier, TieredConfig};
+use crate::storage::tiered::{HotTier, TieredConfig, PRODUCTION_PROMOTE_SAMPLE_RATE};
 use crate::storage::wal::{BatchEntry, Wal, WalConfig, WalEntry, WalOperation};
 use crate::storage::{ScanEntry, StorageEngine};
 
@@ -122,11 +122,28 @@ impl StorageConfig {
             tiered_config: TieredConfig {
                 hot_tier_capacity,
                 eviction_batch_size: 64,
+                // Bound promote-path write-lock/clone churn under cold-read load
+                // in production (HEA-1775). Dev/embedded keeps rate=1.
+                promote_sample_rate: PRODUCTION_PROMOTE_SAMPLE_RATE,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: false,
         }
+    }
+
+    /// Overrides the hot-tier entry capacity on an already-built config.
+    ///
+    /// `--dev` mode builds storage via [`StorageConfig::dev`], which uses
+    /// [`TieredConfig::default`] (100k entries). For most dev corpora the whole
+    /// working set fits in that hot tier, so every lookup is a hot-tier hit and
+    /// tail latency is corpus-size-independent. Corpus-scale lookup profiles
+    /// (HEA-1800) call this to size the hot tier *below* the working set so a
+    /// known fraction of lookups fall through to the cold/SST tier, exposing the
+    /// real lookup-cost-vs-`n` curve. Production sizes capacity through
+    /// [`StorageConfig::production`] instead.
+    pub fn set_hot_tier_capacity(&mut self, capacity: usize) {
+        self.tiered_config.hot_tier_capacity = capacity;
     }
 
     /// Creates a test configuration with fast sync and small thresholds.
@@ -145,6 +162,7 @@ impl StorageConfig {
             tiered_config: TieredConfig {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
+                promote_sample_rate: 1,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig {
@@ -622,6 +640,11 @@ impl EmbeddedStorageEngine {
 
         // Atomic rename — crash-safe: partial writes leave a .tmp, not a corrupt .sst
         self.fs.rename(&tmp_path, &final_path)?;
+        // Fsync the data directory so the rename (the new inode becoming the
+        // canonical `.sst`) is durable. Without this a power loss before the
+        // directory update commits could resolve the tmp/old entries on restart
+        // (HEA-1855).
+        self.fs.sync_dir(&self.data_dir)?;
 
         // Atomically swap reader list to just the compacted SST
         self.sst_readers.store(Arc::new(vec![new_reader]));
@@ -1214,6 +1237,7 @@ mod tests {
             tiered_config: TieredConfig {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
+                promote_sample_rate: 1,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -1273,6 +1297,7 @@ mod tests {
             tiered_config: TieredConfig {
                 hot_tier_capacity: 64,
                 eviction_batch_size: 8,
+                promote_sample_rate: 1,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -1342,6 +1367,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1370,6 +1396,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1396,6 +1423,60 @@ mod tests {
             // Second read should hit hot tier (faster path)
             let val2 = engine.get(&realm, b"cold-0000").expect("hot read");
             assert_eq!(val2, Some(b"cold-value".to_vec()));
+        }
+    }
+
+    // HEA-1800: a corpus-scale load profile sizes the dev hot tier *below* the
+    // working set via `set_hot_tier_capacity` so lookups spill to the cold/SST
+    // tier. The override must take effect (bounded hot tier) while every record
+    // still reads back correctly — the tier miss is a latency event, not a
+    // correctness one.
+    #[test]
+    fn dev_hot_tier_capacity_override_forces_misses_but_stays_correct() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        let mut config = StorageConfig::dev(dir.path().to_path_buf());
+        // Force flushes so records leave the memtable, and cap the hot tier well
+        // below the record count so most reads must miss it.
+        config.memtable_config = MemtableConfig {
+            flush_threshold_bytes: 256,
+        };
+        config.set_hot_tier_capacity(16);
+        assert_eq!(
+            config.tiered_config.hot_tier_capacity, 16,
+            "override must be reflected in the tiered config"
+        );
+
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+        const N: u32 = 500;
+        for i in 0..N {
+            let key = format!("rec-{i:05}");
+            let val = format!("val-{i:05}");
+            engine
+                .put(&realm, key.as_bytes(), val.as_bytes())
+                .expect("put");
+        }
+
+        // The hot tier can never hold more than its capacity, so a corpus this
+        // much larger than the cap guarantees cold/SST misses on most keys.
+        assert!(
+            engine.hot_tier.len() <= 16,
+            "hot tier ({}) must stay within the overridden capacity",
+            engine.hot_tier.len()
+        );
+
+        // Every record still reads back correctly regardless of tier residency.
+        for i in 0..N {
+            let key = format!("rec-{i:05}");
+            let expected = format!("val-{i:05}");
+            let got = engine.get(&realm, key.as_bytes()).expect("get");
+            assert_eq!(
+                got,
+                Some(expected.into_bytes()),
+                "record {i} must survive a hot-tier miss"
+            );
         }
     }
 
@@ -1429,14 +1510,35 @@ mod tests {
         engine.put(&realm, b"ddd", b"mem-val").expect("put");
         engine.put(&realm, b"eee", b"mem-val").expect("put");
 
+        // The 100-byte flush threshold guarantees the first writes were flushed
+        // to at least one SST while the tail stayed in the memtable, so a correct
+        // scan must genuinely merge both layers rather than read a single tier.
+        assert!(
+            !engine.sst_readers.load().is_empty(),
+            "flush threshold must have produced ≥1 SST so the scan actually spans layers"
+        );
+
         // Scan the full range — should merge SST + memtable
         let results = engine.scan(&realm, b"aaa", b"fff").expect("scan");
 
-        // We should see all 5 keys, regardless of which layer they're in
-        assert!(
-            results.len() >= 4,
-            "scan should find keys across layers, got {}",
-            results.len()
+        // Every one of the 5 keys must appear with its exact value, regardless of
+        // which layer it lives in — a `>= 4` check silently tolerated a dropped key.
+        let found: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = results
+            .iter()
+            .map(|r| (r.key.clone(), r.value.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (b"aaa".to_vec(), b"sst-val".to_vec()),
+                (b"bbb".to_vec(), b"sst-val".to_vec()),
+                (b"ccc".to_vec(), b"sst-val".to_vec()),
+                (b"ddd".to_vec(), b"mem-val".to_vec()),
+                (b"eee".to_vec(), b"mem-val".to_vec()),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+            "cross-layer scan must return all 5 keys with their exact values"
         );
 
         // Results should be sorted
@@ -1450,6 +1552,10 @@ mod tests {
         }
     }
 
+    /// Compile-time guarantee (no runtime assertions by design): the engine must
+    /// stay `Send + Sync` so it can be shared across Tokio worker threads behind
+    /// an `Arc`. If a future field loses `Send`/`Sync`, this fails to *compile*,
+    /// which is the enforcement point — a runtime assert could not catch it.
     #[test]
     fn engine_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -1475,6 +1581,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1532,6 +1639,7 @@ mod tests {
                 tiered_config: TieredConfig {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
+                    promote_sample_rate: 1,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -1687,20 +1795,28 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
             .count();
 
-        if sst_before >= 2 {
-            let compacted = engine.compact_ssts(2).expect("compact_ssts");
-            assert_eq!(
-                compacted, sst_before,
-                "compaction at exact min_sst_count boundary should succeed"
-            );
+        // The 30 puts above (values ~5 bytes) at a 50-byte flush threshold must
+        // reliably produce at least `min_sst_count` SSTs, otherwise the boundary
+        // this test exists to cover is never reached — assert it unconditionally
+        // rather than silently no-op'ing the whole body behind an `if`.
+        assert!(
+            sst_before >= 2,
+            "setup must flush ≥2 SSTs to exercise the exact-min_sst_count boundary, got {sst_before}"
+        );
 
-            for i in 0u32..30 {
-                let key = format!("b-{i:04}");
-                assert_eq!(
-                    engine.get(&realm, key.as_bytes()).expect("get"),
-                    Some(format!("vb-{i:04}").into_bytes()),
-                );
-            }
+        let compacted = engine.compact_ssts(2).expect("compact_ssts");
+        assert_eq!(
+            compacted, sst_before,
+            "compaction at exact min_sst_count boundary should compact every SST"
+        );
+
+        for i in 0u32..30 {
+            let key = format!("b-{i:04}");
+            assert_eq!(
+                engine.get(&realm, key.as_bytes()).expect("get"),
+                Some(format!("vb-{i:04}").into_bytes()),
+                "value for {key} must survive compaction at the boundary"
+            );
         }
     }
 
@@ -1837,15 +1953,19 @@ mod tests {
             );
         }
 
-        // Raw WAL bytes must not contain the sentinel in plaintext.
+        // Raw WAL bytes must not contain the sentinel in plaintext. The WAL is
+        // always created on open, so require its presence — an `if exists` guard
+        // silently skipped the check if the on-disk name ever drifted.
         let wal_path = dir.path().join("hearth.wal");
-        if wal_path.exists() {
-            let raw = std::fs::read(&wal_path).expect("read wal");
-            assert!(
-                !raw.windows(sentinel.len()).any(|w| w == sentinel),
-                "WAL file contains plaintext sentinel — WAL encryption-at-rest not working"
-            );
-        }
+        assert!(
+            wal_path.exists(),
+            "WAL file {wal_path:?} must exist so its encryption-at-rest is actually checked"
+        );
+        let raw = std::fs::read(&wal_path).expect("read wal");
+        assert!(
+            !raw.windows(sentinel.len()).any(|w| w == sentinel),
+            "WAL file contains plaintext sentinel — WAL encryption-at-rest not working"
+        );
     }
 
     // ── F3 regression: production() must always fsync ─────────────────────────
@@ -1880,6 +2000,7 @@ mod tests {
         let tier = HotTier::new(TieredConfig {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
+            promote_sample_rate: 1,
         });
         let realm = RealmId::generate();
         tier.promote(&realm, b"key", b"data");
@@ -1900,39 +2021,53 @@ mod tests {
     /// After WAL rotation, all data that was in the memtable must be readable
     /// from the SST layer. Before HEA-1180 the WAL was truncated without flushing,
     /// so a simulated kill after rotation would lose those writes.
+    ///
+    /// To make the crash-loss claim load-bearing (the original test only read
+    /// back through the live engine, where memtable-resident keys would answer
+    /// regardless of whether the flush happened), the engine is dropped and
+    /// re-opened from the same directory before the final reads. A key that was
+    /// truncated out of the rotated WAL without first being flushed to an SST
+    /// would be unrecoverable after reopen.
     #[test]
     fn wal_rotation_flushes_memtable_to_sst_before_truncating() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Use a tiny WAL (4 KiB) so rotation triggers quickly.
-        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
-        config.wal_config.max_size = 4 * 1024;
-        let engine = EmbeddedStorageEngine::open(config).expect("open");
         let realm = RealmId::generate();
-
-        // Write enough data to force WAL rotation; values are 512 bytes each.
+        // Values are 512 bytes each.
         let big_val = vec![0xABu8; 512];
-        for i in 0u32..16 {
-            engine
-                .put(&realm, format!("rot-key-{i:04}").as_bytes(), &big_val)
-                .expect("put");
+
+        {
+            // Use a tiny WAL (4 KiB) so rotation triggers quickly.
+            let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+            config.wal_config.max_size = 4 * 1024;
+            let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+            // Write enough data to force WAL rotation.
+            for i in 0u32..16 {
+                engine
+                    .put(&realm, format!("rot-key-{i:04}").as_bytes(), &big_val)
+                    .expect("put");
+            }
+
+            // After rotation the pre_rotate_fn must have produced at least one SST.
+            assert!(
+                !engine.sst_readers.load().is_empty(),
+                "WAL rotation must have triggered a memtable flush → at least one SST must exist"
+            );
         }
 
-        // After rotation the pre_rotate_fn must have produced at least one SST.
-        let sst_readers = engine.sst_readers.load();
-        assert!(
-            !sst_readers.is_empty(),
-            "WAL rotation must have triggered a memtable flush → at least one SST must exist"
-        );
-
-        // Every key we wrote must still be readable after rotation.
+        // Reopen from disk (simulates a restart): pre-rotation keys must be
+        // recoverable from SSTs and post-rotation keys from the new WAL segment.
+        let reopened =
+            EmbeddedStorageEngine::open(StorageConfig::test_config(dir.path().to_path_buf()))
+                .expect("reopen");
         for i in 0u32..16 {
-            let got = engine
+            let got = reopened
                 .get(&realm, format!("rot-key-{i:04}").as_bytes())
                 .expect("get");
             assert_eq!(
                 got.as_deref(),
                 Some(big_val.as_slice()),
-                "rot-key-{i:04} must be readable after WAL rotation"
+                "rot-key-{i:04} must survive WAL rotation + reopen (flushed, not truncated away)"
             );
         }
     }
