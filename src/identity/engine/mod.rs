@@ -2599,7 +2599,7 @@ impl EmbeddedIdentityEngine {
 
         let user_bytes = Self::serialize_user(&user)?;
         // 16 raw UUID bytes instead of the 36-char hex string: saves ~20 B/user.
-        let user_id_bytes = user_id.as_uuid().as_bytes().to_vec();
+        let user_id_bytes = keys::encode_user_id_value(&user_id);
         let id_key = keys::encode_user_id(&user_id);
         // Collapse the email index and primary record into one atomic batch.
         // `Memtable::put` deep-clones the entire map per call, so two separate
@@ -5340,15 +5340,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(None);
         };
 
-        // Parse the UserId
-        let uuid_str =
-            std::str::from_utf8(&id_bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
+        // Parse the UserId from the canonical index value.
+        let user_id =
+            keys::decode_user_id_value(&id_bytes).ok_or_else(|| IdentityError::Serialization {
+                reason: "email index holds a malformed user id".to_string(),
             })?;
-        let uuid = uuid::Uuid::parse_str(uuid_str).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        let user_id = UserId::new(uuid);
 
         self.get_user(realm_id, &user_id)
     }
@@ -5392,7 +5388,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .map_err(Self::storage_err)?;
 
                 // Write new email index
-                let user_id_bytes = user_id.as_uuid().to_string().into_bytes();
+                let user_id_bytes = keys::encode_user_id_value(user_id);
                 self.storage
                     .put(realm_id, &new_email_key, &user_id_bytes)
                     .map_err(Self::storage_err)?;
@@ -8669,7 +8665,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &old_email_key)
             .map_err(Self::storage_err)?;
-        let user_id_bytes = user_id.as_uuid().to_string().into_bytes();
+        let user_id_bytes = keys::encode_user_id_value(&user_id);
         self.storage
             .put(realm_id, &new_email_key, &user_id_bytes)
             .map_err(Self::storage_err)?;
@@ -9378,7 +9374,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         let user_bytes = Self::serialize_user(&user)?;
-        let user_id_bytes = user_id.as_uuid().to_string().into_bytes();
+        let user_id_bytes = keys::encode_user_id_value(&user_id);
 
         // 4. If a credential was supplied, derive the algorithm from the
         //    PHC prefix and prepare the credential write as part of the
@@ -9500,7 +9496,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 user.set_email_verified(spec.email_verified);
 
                 let user_bytes = Self::serialize_user(&user)?;
-                let id_bytes = user_id.as_uuid().to_string().into_bytes();
+                let id_bytes = keys::encode_user_id_value(&user_id);
                 entries.push((keys::encode_user_email(&email), id_bytes));
                 entries.push((keys::encode_user_id(&user_id), user_bytes));
                 entries.push((keys::encode_credential_key(&user_id), cred_bytes.clone()));

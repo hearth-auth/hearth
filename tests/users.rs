@@ -113,6 +113,74 @@ async fn update_user_fields() {
     assert!(updated.updated_at() >= created.updated_at());
 }
 
+/// Regression: the `usr:email:` index value must round-trip between every
+/// writer and the reader in `get_user_by_email`.
+///
+/// HEA-1896 (`c0954f6b`) changed `create_user` to write the user id as 16 raw
+/// UUID bytes, but left `update_user`'s email-change branch writing a 36-char
+/// hyphenated string and left the reader parsing UTF-8. That mixed the index
+/// format and broke every email-resolved flow (password login, password reset,
+/// adaptive step-up MFA). This test pins both the create-path and the
+/// email-change path through the same reader.
+#[tokio::test]
+async fn email_index_resolves_after_email_change() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = harness.create_realm();
+
+    let created = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "old@example.com".to_string(),
+                display_name: "Alice".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create");
+
+    // Create path: the id written by `create_user` must be readable back.
+    let by_old = harness
+        .identity()
+        .get_user_by_email(&realm, "old@example.com")
+        .expect("lookup by original email must not error")
+        .expect("user must be resolvable by its creation email");
+    assert_eq!(by_old.id(), created.id());
+
+    harness
+        .identity()
+        .update_user(
+            &realm,
+            created.id(),
+            &UpdateUserRequest {
+                email: Some("new@example.com".to_string()),
+                ..UpdateUserRequest::default()
+            },
+        )
+        .expect("update email");
+
+    // Email-change path: the id written by `update_user` must use the same
+    // encoding the reader expects.
+    let by_new = harness
+        .identity()
+        .get_user_by_email(&realm, "new@example.com")
+        .expect("lookup by new email must not error")
+        .expect("user must be resolvable by its new email");
+    assert_eq!(by_new.id(), created.id());
+    assert_eq!(by_new.email(), "new@example.com");
+
+    // Old index entry is released.
+    assert!(harness
+        .identity()
+        .get_user_by_email(&realm, "old@example.com")
+        .expect("lookup by stale email must not error")
+        .is_none());
+}
+
 #[tokio::test]
 async fn delete_user_removes_from_both_indexes() {
     let harness = common::TestHarness::embedded()
