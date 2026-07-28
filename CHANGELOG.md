@@ -19,6 +19,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer shed the operator out of the admin console. New metric
   `hearth_kdf_admin_permits`; `admin_max_in_flight: 0` is rejected at config-load
   time. (HEA-1892)
+- **Pool-specific KDF admission telemetry (HEA-1894)** — the admin-reserved gate now
+  reports its own in-flight and shed counters instead of writing the shared-pool
+  metrics. New metrics `hearth_kdf_admin_in_flight` and `hearth_kdf_admin_shed_total`
+  make operator-console shedding — the exact condition the F2 isolation exists to
+  prevent — directly alertable, and keep `hearth_kdf_in_flight` bounded by
+  `hearth_kdf_permits` so shared-pool saturation alerts no longer misfire on admin
+  traffic. (HEA-1894)
+- **Admin KDF gate prefers queueing over shedding (HEA-1895)** — the admin-reserved
+  pool now has its own, far longer queue-wait (new `security.password.kdf.admin_max_queue_wait_ms`,
+  default `2500` ms) instead of reusing the shared gate's `250` ms shed threshold.
+  F2 stopped a tenant-realm flood from starving admin login, but reusing the 250 ms
+  wait made a *targeted* flood of `/ui/admin/login` cheap — an attacker had only to
+  occupy the pool's ~2 permits to hold the console in steady-state `503`. A seconds-long
+  admin wait — costless on a 2-permit pool that cannot blow up memory — lets genuine
+  operator logins queue for a slot instead. `admin_max_queue_wait_ms: 0` is rejected at
+  config-load time. (HEA-1895)
 
 ### Added
 - **Bounded KDF admission control on the Argon2id path (HEA-1887 / R1)** — password

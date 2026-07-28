@@ -1003,6 +1003,16 @@ pub struct KdfAdmissionYaml {
     /// with `503 Service Unavailable` + `Retry-After`. Default: `250`.
     #[serde(default = "KdfAdmissionYaml::default_max_queue_wait_ms")]
     pub max_queue_wait_ms: u64,
+    /// Maximum milliseconds an **admin** login waits for a permit before it is
+    /// shed (HEA-1895). `null`/absent resolves to
+    /// [`crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS`] — far longer than the
+    /// shared gate's `max_queue_wait_ms`, because admin login prefers queueing
+    /// over shedding: its latency budget is seconds and its volume is low, so a
+    /// longer wait on the tiny reserved pool denies a distributed flood the
+    /// steady-state `503` it would otherwise hold the console in. MUST be `>= 1`
+    /// when set.
+    #[serde(default)]
+    pub admin_max_queue_wait_ms: Option<u64>,
     /// `Retry-After` value (seconds) advertised on a shed response. Default: `1`.
     #[serde(default = "KdfAdmissionYaml::default_retry_after_seconds")]
     pub retry_after_seconds: u64,
@@ -1014,6 +1024,7 @@ impl Default for KdfAdmissionYaml {
             max_in_flight: None,
             admin_max_in_flight: None,
             max_queue_wait_ms: Self::default_max_queue_wait_ms(),
+            admin_max_queue_wait_ms: None,
             retry_after_seconds: Self::default_retry_after_seconds(),
         }
     }

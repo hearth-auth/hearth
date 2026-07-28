@@ -589,16 +589,18 @@ queueing unboundedly.
 |-------|------|---------|-------------|
 | `max_in_flight` | integer | host **core count** | Maximum concurrent Argon2id operations. Omit (or `null`) to default to [`available_parallelism`] — the Little's-Law bound at which Argon2id throughput saturates, so higher values buy no throughput and only add queue latency. An explicit `0` is **rejected at startup**. Calibrate against your hardware using the C7/HEA-1875 saturation sweep. |
 | `admin_max_in_flight` | integer | `2` | Maximum concurrent Argon2id operations reserved for **admin login** (`/ui/admin/login`), in a *separate* permit pool (HEA-1892 / F2). Admin login never draws from the shared `max_in_flight` pool, so a flood against a tenant realm's login form cannot exhaust it and lock the operator out of the admin console. Omit to default to a small reserved lane; an explicit `0` is **rejected at startup**. |
-| `max_queue_wait_ms` | integer | `250` | Milliseconds a request waits for a permit before it is shed with `503`. Shared by both pools. |
+| `max_queue_wait_ms` | integer | `250` | Milliseconds a request waits for a permit before it is shed with `503`. Applies to the **shared** pool. |
+| `admin_max_queue_wait_ms` | integer | `2500` | Milliseconds an **admin login** waits for a permit before it is shed (HEA-1895). Deliberately far longer than `max_queue_wait_ms`: admin login prefers *queueing* over *shedding* — its latency budget is seconds and its volume is low, so a longer wait on the tiny reserved pool denies a distributed flood the steady-state `503` it would otherwise hold the console in. The pool is only a couple of permits, so a longer wait cannot grow its memory footprint unboundedly. Omit to default; an explicit `0` is **rejected at startup**. |
 | `retry_after_seconds` | integer | `1` | `Retry-After` value (seconds) advertised on a shed response. Shared by both pools. |
 
 ```yaml
 security:
   password:
     kdf:
-      max_in_flight: 16          # omit to default to the host core count
-      admin_max_in_flight: 2     # reserved pool for /ui/admin/login (HEA-1892)
-      max_queue_wait_ms: 250
+      max_in_flight: 16              # omit to default to the host core count
+      admin_max_in_flight: 2         # reserved pool for /ui/admin/login (HEA-1892)
+      max_queue_wait_ms: 250         # shared-pool shed threshold
+      admin_max_queue_wait_ms: 2500  # admin prefers queueing over shedding (HEA-1895)
       retry_after_seconds: 1
 ```
 

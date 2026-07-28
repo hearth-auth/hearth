@@ -238,11 +238,20 @@ pub struct Metrics {
     pub storage_sst_files: Gauge,
 
     // ── KDF admission control (HEA-1887 / R1) ───────────────────────────────
-    /// Argon2id operations currently executing on the blocking pool (holding a
-    /// permit). Bounded above by `hearth_kdf_permits`; if it sits pinned at the
-    /// permit ceiling the gate is saturated and `hearth_kdf_queue_wait_seconds`
-    /// / `hearth_kdf_shed_total` show the resulting back-pressure.
+    /// Argon2id operations currently executing on the **shared** blocking pool
+    /// (holding a shared-gate permit). Bounded above by `hearth_kdf_permits`; if
+    /// it sits pinned at the permit ceiling the shared gate is saturated and
+    /// `hearth_kdf_queue_wait_seconds` / `hearth_kdf_shed_total` show the
+    /// resulting back-pressure. The admin-reserved pool (HEA-1892 / F2) is
+    /// tracked separately by `hearth_kdf_admin_in_flight` so this gauge never
+    /// exceeds its own `hearth_kdf_permits` ceiling.
     pub kdf_in_flight: Gauge,
+
+    /// Argon2id operations currently executing on the **admin-reserved** pool
+    /// (HEA-1894). Bounded above by `hearth_kdf_admin_permits`. Split out from
+    /// `hearth_kdf_in_flight` so shared-pool saturation alerts shaped
+    /// `kdf_in_flight >= kdf_permits` do not misfire on admin traffic.
+    pub kdf_admin_in_flight: Gauge,
 
     /// Configured maximum concurrent Argon2id operations (permit count).
     ///
@@ -273,8 +282,16 @@ pub struct Metrics {
     ///
     /// A non-zero and rising value means the KDF path is overloaded and honest
     /// back-pressure is engaging instead of the unbounded queueing that produced
-    /// the multi-second p99 tail in C9/HEA-1879.
+    /// the multi-second p99 tail in C9/HEA-1879. Counts **shared-pool** sheds
+    /// only; admin-pool sheds are tracked by `hearth_kdf_admin_shed_total`.
     pub kdf_shed_total: Counter,
+
+    /// Total Argon2id operations shed on the **admin-reserved** pool (HEA-1894).
+    ///
+    /// Split out from `hearth_kdf_shed_total` so operators can alert on the
+    /// exact condition the F2 isolation exists to prevent — the admin console
+    /// shedding — without conflating it with tenant-realm login sheds.
+    pub kdf_admin_shed_total: Counter,
 }
 
 impl Metrics {
@@ -517,6 +534,15 @@ impl Metrics {
             .register(Box::new(kdf_in_flight.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let kdf_admin_in_flight = Gauge::new(
+            "hearth_kdf_admin_in_flight",
+            "Argon2id operations currently executing on the admin-reserved pool",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_admin_in_flight.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let kdf_permits = Gauge::new(
             "hearth_kdf_permits",
             "Configured maximum concurrent Argon2id operations (permit count)",
@@ -568,6 +594,15 @@ impl Metrics {
             .register(Box::new(kdf_shed_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let kdf_admin_shed_total = Counter::new(
+            "hearth_kdf_admin_shed_total",
+            "Total Argon2id operations shed (503/Retry-After) on the admin-reserved KDF pool",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(kdf_admin_shed_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         Self {
             registry,
             http_request_duration_seconds,
@@ -592,11 +627,13 @@ impl Metrics {
             storage_hot_tier_promotions_total,
             storage_sst_files,
             kdf_in_flight,
+            kdf_admin_in_flight,
             kdf_permits,
             kdf_admin_permits,
             kdf_queue_wait_seconds,
             kdf_compute_seconds,
             kdf_shed_total,
+            kdf_admin_shed_total,
         }
     }
 

@@ -107,6 +107,21 @@ impl std::fmt::Display for KdfGateError {
 
 impl std::error::Error for KdfGateError {}
 
+/// Which permit pool a [`KdfGate`] instance represents (HEA-1894).
+///
+/// The shared and admin-reserved gates are distinct semaphores with distinct
+/// telemetry: the shared pool writes `hearth_kdf_{in_flight,shed_total}`, the
+/// admin pool writes `hearth_kdf_admin_{in_flight,shed_total}`. Without this
+/// discriminant both pools wrote the shared counters, making admin sheds
+/// invisible and letting `hearth_kdf_in_flight` exceed `hearth_kdf_permits`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pool {
+    /// The shared realm-login gate.
+    Shared,
+    /// The admin-reserved gate (HEA-1892 / F2).
+    Admin,
+}
+
 /// Bounded admission gate for Argon2id operations.
 ///
 /// Cheap to clone conceptually via the process-global [`gate`]; typically there
@@ -116,6 +131,7 @@ pub struct KdfGate {
     max_queue_wait: Duration,
     retry_after: Duration,
     permits: usize,
+    pool: Pool,
 }
 
 impl KdfGate {
@@ -126,7 +142,7 @@ impl KdfGate {
     /// never admit is a self-inflicted total outage, which is never the intent.
     #[must_use]
     pub fn new(config: KdfGateConfig) -> Self {
-        let gate = Self::build(config);
+        let gate = Self::build(config, Pool::Shared);
         #[allow(clippy::cast_precision_loss)]
         crate::metrics::metrics()
             .kdf_permits
@@ -142,7 +158,7 @@ impl KdfGate {
     /// of the admin console. Same clamp semantics as [`Self::new`].
     #[must_use]
     pub fn new_admin(config: KdfGateConfig) -> Self {
-        let gate = Self::build(config);
+        let gate = Self::build(config, Pool::Admin);
         #[allow(clippy::cast_precision_loss)]
         crate::metrics::metrics()
             .kdf_admin_permits
@@ -150,16 +166,19 @@ impl KdfGate {
         gate
     }
 
-    /// Shared constructor: clamps permits to `>= 1` and wires the semaphore.
-    /// Metric publication is left to the role-specific [`Self::new`] /
-    /// [`Self::new_admin`] so the two pools report distinct gauges.
-    fn build(config: KdfGateConfig) -> Self {
+    /// Shared constructor: clamps permits to `>= 1`, wires the semaphore, and
+    /// records the `pool` discriminant so [`Self::run`] routes telemetry to the
+    /// right counters. Metric publication is left to the role-specific
+    /// [`Self::new`] / [`Self::new_admin`] so the two pools report distinct
+    /// gauges.
+    fn build(config: KdfGateConfig, pool: Pool) -> Self {
         let permits = config.max_in_flight.max(1);
         Self {
             semaphore: Semaphore::new(permits),
             max_queue_wait: config.max_queue_wait,
             retry_after: config.retry_after,
             permits,
+            pool,
         }
     }
 
@@ -193,6 +212,14 @@ impl KdfGate {
     {
         let metrics = crate::metrics::metrics();
 
+        // Route in-flight / shed telemetry to this gate's pool so admin sheds
+        // are alertable and each `*_in_flight` gauge stays bounded by its own
+        // permit ceiling (HEA-1894).
+        let (in_flight, shed_total) = match self.pool {
+            Pool::Shared => (&metrics.kdf_in_flight, &metrics.kdf_shed_total),
+            Pool::Admin => (&metrics.kdf_admin_in_flight, &metrics.kdf_admin_shed_total),
+        };
+
         // Bounded wait for a permit. Past the budget we shed instead of queueing
         // unboundedly — the crux of R1.
         let wait_start = Instant::now();
@@ -202,13 +229,13 @@ impl KdfGate {
             // Semaphore closed — only happens on shutdown; treat as overload so
             // the caller sheds cleanly rather than panicking mid-auth.
             Ok(Err(_closed)) => {
-                metrics.kdf_shed_total.inc();
+                shed_total.inc();
                 return Err(KdfGateError::Overloaded {
                     retry_after: self.retry_after,
                 });
             }
             Err(_elapsed) => {
-                metrics.kdf_shed_total.inc();
+                shed_total.inc();
                 return Err(KdfGateError::Overloaded {
                     retry_after: self.retry_after,
                 });
@@ -220,13 +247,13 @@ impl KdfGate {
 
         // Permit held for the duration of the compute; released on drop after
         // the blocking task joins.
-        metrics.kdf_in_flight.inc();
+        in_flight.inc();
         let compute_start = Instant::now();
         let result = tokio::task::spawn_blocking(f).await;
         metrics
             .kdf_compute_seconds
             .observe(compute_start.elapsed().as_secs_f64());
-        metrics.kdf_in_flight.dec();
+        in_flight.dec();
         drop(permit);
 
         result.map_err(KdfGateError::Join)
@@ -261,11 +288,25 @@ pub fn gate() -> &'static KdfGate {
 /// reachable while the shared gate sheds a realm-login flood.
 pub const DEFAULT_ADMIN_MAX_IN_FLIGHT: usize = 2;
 
+/// Default queue-wait (milliseconds) for the admin-reserved gate (HEA-1895)
+/// when `security.password.kdf.admin_max_queue_wait_ms` is unset.
+///
+/// Deliberately far longer than the shared gate's 250 ms shed threshold: admin
+/// login is the one auth surface where **queueing beats shedding**. Its latency
+/// budget is seconds, not milliseconds, and its volume is inherently low, so a
+/// distributed flood that occupies the tiny [`DEFAULT_ADMIN_MAX_IN_FLIGHT`]-permit
+/// pool can no longer hold the console in steady-state `503` — genuine operator
+/// logins queue for a slot instead. The pool is only a couple of permits, so a
+/// longer wait cannot grow the queue's memory footprint unboundedly.
+pub const DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS: u64 = 2_500;
+
 /// Builds the default admin gate config: [`DEFAULT_ADMIN_MAX_IN_FLIGHT`] permits
-/// with the shared gate's queue-wait / retry-after semantics.
+/// with the longer [`DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS`] queue-wait (prefer
+/// queueing over shedding on admin login), sharing the retry-after hint.
 fn admin_default_config() -> KdfGateConfig {
     KdfGateConfig {
         max_in_flight: DEFAULT_ADMIN_MAX_IN_FLIGHT,
+        max_queue_wait: Duration::from_millis(DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS),
         ..KdfGateConfig::default()
     }
 }
@@ -436,11 +477,83 @@ mod tests {
     }
 
     /// The admin default pool is small and non-zero — a reserved lane, not the
-    /// full core count.
+    /// full core count — and its queue-wait is the *longer* admin default
+    /// (HEA-1895): admin login prefers queueing over shedding.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admin_default_config_is_small_and_nonzero() {
-        let admin = KdfGate::new_admin(admin_default_config());
+        let cfg = admin_default_config();
+        let admin = KdfGate::new_admin(cfg);
         assert_eq!(admin.permits(), DEFAULT_ADMIN_MAX_IN_FLIGHT);
         assert!(admin.permits() >= 1);
+        assert_eq!(
+            cfg.max_queue_wait,
+            Duration::from_millis(DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS)
+        );
+        // Must strictly exceed the shared gate's shed threshold.
+        assert!(cfg.max_queue_wait > KdfGateConfig::default().max_queue_wait);
+    }
+
+    /// HEA-1894: a shed on the **admin** gate must increment the admin shed
+    /// counter and leave the shared shed counter untouched. Before the pool
+    /// discriminant, `KdfGate::run` wrote the shared counters unconditionally,
+    /// so admin sheds were invisible in telemetry — the exact operator-console
+    /// shedding the F2 isolation exists to make alertable. We measure deltas
+    /// because the metrics singleton is process-global.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admin_shed_increments_admin_counter_not_shared() {
+        let metrics = crate::metrics::metrics();
+        let shared_before = metrics.kdf_shed_total.get();
+        let admin_before = metrics.kdf_admin_shed_total.get();
+        let admin_in_flight_before = metrics.kdf_admin_in_flight.get();
+
+        let admin = std::sync::Arc::new(KdfGate::new_admin(KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: Duration::from_millis(20),
+            retry_after: Duration::from_secs(1),
+        }));
+
+        // Peg the admin gate's only permit with work that outlives the queue
+        // wait, then offer a second op that must shed.
+        let holder = {
+            let g = admin.clone();
+            tokio::spawn(async move {
+                g.run(|| std::thread::sleep(Duration::from_millis(300)))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            admin.available_permits(),
+            0,
+            "admin gate should be saturated by the holder"
+        );
+
+        assert!(
+            matches!(
+                admin.run(|| 0_u32).await,
+                Err(KdfGateError::Overloaded { .. })
+            ),
+            "the offered admin op must shed while the permit is held"
+        );
+
+        // The admin shed counter advanced; the shared shed counter did not.
+        assert_eq!(
+            metrics.kdf_admin_shed_total.get() - admin_before,
+            1.0,
+            "admin shed must increment hearth_kdf_admin_shed_total"
+        );
+        assert_eq!(
+            metrics.kdf_shed_total.get(),
+            shared_before,
+            "admin shed must NOT touch the shared hearth_kdf_shed_total"
+        );
+
+        assert!(holder.await.expect("holder joins").is_ok());
+        // The admin in-flight gauge returns to its starting level (holder done).
+        assert_eq!(
+            metrics.kdf_admin_in_flight.get(),
+            admin_in_flight_before,
+            "admin in-flight gauge must settle back after the op completes"
+        );
     }
 }

@@ -543,6 +543,13 @@ impl SecurityYaml {
                  omit the key to default to the small reserved admin pool",
             ));
         }
+        if self.password.kdf.admin_max_queue_wait_ms == Some(0) {
+            return Err(invalid(
+                "security.password.kdf.admin_max_queue_wait_ms",
+                "must be >= 1 (a 0 ms wait would shed every queued admin login); \
+                 omit the key to default to the longer admin queue-wait",
+            ));
+        }
         Ok(())
     }
 
@@ -566,8 +573,11 @@ impl SecurityYaml {
     /// [`crate::identity::KdfGateConfig`] (HEA-1892 / F2).
     ///
     /// `admin_max_in_flight: null`/absent resolves to
-    /// [`crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT`]. Queue-wait and
-    /// retry-after are shared with the main gate. Assumes
+    /// [`crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT`]. `admin_max_queue_wait_ms:
+    /// null`/absent resolves to [`crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS`]
+    /// — a *longer* wait than the shared gate (HEA-1895): admin login prefers
+    /// queueing over shedding, so a distributed flood cannot hold the console in a
+    /// steady-state `503`. `retry_after` is shared with the main gate. Assumes
     /// [`Self::validate_kdf_admission`] already ran (so `0` cannot reach here).
     #[must_use]
     pub fn resolve_admin_kdf_gate(&self) -> crate::identity::KdfGateConfig {
@@ -576,7 +586,10 @@ impl SecurityYaml {
             max_in_flight: yaml
                 .admin_max_in_flight
                 .unwrap_or(crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT),
-            max_queue_wait: std::time::Duration::from_millis(yaml.max_queue_wait_ms),
+            max_queue_wait: std::time::Duration::from_millis(
+                yaml.admin_max_queue_wait_ms
+                    .unwrap_or(crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS),
+            ),
             retry_after: std::time::Duration::from_secs(yaml.retry_after_seconds),
         }
     }
@@ -2472,7 +2485,9 @@ mod tests {
     #[test]
     fn kdf_admin_gate_absent_resolves_to_small_default() {
         // HEA-1892 / F2: absent `admin_max_in_flight` → small reserved pool,
-        // NOT the core count. Queue-wait / retry-after mirror the main gate.
+        // NOT the core count. HEA-1895: absent `admin_max_queue_wait_ms` → the
+        // *longer* admin queue-wait (prefer queueing over shedding), NOT the
+        // shared gate's 250 ms. retry-after still mirrors the main gate.
         let sec = SecurityYaml::default();
         sec.validate_kdf_admission().expect("default is valid");
         let admin = sec.resolve_admin_kdf_gate();
@@ -2480,8 +2495,50 @@ mod tests {
             admin.max_in_flight,
             crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT
         );
-        assert_eq!(admin.max_queue_wait, std::time::Duration::from_millis(250));
+        assert_eq!(
+            admin.max_queue_wait,
+            std::time::Duration::from_millis(crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS)
+        );
+        // The admin wait must strictly exceed the shared gate's shed threshold,
+        // else a targeted flood could hold the console in steady-state 503.
+        assert!(
+            admin.max_queue_wait
+                > std::time::Duration::from_millis(
+                    sec.resolve_kdf_gate().max_queue_wait.as_millis() as u64
+                ),
+            "admin queue-wait must exceed the shared gate's"
+        );
         assert_eq!(admin.retry_after, std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn kdf_admin_queue_wait_explicit_and_zero_rejected() {
+        // HEA-1895: an explicit `admin_max_queue_wait_ms` resolves through and is
+        // independent of the shared gate's `max_queue_wait_ms`.
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.max_queue_wait_ms = 250;
+        sec.password.kdf.admin_max_queue_wait_ms = Some(5_000);
+        sec.validate_kdf_admission().expect("valid");
+        assert_eq!(
+            sec.resolve_admin_kdf_gate().max_queue_wait,
+            std::time::Duration::from_millis(5_000)
+        );
+        // The shared gate is unaffected.
+        assert_eq!(
+            sec.resolve_kdf_gate().max_queue_wait,
+            std::time::Duration::from_millis(250)
+        );
+
+        // Explicit 0 is a config error (a 0 ms wait would shed every queued
+        // admin login, defeating the point).
+        sec.password.kdf.admin_max_queue_wait_ms = Some(0);
+        let err = sec
+            .validate_kdf_admission()
+            .expect_err("zero admin queue-wait rejected");
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
