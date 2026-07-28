@@ -2,7 +2,7 @@
 
 **Status:** `v1 — GRADED. 13 PASS / 6 MISS / 4 NOT-MEASURABLE / 7 NOT-MEASURED across 30 rows`
 **Owner:** CTO (HEA-1867) · **Joined by:** HEA-1901 (TechnicalWriter) · **CTO-reviewed:** 2026-07-28 · **Parent:** HEA-1867
-**Last updated:** 2026-07-28 · **Branch:** `feature/perf-updates-7-28-26` · **Head SHA at join:** `c0954f6b`
+**Last updated:** 2026-07-28 · **Branch:** `feature/perf-updates-7-28-26` · **Head SHA at join:** `c0954f6b` · **Post-remediation C0 re-run:** `c82d8eb8` (HEA-1904)
 
 > **Board-facing caveat 1 — hardware:** Every figure in this report was measured on
 > `dev-ryzen-7840hs` (AMD Ryzen 7 7840HS mobile, 8 physical cores / 16 threads, governor
@@ -13,10 +13,12 @@
 > does not shard. A 5-node cluster holds the same dataset as one node, five times. **Single-node
 > capacity is the capacity floor of the entire product, cluster included.**
 >
-> **Open remediation tree:** HEA-1896–HEA-1900 address the Layer-B (memtable CoW clone) and
-> Layer-A (record encoding) cost reductions identified in `docs/perf/HEA-1867-record-size-analysis.md`.
-> These are the primary levers for the K4–K7 MISS rows. The report is not a final verdict on
-> capacity — it is a graded baseline with a named remediation path.
+> **Remediation update (HEA-1904, 2026-07-28):** HEA-1896–HEA-1900 (Layer B — memtable CoW clone →
+> lock-free SkipMap; Layer A — postcard binary encoding, 16-byte UUID index, compact audit keys)
+> are **SHIPPED** on `c82d8eb8`. Post-remediation C0 re-run confirms: 2.4× memory improvement
+> (24,141 → 9,960 B/user), 1.6× disk improvement (4,573 → 2,840 B/user), 23× write-throughput
+> improvement (7.76 → 0.34 ms/user at N=12k). K4–K7 remain MISS. Next lever: Layer C (SST eviction,
+> HEA-1881). See `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md`.
 
 ---
 
@@ -223,24 +225,27 @@ All engine-level. HTTP delta NOT-MEASURABLE on this host — see §0 scope note.
 | K1 | Users per node (total managed) | 100M+ | — | — | `NOT-MEASURED` | C8 all rungs swap-voided; this host holds ~600k users |
 | K2 | Active sessions per node | 10M+ | — | — | `NOT-MEASURABLE` | ROPC (`grant_type=password`) removed by HEA-1862; seed binary cannot create sessions; no alternative seeding path |
 | K3 | Role assignments per node | 100M+ | — | — | `NOT-MEASURABLE` | RBAC seeder does not exist; seed binary creates no per-user role assignments |
-| K4 | Memory footprint (idle, 1M hot users) | < 500 MB | **≈ 22.5 GiB** (24,141 B/user × 1M + 37.6 MB intercept, extrapolated) | `dev-ryzen-7840hs` | **MISS (46×)** | C0 `docs/perf/HEA-1868-C0-MEMORY-COST.md` |
-| K5 | Memory footprint (idle, 10M hot users) | < 8 GB | **≈ 225 GiB** (extrapolated) | `dev-ryzen-7840hs` | **MISS (29×)** | C0, extrapolated from 24,141 B/user slope |
-| K6 | Memory footprint (idle, 100M hot users) | < 50 GB | **≈ 2,248 GiB (2.2 TiB)** (extrapolated) | `dev-ryzen-7840hs` | **MISS (46×)** | C0, extrapolated; note §5 H4: SST full-RAM residency makes this Θ(corpus) regardless |
-| K7 | Disk footprint (100M total users) | < 200 GB | **≈ 426 GiB** (4,573 B/user × 100M, extrapolated; C0 headline states "~436 GB") | `dev-ryzen-7840hs` | **MISS (2.1×)** | C0 `docs/perf/HEA-1868-C0-MEMORY-COST.md` |
+| K4 | Memory footprint (idle, 1M hot users) | < 500 MB | pre: **≈ 22.5 GiB** (24,141 B/user × 1M + 37.6 MB) → post: **≈ 9.76 GiB** (9,960 B/user × 1M + 39.7 MB, HEA-1904) | `dev-ryzen-7840hs` | **MISS (20×, was 46×)** | HEA-1904 `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md` |
+| K5 | Memory footprint (idle, 10M hot users) | < 8 GB | pre: **≈ 225 GiB** → post: **≈ 99.6 GiB** (9,960 B/user × 10M, HEA-1904) | `dev-ryzen-7840hs` | **MISS (12×, was 29×)** | HEA-1904 extrapolated from 9,960 B/user slope |
+| K6 | Memory footprint (idle, 100M hot users) | < 50 GB | pre: **≈ 2,248 GiB** → post: **≈ 996 GiB** (9,960 B/user × 100M, HEA-1904) | `dev-ryzen-7840hs` | **MISS (20×, was 46×)** | HEA-1904 extrapolated; §5 H4 still applies (SST residency Θ(corpus)) |
+| K7 | Disk footprint (100M total users) | < 200 GB | pre: **≈ 426 GiB** (4,573 B/user × 100M) → post: **≈ 264 GiB** (2,840 B/user × 100M, HEA-1904) | `dev-ryzen-7840hs` | **MISS (1.4×, was 2.1×)** | HEA-1904 `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md` |
 | K8 | Binary size | < 50 MB | **41.39 MB** (39.47 MiB) | `dev-ryzen-7840hs` | **PASS** | C10 `6e6a24c4`; artifact `docs/perf/artifacts/c10-artifact-facts.json` |
 | K9 | Cold start to serving requests | < 2 s | **70 ms** worst-of-5 (min 59 ms) | `dev-ryzen-7840hs` | **PASS** | C10 `6e6a24c4`; artifact `docs/perf/artifacts/c10-artifact-facts.json` |
 | K10 | Cold-to-hot promotion latency | < 5 ms | — | — | `NOT-MEASURED` | C1 shipped promotion telemetry (HEA-1869); promotion p50/p99 not separately benchmarked |
 
-> **K4–K7 context — what the C0 slope actually measures.** C0's 24,141 B/user is the **memtable-resident
-> cost** in a write-fresh, non-compacted state: `Memtable::put` deep-clones the entire `BTreeMap` on
-> every write, and with 5 keys per user (primary, email index, 3 audit entries) and a 64 MiB flush
-> threshold (~160k entries live), each user creation touches an O(N)-per-write clone.
-> `docs/perf/HEA-1867-record-size-analysis.md` (`3429ce43`) traces the 24 KB to three layers:
-> Layer A (record content, ~2 KB), Layer B (CoW clone multiplier, ~12×), and Layer C (SST full-RAM
-> residency — no eviction path). The analytical hot-tier floor is ~673 B/user, but that floor is
-> only reached after compaction plus a read-sweep to populate the hot tier. Until Layers B and C are
-> fixed, K4–K7 remain MISS even at the hot-tier estimate (673 B vs. 524 B budget — marginal miss).
-> Remediation in HEA-1896–HEA-1900.
+> **K4–K7 context — what the C0 slope measures, and what changed.**
+> C0 (HEA-1868) measured 24,141 B/user in a write-fresh, non-compacted state; `Memtable::put`
+> deep-cloned the entire `BTreeMap` on every write (Layer B). Layer A added JSON field-name + 36-char
+> UUID index overhead. Together they produced a 12× multiplier over the analytical hot-tier floor
+> (~673 B/user). Layer C (SST full-RAM residency — no eviction) adds the full corpus on top.
+>
+> **Post-remediation (HEA-1904, `c82d8eb8`):** Layer B replaced with a lock-free `SkipMap`
+> (HEA-1897) and Layer A replaced with postcard binary encoding + 16-byte raw-UUID index
+> (HEA-1898/1899). Re-run on the same 4-point sweep yields **9,960 B/user (OLS), 10,133 B/user
+> (endpoint)**. The 14.8× gap from the analytical hot-tier (673 B) reflects 5 SkipMap entries/user
+> still resident in-process. Layer C (HEA-1881: block-based SST with eviction) is required to
+> approach the hot-tier floor. K4–K7 remain MISS; the ratio improved (46× → 20× / 29× → 12× / 2.1× → 1.4×).
+> See `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md`.
 
 > **K4–K7 units convention (CTO review, HEA-1901).** All four totals are recomputed here directly
 > from C0's fitted slopes in **binary units (GiB = 2³⁰ B)**, so that every cell reproduces from
@@ -362,27 +367,24 @@ attribution field is trustworthy for new runs. The historical baseline data at
 
 ## 4. The three per-user memory numbers
 
-Derived from C0 (`docs/perf/HEA-1868-C0-MEMORY-COST.md`). Method: OLS regression on 4-point
-sweep {200, 1k, 4k, 12k} users, generator-free, no swap (rule 5 satisfied).
+C0 baseline: `docs/perf/HEA-1868-C0-MEMORY-COST.md`. Post-remediation re-run: `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md`.
+Method: OLS regression on 4-point sweep {200, 1k, 4k, 12k} users, generator-free, no swap (rule 5 satisfied).
 
-| Number | Value | Method | R² | Host | Status |
-|---|---|---|---|---|---|
-| **bytes-resident-per-user (memtable, pre-compaction)** | **24,141 B/user** | OLS slope; endpoint-to-endpoint: 24,627 B/user | 0.9974 | `dev-ryzen-7840hs` | **MEASURED** |
-| **Fixed RSS overhead (intercept)** | **37.6 MB** | OLS intercept | 0.9974 | `dev-ryzen-7840hs` | **MEASURED** |
-| bytes-resident-per-hot-user (analytical, post-compaction hot tier) | **~673 B/user** | Struct accounting; 2 hot-tier entries per user | n/a | — | **ANALYTICAL ONLY** — agreement check failed (§4 below) |
-| bytes-resident-per-session | — | — | — | — | **NOT-MEASURABLE** — ROPC grant removed (HEA-1862); `sessions_frac` seeder non-functional |
-| **bytes-on-disk-per-user** | **4,573 B/user** | OLS slope; endpoint-to-endpoint: 4,508 B/user | 0.9975 | `dev-ryzen-7840hs` | **MEASURED** |
+| Number | **Pre-remediation (C0, `3429ce43`)** | **Post-remediation (HEA-1904, `c82d8eb8`)** | Method | Host |
+|---|---|---|---|---|
+| **bytes-resident-per-user (memtable, pre-compaction)** | **24,141 B/user** (EP: 24,627) | **9,960 B/user** (EP: 10,133) | OLS slope R²=0.9974 (pre) / 0.9320 (post) | `dev-ryzen-7840hs` |
+| **Fixed RSS overhead (intercept)** | **37.6 MB** | **39.7 MB** | OLS intercept | `dev-ryzen-7840hs` |
+| bytes-resident-per-hot-user (analytical, post-compaction hot tier) | **~673 B/user** | **~673 B/user** (unchanged — structural) | Struct accounting; 2 hot-tier entries | — |
+| bytes-resident-per-session | — | — | **NOT-MEASURABLE** — ROPC removed (HEA-1862) | — |
+| **bytes-on-disk-per-user** | **4,573 B/user** (EP: 4,508) | **2,840 B/user** (EP: 2,805) | OLS slope R²=0.9975 (pre) / 0.9991 (post) | `dev-ryzen-7840hs` |
 
-**Agreement check: FAILED.** Measured slope (24,141 B) vs. analytical hot-tier (673 B) → 35.9× gap.
-Root cause: seed writes go to WAL → memtable; hot-tier promotion only happens on reads post-compaction.
-This sweep measured the **memtable CoW cost** (Layer B), not the hot-tier steady-state cost. A
-post-compaction read-sweep measurement was not part of C0's scope and has not been done. Until it is,
-both figures are correct for their respective measurement states — the 24 KB is the honest working-set
-cost under any write-heavy workload; the 673 B is the floor reachable after compaction + promotion.
+**Agreement check: still FAILED** (narrowed). Post-fix slope (9,960 B) vs. analytical hot-tier (673 B) → 14.8× gap (was 35.9×).
+Root cause unchanged: 5 SkipMap entries/user resident in-process; hot-tier promotion only after WAL→SST compaction + read-sweep.
+Layer B/A remediations are confirmed real; the remaining gap requires Layer C (block-based SST with eviction, HEA-1881).
 
-**Max corpus on this host:** (14,055 MiB available − 38 MiB overhead) ÷ 23.6 KiB/user ≈ **609,000 users**
-— C0's arithmetic, reproduced verbatim (24,141 B = 23.6 KiB). Stated in decimal KB (24.141 kB/user)
-the same headroom gives ≈ 581,000 users; the two differ only by the KiB/kB convention.
+**Max corpus on this host (post-remediation):** ~29 GiB available at HEA-1904 run time.
+(29,000 MiB − 40 MiB overhead) ÷ 9.96 KiB/user ≈ **~2,900,000 users** (up from ~609,000 pre-fix).
+Pre-fix arithmetic: (14,055 MiB − 38 MiB) ÷ 23.6 KiB/user ≈ 609,000 users.
 
 ---
 
@@ -433,8 +435,8 @@ on the current branch but may be gated or off by default.
 |---|---|---|---|---|---|
 | R1 | **KDF admission gate — unbounded `spawn_blocking` pool.** C9 confirmed the 7 s issuance tail is queueing (Little's Law: throughput caps at ~247 hash/s from C=16 while p99 climbs 128→954 ms). | Measured, C9 `235e3342` | L6b, E7, operator trust | **SHIPPED — HEA-1887** (async semaphore before `spawn_blocking`, permits = core count, 503/Retry-After shed). Follow-ups: HEA-1892 (hoist abuse controls before permit), HEA-1895 (longer admin login queue-wait). Gated on SecurityAuditor review before merge. | `src/identity/kdf_gate.rs`; config `security.password.kdf` |
 | R2 | **`summary.ceiling` misreports generator-limited runs as `server`.** | Data inspection, C10 | Rule-3 enforcement programme-wide | **DONE — C11 (HEA-1880)** committed | Attribution now trustworthy for new runs |
-| R3 | **Memtable CoW clone (Layer B) — O(N)-per-write.** `Memtable::put` deep-clones the whole BTreeMap on every write. 12× overhead vs. hot-tier design intent; also an unattributed write-throughput defect (seed cost 2.63→7.76 ms/user as N grows). | Measured, C0 + record-size analysis `3429ce43` | K4–K7, T4, write-path throughput | **OPEN — HEA-1896..1900 (Layer B)** | Replace CoW BTreeMap with sharded/concurrent map; batch 5 user keys into `put_batch` |
-| R4 | **Record encoding (Layer A) — `serde_json` field-name overhead + 36-char UUID index + audit density.** 5 keys/user; audit is ~3 of 5 keys and ~half the bytes. | Measured, C0 + record-size analysis | K4–K7, K7 especially | **OPEN — HEA-1896..1900 (Layer A)** | Binary encoding (bincode/postcard); 16-byte UUID index; audit trim |
+| R3 | **Memtable CoW clone (Layer B) — O(N)-per-write.** `Memtable::put` deep-cloned the whole BTreeMap on every write. 12× overhead vs. hot-tier; write-throughput defect (seed cost 2.63→7.76 ms/user). | Measured, C0 + record-size analysis `3429ce43` | K4–K7, T4, write-path throughput | **SHIPPED — HEA-1897 `faec7e66`.** Replaced CoW BTreeMap with lock-free `SkipMap` (crossbeam). HEA-1896 `c0954f6b` batches user keys into `put_batch`. HEA-1904 confirms: 9,960 B/user (−59%); 0.34 ms/user at N=12k (−96%). Remaining gap to 673 B hot-tier floor = Layer C. | `src/storage/memtable.rs` (SkipMap); `src/identity/users.rs` (put_batch) |
+| R4 | **Record encoding (Layer A) — `serde_json` field-name overhead + 36-char UUID index + audit density.** 5 keys/user; audit is ~3 of 5 keys and ~half the bytes. | Measured, C0 + record-size analysis | K4–K7, K7 especially | **SHIPPED — HEA-1898 `c82d8eb8` + HEA-1899 `e27e08db`.** Postcard binary encoding for User/Session/StoredCredential; 16-byte raw-UUID email index; 32-byte raw HMAC + 8-byte BE audit keys. HEA-1904 confirms: 2,840 B/user disk (−38%). K7 ratio improved 2.1× → 1.4×. | `src/storage/codec.rs`; audit encoder |
 | R5 | **`permission_check` scales negatively (−0.549 exponent) — single RBAC resolution Mutex.** | Measured, C7 `b29e57dd` | T3 at high concurrency | OPEN | Shard `ResolutionCache` mutex (per-realm or striped) |
 | R6 | **E4 default config: SST count grows O(n).** Lever-1 (HEA-1885) caps fan-out at constant but ships off by default due to write-stall at the 64 MiB production flush threshold. | Measured, C2 + HEA-1885 `709ed183` | E4, E1–E3 conditional PASSes, L8 at large corpus | **SHIPPED OFF** — enable `storage.compaction.max_sst_count` per hardware; validate write-stall budget | `storage.compaction.max_sst_count` / `merge_min` |
 | R7 | **SST full-RAM residency — Θ(corpus) memory regardless of tiering.** No block index, no eviction. Real scale ceiling for K1/K4–K6. | Code + CTO triage `docs/perf/HEA-1881-cold-path-triage.md` | K1, K4–K6, all capacity rows | DESIGN PENDING (HEA-1881) | Block-based SST format with per-block encryption, lazy paging, reader eviction. Gated on HEA-1881 residency measurement (sub-issue B). |
@@ -478,6 +480,7 @@ All children done. HEA-1877 (duplicate C9) cancelled in favour of HEA-1879.
 | Child | Issue | Title | Status | Final disposition |
 |---|---|---|---|---|
 | C0 | HEA-1868 | Real per-user / per-session memory cost | **done** | K4–K7 MISS; 24 KB/user memtable; session NOT-MEASURABLE |
+| C0-R | HEA-1904 | C0 re-run after Layers B+A (`c82d8eb8`) | **done** | 9,960 B/user RSS (−59%); 2,840 B/user disk (−38%); 0.34 ms/user write (−96%); K4–K7 MISS (improved 46×→20×, 2.1×→1.4×) |
 | C1 | HEA-1869 | Hot-tier observability | **done** | `hearth_storage_get_total{outcome}` live; purity confirmed by C5 |
 | C2 | HEA-1870 | SST-count growth vs corpus size | **done** | E4 MISS default (exponent 1.0); remediation split to HEA-1881/HEA-1885 |
 | C3 | HEA-1871 | Separate load generator from server | **done** | Cliff is server-owned (Argon2id queue stall); `taskset -c` isolation committed |
@@ -493,7 +496,7 @@ All children done. HEA-1877 (duplicate C9) cancelled in favour of HEA-1879.
 > **HEA-1877 cancelled** (duplicate C9, same assignee). Survivor: HEA-1879.
 
 **Open follow-up work (not blocking this report, but required for remediation):**
-- HEA-1896–HEA-1900: Layer B (CoW memtable) + Layer A (record encoding) — primary capacity levers
-- HEA-1881 sub-issue B: SST residency measurement (gates Layer C design)
+- ~~HEA-1896–HEA-1900: Layer B (CoW memtable) + Layer A (record encoding)~~ **SHIPPED** on `c82d8eb8`; verified by HEA-1904
+- HEA-1881 sub-issue B: SST residency measurement (gates Layer C design — the next memory lever)
 - Lever-1 validation on production-representative hardware (enables E4 PASS in the default deployment)
 - Second host provisioning (required for Axis B session-scale and Axis C HTTP concurrency validation)
