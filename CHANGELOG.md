@@ -122,6 +122,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   class through a narrower window). The `Fs` abstraction gains `sync_dir`, now
   called after WAL/SST create and after each finalizing rename (HEA-1855).
 
+### Changed
+- **User, session, and credential records now use binary (postcard) encoding on
+  disk (HEA-1898)** — the per-record value stored in the WAL/SST was previously
+  JSON, carrying field-name overhead on every write and read. Records are now
+  encoded with `postcard` (positional, ULEB128-compressed integers, no field
+  names). The email index value is now 16 raw UUID bytes instead of a 36-character
+  string. Together these reduce the on-disk footprint per user from ~4.5 KB to
+  ~1.5 KB. Realm records remain JSON due to schema complexity. **On-disk format
+  change — Hearth has no backward-compatibility obligation for storage format
+  (Greenfield).** (HEA-1898)
+- **Audit log records now use binary (postcard) encoding and compact binary keys
+  (HEA-1899)** — audit events were previously stored as JSON values with 64-char
+  hex integrity hashes and 19/20-char zero-padded decimal timestamp/sequence keys.
+  Events are now encoded with `postcard` (same codec as HEA-1898), the HMAC-SHA256
+  integrity hash is stored as 32 raw bytes instead of 64 hex chars (saves 32 B/event),
+  and primary/index keys use 8-byte big-endian integers instead of decimal strings
+  (42-byte primary key vs ~48+ bytes; order-preserving). Both `audit:actor:` and
+  `audit:action:` secondary indexes are kept — each is load-bearing for its
+  respective query dimension. Hash-chain tamper-evidence is preserved: the HMAC
+  is computed over the same canonical JSON fields as before; only the storage
+  representation changes. **On-disk format change (Greenfield).** (HEA-1899)
+
 ### Security
 - **KDF admission gate now fronts *every* Argon2id caller, not just login
   (HEA-1891 / HEA-1889 F3)** — the original R1 gate (HEA-1887) only wrapped the

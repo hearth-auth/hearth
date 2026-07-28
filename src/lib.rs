@@ -8,6 +8,7 @@ pub mod abuse;
 pub mod audit;
 pub mod backup;
 pub mod cluster;
+pub(crate) mod codec;
 pub mod config;
 pub mod core;
 pub mod identity;
