@@ -20,16 +20,25 @@ to support. Rows that would have failed get merged into rows that pass; a target
 to be unreachable gets quietly restated as "directional." Fixing the contract first removes that
 degree of freedom.
 
-So: **27 of the 29 verdict cells in §3 currently read `NOT-MEASURED`.** That is not a placeholder
-for "probably fine." It is the honest current state of our evidence, and §3 is the work-tracking
-surface for the programme as much as it is the eventual deliverable.
+Current tally across the 29 rows in §3:
 
-The two exceptions are **K8 (binary size)** and **K9 (cold start)**, which are properties of the
-built artifact and of process startup rather than of load, and therefore need none of C0–C9. Both
-PASS. They are also, deliberately, the two least interesting rows in the report: neither says
-anything about whether Hearth is fast, whether it scales, or what it costs per user. **Nobody should
-read "2 rows PASS" as partial validation of the performance story.** The rows that carry that story
-— L1–L8, T1–T4, K1–K7, E1–E7 — are all still unmeasured.
+| Verdict | Count | Rows |
+|---|---|---|
+| PASS | 2 | K8, K9 |
+| MISS | 0 | — |
+| NOT-MEASURABLE | 1 | E7 (pending C3 — see §3.5) |
+| **NOT-MEASURED** | **26** | everything else |
+
+**26 of 29 cells read `NOT-MEASURED`.** That is not a placeholder for "probably fine." It is the
+honest current state of our evidence, and §3 is the work-tracking surface for the programme as much
+as it is the eventual deliverable.
+
+The two PASSes — **K8 (binary size)** and **K9 (cold start)** — are properties of the built artifact
+and of process startup rather than of load, which is why they need none of C0–C9. They are also,
+deliberately, the two least interesting rows in the report: neither says anything about whether
+Hearth is fast, whether it scales, or what it costs per user. **Nobody should read "2 rows PASS" as
+partial validation of the performance story.** The rows that carry that story — L1–L8, T1–T4, K1–K7,
+E1–E7 — are all still unmeasured.
 
 ### 0.1 Verdict vocabulary (exactly four values, no others)
 
@@ -57,6 +66,21 @@ take to make it measurable.
    hypothetical.
 
 ---
+
+## 1. Scope
+
+**In scope.** Single-node performance of the `hearth` binary against the targets stated in
+VISION §7.1 (latency), §7.2 (throughput) and §7.3 (capacity), plus Axis E — the *shape* of the
+degradation curve once the active set exceeds the hot tier, which is the board's headline question.
+
+**Out of scope, explicitly.**
+- **Multi-node / Raft horizontal-scale numbers.** A different axis. Note this does not soften the
+  single-node targets — see §5 H3: Hearth's cluster layer replicates, it does not shard, so
+  single-node capacity is the capacity floor of the whole product.
+- **Production-hardware numbers.** Every figure here is measured on the host named in §2, which is a
+  developer laptop-class machine. Figures are lower bounds on server-class silicon, not predictions.
+- **Comparative benchmarks** against Keycloak, Redis, or any other system. VISION cites comparables
+  for context; this report grades Hearth against Hearth's own stated targets only.
 
 ## 2. Measurement hardware
 
@@ -200,9 +224,76 @@ slope**, and we name the dominating term.
 | E4 | SST file count vs corpus size | — | — | ≤ O(log n) | `NOT-MEASURED` | **C2** |
 | E5 | p99 vs hot-set/capacity ratio (0.1×→10×, fixed corpus) | — | — | no cliff | `NOT-MEASURED` | C5 |
 | E6 | Ratio at which p99 first breaches §7.1 budget | — | — | stated, not graded | `NOT-MEASURED` | C5 |
-| E7 | Overload behaviour at 2× / 5× / 10× sustainable | — | — | bounded, honest failure | `NOT-MEASURED` | C6 |
+| E7 | Overload behaviour at 2× / 5× / 10× sustainable | — | — | bounded, honest failure | **`NOT-MEASURABLE`** (C3 pending) | C6 → re-run after C3 |
 
 **E4 is the load-bearing row of this entire report.** See §5.
+
+### 3.5 E7 review — why C6's MISS is not accepted into the table
+
+C6 (`docs/perf/HEA-1874-C6-overload-behaviour.md`, commit `a397d86b`) grades overload behaviour
+**MISS**. After applying §0.2, **E7 is recorded as `NOT-MEASURABLE`, not MISS.** C6 did careful work
+and its *recommendation* is sound, but its evidence does not support a verdict about Hearth. The
+distinction matters: a MISS is a claim that we measured Hearth and Hearth failed.
+
+**The disqualifying fact: the server was idle during every overload run.** Reading the raw resource
+samples that C6 cites:
+
+| Run | users | RPS | fail | server CPU mean | server CPU peak | RSS peak |
+|---|---|---|---|---|---|---|
+| `steady-500u` | 500 | 1678 | 0% | 178% | 292% | 3.61 GB |
+| `steady-600u` | 600 | 13 | 100% | **5.8%** | 238% | 3.93 GB |
+| `steady-700u` | 700 | 30 | 100% | **0.0%** | **0.0%** | 3.93 GB |
+| `steady-800u` … `steady-2000u` | 800–2000 | 36–89 | 100% | **0.0%** | **0.0%** | 3.93 GB |
+| `steady-3500u`, `steady-5000u`, `ceiling` | 3500–6000 | 156–285 | 100% | *no data* | *no data* | *no data* |
+
+At 2× the knee and beyond, server CPU is **0.0% mean and 0.0% peak** of 1600% available. Hearth was
+not overloaded — it was **idle**. Requests never arrived. C6's headline observation ("no 503s at any
+overload multiplier; every failure is a silent client timeout") is therefore fully explained by the
+generator failing to emit load, and does **not** demonstrate anything about how Hearth sheds load,
+because Hearth was never offered any. You cannot grade a system's overload behaviour on a window in
+which it did no work. That is rule 3 in substance.
+
+Three further defects, each independently sufficient to keep E7 out of the graded set:
+
+1. **Provenance claim is false.** §6 of C6 states the raw data is in `loadtest/reports/hea1812/*.json`
+   "(committed)". It is not: `loadtest/reports/` is **gitignored** (`.gitignore:66`). The entire
+   evidence base is untracked local scratch that cannot be re-audited from the repository and will
+   not survive a clean checkout. For a conformance report this is a hard provenance failure.
+2. **Three different builds are compared in one degradation table.** C6's header cites build
+   `a79b2e63`, but that SHA belongs only to `ceiling.json` (6000u). The 1×–2× rows come from
+   `dcd2b8c7` and the 5×/10× rows from `6f5b562a`. A degradation curve assembled across three
+   unrelated builds is not a curve.
+3. **The "no OOM / RSS flat → PASS" sub-grade is unsupported at 5× and 10×.** Those runs carry no
+   resource samples at all (`cpu_mean: null`, `rss_peak_bytes: 0`). And where RSS *is* flat, flatness
+   is explained by the server being idle — it is not evidence of memory robustness.
+
+**What C6 does establish, and what is kept.** C6's *code-level* claim is independently verifiable and
+**confirmed**: Hearth has no admission control. `tower` is compiled with only the `util` feature and
+`tower-http` with only `trace` (`Cargo.toml:87-88`) — neither `load-shed`, `limit`, nor `timeout` is
+enabled — and a repo-wide search for `LoadShed` / `ConcurrencyLimit` / `TimeoutLayer` in `src/`
+returns **zero** hits. So "Hearth cannot return a fast 503 under overload because it has no mechanism
+to do so" is true **on code inspection**, and C6's §5 remediation (Tower `LoadShed` +
+`ConcurrencyLimit`, bounded blocking pool, request timeout) is the right recommendation. It is
+carried into §6 as a remediation item on that basis — *not* on the basis of the overload runs.
+
+**To settle E7:** re-run the 2×/5×/10× ladder after C3 lands generator isolation, on a single build,
+with resource sampling confirmed non-null at every rung, and with the raw artifacts committed (or
+`loadtest/reports/` un-ignored for the subset that backs published figures).
+
+### 3.6 Systemic: `summary.ceiling` cannot be trusted to enforce rule 3
+
+**Every** run in the table above — including the ones at 0.0% server CPU — carries
+`summary.ceiling: "server"` in its JSON. The harness's auto-computed attribution field says the
+*server* was the limiter in runs where the server was demonstrably doing nothing.
+
+This is a programme-level problem, not a C6 problem. §7's data contract makes rule 3 machine-checkable
+via `ceiling.attribution`, and **that field is currently wrong in the source data**, so the check
+would pass runs it is designed to reject. Note the hand-written `single_node_ceiling.failure_onset.attribution`
+block in `loadtest/baseline/steady-baseline.json` is honest ("load_generator / host_contention — NOT
+server saturation") — it is the *derived* `summary.ceiling` that misreports. Until it is fixed,
+**ceiling attribution must be corroborated against server CPU utilisation, not read off the field.**
+A run reporting `ceiling: "server"` at near-zero server CPU is generator-limited by definition.
+Tracked as **C11** against the loadtest harness.
 
 ---
 
@@ -278,7 +369,16 @@ and §4 the highest-value items in the programme rather than curiosities.
 Populated as rows reach `MISS`. Each entry: the failing row, the measured gap, the dominating term,
 the proposed fix, and an effort/risk estimate.
 
-*Empty — no row has been graded MISS, because no row has been measured.*
+**No row has been graded MISS yet**, because no load-bearing row has been admissibly measured. The
+list below therefore contains items justified by **code inspection**, not by measurement, and each
+says so. They are ranked by expected impact on the board's question.
+
+| # | Item | Basis | Affects | Fix | Effort / risk |
+|---|---|---|---|---|---|
+| R1 | **No admission control anywhere in the HTTP stack.** `tower` compiled with only `util`, `tower-http` with only `trace` (`Cargo.toml:87-88`); zero hits for `LoadShed` / `ConcurrencyLimit` / `TimeoutLayer` in `src/`. Hearth has no mechanism to return a fast 503, so under genuine overload it can only queue. | **Code inspection — confirmed.** Not from the C6 runs (§3.5). | E7, and operator trust generally | Tower `LoadShedLayer` + `ConcurrencyLimitLayer` on the router; `tower_http` `TimeoutLayer` as defence in depth; bounded queue + immediate rejection on the Argon2id blocking pool. Per C6 §5, in order 5a → 5c → 5b. | Low effort, low risk on the happy path; needs a calibrated `max_in_flight` default, which needs C7's real numbers. |
+| R2 | **`summary.ceiling` misreports generator-limited runs as `server`.** Reports 0.0% server CPU and `ceiling: "server"` simultaneously. | **Data inspection — confirmed.** | Rule 3 enforcement across the *whole* programme; every child artifact | Corroborate attribution against sampled server CPU; refuse `server` attribution below a utilisation floor. | Low effort. **Blocks trustworthy grading of every load-generated row**, so it ranks above its size. |
+| R3 | **Cold-lookup fan-out is linear in SST count** (§5 H1). | **Code inspection — hypothesis, pending E4/C2.** | E1–E4, K1 | Levelled read path or per-level key-range index. Out of this programme's scope; raise as roadmap work per plan §8 decision 5. | Large. Do not start before C2 reports. |
+| R4 | **No hot-tier hit/miss/eviction telemetry** (§5 H2). | **Code inspection — confirmed.** | All of Axis E, K10, L8 | C1, in flight. | Small; also ships as real production observability. |
 
 ---
 
@@ -372,18 +472,19 @@ eleven children and only five existed, so C10 could not have joined work that wa
 | C3 | Separate load generator from server | in progress (`loadtest/scripts/hea1871-isolated.sh`) | Axes C, D; C4, C6, C8 |
 | C4 | High-concurrency generator (10k+) | in progress | T1–T4 over HTTP, C6 |
 | C5 | Complexity-class sweep | todo | E1–E3, E5, E6 |
-| C6 | Graceful-overload behaviour | **done** (commit `a397d86b`) — report not yet folded in | E7 |
+| C6 | Graceful-overload behaviour | done (commit `a397d86b`) — **reviewed, E7 not accepted; re-run after C3** (§3.5) | E7 |
 | C7 | Saturation-throughput benches (§7.2) | todo | T1–T4, L1–L5 in-process |
 | C8 | Record- and session-scale sweep | in progress | K1–K3 |
 | C9 | Issuance/Argon2id: queueing vs compute | todo | L6, L7 |
-| **C10** | **This report** | **in progress** — K8/K9 settled, all other rows blocked | — |
+| C11 | `summary.ceiling` misattribution (filed by C10) | todo | **rule-3 enforcement, all load rows** |
+| **C10** | **This report** | **in progress** — K8/K9 settled, E7 reviewed and rejected, all other rows blocked | — |
 
-**C6 has landed and is not yet reflected in §3.** Commit `a397d86b` ships a graceful-overload
-characterisation report. Row E7 stays `NOT-MEASURED` until C10 has read that report against the
-§0.2 admissibility rules — in particular whether its runs carry `ceiling.attribution: "server"`
-(rule 3) and whether they touched swap (rule 5). Folding a child's conclusion into the conformance
-table without applying the rules is exactly the failure mode this report exists to prevent. That
-review is the next task on C10.
+**C6 landed and has been reviewed — see §3.5.** Its MISS verdict is **not** accepted into the
+conformance table: the server was at 0.0% CPU during every overload run, so the runs grade the
+generator, not Hearth. Its code-level finding (no admission control) is confirmed independently and
+kept as remediation item R1. Applying the rules to a child's conclusion rather than importing it is
+the whole point of this report; C6 is the first instance of that working as intended, and the review
+also surfaced C11, which would otherwise have silently corrupted rule-3 enforcement programme-wide.
 
 **Outstanding board decision:** plan §8 item 3 — provision a second host for Tier 2. Without it,
 Axes B and C ship as `NOT-MEASURABLE (no isolated generator host)` rather than graded. See §2.
