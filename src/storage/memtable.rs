@@ -1000,18 +1000,34 @@ mod tests {
     }
 
     /// `TEST_SCENARIOS.md`: "Concurrent reads during writes see consistent snapshots"
+    ///
+    /// A start [`Barrier`](std::sync::Barrier) rendezvouses all four readers with
+    /// the writer before the first put, and each reader takes its snapshot
+    /// *before* re-checking `done`. Both are load-bearing: since HEA-1897 replaced
+    /// the O(N)-per-put clone with a skiplist insert, the writer can retire all
+    /// 1000 puts and set `done` before a reader thread is ever scheduled, which
+    /// made the `iterations > 0` liveness assert fail intermittently. Gating on
+    /// the barrier (readers are running before any write lands) plus the
+    /// do-while shape guarantees the overlap the test claims to exercise instead
+    /// of leaving it to the scheduler.
     #[test]
     fn concurrent_reads_during_writes_see_consistent_snapshots() {
+        const READERS: usize = 4;
+
         let mt = Arc::new(Memtable::new(MemtableConfig::default()));
         let realm = RealmId::generate();
         let done = Arc::new(AtomicBool::new(false));
+        // READERS + the writer.
+        let start = Arc::new(std::sync::Barrier::new(READERS + 1));
 
         std::thread::scope(|s| {
             // Writer: inserts keys 0..1000
             let mt_w = &mt;
             let t_w = &realm;
             let done_w = &done;
+            let start_w = &start;
             s.spawn(move || {
+                start_w.wait();
                 for i in 0u32..1000 {
                     mt_w.put(t_w, &i.to_be_bytes(), &i.to_be_bytes())
                         .expect("put");
@@ -1020,13 +1036,17 @@ mod tests {
             });
 
             // Readers: continuously snapshot and verify sorted order
-            for _ in 0..4 {
+            for _ in 0..READERS {
                 let mt_r = &mt;
                 let t_r = &realm;
                 let done_r = &done;
+                let start_r = &start;
                 s.spawn(move || {
+                    start_r.wait();
                     let mut iterations = 0u64;
-                    while !done_r.load(Ordering::Acquire) {
+                    // Do-while: always take at least one snapshot, however fast
+                    // the writer retires its puts.
+                    loop {
                         let entries = mt_r.iter_realm(t_r);
                         // Every snapshot must be sorted
                         for window in entries.windows(2) {
@@ -1036,6 +1056,9 @@ mod tests {
                             );
                         }
                         iterations += 1;
+                        if done_r.load(Ordering::Acquire) {
+                            break;
+                        }
                     }
                     // Ensure readers actually ran
                     assert!(iterations > 0, "reader thread never ran");
