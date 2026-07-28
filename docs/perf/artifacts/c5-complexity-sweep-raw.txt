@@ -1,0 +1,40 @@
+HEA-1873 · C5 — Complexity-class sweep
+
+record value = 300 B, flush threshold = 1024 KiB, promote_sample_rate = 4 (production), active set = 2000 keys
+
+── Axis A · corpus-size ladder (fixed active set = 2000, hot cap = 8000) ──
+
+corpus (n) | SSTs | hot p50/p99 (µs) | cold-nat p50/p99 (µs) | cold-cmp p50/p99 (µs) | hot% | cold%
+-----------+------+------------------+-----------------------+-----------------------+------+------
+     10000 |    2 |     0.1/    0.2 |        0.8/      97.5 |        0.8/     160.1 |  100 |  100
+     20000 |    5 |     0.1/    0.1 |        0.9/     110.8 |        1.1/     212.7 |  100 |  100
+     40000 |   11 |     0.1/    0.2 |        1.0/     138.8 |        1.2/     286.1 |  100 |  100
+     80000 |   22 |     0.1/    0.4 |        1.3/     160.9 |        1.2/     395.8 |  100 |  100
+    160000 |   45 |     0.1/    0.1 |        1.1/     180.1 |        1.2/     267.0 |  100 |  100
+    320000 |   91 |     0.1/    0.6 |        1.3/     145.4 |        1.5/     512.0 |  100 |  100
+
+Fit: log(p99) = slope · log(n) + c   [slope ≈ 0 → O(1); slope of a log term → O(log n)]
+  hot            exponent = +0.281  (R² = 0.248)  → PASS (sub-linear, consistent with O(log n))
+  cold (natural) exponent = +0.149  (R² = 0.700)  → PASS (≈ flat, O(1)/O(log n))
+  cold (compact) exponent = +0.281  (R² = 0.760)  → PASS (sub-linear, consistent with O(log n))
+  #SSTs (natural) exponent = +1.087 (R² = 0.997)  [confirms cold fan-out ∝ #SSTs]
+
+  Interpretation: cold-path cost = (#SSTs probed) · (per-SST binary search). The
+  compacted curve isolates the per-SST log term; the natural curve carries the
+  #SSTs fan-out on top. #SSTs is bounded by compaction in steady state, so the
+  graded complexity class is the compacted-cold exponent.
+
+── Axis B · hot-set/capacity ratio ladder (fixed corpus = 160000, active set = 2000) ──
+
+ratio (set/cap) | hot cap | hit ratio | p50 (µs) | p99 (µs) | breaches 500µs budget?
+----------------+---------+-----------+----------+----------+-----------------------
+            0.1 |   20000 |    100.0% |      0.1 |      0.2 | no
+            0.3 |    6667 |    100.0% |      0.1 |      0.2 | no
+            1.0 |    2000 |    100.0% |      0.1 |      0.1 | no
+            3.0 |     667 |     15.1% |      1.2 |    134.6 | no
+           10.0 |     200 |      0.0% |      0.9 |     26.3 | no
+
+No breach across the ladder — active-set p99 stays under 500 µs even at 10× over-subscription.
+
+===JSON===
+{"child_issue":"HEA-1873","record_value_bytes":300,"flush_bytes":1048576,"active_set":2000,"promote_sample_rate":4,"vision_user_p99_hot_us":500,"vision_user_cold_us":5000,"axis_a":[{"n":10000,"ssts_natural":2,"hot_p50_us":0.06,"hot_p99_us":0.19,"cold_natural_p50_us":0.77,"cold_natural_p99_us":97.45,"cold_compacted_p50_us":0.81,"cold_compacted_p99_us":160.14,"hot_purity":0.9999,"cold_purity":1.0000},{"n":20000,"ssts_natural":5,"hot_p50_us":0.06,"hot_p99_us":0.10,"cold_natural_p50_us":0.86,"cold_natural_p99_us":110.77,"cold_compacted_p50_us":1.06,"cold_compacted_p99_us":212.75,"hot_purity":0.9999,"cold_purity":1.0000},{"n":40000,"ssts_natural":11,"hot_p50_us":0.06,"hot_p99_us":0.17,"cold_natural_p50_us":0.96,"cold_natural_p99_us":138.78,"cold_compacted_p50_us":1.24,"cold_compacted_p99_us":286.13,"hot_purity":0.9999,"cold_purity":1.0000},{"n":80000,"ssts_natural":22,"hot_p50_us":0.08,"hot_p99_us":0.37,"cold_natural_p50_us":1.25,"cold_natural_p99_us":160.85,"cold_compacted_p50_us":1.20,"cold_compacted_p99_us":395.76,"hot_purity":0.9999,"cold_purity":1.0000},{"n":160000,"ssts_natural":45,"hot_p50_us":0.06,"hot_p99_us":0.10,"cold_natural_p50_us":1.10,"cold_natural_p99_us":180.09,"cold_compacted_p50_us":1.16,"cold_compacted_p99_us":266.99,"hot_purity":0.9999,"cold_purity":1.0000},{"n":320000,"ssts_natural":91,"hot_p50_us":0.07,"hot_p99_us":0.63,"cold_natural_p50_us":1.32,"cold_natural_p99_us":145.36,"cold_compacted_p50_us":1.45,"cold_compacted_p99_us":512.03,"hot_purity":0.9999,"cold_purity":1.0000}],"axis_b":[{"ratio":0.10,"hot_capacity":20000,"hit_ratio":0.9999,"p50_us":0.07,"p99_us":0.21,"breaches_budget":false},{"ratio":0.30,"hot_capacity":6667,"hit_ratio":0.9999,"p50_us":0.06,"p99_us":0.20,"breaches_budget":false},{"ratio":1.00,"hot_capacity":2000,"hit_ratio":0.9999,"p50_us":0.06,"p99_us":0.12,"breaches_budget":false},{"ratio":3.00,"hot_capacity":667,"hit_ratio":0.1512,"p50_us":1.16,"p99_us":134.58,"breaches_budget":false},{"ratio":10.00,"hot_capacity":200,"hit_ratio":0.0000,"p50_us":0.86,"p99_us":26.31,"breaches_budget":false}]}

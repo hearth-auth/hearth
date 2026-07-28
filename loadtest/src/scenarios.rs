@@ -156,6 +156,39 @@ impl LoadContext {
             "password": self.ropc_password,
         })
     }
+
+    // ── Accessors for the open-loop saturate driver (C4, HEA-1872) ──────────
+
+    /// Realm ID the corpus was seeded into.
+    pub fn realm_id(&self) -> &str {
+        &self.realm_id
+    }
+
+    /// OAuth client ID registered for this realm.
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    /// Number of live (non-revoked) access tokens in the pool.
+    pub fn live_tokens_len(&self) -> usize {
+        self.live_tokens.len()
+    }
+
+    /// Clones and returns a live token, round-robined across the pool.
+    ///
+    /// Returning an owned `String` allows the caller to hold the token across
+    /// `await` points without lifetime issues. Safe to call from concurrent
+    /// tasks — the cursor is atomic.
+    pub fn live_token_cloned(&self) -> String {
+        self.live_tokens[self.next() % self.live_tokens.len()].clone()
+    }
+
+    /// Clones and returns a seeded user ID, round-robined across the pool.
+    ///
+    /// Returns an owned `String` for the same reason as [`Self::live_token_cloned`].
+    pub fn user_id_cloned(&self) -> String {
+        self.user_ids[self.next() % self.user_ids.len()].clone()
+    }
 }
 
 /// Publishes the corpus for the transactions to read. Call once before the

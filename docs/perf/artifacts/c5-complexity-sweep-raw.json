@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "child_issue": "HEA-1873",
+  "axis": "E (complexity class), plan §1a",
+  "git_sha": "37abbc19",
+  "generated_by": "cargo run --release --example complexity_sweep",
+  "measurement_mode": "in-process EmbeddedStorageEngine::get; no HTTP, no load generator",
+  "host": {
+    "profile": "dev-ryzen-7840hs",
+    "cpu_model": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+    "cores_physical": 8,
+    "threads": 16,
+    "governor": "powersave",
+    "ram_total_gib": 54.7,
+    "data_dir_fs": "xfs on /dev/nvme0n1 (/scratch)",
+    "generator_placement": "none (engine driven directly)"
+  },
+  "config": {
+    "record_value_bytes": 300,
+    "flush_bytes": 1048576,
+    "active_set": 2000,
+    "promote_sample_rate": 4,
+    "axis_a_hot_capacity": 8000,
+    "vision_user_p99_hot_us": 500,
+    "vision_user_cold_us": 5000
+  },
+  "axis_a": [
+    {"n":10000,"ssts_natural":2,"hot_p50_us":0.06,"hot_p99_us":0.19,"cold_natural_p50_us":0.77,"cold_natural_p99_us":97.45,"cold_compacted_p50_us":0.81,"cold_compacted_p99_us":160.14,"hot_purity":0.9999,"cold_purity":1.0000},
+    {"n":20000,"ssts_natural":5,"hot_p50_us":0.06,"hot_p99_us":0.10,"cold_natural_p50_us":0.86,"cold_natural_p99_us":110.77,"cold_compacted_p50_us":1.06,"cold_compacted_p99_us":212.75,"hot_purity":0.9999,"cold_purity":1.0000},
+    {"n":40000,"ssts_natural":11,"hot_p50_us":0.06,"hot_p99_us":0.17,"cold_natural_p50_us":0.96,"cold_natural_p99_us":138.78,"cold_compacted_p50_us":1.24,"cold_compacted_p99_us":286.13,"hot_purity":0.9999,"cold_purity":1.0000},
+    {"n":80000,"ssts_natural":22,"hot_p50_us":0.08,"hot_p99_us":0.37,"cold_natural_p50_us":1.25,"cold_natural_p99_us":160.85,"cold_compacted_p50_us":1.20,"cold_compacted_p99_us":395.76,"hot_purity":0.9999,"cold_purity":1.0000},
+    {"n":160000,"ssts_natural":45,"hot_p50_us":0.06,"hot_p99_us":0.10,"cold_natural_p50_us":1.10,"cold_natural_p99_us":180.09,"cold_compacted_p50_us":1.16,"cold_compacted_p99_us":266.99,"hot_purity":0.9999,"cold_purity":1.0000},
+    {"n":320000,"ssts_natural":91,"hot_p50_us":0.07,"hot_p99_us":0.63,"cold_natural_p50_us":1.32,"cold_natural_p99_us":145.36,"cold_compacted_p50_us":1.45,"cold_compacted_p99_us":512.03,"hot_purity":0.9999,"cold_purity":1.0000}
+  ],
+  "axis_a_fits": {
+    "note": "log(p99_us) regressed on log(n); slope is the empirical exponent",
+    "hot_p99":            {"exponent": 0.281, "r2": 0.248, "note": "sub-microsecond at timer resolution; effectively O(1)"},
+    "cold_natural_p99":   {"exponent": 0.149, "r2": 0.700},
+    "cold_compacted_p99": {"exponent": 0.281, "r2": 0.760, "note": "graded steady-state class"},
+    "ssts_natural":       {"exponent": 1.087, "r2": 0.997, "note": "confirms cold fan-out count grows linearly in n"}
+  },
+  "axis_b": [
+    {"ratio":0.10,"hot_capacity":20000,"hit_ratio":0.9999,"p50_us":0.07,"p99_us":0.21,"breaches_budget":false},
+    {"ratio":0.30,"hot_capacity":6667,"hit_ratio":0.9999,"p50_us":0.06,"p99_us":0.20,"breaches_budget":false},
+    {"ratio":1.00,"hot_capacity":2000,"hit_ratio":0.9999,"p50_us":0.06,"p99_us":0.12,"breaches_budget":false},
+    {"ratio":3.00,"hot_capacity":667,"hit_ratio":0.1512,"p50_us":1.16,"p99_us":134.58,"breaches_budget":false},
+    {"ratio":10.00,"hot_capacity":200,"hit_ratio":0.0000,"p50_us":0.86,"p99_us":26.31,"breaches_budget":false}
+  ],
+  "axis_b_breach_ratio": null,
+  "axis_b_hit_ratio_knee": 1.0
+}
