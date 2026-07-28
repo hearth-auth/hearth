@@ -436,8 +436,14 @@ async fn scim_patch_over_operation_cap_rejected() {
         .expect("created user must carry an id");
 
     // Just under the cap: accepted (not a 413).
-    let (ok_status, _) =
-        patch_scim_user(&rig.app, &realm_id, &auth_header, user_id, MAX_SCIM_OPERATIONS).await;
+    let (ok_status, _) = patch_scim_user(
+        &rig.app,
+        &realm_id,
+        &auth_header,
+        user_id,
+        MAX_SCIM_OPERATIONS,
+    )
+    .await;
     assert_ne!(
         ok_status,
         StatusCode::PAYLOAD_TOO_LARGE,

@@ -54,7 +54,10 @@ metrics:
          and `bearer_tokn` are dropped, so `port` keeps its explicit value and \
          `metrics.bearer_token` stays unset",
     );
-    assert_eq!(cfg.server.port, 8420, "the typo did not override the real port");
+    assert_eq!(
+        cfg.server.port, 8420,
+        "the typo did not override the real port"
+    );
     assert!(
         cfg.metrics.bearer_token.is_none(),
         "the typo'd bearer_tokn was dropped — metrics scrape endpoint is UNPROTECTED despite \

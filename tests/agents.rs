@@ -1319,6 +1319,7 @@ async fn agent_credential_audit_actor_attributed() {
 /// against a running server with a valid admin token, asserting status codes
 /// and response bodies at each step.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn agent_rest_crud_positive_http() {
     #[allow(unused_unsafe)]
     unsafe {
@@ -1345,7 +1346,10 @@ async fn agent_rest_crud_positive_http() {
         .expect("bootstrap json");
     let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
     let owner_id = boot["user_id"].as_str().expect("user_id").to_string();
-    let token = boot["access_token"].as_str().expect("access_token").to_string();
+    let token = boot["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
 
     let auth = |req: reqwest::RequestBuilder| {
         req.header("Authorization", format!("Bearer {token}"))
@@ -1384,7 +1388,11 @@ async fn agent_rest_crud_positive_http() {
         .send()
         .await
         .expect("get request");
-    assert_eq!(got.status().as_u16(), 200, "GET /v1/agents/{{id}} must return 200");
+    assert_eq!(
+        got.status().as_u16(),
+        200,
+        "GET /v1/agents/{{id}} must return 200"
+    );
     let got_body: serde_json::Value = got.json().await.expect("get json");
     assert_eq!(got_body["id"], agent_id);
     assert_eq!(got_body["display_name"], "Rest CRUD Agent");
@@ -1394,7 +1402,11 @@ async fn agent_rest_crud_positive_http() {
         .send()
         .await
         .expect("list request");
-    assert_eq!(list.status().as_u16(), 200, "GET /v1/agents must return 200");
+    assert_eq!(
+        list.status().as_u16(),
+        200,
+        "GET /v1/agents must return 200"
+    );
     let list_body: serde_json::Value = list.json().await.expect("list json");
     let items = list_body["items"].as_array().expect("items array");
     assert!(
@@ -1421,7 +1433,11 @@ async fn agent_rest_crud_positive_http() {
         .send()
         .await
         .expect("create key request");
-    assert_eq!(key_resp.status().as_u16(), 201, "POST credentials/keys must return 201");
+    assert_eq!(
+        key_resp.status().as_u16(),
+        201,
+        "POST credentials/keys must return 201"
+    );
     let key_body: serde_json::Value = key_resp.json().await.expect("key json");
     assert!(
         key_body["key"].as_str().is_some_and(|k| !k.is_empty()),
@@ -1438,27 +1454,38 @@ async fn agent_rest_crud_positive_http() {
         .send()
         .await
         .expect("list creds request");
-    assert_eq!(creds.status().as_u16(), 200, "GET credentials must return 200");
+    assert_eq!(
+        creds.status().as_u16(),
+        200,
+        "GET credentials must return 200"
+    );
     let creds_body: serde_json::Value = creds.json().await.expect("creds json");
     let cred_items = creds_body["items"]
         .as_array()
         .or_else(|| creds_body.as_array())
         .expect("credential list");
     assert!(
-        cred_items.iter().any(|c| c["id"] == serde_json::json!(cred_id)),
+        cred_items
+            .iter()
+            .any(|c| c["id"] == serde_json::json!(cred_id)),
         "credential list must include the issued key"
     );
 
     // ── AGENT CARD (A.4) → 200 with authenticated request ────────────────────
-    let card = auth(client.get(format!(
-        "{base}/.well-known/agent.json?agent_id={agent_id}"
-    )))
-    .send()
-    .await
-    .expect("agent card request");
-    assert_eq!(card.status().as_u16(), 200, "authenticated Agent Card must return 200");
+    let card = auth(client.get(format!("{base}/.well-known/agent.json?agent_id={agent_id}")))
+        .send()
+        .await
+        .expect("agent card request");
+    assert_eq!(
+        card.status().as_u16(),
+        200,
+        "authenticated Agent Card must return 200"
+    );
     let card_body: serde_json::Value = card.json().await.expect("card json");
-    assert_eq!(card_body["name"], "Renamed Agent", "card reflects current name");
+    assert_eq!(
+        card_body["name"], "Renamed Agent",
+        "card reflects current name"
+    );
     assert!(
         card_body["capabilities"]
             .as_array()
@@ -1471,7 +1498,11 @@ async fn agent_rest_crud_positive_http() {
         .send()
         .await
         .expect("delete request");
-    assert_eq!(deleted.status().as_u16(), 204, "DELETE must return 204 No Content");
+    assert_eq!(
+        deleted.status().as_u16(),
+        204,
+        "DELETE must return 204 No Content"
+    );
 
     let after = auth(client.get(format!("{base}/v1/agents/{agent_id}")))
         .send()

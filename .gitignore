@@ -82,3 +82,5 @@ go-gin
 build
 **/.gradle/*
 __pycache__
+
+nextest-*
