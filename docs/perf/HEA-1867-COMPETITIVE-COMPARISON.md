@@ -17,14 +17,56 @@ orders of magnitude ahead** — and our *worst* row, the one we grade internally
 failure, is still ~200× faster than the best published competitor number for the same
 operation.
 
-But there is one caveat that governs everything below, and it must not be buried:
+> **UPDATE 2026-07-29 (HEA-1957) — the caveat below is now discharged, and the
+> multiples in this document are correspondingly reduced.** The HTTP delta was measured
+> at `1b2fda55` (`docs/perf/HEA-1957-HTTP-DELTA.md`, artifact
+> `docs/perf/artifacts/c11-http-delta-raw.json`). It is **44–63× for token validation,
+> 2.3× for introspection, 1.3–1.4× for password login.** Read the corrected head-to-head
+> in §"Restated on end-to-end terms" immediately below **before** using any figure in the
+> rest of this document.
+
+But there was one caveat that governed everything below, and it must not be buried:
 
 > **Our numbers are engine-level. Theirs are end-to-end HTTP under load.**
-> We have never measured the HTTP delta (`L1–L8` rows are engine; HEA-1871/HEA-1876
-> mark the HTTP layer `NOT-MEASURABLE`). Until we do, no head-to-head claim is
-> publishable without an asterisk.
+> ~~We have never measured the HTTP delta~~ (`L1–L8` rows are engine; HEA-1871/HEA-1876
+> marked the HTTP layer `NOT-MEASURABLE`). ~~Until we do, no head-to-head claim is
+> publishable without an asterisk.~~ **Measured by HEA-1957 on 2026-07-29.**
 
-That gap is the single highest-value remaining measurement in the programme.
+That gap was the single highest-value remaining measurement in the programme. It is closed.
+
+---
+
+## Restated on end-to-end terms (HEA-1957)
+
+`POST /realms/{r}/introspect` is the one endpoint where the comparison is genuinely
+like-for-like: same RFC 7662 operation, same wire shape, both measured end-to-end over HTTP.
+
+| | Throughput | p50 | Conditions |
+|---|--:|--:|---|
+| Ory Hydra v1.9 (published) | 5,109 /s | 13.3 ms | 2 vCPU, **in-memory adapter, no DB**, end-to-end HTTP |
+| **Hearth (measured, C11 `1b2fda55`)** | **55,700 /s** @ T=32 | **537 µs** | 16 cores, **real storage engine**, end-to-end HTTP, no TLS |
+
+**≈ 10.9× throughput, ≈ 24.8× lower p50 — end-to-end against end-to-end.**
+
+That is far smaller than the ~149× that falls out of comparing our engine figure
+(760,877 validate_token/s/core) to their HTTP figure. **It is also the multiple that
+survives review**, and it is measured against a real storage engine where Hydra's published
+figure uses an in-memory adapter with no database.
+
+**Password login, with our KDF disclosed** — end-to-end **49 ops/s @ T=1, 185 @ T=8** at
+Argon2id `m = 19,456 KiB, t = 2, p = 1`. Every competitor in this document omits its KDF
+parameters (Keycloak's own note is "proportional to hash iterations", count omitted), which
+makes their login numbers unfalsifiable. Ours is stated, and the HTTP surface accounts for
+only ~0.4% of it — a login is Argon2id and essentially nothing else.
+
+**Rules for external use, binding:**
+
+1. Quote the **end-to-end** column only. Engine-level multiples are not competitive claims.
+2. State that our figures exclude TLS and a physical network, so they are an **upper bound**.
+3. State the Argon2id parameters alongside any login figure.
+4. State that the shipped `RequestShaper` default caps **one source IP at 100 rps**.
+
+---
 
 ---
 

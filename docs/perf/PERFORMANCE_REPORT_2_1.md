@@ -159,15 +159,23 @@ Rule 5 is satisfied — no new swap pages were faulted during measurement.
 
 ### 3.1 VISION §7.1 — Latency targets
 
-All engine-level. HTTP delta NOT-MEASURABLE (HEA-1871/HEA-1876 unchanged).
+**The HTTP delta is no longer `NOT-MEASURABLE`.** It was measured at `1b2fda55` by C11
+(HEA-1957) and is stated per row in the new *end-to-end* column. This supersedes the
+HTTP-layer `NOT-MEASURABLE` finding of HEA-1871/HEA-1876; method and admissibility in §3.5.
 
-| # | Operation | Target p50 | Target p99 | Measured | Host | Verdict | Source |
-|---|---|---|---|---|---|---|---|
-| L1 | Token validation | < 50 µs | < 500 µs | ≈ 1.314 µs (C7-v2, 1T hot) | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` `docs/perf/artifacts/c7-saturation-v2-raw.json` |
-| L2 | Session lookup | < 10 µs | < 100 µs | ≈ 0.118 µs (C7-v2, 1T hot) | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` |
-| L3 | Permission check | < 1 µs | < 5 µs | ≈ 0.167 µs (C7-v2, 1T hot) | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` |
-| L4 | Permission resolution | < 100 µs | < 1 ms | ≈ 0.167 µs (C7-v2, cache-hit) | `dev-ryzen-7840hs` | **PASS** (engine, cache-hit) | C7-v2 `981516f1` |
-| L5 | User lookup | < 50 µs | < 500 µs | ≈ 0.458 µs (C7-v2, 1T hot) | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` |
+> **Reading the two columns.** *Measured* is what the identity/storage engine costs.
+> *End-to-end* is what a client over HTTP actually observes, and it is the **only** column
+> comparable to a competitor's published figure. Where the engine cost is ~1 µs the HTTP
+> surface dominates by ~50×; where it is milliseconds the HTTP surface is noise.
+
+| # | Operation | Target p50 | Target p99 | Measured (engine) | End-to-end HTTP p50 (C11) | Host | Verdict | Source |
+|---|---|---|---|---|---|---|---|---|
+| L1 ▲ | Token validation | < 50 µs | < 500 µs | ≈ 1.314 µs (C7-v2, 1T hot) | **50.1 µs** p50 / 153.7 µs p99 @1T; 237 µs p50 / 1.59 ms p99 @32T (via `GET /userinfo`) | `dev-ryzen-7840hs` | **PASS** (engine, 38×). End-to-end: **MISS by 0.2%** on p50 at 1T (50.1 vs 50 µs), **PASS** on p99 at 1T (3.3×), **MISS** on both at 32T | C7-v2 `981516f1`; C11 `1b2fda55` `docs/perf/artifacts/c11-http-delta-raw.json` |
+| L2 | Session lookup | < 10 µs | < 100 µs | ≈ 0.118 µs (C7-v2, 1T hot) | no dedicated HTTP endpoint — exercised inside L1 | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` |
+| L3 | Permission check | < 1 µs | < 5 µs | ≈ 0.167 µs (C7-v2, 1T hot) | not on the HTTP surface by design (claims are embedded in the JWT at issue time) | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` |
+| L4 | Permission resolution | < 100 µs | < 1 ms | ≈ 0.167 µs (C7-v2, cache-hit) | — | `dev-ryzen-7840hs` | **PASS** (engine, cache-hit) | C7-v2 `981516f1` |
+| L5 ▲ | User lookup | < 50 µs | < 500 µs | ≈ 0.458 µs (C7-v2, 1T hot) | **50.1 µs** p50 @1T (via `GET /userinfo`; the same request also validates the token, so this is an upper bound for user lookup alone) | `dev-ryzen-7840hs` | **PASS** (engine, 109×); end-to-end p50 lands **on** the 50 µs target | C7-v2 `981516f1`; C11 `1b2fda55` |
+| L9 (new) | Token introspection (RFC 7662) | — | — | 44.0 µs (C11, 1T) | **93.0 µs** @1T / 537 µs @32T | `dev-ryzen-7840hs` | no VISION target; recorded for competitive comparison | C11 `1b2fda55` |
 | L6a | Token minting (no KDF) | < 1 ms | < 5 ms | — | — | `NOT-MEASURED` | needs isolated host |
 | L6b | Password issuance | < 50 ms | < 100 ms | KDF floor: 12.5–29 ms (C9); gated p99: 66–213 ms (HEA-1887) | `dev-ryzen-7840hs` | `NOT-MEASURABLE` (KDF-dominated) | C9 `235e3342`, HEA-1887 |
 | L7 | User creation | < 50 ms | < 100 ms | — | — | `NOT-MEASURED` | — |
@@ -181,10 +189,11 @@ All engine-level. HTTP delta NOT-MEASURABLE (HEA-1871/HEA-1876 unchanged).
 
 | # | Workload | Target ops/s/core | Target 16-core | Measured/core | Measured 16T | Scaling exp | Host | Verdict | Source |
 |---|---|---|---|---|---|---|---|---|---|
-| T1 | Token validation (hot) | 200,000+ | 3,000,000+ | **760,877** | **9,409,220** | +0.889 | `dev-ryzen-7840hs` | **PASS** (engine) | C7-v2 `981516f1` |
+| T1 ▲ | Token validation (hot) | 200,000+ | 3,000,000+ | **760,877** | **9,409,220** | +0.889 | `dev-ryzen-7840hs` | **PASS** (engine, 3.8×). **End-to-end HTTP: 16,642 ops/s @1T, 106,641 @32T** — a **44–63× delta**. Against the /core target the end-to-end rate is a **MISS**; it is nonetheless ~11× Ory Hydra's published end-to-end figure | C7-v2 `981516f1`; C11 `1b2fda55` |
 | T2 | Mixed read/write (95/5) | 100,000+ | 1,500,000+ | — | — | — | — | `NOT-MEASURED` | harness not constructed |
 | T3 ▲ | Permission check | 1,000,000+ | 15,000,000+ | **5,987,782** | **52,048,086** | **+0.796** | `dev-ryzen-7840hs` | **PASS** (engine; was −0.549 in v1) | C7-v2 `981516f1` |
-| T4 ▲ | Session creation | 50,000+ agg @ stated concurrency | — | **424** @ T=1 | **33,724** @ T=256 | **+0.851** | `dev-ryzen-7840hs`, F=515.8 fsyncs/s | **MISS** (1.48×; was 316× in v2) | C7 post-1955 `c709fa58` |
+| T4 ▲ | Session creation | 50,000+ agg @ stated concurrency | — | **424** @ T=1 | **33,724** @ T=256 | **+0.851** | `dev-ryzen-7840hs`, F=515.8 fsyncs/s | **MISS** (1.48×; was 316× in v2). **No end-to-end counterpart exists** — see §3.5 F4 | C7 post-1955 `c709fa58`; C11 `1b2fda55` |
+| T5 (new) | Password login, end-to-end (Argon2id m=19 MiB, t=2, p=1 **+** durable session create) | no VISION target | — | — | **49** @ T=1, **185** @ T=8 | — | `dev-ryzen-7840hs` | recorded; **1.3–1.4× delta** over the same work called in-process (67 / 244 ops/s) — i.e. the HTTP surface is ~0.4% of a login | C11 `1b2fda55` |
 
 > **T3 update (▲ from v1).** The v1 `Mutex<ResolutionCache>` caused negative scaling (exponent
 > −0.549, R² 0.918): adding cores reduced aggregate throughput because every `resolve_permissions`
@@ -341,6 +350,68 @@ All engine-level. HTTP delta NOT-MEASURABLE (HEA-1871/HEA-1876 unchanged).
 
 ---
 
+### 3.5 Axis C11 — the end-to-end HTTP delta ▲ (new; supersedes HEA-1871/HEA-1876 `NOT-MEASURABLE`)
+
+Full analysis: `docs/perf/HEA-1957-HTTP-DELTA.md`.
+Raw: `docs/perf/artifacts/c11-http-delta-raw.json` · Harness: `examples/http_delta.rs`.
+
+Engine phase and HTTP phase run **in the same process, in the same run, against the same
+fixture** — the real `protocol::http` and `protocol::web` axum routers on real loopback TCP
+listeners, driven by a closed-loop hand-rolled HTTP/1.1 client.
+
+| Operation | T | engine ops/s | HTTP ops/s | **delta ratio** | engine p50 | HTTP p50 | generator headroom |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `introspect_token` → `POST /realms/{r}/introspect` | 1 | 21,802 | 9,508 | **2.3×** | 44.0 µs | 93.0 µs | 5.4× |
+| | 32 | 125,613 | 55,700 | **2.3×** | 101.9 µs | 537.5 µs | 9.0× |
+| `validate_token`+`get_user` → `GET /realms/{r}/userinfo` | 1 | 731,419 | 16,642 | **44.0×** | 1.15 µs | 50.1 µs | 3.1× |
+| | 8 | 4,500,392 | 71,029 | **63.4×** | 1.64 µs | 87.8 µs | 3.5× |
+| | 32 | 6,045,477 | 106,641 | **56.7×** | 1.96 µs | 237.1 µs | 4.7× |
+| `verify_password`+`create_session` → `POST /ui/realms/{r}/login` | 1 | 67 | 49 | **1.4×** | 14.70 ms | 20.08 ms | 1042× |
+| | 8 | 244 | 185 | **1.3×** | 32.29 ms | 42.87 ms | 1355× |
+
+All rows: **100% success**, generator headroom **3.1×–1355×**. Admissibility rule 3 is
+satisfied numerically, not by assertion: a bare canned-response TCP server in the same
+process measures the driver's own ceiling (51,407 / 251,185 / 500,031 ops/s at T=1/8/32),
+and every row is published against it.
+
+**HTTP envelope floor** (`GET /healthz`, same stack, engine removed): 32,865 ops/s p50
+25.4 µs @1T; 187,070 ops/s @32T. Decomposed at 1T: ~17.2 µs driver + kernel loopback,
+**~8.2 µs axum/hyper/tower**. Both engine-backed API endpoints add the **same ~23.5 µs** of
+handler cost above that floor regardless of engine work — that constant is the entire
+read-path HTTP delta.
+
+**F1.** The delta is inversely proportional to engine work. The HTTP stack costs a near-
+constant ~25 µs p50; the ratio is just `(envelope + handler) ÷ (engine cost)`.
+
+**F2.** `T1 = 760,877 validate_token/s/core` **must not** be quoted against a competitor's
+HTTP number. The end-to-end figure is 16,642 @1T / 106,641 @32T.
+
+**F3.** `POST /realms/{r}/introspect` is the fair head-to-head endpoint. Hearth **55,700 /s
+p50 537 µs** vs Ory Hydra's published **5,109 /s p50 13.3 ms** — **≈11× throughput, ≈25×
+lower p50, end-to-end against end-to-end**, and against a real storage engine where Hydra's
+figure uses an in-memory adapter with no DB. That is the publishable claim; the 149× that
+falls out of the engine-vs-HTTP comparison is not.
+
+**F4.** **T4 has no end-to-end counterpart.** `create_session` is reachable over HTTP only
+via web login and the federation callback, both of which pay an Argon2id verify first. The
+~30 µs session create is buried under 14.7 ms of KDF, so **T4's residual 1.48× MISS is
+invisible from outside the process.** Further T4 work should be justified on durability-
+headroom grounds, not end-to-end latency.
+
+**F5.** The `RequestShaper` default caps **one source IP at 100 rps** (`realm_rps` 1,000).
+The measured run disables it — those limits bound one client, not server capacity — but any
+published throughput figure must carry that note.
+
+**Excluded, and disclosed:** TLS, physical network/RTT, client-server core isolation, and
+connection-establishment cost. All four push the same way, so **the HTTP figures are an
+upper bound and the delta ratios a lower bound.**
+
+**Argon2id in force for the login row (stated, because no competitor states theirs):**
+`m = 19,456 KiB`, `t = 2`, `p = 1` — production `CredentialConfig::default()`, **not**
+`fast_for_testing()`.
+
+---
+
 ## 4. The per-user memory numbers (v2)
 
 v2 adds the SST v3 C0-v3 measurement to the three-number table from v1.
@@ -440,10 +511,14 @@ delivered a latency win instead (p99 at T=256: 23.0 → 11.9 ms). Target to clos
 | `docs/perf/artifacts/c5-complexity-sweep-raw.json` | C5, `b2aa7cb9`, 2026-07-28 | E1–E4 |
 | `docs/perf/artifacts/c9-issuance-argon2.json` | C9, `235e3342`, 2026-07-28 | L6b |
 | `docs/perf/artifacts/c10-artifact-facts.json` | C10, `6e6a24c4`, 2026-07-28 | K8, K9 |
+| `docs/perf/artifacts/c11-http-delta-raw.json` | C11, `1b2fda55`, 2026-07-29 | **§3.5 HTTP delta — L1, L5, L9, T1, T5** |
+| `docs/perf/artifacts/c11-http-delta-console.txt` | same run, human-readable | §3.5 |
+| `docs/perf/HEA-1957-HTTP-DELTA.md` | HEA-1957 analysis, 2026-07-29 | §3.5, competitive restatement |
 
 ### 7.2 How to reproduce v2 runs
 
-All three new measurements run in-process, no server, no load generator:
+All four measurements run in-process — no external server, no load generator. C11 boots the
+real axum routers on ephemeral loopback ports inside the harness process:
 
 ```bash
 # C7-v2: saturation throughput (permission_check + session_create scaling)
@@ -454,9 +529,14 @@ RUSTC_WRAPPER="" PROTOC=$(which protoc) cargo run --release --example sst_v3_c0_
 
 # E4-v2: SST fan-out across trigger values (including T12 default)
 RUSTC_WRAPPER="" PROTOC=$(which protoc) cargo run --release --example sst_growth_e4_rerun
+
+# C11: end-to-end HTTP delta (engine vs HTTP, same process, same run)   [HEA-1957]
+RUSTC_WRAPPER="" PROTOC=$(which protoc) cargo run --release --example http_delta
 ```
 
-Build is deterministic on `feature/perf-updates-7-28-26` HEAD `981516f1`.
+C7-v2 / C0-v3 / E4-v2 are deterministic on `feature/perf-updates-7-28-26` HEAD `981516f1`;
+C11 was measured at HEAD `1b2fda55` on the same branch and host. C11 takes ≈ 3 minutes,
+dominated by provisioning 32 Argon2id credentials at m = 19 MiB.
 
 ---
 
