@@ -47,7 +47,15 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 use uuid::Uuid;
+
+/// Nanoseconds elapsed since `start`, saturating at `u64::MAX`.
+///
+/// Used only by the group-commit phase profiler; sampled once per batch.
+fn elapsed_ns(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
 
 /// The type of mutation in a WAL entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -507,6 +515,45 @@ impl Drop for LeaderGuard<'_> {
     }
 }
 
+/// Cumulative per-phase timing of `commit_batch`, in nanoseconds.
+///
+/// Every field is sampled once per batch.  Together with `batches` and
+/// `entries` this decomposes the group-commit cycle into the device-bound part
+/// (`fsync_ns`) and the serial CPU/syscall part that scales with batch size
+/// (`encrypt_ns` + `write_ns` + `signal_ns`) — the distinction HEA-1959 needs.
+#[derive(Default)]
+pub(crate) struct CommitProfile {
+    /// Batches committed.
+    batches: AtomicU64,
+    /// Entries committed across all batches.
+    entries: AtomicU64,
+    /// Time assigning record numbers and encrypting (per-entry serial work).
+    encrypt_ns: AtomicU64,
+    /// Time in `write_all` calls (per-entry serial syscalls).
+    write_ns: AtomicU64,
+    /// Time in `sync_all` (device-bound, amortised over the whole batch).
+    fsync_ns: AtomicU64,
+    /// Time marking slots done and notifying condvars (per-entry futex wakes).
+    signal_ns: AtomicU64,
+}
+
+/// Snapshot of [`CommitProfile`] returned by [`Wal::commit_profile`].
+#[derive(Debug, Clone, Copy)]
+pub struct CommitProfileSnapshot {
+    /// Batches committed.
+    pub batches: u64,
+    /// Entries committed across all batches.
+    pub entries: u64,
+    /// Nanoseconds spent assigning record numbers and encrypting.
+    pub encrypt_ns: u64,
+    /// Nanoseconds spent in `write_all`.
+    pub write_ns: u64,
+    /// Nanoseconds spent in `sync_all`.
+    pub fsync_ns: u64,
+    /// Nanoseconds spent signalling committed slots.
+    pub signal_ns: u64,
+}
+
 /// Write-ahead log providing durable, ordered storage of mutations.
 ///
 /// Thread-safe via `std::sync::Mutex`. WAL writes are blocking I/O and
@@ -553,6 +600,13 @@ pub struct Wal {
     /// saturation-throughput benchmark to measure fsyncs/write under group
     /// commit.  Off the hot path (relaxed ordering is sufficient).
     sync_count: AtomicU64,
+    /// Per-phase timing of the group-commit critical path (HEA-1959).
+    ///
+    /// Sampled once per batch (not per entry), so the four `Instant::now()`
+    /// calls amortise to well under 100 ns/entry at the batch sizes where this
+    /// matters (30–110 entries).  Read by `examples/saturation_throughput.rs`
+    /// to attribute the T=64→256 coalescing decay to a phase.
+    commit_profile: CommitProfile,
     /// Set to `true` after any write error inside `commit_batch`.
     ///
     /// A mid-batch write fault leaves a torn record in the file; any bytes
@@ -869,6 +923,7 @@ impl Wal {
                 leader_active: false,
             }),
             sync_count: AtomicU64::new(0),
+            commit_profile: CommitProfile::default(),
             fenced: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             commit_barrier: None,
@@ -1287,37 +1342,75 @@ impl Wal {
                 self.rotate_locked(&mut **file)?;
             }
 
-            // Assign record numbers and write entries in queue order so that
-            // nonce ordering on disk matches the record-number sequence.  The
-            // rotation mutex is locked once per entry inside the file-mutex
-            // critical section to uphold HEA-SEC-08.
-            for slot in batch {
-                let (nonce, aad, dek) = {
-                    let mut rot = self.rotation.lock().map_err(|_| {
-                        StorageError::Io(std::io::Error::other("rotation mutex poisoned"))
-                    })?;
-                    let record_num = rot.record_counter;
-                    rot.record_counter += 1;
-                    let nonce = counter_nonce(record_num);
-                    let aad = record_num.to_le_bytes();
-                    let mut dek_bytes = [0u8; 32];
-                    dek_bytes.copy_from_slice(rot.dek.as_bytes());
-                    (nonce, aad, DataEncryptionKey::from_bytes(dek_bytes))
-                };
+            // Reserve every record number for this batch in ONE rotation-mutex
+            // critical section and snapshot the DEK once.  Rotation, if it was
+            // needed, already happened above while this same file mutex was
+            // held, so the counter cannot be reset underneath us mid-batch —
+            // the reservation is as atomic as the per-entry locking it replaces
+            // and upholds HEA-SEC-08 identically (each record still gets its
+            // own counter-derived nonce and AAD).
+            let t_encrypt = Instant::now();
+            let (first_record_num, dek) = {
+                let mut rot = self.rotation.lock().map_err(|_| {
+                    StorageError::Io(std::io::Error::other("rotation mutex poisoned"))
+                })?;
+                let first = rot.record_counter;
+                rot.record_counter += batch.len() as u64;
+                let mut dek_bytes = [0u8; 32];
+                dek_bytes.copy_from_slice(rot.dek.as_bytes());
+                (first, DataEncryptionKey::from_bytes(dek_bytes))
+            };
 
-                let ciphertext = encryption::encrypt_section(&slot.plaintext, &dek, &nonce, &aad)?;
-                let crc = crc32fast::hash(&ciphertext);
+            // One AES key schedule for the whole batch instead of one per entry.
+            let cipher = encryption::SectionCipher::new(&dek)?;
 
+            // Serialise the entire batch into one buffer, then issue a single
+            // `write_all`.  The previous three-syscalls-per-entry pattern cost
+            // ~5.1 µs/entry of serial time on the commit critical path, which
+            // at batch=110 was a third of the whole cycle (HEA-1959).
+            let mut buf: Vec<u8> = Vec::with_capacity(approx_total as usize);
+            for (i, slot) in batch.iter().enumerate() {
+                let record_num = first_record_num + i as u64;
+                let nonce = counter_nonce(record_num);
+                let aad = record_num.to_le_bytes();
+
+                // Length prefix is known ahead of the seal: plaintext + GCM tag.
                 #[allow(clippy::cast_possible_truncation)]
-                let payload_len = ciphertext.len() as u32;
-                file.write_all(&payload_len.to_le_bytes())?;
-                file.write_all(&ciphertext)?;
-                file.write_all(&crc.to_le_bytes())?;
+                let payload_len = (slot.plaintext.len() + encryption::TAG_SIZE) as u32;
+                buf.extend_from_slice(&payload_len.to_le_bytes());
+
+                let ct_start = buf.len();
+                let ct_len = cipher.seal_into(&mut buf, &slot.plaintext, &nonce, &aad)?;
+                let crc = crc32fast::hash(&buf[ct_start..ct_start + ct_len]);
+                buf.extend_from_slice(&crc.to_le_bytes());
             }
+            let encrypt_ns = elapsed_ns(t_encrypt);
+
+            let t_write = Instant::now();
+            file.write_all(&buf)?;
+            self.commit_profile
+                .write_ns
+                .fetch_add(elapsed_ns(t_write), Ordering::Relaxed);
 
             // ONE fsync for the entire group — the group-commit throughput win.
-            file.sync_all()?;
+            //
+            // `sync_data` (fdatasync) rather than `sync_all` (fsync): the WAL
+            // segment is created and parent-dir-fsynced at open (HEA-1855) and
+            // thereafter only appended to, so the only metadata replay needs is
+            // the file length — which fdatasync persists. Skipping the mtime
+            // journal commit halves the device round-trips per batch
+            // (HEA-1959). Durability is unchanged: no writer is acked before a
+            // sync covering its bytes returns.
+            let t_fsync = Instant::now();
+            file.sync_data()?;
+            let fsync_ns = elapsed_ns(t_fsync);
             self.sync_count.fetch_add(1, Ordering::Relaxed);
+
+            let p = &self.commit_profile;
+            p.encrypt_ns.fetch_add(encrypt_ns, Ordering::Relaxed);
+            p.fsync_ns.fetch_add(fsync_ns, Ordering::Relaxed);
+            p.batches.fetch_add(1, Ordering::Relaxed);
+            p.entries.fetch_add(batch.len() as u64, Ordering::Relaxed);
             Ok(())
         })();
 
@@ -1334,12 +1427,24 @@ impl Wal {
         // Use unwrap_or_else so a poisoned slot mutex does not silently skip
         // the signal and strand a writer waiting on the condvar forever.
         let err_msg = commit_result.as_ref().err().map(|e| e.to_string());
+        let t_signal = Instant::now();
         for slot in batch {
-            let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.done = true;
-            state.error = err_msg.clone();
+            {
+                let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.done = true;
+                state.error = err_msg.clone();
+            }
+            // Notify *after* releasing the slot mutex.  Waking a writer while
+            // still holding its mutex makes it immediately re-block on that
+            // mutex, costing a second futex round-trip per slot — ~2.6 µs/entry
+            // on the leader's serial path at batch=110 (HEA-1959).  Setting
+            // `done` before the unlock means a writer that wakes spuriously in
+            // the gap still observes completion, so no wakeup can be lost.
             slot.cv.notify_one();
         }
+        self.commit_profile
+            .signal_ns
+            .fetch_add(elapsed_ns(t_signal), Ordering::Relaxed);
 
         // Per-entry errors are communicated through the slot; only return Err
         // for hard failures that prevent signalling (mutex poisoning).
@@ -1396,6 +1501,24 @@ impl Wal {
     /// number of committed writes gives the fsyncs-per-write ratio.
     pub fn sync_count(&self) -> u64 {
         self.sync_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns a snapshot of the cumulative group-commit phase timings.
+    ///
+    /// Used by `examples/saturation_throughput.rs` to attribute the coalescing
+    /// decay at high queue depth to a specific phase of the commit cycle
+    /// (HEA-1959).  Counters are cumulative since WAL open; take a difference
+    /// around a measurement window.
+    pub fn commit_profile(&self) -> CommitProfileSnapshot {
+        let p = &self.commit_profile;
+        CommitProfileSnapshot {
+            batches: p.batches.load(Ordering::Relaxed),
+            entries: p.entries.load(Ordering::Relaxed),
+            encrypt_ns: p.encrypt_ns.load(Ordering::Relaxed),
+            write_ns: p.write_ns.load(Ordering::Relaxed),
+            fsync_ns: p.fsync_ns.load(Ordering::Relaxed),
+            signal_ns: p.signal_ns.load(Ordering::Relaxed),
+        }
     }
 
     /// Registers a callback that is invoked inside `rotate_locked` before the

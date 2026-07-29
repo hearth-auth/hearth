@@ -52,6 +52,22 @@ pub trait FsFile: Send + Sync {
     /// Flushes and syncs the file to durable storage.
     fn sync_all(&self) -> io::Result<()>;
 
+    /// Syncs file *data* to durable storage, skipping non-essential metadata.
+    ///
+    /// Maps to `fdatasync(2)`. The kernel still persists any metadata required
+    /// to read the written bytes back after a crash — critically, the file
+    /// length — but skips the journal commit for fields the WAL does not
+    /// depend on (`mtime`, `ctime`). For an append-only, pre-created WAL
+    /// segment this is the same durability guarantee as [`Self::sync_all`] at
+    /// roughly half the device round-trips (HEA-1959).
+    ///
+    /// The default implementation delegates to `sync_all`, so alternate
+    /// filesystems (simulation, fault injection) remain correct without
+    /// change — they simply give up the optimisation.
+    fn sync_data(&self) -> io::Result<()> {
+        self.sync_all()
+    }
+
     /// Seeks to a position in the file.
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64>;
 
@@ -136,6 +152,10 @@ impl FsFile for RealFsFile {
 
     fn sync_all(&self) -> io::Result<()> {
         self.0.sync_all()
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        self.0.sync_data()
     }
 
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {

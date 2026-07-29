@@ -299,6 +299,58 @@ pub(crate) fn encrypt_section(
     Ok(buffer)
 }
 
+/// A DEK with its AES-GCM key schedule already expanded.
+///
+/// [`encrypt_section`] rebuilds the AES-256 key schedule and the GHASH tables on
+/// every call. That is fine for one-shot use, but the WAL group-commit leader
+/// encrypts an entire batch — up to ~110 records — under a single DEK, and at
+/// high queue depth those per-record key expansions land directly on the commit
+/// cycle (HEA-1959). Building the key once per batch and reusing it removes
+/// that cost without changing a single output byte.
+pub(crate) struct SectionCipher {
+    key: LessSafeKey,
+}
+
+impl SectionCipher {
+    /// Expands the AES-GCM key schedule for `dek` once.
+    pub(crate) fn new(dek: &DataEncryptionKey) -> Result<Self, StorageError> {
+        let unbound =
+            UnboundKey::new(&AES_256_GCM, dek.as_bytes()).map_err(|_| StorageError::Crypto {
+                reason: "failed to create AEAD key for data encryption".to_string(),
+            })?;
+        Ok(Self {
+            key: LessSafeKey::new(unbound),
+        })
+    }
+
+    /// Encrypts `plaintext` and appends `ciphertext || tag` to `out`.
+    ///
+    /// Produces byte-for-byte the same output [`encrypt_section`] would return
+    /// for the same inputs, but writes it into a caller-owned buffer so a whole
+    /// batch can be built up and flushed with one `write_all`.
+    ///
+    /// Returns the number of bytes appended (`plaintext.len() + TAG_SIZE`).
+    pub(crate) fn seal_into(
+        &self,
+        out: &mut Vec<u8>,
+        plaintext: &[u8],
+        nonce_bytes: &[u8; NONCE_SIZE],
+        aad: &[u8],
+    ) -> Result<usize, StorageError> {
+        let nonce = Nonce::assume_unique_for_key(*nonce_bytes);
+        let start = out.len();
+        out.extend_from_slice(plaintext);
+        let tag = self
+            .key
+            .seal_in_place_separate_tag(nonce, Aad::from(aad), &mut out[start..])
+            .map_err(|_| StorageError::Crypto {
+                reason: "data encryption failed".to_string(),
+            })?;
+        out.extend_from_slice(tag.as_ref());
+        Ok(plaintext.len() + TAG_SIZE)
+    }
+}
+
 /// Decrypts a data section (ciphertext with appended tag) using a DEK and data nonce.
 pub(crate) fn decrypt_section(
     ciphertext_with_tag: &[u8],
@@ -460,6 +512,60 @@ pub(crate) fn decrypt_kek(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SectionCipher::seal_into` is the batched form of `encrypt_section`, used
+    /// by the WAL group-commit leader (HEA-1959). If the two ever diverge, WAL
+    /// segments written by the batched path stop decrypting — a silent,
+    /// unrecoverable data-loss bug that only surfaces at replay after a crash.
+    /// Pin them to byte equality.
+    #[test]
+    fn section_cipher_matches_encrypt_section_byte_for_byte() {
+        let dek = generate_dek().expect("dek");
+        let cipher = SectionCipher::new(&dek).expect("cipher");
+
+        // Several records under one key schedule, each with its own nonce/AAD —
+        // exactly the WAL batch shape.
+        for record_num in [0u64, 1, 7, 4096, u64::from(u32::MAX)] {
+            let plaintext = format!("record {record_num} payload").into_bytes();
+            let nonce = counter_nonce(record_num);
+            let aad = record_num.to_le_bytes();
+
+            let one_shot = encrypt_section(&plaintext, &dek, &nonce, &aad).expect("one-shot");
+
+            let mut batched = Vec::new();
+            let n = cipher
+                .seal_into(&mut batched, &plaintext, &nonce, &aad)
+                .expect("batched");
+
+            assert_eq!(n, plaintext.len() + TAG_SIZE, "reported length");
+            assert_eq!(batched, one_shot, "record {record_num} must match exactly");
+
+            // And it must still decrypt back to the original plaintext.
+            let round_trip = decrypt_section(&batched, &dek, &nonce, &aad).expect("decrypt");
+            assert_eq!(round_trip, plaintext);
+        }
+    }
+
+    /// `seal_into` appends; it must not disturb bytes already in the buffer.
+    /// The WAL relies on this to build a whole batch in one allocation.
+    #[test]
+    fn section_cipher_seal_into_appends_without_clobbering() {
+        let dek = generate_dek().expect("dek");
+        let cipher = SectionCipher::new(&dek).expect("cipher");
+
+        let prefix = b"\xDE\xAD\xBE\xEF".to_vec();
+        let mut buf = prefix.clone();
+        let plaintext = b"second record";
+        let nonce = counter_nonce(9);
+        cipher
+            .seal_into(&mut buf, plaintext, &nonce, &9u64.to_le_bytes())
+            .expect("seal");
+
+        assert_eq!(&buf[..prefix.len()], &prefix[..], "prefix must be untouched");
+        let decrypted = decrypt_section(&buf[prefix.len()..], &dek, &nonce, &9u64.to_le_bytes())
+            .expect("decrypt appended region");
+        assert_eq!(decrypted, plaintext);
+    }
 
     #[test]
     fn generate_dek_produces_32_bytes() {

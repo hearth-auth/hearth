@@ -765,6 +765,15 @@ impl EmbeddedStorageEngine {
     pub fn wal_sync_count(&self) -> u64 {
         self.wal.sync_count()
     }
+
+    /// Returns a snapshot of the WAL group-commit phase timings (HEA-1959).
+    ///
+    /// Lets the saturation benchmark decompose the commit cycle into its
+    /// device-bound (`fsync`) and batch-size-scaling (encrypt/write/signal)
+    /// components.
+    pub fn wal_commit_profile(&self) -> crate::storage::wal::CommitProfileSnapshot {
+        self.wal.commit_profile()
+    }
 }
 
 impl EmbeddedStorageEngine {

@@ -407,10 +407,11 @@ impl Fixture {
     /// coalescing efficiency vs. the device fsync ceiling.
     fn sweep_write_op(&self) -> WriteResult {
         // First pass: raw measurements.
-        let raw: Vec<(usize, u64, f64, f64, f64)> = WRITE_THREADS
+        let raw: Vec<(usize, u64, f64, f64, f64, CommitPhases)> = WRITE_THREADS
             .iter()
             .map(|&threads| {
                 let sync_before = self.storage.wal_sync_count();
+                let prof_before = self.storage.wal_commit_profile();
                 let (point, mut latencies_ns) = measure_write_cell(threads, |tid, n| {
                     let i = mix(tid, n) % self.users.len();
                     let _ = self.engine.create_session(
@@ -420,6 +421,7 @@ impl Fixture {
                     );
                 });
                 let sync_after = self.storage.wal_sync_count();
+                let phases = CommitPhases::delta(&prof_before, &self.storage.wal_commit_profile());
                 let syncs = sync_after.saturating_sub(sync_before);
                 let fsyncs_per_write = if point.ops == 0 {
                     0.0
@@ -439,6 +441,7 @@ impl Fixture {
                     point.agg_ops_s,
                     fsyncs_per_write,
                     p99_us,
+                    phases,
                 )
             })
             .collect();
@@ -450,7 +453,7 @@ impl Fixture {
         // Second pass: derive ceiling and coalescing efficiency.
         let write_points: Vec<WritePoint> = raw
             .into_iter()
-            .map(|(threads, ops, agg_ops_s, fsyncs_per_write, p99_us)| {
+            .map(|(threads, ops, agg_ops_s, fsyncs_per_write, p99_us, phases)| {
                 let elapsed_s = if agg_ops_s > 0.0 {
                     ops as f64 / agg_ops_s
                 } else {
@@ -474,6 +477,7 @@ impl Fixture {
                     p99_us,
                     ceiling_ops_s,
                     coalescing_efficiency,
+                    phases,
                 }
             })
             .collect();
@@ -537,6 +541,59 @@ struct WritePoint {
     ceiling_ops_s: f64,
     /// measured ops/s ÷ ceiling — fraction of the device fsync budget captured.
     coalescing_efficiency: f64,
+    /// Group-commit cycle decomposed into its phases (HEA-1959).
+    phases: CommitPhases,
+}
+
+/// WAL group-commit phase timings for one cell of the thread ladder.
+///
+/// The commit cycle is `fsync` (device-bound, once per batch) plus serial
+/// CPU/syscall work that scales with batch size (`encrypt`, `write`, `signal`).
+/// Only the latter can be optimised away; reporting the split is what turns
+/// "coalescing efficiency decayed" into an actionable mechanism.
+#[derive(Clone, Copy, Default)]
+struct CommitPhases {
+    batches: u64,
+    entries: u64,
+    encrypt_ns: u64,
+    write_ns: u64,
+    fsync_ns: u64,
+    signal_ns: u64,
+}
+
+impl CommitPhases {
+    fn delta(
+        before: &hearth::storage::wal::CommitProfileSnapshot,
+        after: &hearth::storage::wal::CommitProfileSnapshot,
+    ) -> Self {
+        Self {
+            batches: after.batches.saturating_sub(before.batches),
+            entries: after.entries.saturating_sub(before.entries),
+            encrypt_ns: after.encrypt_ns.saturating_sub(before.encrypt_ns),
+            write_ns: after.write_ns.saturating_sub(before.write_ns),
+            fsync_ns: after.fsync_ns.saturating_sub(before.fsync_ns),
+            signal_ns: after.signal_ns.saturating_sub(before.signal_ns),
+        }
+    }
+
+    /// Mean nanoseconds of serial non-fsync work per committed entry.
+    ///
+    /// This is the quantity HEA-1959 must drive toward zero: it multiplies by
+    /// batch size and lands on the commit cycle alongside the fsync.
+    fn serial_ns_per_entry(self) -> f64 {
+        if self.entries == 0 {
+            return 0.0;
+        }
+        (self.encrypt_ns + self.write_ns + self.signal_ns) as f64 / self.entries as f64
+    }
+
+    /// Mean nanoseconds of `sync_data` per batch - the device-bound floor.
+    fn fsync_ns_per_batch(self) -> f64 {
+        if self.batches == 0 {
+            return 0.0;
+        }
+        self.fsync_ns as f64 / self.batches as f64
+    }
 }
 
 /// One read operation's full sweep across the thread ladder.
@@ -841,6 +898,40 @@ fn print_write_table(wr: &WriteResult) {
     }
     println!();
 
+    // HEA-1959: decompose the commit cycle. `cycle = fsync + serial x batch`.
+    println!("Group-commit cycle decomposition (per batch):");
+    println!("threads | batch | fsync us | ns/entry enc | wr | sig | serial us | cycle us | share");
+    println!("--------+-------+----------+--------------+----+-----+-----------+----------+------");
+    for wp in &wr.write_points {
+        let batch = if wp.fsyncs_per_write > 0.0 {
+            1.0 / wp.fsyncs_per_write
+        } else {
+            0.0
+        };
+        let n = wp.phases.entries.max(1) as f64;
+        let fsync_us = wp.phases.fsync_ns_per_batch() / 1_000.0;
+        let serial_us = wp.phases.serial_ns_per_entry() * batch / 1_000.0;
+        let cycle_us = fsync_us + serial_us;
+        let share = if cycle_us > 0.0 {
+            serial_us / cycle_us * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "{:>7} | {:>5.2} | {:>8.1} | {:>12.0} | {:>4.0} | {:>4.0} | {:>9.1} | {:>8.1} | {:>4.1}%",
+            wp.point.threads,
+            batch,
+            fsync_us,
+            wp.phases.encrypt_ns as f64 / n,
+            wp.phases.write_ns as f64 / n,
+            wp.phases.signal_ns as f64 / n,
+            serial_us,
+            cycle_us,
+            share,
+        );
+    }
+    println!();
+
     let (slope, r2) = wr.scaling_exponent();
     println!(
         "  scaling exponent = {slope:+.3} (R² = {r2:.3}) → {}",
@@ -1094,7 +1185,10 @@ fn emit_json(results: &[OpResult], wr: &WriteResult, cores: usize) {
                  \"agg_ops_s\":{:.1},\"per_core_ops_s\":{:.1},\
                  \"fsyncs_per_write\":{:.6},\"p99_us\":{:.2},\
                  \"ceiling_ops_s\":{:.1},\"coalescing_efficiency\":{:.6},\
-                 \"coalescing_batch\":{:.4}}}",
+                 \"coalescing_batch\":{:.4},\
+                 \"commit_batches\":{},\"commit_entries\":{},\
+                 \"encrypt_ns\":{},\"write_ns\":{},\"fsync_ns\":{},\"signal_ns\":{},\
+                 \"serial_ns_per_entry\":{:.1},\"fsync_ns_per_batch\":{:.1}}}",
                 wp.point.threads,
                 wp.point.ops,
                 wp.point.elapsed_s,
@@ -1105,6 +1199,14 @@ fn emit_json(results: &[OpResult], wr: &WriteResult, cores: usize) {
                 wp.ceiling_ops_s,
                 wp.coalescing_efficiency,
                 batch,
+                wp.phases.batches,
+                wp.phases.entries,
+                wp.phases.encrypt_ns,
+                wp.phases.write_ns,
+                wp.phases.fsync_ns,
+                wp.phases.signal_ns,
+                wp.phases.serial_ns_per_entry(),
+                wp.phases.fsync_ns_per_batch(),
             )
         })
         .collect();
