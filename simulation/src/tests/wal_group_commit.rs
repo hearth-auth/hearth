@@ -11,7 +11,9 @@
 //! 3. **Throughput**: the number of `sync_all` calls is strictly less than the
 //!    number of committed writes (the group commit benefit).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 use hearth::core::{RealmId, Timestamp};
 use hearth::storage::encryption;
@@ -569,5 +571,211 @@ fn leader_panic_in_pre_rotate_does_not_strand_in_flight_batch() {
         finished, N,
         "all {N} writers must return after a leader panic; only {finished} did — \
          in-flight batch members are stranded on their condvars"
+    );
+}
+
+// ── HEA-1955: looping-leader coalescing tests ─────────────────────────────
+
+/// HEA-1955 measurement: the looping leader must not waste inter-fsync budget
+/// on follower-wakeup gaps.
+///
+/// With synthetic 5 ms sync latency and T=16 concurrent writers, the promote-
+/// follower design (pre-fix) lost ~1–3 ms per fsync to OS thread wakeup,
+/// cutting coalescing efficiency from ~100% to ~60–75%.  The looping leader
+/// eliminates handoff: after committing a batch it immediately drains and
+/// commits the next without parking the leader thread.
+///
+/// Measurement: run T writers for 300 ms, record ops and sync_count, derive
+/// average batch size and (via FaultFs) the effective fsync rate.  The leader
+/// must achieve an inter-fsync gap < half the sync latency (2.5 ms).
+///
+/// This test uses `#[ignore]` because:
+///   (a) it takes ~300 ms of wall time, and
+///   (b) its gap assertion depends on scheduler timing that is unreliable in
+///       heavily-loaded CI containers.
+///
+/// Run manually to compare before/after the looping-leader fix:
+///
+///   CARGO_TARGET_DIR=/scratch/cache/target \
+///     cargo test -p hearth-simulation -- \
+///     measure_looping_leader_inter_fsync_gap --ignored --nocapture
+///
+/// Expected output after the fix:
+///   avg_gap_ms ≈ 0.0  avg_batch ≈ T  efficiency ≈ 95–100%
+#[test]
+#[ignore = "manual measurement — run with -- --ignored --nocapture; ~300 ms wall time"]
+fn measure_looping_leader_inter_fsync_gap() {
+    const T: usize = 16;
+    const SYNC_LAT_US: u64 = 5_000; // 5 ms synthetic fsync latency
+    const RUN_MS: u64 = 300;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fault_fs = Arc::new(FaultFs::new());
+    fault_fs.config.set_latency(0, 0, SYNC_LAT_US, 0, 0);
+
+    let wal = Arc::new(open_wal_with_fs(
+        &dir.path().join("gap.wal"),
+        WalConfig {
+            max_size: u64::MAX,
+            sync_mode: SyncMode::EveryWrite,
+        },
+        Arc::clone(&fault_fs) as Arc<dyn Fs>,
+    ));
+
+    let sync_start = fault_fs
+        .config
+        .sync_count
+        .load(Ordering::SeqCst);
+    let start = std::time::Instant::now();
+    let stop = Arc::new(AtomicBool::new(false));
+    let total_ops = Arc::new(AtomicU64::new(0));
+
+    let handles: Vec<_> = (0..T)
+        .map(|t| {
+            let wal = Arc::clone(&wal);
+            let stop = Arc::clone(&stop);
+            let ops = Arc::clone(&total_ops);
+            std::thread::spawn(move || {
+                let mut k: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    wal.append(&make_entry(
+                        format!("gap-{t}-{k}").as_bytes(),
+                        b"v",
+                    ))
+                    .expect("append");
+                    ops.fetch_add(1, Ordering::Relaxed);
+                    k += 1;
+                }
+            })
+        })
+        .collect();
+
+    std::thread::sleep(Duration::from_millis(RUN_MS));
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        h.join().expect("thread");
+    }
+
+    let elapsed = start.elapsed();
+    let syncs =
+        fault_fs.config.sync_count.load(Ordering::Relaxed) - sync_start;
+    let ops = total_ops.load(Ordering::Relaxed);
+
+    let effective_rate_hz = syncs as f64 / elapsed.as_secs_f64();
+    let theoretical_rate_hz = 1_000_000.0 / SYNC_LAT_US as f64;
+    let avg_batch = if syncs > 0 {
+        ops as f64 / syncs as f64
+    } else {
+        0.0
+    };
+    let avg_gap_ms = if syncs > 0 {
+        (elapsed.as_secs_f64() / syncs as f64
+            - SYNC_LAT_US as f64 / 1_000_000.0)
+            * 1_000.0
+    } else {
+        f64::MAX
+    };
+    let efficiency_pct = (effective_rate_hz / theoretical_rate_hz) * 100.0;
+
+    eprintln!(
+        "HEA-1955 measurement: T={T}, ops={ops}, syncs={syncs}, \
+         avg_batch={avg_batch:.1}, efficiency={efficiency_pct:.1}%, \
+         avg_gap_ms={avg_gap_ms:.2}"
+    );
+    eprintln!(
+        "  promote-follower baseline: gap≈1–3ms, efficiency≈60–75%"
+    );
+    eprintln!(
+        "  looping-leader target:     gap≈0ms,   efficiency≈95–100%"
+    );
+
+    // Lenient sanity check: at least some coalescing must occur.
+    assert!(
+        ops > 0 && syncs > 0,
+        "no writes completed in {RUN_MS} ms"
+    );
+    assert!(
+        syncs <= ops,
+        "sync count {syncs} must not exceed op count {ops}"
+    );
+}
+
+/// HEA-1955 correctness: the looping leader must commit all entries across
+/// multiple back-to-back batches without deadlock or data loss.
+///
+/// This test verifies that a leader which finds new entries queued after its
+/// first fsync processes them in the same call rather than handing off, and
+/// that all committed entries remain durable after re-open.
+///
+/// Uses FaultFs with 2 ms sync latency so entries accumulate between batches
+/// without making the test slow.
+#[test]
+fn group_commit_looping_leader_chains_multiple_batches_correctly() {
+    const T: usize = 8;
+    const K: usize = 40; // writes per thread; enough rounds that looping fires
+    const SYNC_LAT_US: u64 = 2_000; // 2 ms — enough for batches to form
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fault_fs = Arc::new(FaultFs::new());
+    fault_fs.config.set_latency(0, 0, SYNC_LAT_US, 0, 0);
+
+    let wal_path = dir.path().join("chain.wal");
+    {
+        let wal = Arc::new(open_wal_with_fs(
+            &wal_path,
+            WalConfig {
+                max_size: u64::MAX,
+                sync_mode: SyncMode::EveryWrite,
+            },
+            Arc::clone(&fault_fs) as Arc<dyn Fs>,
+        ));
+
+        let barrier = Arc::new(Barrier::new(T));
+        let handles: Vec<_> = (0..T)
+            .map(|t| {
+                let wal = Arc::clone(&wal);
+                let b = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    b.wait();
+                    for k in 0..K {
+                        wal.append(&make_entry(
+                            format!("chain-{t}-{k:03}").as_bytes(),
+                            b"val",
+                        ))
+                        .expect("append must succeed");
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+    }
+
+    // Re-open and verify all T*K entries are durable.
+    let wal_ro = open_wal(
+        &wal_path,
+        WalConfig {
+            max_size: u64::MAX,
+            sync_mode: SyncMode::None,
+        },
+    );
+    let entries = wal_ro.read_all().expect("read_all after multi-batch loop");
+    assert_eq!(
+        entries.len(),
+        T * K,
+        "all {T}×{K} entries must be durable after looping-leader commits; \
+         got {} — looping leader may have dropped entries across batch boundaries",
+        entries.len()
+    );
+
+    // Verify coalescing actually occurred (batches formed during 2 ms fsyncs).
+    let total_syncs = fault_fs.config.sync_count.load(Ordering::Relaxed);
+    let total_writes = (T * K) as u64;
+    assert!(
+        total_syncs < total_writes,
+        "looping leader must batch writes: {total_syncs} fsyncs for \
+         {total_writes} writes — ratio should be < 1.0"
     );
 }

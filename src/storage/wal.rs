@@ -419,10 +419,6 @@ struct GroupSlotState {
     done: bool,
     /// `None` = success; `Some(msg)` = the error message from the commit.
     error: Option<String>,
-    /// Set by the outgoing leader to hand off leadership to this slot's thread.
-    /// When `true`, the waiting thread must call `lead_group_commit` before
-    /// reading its own slot outcome.
-    be_leader: bool,
 }
 
 /// Opaque handle returned by [`Wal::enqueue_entry`].
@@ -956,7 +952,6 @@ impl Wal {
             state: Mutex::new(GroupSlotState {
                 done: false,
                 error: None,
-                be_leader: false,
             }),
             cv: Condvar::new(),
         });
@@ -1013,28 +1008,11 @@ impl Wal {
 
         if am_leader {
             self.lead_group_commit(pre_rotate)?;
-        } else {
-            let mut state = slot
-                .state
-                .lock()
-                .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
-            loop {
-                if state.done {
-                    break;
-                }
-                if state.be_leader {
-                    drop(state);
-                    self.lead_group_commit(pre_rotate)?;
-                    break;
-                }
-                state = slot.cv.wait(state).map_err(|_| {
-                    StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
-                })?;
-            }
         }
+        // Follower: the looping leader handles this slot; pre_rotate is dropped.
 
-        // Read the slot outcome. `state.done` is always true at this point
-        // (set by commit_batch or LeaderGuard::drop before any notification).
+        // Read the slot outcome. The looping leader sets done=true and calls
+        // notify_one() before any waiter could miss the signal.
         let mut state = slot
             .state
             .lock()
@@ -1056,23 +1034,21 @@ impl Wal {
     /// rotation is needed.
     ///
     /// When `SyncMode::EveryWrite` is configured (the production default) this
-    /// uses **leader/follower group commit**: multiple concurrent callers share
-    /// a single `fsync` call rather than each paying a private one.  The leader
-    /// — whichever thread first finds the queue empty — writes one batch of
-    /// pending entries under the file mutex, calls `sync_all` once, then either
-    /// releases leadership (queue empty) or promotes the head of the remaining
-    /// queue to leader and exits.  Each caller commits at most one batch,
-    /// bounding the time any single `spawn_blocking` thread is held.
+    /// uses **looping-leader group commit** (HEA-1955): multiple concurrent
+    /// callers share a single `fsync` per batch.  The leader — whichever thread
+    /// first finds the queue empty — drains the queue, writes all entries, and
+    /// calls `sync_all` once.  It then loops immediately: if new entries arrived
+    /// during the fsync they are committed in the next iteration without any
+    /// thread handoff.  The leader exits only when it finds the queue empty.
     ///
     /// Durability guarantee: no writer returns `Ok` until a `sync_all` that
     /// covered its bytes has completed.
     ///
-    /// `pre_rotate` usage: the initial leader invokes it on the first batch that
-    /// triggers rotation; a promoted follower invokes it on its first led batch.
-    /// Followers whose slots are committed without promotion have their
-    /// `pre_rotate` dropped.  All call sites in `engine.rs` supply the
-    /// identical `|| self.trigger_flush()` closure, so the dropped instances
-    /// have no observable effect beyond the first rotation per session.
+    /// `pre_rotate` usage: the leader invokes it on the first batch that
+    /// triggers rotation; subsequent batches pass `None`.  Follower threads'
+    /// `pre_rotate` closures are dropped without being called.  All call sites
+    /// in `engine.rs` supply the identical `|| self.trigger_flush()` closure,
+    /// so the dropped instances have no observable effect.
     pub fn append_with_pre_rotate<F>(
         &self,
         entry: &WalEntry,
@@ -1107,7 +1083,6 @@ impl Wal {
             state: Mutex::new(GroupSlotState {
                 done: false,
                 error: None,
-                be_leader: false,
             }),
             cv: Condvar::new(),
         });
@@ -1136,37 +1111,17 @@ impl Wal {
         }
 
         if am_leader {
-            // Propagate only hard (unrecoverable) failures from the commit.
-            // Per-entry I/O errors travel through slot.state.error.
+            // Leader: run the commit loop.  The looping leader drains every
+            // pending batch itself rather than handing off to a follower
+            // (HEA-1955).  Per-entry I/O errors travel through slot.state.error.
             self.lead_group_commit(pre_rotate)?;
-        } else {
-            // Follower: wait until our slot is committed, or until the outgoing
-            // leader promotes us.  Promotion means our slot is still in pending
-            // and we must run the commit loop ourselves.
-            let mut state = slot
-                .state
-                .lock()
-                .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
-            loop {
-                if state.done {
-                    break;
-                }
-                if state.be_leader {
-                    // Promoted: our slot is still in pending; running
-                    // lead_group_commit will commit it in the first batch.
-                    drop(state);
-                    self.lead_group_commit(pre_rotate)?;
-                    break;
-                }
-                state = slot.cv.wait(state).map_err(|_| {
-                    StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
-                })?;
-            }
         }
+        // Follower: the looping leader handles this slot; pre_rotate is dropped.
 
-        // Read the slot outcome.  For the original leader and promoted followers
-        // the slot was committed in the first batch they led (done=true on
-        // re-acquire).  For non-promoted followers it was set by another leader.
+        // Read the slot outcome.  The looping leader sets done=true on every
+        // slot it commits before returning, so the wait below is typically a
+        // no-op for the leader thread (its own slot was in the first batch) and
+        // a single condvar wait for each follower thread.
         let mut state = slot
             .state
             .lock()
@@ -1231,81 +1186,63 @@ impl Wal {
         Ok(())
     }
 
-    /// Commits one batch of pending WAL writes under the file mutex with a
-    /// single `sync_all`, then either releases leadership (queue empty) or
-    /// promotes the head of the remaining queue to leader and exits.
+    /// Commits all pending WAL writes in a loop until the queue is empty.
     ///
-    /// Each caller commits exactly one batch, bounding the time any single
-    /// `spawn_blocking` thread is held as leader regardless of write pressure.
-    /// `pre_rotate` is forwarded to `commit_batch`; promoted successors use
-    /// their own `pre_rotate` or the registered `pre_rotate_fn`.
+    /// HEA-1955: the previous single-batch design promoted a follower after
+    /// each fsync, paying ~1–3 ms of OS thread-wakeup latency per inter-fsync
+    /// gap.  At T=256 this cut coalescing efficiency from ~92% to 23%.
+    ///
+    /// The looping leader eliminates handoff: after committing one batch it
+    /// immediately drains the queue again — no thread parking, no condvar
+    /// round-trip.  `leader_active` stays `true` throughout so late-arriving
+    /// writers never race to elect a parallel leader.
+    ///
+    /// Panic safety: the RAII `LeaderGuard` holds `in_flight` throughout each
+    /// batch.  If `commit_batch` panics, `Drop` signals every in-flight slot
+    /// with an error and clears `leader_active`, so no writer hangs forever.
     fn lead_group_commit<F>(&self, pre_rotate: F) -> Result<(), StorageError>
     where
         F: FnOnce() -> Result<(), StorageError>,
     {
-        // RAII guard: if `commit_batch` panics (e.g. inside the memtable-flush
-        // closure injected by the storage engine), the unwind would otherwise
-        // leave `leader_active == true` forever, silently hanging every later
-        // writer on a condvar nobody notifies.  The guard restores a clean state
-        // on any unwind so callers fail fast instead.  Disarm it before any
-        // normal return.
+        // RAII guard: converts any panic inside commit_batch into a clean
+        // fail-fast for every waiting writer rather than a silent hang.
+        // Disarmed on the normal empty-queue exit.
         let mut guard = LeaderGuard {
             group: &self.group,
             in_flight: Vec::new(),
             disarmed: false,
         };
 
-        // Drain atomically.  If the queue is already empty (rare: another
-        // leader drained it before us), release leadership and exit.
-        {
-            let mut gs = self
-                .group
-                .lock()
-                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
-            let b: Vec<_> = gs.pending.drain(..).collect();
-            if b.is_empty() {
-                gs.leader_active = false;
-                guard.disarmed = true;
-                return Ok(());
+        // Wrap in Option so the FnOnce can be consumed on the first rotation-
+        // triggering batch and passed as None to subsequent batches.
+        let mut pre_rotate_opt = Some(pre_rotate);
+
+        loop {
+            // Drain atomically.  Exit when the queue is empty.
+            {
+                let mut gs = self.group.lock().map_err(|_| {
+                    StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
+                })?;
+                let b: Vec<_> = gs.pending.drain(..).collect();
+                if b.is_empty() {
+                    gs.leader_active = false;
+                    guard.disarmed = true;
+                    return Ok(());
+                }
+                // Place batch in the guard before commit_batch so Drop can
+                // signal these writers on a panic (HEA-1924 / HEA-1925).
+                guard.in_flight = b;
             }
-            // Move the drained batch into the guard *before* calling
-            // commit_batch.  This ensures Drop can signal these writers if a
-            // panic occurs inside commit_batch (e.g. the pre_rotate closure).
-            guard.in_flight = b;
+
+            // Write every slot + ONE fsync for this batch.
+            self.commit_batch(&guard.in_flight, pre_rotate_opt.take())?;
+            // Clear so Drop does not re-signal committed slots on a later
+            // error in this same call (R1 ghost-write fix).
+            guard.in_flight.clear();
+
+            // Loop immediately: drain the next batch without waking a
+            // follower.  This is the HEA-1955 efficiency improvement.
         }
-
-        // Write every slot in the batch + ONE fsync.
-        self.commit_batch(&guard.in_flight, Some(pre_rotate))?;
-        // Clear committed slots from the guard so that if the subsequent
-        // group-mutex lock fails (R1: ghost-write fix), `Drop` does not
-        // overwrite durably-fsynced slots with a spurious failure message.
-        guard.in_flight.clear();
-
-        // Our own slot is now committed.  Check whether more writers arrived
-        // while we were writing and, if so, promote the head of the queue.
-        // Keeping leader_active=true prevents new arrivals from racing to
-        // elect themselves over the promoted leader.
-        let next_leader: Option<Arc<GroupSlot>> = {
-            let mut gs = self
-                .group
-                .lock()
-                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
-            if gs.pending.is_empty() {
-                gs.leader_active = false;
-                guard.disarmed = true;
-                return Ok(());
-            }
-            gs.pending.front().map(Arc::clone)
-        };
-
-        if let Some(next) = next_leader {
-            let mut state = next.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.be_leader = true;
-            drop(state);
-            next.cv.notify_one();
-        }
-        guard.disarmed = true;
-        Ok(())
     }
 
     /// Writes every slot in `batch` to the WAL file and calls `sync_all` once.
@@ -2243,7 +2180,6 @@ mod tests {
             state: Mutex::new(GroupSlotState {
                 done: true,
                 error: None,
-                be_leader: false,
             }),
             cv: Condvar::new(),
         });
@@ -2294,7 +2230,6 @@ mod tests {
             state: Mutex::new(GroupSlotState {
                 done: false,
                 error: None,
-                be_leader: false,
             }),
             cv: Condvar::new(),
         });
