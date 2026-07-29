@@ -3126,10 +3126,35 @@ impl EmbeddedIdentityEngine {
 
     /// Persists a session to storage and keeps the in-process cache consistent.
     fn persist_session(&self, realm_id: &RealmId, session: &Session) -> Result<(), IdentityError> {
+        self.persist_session_with(realm_id, session, Vec::new())
+    }
+
+    /// Persists a session record together with `extra` index entries as a
+    /// **single** atomic write.
+    ///
+    /// `StorageEngine::put_batch` emits one WAL record for the whole batch, so
+    /// this costs one `fsync` on the production `SyncMode::EveryWrite` path
+    /// where separate `put` calls cost one each. `session_create` is
+    /// fsync-bound (HEA-1945), so collapsing a logically-atomic write into one
+    /// record is a directly proportional throughput win.
+    ///
+    /// It is also the more correct shape: the session body and its indexes
+    /// describe one fact, and writing them separately leaves a crash window in
+    /// which an index entry can survive pointing at a session that was never
+    /// persisted.
+    fn persist_session_with(
+        &self,
+        realm_id: &RealmId,
+        session: &Session,
+        extra: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), IdentityError> {
         let session_bytes = Self::serialize_session(session)?;
         let id_key = keys::encode_session_id(session.id());
+        let mut batch = Vec::with_capacity(1 + extra.len());
+        batch.push((id_key, session_bytes));
+        batch.extend(extra);
         self.storage
-            .put(realm_id, &id_key, &session_bytes)
+            .put_batch(realm_id, &batch)
             .map_err(Self::storage_err)?;
         // Update cache after the storage write succeeds.
         if session.is_valid(self.clock.now()) {
@@ -6196,14 +6221,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             absolute_timeout_secs,
         );
 
-        // Persist session record
-        self.persist_session(realm_id, &session)?;
-
-        // Write user-to-session index entry
+        // Persist the session record and its user→session index entry as one
+        // atomic WAL record. Two separate `put` calls cost two fsyncs on the
+        // production path and leave a crash window that can strand the index
+        // entry (HEA-1945).
         let user_session_key = keys::encode_user_session(user_id, &session_id);
-        self.storage
-            .put(realm_id, &user_session_key, &[])
-            .map_err(Self::storage_err)?;
+        self.persist_session_with(realm_id, &session, vec![(user_session_key, Vec::new())])?;
 
         let session_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),

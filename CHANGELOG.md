@@ -45,6 +45,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   durability are unchanged. (HEA-1915)
 
 ### Fixed
+- **Session creation is now a single atomic write (HEA-1945)** — `create_session` wrote the
+  session record and its user→session index entry as two separate storage puts, so a crash
+  between them could leave an index entry pointing at a session that was never persisted,
+  and each put cost a separate WAL `fsync` on the production durability path. Both now land
+  in one atomic `put_batch` (one WAL record, one fsync), cutting `session_create` from 3
+  fsyncs per operation to 2. Durability semantics are unchanged — the WAL is still fsync'd
+  before the write is acknowledged. (HEA-1945)
 - **SST compaction memory is now `O(#inputs × block)` instead of `O(corpus)` (HEA-1922)** —
   compaction previously materialized every input entry into a `BTreeMap` and then a `Vec`
   before writing the output SST, so merging a large corpus briefly allocated roughly twice
