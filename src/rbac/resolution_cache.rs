@@ -233,8 +233,16 @@ mod tests {
         let ka = key(&realm_a, &user);
         let kb = key(&realm_b, &user);
 
-        cache.insert(ka.clone(), cache.generation(&realm_a), resolved_with("a.read"));
-        cache.insert(kb.clone(), cache.generation(&realm_b), resolved_with("b.read"));
+        cache.insert(
+            ka.clone(),
+            cache.generation(&realm_a),
+            resolved_with("a.read"),
+        );
+        cache.insert(
+            kb.clone(),
+            cache.generation(&realm_b),
+            resolved_with("b.read"),
+        );
 
         cache.bump(&realm_a);
 
@@ -260,7 +268,11 @@ mod tests {
             .iter()
             .map(|s| Arc::as_ptr(&s.load_full()))
             .collect();
-        cache.insert(key(&realm, &UserId::generate()), 0, resolved_with("new.read"));
+        cache.insert(
+            key(&realm, &UserId::generate()),
+            0,
+            resolved_with("new.read"),
+        );
         let after: Vec<*const HashMap<CacheKey, Entry>> = cache
             .entries
             .iter()

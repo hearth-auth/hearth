@@ -254,9 +254,7 @@ fn print_config_results(label: &str, max_sst_count: usize, rungs: &[Rung]) {
             );
         }
     } else {
-        println!(
-            "corpus (n) | live SSTs | peak SSTs | bytes written | write-amp | seed (s)"
-        );
+        println!("corpus (n) | live SSTs | peak SSTs | bytes written | write-amp | seed (s)");
         println!("-----------+-----------+-----------+---------------+-----------+---------");
         for r in rungs {
             println!(
@@ -315,6 +313,7 @@ fn print_config_results(label: &str, max_sst_count: usize, rungs: &[Rung]) {
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Admissibility check
     let mem_avail_kb = std::fs::read_to_string("/proc/meminfo")
@@ -428,7 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("## Recommendation\n");
     let t8_slope = {
-        let (trigger, rungs) = results.iter().find(|(t, _)| *t == 8).unwrap();
+        let (trigger, rungs) = results.iter().find(|(t, _)| *t == 8).expect("T8 result");
         let _ = trigger;
         let log_n: Vec<f64> = rungs.iter().map(|r| (r.n as f64).ln()).collect();
         let log_peak: Vec<f64> = rungs
@@ -438,7 +437,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         linreg(&log_n, &log_peak).0
     };
     let t16_slope = {
-        let (trigger, rungs) = results.iter().find(|(t, _)| *t == 16).unwrap();
+        let (trigger, rungs) = results.iter().find(|(t, _)| *t == 16).expect("T16 result");
         let _ = trigger;
         let log_n: Vec<f64> = rungs.iter().map(|r| (r.n as f64).ln()).collect();
         let log_peak: Vec<f64> = rungs

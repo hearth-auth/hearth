@@ -2542,15 +2542,14 @@ pub(super) async fn dev_seed_session(
         }
     };
     let user_id = UserId::new(user_uuid);
-    match state
-        .identity
-        .create_session(&realm_id, &user_id, &crate::identity::SessionContext::default())
-    {
+    match state.identity.create_session(
+        &realm_id,
+        &user_id,
+        &crate::identity::SessionContext::default(),
+    ) {
         Ok(session) => (
             StatusCode::CREATED,
-            Json(
-                serde_json::json!({"session_id": session.id().as_uuid().to_string()}),
-            ),
+            Json(serde_json::json!({"session_id": session.id().as_uuid().to_string()})),
         )
             .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
