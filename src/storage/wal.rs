@@ -404,7 +404,7 @@ struct RotationState {
 // ─── Group-commit types ──────────────────────────────────────────────────────
 
 /// A single writer's entry waiting to be committed by the group leader.
-struct GroupSlot {
+pub(crate) struct GroupSlot {
     /// Pre-serialised WAL entry payload (plaintext before encryption).
     plaintext: Vec<u8>,
     /// Outcome written by the leader once the entry is written + synced.
@@ -423,6 +423,20 @@ struct GroupSlotState {
     /// When `true`, the waiting thread must call `lead_group_commit` before
     /// reading its own slot outcome.
     be_leader: bool,
+}
+
+/// Opaque handle returned by [`Wal::enqueue_entry`].
+///
+/// Must be passed to [`Wal::await_entry_durable`] to block until the WAL entry
+/// is guaranteed durable (covered by an `fsync`/`sync_all`).
+pub(crate) enum WalDurabilityHandle {
+    /// Entry was written synchronously (`SyncMode::None`). Already durable.
+    Immediate,
+    /// Entry is pending in the group-commit queue.
+    Pending {
+        am_leader: bool,
+        slot: Arc<GroupSlot>,
+    },
 }
 
 /// Shared group-commit queue and leader flag.
@@ -883,6 +897,160 @@ impl Wal {
     pub fn append(&self, entry: &WalEntry) -> Result<(), StorageError> {
         self.append_with_pre_rotate(entry, || Ok(()))
     }
+
+    // ── Split-commit API (HEA-1948) ──────────────────────────────────────────
+    //
+    // `enqueue_entry` + `await_entry_durable` split what `append_with_pre_rotate`
+    // does in a single blocking call into two phases:
+    //
+    //   Phase 1 (enqueue_entry)  — push entry to the group-commit queue.
+    //                              Must be called while holding any serialising
+    //                              lock (e.g. audit chain lock) so that WAL record
+    //                              ordering matches logical ordering.
+    //
+    //   Phase 2 (await_entry_durable) — wait for the fsync that covers the entry.
+    //                              MUST be called outside the serialising lock so
+    //                              concurrent writers can enqueue and coalesce into
+    //                              the same group-commit batch.
+
+    /// Enqueue a WAL entry for group commit without blocking for the fsync.
+    ///
+    /// For `SyncMode::None` (dev/test): writes the entry synchronously via
+    /// `write_entry_no_sync` and returns [`WalDurabilityHandle::Immediate`].
+    /// `pre_rotate` is consumed and forwarded to `write_entry_no_sync`.
+    ///
+    /// For `SyncMode::EveryWrite`: serialises the entry, pushes it to the
+    /// group-commit queue, and returns [`WalDurabilityHandle::Pending`].
+    /// `pre_rotate` is **dropped without being called** here — pass a fresh
+    /// instance to [`Self::await_entry_durable`] where it may be needed by
+    /// the group-commit leader.
+    pub(crate) fn enqueue_entry<F>(
+        &self,
+        entry: &WalEntry,
+        pre_rotate: F,
+    ) -> Result<WalDurabilityHandle, StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "WAL fenced after write fault — all subsequent writes rejected",
+            )));
+        }
+
+        let plaintext = entry.serialize();
+
+        if self.config.sync_mode != SyncMode::EveryWrite {
+            return self
+                .write_entry_no_sync(plaintext, pre_rotate)
+                .map(|()| WalDurabilityHandle::Immediate);
+        }
+
+        // EveryWrite path: drop pre_rotate here. The leader will reconstruct
+        // it independently inside await_entry_durable (the storage engine passes
+        // `|| self.trigger_flush()` to both enqueue_entry and await_entry_durable).
+        drop(pre_rotate);
+
+        let slot = Arc::new(GroupSlot {
+            plaintext,
+            state: Mutex::new(GroupSlotState {
+                done: false,
+                error: None,
+                be_leader: false,
+            }),
+            cv: Condvar::new(),
+        });
+
+        let am_leader = {
+            let mut gs = self
+                .group
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
+            gs.pending.push_back(Arc::clone(&slot));
+            if gs.leader_active {
+                false
+            } else {
+                gs.leader_active = true;
+                true
+            }
+        };
+
+        Ok(WalDurabilityHandle::Pending { am_leader, slot })
+    }
+
+    /// Block until the WAL entry represented by `handle` is durable.
+    ///
+    /// For [`WalDurabilityHandle::Immediate`]: returns `Ok(())` immediately.
+    ///
+    /// For [`WalDurabilityHandle::Pending`]: if this thread won leadership of
+    /// the group-commit queue, runs the commit loop (writing all queued slots +
+    /// one `sync_all`) before returning. Otherwise, waits on the slot condvar
+    /// until a leader marks it done.
+    ///
+    /// `pre_rotate` is forwarded to `lead_group_commit` when this thread acts
+    /// as leader; it is dropped without being called for follower threads.
+    pub(crate) fn await_entry_durable<F>(
+        &self,
+        handle: WalDurabilityHandle,
+        pre_rotate: F,
+    ) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
+        let (am_leader, slot) = match handle {
+            WalDurabilityHandle::Immediate => return Ok(()),
+            WalDurabilityHandle::Pending { am_leader, slot } => (am_leader, slot),
+        };
+
+        // Test hook: rendezvous all concurrent writers here — after callers
+        // have released any serialising lock (e.g. the audit chain lock) but
+        // before the leader drains the queue.  This makes batch membership
+        // deterministic in tests that need a guaranteed group size.
+        #[cfg(feature = "test-hooks")]
+        if let Some(ref b) = self.commit_barrier {
+            b.wait();
+        }
+
+        if am_leader {
+            self.lead_group_commit(pre_rotate)?;
+        } else {
+            let mut state = slot
+                .state
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
+            loop {
+                if state.done {
+                    break;
+                }
+                if state.be_leader {
+                    drop(state);
+                    self.lead_group_commit(pre_rotate)?;
+                    break;
+                }
+                state = slot.cv.wait(state).map_err(|_| {
+                    StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
+                })?;
+            }
+        }
+
+        // Read the slot outcome. `state.done` is always true at this point
+        // (set by commit_batch or LeaderGuard::drop before any notification).
+        let mut state = slot
+            .state
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
+        while !state.done {
+            state = slot.cv.wait(state).map_err(|_| {
+                StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
+            })?;
+        }
+        match state.error.take() {
+            None => Ok(()),
+            Some(msg) => Err(StorageError::Io(std::io::Error::other(msg))),
+        }
+    }
+
+    // ── Original combined-phase append (unchanged) ────────────────────────────
 
     /// Appends an entry to the WAL, calling `pre_rotate` before rotating if
     /// rotation is needed.

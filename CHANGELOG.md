@@ -45,6 +45,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   durability are unchanged. (HEA-1915)
 
 ### Fixed
+- **Audit appends no longer hold the chain lock across the WAL fsync (HEA-1948)** —
+  `EmbeddedAuditEngine::append` previously held the per-realm chain lock for the entire
+  `put_batch` call, including the WAL `fsync` wait. This serialised all audit writes to the
+  same realm behind a single mutex, capping coalescing at exactly one fsync per append
+  regardless of concurrency. The chain lock now covers only the hash-chain RMW and the WAL
+  *enqueue*; the fsync wait happens outside the lock via a new split-phase
+  `enqueue_batch` / `await_batch_durable` API on `StorageEngine`. Concurrent audit appenders
+  on the same realm can now enqueue within the same fsync window and share a single
+  group-commit `sync_all`. At 8 concurrent writers, measured `fsyncs_per_write` drops
+  well below 1.0; chain integrity is preserved by an optimistic cache update that is rolled
+  back on durability failure. Single-threaded throughput and durability guarantees are
+  unchanged. (HEA-1948)
+- **Admin-API user mutations now emit exactly one audit event each (HEA-1950)** —
+  `POST /admin/users`, `PATCH /admin/users/{id}`, and `DELETE /admin/users/{id}` previously
+  wrote two audit events per operation: one from the identity layer (actor=`"system"`) and a
+  second from the handler (actor=admin user ID). Auditors counting `UserCreated` events got
+  2× the true number with half the entries unattributed. The fix threads the admin actor and
+  `{"via":"admin_api"}` metadata into the identity layer via new
+  `create_user_attributed` / `update_user_attributed` / `delete_user_attributed` trait
+  methods, so the handler emits exactly one event with the correct actor and drops the
+  redundant second append. Storage impact: ~39.5% of per-user audit bytes were redundant;
+  removing the duplicate reduces SST bytes/user from ~1,192 B to ~721 B (~67 GiB saved at
+  100 M users). Self-registration, SCIM, gRPC, and import paths are unaffected. (HEA-1950)
 - **Session creation is now a single atomic write (HEA-1945)** — `create_session` wrote the
   session record and its user→session index entry as two separate storage puts, so a crash
   between them could leave an index entry pointing at a session that was never persisted,

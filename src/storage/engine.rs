@@ -18,8 +18,12 @@ use crate::storage::key_registry::KeyRegistry;
 use crate::storage::memtable::{Memtable, MemtableConfig, MemtableValue};
 use crate::storage::sst::{self, SstReader, SstWriter};
 use crate::storage::tiered::{HotTier, TieredConfig, PRODUCTION_PROMOTE_SAMPLE_RATE};
-use crate::storage::wal::{BatchEntry, Wal, WalConfig, WalEntry, WalOperation};
-use crate::storage::{ScanEntry, StorageEngine};
+use crate::storage::wal::{
+    BatchEntry, Wal, WalConfig, WalDurabilityHandle, WalEntry, WalOperation,
+};
+use crate::storage::{
+    ScanEntry, StorageDurabilityHandle, StorageDurabilityHandleKind, StorageEngine,
+};
 
 /// Publishes the live SST file count to the observability gauge (HEA-1869).
 ///
@@ -31,6 +35,20 @@ fn record_sst_file_count(count: usize) {
     crate::metrics::metrics()
         .storage_sst_files
         .set(count as f64);
+}
+
+/// Pending write-batch handle for the [`EmbeddedStorageEngine`] group-commit path.
+///
+/// Returned (wrapped in a [`StorageDurabilityHandle`]) by
+/// [`EmbeddedStorageEngine::enqueue_batch`] when `SyncMode::EveryWrite` is active.
+/// Passed back to [`EmbeddedStorageEngine::await_batch_durable`], which runs the
+/// WAL leader loop (or waits as a follower) and then applies the entries to the
+/// memtable once the `fsync` succeeds.
+pub(crate) struct PendingBatchHandle {
+    pub(crate) am_leader: bool,
+    pub(crate) slot: std::sync::Arc<crate::storage::wal::GroupSlot>,
+    pub(crate) realm_id: crate::core::RealmId,
+    pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Configuration for the embedded storage engine.
@@ -1279,6 +1297,106 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         Ok(())
     }
+
+    // ── Split-commit API (HEA-1948) ──────────────────────────────────────────
+
+    fn enqueue_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<StorageDurabilityHandle, StorageError> {
+        if entries.is_empty() {
+            return Ok(StorageDurabilityHandle(
+                StorageDurabilityHandleKind::Immediate,
+            ));
+        }
+
+        let sub_entries: Vec<BatchEntry> = entries
+            .iter()
+            .map(|(k, v)| BatchEntry {
+                operation: WalOperation::Put,
+                key: k.clone(),
+                value: v.clone(),
+            })
+            .collect();
+        let payload = crate::storage::wal::encode_batch_payload(&sub_entries)?;
+        let wal_entry = WalEntry {
+            timestamp: crate::core::Timestamp::now(),
+            realm_id: realm_id.clone(),
+            operation: WalOperation::Batch,
+            key: Vec::new(),
+            value: payload,
+        };
+
+        let wal_handle = self
+            .wal
+            .enqueue_entry(&wal_entry, || self.trigger_flush())?;
+
+        match wal_handle {
+            WalDurabilityHandle::Immediate => {
+                // SyncMode::None path: write already committed, apply to memtable now.
+                self.active_memtable.put_batch(realm_id, entries)?;
+                for (key, _) in entries {
+                    self.hot_tier.invalidate(realm_id, key);
+                }
+                if self.active_memtable.should_flush() {
+                    self.trigger_flush()?;
+                }
+                Ok(StorageDurabilityHandle(
+                    StorageDurabilityHandleKind::Immediate,
+                ))
+            }
+            WalDurabilityHandle::Pending { am_leader, slot } => {
+                // EveryWrite path: WAL entry is queued but not yet fsync'd.
+                // Store entries for post-durability memtable update in await_batch_durable.
+                Ok(StorageDurabilityHandle(
+                    StorageDurabilityHandleKind::Pending(PendingBatchHandle {
+                        am_leader,
+                        slot,
+                        realm_id: realm_id.clone(),
+                        entries: entries.to_vec(),
+                    }),
+                ))
+            }
+        }
+    }
+
+    fn await_batch_durable(&self, handle: StorageDurabilityHandle) -> Result<(), StorageError> {
+        let pending = match handle.0 {
+            StorageDurabilityHandleKind::Immediate => return Ok(()),
+            StorageDurabilityHandleKind::Pending(p) => p,
+        };
+
+        // Run the group-commit leader loop (or wait as a follower) until the
+        // WAL entry is covered by a sync_all.
+        let wal_result = self.wal.await_entry_durable(
+            WalDurabilityHandle::Pending {
+                am_leader: pending.am_leader,
+                slot: pending.slot,
+            },
+            || self.trigger_flush(),
+        );
+
+        // Apply entries to the memtable only after confirmed durability. On WAL
+        // failure we skip the memtable update; the WAL is fenced after a write
+        // fault, so callers that retry will see the fence error. On the next
+        // open, WAL replay restores the memtable from the last successfully
+        // committed record.
+        if wal_result.is_ok() {
+            self.active_memtable
+                .put_batch(&pending.realm_id, &pending.entries)?;
+            for (key, _) in &pending.entries {
+                self.hot_tier.invalidate(&pending.realm_id, key);
+            }
+            if self.active_memtable.should_flush() {
+                self.trigger_flush()?;
+            }
+        }
+
+        wal_result
+    }
+
+    // ── End split-commit API ──────────────────────────────────────────────────
 
     /// Atomic single-node check-and-write.
     ///

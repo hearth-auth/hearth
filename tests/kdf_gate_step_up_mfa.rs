@@ -134,9 +134,7 @@ async fn step_up_mfa_grant_is_shed_when_kdf_gate_is_saturated() {
         let _ = hearth::identity::gate()
             .run(move || {
                 let _ = tx.send(());
-                // AUDIT: justified-sleep: holds the only KDF permit so the
-                // test can verify step-up shedding while the permit is occupied
-                std::thread::sleep(Duration::from_millis(1500));
+                std::thread::sleep(Duration::from_millis(1500)); // AUDIT: justified-sleep: holds the only KDF permit so step-up shedding is observable
             })
             .await;
     });

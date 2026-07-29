@@ -2,13 +2,30 @@
 //!
 //! Answers the board's throughput questions for the identity hot path by
 //! driving the **real** engine operations in-process — no HTTP server, no axum,
-//! no tokio, no load generator in the loop — swept across 1/2/4/8/16 OS threads:
+//! no tokio, no load generator in the loop — swept across 1/2/4/8/16 OS threads
+//! (reads) and 1/4/16/64/128/256 blocking writers (session_create):
 //!
 //!   * `validate_token`  (hot: token-claims-cache hit; miss: full Ed25519 verify)
 //!   * `session_lookup`  (`get_session`; hot-tier hit vs forced miss)
 //!   * `user_lookup`     (`get_user`;    hot-tier hit vs forced miss)
 //!   * `permission_check`(`RbacEngine::resolve_permissions`, HEA-1770 cache)
 //!   * `session_create`  (`create_session`; WAL-`fsync` write path)
+//!
+//! ## Why read and write ladders differ (HEA-1949)
+//!
+//! Read ops are CPU-bound: scaling throughput tells us about lock contention,
+//! cache sharing, and NUMA effects, so we compare against physical core count.
+//!
+//! `session_create` is **I/O-bound**: each call blocks on one or more WAL
+//! `sync_all` calls.  A thread that is blocked on fsync consumes no CPU, so
+//! oversubscription is correct — not a measurement artifact.  The write sweep
+//! therefore uses a **higher concurrency ladder** ([1,4,16,64,128,256]) to
+//! drive group-commit coalescing past the point where CPU cores are the limit.
+//!
+//! The key engine-owned metric is the **coalescing efficiency**: what fraction
+//! of the device's available fsync budget is turned into committed ops.  The
+//! device fsync rate is recorded as a first-class field so runs on different
+//! hosts are comparable.
 //!
 //! ## Why in-process, not through the Goose/HTTP harness
 //!
@@ -39,13 +56,17 @@
 //!
 //! ## Output
 //!
-//! For every operation: aggregate ops/s and **per-core** ops/s at each thread
-//! count, the fitted **scaling exponent** (slope of `log(agg ops/s)` on
-//! `log(threads)`; 1.0 = perfect linear scaling, 0.0 = fully serialized), whether
-//! single-thread per-core throughput clears the **200 k ops/s/core** VISION §7.2
-//! bar, and a scales-vs-contends verdict from the 1→16-thread efficiency. Every
-//! figure is engine-level on the host it was measured on (printed in the header);
-//! a machine-readable JSON block follows the `===JSON===` marker for the artifact.
+//! For read ops: aggregate ops/s and **per-core** ops/s at each thread count,
+//! the fitted **scaling exponent** (slope of `log(agg ops/s)` on `log(threads)`;
+//! 1.0 = perfect linear scaling, 0.0 = fully serialized), whether single-thread
+//! per-core throughput clears the **200 k ops/s/core** VISION §7.2 bar, and a
+//! scales-vs-contends verdict from the 1→16-thread efficiency.
+//!
+//! For `session_create`: aggregate ops/s, fsyncs/write, the T×F/W perfect-
+//! coalescing ceiling (F = device fsync rate, W = WAL records/op = fsyncs/write
+//! at T=1), and the coalescing efficiency (fraction of the ceiling the engine
+//! actually achieves). The device fsync rate is measured directly (N sequential
+//! sync_all calls) and emitted as a first-class JSON field.
 //!
 //! Run:  `cargo run --release --example saturation_throughput`
 
@@ -60,7 +81,8 @@
     clippy::needless_range_loop
 )]
 
-use std::path::PathBuf;
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -74,15 +96,24 @@ use hearth::identity::{
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
-/// Thread counts swept for every operation (VISION §7.2 ladder).
+/// Thread counts swept for CPU-bound read operations (VISION §7.2 ladder).
 const THREADS: &[usize] = &[1, 2, 4, 8, 16];
+
+/// Thread counts swept for I/O-bound session_create.
+///
+/// Blocked-on-fsync threads consume no CPU, so oversubscription is correct.
+/// This ladder drives group-commit coalescing past the CPU-core ceiling.
+const WRITE_THREADS: &[usize] = &[1, 4, 16, 64, 128, 256];
 
 /// Wall-clock measurement window per (operation, thread-count) cell.
 const MEASURE: Duration = Duration::from_secs(2);
 
-/// Ops between deadline checks — amortizes `Instant::now()` over sub-µs reads
-/// without materially overshooting the window.
+/// Ops between deadline checks for read ops — amortizes `Instant::now()` over
+/// sub-µs reads without materially overshooting the measurement window.
 const BATCH: u64 = 64;
+
+/// Number of sequential sync_all calls used to calibrate the device fsync rate.
+const DEVICE_FSYNC_SAMPLES: u64 = 200;
 
 /// Distinct users seeded (user_lookup pool + token subjects).
 const USERS: usize = 1_000;
@@ -107,6 +138,9 @@ const HOT_CAPACITY: usize = 40_000;
 /// VISION §7.2 per-core throughput bar.
 const VISION_OPS_PER_CORE: f64 = 200_000.0;
 
+/// T4 aggregate throughput target.
+const T4_TARGET_OPS_S: f64 = 50_000.0;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cores = thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
     println!("HEA-1875 · C7 — Saturation-throughput benches (VISION §7.2)\n");
@@ -116,8 +150,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cores, MEASURE
     );
     println!("in-process engine drive — no HTTP / axum / tokio / load generator in the loop\n");
+    println!("read ladder:  {:?} threads  (CPU-bound ops)", THREADS);
+    println!(
+        "write ladder: {:?} threads  (I/O-bound, blocked-on-fsync oversubscription)\n",
+        WRITE_THREADS
+    );
 
     let fixture = Fixture::build()?;
+    println!(
+        "Device fsync rate: {:.1} fsyncs/s  ({} sequential sync_all calls on scratch file)\n",
+        fixture.device_fsyncs_s, DEVICE_FSYNC_SAMPLES
+    );
+
     let (results, write_result) = fixture.run_all();
 
     print_tables(&results, cores);
@@ -149,6 +193,8 @@ struct Fixture {
     miss_user_ids: Vec<UserId>,
     /// Random, never-inserted session ids (`session_lookup` miss).
     miss_session_ids: Vec<SessionId>,
+    /// Device fsync rate measured directly (fsyncs/s) on the same storage path.
+    device_fsyncs_s: f64,
     /// Kept alive for the lifetime of the run so the data dir is not reaped.
     _tmp: tempfile::TempDir,
 }
@@ -240,6 +286,11 @@ impl Fixture {
         let miss_user_ids: Vec<UserId> = (0..4_096).map(|_| UserId::generate()).collect();
         let miss_session_ids: Vec<SessionId> = (0..4_096).map(|_| SessionId::generate()).collect();
 
+        println!(
+            "measuring device fsync rate ({DEVICE_FSYNC_SAMPLES} sequential sync_all calls) …"
+        );
+        let device_fsyncs_s = measure_device_fsyncs_per_sec(tmp.path())?;
+
         let fixture = Self {
             engine,
             rbac: rbac_handle,
@@ -251,6 +302,7 @@ impl Fixture {
             miss_tokens,
             miss_user_ids,
             miss_session_ids,
+            device_fsyncs_s,
             _tmp: tmp,
         };
 
@@ -288,8 +340,8 @@ impl Fixture {
     /// Runs every operation's full thread sweep.
     ///
     /// Returns (read/check results, session_create write result).  The write
-    /// result carries extra WAL metrics (fsyncs/write, p99 latency) and is
-    /// printed separately.
+    /// result carries extra WAL metrics (fsyncs/write, coalescing ceiling and
+    /// efficiency, p99 latency) and is printed separately.
     fn run_all(&self) -> (Vec<OpResult>, WriteResult) {
         let read_results = vec![
             self.sweep_op("validate_token", "hot", |tid, n| {
@@ -334,7 +386,7 @@ impl Fixture {
         (read_results, write_result)
     }
 
-    /// Runs one operation across the whole thread ladder.
+    /// Runs one read/CPU-bound operation across the core-count ladder.
     fn sweep_op<F>(&self, op: &str, state: &str, body: F) -> OpResult
     where
         F: Fn(usize, u64) + Sync + Send + Copy,
@@ -347,9 +399,15 @@ impl Fixture {
         }
     }
 
-    /// session_create sweep: throughput + fsyncs/write + p99 latency.
+    /// session_create sweep: throughput + fsyncs/write + coalescing analysis +
+    /// p99 latency.
+    ///
+    /// Uses WRITE_THREADS (oversubscribed) rather than THREADS, because blocked-
+    /// on-fsync writers consume no CPU and the interesting metric is group-commit
+    /// coalescing efficiency vs. the device fsync ceiling.
     fn sweep_write_op(&self) -> WriteResult {
-        let write_points: Vec<WritePoint> = THREADS
+        // First pass: raw measurements.
+        let raw: Vec<(usize, u64, f64, f64, f64)> = WRITE_THREADS
             .iter()
             .map(|&threads| {
                 let sync_before = self.storage.wal_sync_count();
@@ -375,19 +433,86 @@ impl Fixture {
                     let idx = (latencies_ns.len() * 99 / 100).min(latencies_ns.len() - 1);
                     latencies_ns[idx] as f64 / 1_000.0
                 };
-                WritePoint {
-                    point,
+                (
+                    threads,
+                    point.ops,
+                    point.agg_ops_s,
                     fsyncs_per_write,
                     p99_us,
+                )
+            })
+            .collect();
+
+        // W = WAL syncs/op at T=1 (no coalescing possible with a single writer).
+        let w_per_op = raw.first().map_or(1.0, |r| r.3.max(f64::MIN_POSITIVE));
+        let f = self.device_fsyncs_s;
+
+        // Second pass: derive ceiling and coalescing efficiency.
+        let write_points: Vec<WritePoint> = raw
+            .into_iter()
+            .map(|(threads, ops, agg_ops_s, fsyncs_per_write, p99_us)| {
+                let elapsed_s = if agg_ops_s > 0.0 {
+                    ops as f64 / agg_ops_s
+                } else {
+                    0.0
+                };
+                let ceiling_ops_s = threads as f64 * f / w_per_op;
+                let coalescing_efficiency = if ceiling_ops_s > 0.0 {
+                    agg_ops_s / ceiling_ops_s
+                } else {
+                    0.0
+                };
+                WritePoint {
+                    point: Point {
+                        threads,
+                        ops,
+                        elapsed_s,
+                        agg_ops_s,
+                        per_core_ops_s: agg_ops_s / threads as f64,
+                    },
+                    fsyncs_per_write,
+                    p99_us,
+                    ceiling_ops_s,
+                    coalescing_efficiency,
                 }
             })
             .collect();
+
         WriteResult {
             op: "session_create".to_string(),
             state: "write".to_string(),
             write_points,
+            device_fsyncs_s: f,
+            w_per_op,
         }
     }
+}
+
+// ──────────────────────── device fsync calibration ─────────────────────────
+
+/// Measures the device's sequential fsync throughput by issuing
+/// `DEVICE_FSYNC_SAMPLES` sync_all calls on a scratch file in `dir`.
+///
+/// Uses the same storage device as the engine so the result is directly
+/// comparable to WAL fsync throughput observed during the write bench.
+fn measure_device_fsyncs_per_sec(dir: &Path) -> std::io::Result<f64> {
+    let path = dir.join("_fsync_probe");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    // Initial write + sync to place the file on disk.
+    f.write_all(b"x")?;
+    f.sync_all()?;
+    let t0 = Instant::now();
+    for _ in 0..DEVICE_FSYNC_SAMPLES {
+        f.write_all(b"x")?;
+        f.sync_all()?;
+    }
+    let elapsed = t0.elapsed();
+    let _ = std::fs::remove_file(path);
+    Ok(DEVICE_FSYNC_SAMPLES as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE))
 }
 
 // ───────────────────────────── measurement core ────────────────────────────
@@ -401,16 +526,20 @@ struct Point {
     per_core_ops_s: f64,
 }
 
-/// Extended point for the WAL write path, adding fsync and latency metrics.
+/// Extended point for the WAL write path, adding fsync and coalescing metrics.
 struct WritePoint {
     point: Point,
     /// fsyncs / write — < 1.0 demonstrates group-commit batching.
     fsyncs_per_write: f64,
     /// p99 single-op latency in microseconds (sampled from all threads).
     p99_us: f64,
+    /// T × F / W — the perfect-coalescing throughput ceiling at this concurrency.
+    ceiling_ops_s: f64,
+    /// measured ops/s ÷ ceiling — fraction of the device fsync budget captured.
+    coalescing_efficiency: f64,
 }
 
-/// One operation's full sweep across the thread ladder.
+/// One read operation's full sweep across the thread ladder.
 struct OpResult {
     op: String,
     state: String,
@@ -422,6 +551,10 @@ struct WriteResult {
     op: String,
     state: String,
     write_points: Vec<WritePoint>,
+    /// Device fsync rate measured directly (fsyncs/s).
+    device_fsyncs_s: f64,
+    /// WAL syncs per op at T=1 (= W in the T×F/W ceiling formula).
+    w_per_op: f64,
 }
 
 impl OpResult {
@@ -499,6 +632,16 @@ impl WriteResult {
             top / base
         }
     }
+
+    /// Concurrency required to reach T4_TARGET_OPS_S with perfect coalescing.
+    fn t4_required_concurrency(&self) -> f64 {
+        T4_TARGET_OPS_S * self.w_per_op / self.device_fsyncs_s.max(f64::MIN_POSITIVE)
+    }
+
+    /// Ceiling ops/s at the top of the write ladder (T = WRITE_THREADS.last()).
+    fn top_ceiling_ops_s(&self) -> f64 {
+        self.write_points.last().map_or(0.0, |wp| wp.ceiling_ops_s)
+    }
 }
 
 /// Runs `body` on `threads` threads for [`MEASURE`], returning aggregate and
@@ -559,7 +702,7 @@ where
 /// Each op is timed individually (no `BATCH` amortisation) so the returned
 /// vec can be sorted to compute percentiles.  Memory cost: each entry is 8 B,
 /// and a 2-second window at the expected ~1k–10k ops/s/thread is O(tens of
-/// thousands) of entries per thread — well within bounds.
+/// thousands) of entries per thread — well within bounds even at T=256.
 fn measure_write_cell<F>(threads: usize, body: F) -> (Point, Vec<u64>)
 where
     F: Fn(usize, u64) + Sync + Send + Copy,
@@ -580,7 +723,7 @@ where
                         body(tid, n);
                         lats.push(op_start.elapsed().as_nanos() as u64);
                         n += 1;
-                        if n % BATCH == 0 && Instant::now() >= deadline {
+                        if Instant::now() >= deadline {
                             break;
                         }
                     }
@@ -662,54 +805,127 @@ fn print_tables(results: &[OpResult], cores: usize) {
 }
 
 fn print_write_table(wr: &WriteResult) {
-    println!("── {} (group commit metrics) ──", wr.label());
     println!(
-        "threads | aggregate ops/s | per-core ops/s | fsyncs/write | p99 latency µs | scaling eff"
+        "── {} (I/O-bound: oversubscribed write ladder + coalescing analysis) ──",
+        wr.label()
     );
     println!(
-        "--------+-----------------+----------------+--------------+----------------+------------"
+        "Device fsync rate F = {:.1} fsyncs/s  |  W = {:.3} WAL syncs/op (at T=1)  |  \
+         T×F/W ceiling formula",
+        wr.device_fsyncs_s, wr.w_per_op
     );
-    let base = wr
-        .write_points
-        .first()
-        .map_or(0.0, |wp| wp.point.per_core_ops_s);
+    println!();
+    println!(
+        "threads | agg ops/s | fsyncs/write | batch | T×F/W ceiling | coalescing eff | p99 µs"
+    );
+    println!(
+        "--------+-----------+--------------+-------+---------------+----------------+-------"
+    );
     for wp in &wr.write_points {
-        let eff = if base > 0.0 {
-            wp.point.per_core_ops_s / base
+        // achieved batch = mean ops coalesced per fsync = 1 / fsyncs_per_write
+        let batch = if wp.fsyncs_per_write > 0.0 {
+            1.0 / wp.fsyncs_per_write
         } else {
             0.0
         };
         println!(
-            "{:>7} | {:>15.0} | {:>14.0} | {:>12.4} | {:>14.1} | {:>10.2}×",
+            "{:>7} | {:>9.0} | {:>12.3} | {:>5.2} | {:>13.0} | {:>13.1}%  | {:>7.1}",
             wp.point.threads,
             wp.point.agg_ops_s,
-            wp.point.per_core_ops_s,
             wp.fsyncs_per_write,
+            batch,
+            wp.ceiling_ops_s,
+            wp.coalescing_efficiency * 100.0,
             wp.p99_us,
-            eff
         );
     }
+    println!();
+
     let (slope, r2) = wr.scaling_exponent();
     println!(
-        "  scaling exponent = {slope:+.3} (R² = {r2:.3})  [1.0 = linear, 0.0 = serialized] → {}",
+        "  scaling exponent = {slope:+.3} (R² = {r2:.3}) → {}",
         scaling_verdict(slope, wr.efficiency())
     );
-    if let (Some(wp), Some(t_max)) = (wr.write_points.first(), wr.write_points.last()) {
+
+    if let (Some(wp1), Some(wp_top)) = (wr.write_points.first(), wr.write_points.last()) {
         println!(
-            "  single-thread: {:.0} ops/s, p99 = {:.1} µs, fsyncs/write = {:.4}",
-            wp.point.per_core_ops_s, wp.p99_us, wp.fsyncs_per_write
+            "  T=1:   {:.0} ops/s, p99 = {:.1} ms, fsyncs/write = {:.3}, \
+             ceiling = {:.0}, efficiency = {:.1}%",
+            wp1.point.agg_ops_s,
+            wp1.p99_us / 1_000.0,
+            wp1.fsyncs_per_write,
+            wp1.ceiling_ops_s,
+            wp1.coalescing_efficiency * 100.0,
         );
         println!(
-            "  {}-thread:      {:.0} ops/s agg, p99 = {:.1} µs, fsyncs/write = {:.4}",
-            t_max.point.threads, t_max.point.agg_ops_s, t_max.p99_us, t_max.fsyncs_per_write
+            "  T={}: {:.0} ops/s agg, p99 = {:.1} ms, fsyncs/write = {:.3}, \
+             ceiling = {:.0}, efficiency = {:.1}%",
+            wp_top.point.threads,
+            wp_top.point.agg_ops_s,
+            wp_top.p99_us / 1_000.0,
+            wp_top.fsyncs_per_write,
+            wp_top.ceiling_ops_s,
+            wp_top.coalescing_efficiency * 100.0,
         );
     }
+
+    let t4_t = wr.t4_required_concurrency();
+    let top_ceil = wr.top_ceiling_ops_s();
+    println!();
+    println!("  ── T4 (50,000 ops/s) feasibility at this device ──");
     println!(
-        "  group-commit target: fsyncs/write << 1.0 at concurrency ≥ 8 → {}",
+        "  Formula: T_needed = ⌈{:.0} × W / F⌉ = ⌈{:.0} × {:.3} / {:.1}⌉ = {:.0} writers",
+        T4_TARGET_OPS_S,
+        T4_TARGET_OPS_S,
+        wr.w_per_op,
+        wr.device_fsyncs_s,
+        t4_t.ceil()
+    );
+    if top_ceil >= T4_TARGET_OPS_S {
+        println!(
+            "  Perfect coalescing at T={} yields a ceiling of {:.0} ops/s ≥ 50,000 → \
+             T4 is theoretically reachable at this device if the engine fully coalesces.",
+            WRITE_THREADS.last().unwrap_or(&256),
+            top_ceil
+        );
+        if let Some(wp_top) = wr.write_points.last() {
+            if wp_top.point.agg_ops_s >= T4_TARGET_OPS_S {
+                println!(
+                    "  ✓ Measured {:.0} ops/s at T={} — T4 target MET.",
+                    wp_top.point.agg_ops_s, wp_top.point.threads
+                );
+            } else {
+                println!(
+                    "  Measured {:.0} ops/s at T={} ({:.1}% of ceiling) — \
+                     T4 target NOT yet met; gap = {:.0} ops/s attributable to incomplete coalescing.",
+                    wp_top.point.agg_ops_s,
+                    wp_top.point.threads,
+                    wp_top.coalescing_efficiency * 100.0,
+                    T4_TARGET_OPS_S - wp_top.point.agg_ops_s
+                );
+            }
+        }
+    } else {
+        println!(
+            "  Even at T={}, the perfect-coalescing ceiling is {:.0} ops/s < 50,000.",
+            WRITE_THREADS.last().unwrap_or(&256),
+            top_ceil
+        );
+        println!(
+            "  T4 CANNOT be passed at this device ({:.1} fsyncs/s) with W={:.3} at \
+             the measured concurrency range.  T_needed ≈ {:.0}.",
+            wr.device_fsyncs_s,
+            wr.w_per_op,
+            t4_t.ceil()
+        );
+    }
+    println!();
+    println!(
+        "  group-commit target: fsyncs/write << 1.0 at concurrency ≥ 16 → {}",
         if wr
             .write_points
             .iter()
-            .any(|wp| wp.point.threads >= 8 && wp.fsyncs_per_write < 0.5)
+            .any(|wp| wp.point.threads >= 16 && wp.fsyncs_per_write < 0.5)
         {
             "MET"
         } else {
@@ -721,8 +937,12 @@ fn print_write_table(wr: &WriteResult) {
 
 fn print_summary(results: &[OpResult], wr: &WriteResult) {
     println!("═══ Summary ═══\n");
-    println!("op [state]              | 1T/core ops/s | 16T agg ops/s | scaling | eff | 200k/core | verdict");
-    println!("------------------------+---------------+---------------+---------+-----+-----------+--------");
+    println!(
+        "op [state]              | 1T/core ops/s | top-T agg ops/s | scaling | eff | 200k/core | verdict"
+    );
+    println!(
+        "------------------------+---------------+-----------------+---------+-----+-----------+--------"
+    );
     for r in results {
         let (slope, _) = r.scaling_exponent();
         let top = r
@@ -731,7 +951,7 @@ fn print_summary(results: &[OpResult], wr: &WriteResult) {
             .max_by_key(|p| p.threads)
             .map_or(0.0, |p| p.agg_ops_s);
         println!(
-            "{:<23} | {:>13.0} | {:>13.0} | {:>+7.3} | {:>3.2} | {:>9} | {}",
+            "{:<23} | {:>13.0} | {:>15.0} | {:>+7.3} | {:>3.2} | {:>9} | {}",
             r.label(),
             r.point(1).map_or(0.0, |p| p.per_core_ops_s),
             top,
@@ -752,13 +972,14 @@ fn print_summary(results: &[OpResult], wr: &WriteResult) {
         .iter()
         .max_by_key(|wp| wp.point.threads)
         .map_or(0.0, |wp| wp.point.agg_ops_s);
-    let t8_fsyncs = wr
+    let top_threads = WRITE_THREADS.last().copied().unwrap_or(0);
+    let top_eff = wr
         .write_points
-        .iter()
-        .find(|wp| wp.point.threads >= 8)
-        .map_or(f64::NAN, |wp| wp.fsyncs_per_write);
+        .last()
+        .map_or(0.0, |wp| wp.coalescing_efficiency);
     println!(
-        "{:<23} | {:>13.0} | {:>13.0} | {:>+7.3} | {:>3.2} | {:>9} | {} (fsyncs/w@8T={:.3})",
+        "{:<23} | {:>13.0} | {:>15.0} | {:>+7.3} | {:>3.2} | {:>9} | {} \
+         (T={}, coalesce_eff={:.1}%)",
         wr.label(),
         wr.write_points
             .first()
@@ -768,18 +989,33 @@ fn print_summary(results: &[OpResult], wr: &WriteResult) {
         wr.efficiency(),
         "n/a",
         scaling_verdict(slope, wr.efficiency()),
-        t8_fsyncs
+        top_threads,
+        top_eff * 100.0,
     );
     println!();
+    println!(
+        "Read ops: CPU-bound, measured on {}-core core-count ladder {:?}.",
+        thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
+        THREADS
+    );
+    println!(
+        "Write op: I/O-bound (WAL fsync), measured on write ladder {:?}.",
+        WRITE_THREADS
+    );
     println!(
         "Engine-cost floor only. The HTTP/axum/tokio delta on top is NOT-MEASURABLE in this\n\
          environment (HEA-1871 C3 / HEA-1876 C8: the generator, not the server, is the ceiling).\n\
          Reads are lock-free hot-path (epoch-reclaimed, ArcSwap caches) and are expected to scale;\n\
-         session_create is WAL-fsync + group-commit (fsyncs/write drops with concurrency)."
+         session_create is WAL-fsync + group-commit (fsyncs/write drops with concurrency).\n\
+         Device F = {:.1} fsyncs/s; W = {:.3} WAL syncs/op; T4 ceiling at T={}: {:.0} ops/s.",
+        wr.device_fsyncs_s,
+        wr.w_per_op,
+        top_threads,
+        wr.top_ceiling_ops_s()
     );
 }
 
-/// Scales-vs-contends verdict from the fitted exponent and 1→16T efficiency.
+/// Scales-vs-contends verdict from the fitted exponent and efficiency.
 fn scaling_verdict(slope: f64, efficiency: f64) -> &'static str {
     if slope >= 0.85 && efficiency >= 0.80 {
         "SCALES (near-linear)"
@@ -829,7 +1065,7 @@ fn emit_json(results: &[OpResult], wr: &WriteResult, cores: usize) {
                 .collect();
             format!(
                 "{{\"op\":\"{}\",\"state\":\"{}\",\"scaling_exponent\":{:.4},\
-                 \"scaling_r2\":{:.4},\"efficiency_1_to_16\":{:.4},\
+                 \"scaling_r2\":{:.4},\"efficiency_1_to_top\":{:.4},\
                  \"meets_200k_single_core\":{},\"points\":[{}]}}",
                 r.op,
                 r.state,
@@ -842,42 +1078,73 @@ fn emit_json(results: &[OpResult], wr: &WriteResult, cores: usize) {
         })
         .collect();
 
-    // Append the write result with group-commit metrics.
+    // Write result with group-commit + coalescing metrics.
     let (wslope, wr2) = wr.scaling_exponent();
     let wpts: Vec<String> = wr
         .write_points
         .iter()
         .map(|wp| {
+            let batch = if wp.fsyncs_per_write > 0.0 {
+                1.0 / wp.fsyncs_per_write
+            } else {
+                0.0
+            };
             format!(
                 "{{\"threads\":{},\"ops\":{},\"elapsed_s\":{:.4},\
                  \"agg_ops_s\":{:.1},\"per_core_ops_s\":{:.1},\
-                 \"fsyncs_per_write\":{:.6},\"p99_us\":{:.2}}}",
+                 \"fsyncs_per_write\":{:.6},\"p99_us\":{:.2},\
+                 \"ceiling_ops_s\":{:.1},\"coalescing_efficiency\":{:.6},\
+                 \"coalescing_batch\":{:.4}}}",
                 wp.point.threads,
                 wp.point.ops,
                 wp.point.elapsed_s,
                 wp.point.agg_ops_s,
                 wp.point.per_core_ops_s,
                 wp.fsyncs_per_write,
-                wp.p99_us
+                wp.p99_us,
+                wp.ceiling_ops_s,
+                wp.coalescing_efficiency,
+                batch,
             )
         })
         .collect();
+
+    let t4_t = wr.t4_required_concurrency();
+    let top_ceil = wr.top_ceiling_ops_s();
+    let top_measured = wr.write_points.last().map_or(0.0, |wp| wp.point.agg_ops_s);
+    let t4_ceiling_met = top_ceil >= T4_TARGET_OPS_S;
+    let t4_met = top_measured >= T4_TARGET_OPS_S;
+
     ops.push(format!(
         "{{\"op\":\"{}\",\"state\":\"{}\",\"scaling_exponent\":{:.4},\
-         \"scaling_r2\":{:.4},\"efficiency_1_to_16\":{:.4},\
-         \"meets_200k_single_core\":false,\"points\":[{}]}}",
+         \"scaling_r2\":{:.4},\"efficiency_1_to_top\":{:.4},\
+         \"meets_200k_single_core\":false,\
+         \"device_fsyncs_s\":{:.2},\"w_per_op\":{:.6},\
+         \"t4_target_ops_s\":{},\"t4_required_concurrency\":{:.1},\
+         \"t4_ceiling_met_at_top\":{},\"t4_measured_met\":{},\
+         \"points\":[{}]}}",
         wr.op,
         wr.state,
         wslope,
         wr2,
         wr.efficiency(),
+        wr.device_fsyncs_s,
+        wr.w_per_op,
+        T4_TARGET_OPS_S as u64,
+        t4_t,
+        t4_ceiling_met,
+        t4_met,
         wpts.join(",")
     ));
 
     println!(
-        "{{\"child_issue\":\"HEA-1875\",\"host_logical_cores\":{},\"measure_secs\":{},\
+        "{{\"child_issue\":\"HEA-1949\",\"parent_issue\":\"HEA-1875\",\
+         \"host_logical_cores\":{},\"measure_secs\":{},\
          \"users\":{},\"warm_sessions\":{},\"miss_sessions\":{},\
-         \"vision_ops_per_core\":{},\"http_split\":\"NOT-MEASURABLE (HEA-1871/HEA-1876)\",\
+         \"vision_ops_per_core\":{},\
+         \"read_threads\":{:?},\"write_threads\":{:?},\
+         \"device_fsyncs_s\":{:.2},\"device_fsync_samples\":{},\
+         \"http_split\":\"NOT-MEASURABLE (HEA-1871/HEA-1876)\",\
          \"operations\":[{}]}}",
         cores,
         MEASURE.as_secs(),
@@ -885,6 +1152,10 @@ fn emit_json(results: &[OpResult], wr: &WriteResult, cores: usize) {
         SESSIONS,
         MISS_SESSIONS,
         VISION_OPS_PER_CORE,
+        THREADS,
+        WRITE_THREADS,
+        wr.device_fsyncs_s,
+        DEVICE_FSYNC_SAMPLES,
         ops.join(",")
     );
 }

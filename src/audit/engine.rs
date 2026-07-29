@@ -459,12 +459,25 @@ impl EmbeddedAuditEngine {
 
 impl AuditEngine for EmbeddedAuditEngine {
     fn append(&self, request: &CreateAuditEvent) -> Result<AuditEvent, AuditError> {
-        // Acquire the per-realm chain lock BEFORE reading the last hash. The
-        // chain's integrity guarantee ("every event's prev_hash is the
-        // previous event's integrity_hash") is only preserved if no other
-        // append can interleave between our read of last_hash and our
-        // storage write. The lock doubles as a cache for the last hash
-        // to avoid a full O(n) scan per append after the first.
+        // ── Phase 1: hash-chain RMW + WAL enqueue (under chain lock) ─────────
+        //
+        // The chain lock serves two purposes:
+        //
+        // 1. Serialises the hash-chain read-modify-write (read `last_hash` →
+        //    compute new HMAC → produce `new_head`) so no two events can race
+        //    on the same `prev_hash`.
+        //
+        // 2. Serialises the WAL *enqueue* so events reach the WAL queue in the
+        //    same order they appear in the logical chain. Releasing the lock
+        //    before enqueue would let event N+1 reach the WAL ahead of event N,
+        //    breaking chain recovery (a persisted head referencing an event that
+        //    is not yet in the log).
+        //
+        // The lock does NOT need to cover the WAL fsync wait. Releasing it
+        // before `await_batch_durable` allows concurrent appenders to enqueue
+        // within the first writer's fsync window, enabling group-commit
+        // coalescing (HEA-1948).
+
         let chain_lock = self.realm_chain_lock(&request.realm_id);
         let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
 
@@ -483,7 +496,6 @@ impl AuditEngine for EmbeddedAuditEngine {
         let event_id = AuditEventId::generate();
         let timestamp = self.clock.now();
 
-        // Build the event (integrity_hash will be filled after computation)
         let mut event = AuditEvent {
             id: event_id,
             realm_id: request.realm_id.clone(),
@@ -496,19 +508,10 @@ impl AuditEngine for EmbeddedAuditEngine {
             integrity_hash: String::new(),
         };
 
-        // Compute and set HMAC-SHA256 integrity hash.
         event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
 
-        // Serialise the complete event using compact binary encoding (HEA-1899).
         let value = encode_event(&event)?;
 
-        // Single atomic write: primary + actor index + action index + the
-        // updated signed head all land together, or not at all. `put_batch`
-        // guarantees that a crash mid-write can never leave a "half-indexed"
-        // event or a head that disagrees with the persisted events. This is
-        // what makes the hash chain recoverable and tail-truncation-detectable:
-        // every persisted event is fully observable through every query path,
-        // and the head always reflects exactly the events on disk.
         let primary_key = keys::encode_event_key(timestamp, seq, &event.id);
         let actor_key = keys::encode_actor_index(&request.actor, timestamp, &event.id);
         let action_key = keys::encode_action_index(request.action.as_str(), timestamp, &event.id);
@@ -522,7 +525,20 @@ impl AuditEngine for EmbeddedAuditEngine {
         );
         let head_value = Self::head_bytes(&new_head)?;
 
-        self.storage.put_batch(
+        // Optimistically advance the cache NOW, while holding the lock, so the
+        // next appender can chain off `new_head.last_hash` immediately after
+        // acquiring the lock — without waiting for our fsync to complete.
+        //
+        // If the durability wait fails below, we invalidate the cache so the
+        // next append re-reads the persisted head (which will not include this
+        // event since the WAL write failed).
+        *cached = Some(new_head);
+
+        // Enqueue the WAL batch UNDER the chain lock to guarantee that the WAL
+        // record order matches the logical chain order. The enqueue does NOT
+        // block for the fsync; it only pushes the entry to the group-commit
+        // queue and returns a handle.
+        let durable_handle = match self.storage.enqueue_batch(
             &request.realm_id,
             &[
                 (primary_key.clone(), value),
@@ -530,12 +546,36 @@ impl AuditEngine for EmbeddedAuditEngine {
                 (action_key, primary_key),
                 (keys::chain_head_key(), head_value),
             ],
-        )?;
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                // Enqueue failed (e.g. WAL fenced). Rollback the optimistic
+                // cache update so the next append does not chain off a head
+                // that was never persisted.
+                *cached = None;
+                return Err(AuditError::from(e));
+            }
+        };
 
-        // Only advance the cached head after the storage write succeeds. On
-        // error we leave the cache unchanged so the next append will re-read
-        // the persisted head and recover from whatever state actually landed.
-        *cached = Some(new_head);
+        // ── Phase 2: fsync wait (OUTSIDE the chain lock) ─────────────────────
+        //
+        // Drop the chain lock before blocking. Concurrent appenders can now
+        // acquire it, enqueue their events, and pipeline into the same
+        // group-commit batch as this write — reducing `fsyncs_per_write` from
+        // ~1.0 to ~1/N under N-way concurrent load (HEA-1948).
+        drop(cached);
+
+        let durable_result = self.storage.await_batch_durable(durable_handle);
+
+        if durable_result.is_err() {
+            // The WAL fsync failed. Invalidate the cache so the next append
+            // reloads from the last successfully persisted head rather than
+            // chaining off a head that may not be on disk.
+            let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
+            *cached = None;
+        }
+
+        durable_result?;
 
         Ok(event)
     }

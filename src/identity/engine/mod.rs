@@ -2517,6 +2517,7 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateUserRequest,
         status: UserStatus,
+        audit_ctx: Option<&AuditContext>,
     ) -> Result<User, IdentityError> {
         let email = validation::validate_email(&request.email)?;
         let first_name = validation::validate_name_part(&request.first_name, "First name")?;
@@ -2617,7 +2618,7 @@ impl EmbeddedIdentityEngine {
 
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx,
             AuditAction::UserCreated,
             "user",
             &user_id.as_uuid().to_string(),
@@ -4384,6 +4385,407 @@ impl EmbeddedIdentityEngine {
     }
 }
 
+// Private helpers that share the full update/delete logic with audit-context
+// parametrisation, so both the unattributed (actor="system") and attributed
+// (real admin actor) paths avoid code duplication.
+impl EmbeddedIdentityEngine {
+    #[allow(clippy::too_many_lines)]
+    fn update_user_impl(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        request: &UpdateUserRequest,
+        audit_ctx: Option<&AuditContext>,
+    ) -> Result<User, IdentityError> {
+        self.require_active_realm(realm_id)?;
+
+        // 1. Load existing user
+        let mut user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+
+        let old_email = user.email().to_string();
+        let mut email_changed = false;
+
+        // 2. Apply email change if requested
+        if let Some(ref new_email) = request.email {
+            let normalized = validation::validate_email(new_email)?;
+
+            if normalized != old_email {
+                // Check uniqueness of new email
+                let new_email_key = keys::encode_user_email(&normalized);
+                let existing = self
+                    .storage
+                    .get(realm_id, &new_email_key)
+                    .map_err(Self::storage_err)?;
+                if existing.is_some() {
+                    return Err(IdentityError::DuplicateEmail);
+                }
+
+                // Remove old email index
+                let old_email_key = keys::encode_user_email(&old_email);
+                self.storage
+                    .delete(realm_id, &old_email_key)
+                    .map_err(Self::storage_err)?;
+
+                // Write new email index (16 raw UUID bytes).
+                let user_id_bytes = keys::encode_user_id_value(user_id);
+                self.storage
+                    .put(realm_id, &new_email_key, &user_id_bytes)
+                    .map_err(Self::storage_err)?;
+
+                user.set_email(normalized);
+                email_changed = true;
+            }
+        }
+
+        // 3. Apply display name change if requested
+        if let Some(ref new_name) = request.display_name {
+            let normalized = validation::validate_display_name(new_name)?;
+            user.set_display_name(normalized);
+        }
+
+        // 3a. Apply first_name change if requested
+        if let Some(ref new_first) = request.first_name {
+            let normalized = validation::validate_name_part(new_first, "First name")?;
+            user.set_first_name(normalized);
+        }
+
+        // 3b. Apply last_name change if requested
+        if let Some(ref new_last) = request.last_name {
+            let normalized = validation::validate_name_part(new_last, "Last name")?;
+            user.set_last_name(normalized);
+        }
+
+        // 4. Apply status change if requested
+        let status_disabled = if let Some(new_status) = request.status {
+            let prev = user.status();
+            user.set_status(new_status);
+            prev != crate::identity::types::UserStatus::Disabled
+                && new_status == crate::identity::types::UserStatus::Disabled
+        } else {
+            false
+        };
+
+        // 4a. Replace attributes map if requested.
+        if let Some(attributes) = &request.attributes {
+            let user_attr_defs = self
+                .get_realm(realm_id)?
+                .and_then(|r| r.config().attribute_definitions.clone())
+                .map(|d| d.users);
+            validation::validate_attributes(attributes, user_attr_defs.as_deref())?;
+            user.set_attributes(attributes.clone());
+        }
+
+        // 4b. Replace required actions if requested.
+        if let Some(actions) = request.required_actions.clone() {
+            user.set_required_actions(actions);
+        }
+
+        // 4c. Apply phone_number change if requested.
+        if let Some(ref phone) = request.phone_number {
+            user.set_phone_number(phone.clone());
+        }
+
+        // 4d. Apply phone_verified change if requested.
+        if let Some(verified) = request.phone_verified {
+            user.set_phone_verified(verified);
+        }
+
+        // 4e. Apply email_otp_enabled change if requested.
+        if let Some(enabled) = request.email_otp_enabled {
+            user.set_email_otp_enabled(enabled);
+        }
+
+        // 5. Update timestamp
+        user.set_updated_at(self.clock.now());
+
+        // 6. Write updated record
+        let user_bytes = Self::serialize_user(&user)?;
+        let id_key = keys::encode_user_id(user_id);
+        self.storage
+            .put(realm_id, &id_key, &user_bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            audit_ctx,
+            AuditAction::UserUpdated,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        // A-42: Email address change is a security event — an attacker who
+        // hijacks the new address could receive password-reset emails.  Revoke
+        // all existing sessions so stale holders must re-authenticate.
+        if email_changed {
+            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+                tracing::warn!(
+                    user_id = %user_id.as_uuid(),
+                    error = %e,
+                    "revoke_all_user_sessions failed on email change"
+                );
+            }
+        }
+
+        // Security: disabling a user must immediately invalidate all existing
+        // sessions so that active access tokens cannot be used past revocation.
+        // Access tokens embed claims at issuance and are not re-checked on the
+        // hot path, so revocation is the only mechanism to enforce a disable.
+        if status_disabled {
+            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+                tracing::warn!(
+                    user_id = %user_id.as_uuid(),
+                    error = %e,
+                    "revoke_all_user_sessions failed on user disable"
+                );
+            }
+        }
+
+        Ok(user)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn delete_user_impl(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        audit_ctx: Option<&AuditContext>,
+    ) -> Result<(), IdentityError> {
+        // 1. Load user to get email for index cleanup
+        let user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+
+        // 2. Delete primary record
+        let id_key = keys::encode_user_id(user_id);
+        self.storage
+            .delete(realm_id, &id_key)
+            .map_err(Self::storage_err)?;
+
+        // 3. Delete email index
+        let email_key = keys::encode_user_email(user.email());
+        self.storage
+            .delete(realm_id, &email_key)
+            .map_err(Self::storage_err)?;
+
+        // A-20: write a 90-day reservation tombstone so the deleted email
+        // cannot be immediately re-registered by another actor.
+        let now_micros = self.clock.now().as_micros();
+        let reservation = StoredEmailReservation {
+            reserved_at_micros: now_micros,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&reservation) {
+            let reserved_key = keys::encode_email_reserved(user.email());
+            let _ = self.storage.put(realm_id, &reserved_key, &bytes);
+        }
+
+        // 4. Delete credential (if any — best effort, ignore not-found)
+        let cred_key = keys::encode_credential_key(user_id);
+        self.storage
+            .delete(realm_id, &cred_key)
+            .map_err(Self::storage_err)?;
+
+        // 4b. Delete MFA state (if any — best effort)
+        let mfa_key = keys::encode_mfa_totp_key(user_id);
+        self.storage
+            .delete(realm_id, &mfa_key)
+            .map_err(Self::storage_err)?;
+
+        // 4c. Delete all WebAuthn credentials + discoverable index entries
+        let webauthn_prefix = keys::encode_webauthn_credentials_prefix(user_id);
+        let webauthn_end = keys::prefix_end(&webauthn_prefix);
+        let webauthn_entries = self
+            .storage
+            .scan(realm_id, &webauthn_prefix, &webauthn_end)
+            .map_err(Self::storage_err)?;
+
+        for entry in &webauthn_entries {
+            // If discoverable, delete the discoverable index entry
+            if let Ok(stored) = serde_json::from_slice::<StoredWebAuthnCredential>(&entry.value) {
+                if stored.discoverable {
+                    let disc_key = keys::encode_webauthn_discoverable(&stored.credential_id_b64);
+                    self.storage
+                        .delete(realm_id, &disc_key)
+                        .map_err(Self::storage_err)?;
+                }
+            }
+            // Delete the credential itself
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 5. Delete all sessions for this user
+        let session_prefix = keys::encode_user_sessions_prefix(user_id);
+        let session_end = keys::prefix_end(&session_prefix);
+        let session_entries = self
+            .storage
+            .scan(realm_id, &session_prefix, &session_end)
+            .map_err(Self::storage_err)?;
+
+        for entry in &session_entries {
+            // Extract session UUID from the user-session index key
+            // Key format: "ses:user:{user_uuid}:{session_uuid}"
+            let key_str =
+                std::str::from_utf8(&entry.key).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if let Some(session_uuid_str) = key_str.rsplit(':').next() {
+                if let Ok(uuid) = uuid::Uuid::parse_str(session_uuid_str) {
+                    let session_id = SessionId::new(uuid);
+                    let session_key = keys::encode_session_id(&session_id);
+                    self.storage
+                        .delete(realm_id, &session_key)
+                        .map_err(Self::storage_err)?;
+                    // Evict from in-process cache so subsequent get_session
+                    // calls see the deletion rather than a stale cache hit.
+                    self.session_cache_evict(realm_id, &session_id);
+                }
+            }
+
+            // Delete the user-session index entry itself
+            // The scan returns keys without realm prefix, so re-use entry.key
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 6. Delete all organization memberships for this user
+        let org_membership_prefix = keys::membership_by_user_prefix(user_id);
+        let org_membership_end = keys::prefix_end(&org_membership_prefix);
+        let org_memberships = self
+            .storage
+            .scan(realm_id, &org_membership_prefix, &org_membership_end)
+            .map_err(Self::storage_err)?;
+
+        for entry in &org_memberships {
+            if let Ok(membership) = serde_json::from_slice::<OrganizationMembership>(&entry.value) {
+                // Delete forward index (org → user)
+                let fwd_key = keys::encode_membership_by_org(membership.org_id(), user_id);
+                self.storage
+                    .delete(realm_id, &fwd_key)
+                    .map_err(Self::storage_err)?;
+            }
+            // Delete reverse index entry (user → org)
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 7. Cascade: scrub all OAuth consent records for this user.
+        let consent_prefix = keys::encode_consent_prefix_for_user(user_id);
+        let consent_end = keys::prefix_end(&consent_prefix);
+        let consent_entries = self
+            .storage
+            .scan(realm_id, &consent_prefix, &consent_end)
+            .map_err(Self::storage_err)?;
+        for entry in &consent_entries {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 8. Cascade: scrub all federated external-identity links for
+        //    this user. Each forward index entry holds the external_sub
+        //    string as its value — we use it to compute the matching
+        //    reverse `fed:ext:{idp_id}:{external_sub}` key and delete
+        //    both in one pass. A user must be able to sign up freshly
+        //    via the same external identity after deletion, so both
+        //    directions MUST go.
+        let fed_fwd_prefix = keys::encode_federation_ext_fwd_prefix_for_user(user_id);
+        let fed_fwd_end = keys::prefix_end(&fed_fwd_prefix);
+        let fed_fwd_entries = self
+            .storage
+            .scan(realm_id, &fed_fwd_prefix, &fed_fwd_end)
+            .map_err(Self::storage_err)?;
+        for entry in &fed_fwd_entries {
+            // Key format: fed:ext_fwd:{user_uuid}:{idp_uuid}
+            let key_str = std::str::from_utf8(&entry.key).unwrap_or("");
+            if let Some(idp_uuid_str) = key_str.rsplit(':').next() {
+                if let Ok(idp_uuid) = uuid::Uuid::parse_str(idp_uuid_str) {
+                    let idp_id = crate::core::IdpId::new(idp_uuid);
+                    let external_sub = std::str::from_utf8(&entry.value).unwrap_or("");
+                    if !external_sub.is_empty() {
+                        let reverse_key = keys::encode_federation_ext_key(&idp_id, external_sub);
+                        self.storage
+                            .delete(realm_id, &reverse_key)
+                            .map_err(Self::storage_err)?;
+                    }
+                }
+            }
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 10. Cascade SCIM externalId mapping. Forward index holds the
+        //     external_id string as its value; use it to resolve the
+        //     reverse key. Both directions MUST go so a future SCIM POST
+        //     with the same externalId can reprovision.
+        let scim_fwd_key = keys::encode_scim_ext_user_fwd_key(user_id);
+        if let Some(ext_bytes) = self
+            .storage
+            .get(realm_id, &scim_fwd_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(ext_str) = std::str::from_utf8(&ext_bytes) {
+                let reverse_key = keys::encode_scim_ext_user_key(ext_str);
+                self.storage
+                    .delete(realm_id, &reverse_key)
+                    .map_err(Self::storage_err)?;
+            }
+            self.storage
+                .delete(realm_id, &scim_fwd_key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 11. Cascade: delete all device fingerprints (GDPR Art. 17, AC-11).
+        //     Failures here must not block the deletion — fingerprints are
+        //     advisory risk signals, not authoritative data.  The UserDeleted
+        //     audit event already records that erasure happened.
+        let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
+
+        // 12. Cascade: purge RBAC role assignments and group memberships.
+        self.rbac
+            .purge_user_from_realm(realm_id, user_id)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("rbac cascade failed during delete_user: {e}"),
+            })?;
+
+        // 13. Cascade: delete all agents owned by this user to prevent orphans.
+        {
+            let owner = AgentOwner::User(user_id.clone());
+            let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
+            let end = keys::prefix_end(&prefix);
+            if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                for entry in &entries {
+                    if let Ok(key_str) = std::str::from_utf8(&entry.key) {
+                        if let Some(uuid_str) = key_str.rsplit(':').next() {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
+                                let aid = AgentId::new(uuid);
+                                let _ = <Self as IdentityEngine>::delete_agent(
+                                    self, realm_id, &aid, None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.record_audit(
+            realm_id,
+            audit_ctx,
+            AuditAction::UserDeleted,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        Ok(())
+    }
+}
+
 impl IdentityEngine for EmbeddedIdentityEngine {
     fn check_ip_login_rate_limit(&self, realm_id: &RealmId, ip: &str) -> Result<(), IdentityError> {
         self.check_ip_login_rate_limit(realm_id, ip)
@@ -5297,7 +5699,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 }
             }
         }
-        self.create_user_with_status(realm_id, request, self.config.default_status)
+        self.create_user_with_status(realm_id, request, self.config.default_status, None)
     }
 
     fn create_admin_user(&self, request: &CreateUserRequest) -> Result<User, IdentityError> {
@@ -5306,7 +5708,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // in the system realm; callers are responsible for assigning
         // the `realm.admin` RBAC role after the user is persisted.
         let realm_id = keys::system_realm_id();
-        self.create_user_with_status(&realm_id, request, self.config.default_status)
+        self.create_user_with_status(&realm_id, request, self.config.default_status, None)
     }
 
     fn get_user(
@@ -5364,394 +5766,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.get_user(realm_id, &user_id)
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn update_user(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         request: &UpdateUserRequest,
     ) -> Result<User, IdentityError> {
-        self.require_active_realm(realm_id)?;
-
-        // 1. Load existing user
-        let mut user = self
-            .get_user(realm_id, user_id)?
-            .ok_or(IdentityError::UserNotFound)?;
-
-        let old_email = user.email().to_string();
-        let mut email_changed = false;
-
-        // 2. Apply email change if requested
-        if let Some(ref new_email) = request.email {
-            let normalized = validation::validate_email(new_email)?;
-
-            if normalized != old_email {
-                // Check uniqueness of new email
-                let new_email_key = keys::encode_user_email(&normalized);
-                let existing = self
-                    .storage
-                    .get(realm_id, &new_email_key)
-                    .map_err(Self::storage_err)?;
-                if existing.is_some() {
-                    return Err(IdentityError::DuplicateEmail);
-                }
-
-                // Remove old email index
-                let old_email_key = keys::encode_user_email(&old_email);
-                self.storage
-                    .delete(realm_id, &old_email_key)
-                    .map_err(Self::storage_err)?;
-
-                // Write new email index (16 raw UUID bytes).
-                let user_id_bytes = keys::encode_user_id_value(user_id);
-                self.storage
-                    .put(realm_id, &new_email_key, &user_id_bytes)
-                    .map_err(Self::storage_err)?;
-
-                user.set_email(normalized);
-                email_changed = true;
-            }
-        }
-
-        // 3. Apply display name change if requested
-        if let Some(ref new_name) = request.display_name {
-            let normalized = validation::validate_display_name(new_name)?;
-            user.set_display_name(normalized);
-        }
-
-        // 3a. Apply first_name change if requested
-        if let Some(ref new_first) = request.first_name {
-            let normalized = validation::validate_name_part(new_first, "First name")?;
-            user.set_first_name(normalized);
-        }
-
-        // 3b. Apply last_name change if requested
-        if let Some(ref new_last) = request.last_name {
-            let normalized = validation::validate_name_part(new_last, "Last name")?;
-            user.set_last_name(normalized);
-        }
-
-        // 4. Apply status change if requested
-        let status_disabled = if let Some(new_status) = request.status {
-            let prev = user.status();
-            user.set_status(new_status);
-            prev != crate::identity::types::UserStatus::Disabled
-                && new_status == crate::identity::types::UserStatus::Disabled
-        } else {
-            false
-        };
-
-        // 4a. Replace attributes map if requested.
-        if let Some(attributes) = &request.attributes {
-            let user_attr_defs = self
-                .get_realm(realm_id)?
-                .and_then(|r| r.config().attribute_definitions.clone())
-                .map(|d| d.users);
-            validation::validate_attributes(attributes, user_attr_defs.as_deref())?;
-            user.set_attributes(attributes.clone());
-        }
-
-        // 4b. Replace required actions if requested.
-        if let Some(actions) = request.required_actions.clone() {
-            user.set_required_actions(actions);
-        }
-
-        // 4c. Apply phone_number change if requested.
-        if let Some(ref phone) = request.phone_number {
-            user.set_phone_number(phone.clone());
-        }
-
-        // 4d. Apply phone_verified change if requested.
-        if let Some(verified) = request.phone_verified {
-            user.set_phone_verified(verified);
-        }
-
-        // 4e. Apply email_otp_enabled change if requested.
-        if let Some(enabled) = request.email_otp_enabled {
-            user.set_email_otp_enabled(enabled);
-        }
-
-        // 5. Update timestamp
-        user.set_updated_at(self.clock.now());
-
-        // 6. Write updated record
-        let user_bytes = Self::serialize_user(&user)?;
-        let id_key = keys::encode_user_id(user_id);
-        self.storage
-            .put(realm_id, &id_key, &user_bytes)
-            .map_err(Self::storage_err)?;
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::UserUpdated,
-            "user",
-            &user_id.as_uuid().to_string(),
-        )?;
-
-        // A-42: Email address change is a security event — an attacker who
-        // hijacks the new address could receive password-reset emails.  Revoke
-        // all existing sessions so stale holders must re-authenticate.
-        if email_changed {
-            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
-                tracing::warn!(
-                    user_id = %user_id.as_uuid(),
-                    error = %e,
-                    "revoke_all_user_sessions failed on email change"
-                );
-            }
-        }
-
-        // Security: disabling a user must immediately invalidate all existing
-        // sessions so that active access tokens cannot be used past revocation.
-        // Access tokens embed claims at issuance and are not re-checked on the
-        // hot path, so revocation is the only mechanism to enforce a disable.
-        if status_disabled {
-            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
-                tracing::warn!(
-                    user_id = %user_id.as_uuid(),
-                    error = %e,
-                    "revoke_all_user_sessions failed on user disable"
-                );
-            }
-        }
-
-        Ok(user)
+        self.update_user_impl(realm_id, user_id, request, None)
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError> {
-        // 1. Load user to get email for index cleanup
-        let user = self
-            .get_user(realm_id, user_id)?
-            .ok_or(IdentityError::UserNotFound)?;
-
-        // 2. Delete primary record
-        let id_key = keys::encode_user_id(user_id);
-        self.storage
-            .delete(realm_id, &id_key)
-            .map_err(Self::storage_err)?;
-
-        // 3. Delete email index
-        let email_key = keys::encode_user_email(user.email());
-        self.storage
-            .delete(realm_id, &email_key)
-            .map_err(Self::storage_err)?;
-
-        // A-20: write a 90-day reservation tombstone so the deleted email
-        // cannot be immediately re-registered by another actor.
-        let now_micros = self.clock.now().as_micros();
-        let reservation = StoredEmailReservation {
-            reserved_at_micros: now_micros,
-        };
-        if let Ok(bytes) = serde_json::to_vec(&reservation) {
-            let reserved_key = keys::encode_email_reserved(user.email());
-            let _ = self.storage.put(realm_id, &reserved_key, &bytes);
-        }
-
-        // 4. Delete credential (if any — best effort, ignore not-found)
-        let cred_key = keys::encode_credential_key(user_id);
-        self.storage
-            .delete(realm_id, &cred_key)
-            .map_err(Self::storage_err)?;
-
-        // 4b. Delete MFA state (if any — best effort)
-        let mfa_key = keys::encode_mfa_totp_key(user_id);
-        self.storage
-            .delete(realm_id, &mfa_key)
-            .map_err(Self::storage_err)?;
-
-        // 4c. Delete all WebAuthn credentials + discoverable index entries
-        let webauthn_prefix = keys::encode_webauthn_credentials_prefix(user_id);
-        let webauthn_end = keys::prefix_end(&webauthn_prefix);
-        let webauthn_entries = self
-            .storage
-            .scan(realm_id, &webauthn_prefix, &webauthn_end)
-            .map_err(Self::storage_err)?;
-
-        for entry in &webauthn_entries {
-            // If discoverable, delete the discoverable index entry
-            if let Ok(stored) = serde_json::from_slice::<StoredWebAuthnCredential>(&entry.value) {
-                if stored.discoverable {
-                    let disc_key = keys::encode_webauthn_discoverable(&stored.credential_id_b64);
-                    self.storage
-                        .delete(realm_id, &disc_key)
-                        .map_err(Self::storage_err)?;
-                }
-            }
-            // Delete the credential itself
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 5. Delete all sessions for this user
-        let session_prefix = keys::encode_user_sessions_prefix(user_id);
-        let session_end = keys::prefix_end(&session_prefix);
-        let session_entries = self
-            .storage
-            .scan(realm_id, &session_prefix, &session_end)
-            .map_err(Self::storage_err)?;
-
-        for entry in &session_entries {
-            // Extract session UUID from the user-session index key
-            // Key format: "ses:user:{user_uuid}:{session_uuid}"
-            let key_str =
-                std::str::from_utf8(&entry.key).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            if let Some(session_uuid_str) = key_str.rsplit(':').next() {
-                if let Ok(uuid) = uuid::Uuid::parse_str(session_uuid_str) {
-                    let session_id = SessionId::new(uuid);
-                    let session_key = keys::encode_session_id(&session_id);
-                    self.storage
-                        .delete(realm_id, &session_key)
-                        .map_err(Self::storage_err)?;
-                    // Evict from in-process cache so subsequent get_session
-                    // calls see the deletion rather than a stale cache hit.
-                    self.session_cache_evict(realm_id, &session_id);
-                }
-            }
-
-            // Delete the user-session index entry itself
-            // The scan returns keys without realm prefix, so re-use entry.key
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 6. Delete all organization memberships for this user
-        let org_membership_prefix = keys::membership_by_user_prefix(user_id);
-        let org_membership_end = keys::prefix_end(&org_membership_prefix);
-        let org_memberships = self
-            .storage
-            .scan(realm_id, &org_membership_prefix, &org_membership_end)
-            .map_err(Self::storage_err)?;
-
-        for entry in &org_memberships {
-            if let Ok(membership) = serde_json::from_slice::<OrganizationMembership>(&entry.value) {
-                // Delete forward index (org → user)
-                let fwd_key = keys::encode_membership_by_org(membership.org_id(), user_id);
-                self.storage
-                    .delete(realm_id, &fwd_key)
-                    .map_err(Self::storage_err)?;
-            }
-            // Delete reverse index entry (user → org)
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 7. Cascade: scrub all OAuth consent records for this user.
-        let consent_prefix = keys::encode_consent_prefix_for_user(user_id);
-        let consent_end = keys::prefix_end(&consent_prefix);
-        let consent_entries = self
-            .storage
-            .scan(realm_id, &consent_prefix, &consent_end)
-            .map_err(Self::storage_err)?;
-        for entry in &consent_entries {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8. Cascade: scrub all federated external-identity links for
-        //    this user. Each forward index entry holds the external_sub
-        //    string as its value — we use it to compute the matching
-        //    reverse `fed:ext:{idp_id}:{external_sub}` key and delete
-        //    both in one pass. A user must be able to sign up freshly
-        //    via the same external identity after deletion, so both
-        //    directions MUST go.
-        let fed_fwd_prefix = keys::encode_federation_ext_fwd_prefix_for_user(user_id);
-        let fed_fwd_end = keys::prefix_end(&fed_fwd_prefix);
-        let fed_fwd_entries = self
-            .storage
-            .scan(realm_id, &fed_fwd_prefix, &fed_fwd_end)
-            .map_err(Self::storage_err)?;
-        for entry in &fed_fwd_entries {
-            // Key format: fed:ext_fwd:{user_uuid}:{idp_uuid}
-            let key_str = std::str::from_utf8(&entry.key).unwrap_or("");
-            if let Some(idp_uuid_str) = key_str.rsplit(':').next() {
-                if let Ok(idp_uuid) = uuid::Uuid::parse_str(idp_uuid_str) {
-                    let idp_id = crate::core::IdpId::new(idp_uuid);
-                    let external_sub = std::str::from_utf8(&entry.value).unwrap_or("");
-                    if !external_sub.is_empty() {
-                        let reverse_key = keys::encode_federation_ext_key(&idp_id, external_sub);
-                        self.storage
-                            .delete(realm_id, &reverse_key)
-                            .map_err(Self::storage_err)?;
-                    }
-                }
-            }
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 10. Cascade SCIM externalId mapping. Forward index holds the
-        //     external_id string as its value; use it to resolve the
-        //     reverse key. Both directions MUST go so a future SCIM POST
-        //     with the same externalId can reprovision.
-        let scim_fwd_key = keys::encode_scim_ext_user_fwd_key(user_id);
-        if let Some(ext_bytes) = self
-            .storage
-            .get(realm_id, &scim_fwd_key)
-            .map_err(Self::storage_err)?
-        {
-            if let Ok(ext_str) = std::str::from_utf8(&ext_bytes) {
-                let reverse_key = keys::encode_scim_ext_user_key(ext_str);
-                self.storage
-                    .delete(realm_id, &reverse_key)
-                    .map_err(Self::storage_err)?;
-            }
-            self.storage
-                .delete(realm_id, &scim_fwd_key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 11. Cascade: delete all device fingerprints (GDPR Art. 17, AC-11).
-        //     Failures here must not block the deletion — fingerprints are
-        //     advisory risk signals, not authoritative data.  The UserDeleted
-        //     audit event already records that erasure happened.
-        let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
-
-        // 12. Cascade: purge RBAC role assignments and group memberships.
-        self.rbac
-            .purge_user_from_realm(realm_id, user_id)
-            .map_err(|e| IdentityError::Internal {
-                reason: format!("rbac cascade failed during delete_user: {e}"),
-            })?;
-
-        // 13. Cascade: delete all agents owned by this user to prevent orphans.
-        {
-            let owner = AgentOwner::User(user_id.clone());
-            let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
-            let end = keys::prefix_end(&prefix);
-            if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
-                for entry in &entries {
-                    if let Ok(key_str) = std::str::from_utf8(&entry.key) {
-                        if let Some(uuid_str) = key_str.rsplit(':').next() {
-                            if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
-                                let aid = AgentId::new(uuid);
-                                let _ = <Self as IdentityEngine>::delete_agent(
-                                    self, realm_id, &aid, None,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::UserDeleted,
-            "user",
-            &user_id.as_uuid().to_string(),
-        )?;
-
-        Ok(())
+        self.delete_user_impl(realm_id, user_id, None)
     }
 
     fn delete_user_device_fingerprints(
@@ -5760,6 +5785,53 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
     ) -> Result<usize, IdentityError> {
         self.device_fp.delete_all_for_user(realm_id, user_id)
+    }
+
+    fn create_user_attributed(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        audit_ctx: &AuditContext,
+    ) -> Result<User, IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "create_user_attributed",
+            });
+        }
+        self.require_active_realm(realm_id)?;
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_users {
+                    let prefix = keys::user_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "users", &prefix, max)?;
+                }
+            }
+        }
+        self.create_user_with_status(
+            realm_id,
+            request,
+            self.config.default_status,
+            Some(audit_ctx),
+        )
+    }
+
+    fn update_user_attributed(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        request: &UpdateUserRequest,
+        audit_ctx: &AuditContext,
+    ) -> Result<User, IdentityError> {
+        self.update_user_impl(realm_id, user_id, request, Some(audit_ctx))
+    }
+
+    fn delete_user_attributed(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        audit_ctx: &AuditContext,
+    ) -> Result<(), IdentityError> {
+        self.delete_user_impl(realm_id, user_id, Some(audit_ctx))
     }
 
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
@@ -8241,6 +8313,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 ..Default::default()
             },
             UserStatus::PendingVerification,
+            None,
         )?;
 
         // 8. Store the password.
