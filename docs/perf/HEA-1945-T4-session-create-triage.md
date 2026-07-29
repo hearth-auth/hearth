@@ -1,7 +1,8 @@
 # HEA-1945 · T4 — `session_create` fsync-bound: CTO triage
 
-**Status:** triaged; `W` 3→2 fix landed (`abf179ba`); HEA-1948 (engine fix) in progress,
-HEA-1949 (measurement) delivered and folded in below; units-restatement escalated to the board.
+**Status:** `W` 3→2 landed (`abf179ba`); HEA-1948 chain-lock split landed (`daf65d9c`) and
+**re-measured — 323 → 15,841 ops/s at T=256 (49×)**. T4 remains **MISS at 3.2×** (was 316×);
+two quantified levers remain, children opened. Units-restatement escalated to the board.
 **Parent:** HEA-1940 (PERFORMANCE_REPORT v2) · **Ancestor:** HEA-1867
 **Source data:** `docs/perf/artifacts/c7-saturation-v2-raw.json` (HEA-1875 C7-v2, HEAD `981516f1`)
 
@@ -171,6 +172,66 @@ So the target is not absurd, and I withdraw the "unreachable" half of my escalat
   issue — commit `abf179ba`. HEA-1908 does not touch the session write path.
 - It names *HEA-1947* as the chain-lock fix. HEA-1947 is the parent ("close the 2
   remaining MISSes"); the chain-lock fix is **HEA-1948**.
+
+## Post-HEA-1948 re-measurement — the fix works; T4 is still MISS, now by 3.2× not 316×
+
+**Run:** HEAD `daf65d9c` (+ the trait declaration in `src/identity/mod.rs` that `daf65d9c`
+omitted — see "HEAD was red" below), clean detached worktree, 16 logical cores.
+**Artifact:** `docs/perf/artifacts/c7-saturation-post-hea1948-raw.json`
+**Device F:** 533.0 fsyncs/s (direct, 200 sequential `sync_all` — within 1% of HEA-1949's 528.7).
+**W:** 2.000 at T=1 (unchanged).
+
+| T | ops/s (pre-1948) | **ops/s (post-1948)** | gain | fsyncs/write | batch | ceiling `T×F/W` | coalesce eff | p99 (ms) |
+|--:|-----:|------:|-----:|------:|------:|--------:|------:|------:|
+|   1 | 125 | **245** |  2.0× | 2.0000 |  0.50 |    267 | 92.1% |  6.0 |
+|   4 | 170 | **513** |  3.0× | 0.9951 |  1.00 |  1,066 | 48.1% | 10.1 |
+|  16 | 118 | **1,984** | 16.8× | 0.2472 |  4.05 |  4,264 | 46.5% | 10.9 |
+|  64 | 168 | **7,286** | 43.4× | 0.0558 | 17.93 | 17,057 | 42.7% | 12.1 |
+| 128 | 332 | **12,699** | 38.3× | 0.0272 | 36.71 | 34,114 | 37.2% | 14.3 |
+| 256 | 323 | **15,841** | **49.0×** | 0.0140 | 71.55 | 68,229 | 23.2% | 23.0 |
+
+Scaling exponent: **+0.299 → +0.809** (r²=0.989).
+
+### The diagnosis is confirmed
+
+The pre-1948 signature was a batch size *pinned at 0.65 ops/fsync from T=4 to T=256*. That
+was the one-audit-append-in-flight ceiling, and it is gone: batch size now grows
+**monotonically with concurrency**, 0.50 → 71.55 across the ladder. Releasing the chain
+lock before the fsync wait was the whole mechanism, exactly as modelled. The 49× at T=256
+is the size of that mistake.
+
+Note the 2× gain at **T=1**, where group commit cannot help by definition. The old code
+paid the chain-lock hold as pure serialized latency even with a single writer; coalescing
+efficiency at T=1 went 47.1% → 92.1% of `F/W`. That is the lock, not the batching.
+
+### T4 verdict: MISS, 3.2× short
+
+Measured peak **15,841 ops/s at T=256** against the 50,000 target. Down from a 316× gap to
+a **3.2× gap**. I am not grading this PASS and I am not asking the board to; the number is
+below target and the honest label is MISS.
+
+What changed is the *character* of the gap. It is no longer architectural — nothing is
+serialized behind a lock any more. It is now two ordinary, quantified inefficiencies:
+
+1. **`W` is still 2.** The session write and its audit event are two separate WAL records.
+   Merging them into one halves the fsync budget per op — a straight ~2× on ceiling and,
+   at fixed efficiency, on measured throughput.
+2. **Coalescing efficiency decays with concurrency**: 92% (T=1) → 43% (T=64) → **23%**
+   (T=256), while p99 climbs 6.0 → 23.0 ms. The engine is leaving three quarters of the
+   device fsync budget on the floor at the top of the ladder. The batch window / wakeup
+   discipline in group commit is not keeping up; this is tunable, not structural.
+
+`2× × 1.7×` ≈ 3.4×, which covers the 3.2× gap. **50,000 is reachable at T≈256 with
+durability intact.** Children opened below.
+
+### HEAD was red
+
+`daf65d9c` (HEA-1948) also swept in `create/update/delete_user_attributed` impls in
+`src/identity/engine/mod.rs` from another agent's in-flight work in the shared worktree,
+**without** the matching trait declarations in `src/identity/mod.rs` — which were still
+sitting uncommitted. The branch did not compile (`E0407` ×3) from `daf65d9c` until
+`89b161d7`, which commits only those declarations. This is the third shared-worktree
+cross-contamination on this branch; stage by filename, not `git add -A`.
 
 ## Escalated to the board (via HEA-1940)
 
