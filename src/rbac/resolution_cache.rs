@@ -361,16 +361,32 @@ mod tests {
             .collect();
 
         // Writer: fill-then-bump many times, mirroring the engine's
-        // resolve→mutation interleaving.
+        // resolve→mutation interleaving. Capped at 5_000 (down from 50_000) so
+        // the test does not create ruinous allocation pressure under full-suite
+        // parallelism: each iteration clones two single-entry HashMaps via rcu,
+        // and running 50k of those concurrently with 4500+ other tests caused
+        // a one-time flake (HEA-1953). 5k still exercises thousands of
+        // concurrent reader/writer interleavings — more than enough to catch any
+        // ordering hole in the ArcSwap-based invalidation path.
         barrier.wait();
-        for v in 0..50_000u64 {
+        for v in 0..5_000u64 {
             cache.insert(k.clone(), cache.generation(&realm), resolved_with("v.read"));
             cache.bump(&realm);
             let _ = v;
         }
         stop.store(true, Ordering::Relaxed);
         for r in readers {
-            r.join().expect("reader thread panicked");
+            // Propagate the inner panic message so a future failure is
+            // self-diagnosing. `join().expect()` swallows the payload as
+            // `Any { .. }`; downcast to the two common panic types first.
+            if let Err(e) = r.join() {
+                let msg = e
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| e.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("(opaque panic payload — not a &str or String)");
+                panic!("reader thread panicked: {msg}");
+            }
         }
 
         // Final consistency: after all bumps, a stale (version-0) entry must

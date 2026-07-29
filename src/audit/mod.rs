@@ -48,6 +48,18 @@ pub struct AuditPendingWrite {
     pub on_success: Box<dyn FnOnce() + Send>,
 }
 
+/// Caller-supplied WAL enqueue closure for the merged audit-write path.
+///
+/// Receives the audit KV pairs computed under the chain lock (primary event
+/// record + two index entries + chain-head update) and is expected to combine
+/// them with the caller's own KV pairs into a single
+/// [`StorageEngine::enqueue_batch`] call — one WAL record, one fsync
+/// (`W` 2 → 1, HEA-1954).
+///
+/// [`StorageEngine::enqueue_batch`]: crate::storage::StorageEngine::enqueue_batch
+pub type AuditEnqueueFn<'a> =
+    Box<dyn FnOnce(&[(Vec<u8>, Vec<u8>)]) -> Result<StorageDurabilityHandle, StorageError> + 'a>;
+
 /// Trait defining the audit engine interface.
 ///
 /// Events are append-only by design to maintain the tamper-evident hash chain.
@@ -134,10 +146,7 @@ pub trait AuditEngine: Send + Sync {
     fn with_pending_append(
         &self,
         request: &CreateAuditEvent,
-        enqueue_fn: Box<
-            dyn FnOnce(&[(Vec<u8>, Vec<u8>)]) -> Result<StorageDurabilityHandle, StorageError>
-                + '_,
-        >,
+        enqueue_fn: AuditEnqueueFn<'_>,
     ) -> Result<AuditPendingWrite, AuditError> {
         let _ = (request, enqueue_fn);
         Err(AuditError::MergedAppendNotSupported)

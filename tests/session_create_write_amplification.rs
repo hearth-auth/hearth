@@ -216,7 +216,8 @@ fn create_session_torn_wal_record_leaves_neither_session_nor_audit_event() {
         // XOR all bits to guarantee the CRC is invalid regardless of original value.
         let corrupt = u32::from_le_bytes(crc_bytes) ^ 0xFFFF_FFFF;
         file.seek(SeekFrom::End(-4)).expect("seek -4 again");
-        file.write_all(&corrupt.to_le_bytes()).expect("write corrupt CRC");
+        file.write_all(&corrupt.to_le_bytes())
+            .expect("write corrupt CRC");
         file.sync_all().expect("sync");
     }
 
@@ -228,11 +229,7 @@ fn create_session_torn_wal_record_leaves_neither_session_nor_audit_event() {
         // The warm-up session (from phase 1) should still exist.
         // The torn session (from phase 2) must not.
         let sessions = engine
-            .list_sessions_by_user(
-                &realm_id,
-                &user_id,
-                &hearth::core::PageRequest::new(0, 100),
-            )
+            .list_sessions_by_user(&realm_id, &user_id, &hearth::core::PageRequest::new(0, 100))
             .expect("list sessions");
 
         // Phase 1 warm-up session + phase 2 create (NOT committed → must be 1).
@@ -262,6 +259,9 @@ fn create_session_torn_wal_record_leaves_neither_session_nor_audit_event() {
         let valid = audit
             .verify_integrity(&realm_id, None, None)
             .expect("verify chain");
-        assert!(valid, "audit chain integrity must survive a torn merged record");
+        assert!(
+            valid,
+            "audit chain integrity must survive a torn merged record"
+        );
     }
 }

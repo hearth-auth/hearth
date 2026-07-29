@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::CreateAuditEvent;
+use crate::audit::{Actor, AuditContext, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::UpdateRealmRequest;
@@ -680,11 +680,18 @@ async fn admin_create_user(
 
     let identity = Arc::clone(&state.identity);
     let realm_id = auth.realm_id.clone();
+    let admin_actor = auth.user_id.clone();
     // create_user hashes an Argon2id credential — route through the shared KDF
     // admission gate so bulk provisioning can't oversubscribe the blocking pool
     // and blow the peak-memory ceiling (HEA-1891 / F3).
     let result = match super::run_kdf_gated_rest(
-        move || identity.create_user(&realm_id, &request),
+        move || {
+            let audit_ctx = AuditContext {
+                actor: Actor::User(admin_actor),
+                metadata: Some(serde_json::json!({"via": "admin_api"})),
+            };
+            identity.create_user_attributed(&realm_id, &request, &audit_ctx)
+        },
         |e| {
             tracing::error!(error = %e, "admin_create_user KDF task failed");
             Err(crate::identity::IdentityError::Storage(Box::new(e)))
@@ -697,21 +704,11 @@ async fn admin_create_user(
     };
 
     match result {
-        Ok(user) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::UserCreated,
-                resource_type: "user".to_string(),
-                resource_id: user.id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
-            (
-                StatusCode::CREATED,
-                Json(proto_to_rest_json(&pb::User::from(&user))),
-            )
-                .into_response()
-        }
+        Ok(user) => (
+            StatusCode::CREATED,
+            Json(proto_to_rest_json(&pb::User::from(&user))),
+        )
+            .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
@@ -798,23 +795,20 @@ async fn admin_update_user(
 
     let request = crate::identity::UpdateUserRequest::from(body);
     let uid = UserId::new(user_uuid);
+    let audit_ctx = AuditContext {
+        actor: Actor::User(auth.user_id.clone()),
+        metadata: Some(serde_json::json!({"via": "admin_api"})),
+    };
 
-    match state.identity.update_user(&auth.realm_id, &uid, &request) {
-        Ok(user) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::UserUpdated,
-                resource_type: "user".to_string(),
-                resource_id: uid.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
-            (
-                StatusCode::OK,
-                Json(proto_to_rest_json(&pb::User::from(&user))),
-            )
-                .into_response()
-        }
+    match state
+        .identity
+        .update_user_attributed(&auth.realm_id, &uid, &request, &audit_ctx)
+    {
+        Ok(user) => (
+            StatusCode::OK,
+            Json(proto_to_rest_json(&pb::User::from(&user))),
+        )
+            .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
@@ -844,21 +838,16 @@ async fn admin_delete_user(
         }
     };
 
+    let audit_ctx = AuditContext {
+        actor: Actor::User(auth.user_id.clone()),
+        metadata: Some(serde_json::json!({"via": "admin_api"})),
+    };
+
     match state
         .identity
-        .delete_user(&auth.realm_id, &UserId::new(user_uuid))
+        .delete_user_attributed(&auth.realm_id, &UserId::new(user_uuid), &audit_ctx)
     {
-        Ok(()) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::UserDeleted,
-                resource_type: "user".to_string(),
-                resource_id: user_uuid.to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }

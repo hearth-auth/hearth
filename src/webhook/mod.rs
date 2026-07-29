@@ -151,14 +151,7 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
     fn with_pending_append(
         &self,
         request: &crate::audit::CreateAuditEvent,
-        enqueue_fn: Box<
-            dyn FnOnce(
-                    &[(Vec<u8>, Vec<u8>)],
-                ) -> Result<
-                    crate::storage::StorageDurabilityHandle,
-                    crate::storage::StorageError,
-                > + '_,
-        >,
+        enqueue_fn: crate::audit::AuditEnqueueFn<'_>,
     ) -> Result<crate::audit::AuditPendingWrite, crate::audit::AuditError> {
         let mut pending = self.inner.with_pending_append(request, enqueue_fn)?;
         // Wrap on_success to broadcast the event to webhook subscribers after

@@ -11,7 +11,7 @@ use ring::rand::SecureRandom as _;
 
 use crate::codec;
 use crate::core::{AuditEventId, Clock, RealmId, Timestamp};
-use crate::storage::{StorageDurabilityHandle, StorageEngine, StorageError};
+use crate::storage::StorageEngine;
 
 use super::error::AuditError;
 use super::keys;
@@ -488,10 +488,7 @@ impl AuditEngine for EmbeddedAuditEngine {
     fn with_pending_append(
         &self,
         request: &CreateAuditEvent,
-        enqueue_fn: Box<
-            dyn FnOnce(&[(Vec<u8>, Vec<u8>)]) -> Result<StorageDurabilityHandle, StorageError>
-                + '_,
-        >,
+        enqueue_fn: super::AuditEnqueueFn<'_>,
     ) -> Result<super::AuditPendingWrite, AuditError> {
         // ── Phase 1: hash-chain RMW + caller enqueue (under chain lock) ──────
         //
@@ -597,7 +594,9 @@ impl AuditEngine for EmbeddedAuditEngine {
         // Build the rollback closure (captures the lock Arc so it can re-acquire
         // on failure without holding the lock across the fsync wait).
         let on_failure: Box<dyn FnOnce() + Send> = Box::new(move || {
-            let mut c = chain_lock_for_rollback.lock().expect("realm chain lock poisoned");
+            let mut c = chain_lock_for_rollback
+                .lock()
+                .expect("realm chain lock poisoned");
             *c = None;
         });
 

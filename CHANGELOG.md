@@ -57,6 +57,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   well below 1.0; chain integrity is preserved by an optimistic cache update that is rolled
   back on durability failure. Single-threaded throughput and durability guarantees are
   unchanged. (HEA-1948)
+- **Session creation now costs exactly one WAL fsync (HEA-1954)** — the `SessionCreated`
+  audit event was written as a second WAL record after the session itself, so every
+  `create_session` paid two fsyncs on the durable path. The audit event is now merged into
+  the session's own `put_batch` via a new `AuditEngine::with_pending_append` method, which
+  performs the hash-chain RMW and WAL enqueue under the chain lock but delegates the batch
+  call to the caller. One WAL record, one fsync. This also closes a crash window: a
+  `kill -9` between the two former records could strand a session with no `SessionCreated`
+  event, whereas a CRC failure on the merged record now discards both. Audit engines that
+  do not implement the merged path fall back automatically to the two-record behaviour.
+  Durability semantics are unchanged — the WAL is still fsync'd before acknowledgement.
+  (HEA-1954)
+- **WAL group-commit leader loops instead of re-electing per batch (HEA-1955)** — the
+  group-commit leader previously exited after each `sync_all`, so the next batch had to
+  wake and elect a new leader, leaving a thread-wakeup gap between consecutive fsyncs
+  during which arriving writes could not be coalesced. The leader now loops while work
+  remains. Measured effect at 256 concurrent `session_create` writers: p99 latency roughly
+  halves (23.0 → 11.9 ms), improving at every concurrency level. Throughput effect is
+  small (coalescing efficiency 23.2% → 25.5%); the remaining efficiency decay at high
+  queue depth is tracked separately. (HEA-1955)
 - **Admin-API user mutations now emit exactly one audit event each (HEA-1950)** —
   `POST /admin/users`, `PATCH /admin/users/{id}`, and `DELETE /admin/users/{id}` previously
   wrote two audit events per operation: one from the identity layer (actor=`"system"`) and a

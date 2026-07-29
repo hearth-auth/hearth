@@ -589,7 +589,7 @@ fn leader_panic_in_pre_rotate_does_not_strand_in_flight_batch() {
 /// average batch size and (via FaultFs) the effective fsync rate.  The leader
 /// must achieve an inter-fsync gap < half the sync latency (2.5 ms).
 ///
-/// This test uses `#[ignore]` because:
+/// This test uses `#[ignore]` (HEA-1955) because:
 ///   (a) it takes ~300 ms of wall time, and
 ///   (b) its gap assertion depends on scheduler timing that is unreliable in
 ///       heavily-loaded CI containers.
@@ -603,7 +603,8 @@ fn leader_panic_in_pre_rotate_does_not_strand_in_flight_batch() {
 /// Expected output after the fix:
 ///   avg_gap_ms ≈ 0.0  avg_batch ≈ T  efficiency ≈ 95–100%
 #[test]
-#[ignore = "manual measurement — run with -- --ignored --nocapture; ~300 ms wall time"]
+#[ignore = "HEA-1955: manual measurement — run with -- --ignored --nocapture; ~300 ms wall time, \
+            and the gap assertion depends on scheduler timing unreliable in loaded CI containers"]
 fn measure_looping_leader_inter_fsync_gap() {
     const T: usize = 16;
     const SYNC_LAT_US: u64 = 5_000; // 5 ms synthetic fsync latency
@@ -622,10 +623,7 @@ fn measure_looping_leader_inter_fsync_gap() {
         Arc::clone(&fault_fs) as Arc<dyn Fs>,
     ));
 
-    let sync_start = fault_fs
-        .config
-        .sync_count
-        .load(Ordering::SeqCst);
+    let sync_start = fault_fs.config.sync_count.load(Ordering::SeqCst);
     let start = std::time::Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
@@ -638,11 +636,8 @@ fn measure_looping_leader_inter_fsync_gap() {
             std::thread::spawn(move || {
                 let mut k: u64 = 0;
                 while !stop.load(Ordering::Relaxed) {
-                    wal.append(&make_entry(
-                        format!("gap-{t}-{k}").as_bytes(),
-                        b"v",
-                    ))
-                    .expect("append");
+                    wal.append(&make_entry(format!("gap-{t}-{k}").as_bytes(), b"v"))
+                        .expect("append");
                     ops.fetch_add(1, Ordering::Relaxed);
                     k += 1;
                 }
@@ -650,6 +645,10 @@ fn measure_looping_leader_inter_fsync_gap() {
         })
         .collect();
 
+    // RUN_MS *is* the measurement window: this benchmark derives fsync rate and batch size
+    // from ops observed over a fixed wall-clock interval, so there is no condition to poll
+    // for — replacing the sleep would void the measurement.
+    // AUDIT: justified-sleep: fixed wall-clock measurement window; no condition to poll for.
     std::thread::sleep(Duration::from_millis(RUN_MS));
     stop.store(true, Ordering::Relaxed);
     for h in handles {
@@ -657,8 +656,7 @@ fn measure_looping_leader_inter_fsync_gap() {
     }
 
     let elapsed = start.elapsed();
-    let syncs =
-        fault_fs.config.sync_count.load(Ordering::Relaxed) - sync_start;
+    let syncs = fault_fs.config.sync_count.load(Ordering::Relaxed) - sync_start;
     let ops = total_ops.load(Ordering::Relaxed);
 
     let effective_rate_hz = syncs as f64 / elapsed.as_secs_f64();
@@ -669,9 +667,7 @@ fn measure_looping_leader_inter_fsync_gap() {
         0.0
     };
     let avg_gap_ms = if syncs > 0 {
-        (elapsed.as_secs_f64() / syncs as f64
-            - SYNC_LAT_US as f64 / 1_000_000.0)
-            * 1_000.0
+        (elapsed.as_secs_f64() / syncs as f64 - SYNC_LAT_US as f64 / 1_000_000.0) * 1_000.0
     } else {
         f64::MAX
     };
@@ -682,18 +678,11 @@ fn measure_looping_leader_inter_fsync_gap() {
          avg_batch={avg_batch:.1}, efficiency={efficiency_pct:.1}%, \
          avg_gap_ms={avg_gap_ms:.2}"
     );
-    eprintln!(
-        "  promote-follower baseline: gap≈1–3ms, efficiency≈60–75%"
-    );
-    eprintln!(
-        "  looping-leader target:     gap≈0ms,   efficiency≈95–100%"
-    );
+    eprintln!("  promote-follower baseline: gap≈1–3ms, efficiency≈60–75%");
+    eprintln!("  looping-leader target:     gap≈0ms,   efficiency≈95–100%");
 
     // Lenient sanity check: at least some coalescing must occur.
-    assert!(
-        ops > 0 && syncs > 0,
-        "no writes completed in {RUN_MS} ms"
-    );
+    assert!(ops > 0 && syncs > 0, "no writes completed in {RUN_MS} ms");
     assert!(
         syncs <= ops,
         "sync count {syncs} must not exceed op count {ops}"
@@ -738,11 +727,8 @@ fn group_commit_looping_leader_chains_multiple_batches_correctly() {
                 std::thread::spawn(move || {
                     b.wait();
                     for k in 0..K {
-                        wal.append(&make_entry(
-                            format!("chain-{t}-{k:03}").as_bytes(),
-                            b"val",
-                        ))
-                        .expect("append must succeed");
+                        wal.append(&make_entry(format!("chain-{t}-{k:03}").as_bytes(), b"val"))
+                            .expect("append must succeed");
                     }
                 })
             })

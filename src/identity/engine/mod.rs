@@ -6310,10 +6310,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let session_bytes = Self::serialize_session(&session)?;
         let id_key = keys::encode_session_id(session.id());
         let user_session_key = keys::encode_user_session(user_id, &session_id);
-        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![
-            (id_key, session_bytes),
-            (user_session_key, Vec::new()),
-        ];
+        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> =
+            vec![(id_key, session_bytes), (user_session_key, Vec::new())];
 
         let session_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
