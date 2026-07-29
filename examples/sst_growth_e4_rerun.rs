@@ -51,9 +51,9 @@ const MERGE_MIN: usize = 4;
 /// Corpus-size ladder.  Geometric so the log-log fit is evenly spaced.
 const LADDER: &[usize] = &[10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
 
-/// Trigger values to sweep.  0 = control (disabled), 8 and 16 are the two
-/// partial-compaction settings requested by HEA-1905.
-const TRIGGERS: &[usize] = &[0, 8, 16];
+/// Trigger values to sweep.  0 = control (disabled), 8, 12 (new default from
+/// HEA-1931), and 16 are the settings requested by HEA-1905/HEA-1936.
+const TRIGGERS: &[usize] = &[0, 8, 12, 16];
 
 // ─── per-rung measurements ──────────────────────────────────────────────────
 
@@ -426,9 +426,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("## Recommendation\n");
-    let t8_slope = {
-        let (trigger, rungs) = results.iter().find(|(t, _)| *t == 8).expect("T8 result");
-        let _ = trigger;
+    let slope_for = |trigger: usize| -> f64 {
+        let (_, rungs) = results
+            .iter()
+            .find(|(t, _)| *t == trigger)
+            .unwrap_or_else(|| panic!("T{trigger} result missing"));
         let log_n: Vec<f64> = rungs.iter().map(|r| (r.n as f64).ln()).collect();
         let log_peak: Vec<f64> = rungs
             .iter()
@@ -436,31 +438,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         linreg(&log_n, &log_peak).0
     };
-    let t16_slope = {
-        let (trigger, rungs) = results.iter().find(|(t, _)| *t == 16).expect("T16 result");
-        let _ = trigger;
-        let log_n: Vec<f64> = rungs.iter().map(|r| (r.n as f64).ln()).collect();
-        let log_peak: Vec<f64> = rungs
-            .iter()
-            .map(|r| (r.peak_ssts.max(1) as f64).ln())
-            .collect();
-        linreg(&log_n, &log_peak).0
-    };
+    let t8_slope = slope_for(8);
+    let t12_slope = slope_for(12);
+    let t16_slope = slope_for(16);
 
-    if t8_slope <= 0.3 && t16_slope <= 0.3 {
+    // HEA-1936: the acceptance criterion for the HEA-1931 flipped default is
+    // T12 exponent ≤ 0.20.
+    if t12_slope <= 0.20 {
         println!(
-            "Both T8 (exp={t8_slope:.4}) and T16 (exp={t16_slope:.4}) cap fan-out at O(1),\n\
-             confirming the E4 dual-verdict PASS holds across the measured trigger range.\n\
-             The write-amplification figures above quantify the cost of enabling the trigger;\n\
-             the per-merge stall at the 256 KiB measurement flush threshold should be\n\
-             projected to the 64 MiB production threshold (×256) before flipping the default.\n\
-             If the projected stall is acceptable, T8 minimises fan-out at lower write-amp;\n\
-             T16 trades higher fan-out cap for fewer merge interruptions."
+            "HEA-1931 AC PASS — T12 (max_sst_count=12, the new default) exponent={t12_slope:.4} ≤ 0.20.\n\
+             T8 exp={t8_slope:.4}  T16 exp={t16_slope:.4}"
         );
     } else {
         println!(
-            "At least one trigger value failed to cap fan-out (T8 exp={t8_slope:.4}, T16 exp={t16_slope:.4}).\n\
-             Review results above; do NOT flip the default in this issue."
+            "HEA-1931 AC MISS — T12 exponent={t12_slope:.4} > 0.20. The new default may need tuning.\n\
+             T8 exp={t8_slope:.4}  T16 exp={t16_slope:.4}\n\
+             Review results; consider a lower max_sst_count or tuned merge_min."
         );
     }
 
