@@ -45,7 +45,7 @@ use crate::storage::migrations::{self, WAL_MAGIC, WAL_VERSION_CURRENT, WAL_VERSI
 use std::collections::VecDeque;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use uuid::Uuid;
 
@@ -419,6 +419,10 @@ struct GroupSlotState {
     done: bool,
     /// `None` = success; `Some(msg)` = the error message from the commit.
     error: Option<String>,
+    /// Set by the outgoing leader to hand off leadership to this slot's thread.
+    /// When `true`, the waiting thread must call `lead_group_commit` before
+    /// reading its own slot outcome.
+    be_leader: bool,
 }
 
 /// Shared group-commit queue and leader flag.
@@ -430,6 +434,48 @@ struct GroupState {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// RAII guard held by the group-commit leader for the duration of its commit
+/// loop.
+///
+/// If `commit_batch` panics (e.g. the memtable-flush closure inside
+/// `pre_rotate` raises), the unwind would otherwise leave `leader_active ==
+/// true` permanently, silently hanging every subsequent writer on a condvar
+/// that nobody will ever notify.  Wrapping leadership in this guard converts
+/// that silent hang into the same fail-fast behaviour the pre-group-commit code
+/// exhibited (mutex-poison → immediate `Err`).
+///
+/// Call `guard.disarmed = true` just before the normal empty-queue return so
+/// that `Drop` is a no-op on the happy path.
+struct LeaderGuard<'a> {
+    group: &'a Mutex<GroupState>,
+    /// `true` once the leader drains an empty queue — suppresses the
+    /// panic-path drain in `Drop`.
+    disarmed: bool,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        // Panic / hard-error path: restore a clean state so that any threads
+        // blocked on their slot condvars fail fast rather than waiting forever.
+        if let Ok(mut gs) = self.group.lock() {
+            gs.leader_active = false;
+            let pending: Vec<_> = gs.pending.drain(..).collect();
+            drop(gs); // release the lock before signalling
+            for slot in pending {
+                if let Ok(mut state) = slot.state.lock() {
+                    state.done = true;
+                    state.error =
+                        Some("WAL leader exited unexpectedly; write failed".to_string());
+                    slot.cv.notify_one();
+                }
+            }
+        }
+    }
+}
 
 /// Write-ahead log providing durable, ordered storage of mutations.
 ///
@@ -476,7 +522,23 @@ pub struct Wal {
     /// Incremented after each `commit_batch` sync completes.  Used by the
     /// saturation-throughput benchmark to measure fsyncs/write under group
     /// commit.  Off the hot path (relaxed ordering is sufficient).
-    sync_count: Arc<AtomicU64>,
+    sync_count: AtomicU64,
+    /// Set to `true` after any write error inside `commit_batch`.
+    ///
+    /// A mid-batch write fault leaves a torn record in the file; any bytes
+    /// written after it are dropped by `scan_records` on recovery.  Fencing
+    /// prevents subsequent appends from returning `Ok` for data that will be
+    /// silently discarded at replay time.
+    fenced: AtomicBool,
+    /// Test hook: barrier released by every writer (leader and followers)
+    /// after pushing its slot and computing `am_leader`, but before the
+    /// leader begins draining the queue.
+    ///
+    /// When `Some`, all N concurrent callers of `append_with_pre_rotate`
+    /// rendezvous here, guaranteeing the leader sees every slot in `pending`
+    /// when it drains — making batch membership deterministic in tests.
+    #[cfg(feature = "test-hooks")]
+    pub commit_barrier: Option<Arc<std::sync::Barrier>>,
 }
 
 /// Outcome of scanning the record region of a WAL segment.
@@ -776,7 +838,10 @@ impl Wal {
                 pending: VecDeque::new(),
                 leader_active: false,
             }),
-            sync_count: Arc::new(AtomicU64::new(0)),
+            sync_count: AtomicU64::new(0),
+            fenced: AtomicBool::new(false),
+            #[cfg(feature = "test-hooks")]
+            commit_barrier: None,
         })
     }
 
@@ -805,16 +870,21 @@ impl Wal {
     /// When `SyncMode::EveryWrite` is configured (the production default) this
     /// uses **leader/follower group commit**: multiple concurrent callers share
     /// a single `fsync` call rather than each paying a private one.  The leader
-    /// — whichever thread first finds the queue empty — writes every pending
-    /// entry under the file mutex and calls `sync_all` once.  Followers wait on
-    /// a per-slot condvar and return as soon as their bytes are covered.
+    /// — whichever thread first finds the queue empty — writes one batch of
+    /// pending entries under the file mutex, calls `sync_all` once, then either
+    /// releases leadership (queue empty) or promotes the head of the remaining
+    /// queue to leader and exits.  Each caller commits at most one batch,
+    /// bounding the time any single `spawn_blocking` thread is held.
     ///
     /// Durability guarantee: no writer returns `Ok` until a `sync_all` that
     /// covered its bytes has completed.
     ///
-    /// `pre_rotate` fires while the WAL file mutex is held (exactly as before);
-    /// with group commit the leader calls the per-batch `pre_rotate` on the
-    /// first batch that triggers rotation.
+    /// `pre_rotate` usage: the initial leader invokes it on the first batch that
+    /// triggers rotation; a promoted follower invokes it on its first led batch.
+    /// Followers whose slots are committed without promotion have their
+    /// `pre_rotate` dropped.  All call sites in `engine.rs` supply the
+    /// identical `|| self.trigger_flush()` closure, so the dropped instances
+    /// have no observable effect beyond the first rotation per session.
     pub fn append_with_pre_rotate<F>(
         &self,
         entry: &WalEntry,
@@ -823,6 +893,15 @@ impl Wal {
     where
         F: FnOnce() -> Result<(), StorageError>,
     {
+        // A write fault inside commit_batch fences the WAL: bytes written after
+        // a torn record are dropped by scan_records on recovery, so subsequent
+        // appends must not be acked as durable.
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "WAL fenced after write fault — all subsequent writes rejected",
+            )));
+        }
+
         let plaintext = entry.serialize();
 
         // ── Fast path: SyncMode::None (dev / test only) ───────────────────
@@ -840,6 +919,7 @@ impl Wal {
             state: Mutex::new(GroupSlotState {
                 done: false,
                 error: None,
+                be_leader: false,
             }),
             cv: Condvar::new(),
         });
@@ -858,13 +938,47 @@ impl Wal {
             }
         };
 
-        if am_leader {
-            // Propagate only hard (unrecoverable) failures from the leader
-            // loop.  Per-entry I/O errors travel through slot.state.error.
-            self.lead_group_commit(pre_rotate)?;
+        // Test hook: rendezvous all concurrent writers before the leader
+        // drains the queue.  This makes batch membership deterministic
+        // (every writer that reaches the barrier is guaranteed to appear in
+        // the leader's first drain) without relying on fsync latency.
+        #[cfg(feature = "test-hooks")]
+        if let Some(ref b) = self.commit_barrier {
+            b.wait();
         }
 
-        // Wait for our slot — either set by us as leader, or by another leader.
+        if am_leader {
+            // Propagate only hard (unrecoverable) failures from the commit.
+            // Per-entry I/O errors travel through slot.state.error.
+            self.lead_group_commit(pre_rotate)?;
+        } else {
+            // Follower: wait until our slot is committed, or until the outgoing
+            // leader promotes us.  Promotion means our slot is still in pending
+            // and we must run the commit loop ourselves.
+            let mut state = slot
+                .state
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
+            loop {
+                if state.done {
+                    break;
+                }
+                if state.be_leader {
+                    // Promoted: our slot is still in pending; running
+                    // lead_group_commit will commit it in the first batch.
+                    drop(state);
+                    self.lead_group_commit(pre_rotate)?;
+                    break;
+                }
+                state = slot.cv.wait(state).map_err(|_| {
+                    StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
+                })?;
+            }
+        }
+
+        // Read the slot outcome.  For the original leader and promoted followers
+        // the slot was committed in the first batch they led (done=true on
+        // re-acquire).  For non-promoted followers it was set by another leader.
         let mut state = slot
             .state
             .lock()
@@ -929,39 +1043,71 @@ impl Wal {
         Ok(())
     }
 
-    /// Leader commit loop: drain the pending queue and commit each batch under
-    /// the file mutex with a single `sync_all`.  Loops until the queue is empty,
-    /// then releases the leader role atomically with the empty check.
+    /// Commits one batch of pending WAL writes under the file mutex with a
+    /// single `sync_all`, then either releases leadership (queue empty) or
+    /// promotes the head of the remaining queue to leader and exits.
     ///
-    /// `pre_rotate` is forwarded to the first batch only (it is `FnOnce`);
-    /// subsequent batches rely on `rotate_locked` calling `pre_rotate_fn`.
+    /// Each caller commits exactly one batch, bounding the time any single
+    /// `spawn_blocking` thread is held as leader regardless of write pressure.
+    /// `pre_rotate` is forwarded to `commit_batch`; promoted successors use
+    /// their own `pre_rotate` or the registered `pre_rotate_fn`.
     fn lead_group_commit<F>(&self, pre_rotate: F) -> Result<(), StorageError>
     where
         F: FnOnce() -> Result<(), StorageError>,
     {
-        let mut pre_rotate = Some(pre_rotate);
+        // RAII guard: if `commit_batch` panics (e.g. inside the memtable-flush
+        // closure injected by the storage engine), the unwind would otherwise
+        // leave `leader_active == true` forever, silently hanging every later
+        // writer on a condvar nobody notifies.  The guard restores a clean state
+        // on any unwind so callers fail fast instead.  Disarm it before any
+        // normal return.
+        let mut guard = LeaderGuard {
+            group: &self.group,
+            disarmed: false,
+        };
 
-        loop {
-            // Drain atomically.  If the queue is empty, release leadership and
-            // exit — the release is inside the lock so no writer can push and
-            // miss the leader before we exit.
-            let batch: Vec<Arc<GroupSlot>> = {
-                let mut gs = self.group.lock().map_err(|_| {
-                    StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
-                })?;
-                let b: Vec<_> = gs.pending.drain(..).collect();
-                if b.is_empty() {
-                    gs.leader_active = false;
-                    return Ok(());
-                }
-                b
-            };
+        // Drain atomically.  If the queue is already empty (rare: another
+        // leader drained it before us), release leadership and exit.
+        let batch: Vec<Arc<GroupSlot>> = {
+            let mut gs = self.group.lock().map_err(|_| {
+                StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
+            })?;
+            let b: Vec<_> = gs.pending.drain(..).collect();
+            if b.is_empty() {
+                gs.leader_active = false;
+                guard.disarmed = true;
+                return Ok(());
+            }
+            b
+        };
 
-            // Write every slot in the batch + ONE fsync.
-            self.commit_batch(&batch, pre_rotate.take())?;
+        // Write every slot in the batch + ONE fsync.
+        self.commit_batch(&batch, Some(pre_rotate))?;
 
-            // Loop: drain any writers that arrived while we were committing.
+        // Our own slot is now committed.  Check whether more writers arrived
+        // while we were writing and, if so, promote the head of the queue.
+        // Keeping leader_active=true prevents new arrivals from racing to
+        // elect themselves over the promoted leader.
+        let next_leader: Option<Arc<GroupSlot>> = {
+            let mut gs = self.group.lock().map_err(|_| {
+                StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
+            })?;
+            if gs.pending.is_empty() {
+                gs.leader_active = false;
+                guard.disarmed = true;
+                return Ok(());
+            }
+            gs.pending.front().map(Arc::clone)
+        };
+
+        if let Some(next) = next_leader {
+            let mut state = next.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.be_leader = true;
+            drop(state);
+            next.cv.notify_one();
         }
+        guard.disarmed = true;
+        Ok(())
     }
 
     /// Writes every slot in `batch` to the WAL file and calls `sync_all` once.
@@ -969,8 +1115,8 @@ impl Wal {
     /// All I/O runs under the file mutex so writes are in record-number order
     /// and rotation is atomic with respect to concurrent appenders.  Each slot
     /// is marked done (success or error string) before this function returns;
-    /// per-slot errors never propagate out of here so the leader loop can
-    /// continue with subsequent batches.
+    /// per-slot errors travel through `slot.state.error` and do not propagate
+    /// to the caller.
     fn commit_batch<F>(
         &self,
         batch: &[Arc<GroupSlot>],
@@ -988,6 +1134,10 @@ impl Wal {
 
             // Estimate total on-disk size to decide whether to rotate before
             // assigning any record numbers (rotation resets the counter to 0).
+            // NOTE: if a batch's total size exceeds max_size, all entries still
+            // land in a single segment (overshooting the cap); the next batch
+            // will immediately trigger a rotation, so the overshoot is
+            // self-correcting within one segment.
             let file_size = file.seek(SeekFrom::End(0))?;
             #[allow(clippy::cast_possible_truncation)]
             let approx_total: u64 = batch
@@ -1036,15 +1186,24 @@ impl Wal {
             Ok(())
         })();
 
+        // A mid-batch write fault leaves a torn record in the file; bytes
+        // written after it are dropped by scan_records on recovery.  Fence the
+        // WAL so subsequent appends are rejected rather than silently acking
+        // data that replay will discard.
+        if commit_result.is_err() {
+            self.fenced.store(true, Ordering::Release);
+        }
+
         // Propagate the outcome to every slot; errors travel as strings so
         // callers receive a typed `StorageError::Io` with a message.
+        // Use unwrap_or_else so a poisoned slot mutex does not silently skip
+        // the signal and strand a writer waiting on the condvar forever.
         let err_msg = commit_result.as_ref().err().map(|e| e.to_string());
         for slot in batch {
-            if let Ok(mut state) = slot.state.lock() {
-                state.done = true;
-                state.error = err_msg.clone();
-                slot.cv.notify_one();
-            }
+            let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.done = true;
+            state.error = err_msg.clone();
+            slot.cv.notify_one();
         }
 
         // Per-entry errors are communicated through the slot; only return Err

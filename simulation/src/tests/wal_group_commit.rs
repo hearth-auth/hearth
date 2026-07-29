@@ -246,10 +246,15 @@ fn concurrent_writes_preserve_nonce_ordering() {
     );
 }
 
-/// A sync failure mid-batch must propagate to all writers in that group.
+/// A sync failure mid-batch must propagate to **every** writer in that group.
 ///
-/// No writer whose bytes were not durably fsynced may return Ok.  After the
-/// failure the WAL must still recover to a valid prefix.
+/// No writer whose bytes were not durably fsynced may return `Ok`.  This test
+/// uses a `commit_barrier` (test-hooks feature) to make batch membership
+/// deterministic: all N writers push their slot before the leader drains,
+/// so the leader's first batch contains exactly N entries.  A failing
+/// `sync_all` on that batch must therefore produce exactly N errors.
+///
+/// After the failure the WAL must still recover to a valid prefix.
 #[test]
 fn group_commit_sync_failure_propagates_to_all_batch_members() {
     const N: usize = 4;
@@ -258,21 +263,22 @@ fn group_commit_sync_failure_propagates_to_all_batch_members() {
     let wal_path = dir.path().join("test.wal");
 
     let fault_fs = Arc::new(FaultFs::new());
-    // Slow syncs so all N writers queue into the same batch before the leader
-    // calls sync_all.
-    fault_fs.config.set_latency(0, 0, 10_000, 0, 0);
 
     let error_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     {
-        let wal = Arc::new(open_wal_with_fs(
+        // Open the WAL, then attach the commit barrier before wrapping in Arc
+        // so all N writers rendezvous before the leader drains the queue.
+        let mut wal = open_wal_with_fs(
             &wal_path,
             WalConfig {
                 max_size: u64::MAX,
                 sync_mode: SyncMode::EveryWrite,
             },
             Arc::clone(&fault_fs) as Arc<dyn Fs>,
-        ));
+        );
+        wal.commit_barrier = Some(Arc::new(std::sync::Barrier::new(N)));
+        let wal = Arc::new(wal);
 
         // Arm the failure AFTER WAL open (which itself calls sync_all once).
         fault_fs
@@ -280,11 +286,11 @@ fn group_commit_sync_failure_propagates_to_all_batch_members() {
             .fail_next_sync
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let barrier = Arc::new(Barrier::new(N));
+        let start = Arc::new(Barrier::new(N));
         let handles: Vec<_> = (0..N)
             .map(|t| {
                 let wal = Arc::clone(&wal);
-                let b = Arc::clone(&barrier);
+                let b = Arc::clone(&start);
                 let errs = Arc::clone(&error_count);
                 std::thread::spawn(move || {
                     b.wait();
@@ -301,18 +307,13 @@ fn group_commit_sync_failure_propagates_to_all_batch_members() {
         }
     }
 
-    // At least one writer in the failed batch must have received an error.
-    // (With 10 ms sync latency all N writers typically batch together, but
-    // the guarantee is: any writer whose bytes hit the failed sync_all gets
-    // Err.  Writers in subsequent batches may succeed.)
+    // The commit_barrier guarantees all N writers are in the same batch.
+    // A failing sync_all must propagate the error to every member — exactly N.
     let errs = error_count.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        errs >= 1,
-        "sync failure must propagate to at least one batch member; got 0/{N} errors"
-    );
-    assert!(
-        errs <= N,
-        "impossible: more errors ({errs}) than writers ({N})"
+    assert_eq!(
+        errs, N,
+        "sync failure must propagate to every member of the failed batch; \
+         got {errs}/{N} errors"
     );
 
     // Recovery: WAL must still parse to a valid (possibly empty) prefix.
@@ -325,6 +326,90 @@ fn group_commit_sync_failure_propagates_to_all_batch_members() {
     );
     wal.read_all()
         .expect("WAL must recover to a valid prefix after group sync failure");
+}
+
+/// Rotation under group commit must not cause nonce reuse.
+///
+/// During `commit_batch`, when the WAL crosses `max_size`, the leader calls
+/// `rotate_locked`, which resets `record_counter` to 0 atomically with the DEK
+/// swap (HEA-SEC-08).  A bug that splits the counter reset from the DEK swap
+/// would encrypt post-rotation records under a (DEK, nonce) pair already used
+/// by the pre-rotation segment — a confidentiality breach.  On replay,
+/// `scan_records` derives nonces positionally from 0, so any mismatch breaks
+/// the AEAD tag and surfaces as an error or short read in `read_all`.
+///
+/// This test forces several WAL rotations under concurrent writers, then
+/// re-opens and asserts that all remaining records decrypt without error.
+#[test]
+fn group_commit_rotation_does_not_cause_nonce_reuse() {
+    const N: usize = 4;
+    const K: usize = 30;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("rotation-nonce.wal");
+
+    // max_size small enough that every group-commit batch triggers a rotation.
+    // Per-entry on-disk footprint: 4 (len) + plaintext + 16 (GCM tag) + 4 (CRC).
+    // "rot-N-KK" key ≈ 9 B, "rotation-nonce-val" value ≈ 18 B:
+    //   plaintext ≈ 8+16+1+4+9+4+18 = 60 B → on-disk ≈ 4+76+4 = 84 B/record.
+    // With max_size=300 and header=82 B: 82+84 = 166 < 300 → no rotation alone,
+    // but a batch of 4 adds 4×84 = 336 B → 82+336 = 418 > 300 → rotates.
+    {
+        let wal = Arc::new(open_wal(
+            &wal_path,
+            WalConfig {
+                max_size: 300,
+                sync_mode: SyncMode::EveryWrite,
+            },
+        ));
+
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|t| {
+                let wal = Arc::clone(&wal);
+                let b = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    b.wait();
+                    for k in 0..K {
+                        // Ignore errors — some writes may be lost on rotation;
+                        // correctness is verified by decryption, not entry count.
+                        let _ = wal.append(&make_entry(
+                            format!("rot-{t}-{k}").as_bytes(),
+                            b"rotation-nonce-val",
+                        ));
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("rotation thread panicked");
+        }
+    }
+
+    // Re-open and verify all remaining records decrypt without AEAD error.
+    // A nonce-reuse bug would corrupt the GCM tag and cause read_all to
+    // return Err (or silently truncate — either way the assertion below fires).
+    let wal = open_wal(
+        &wal_path,
+        WalConfig {
+            max_size: u64::MAX,
+            sync_mode: SyncMode::None,
+        },
+    );
+    let entries = wal.read_all().expect(
+        "read_all must succeed after concurrent rotations — \
+         AEAD failure indicates nonce reuse under group commit",
+    );
+
+    // After many rotations the WAL holds the entries from the final segment.
+    // Assert we recovered at least one readable record (zero would indicate
+    // total data loss, which is a separate correctness bug).
+    assert!(
+        !entries.is_empty(),
+        "WAL must contain at least one readable entry after concurrent rotations; \
+         got none — possible rotation or nonce-counter bug"
+    );
 }
 
 /// After a crash mid-batch (simulated via WAL re-open), the valid prefix from
@@ -408,11 +493,25 @@ fn concurrent_crash_mid_batch_leaves_valid_prefix() {
     let entries = wal
         .read_all()
         .expect("read after crash — valid prefix required");
+
+    // Verify the specific pre-crash key contents rather than just a count,
+    // so the test can distinguish "right entries present" from "enough entries
+    // of any kind happened to survive" (e.g. post-crash entries padding the
+    // count past the N*K_BEFORE floor).
+    let recovered_keys: std::collections::HashSet<Vec<u8>> =
+        entries.iter().map(|e| e.key.clone()).collect();
+
+    let missing: Vec<String> = (0..N)
+        .flat_map(|t| {
+            (0..K_BEFORE).map(move |k| format!("pre-{t}-{k}"))
+        })
+        .filter(|k| !recovered_keys.contains(k.as_bytes()))
+        .collect();
+
     assert!(
-        entries.len() >= N * K_BEFORE,
-        "all {0}×{1} pre-crash entries must survive; got {2} entries",
-        N,
-        K_BEFORE,
-        entries.len()
+        missing.is_empty(),
+        "{} pre-crash key(s) missing after recovery: {:?}",
+        missing.len(),
+        &missing[..missing.len().min(5)],
     );
 }

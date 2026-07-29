@@ -34,6 +34,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scaling exponent moves from near-zero toward positive; single-thread throughput and
   durability are unchanged. (HEA-1915)
 
+### Fixed
+- **WAL group-commit leader bounded to one batch (HEA-1921)** — the group-commit leader
+  now commits exactly one batch then either releases leadership (queue empty) or promotes
+  the head of the remaining queue to leader and exits. Previously the leader looped until
+  the queue drained, which under sustained load could pin a `spawn_blocking` thread
+  indefinitely after its own write was already durable, degrading tail latency for the
+  unlucky thread that drew leader. Each caller now holds the leader role for at most one
+  fsync round. (HEA-1921 / F4)
+- **WAL write fault fences subsequent appends (HEA-1921)** — a mid-batch write error
+  now sets an internal fence flag; any subsequent `append` call returns `Err` rather than
+  silently acking data that `scan_records` will discard on recovery after a torn record.
+  (HEA-1921 / F6)
+- **WAL slot-mutex poison no longer strands a follower (HEA-1921)** — the slot-state
+  lock is now recovered with `unwrap_or_else` instead of silently skipping the condvar
+  signal on poison, ensuring a poisoned slot always gets its `done` flag set. (HEA-1921 / F5)
+
 - **CSRF rejection copy is now plain language, with a recovery link (HEA-1913)** — the
   login, MFA-challenge, and registration forms previously rejected a stale CSRF token
   with "Invalid security token. Please reload the page and try again." Users have no
@@ -46,6 +62,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   HEA-1367 are unchanged — this is a copy and affordance fix only. (HEA-1913)
 
 ### Security
+- **SST `entry_count` no longer sizes an allocation from unauthenticated bytes (HEA-1917)** —
+  the SST header's `entry_count` field lies outside the AEAD and the CRC on *every* format
+  version and is never validated before use, yet it was passed straight to
+  `Vec::with_capacity` on both the v3 path (`SstReader::iter_all`) and the legacy V1/V2 path
+  (`parse_entries`, whose count-mismatch check only runs *after* the decode loop). A tampered
+  or bit-rotted value (e.g. `u32::MAX`) drove a ~275 GB reservation that aborts the process —
+  on v3 when the file is next compacted, on V1/V2 at open — defeating the format's
+  "corruption surfaces as an error, never a crash" contract. Every reservation derived from
+  `entry_count` is now clamped against an authenticated length (the decrypted section's or
+  block's plaintext size, and the sealed footer's per-block lengths), so a bogus count can
+  only under-reserve. Tampered files now surface a clean `InvalidSstFormat`. (HEA-1917)
 - **Step-up MFA grant now routes through the shared KDF admission gate (HEA-1910)** —
   the `urn:hearth:params:grant-type:step-up-mfa` grant at `/token` previously called
   `step_up_mfa_grant_token` inline in the async handler with neither a gate permit nor
