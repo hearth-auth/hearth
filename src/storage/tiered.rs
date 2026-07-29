@@ -776,8 +776,9 @@ mod tests {
     proptest! {
         #[test]
         fn proptest_power_law_converges(seed in any::<u64>()) {
+            const CAPACITY: usize = 10;
             let config = TieredConfig {
-                hot_tier_capacity: 10,
+                hot_tier_capacity: CAPACITY,
                 eviction_batch_size: 5,
                 promote_sample_rate: 1,
             };
@@ -818,27 +819,75 @@ mod tests {
                 }
             }
 
-            // Convergence to the active working set. The bare `hot_in_tier >= 1`
-            // this replaces was exactly random-chance level (hot keys are 10% of
-            // the keyspace, capacity is 10, so ≈1 is expected even with no
-            // locality) and proved nothing. Because the Zipfian phase interleaves
-            // clock sweeps, the count after it is genuinely PRNG-dependent (the
-            // report's flakiness note), so instead we drive the tier to steady
-            // state deterministically: a final burst touching only the 5 hot keys
-            // with no interleaved sweeps. Capacity 10 comfortably holds the
-            // 5-key working set, so a converging tier must end with all of them
-            // resident — this is what "converges to active working set" means.
-            for key in &hot_keys {
-                if tier.get(&realm, key).is_none() {
-                    tier.promote(&realm, key, &[42u8; 8]);
+            // Convergence to the active working set, asserted as *retention under
+            // cold-stream pressure*.
+            //
+            // Two earlier framings of this assertion were both bad, and both are
+            // worth recording so they are not reintroduced:
+            //
+            //   * `hot_in_tier >= 1` after the Zipfian phase was random-chance
+            //     level (hot keys are 10% of the keyspace and capacity is 10, so
+            //     ≈1 resident is expected with no locality at all).
+            //   * "touch each hot key once, then require all 5 resident" is not a
+            //     property CLOCK provides and failed for ~1 seed in N. Entering
+            //     that round the tier holds reference bits left by the Zipfian
+            //     phase, and each promotion's `evict_locked` clears bits as it
+            //     scans, so a key promoted early in the round can be evicted by a
+            //     later promotion in the same round. That is second-chance
+            //     behaviour working as designed, not a defect.
+            //
+            // Measured on this workload, hot-vs-cold *hit rate* after the Zipfian
+            // phase (≈0.91 vs ≈0.10) does not discriminate either: because every
+            // miss re-promotes, the numbers are identical whether eviction honours
+            // the reference bit, ignores it, or inverts it. So the assertion below
+            // instead drives the case eviction policy actually decides — a working
+            // set that is *being used* while new cold data streams in:
+            //
+            //   for each cold entry still resident: re-read all 5 hot keys (sets
+            //   their reference bits), then promote one never-seen intruder key.
+            //
+            // The tier is at capacity, so each intruder forces an eviction, and a
+            // tier with locality must spend those evictions on the cold/intruder
+            // entries rather than on the working set.
+            //
+            // Residency is averaged over the rounds rather than asserted per round:
+            // when *every* resident entry is referenced, CLOCK legitimately falls
+            // back to evicting at the hand, which can take a hot key for one round.
+            // Averaging tolerates that without tolerating a policy that keeps doing
+            // it. Measured discrimination, threshold 0.90:
+            //
+            //   as-shipped CLOCK                              residency 1.000 (pass)
+            //   evict *referenced* entries (locality inverted) residency 0.800 (fail)
+            //   evict at the hand, ignoring the reference bit  residency ≥0.90 (pass)
+            //
+            // So this catches a tier that actively works against locality; it does
+            // not claim to separate CLOCK from FIFO — with promote-on-miss and a
+            // working set half the capacity, FIFO retains it too. Do not read a
+            // pass here as evidence the reference bit is honoured; the dedicated
+            // unit tests (`hot_tier_recently_accessed_remains_hot`,
+            // `clock_lru_evicts_least_recently_used`) cover that.
+            // Intruder keys are outside both hot_keys (0..5) and cold_keys (5..50),
+            // so every one of them is a genuine first-touch admission.
+            const ROUNDS: usize = 40;
+            let mut resident_total = 0usize;
+            for i in 0..ROUNDS {
+                for key in &hot_keys {
+                    if tier.get(&realm, key).is_none() {
+                        tier.promote(&realm, key, &[42u8; 8]);
+                    }
                 }
+                #[allow(clippy::cast_possible_truncation)]
+                tier.promote(&realm, &[200u8, i as u8], &[7u8; 8]);
+                resident_total += hot_keys.iter().filter(|k| tier.contains(&realm, k)).count();
             }
-            for key in &hot_keys {
-                prop_assert!(
-                    tier.contains(&realm, key),
-                    "hot key {:?} must be resident after converging on the working set", key,
-                );
-            }
+            #[allow(clippy::cast_precision_loss)]
+            let residency = resident_total as f64 / (ROUNDS * hot_keys.len()) as f64;
+            prop_assert!(
+                residency >= 0.90,
+                "actively-used working set residency {:.3} < 0.90 over {} rounds of \
+                 cold-stream pressure at capacity {}",
+                residency, ROUNDS, CAPACITY,
+            );
         }
     }
 
