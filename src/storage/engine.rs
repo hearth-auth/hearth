@@ -56,7 +56,14 @@ pub struct StorageConfig {
     /// `HEARTH_MASTER_KEY` is unset (dev/test only). When `false` (production),
     /// startup fails if the env var is absent — preventing a world-readable key.
     pub dev_mode: bool,
+    /// Total byte budget for the process-wide decrypted-block cache shared by
+    /// all v3 SST readers (HEA-1914). Bounds decrypted cold-tier residency
+    /// independent of corpus size. Default 256 MiB.
+    pub block_cache_bytes: usize,
 }
+
+/// Default byte budget for the shared decrypted-block cache (256 MiB).
+pub const DEFAULT_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Configuration for background SST compaction.
 #[derive(Debug, Clone)]
@@ -118,6 +125,7 @@ impl StorageConfig {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: DEFAULT_BLOCK_CACHE_BYTES,
         }
     }
 
@@ -161,6 +169,7 @@ impl StorageConfig {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: false,
+            block_cache_bytes: DEFAULT_BLOCK_CACHE_BYTES,
         }
     }
 
@@ -215,6 +224,7 @@ impl StorageConfig {
                 merge_min: 4,
             },
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -275,6 +285,10 @@ pub struct EmbeddedStorageEngine {
     /// internal to avoid the global-registry cross-test interference that
     /// process-wide counters suffer under parallel `nextest`.
     compaction_records_written: Arc<std::sync::atomic::AtomicU64>,
+    /// Process-wide, byte-bounded cache of decrypted v3 SST blocks, shared by
+    /// every reader so decrypted cold-tier residency is `O(cache_cap)`, not
+    /// `O(corpus)` (HEA-1914).
+    block_cache: Arc<crate::storage::block_cache::BlockCache>,
 }
 
 impl EmbeddedStorageEngine {
@@ -347,6 +361,11 @@ impl EmbeddedStorageEngine {
             .collect();
         sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
 
+        // Shared, byte-bounded decrypted-block cache for all v3 SST readers.
+        let block_cache = Arc::new(crate::storage::block_cache::BlockCache::new(
+            config.block_cache_bytes,
+        ));
+
         let mut sst_readers = Vec::new();
         let mut max_sst_num: u64 = 0;
         for (path, sst_num) in &sst_paths {
@@ -388,11 +407,11 @@ impl EmbeddedStorageEngine {
                     });
                 }
             };
-            let reader = SstReader::open_with_fs(path, &*fs, *sst_num, &dek).map_err(|e| {
-                StorageError::Crypto {
-                    reason: format!("SST {} failed to open reader: {}", path.display(), e),
-                }
-            })?;
+            let reader =
+                SstReader::open_with_fs(path, &*fs, *sst_num, &dek, Arc::clone(&block_cache))
+                    .map_err(|e| StorageError::Crypto {
+                        reason: format!("SST {} failed to open reader: {}", path.display(), e),
+                    })?;
             max_sst_num = max_sst_num.max(*sst_num);
             sst_readers.push(reader);
         }
@@ -419,6 +438,7 @@ impl EmbeddedStorageEngine {
             let cb_key_registry = Arc::clone(&key_registry);
             let cb_system_realm = system_realm.clone();
             let cb_fs = Arc::clone(&fs);
+            let cb_block_cache = Arc::clone(&block_cache);
 
             wal.set_pre_rotate_fn(move || {
                 let Ok(_guard) = cb_flush_lock.lock() else {
@@ -443,7 +463,10 @@ impl EmbeddedStorageEngine {
                     // Collect entries: crossbeam_skiplist Entry::key/value lifetimes
                     // are tied to &self (the entry guard), not the map, so we must
                     // materialise the pairs before passing to write_sst_with_fs.
-                    let entries: Vec<_> = map.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
+                    let entries: Vec<_> = map
+                        .iter()
+                        .map(|e| (e.key().clone(), e.value().clone()))
+                        .collect();
                     SstWriter::write_sst_with_fs(
                         &sst_path,
                         entries.iter().map(|(k, v)| (k, v)),
@@ -479,7 +502,13 @@ impl EmbeddedStorageEngine {
                             Ok(d) => d,
                             Err(_) => continue,
                         };
-                        if let Ok(reader) = SstReader::open_with_fs(path, &*cb_fs, *n, &file_dek) {
+                        if let Ok(reader) = SstReader::open_with_fs(
+                            path,
+                            &*cb_fs,
+                            *n,
+                            &file_dek,
+                            Arc::clone(&cb_block_cache),
+                        ) {
                             rebuilt.push(reader);
                         }
                     }
@@ -506,6 +535,7 @@ impl EmbeddedStorageEngine {
             compaction: config.compaction,
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            block_cache,
         })
     }
 
@@ -547,7 +577,10 @@ impl EmbeddedStorageEngine {
 
             // Collect entries: crossbeam_skiplist Entry::key/value lifetimes are
             // tied to &self (the entry guard), not the map, so materialise first.
-            let entries: Vec<_> = map.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
+            let entries: Vec<_> = map
+                .iter()
+                .map(|e| (e.key().clone(), e.value().clone()))
+                .collect();
             SstWriter::write_sst_with_fs(
                 &sst_path,
                 entries.iter().map(|(k, v)| (k, v)),
@@ -641,7 +674,13 @@ impl EmbeddedStorageEngine {
                     continue;
                 }
             };
-            match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
+            match SstReader::open_with_fs(
+                path,
+                &*self.fs,
+                *sst_num,
+                &dek,
+                Arc::clone(&self.block_cache),
+            ) {
                 Ok(reader) => readers.push(reader),
                 Err(e) => {
                     tracing::warn!(
@@ -672,6 +711,16 @@ impl EmbeddedStorageEngine {
     pub(crate) fn compaction_records_written(&self) -> u64 {
         self.compaction_records_written
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns the cumulative number of WAL `sync_all` calls completed since
+    /// this engine was opened.
+    ///
+    /// Dividing this by the number of write operations gives the
+    /// fsyncs-per-write ratio under group commit.  Used by the
+    /// saturation-throughput benchmark (`examples/saturation_throughput.rs`).
+    pub fn wal_sync_count(&self) -> u64 {
+        self.wal.sync_count()
     }
 }
 
@@ -751,14 +800,21 @@ impl EmbeddedStorageEngine {
             &enc_header,
         )?;
 
-        // Open reader from temp path before rename (SstReader is in-memory,
-        // independent of the underlying file path)
-        let new_reader =
-            SstReader::open_with_fs(&tmp_path, &*self.fs, sst_num, &dek).map_err(|e| {
-                StorageError::Crypto {
-                    reason: format!("compacted SST failed to open reader: {e}"),
-                }
-            })?;
+        // Open reader from the temp path before rename. A v3 reader mmaps the
+        // file, but on Unix `rename(2)` preserves the inode, so the mapping
+        // stays valid and points at the same bytes after the temp file is
+        // renamed to its final name. The reader carries `sst_num`, so its block
+        // cache keys and per-block nonces match the final file identity.
+        let new_reader = SstReader::open_with_fs(
+            &tmp_path,
+            &*self.fs,
+            sst_num,
+            &dek,
+            Arc::clone(&self.block_cache),
+        )
+        .map_err(|e| StorageError::Crypto {
+            reason: format!("compacted SST failed to open reader: {e}"),
+        })?;
 
         // Atomic rename — crash-safe: partial writes leave a .tmp, not a corrupt .sst
         self.fs.rename(&tmp_path, &final_path)?;
@@ -1018,7 +1074,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         let mut ssts_probed: u64 = 0;
         for reader in sst_readers.iter() {
             ssts_probed += 1;
-            if let Some(value) = reader.get(realm_id, key) {
+            if let Some(value) = reader.get(realm_id, key)? {
                 match value {
                     MemtableValue::Data(data) => {
                         // Cold hit — promote to hot tier
@@ -1274,7 +1330,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         // SST files oldest-to-newest (reverse of storage order) so newer overwrites older
         let sst_readers = self.sst_readers.load();
         for reader in sst_readers.iter().rev() {
-            let entries = reader.range_scan(realm_id, start, end);
+            let entries = reader.range_scan(realm_id, start, end)?;
             for (key, value) in entries {
                 merged.insert(key, value);
             }
@@ -1326,7 +1382,7 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         let sst_readers = self.sst_readers.load();
         for reader in sst_readers.iter().rev() {
-            for (key, alive) in reader.range_scan_keys(realm_id, start, end) {
+            for (key, alive) in reader.range_scan_keys(realm_id, start, end)? {
                 merged.insert(key, alive);
             }
         }
@@ -1567,6 +1623,7 @@ mod tests {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1627,6 +1684,7 @@ mod tests {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         };
         let engine = std::sync::Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
 
@@ -1697,6 +1755,7 @@ mod tests {
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
                 dev_mode: true,
+                block_cache_bytes: 4 * 1024 * 1024,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1726,6 +1785,7 @@ mod tests {
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
                 dev_mode: true,
+                block_cache_bytes: 4 * 1024 * 1024,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("reopen");
 
@@ -1823,6 +1883,7 @@ mod tests {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1911,6 +1972,7 @@ mod tests {
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
                 dev_mode: true,
+                block_cache_bytes: 4 * 1024 * 1024,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("open");
             for i in 0u32..5 {
@@ -1937,6 +1999,7 @@ mod tests {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         };
         let result = EmbeddedStorageEngine::open(config);
         assert!(
@@ -1969,6 +2032,7 @@ mod tests {
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
                 dev_mode: true,
+                block_cache_bytes: 4 * 1024 * 1024,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("open");
             for i in 0u32..5 {
@@ -1994,6 +2058,7 @@ mod tests {
             allow_missing_keks: true,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open with allow_missing_keks");
         // Data that was only in the SST is no longer reachable
@@ -2192,7 +2257,7 @@ mod tests {
         // Compacted SST must have zero tombstones
         let readers = engine.sst_readers.load();
         assert_eq!(readers.len(), 1, "should be 1 SST after compaction");
-        for (_key, value) in readers[0].iter_all() {
+        for (_key, value) in readers[0].iter_all().expect("iter_all") {
             assert!(
                 !matches!(value, MemtableValue::Tombstone),
                 "compacted SST must contain zero tombstones"
@@ -2449,6 +2514,7 @@ mod tests {
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
             dev_mode: true,
+            block_cache_bytes: 4 * 1024 * 1024,
         };
 
         {

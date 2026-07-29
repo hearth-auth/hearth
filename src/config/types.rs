@@ -202,6 +202,11 @@ pub struct StorageSection {
     /// Whether to fsync WAL writes. MUST be true in production.
     #[serde(default = "StorageSection::default_fsync")]
     pub fsync: bool,
+    /// Total byte budget for the process-wide decrypted-block cache shared by
+    /// all v3 SST readers (HEA-1914). Bounds decrypted cold-tier residency
+    /// independent of corpus size. Default 256 MiB.
+    #[serde(default = "StorageSection::default_block_cache_bytes")]
+    pub block_cache_bytes: usize,
     /// Background SST compaction (all fields optional).
     #[serde(default)]
     pub compaction: CompactionSection,
@@ -228,6 +233,10 @@ impl StorageSection {
     const fn default_fsync() -> bool {
         true
     }
+
+    const fn default_block_cache_bytes() -> usize {
+        256 * 1024 * 1024 // 256 MiB
+    }
 }
 
 impl Default for StorageSection {
@@ -239,6 +248,7 @@ impl Default for StorageSection {
             hot_tier_capacity: None,
             hot_tier_max_memory: None,
             fsync: Self::default_fsync(),
+            block_cache_bytes: Self::default_block_cache_bytes(),
             compaction: CompactionSection::default(),
         }
     }

@@ -60,6 +60,16 @@ impl DataEncryptionKey {
     pub fn from_bytes(bytes: [u8; KEY_SIZE]) -> Self {
         Self { bytes }
     }
+
+    /// Creates an independent copy of this key.
+    ///
+    /// A v3 SST reader retains its per-file DEK so it can lazily decrypt data
+    /// blocks on demand (HEA-1914) rather than decrypting the whole file at
+    /// open time. Cloning is deliberate and explicit — the key bytes never
+    /// leak through `Debug`/`Serialize` (the type has neither).
+    pub(crate) fn clone_key(&self) -> Self {
+        Self { bytes: self.bytes }
+    }
 }
 
 /// A 32-byte Key Encryption Key used to wrap (encrypt) file DEKs.
@@ -350,6 +360,31 @@ fn random_nonce() -> Result<[u8; NONCE_SIZE], StorageError> {
 pub(crate) fn counter_nonce(counter: u64) -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
     nonce[..8].copy_from_slice(&counter.to_le_bytes());
+    nonce
+}
+
+/// Sentinel block index used to derive the nonce/AAD for a v3 SST footer.
+///
+/// Distinct from any real data-block index (a file never contains `u32::MAX`
+/// blocks) so the footer's `(nonce, AAD)` can never collide with a data block's.
+pub(crate) const SST_FOOTER_BLOCK_INDEX: u32 = u32::MAX;
+
+/// Derives a unique 12-byte AEAD nonce for one block of a v3 SST.
+///
+/// The nonce encodes `(sst_number, block_index)` exactly — 8 bytes of file
+/// number followed by 4 bytes of block index — filling all 96 bits. This binds
+/// each block's ciphertext to both its file and its position: a block spliced
+/// into another position (different `block_index`) or another file (different
+/// `sst_number`) decrypts under a different nonce and fails GCM authentication.
+///
+/// Per-file DEKs are already unique, so `block_index` alone guarantees nonce
+/// uniqueness within a file; folding in `sst_number` is defense in depth. The
+/// same bytes are also passed as AAD by the block writer/reader so the binding
+/// is authenticated even though it is already reflected in the nonce.
+pub(crate) fn block_nonce(sst_number: u64, block_index: u32) -> [u8; NONCE_SIZE] {
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce[..8].copy_from_slice(&sst_number.to_le_bytes());
+    nonce[8..12].copy_from_slice(&block_index.to_le_bytes());
     nonce
 }
 

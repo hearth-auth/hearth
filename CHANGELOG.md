@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Block-structured SST format (v3) with mmap + bounded block cache (HEA-1914)** — SST
+  files now use a block-based on-disk format (magic `HSS3`): the data section is split
+  into ~4 KiB independently-encrypted blocks with a footer block index, and readers
+  memory-map the file and decrypt individual blocks on demand through a process-wide,
+  byte-bounded cache instead of decrypting the entire file into the heap at open. This
+  removes the previous `Θ(corpus)` resident-RAM ceiling — an open SST now holds only its
+  footer index (`O(#blocks)`), so a node's users-per-node is no longer bounded by having
+  every cold record permanently resident. New config key **`storage.block_cache_bytes`**
+  (default 256 MiB) caps decrypted-block residency across all readers. Each block is
+  sealed with an AEAD nonce/AAD derived from `(sst_number, block_index)`, so a block
+  cannot be replayed at a different position or spliced into another file. V1/V2 SSTs
+  remain readable via the eager path; new writes and compaction output are v3. Greenfield
+  — no migration tooling; old files are absorbed by compaction. (HEA-1914)
+
 ### Changed
 - **CSRF rejection copy is now plain language, with a recovery link (HEA-1913)** — the
   login, MFA-challenge, and registration forms previously rejected a stale CSRF token

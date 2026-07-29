@@ -11,6 +11,8 @@
 
 pub mod auto_size;
 #[allow(dead_code)]
+pub(crate) mod block_cache;
+#[allow(dead_code)]
 pub(crate) mod breach_corpus;
 pub mod encryption;
 mod engine;

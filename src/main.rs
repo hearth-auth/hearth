@@ -842,6 +842,7 @@ async fn run_serve(
             max_sst_count: config.storage.compaction.max_sst_count,
             merge_min: config.storage.compaction.merge_min,
         };
+        storage_config.block_cache_bytes = config.storage.block_cache_bytes;
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     } else {
@@ -876,6 +877,7 @@ async fn run_serve(
             max_sst_count: config.storage.compaction.max_sst_count,
             merge_min: config.storage.compaction.merge_min,
         };
+        storage_config.block_cache_bytes = config.storage.block_cache_bytes;
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     };

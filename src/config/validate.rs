@@ -136,6 +136,7 @@ impl Config {
                 hot_tier_capacity: Some(1_000),
                 hot_tier_max_memory: None,
                 fsync: false,
+                block_cache_bytes: 4 * 1024 * 1024,
                 compaction: CompactionSection::default(),
             },
             observability: ObservabilityConfig {
