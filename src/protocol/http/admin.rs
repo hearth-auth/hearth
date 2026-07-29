@@ -2424,13 +2424,19 @@ async fn admin_get_user_effective_permissions(
 
 // === Dev Bootstrap Endpoint ===
 
-/// Generates a random 32-character alphanumeric password using the OS CSPRNG.
 /// Fixed dev-mode password for `admin@hearth.test`.
 ///
 /// Using a stable value (rather than a random one) lets the Playwright UI
 /// test suite log in without needing to propagate the password through the
 /// bootstrap response. Acceptable in dev mode; `admin_bootstrap` is a 404
 /// in production.
+///
+/// HEA-1670 originally specified a CSPRNG-generated password here. That
+/// approach was dropped in favour of the stable value above, deliberately —
+/// the containment is the `state.dev_mode` 404 guard on `admin_bootstrap`,
+/// not the entropy of this constant. The re-bootstrap protections from that
+/// issue (Bearer token required, existing password never overwritten) are
+/// implemented and are what stop a known-value reset.
 pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 
 /// Seeds a system-realm admin user (`admin@hearth.test`) the first time a dev
