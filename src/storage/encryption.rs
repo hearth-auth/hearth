@@ -561,7 +561,11 @@ mod tests {
             .seal_into(&mut buf, plaintext, &nonce, &9u64.to_le_bytes())
             .expect("seal");
 
-        assert_eq!(&buf[..prefix.len()], &prefix[..], "prefix must be untouched");
+        assert_eq!(
+            &buf[..prefix.len()],
+            &prefix[..],
+            "prefix must be untouched"
+        );
         let decrypted = decrypt_section(&buf[prefix.len()..], &dek, &nonce, &9u64.to_le_bytes())
             .expect("decrypt appended region");
         assert_eq!(decrypted, plaintext);
