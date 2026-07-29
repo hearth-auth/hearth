@@ -458,6 +458,7 @@ struct GroupState {
 ///
 /// Replacing it with one watermark plus one `notify_all` makes the leader's
 /// signalling cost O(1) per batch instead of O(batch).
+#[derive(Default)]
 struct CommitSignal {
     /// Highest ticket whose commit has finished, successfully or not.
     ///
@@ -956,13 +957,7 @@ impl Wal {
             kek_id,
             fs,
             record_start: V1_RECORD_OFFSET,
-            commit_signal: (
-                Mutex::new(CommitSignal {
-                    completed: 0,
-                    failed_from: None,
-                }),
-                Condvar::new(),
-            ),
+            commit_signal: (Mutex::new(CommitSignal::default()), Condvar::new()),
             group: Mutex::new(GroupState {
                 pending: VecDeque::new(),
                 leader_active: false,
@@ -2330,13 +2325,7 @@ mod tests {
 
     /// Builds a fresh signal pair for the LeaderGuard tests.
     fn test_signal() -> (Mutex<CommitSignal>, Condvar) {
-        (
-            Mutex::new(CommitSignal {
-                completed: 0,
-                failed_from: None,
-            }),
-            Condvar::new(),
-        )
+        (Mutex::new(CommitSignal::default()), Condvar::new())
     }
 
     /// R1 regression: `Drop` must not retroactively fail an already-committed
@@ -2354,11 +2343,7 @@ mod tests {
     fn leader_guard_drop_does_not_fail_committed_writer() {
         let signal = test_signal();
         // Simulate: tickets 1..=3 committed successfully and published.
-        signal
-            .0
-            .lock()
-            .expect("fresh mutex")
-            .completed = 3;
+        signal.0.lock().expect("fresh mutex").completed = 3;
 
         let group = Mutex::new(GroupState {
             pending: VecDeque::new(),
@@ -2465,11 +2450,17 @@ mod tests {
         let sig = signal.0.lock().expect("mutex");
         for t in 1..=5u64 {
             let failed = matches!(&sig.failed_from, Some((from, _)) if t >= *from);
-            assert!(!failed, "ticket {t} committed before the fault must stay OK");
+            assert!(
+                !failed,
+                "ticket {t} committed before the fault must stay OK"
+            );
         }
         for t in 6..=10u64 {
             let failed = matches!(&sig.failed_from, Some((from, _)) if t >= *from);
-            assert!(failed, "ticket {t} at or after the fault must report failure");
+            assert!(
+                failed,
+                "ticket {t} at or after the fault must report failure"
+            );
         }
     }
 }
