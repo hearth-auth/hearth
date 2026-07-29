@@ -288,7 +288,12 @@ impl SstWriter {
     ) -> Result<SstMetadata, StorageError> {
         Self::write_sst_with_fs(
             path,
-            entries.iter().map(|(k, v)| (k, v)),
+            |sink| {
+                for (k, v) in entries {
+                    sink(k, v)?;
+                }
+                Ok(())
+            },
             entries.len(),
             &RealFs,
             sst_number,
@@ -297,19 +302,27 @@ impl SstWriter {
         )
     }
 
-    /// Writes an SST file from an **ordered iterator** of entries using a custom
-    /// filesystem implementation.
+    /// Writes an SST file by **pulling entries through a caller-driven `feed`**,
+    /// using a custom filesystem implementation.
     ///
-    /// `entries` MUST yield `(CompositeKey, MemtableValue)` references in sorted
-    /// `CompositeKey` order, and `entry_count` MUST be its length. Taking an
-    /// iterator rather than a slice lets a memtable flush stream directly off its
-    /// lock-free `SkipMap` without first materialising a full `Vec` copy of every
-    /// key and value (HEA-1908) — the bloom filter and the serialized payload are
-    /// both produced in a **single pass** over the iterator, with the filter sized
-    /// up front from `entry_count`.
-    pub(crate) fn write_sst_with_fs<'a, I>(
+    /// `feed` is invoked once with a `sink` and MUST call `sink(key, value)` for
+    /// every entry in ascending `CompositeKey` order; `entry_count` MUST be the
+    /// number of entries it will emit (it sizes the bloom filter up front). The
+    /// bloom filter and the serialized payload are produced in a **single pass** as
+    /// entries arrive.
+    ///
+    /// Inverting control (a `sink` the caller pushes into, rather than an iterator
+    /// the writer pulls) is what lets a memtable flush stream directly off its
+    /// lock-free `SkipMap` with **no copy at all** (HEA-1908): each
+    /// `crossbeam_skiplist::Entry` guard's `key()`/`value()` references are only
+    /// valid while the guard is alive, which an `Iterator<Item = (&K, &V)>` cannot
+    /// express, but a per-entry `sink` call can — the guard stays live across its
+    /// own `sink` call and nothing accumulates. Previously both flush callsites
+    /// materialised the entire parked map into an owned `Vec` first, duplicating
+    /// every key and value for the whole encrypt+`fsync`.
+    pub(crate) fn write_sst_with_fs<Feed>(
         path: &Path,
-        entries: I,
+        feed: Feed,
         entry_count: usize,
         fs: &dyn Fs,
         sst_number: u64,
@@ -317,7 +330,9 @@ impl SstWriter {
         enc_header: &EncryptionHeader,
     ) -> Result<SstMetadata, StorageError>
     where
-        I: IntoIterator<Item = (&'a CompositeKey, &'a MemtableValue)>,
+        Feed: FnOnce(
+            &mut dyn FnMut(&CompositeKey, &MemtableValue) -> Result<(), StorageError>,
+        ) -> Result<(), StorageError>,
     {
         let mut file = fs.create(path)?;
 
@@ -344,7 +359,7 @@ impl SstWriter {
         let mut max_key: Option<CompositeKey> = None;
         let mut written: u32 = 0;
 
-        for (key, value) in entries {
+        feed(&mut |key, value| {
             filter.insert(key.realm_id(), key.key());
             if cur_first_key.is_none() {
                 cur_first_key = Some(key.clone());
@@ -365,7 +380,8 @@ impl SstWriter {
                     dek,
                 )?;
             }
-        }
+            Ok(())
+        })?;
         // Flush the final partial block.
         Self::seal_block(
             &mut blocks_buf,

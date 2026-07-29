@@ -475,17 +475,21 @@ impl EmbeddedStorageEngine {
                     let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
                     let dek = encryption::generate_dek()?;
                     let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
-                    // Collect entries: crossbeam_skiplist Entry::key/value lifetimes
-                    // are tied to &self (the entry guard), not the map, so we must
-                    // materialise the pairs before passing to write_sst_with_fs.
-                    let entries: Vec<_> = map
-                        .iter()
-                        .map(|e| (e.key().clone(), e.value().clone()))
-                        .collect();
+                    // Stream entries straight off the parked skiplist with no copy
+                    // (HEA-1908): a crossbeam_skiplist Entry guard's key/value refs
+                    // are only valid while the guard is alive, so push them into the
+                    // writer's `sink` per entry rather than materialising the whole
+                    // map into an owned Vec first. This callback is the easy-to-miss
+                    // second flush path (it was missed in HEA-1937 F1).
                     SstWriter::write_sst_with_fs(
                         &sst_path,
-                        entries.iter().map(|(k, v)| (k, v)),
-                        entries.len(),
+                        |sink| {
+                            for e in map.iter() {
+                                sink(e.key(), e.value())?;
+                            }
+                            Ok(())
+                        },
+                        map.len(),
                         &*cb_fs,
                         sst_num,
                         &dek,
@@ -591,16 +595,21 @@ impl EmbeddedStorageEngine {
             let dek = encryption::generate_dek()?;
             let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
 
-            // Collect entries: crossbeam_skiplist Entry::key/value lifetimes are
-            // tied to &self (the entry guard), not the map, so materialise first.
-            let entries: Vec<_> = map
-                .iter()
-                .map(|e| (e.key().clone(), e.value().clone()))
-                .collect();
+            // Stream entries straight off the parked skiplist with no copy: each
+            // crossbeam_skiplist Entry guard's key/value refs are only valid while
+            // the guard is alive, so we push them into the writer's `sink` per
+            // entry rather than materialising an owned Vec of the whole map first
+            // (HEA-1908). The parked map is immutable during the flush, so
+            // `map.len()` is a stable, exact bloom-filter size.
             SstWriter::write_sst_with_fs(
                 &sst_path,
-                entries.iter().map(|(k, v)| (k, v)),
-                entries.len(),
+                |sink| {
+                    for e in map.iter() {
+                        sink(e.key(), e.value())?;
+                    }
+                    Ok(())
+                },
+                map.len(),
                 &*self.fs,
                 sst_num,
                 &dek,
