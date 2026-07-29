@@ -98,9 +98,13 @@ impl Default for CompactionConfig {
             enabled: true,
             interval_secs: 3600,
             min_sst_count: 3,
-            // Count trigger OFF by default (reversible per HEA-1885): operators
-            // opt in after validating write-stall on their hardware.
-            max_sst_count: 0,
+            // Count trigger ON by default (HEA-1931). It bounds cold-read SST
+            // fan-out at ~`merge_min * log(corpus)` instead of Θ(corpus). Safe to
+            // enable by default now that the merge I/O runs off `flush_lock`
+            // (HEA-1931), so the count trigger no longer risks order-of-seconds
+            // write stalls. `12` is the best fan-out/write-amp trade-off per
+            // HEA-1905. Set to `0` to disable.
+            max_sst_count: 12,
             merge_min: 4,
         }
     }
@@ -250,6 +254,17 @@ pub struct EmbeddedStorageEngine {
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
     flush_lock: Arc<Mutex<()>>,
+    /// Serializes compaction operations against each other.
+    ///
+    /// Held for the *whole* of [`Self::compact_partial`] / [`Self::compact_ssts`]
+    /// so two compactions never overlap (they would race on the shared SST file
+    /// set and reader list). Crucially this is a *different* lock from
+    /// [`Self::flush_lock`]: the O(tier-data) merge I/O runs while holding only
+    /// this lock, so writers (which contend on `flush_lock`) are never stalled
+    /// for the merge's duration — only for the brief metadata-only commit phase
+    /// at the end (HEA-1931). Held before `flush_lock` in every path that takes
+    /// both, so no lock-order inversion is possible.
+    compaction_lock: Mutex<()>,
     /// Serializes [`put_if_absent`](StorageEngine::put_if_absent) so the
     /// existence check and the write are atomic against each other.
     ///
@@ -527,6 +542,7 @@ impl EmbeddedStorageEngine {
             hot_tier,
             data_dir: config.data_dir,
             flush_lock,
+            compaction_lock: Mutex::new(()),
             put_if_absent_lock: Mutex::new(()),
             sst_counter,
             fs,
@@ -731,9 +747,11 @@ impl EmbeddedStorageEngine {
     /// `min_sst_count`). Writes to a temporary path and atomically
     /// renames for crash safety.
     ///
-    /// Acquires the flush lock to serialize with memtable flushes.
-    /// Callers in async contexts should wrap this in `spawn_blocking`
-    /// to avoid blocking Tokio worker threads.
+    /// Serializes against other compactions via the compaction lock, but holds
+    /// `flush_lock` (which writers contend on) only for the brief commit phase —
+    /// the merge I/O runs off it, so writers are not stalled for the merge's
+    /// O(total-data) duration (HEA-1931). Callers in async contexts should wrap
+    /// this in `spawn_blocking` to avoid blocking Tokio worker threads.
     ///
     /// # Crash Safety
     ///
@@ -744,28 +762,25 @@ impl EmbeddedStorageEngine {
     /// SST (higher number) takes priority for duplicate keys. The leaked
     /// old files are harmless orphans cleaned up by the next compaction.
     pub fn compact_ssts(&self, min_sst_count: usize) -> Result<usize, StorageError> {
-        // Fast path — check count without locking
+        // Serialize against other compactions for the whole operation, but hold
+        // `flush_lock` only for the brief commit phase — the O(total-data) merge
+        // I/O below runs off `flush_lock` so it never stalls writers (HEA-1931).
+        let Ok(_compaction_guard) = self.compaction_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "compaction mutex poisoned",
+            )));
+        };
+
+        // Snapshot the reader set. The `Arc` pins the input readers' mmaps alive
+        // for the whole merge even if a concurrent flush swaps the list; flushes
+        // only *add* newer SSTs (higher numbers), never delete or reorder the
+        // inputs we merge here, and `compaction_lock` guarantees no other
+        // compaction can. So the numbers captured now stay valid through commit.
         let sst_readers = self.sst_readers.load();
         if sst_readers.len() < min_sst_count {
             return Ok(0);
         }
         let input_count = sst_readers.len();
-
-        // TODO: HEA-1358 (compaction): holding flush_lock across full merge blocks writers
-        // for O(total-data) time. In Phase 2+, switch to leveled compaction
-        // where minor compactions merge subsets of SSTs without blocking.
-
-        let Ok(_guard) = self.flush_lock.lock() else {
-            return Err(StorageError::Io(std::io::Error::other(
-                "flush mutex poisoned",
-            )));
-        };
-
-        // Re-check after lock — another compaction may have reduced count
-        let sst_readers = self.sst_readers.load();
-        if sst_readers.len() < min_sst_count {
-            return Ok(0);
-        }
 
         // Collect old SST numbers for file deletion after successful compaction
         let old_sst_nums: Vec<u64> = sst_readers.iter().map(|r| r.sst_number()).collect();
@@ -790,7 +805,8 @@ impl EmbeddedStorageEngine {
         let tmp_path = self.data_dir.join(format!("{sst_num:06}.sst.tmp"));
         let final_path = self.data_dir.join(format!("{sst_num:06}.sst"));
 
-        // Write to temp path for crash safety
+        // Write to temp path for crash safety — the expensive merge, OFF the
+        // flush path.
         sst::compact_with_fs(
             &readers_oldest_first,
             &tmp_path,
@@ -800,21 +816,17 @@ impl EmbeddedStorageEngine {
             &enc_header,
         )?;
 
-        // Open reader from the temp path before rename. A v3 reader mmaps the
-        // file, but on Unix `rename(2)` preserves the inode, so the mapping
-        // stays valid and points at the same bytes after the temp file is
-        // renamed to its final name. The reader carries `sst_num`, so its block
-        // cache keys and per-block nonces match the final file identity.
-        let new_reader = SstReader::open_with_fs(
-            &tmp_path,
-            &*self.fs,
-            sst_num,
-            &dek,
-            Arc::clone(&self.block_cache),
-        )
-        .map_err(|e| StorageError::Crypto {
-            reason: format!("compacted SST failed to open reader: {e}"),
-        })?;
+        // Release the input-reader snapshot before the commit phase (the reload
+        // there re-reads from disk); everything needed for the commit is already
+        // captured by number.
+        drop(sst_readers);
+
+        // --- Commit phase: hold `flush_lock` only for these metadata ops ---
+        let Ok(_guard) = self.flush_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "flush mutex poisoned",
+            )));
+        };
 
         // Atomic rename — crash-safe: partial writes leave a .tmp, not a corrupt .sst
         self.fs.rename(&tmp_path, &final_path)?;
@@ -824,15 +836,9 @@ impl EmbeddedStorageEngine {
         // (HEA-1855).
         self.fs.sync_dir(&self.data_dir)?;
 
-        // Atomically swap reader list to just the compacted SST
-        record_sst_file_count(1);
-        self.compaction_records_written.fetch_add(
-            u64::from(new_reader.entry_count()),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self.sst_readers.store(Arc::new(vec![new_reader]));
-
-        // Delete old SST files (best-effort — warn on failure)
+        // Delete old SST files (best-effort — warn on failure). Only the merged
+        // inputs are removed; any SST a flush added *during* the merge (higher
+        // number, not in `old_sst_nums`) is left untouched.
         for old_num in old_sst_nums {
             let old_path = self.data_dir.join(format!("{old_num:06}.sst"));
             if let Err(e) = self.fs.remove_file(&old_path) {
@@ -843,6 +849,21 @@ impl EmbeddedStorageEngine {
                 );
             }
         }
+
+        // Rematerialise the reader list from disk rather than assuming the merged
+        // output is the only live SST: a flush that landed while the merge ran
+        // (off `flush_lock`) added a newer SST that MUST survive. Reload gives the
+        // correct newest-first order (new flush > merged output > nothing), so no
+        // just-flushed key is dropped.
+        let rebuilt = self.reload_sst_readers()?;
+        record_sst_file_count(rebuilt.len());
+        if let Some(merged) = rebuilt.iter().find(|r| r.sst_number() == sst_num) {
+            self.compaction_records_written.fetch_add(
+                u64::from(merged.entry_count()),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        self.sst_readers.store(Arc::new(rebuilt));
 
         Ok(input_count)
     }
@@ -880,19 +901,30 @@ impl EmbeddedStorageEngine {
     /// merged (newer) output shadowing any not-yet-deleted older run members —
     /// harmless orphans cleaned up on the next compaction.
     ///
-    /// Acquires `flush_lock`, so like [`Self::compact_ssts`] async callers should
-    /// wrap it in `spawn_blocking`. The lock is held only for one tier's worth of
-    /// data, never the whole dataset.
+    /// Serializes against other compactions via the compaction lock; `flush_lock`
+    /// (which writers contend on) is held only for the brief commit phase, never
+    /// across the merge I/O (HEA-1931). Like [`Self::compact_ssts`], async callers
+    /// should wrap it in `spawn_blocking`.
     pub fn compact_partial(&self) -> Result<usize, StorageError> {
         let merge_min = self.compaction.merge_min.max(2);
 
-        let Ok(_guard) = self.flush_lock.lock() else {
+        // Serialize against other compactions for the whole operation. `flush_lock`
+        // is deliberately NOT taken here — the O(tier-data) merge I/O below runs
+        // off it so writers are never stalled for the merge's duration, only for
+        // the brief commit phase at the end (HEA-1931).
+        let Ok(_compaction_guard) = self.compaction_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
-                "flush mutex poisoned",
+                "compaction mutex poisoned",
             )));
         };
 
-        // Select under the lock so indices can't shift under a concurrent flush.
+        // Snapshot + select the run. The `Arc` pins the input readers' mmaps
+        // alive for the whole merge even if a concurrent flush swaps the list.
+        // Concurrent flushes only add *newer* SSTs (prepended at the newest end),
+        // never touch our run members nor add anything older, so `target_num`,
+        // `other_nums`, and `drop_tombstones` (the run still being the oldest)
+        // stay valid through the merge; `compaction_lock` keeps any other
+        // compaction out.
         let sst_readers = self.sst_readers.load();
         let Some((start, end)) = select_partial_run(&sst_readers, merge_min) else {
             return Ok(0);
@@ -939,9 +971,18 @@ impl EmbeddedStorageEngine {
             drop_tombstones,
         )?;
 
-        // Drop the load guard before mutating the reader list (reload re-reads
-        // from disk). Everything needed for the splice is already captured.
+        // Drop the load guard before the commit phase (reload re-reads from
+        // disk). Everything needed for the splice is already captured.
         drop(sst_readers);
+
+        // --- Commit phase: hold `flush_lock` only for these metadata ops, so a
+        // writer contends with compaction for the rename+fsync+reload, never for
+        // the merge I/O above (HEA-1931). ---
+        let Ok(_guard) = self.flush_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "flush mutex poisoned",
+            )));
+        };
 
         // Atomically replace the run's newest file with the merged output, then
         // fsync the directory so the rename is durable (HEA-1855).
@@ -2485,6 +2526,194 @@ mod tests {
             "size-tiered partial compaction should rewrite far fewer records than \
              full-merge-on-trigger at 2N: partial={partial_2n} full={full_2n}"
         );
+    }
+
+    /// A [`Fs`] decorator that blocks the first `create` of a `*.tmp` path
+    /// (i.e. a compaction merge's temporary output) until the test releases it,
+    /// signalling the moment the block is reached. Every other operation is a
+    /// straight delegation to the wrapped [`RealFs`], so real files, mmaps, and
+    /// fsyncs behave exactly as in production.
+    ///
+    /// Used to prove that `flush_lock` is *not* held while merge I/O runs
+    /// (HEA-1931): while the merge is parked inside `create`, a concurrent flush
+    /// must still be able to acquire `flush_lock`.
+    struct MergeGateFs {
+        inner: RealFs,
+        /// Fires once, when the gated `*.tmp` create is first entered.
+        reached: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+        /// Set to `true` (with a notify) by the test to let the merge proceed.
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl crate::storage::fs::Fs for MergeGateFs {
+        fn open_append(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_append(path)
+        }
+
+        fn create(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            let is_tmp = path.extension().is_some_and(|e| e == "tmp");
+            if is_tmp {
+                // Signal once, then park until the test releases the gate.
+                if let Some(tx) = self.reached.lock().expect("reached lock").take() {
+                    let _ = tx.send(());
+                    let (lock, cv) = &*self.release;
+                    let mut released = lock.lock().expect("release lock");
+                    while !*released {
+                        released = cv.wait(released).expect("release wait");
+                    }
+                }
+            }
+            self.inner.create(path)
+        }
+
+        fn open_read(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+
+        fn map_readonly(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<crate::storage::fs::FileBacking> {
+            self.inner.map_readonly(path)
+        }
+
+        fn write(&self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+
+        fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+
+        fn sync_dir(&self, dir: &std::path::Path) -> std::io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    /// HEA-1931 — merge I/O MUST run off `flush_lock`, so a partial compaction
+    /// cannot stall writers for the O(tier-data) duration of the merge.
+    ///
+    /// We gate the compaction's `*.tmp` merge write inside a decorator `Fs`, run
+    /// `compact_partial` on a worker thread, and — while the merge is parked
+    /// mid-write — assert the *main* thread can still acquire `flush_lock`. Before
+    /// the fix, `compact_partial` held `flush_lock` across the whole merge, so the
+    /// `try_lock` here would fail; after it, the lock is free during merge I/O.
+    #[test]
+    fn compaction_merge_io_does_not_hold_flush_lock() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        // ~one SST per put so a short run accumulates a mergeable same-size tier.
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 50;
+        config.compaction = CompactionConfig {
+            enabled: true,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 8,
+            merge_min: 3,
+        };
+
+        let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let gate_fs = Arc::new(MergeGateFs {
+            inner: RealFs,
+            reached: Mutex::new(Some(reached_tx)),
+            release: Arc::clone(&release),
+        });
+
+        let engine = Arc::new(EmbeddedStorageEngine::open_with_fs(config, gate_fs).expect("open"));
+
+        // Write enough distinct SSTs to form a merge run.
+        let value = vec![b'x'; 80];
+        for i in 0..8u32 {
+            engine
+                .put(&realm, format!("k-{i:04}").as_bytes(), &value)
+                .expect("put");
+        }
+        assert!(
+            count_sst_files(dir.path()) >= 3,
+            "expected several SSTs to accumulate before compaction"
+        );
+
+        // Run the partial compaction on a worker; it will park inside the gated
+        // merge write until we release it.
+        let merge_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = {
+            let engine = Arc::clone(&engine);
+            let merge_done = Arc::clone(&merge_done);
+            std::thread::spawn(move || {
+                let merged = engine.compact_partial().expect("compact_partial");
+                merge_done.store(true, Ordering::SeqCst);
+                merged
+            })
+        };
+
+        // Wait until the merge is genuinely mid-write (parked inside `create`).
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("merge should reach the gated tmp write");
+
+        // The merge has NOT yet been released, so it is actively "doing" merge
+        // I/O. `flush_lock` must be free right now.
+        assert!(
+            !merge_done.load(Ordering::SeqCst),
+            "merge must still be parked mid-write for this assertion to be meaningful"
+        );
+        {
+            let guard = engine.flush_lock.try_lock();
+            assert!(
+                guard.is_ok(),
+                "flush_lock must NOT be held during SST merge I/O (HEA-1931)"
+            );
+        }
+
+        // Release the merge and let it commit.
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().expect("release lock") = true;
+            cv.notify_all();
+        }
+        let merged = worker.join().expect("compaction thread");
+        assert!(merged >= 3, "partial compaction should have merged the run");
+
+        // Data survives the off-lock merge.
+        for i in 0..8u32 {
+            assert_eq!(
+                engine
+                    .get(&realm, format!("k-{i:04}").as_bytes())
+                    .expect("get"),
+                Some(value.clone()),
+                "k-{i:04} must survive off-lock compaction"
+            );
+        }
     }
 
     /// Encryption-at-rest: raw SST and WAL bytes must not contain plaintext.

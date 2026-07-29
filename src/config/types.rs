@@ -133,8 +133,10 @@ pub struct CompactionSection {
     pub min_sst_count: usize,
     /// Count trigger for **partial** (size-tiered) compaction: when the live SST
     /// count reaches this value after a flush, a partial merge is scheduled off
-    /// the write path. `0` (the default) disables the trigger, leaving only the
-    /// periodic full sweep — the reversible default per HEA-1885.
+    /// the write path. Defaults to `12` (HEA-1931) — the best fan-out/write-amp
+    /// trade-off per HEA-1905 — which bounds cold-read SST fan-out instead of
+    /// letting it grow Θ(corpus). Set to `0` to disable the trigger, leaving only
+    /// the periodic full sweep.
     #[serde(default = "CompactionSection::default_max_sst_count")]
     pub max_sst_count: usize,
     /// Minimum same-size-tier SST files a partial compaction merges at once
@@ -149,7 +151,7 @@ impl Default for CompactionSection {
             enabled: true,
             interval_secs: 3600,
             min_sst_count: 3,
-            max_sst_count: 0,
+            max_sst_count: 12,
             merge_min: 4,
         }
     }
@@ -166,7 +168,7 @@ impl CompactionSection {
         3
     }
     const fn default_max_sst_count() -> usize {
-        0
+        12
     }
     const fn default_merge_min() -> usize {
         4

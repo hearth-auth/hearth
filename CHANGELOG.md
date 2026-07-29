@@ -22,6 +22,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
 ### Changed
+- **Count-triggered SST compaction is now ON by default; merge I/O runs off the flush
+  lock (HEA-1931)** — `storage.compaction.max_sst_count` now defaults to `12` (was `0` =
+  off), so partial size-tiered compaction is triggered automatically once live SST files
+  reach that count. This bounds cold-read SST fan-out at roughly `merge_min * log(corpus)`
+  instead of letting it grow linearly with corpus size. Enabling it by default is now safe
+  because the O(tier-data) merge I/O no longer runs under the flush lock: compactions
+  serialize against each other on a dedicated compaction lock and hold the flush lock only
+  for the brief metadata-only commit (rename + directory fsync + reader reload), so a merge
+  no longer stalls writers for its full duration. Set `max_sst_count: 0` to restore the
+  previous behavior (periodic full sweep only). (HEA-1931)
 - **WAL group commit — fsyncs coalesced across concurrent writers (HEA-1915)** — the
   write-ahead log now uses a leader/follower group-commit protocol: multiple concurrent
   `append` callers share a single `sync_all` call instead of each paying a private fsync.
@@ -61,6 +71,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **WAL slot-mutex poison no longer strands a follower (HEA-1921)** — the slot-state
   lock is now recovered with `unwrap_or_else` instead of silently skipping the condvar
   signal on poison, ensuring a poisoned slot always gets its `done` flag set. (HEA-1921 / F5)
+- **WAL `LeaderGuard` no longer reports phantom write failures (HEA-1935)** — after a
+  successful group-commit `commit_batch`, committed slots are now cleared from the guard's
+  `in_flight` list immediately. Previously, if the subsequent queue-re-check lock failed,
+  an armed guard drop would overwrite each durably-fsynced slot's `error` field with a
+  spurious failure string — causing callers to see `Err` for records that would replay
+  correctly on recovery (ghost write). (HEA-1935 / R1)
+- **WAL `LeaderGuard::drop` now recovers a poisoned group mutex (HEA-1935)** — the guard's
+  `Drop` implementation previously used `if let Ok` on the group mutex, silently no-opping
+  the entire guard body (including the in-flight signal loop) when the mutex was poisoned.
+  Writers blocked on their condvars would be stranded indefinitely — the same failure mode
+  as HEA-1924. The group mutex now uses `unwrap_or_else(|e| e.into_inner())`, matching
+  every slot-mutex call in the same function. (HEA-1935 / R2)
 
 - **CSRF rejection copy is now plain language, with a recovery link (HEA-1913)** — the
   login, MFA-challenge, and registration forms previously rejected a stale CSRF token
