@@ -1,0 +1,119 @@
+═══════════════════════════════════════════════════════════════
+ HEA-1905 · E4 re-run: SST-count growth, three trigger values
+═══════════════════════════════════════════════════════════════
+
+Record value bytes      = 300
+Measurement flush bytes = 256 KiB
+merge_min               = 4
+Trigger values swept    = [0, 8, 12, 16]
+
+Admissibility check:
+  MemAvailable = 22 GiB
+  Swap used    = 21694 MiB
+
+▶ Running config C (control) (max_sst_count=0, 6 rungs) …
+  done.
+
+▶ Running config T8 (max_sst_count=8, 6 rungs) …
+  done.
+
+▶ Running config T12 (max_sst_count=12, 6 rungs) …
+  done.
+
+▶ Running config T16 (max_sst_count=16, 6 rungs) …
+  done.
+
+
+═══════════════════════════════════════════════════════════════
+ Results
+═══════════════════════════════════════════════════════════════
+
+### Config C (control) (max_sst_count = 0)
+
+corpus (n) | SSTs post-seed | SSTs post-full-compact | write-amp | seed (s)
+-----------+----------------+------------------------+-----------+---------
+     10000 |             10 |                      1 |     1.16x |    0.18
+     20000 |             20 |                      1 |     1.16x |    0.34
+     40000 |             40 |                      1 |     1.16x |    0.70
+     80000 |             80 |                      1 |     1.16x |    1.69
+    160000 |            160 |                      1 |     1.16x |    6.78
+    320000 |            320 |                      1 |     1.16x |   10.92
+
+Fit: log(peak fan-out) = 1.0000 * log(n) + c   R² = 1.0000
+Verdict: MISS (super-logarithmic)
+
+───────────────────────────────────────────────────────────────
+
+### Config T8 (max_sst_count = 8)
+
+corpus (n) | live SSTs | peak SSTs | bytes written | write-amp | seed (s)
+-----------+-----------+-----------+---------------+-----------+---------
+     10000 |         3 |         7 |       6411343 |     2.14x |    0.19
+     20000 |         3 |         7 |      14282263 |     2.38x |    0.41
+     40000 |         5 |         7 |      38415226 |     3.20x |    0.91
+     80000 |         5 |         8 |      83033574 |     3.46x |    2.26
+    160000 |         3 |        10 |     229914761 |     4.79x |    4.67
+    320000 |         6 |        12 |     553958192 |     5.77x |   14.53
+
+Fit: log(peak fan-out) = 0.1607 * log(n) + c   R² = 0.8382
+Verdict: PASS (capped, O(1) fan-out)
+
+Write amplification: max across ladder = 5.77x
+
+Per-merge stall (flush_lock hold): merges=162, mean=41.6ms, p50=28.7ms, p99=162.6ms, max=580.3ms
+
+───────────────────────────────────────────────────────────────
+
+### Config T12 (max_sst_count = 12)
+
+corpus (n) | live SSTs | peak SSTs | bytes written | write-amp | seed (s)
+-----------+-----------+-----------+---------------+-----------+---------
+     10000 |         1 |        10 |       7141031 |     2.38x |    0.12
+     20000 |         2 |        11 |      14281993 |     2.38x |    0.24
+     40000 |         1 |        11 |      43157634 |     3.60x |    0.52
+     80000 |         4 |        11 |      83032100 |     3.46x |    1.36
+    160000 |         2 |        11 |     226628113 |     4.72x |    3.48
+    320000 |         9 |        12 |     399261522 |     4.16x |   18.25
+
+Fit: log(peak fan-out) = 0.0376 * log(n) + c   R² = 0.7133
+Verdict: PASS (capped, O(1) fan-out)
+
+Write amplification: max across ladder = 4.72x
+
+Per-merge stall (flush_lock hold): merges=108, mean=48.3ms, p50=27.5ms, p99=143.1ms, max=359.1ms
+
+───────────────────────────────────────────────────────────────
+
+### Config T16 (max_sst_count = 16)
+
+corpus (n) | live SSTs | peak SSTs | bytes written | write-amp | seed (s)
+-----------+-----------+-----------+---------------+-----------+---------
+     10000 |         1 |        10 |       7141031 |     2.38x |    0.14
+     20000 |         2 |        15 |      14282062 |     2.38x |    0.34
+     40000 |         3 |        15 |      28563787 |     2.38x |    0.66
+     80000 |         1 |        15 |      86314529 |     3.60x |    1.49
+    160000 |         6 |        15 |     168982288 |     3.52x |    3.72
+    320000 |        15 |        17 |     360952893 |     3.76x |   12.29
+
+Fit: log(peak fan-out) = 0.1094 * log(n) + c   R² = 0.6022
+Verdict: PASS (capped, O(1) fan-out)
+
+Write amplification: max across ladder = 3.76x
+
+Per-merge stall (flush_lock hold): merges=86, mean=36.8ms, p50=28.6ms, p99=137.8ms, max=172.5ms
+
+───────────────────────────────────────────────────────────────
+
+## Summary — fitted exponents across configurations
+
+config               | peak-fan-out exp |       R² | max write-amp | verdict
+                    -+-----------------+----------+--------------+---------------
+C max_sst_count=0    |          1.0000 |   1.0000 |        1.16x | MISS
+T max_sst_count=8    |          0.1607 |   0.8382 |        5.77x | PASS (capped)
+T max_sst_count=12   |          0.0376 |   0.7133 |        4.72x | PASS (capped)
+T max_sst_count=16   |          0.1094 |   0.6022 |        3.76x | PASS (capped)
+
+## Recommendation
+
+HEA-1931 AC PASS — T12 (max_sst_count=12, the new default) exponent=0.0376 ≤ 0.20.
+T8 exp=0.1607  T16 exp=0.1094
