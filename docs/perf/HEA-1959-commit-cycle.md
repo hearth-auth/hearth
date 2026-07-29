@@ -10,6 +10,8 @@
 `docs/perf/artifacts/c7-hea1959-phase-baseline-console.txt` (pre-fix phase split)
 `docs/perf/artifacts/c7-hea1959-fdatasync-only-console.txt` (fix 1 in isolation)
 `docs/perf/artifacts/c7-hea1959-batched-writes-console.txt` (fixes 1+2)
+`docs/perf/artifacts/c7-saturation-post-hea1959-sample2-raw.json` (repeatability sample D)
+`docs/perf/artifacts/c7-saturation-post-hea1959-sample2-console.txt`
 
 ---
 
@@ -120,15 +122,17 @@ Per-entry serial cost, T=256, before → after:
 
 | phase | before | after | change |
 |---|---:|---:|---|
-| `write` | 5,150 | **395** | **13× better** |
-| `encrypt` | 1,250 | **611** | 2× better |
-| `signal` | 2,584 | **3,274** | **no better** |
-| total serial | 8,984 | **4,279** | 2.1× better |
+| `write` | 5,150 | **469** | **11× better** |
+| `encrypt` | 1,250 | **561** | 2.2× better |
+| `signal` | 2,584 | **3,554** | **worse** |
+| total serial | 8,984 | **4,584** | 2.0× better |
+
+(after-figures from sample D, the representative run — see §5)
 
 **The signalling change did not deliver.** Collapsing N `notify_one` calls into
 one `notify_all` removed the syscalls but not the work: waking N waiters is O(N)
-inside the kernel either way, measured at **428 µs per batch** for a single
-`notify_all` releasing ~130 threads (~3.3 µs per woken thread). This is stated
+inside the kernel either way, measured at **358 µs per batch** for a single
+`notify_all` releasing ~100 threads (~3.5 µs per woken thread). This is stated
 plainly because HEA-1955 was closed on a prediction that was never checked against
 a measurement; this one was, and it was wrong. The change is retained — it is
 simpler, it removes a per-writer mutex and condvar, and it eliminates the
@@ -190,6 +194,29 @@ Escaping it means not parking a thread per in-flight write — i.e. a
 completion/async acknowledgement path rather than 256 blocked `spawn_blocking`
 threads. That is an architectural change well beyond this issue, and it is what
 the follow-up should evaluate.
+
+## 6. Measurement honesty — variance on this host
+
+Four runs of the write ladder produced T=256 figures of 35,726 / 42,456 / 30,317 /
+41,255. Three cluster at 35–42 k with `fdatasync` flat; one (run C) sat at 30 k
+with `fdatasync` inflated to 3.64 ms. **Grade T4 on a quiet, dedicated host, not
+this shared workstation.** Hazards observed directly:
+
+- A co-resident agent's HTTP benchmark (HEA-1957) ran during one pass at loadavg 24
+  on 16 cores and roughly halved every number. That run was discarded, not
+  reported. The same agent also `git stash`-ed this work mid-run to land its own
+  commit; it was recovered from `stash@{0}`.
+- A long-lived idle `cargo-watch` defeats a naive `pgrep cargo` idle gate; gate on
+  `rustc|rust-lld` instead. Note also that `pgrep -c` prints `0` *and* exits
+  non-zero on no match, so `$(pgrep -c … || echo 0)` emits two lines and breaks the
+  comparison.
+- Sample D's own device-calibration probe returned 234 fsyncs/s (against 515–541 in
+  every other run), so that run's `T × F / W` ceiling column is garbage and reads
+  as ">100% efficiency". Its *measured throughput* and *phase decomposition* are
+  unaffected — one more reason to stop reporting that ratio (§1).
+
+The reproducible results are the mechanism measurements — the phase split, the
+fdatasync effect, and the wakeup cost — consistent across every run.
 
 ---
 
