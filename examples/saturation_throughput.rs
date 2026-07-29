@@ -453,33 +453,35 @@ impl Fixture {
         // Second pass: derive ceiling and coalescing efficiency.
         let write_points: Vec<WritePoint> = raw
             .into_iter()
-            .map(|(threads, ops, agg_ops_s, fsyncs_per_write, p99_us, phases)| {
-                let elapsed_s = if agg_ops_s > 0.0 {
-                    ops as f64 / agg_ops_s
-                } else {
-                    0.0
-                };
-                let ceiling_ops_s = threads as f64 * f / w_per_op;
-                let coalescing_efficiency = if ceiling_ops_s > 0.0 {
-                    agg_ops_s / ceiling_ops_s
-                } else {
-                    0.0
-                };
-                WritePoint {
-                    point: Point {
-                        threads,
-                        ops,
-                        elapsed_s,
-                        agg_ops_s,
-                        per_core_ops_s: agg_ops_s / threads as f64,
-                    },
-                    fsyncs_per_write,
-                    p99_us,
-                    ceiling_ops_s,
-                    coalescing_efficiency,
-                    phases,
-                }
-            })
+            .map(
+                |(threads, ops, agg_ops_s, fsyncs_per_write, p99_us, phases)| {
+                    let elapsed_s = if agg_ops_s > 0.0 {
+                        ops as f64 / agg_ops_s
+                    } else {
+                        0.0
+                    };
+                    let ceiling_ops_s = threads as f64 * f / w_per_op;
+                    let coalescing_efficiency = if ceiling_ops_s > 0.0 {
+                        agg_ops_s / ceiling_ops_s
+                    } else {
+                        0.0
+                    };
+                    WritePoint {
+                        point: Point {
+                            threads,
+                            ops,
+                            elapsed_s,
+                            agg_ops_s,
+                            per_core_ops_s: agg_ops_s / threads as f64,
+                        },
+                        fsyncs_per_write,
+                        p99_us,
+                        ceiling_ops_s,
+                        coalescing_efficiency,
+                        phases,
+                    }
+                },
+            )
             .collect();
 
         WriteResult {
