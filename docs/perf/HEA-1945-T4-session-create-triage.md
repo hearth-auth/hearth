@@ -1,6 +1,7 @@
 # HEA-1945 · T4 — `session_create` fsync-bound: CTO triage
 
-**Status:** triaged, first fix landed, two children opened, one board decision escalated.
+**Status:** triaged; `W` 3→2 fix landed (`abf179ba`); HEA-1948 (engine fix) in progress,
+HEA-1949 (measurement) delivered and folded in below; units-restatement escalated to the board.
 **Parent:** HEA-1940 (PERFORMANCE_REPORT v2) · **Ancestor:** HEA-1867
 **Source data:** `docs/perf/artifacts/c7-saturation-v2-raw.json` (HEA-1875 C7-v2, HEAD `981516f1`)
 
@@ -14,18 +15,21 @@ framings are wrong in an important way, and the arithmetic below is the reason:
 1. **The device fsync rate is the binding constraint, and it is flat.** It does not
    improve with threads. Every ops/s number on this path is
    `device_fsync_rate ÷ fsyncs_per_write`, and the engine controls only the denominator.
-2. **T4 cannot pass as currently measured — by arithmetic, not by engine quality.** A
-   *perfect* engine (one WAL record per op, perfect coalescing) on this device at the
-   bench's 16-thread ladder tops out at **≈6,700 ops/s** against a 50,000 target. The
-   measurement caps in-flight concurrency at 16, and durable-write throughput is
-   proportional to concurrency. Reaching 50,000 needs **≈119 concurrent writers**.
+2. **T4 cannot pass *at the bench's 16-thread ladder* — by arithmetic, not engine
+   quality.** A *perfect* engine (one WAL record per op, perfect coalescing) tops out at
+   **≈6,700 ops/s** there against a 50,000 target, because the measurement caps in-flight
+   concurrency at 16 and durable-write throughput is proportional to concurrency.
+   *(Superseded in scope by HEA-1949 — see the post-hoc section: with the ladder extended
+   to T=256 and `F` measured directly at 528.7/s, the device ceiling is 67,674 ops/s,
+   **above** the target. The hardware supports T4; the audit chain lock is what does not.)*
 3. **Option B (`SyncMode::Async`) is rejected as a default.** It violates the standing
    ground rule that the WAL is fsync'd before a write is acknowledged and must survive
    `kill -9`. Buying a throughput number by silently deleting the durability guarantee
    is not closing the gap, it is changing the product.
 4. **`ops/s/core` is a category error for this operation.** It is a compute framing
-   applied to an I/O-bound one. T4 needs restating against a stated device fsync rate
-   and a stated concurrency level. That is a board/spec decision, escalated below.
+   applied to an I/O-bound one. T4's *units* need restating against a stated device fsync
+   rate and concurrency level; its *magnitude* stands. That is a board/spec decision,
+   escalated below.
 
 ---
 
@@ -118,14 +122,14 @@ steady-state cost, so a one-time per-realm write can never hide inside the numbe
 
 ## Children opened
 
-- **`7de487e4` (PlatformEngineer) — split the audit chain lock off the durability wait.**
+- **HEA-1948** (`7de487e4`, PlatformEngineer) — split the audit chain lock off the durability wait.**
   The chain lock must
   serialize the hash-chain read-modify-write *and* the WAL enqueue order (releasing it
   before enqueue would let event N+1 reach the WAL ahead of event N and break chain
   recovery). It must **not** cover the fsync wait. Needs a storage API split:
   `enqueue → handle` under the lock, `await_durable(handle)` after release. Removes the
   one-audit-append-in-flight ceiling; unblocks coalescing to `W=2`.
-- **`b2e58d59` (QA) — raise bench concurrency above the core count.** The 16-thread ladder caps
+- **HEA-1949** (`b2e58d59`, QA — delivered) — raise bench concurrency above the core count.** The 16-thread ladder caps
   in-flight writers at 16 and therefore caps measurable durable-write throughput at
   `16 × F`. The write sweep needs a concurrency ladder decoupled from core count
   (blocking writers are not CPU-bound), plus the device fsync rate recorded as a
@@ -134,15 +138,52 @@ steady-state cost, so a one-time per-realm write can never hide inside the numbe
 Deferred, not opened: merging the audit event into the *same* WAL record as the session
 write (true `W=1`). It requires an identity→audit API that returns pending writes instead
 of performing them — a cross-layer change to the `AuditEngine` trait. Worth doing only
-after HEA-1947 lands and is measured; sequencing it first would be speculative.
+after HEA-1948 lands and is measured; sequencing it first would be speculative.
+
+## Post-hoc: HEA-1949 results confirm the model — and correct me on one point
+
+QA delivered HEA-1949 within the same heartbeat
+(`docs/perf/HEA-1949-write-coalescing-results.md`). Its independent measurement confirms
+the mechanism and **falsifies one of my conclusions in the favourable direction**:
+
+| | my derivation | HEA-1949 (measured) |
+|---|---|---|
+| device fsync rate `F` | ~419/s (derived from ops×fsyncs) | **528.7/s** (direct: 200 sequential `sync_all`) |
+| `W` after this change | 2 (predicted) | **2.000** (confirmed at T=1) |
+| coalescing vs concurrency | plateaus, audit-lock-pinned | **confirmed** — 1.52 fsyncs/write flat from T=4 to T=256 |
+
+Confirmed: batch size plateaus at ~0.65 ops/fsync and does **not** grow with concurrency
+all the way to 256 writers. That is exactly the one-audit-append-in-flight signature, and
+it is now measured rather than argued.
+
+**Where I was wrong.** I wrote that T4 "cannot pass" and part of my board escalation
+rested on the target being physically unreachable. That was an artefact of reasoning from
+the T=16 ladder and a *derived* `F`. With the ladder extended and `F` measured directly,
+the perfect-coalescing ceiling at T=256 is **67,674 ops/s — above the 50,000 target**. The
+device supports T4. The gap is entirely the audit chain lock, and 50,000 needs ~190
+concurrent writers, which a real server has and a 16-thread bench does not.
+
+So the target is not absurd, and I withdraw the "unreachable" half of my escalation.
+
+**Two mis-citations in the HEA-1949 write-up to fix before any of this reaches the board**
+(flagged to QA, not silently corrected here):
+- It attributes the `W` 3→2 drop to *HEA-1908* (streaming memtable flush). It was this
+  issue — commit `abf179ba`. HEA-1908 does not touch the session write path.
+- It names *HEA-1947* as the chain-lock fix. HEA-1947 is the parent ("close the 2
+  remaining MISSes"); the chain-lock fix is **HEA-1948**.
 
 ## Escalated to the board (via HEA-1940)
 
-T4's target needs restating. `50,000 ops/s/core` applies a compute framing to an
-I/O-bound operation, and no engine can satisfy it on a ~419 fsync/s device at any
-concurrency the current bench can produce. Recommended replacement: a durable-write
-target expressed as **ops/s at a stated concurrency on a stated device fsync rate**, with
-`fsyncs/write` as the engine-owned metric that is actually gradeable. If the board wants
-the 50,000 headline number instead, that is a decision to offer a non-default,
-explicitly-opted-in relaxed-durability mode with a documented RPO — a product decision,
-not a performance fix.
+T4's **units** need restating; its **magnitude** does not.
+
+`50,000 ops/s/core` applies a compute framing to an I/O-bound operation. Durable-write
+throughput scales with *concurrency* and the *device fsync rate*, not with cores — 190
+blocked-on-fsync writers is the operative quantity, and it has no relationship to a core
+count. Recommended replacement: **aggregate ops/s at a stated concurrency on a stated
+device fsync rate**, with `fsyncs/write` as the engine-owned, actually-gradeable metric.
+Keep the 50,000 magnitude: HEA-1949 shows the hardware clears it at T≈190.
+
+Option B (`SyncMode::Async`) remains rejected as a default and is now also unnecessary —
+the target is reachable *with* durability intact once HEA-1948 lands. Relaxed durability
+would only ever be a non-default, opted-in mode with a documented RPO, and there is no
+longer a performance argument for it.
