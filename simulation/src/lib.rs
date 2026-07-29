@@ -86,6 +86,14 @@ pub struct FaultConfig {
     /// Monotonically increasing count of `sync_all` calls that succeeded.
     /// Useful for asserting group commit reduces fsyncs-per-write.
     pub sync_count: Arc<AtomicU64>,
+    /// Count of `sync_data` (fdatasync) calls, which the WAL steady-state
+    /// append path uses instead of `sync_all` (HEA-1959).
+    ///
+    /// These also increment [`Self::sync_count`], so every existing
+    /// fsyncs-per-write assertion keeps its original meaning. The separate
+    /// counter is what lets a test pin *which* sync each path uses — rotation
+    /// changes metadata beyond the file length and must stay a full `sync_all`.
+    pub datasync_count: Arc<AtomicU64>,
 }
 
 impl Default for FaultConfig {
@@ -102,6 +110,7 @@ impl Default for FaultConfig {
             latency_jitter_us: Arc::new(AtomicU64::new(0)),
             latency_seed: Arc::new(AtomicU64::new(0)),
             sync_count: Arc::new(AtomicU64::new(0)),
+            datasync_count: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -314,6 +323,22 @@ impl FsFile for FaultFsFile {
         let result = self.inner.sync_all();
         if result.is_ok() {
             self.config.sync_count.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        // Counts into `sync_count` as well, so pre-existing group-commit
+        // assertions are unaffected, and honours the same injected sync fault
+        // as `sync_all` so crash tests still cover the commit path.
+        self.config.sleep_sync();
+        if self.config.fail_next_sync.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("injected sync fault"));
+        }
+        let result = self.inner.sync_data();
+        if result.is_ok() {
+            self.config.sync_count.fetch_add(1, Ordering::Relaxed);
+            self.config.datasync_count.fetch_add(1, Ordering::Relaxed);
         }
         result
     }

@@ -1065,8 +1065,8 @@ impl Wal {
     ///
     /// For [`WalDurabilityHandle::Pending`]: if this thread won leadership of
     /// the group-commit queue, runs the commit loop (writing all queued slots +
-    /// one `sync_all`) before returning. Otherwise, waits on the slot condvar
-    /// until a leader marks it done.
+    /// one `sync_data`) before returning. Otherwise, waits on the shared commit
+    /// watermark until it covers this writer's ticket.
     ///
     /// `pre_rotate` is forwarded to `lead_group_commit` when this thread acts
     /// as leader; it is dropped without being called for follower threads.
@@ -1110,12 +1110,13 @@ impl Wal {
     /// uses **looping-leader group commit** (HEA-1955): multiple concurrent
     /// callers share a single `fsync` per batch.  The leader — whichever thread
     /// first finds the queue empty — drains the queue, writes all entries, and
-    /// calls `sync_all` once.  It then loops immediately: if new entries arrived
+    /// calls `sync_data` once.  It then loops immediately: if new entries arrived
     /// during the fsync they are committed in the next iteration without any
     /// thread handoff.  The leader exits only when it finds the queue empty.
     ///
-    /// Durability guarantee: no writer returns `Ok` until a `sync_all` that
-    /// covered its bytes has completed.
+    /// Durability guarantee: no writer returns `Ok` until a `sync_data` that
+    /// covered its bytes has completed.  Rotation, which changes metadata
+    /// beyond the file length, still uses a full `sync_all`.
     ///
     /// `pre_rotate` usage: the leader invokes it on the first batch that
     /// triggers rotation; subsequent batches pass `None`.  Follower threads'
@@ -1324,7 +1325,7 @@ impl Wal {
         }
     }
 
-    /// Writes every slot in `batch` to the WAL file and calls `sync_all` once.
+    /// Writes every slot in `batch` to the WAL file and calls `sync_data` once.
     ///
     /// All I/O runs under the file mutex so writes are in record-number order
     /// and rotation is atomic with respect to concurrent appenders.  Each slot

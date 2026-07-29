@@ -182,6 +182,83 @@ fn group_commit_reduces_fsyncs() {
     );
 }
 
+/// The steady-state append path must use `sync_data` (fdatasync), while
+/// rotation must still use a full `sync_all` (fsync).
+///
+/// HEA-1959 swapped the per-batch sync to fdatasync, which persists the data
+/// and the file length but not other metadata. That is sound for an append-only
+/// segment whose directory entry was already fsynced at creation (HEA-1855),
+/// and it is *not* sound for rotation, which truncates and rewrites headers.
+///
+/// Without this test, a later change could quietly route rotation through
+/// fdatasync too and lose the metadata durability that WAL reuse depends on —
+/// a failure that would only ever appear as corruption after a real power loss,
+/// which no test in this suite can reproduce. Pin the split instead.
+#[test]
+fn appends_use_fdatasync_while_rotation_uses_full_fsync() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("wal.log");
+    let fault_fs = Arc::new(FaultFs::new());
+
+    let counts = || {
+        (
+            fault_fs
+                .config
+                .sync_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            fault_fs
+                .config
+                .datasync_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    };
+
+    // A cap small enough that a handful of appends forces a rotation.
+    let wal = open_wal_with_fs(
+        &wal_path,
+        WalConfig {
+            max_size: 4096,
+            sync_mode: SyncMode::EveryWrite,
+        },
+        Arc::clone(&fault_fs) as Arc<dyn Fs>,
+    );
+
+    // Steady-state appends, well under the rotation threshold.
+    let (sync_before, data_before) = counts();
+    wal.append(&make_entry(b"steady-1", b"value"))
+        .expect("append");
+    wal.append(&make_entry(b"steady-2", b"value"))
+        .expect("append");
+    let (sync_after, data_after) = counts();
+
+    let syncs = sync_after - sync_before;
+    let datasyncs = data_after - data_before;
+    assert!(datasyncs > 0, "appends must issue at least one fdatasync");
+    assert_eq!(
+        syncs, datasyncs,
+        "every sync on the steady-state append path must be an fdatasync; \
+         got {syncs} syncs of which only {datasyncs} were fdatasync"
+    );
+
+    // Now force a rotation by overflowing the 4 KiB cap, and require that it
+    // contributes at least one sync that is NOT an fdatasync.
+    let (sync_before, data_before) = counts();
+    let big = vec![b'x'; 2048];
+    for i in 0..8 {
+        wal.append(&make_entry(format!("rot-{i}").as_bytes(), &big))
+            .expect("append");
+    }
+    let (sync_after, data_after) = counts();
+
+    let syncs = sync_after - sync_before;
+    let datasyncs = data_after - data_before;
+    assert!(
+        syncs > datasyncs,
+        "rotation must issue a full sync_all, not an fdatasync: {syncs} total \
+         syncs and {datasyncs} fdatasyncs means rotation used fdatasync too"
+    );
+}
+
 /// Bytes on disk must be in record_num (nonce) order even under concurrency.
 ///
 /// A nonce ordering violation would break AEAD authentication, causing
