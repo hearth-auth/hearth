@@ -217,8 +217,8 @@ serialized behind a lock any more. It is now two ordinary, quantified inefficien
 1. ~~**`W` is still 2.**~~ **`W` is now 1 — HEA-1954 landed.** `SessionCreated` audit event merged
    into the session `put_batch` via `AuditEngine::with_pending_append`. One WAL record, one fsync
    per `create_session`. Pinned by `tests/session_create_write_amplification.rs` (steady-state
-   count = 1, crash-atomicity proven). Predicted ~2× on ceiling and, at fixed efficiency, on
-   measured throughput; re-measurement pending.
+   count = 1, crash-atomicity proven). **Measured (HEA-1956): delivered — 1.935× on the
+   ceiling, `fsyncs/write` = 1.000 at T=1.**
 2. **Coalescing efficiency decays with concurrency**: 92% (T=1) → 43% (T=64) → **23%**
    (T=256), while p99 climbs 6.0 → 23.0 ms. The engine is leaving three quarters of the
    device fsync budget on the floor at the top of the ladder. The batch window / wakeup
@@ -280,14 +280,35 @@ without any code changes at the call site. `NotifyingAuditEngine` (webhook decor
 `with_pending_append` to delegate to its inner engine and wrap `on_success` with the webhook
 broadcast, preserving delivery guarantees.
 
-**Predicted effect.** `W` 2 → 1 halves the fsync budget per op. At fixed coalescing efficiency
-and the device's measured 528.7 fsyncs/s:
+**Measured effect (HEA-1956, 2026-07-29).** The prediction table that stood here has been
+replaced by the measurement it was waiting for. Full run:
+`docs/perf/HEA-1956-T4-remeasure.md`; artifact
+`docs/perf/artifacts/c7-saturation-post-hea1955-raw.json`.
 
-| T | pre-1954 ceiling | post-1954 ceiling | gain |
-|--:|----------------:|------------------:|-----:|
-|   1 | 264 ops/s | **529 ops/s** | 2× |
-|  64 | 16,928 ops/s | **33,856 ops/s** | 2× |
-| 128 | 33,856 ops/s | **67,713 ops/s** | 2× |
+Measured at HEAD `c709fa58` on `dev-ryzen-7840hs`, F = 515.8 fsyncs/s, **W = 1.000**:
 
-Re-measurement against this commit will replace the predictions above. The remaining open
-child is **HEA-1955** (coalescing efficiency decay: 92% → 23% across the concurrency ladder).
+| T | post-1948 (W=2) | **post-1954/1955 (W=1)** | gain | fsyncs/write | batch | ceiling | coalesce eff | p99 (ms) |
+|--:|------:|------:|-----:|--------:|-------:|--------:|------:|------:|
+|   1 |    245 |   **424** | 1.73× | 1.0000 |   1.00 |     516 | 82.2% |  5.2 |
+|   4 |    513 |   **756** | 1.47× | 0.6526 |   1.53 |   2,063 | 36.6% |  6.6 |
+|  16 |  1,984 | **3,645** | 1.84× | 0.1336 |   7.48 |   8,253 | 44.2% |  6.7 |
+|  64 |  7,286 | **12,974** | 1.78× | 0.0326 |  30.67 |  33,013 | 39.3% |  8.1 |
+| 128 | 12,699 | **24,083** | 1.90× | 0.0154 |  64.95 |  66,026 | 36.5% |  9.4 |
+| 256 | 15,841 | **33,724** | **2.13×** | 0.0091 | 109.89 | 132,053 | 25.5% | 11.9 |
+
+**`W` = 1.000 confirmed** — one fsync per durable `create_session`, the theoretical floor.
+HEA-1954's predicted ~2× on the ceiling was delivered (1.935×, the shortfall being a 3%
+slower device on the day).
+
+**HEA-1955's predicted effect was not delivered.** It was staffed to recover the coalescing
+decay toward the 92% seen at T=1; measured recovery at T=256 is **23.2% → 25.5%** (1.10×)
+where ~4× was modelled. Decomposed: `2.129× total = 1.935× ceiling × 1.101× efficiency`.
+Essentially all of the gain is HEA-1954. HEA-1955's real, shippable win is **latency** — p99
+at T=256 halved (23.0 → 11.9 ms) and improved at every rung — but it does not close T4.
+
+**T4 verdict: MISS, 1.48× short** (33,724 vs 50,000). The residual is a single quantified
+factor: coalescing efficiency decays to 25.5% at T=256 while the same engine sustains
+36.5% at T=128 and 39.3% at T=64. Holding the T=128 efficiency out to T=256 yields 48,167
+ops/s; 37.9% yields exactly 50,000. This is batch-window / leader-handoff tuning at high
+queue depth, with **no durability implication** — nothing is serialized any more (batch size
+grows monotonically 1.00 → 109.89 across the ladder).

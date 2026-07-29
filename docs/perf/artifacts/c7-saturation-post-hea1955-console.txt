@@ -1,0 +1,143 @@
+HEA-1875 · C7 — Saturation-throughput benches (VISION §7.2)
+
+host: 16 logical cores | measure window = 2s/cell | users = 1000, warm sessions = 2048, miss sessions = 512
+in-process engine drive — no HTTP / axum / tokio / load generator in the loop
+
+read ladder:  [1, 2, 4, 8, 16] threads  (CPU-bound ops)
+write ladder: [1, 4, 16, 64, 128, 256] threads  (I/O-bound, blocked-on-fsync oversubscription)
+
+seeding 1000 users …
+creating 2048 warm sessions + minting warm tokens …
+creating 512 sessions + minting miss tokens …
+measuring device fsync rate (200 sequential sync_all calls) …
+warming hot tier (24 passes) + saturating claims cache …
+
+Device fsync rate: 515.8 fsyncs/s  (200 sequential sync_all calls on scratch file)
+
+── validate_token [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |          670645 |         670645 |              1.00×
+      2 |         1658436 |         829218 |              1.24×
+      4 |         3147819 |         786955 |              1.17×
+      8 |         5491334 |         686417 |              1.02×
+     16 |         7446170 |         465386 |              0.69×
+  scaling exponent = +0.867 (R² = 0.968)  [1.0 = linear, 0.0 = serialized] → PARTIAL (some contention)
+  single-core throughput = 670645 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 1.491 µs/op (single thread, 16-core host)
+
+── validate_token [miss] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |           20666 |          20666 |              1.00×
+      2 |           39490 |          19745 |              0.96×
+      4 |           63976 |          15994 |              0.77×
+      8 |           88791 |          11099 |              0.54×
+     16 |          111532 |           6971 |              0.34×
+  scaling exponent = +0.603 (R² = 0.961)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 20666 ops/s → 200 k/core bar: MISS
+  ⇒ engine cost ≈ 48.388 µs/op (single thread, 16-core host)
+
+── session_lookup [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |        11208095 |       11208095 |              1.00×
+      2 |        20199307 |       10099653 |              0.90×
+      4 |        35047954 |        8761989 |              0.78×
+      8 |        53004179 |        6625522 |              0.59×
+     16 |        76048216 |        4753014 |              0.42×
+  scaling exponent = +0.692 (R² = 0.989)  [1.0 = linear, 0.0 = serialized] → PARTIAL (some contention)
+  single-core throughput = 11208095 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.089 µs/op (single thread, 16-core host)
+
+── session_lookup [miss] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         1757586 |        1757586 |              1.00×
+      2 |         2494547 |        1247273 |              0.71×
+      4 |         3566810 |         891703 |              0.51×
+      8 |         5190860 |         648857 |              0.37×
+     16 |         6262971 |         391436 |              0.22×
+  scaling exponent = +0.472 (R² = 0.990)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 1757586 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.569 µs/op (single thread, 16-core host)
+
+── user_lookup [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         3245870 |        3245870 |              1.00×
+      2 |         5882440 |        2941220 |              0.91×
+      4 |        10083639 |        2520910 |              0.78×
+      8 |        14210645 |        1776331 |              0.55×
+     16 |        18020800 |        1126300 |              0.35×
+  scaling exponent = +0.622 (R² = 0.969)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 3245870 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.308 µs/op (single thread, 16-core host)
+
+── user_lookup [miss] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         2105346 |        2105346 |              1.00×
+      2 |         3145360 |        1572680 |              0.75×
+      4 |         4305320 |        1076330 |              0.51×
+      8 |         5359487 |         669936 |              0.32×
+     16 |         6282718 |         392670 |              0.19×
+  scaling exponent = +0.392 (R² = 0.968)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 2105346 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.475 µs/op (single thread, 16-core host)
+
+── permission_check [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         8545104 |        8545104 |              1.00×
+      2 |        16154926 |        8077463 |              0.95×
+      4 |        32007407 |        8001852 |              0.94×
+      8 |        47465039 |        5933130 |              0.69×
+     16 |        55351703 |        3459481 |              0.40×
+  scaling exponent = +0.695 (R² = 0.950)  [1.0 = linear, 0.0 = serialized] → PARTIAL (some contention)
+  single-core throughput = 8545104 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.117 µs/op (single thread, 16-core host)
+
+── session_create [write] (I/O-bound: oversubscribed write ladder + coalescing analysis) ──
+Device fsync rate F = 515.8 fsyncs/s  |  W = 1.000 WAL syncs/op (at T=1)  |  T×F/W ceiling formula
+
+threads | agg ops/s | fsyncs/write | batch | T×F/W ceiling | coalescing eff | p99 µs
+--------+-----------+--------------+-------+---------------+----------------+-------
+      1 |       424 |        1.000 |  1.00 |           516 |          82.2%  |  5231.4
+      4 |       756 |        0.653 |  1.53 |          2063 |          36.6%  |  6611.2
+     16 |      3645 |        0.134 |  7.48 |          8253 |          44.2%  |  6741.3
+     64 |     12974 |        0.033 | 30.67 |         33013 |          39.3%  |  8141.3
+    128 |     24083 |        0.015 | 64.95 |         66026 |          36.5%  |  9350.3
+    256 |     33724 |        0.009 | 109.89 |        132053 |          25.5%  | 11929.3
+
+  scaling exponent = +0.851 (R² = 0.986) → CONTENDS (serialized/shared bottleneck)
+  T=1:   424 ops/s, p99 = 5.2 ms, fsyncs/write = 1.000, ceiling = 516, efficiency = 82.2%
+  T=256: 33724 ops/s agg, p99 = 11.9 ms, fsyncs/write = 0.009, ceiling = 132053, efficiency = 25.5%
+
+  ── T4 (50,000 ops/s) feasibility at this device ──
+  Formula: T_needed = ⌈50000 × W / F⌉ = ⌈50000 × 1.000 / 515.8⌉ = 97 writers
+  Perfect coalescing at T=256 yields a ceiling of 132053 ops/s ≥ 50,000 → T4 is theoretically reachable at this device if the engine fully coalesces.
+  Measured 33724 ops/s at T=256 (25.5% of ceiling) — T4 target NOT yet met; gap = 16276 ops/s attributable to incomplete coalescing.
+
+  group-commit target: fsyncs/write << 1.0 at concurrency ≥ 16 → MET
+
+═══ Summary ═══
+
+op [state]              | 1T/core ops/s | top-T agg ops/s | scaling | eff | 200k/core | verdict
+------------------------+---------------+-----------------+---------+-----+-----------+--------
+validate_token [hot]    |        670645 |         7446170 |  +0.867 | 0.69 |       MET | PARTIAL (some contention)
+validate_token [miss]   |         20666 |          111532 |  +0.603 | 0.34 |      MISS | CONTENDS (serialized/shared bottleneck)
+session_lookup [hot]    |      11208095 |        76048216 |  +0.692 | 0.42 |       MET | PARTIAL (some contention)
+session_lookup [miss]   |       1757586 |         6262971 |  +0.472 | 0.22 |       MET | CONTENDS (serialized/shared bottleneck)
+user_lookup [hot]       |       3245870 |        18020800 |  +0.622 | 0.35 |       MET | CONTENDS (serialized/shared bottleneck)
+user_lookup [miss]      |       2105346 |         6282718 |  +0.392 | 0.19 |       MET | CONTENDS (serialized/shared bottleneck)
+permission_check [hot]  |       8545104 |        55351703 |  +0.695 | 0.40 |       MET | PARTIAL (some contention)
+session_create [write]  |           424 |           33724 |  +0.851 | 0.31 |       n/a | CONTENDS (serialized/shared bottleneck) (T=256, coalesce_eff=25.5%)
+
+Read ops: CPU-bound, measured on 16-core core-count ladder [1, 2, 4, 8, 16].
+Write op: I/O-bound (WAL fsync), measured on write ladder [1, 4, 16, 64, 128, 256].
+Engine-cost floor only. The HTTP/axum/tokio delta on top is NOT-MEASURABLE in this
+environment (HEA-1871 C3 / HEA-1876 C8: the generator, not the server, is the ceiling).
+Reads are lock-free hot-path (epoch-reclaimed, ArcSwap caches) and are expected to scale;
+session_create is WAL-fsync + group-commit (fsyncs/write drops with concurrency).
+Device F = 515.8 fsyncs/s; W = 1.000 WAL syncs/op; T4 ceiling at T=256: 132053 ops/s.
