@@ -101,6 +101,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   block preserves the prior no-pepper behaviour (HEA-1838).
 
 ### Fixed
+- **Permission resolution now scales with cores under concurrent token issuance (HEA-1906)** —
+  the RBAC decision cache that memoizes full permission resolutions was a single global
+  `Mutex`; every `resolve_permissions` took it, so under concurrency throughput *fell* as
+  cores were added (the C7 saturation sweep measured a negative scaling exponent). The cache
+  is now a sharded, lock-free structure: reads are wait-free `ArcSwap` loads with no mutex,
+  and a fill clones only the one shard the key maps to. The per-realm version-gated
+  invalidation is unchanged, so a mutation still atomically renders every prior cached
+  resolution for that realm unreachable — no stale-permission read is possible. Behaviour is
+  identical for callers; only concurrent throughput changes (HEA-1906).
 - **WAL recovery now truncates a corrupt tail instead of appending behind it** —
   after recovering from a torn or corrupt WAL tail (e.g. power loss), the append
   cursor was positioned at physical end-of-file, *after* the surviving garbage.

@@ -18,6 +18,7 @@ mod engine;
 pub mod error;
 pub(crate) mod keys;
 pub mod registry;
+mod resolution_cache;
 mod resolve;
 mod seed;
 mod types;

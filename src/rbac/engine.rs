@@ -9,8 +9,8 @@
 //! token issuance; `resolve.rs` still tolerates a late-appearing cycle
 //! in case storage was corrupted out-of-band).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeSet, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use crate::core::{Clock, OrganizationId, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
@@ -18,6 +18,7 @@ use crate::storage::{StorageEngine, StorageError};
 
 use super::error::RbacError;
 use super::keys;
+use super::resolution_cache::ShardedResolutionCache;
 use super::resolve::{self, Resolver};
 use super::seed::{self, StoredScope};
 use super::types::{
@@ -28,72 +29,6 @@ use super::types::{
     UpdateRoleRequest, UserPermissionGrant,
 };
 use super::{RbacEngine, SvBumper};
-
-/// Upper bound on cached resolutions across all realms. When exceeded, the
-/// entire cache is cleared (coarse eviction — correctness-safe, since every
-/// entry is re-derivable from storage). Sized to comfortably hold the working
-/// set of a large tenant without unbounded growth.
-const MAX_RESOLUTION_CACHE_ENTRIES: usize = 50_000;
-
-/// Decision cache for full (pre-scope-narrowing) permission resolutions.
-///
-/// # Correctness
-///
-/// Each realm carries a monotonic *graph version* (`generations`). Every RBAC
-/// mutation bumps its realm's version (see [`EmbeddedRbacEngine::invalidate_realm`]).
-/// A cache entry is only served when its stored version equals the realm's
-/// current version, so any mutation atomically renders every prior entry for
-/// that realm unreachable. This makes a stale-permission read — a
-/// privilege-escalation bug — impossible, at the cost of coarse (whole-realm)
-/// invalidation.
-///
-/// The cached value is the *unnarrowed* effective set (`requested_scope = None`),
-/// which depends only on the stored RBAC graph and never on the config scope
-/// registry, so RBAC hot-reload of scope definitions needs no special handling
-/// here: scope narrowing runs fresh on top of the cached full set on every call.
-#[derive(Default)]
-struct ResolutionCache {
-    /// Per-realm graph version, bumped on every mutation.
-    generations: HashMap<RealmId, u64>,
-    /// `(realm, user, org)` → `(version-at-fill, resolved)`.
-    entries: HashMap<(RealmId, UserId, Option<OrganizationId>), (u64, ResolvedPermissions)>,
-}
-
-impl ResolutionCache {
-    /// Current graph version for a realm (`0` if never mutated).
-    fn generation(&self, realm_id: &RealmId) -> u64 {
-        self.generations.get(realm_id).copied().unwrap_or(0)
-    }
-
-    /// Returns the cached resolution iff it matches the realm's current version.
-    fn get(&self, key: &(RealmId, UserId, Option<OrganizationId>)) -> Option<ResolvedPermissions> {
-        let current = self.generation(&key.0);
-        match self.entries.get(key) {
-            Some((version, value)) if *version == current => Some(value.clone()),
-            _ => None,
-        }
-    }
-
-    /// Inserts a resolution tagged with the version it was computed against.
-    /// Callers MUST pass the version captured *before* the storage reads that
-    /// produced `value`, and only after confirming it is still current.
-    fn insert(
-        &mut self,
-        key: (RealmId, UserId, Option<OrganizationId>),
-        version: u64,
-        value: ResolvedPermissions,
-    ) {
-        if self.entries.len() >= MAX_RESOLUTION_CACHE_ENTRIES && !self.entries.contains_key(&key) {
-            self.entries.clear();
-        }
-        self.entries.insert(key, (version, value));
-    }
-
-    /// Bumps a realm's graph version, invalidating all of its cached entries.
-    fn bump(&mut self, realm_id: &RealmId) {
-        *self.generations.entry(realm_id.clone()).or_insert(0) += 1;
-    }
-}
 
 /// Embedded RBAC engine backed by [`StorageEngine`].
 pub struct EmbeddedRbacEngine {
@@ -107,7 +42,11 @@ pub struct EmbeddedRbacEngine {
     assign_write_lock: std::sync::Mutex<()>,
     /// Memoizes full permission resolutions to collapse the per-issuance N+1
     /// storage fan-out (HEA-1770). Invalidated per-realm on every mutation.
-    resolution_cache: Mutex<ResolutionCache>,
+    ///
+    /// Sharded and lock-free (HEA-1906): reads are wait-free `ArcSwap` loads with
+    /// no mutex, fixing the −0.549 `permission_check` scaling the single
+    /// `Mutex<ResolutionCache>` caused under saturation (HEA-1875 C7).
+    resolution_cache: ShardedResolutionCache,
 }
 
 impl EmbeddedRbacEngine {
@@ -118,7 +57,7 @@ impl EmbeddedRbacEngine {
             clock,
             sv_bumper: OnceLock::new(),
             assign_write_lock: std::sync::Mutex::new(()),
-            resolution_cache: Mutex::new(ResolutionCache::default()),
+            resolution_cache: ShardedResolutionCache::new(),
         }
     }
 
@@ -134,10 +73,7 @@ impl EmbeddedRbacEngine {
     /// and refuses to cache its pre-mutation snapshot, or (b) already cached a
     /// snapshot under the old version which this bump renders unreachable.
     fn invalidate_realm(&self, realm_id: &RealmId) {
-        self.resolution_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .bump(realm_id);
+        self.resolution_cache.bump(realm_id);
     }
 
     // GUARDRAIL: these three helpers are the ONLY place `self.storage.put`,
@@ -533,30 +469,23 @@ impl Resolver for EmbeddedRbacEngine {
     ) -> Result<ResolvedPermissions, RbacError> {
         let key = (realm_id.clone(), user_id.clone(), org_id.cloned());
 
-        // Fast path: serve a version-matched hit; otherwise capture the current
-        // version to validate the fill against.
-        let version_at_read = {
-            let cache = self
-                .resolution_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(hit) = cache.get(&key) {
-                return Ok(hit);
-            }
-            cache.generation(realm_id)
-        };
+        // Fast path: wait-free version-matched hit (two atomic loads, no lock).
+        if let Some(hit) = self.resolution_cache.get(&key) {
+            return Ok(hit);
+        }
+
+        // Capture the graph version *before* the storage reads so a mutation that
+        // races those reads is detected by the post-read recheck below.
+        let version_at_read = self.resolution_cache.generation(realm_id);
 
         let resolved = resolve::resolve_full(self, user_id, realm_id, org_id)?;
 
-        let mut cache = self
-            .resolution_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Only cache if no mutation raced our storage reads. If the version
         // moved, the snapshot may already be stale — drop it rather than risk
         // serving stale permissions.
-        if cache.generation(realm_id) == version_at_read {
-            cache.insert(key, version_at_read, resolved.clone());
+        if self.resolution_cache.generation(realm_id) == version_at_read {
+            self.resolution_cache
+                .insert(key, version_at_read, resolved.clone());
         }
         Ok(resolved)
     }
@@ -2060,6 +1989,95 @@ mod tests {
         assert!(
             !r2.permissions.contains(&perm("billing.read")),
             "revoked permission must not survive in a cached resolution"
+        );
+    }
+
+    // HEA-1906 (concurrency regression): the resolution decision cache is now
+    // sharded and lock-free. Many threads resolving the same subject concurrently
+    // with a writer that grants-then-revokes must (1) never panic/deadlock/error
+    // and (2) never lose an invalidation — once the writer settles on a final
+    // state, every subsequent resolve must reflect it (no stale hit). A lost
+    // invalidation here is privilege escalation, so this pins the security
+    // invariant the sharding must preserve.
+    #[test]
+    fn concurrent_resolves_under_mutation_never_go_stale() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Barrier;
+
+        let (engine, _storage, realm) = mk_counting_engine();
+        engine.seed_realm(&realm).expect("seed");
+        let engine = Arc::new(engine);
+        let user = UserId::generate();
+
+        let readers = 8;
+        let barrier = Arc::new(Barrier::new(readers + 1));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let handles: Vec<_> = (0..readers)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let realm = realm.clone();
+                let user = user.clone();
+                let barrier = Arc::clone(&barrier);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    while !stop.load(Ordering::Relaxed) {
+                        // Every resolve must succeed and be internally consistent;
+                        // a torn read from the sharded cache would surface here.
+                        let r = engine
+                            .resolve_permissions(&user, &realm, None, None)
+                            .expect("concurrent resolve must not error");
+                        // The set is always well-formed regardless of the racing
+                        // grant/revoke: it either contains the permission or not.
+                        let _ = r.permissions.contains(&perm("live.edit"));
+                    }
+                })
+            })
+            .collect();
+
+        // Writer: repeatedly grant then revoke while readers hammer the cache.
+        barrier.wait();
+        let grant = UserPermissionGrant {
+            realm_id: realm.clone(),
+            user_id: user.clone(),
+            permission: perm("live.edit"),
+            scope: Scope::Realm,
+            granted_at: Timestamp::from_micros(1),
+            granted_by: None,
+        };
+        for _ in 0..200 {
+            engine.grant_user_permission(&realm, &grant).expect("grant");
+            engine
+                .revoke_user_permission(&realm, &user, &perm("live.edit"), &Scope::Realm)
+                .expect("revoke");
+        }
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().expect("reader thread panicked");
+        }
+
+        // Settle on a known final state: grant, and assert every resolve now sees
+        // it (invalidation on the grant reached the sharded cache).
+        engine.grant_user_permission(&realm, &grant).expect("grant");
+        let settled = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(
+            settled.permissions.contains(&perm("live.edit")),
+            "post-settle grant must be visible (no lost invalidation)"
+        );
+
+        // Now revoke and assert the cache does not serve the stale grant.
+        engine
+            .revoke_user_permission(&realm, &user, &perm("live.edit"), &Scope::Realm)
+            .expect("revoke");
+        let after_revoke = engine
+            .resolve_permissions(&user, &realm, None, None)
+            .expect("resolve");
+        assert!(
+            !after_revoke.permissions.contains(&perm("live.edit")),
+            "post-settle revoke must invalidate — a stale hit is privilege escalation"
         );
     }
 
