@@ -1467,7 +1467,24 @@ async fn token_exchange_impl(
                     .map(str::to_string),
             };
             let realm_str = realm_id.as_uuid().to_string();
-            match state.identity.step_up_mfa_grant_token(&realm_id, &request) {
+            let realm_id_clone = realm_id.clone();
+            let identity = Arc::clone(&state.identity);
+            // step_up_mfa_grant_token verifies Argon2id — route through the
+            // shared KDF admission gate (HEA-1910 / HEA-1889 F3) so this grant
+            // joins the permit pool rather than blocking Tokio workers directly.
+            let result = match super::run_kdf_gated_rest(
+                move || identity.step_up_mfa_grant_token(&realm_id_clone, &request),
+                |e| {
+                    tracing::error!(error = %e, "step_up_mfa_grant KDF task failed");
+                    Err(crate::identity::IdentityError::Storage(Box::new(e)))
+                },
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(shed) => return shed,
+            };
+            match result {
                 Ok(response) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -2422,7 +2439,24 @@ async fn realm_token_exchange(
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
             };
-            match state.identity.step_up_mfa_grant_token(&realm_id, &request) {
+            let realm_id_clone = realm_id.clone();
+            let identity = Arc::clone(&state.identity);
+            // step_up_mfa_grant_token verifies Argon2id — route through the
+            // shared KDF admission gate (HEA-1910 / HEA-1889 F3) so this grant
+            // joins the permit pool rather than blocking Tokio workers directly.
+            let result = match super::run_kdf_gated_rest(
+                move || identity.step_up_mfa_grant_token(&realm_id_clone, &request),
+                |e| {
+                    tracing::error!(error = %e, "realm_step_up_mfa_grant KDF task failed");
+                    Err(crate::identity::IdentityError::Storage(Box::new(e)))
+                },
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(shed) => return shed,
+            };
+            match result {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(serde_json::json!({

@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Step-up MFA grant now routes through the shared KDF admission gate (HEA-1910)** —
+  the `urn:hearth:params:grant-type:step-up-mfa` grant at `/token` previously called
+  `step_up_mfa_grant_token` inline in the async handler with neither a gate permit nor
+  `spawn_blocking`. A distributed flood of step-up requests could independently
+  oversubscribe the blocking pool (falsifying the `permits × 19 MiB` ceiling) and block
+  Tokio workers, degrading the `validate_token` hot path. The path is now wrapped in
+  `run_kdf_gated_rest` at both callsites (header-based and realm-name-routed `/token`),
+  matching the pattern used for `create_user` and `import_user`. Saturated gate sheds
+  with `503 + Retry-After`. (HEA-1910)
 - **KDF admission gate hardening (HEA-1892 / HEA-1889 F1+F2)** — two abuse-resistance
   fixes over the R1 gate. **F1:** the allocation-free login abuse fast-rejects (CSRF
   double-submit, cross-origin POST, and the per-IP login rate limit) now run
