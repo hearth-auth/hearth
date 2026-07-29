@@ -46,7 +46,8 @@ fn record_sst_file_count(count: usize) {
 /// memtable once the `fsync` succeeds.
 pub(crate) struct PendingBatchHandle {
     pub(crate) am_leader: bool,
-    pub(crate) slot: std::sync::Arc<crate::storage::wal::GroupSlot>,
+    /// Position in the WAL commit stream this batch is waiting on.
+    pub(crate) ticket: u64,
     pub(crate) realm_id: crate::core::RealmId,
     pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
@@ -1355,13 +1356,13 @@ impl StorageEngine for EmbeddedStorageEngine {
                     StorageDurabilityHandleKind::Immediate,
                 ))
             }
-            WalDurabilityHandle::Pending { am_leader, slot } => {
+            WalDurabilityHandle::Pending { am_leader, ticket } => {
                 // EveryWrite path: WAL entry is queued but not yet fsync'd.
                 // Store entries for post-durability memtable update in await_batch_durable.
                 Ok(StorageDurabilityHandle(
                     StorageDurabilityHandleKind::Pending(PendingBatchHandle {
                         am_leader,
-                        slot,
+                        ticket,
                         realm_id: realm_id.clone(),
                         entries: entries.to_vec(),
                     }),
@@ -1381,7 +1382,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         let wal_result = self.wal.await_entry_durable(
             WalDurabilityHandle::Pending {
                 am_leader: pending.am_leader,
-                slot: pending.slot,
+                ticket: pending.ticket,
             },
             || self.trigger_flush(),
         );

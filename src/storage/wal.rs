@@ -415,40 +415,61 @@ struct RotationState {
 pub(crate) struct GroupSlot {
     /// Pre-serialised WAL entry payload (plaintext before encryption).
     plaintext: Vec<u8>,
-    /// Outcome written by the leader once the entry is written + synced.
-    state: Mutex<GroupSlotState>,
-    /// Notifies the owning writer when `state.done` flips to `true`.
-    cv: Condvar,
-}
-
-/// Outcome state inside a `GroupSlot`.
-struct GroupSlotState {
-    /// `true` once the leader has written and synced (or errored) this slot.
-    done: bool,
-    /// `None` = success; `Some(msg)` = the error message from the commit.
-    error: Option<String>,
+    /// Monotonic position in the commit stream, assigned at enqueue.
+    ///
+    /// This is the writer's entire claim on the commit: it waits until the
+    /// shared [`CommitSignal`] reports a completed ticket at least this high.
+    ticket: u64,
 }
 
 /// Opaque handle returned by [`Wal::enqueue_entry`].
 ///
 /// Must be passed to [`Wal::await_entry_durable`] to block until the WAL entry
-/// is guaranteed durable (covered by an `fsync`/`sync_all`).
+/// is guaranteed durable (covered by an `fsync`/`sync_data`).
 pub(crate) enum WalDurabilityHandle {
     /// Entry was written synchronously (`SyncMode::None`). Already durable.
     Immediate,
     /// Entry is pending in the group-commit queue.
-    Pending {
-        am_leader: bool,
-        slot: Arc<GroupSlot>,
-    },
+    Pending { am_leader: bool, ticket: u64 },
 }
 
 /// Shared group-commit queue and leader flag.
 struct GroupState {
     /// Writers waiting for the current leader to commit their entries.
-    pending: VecDeque<Arc<GroupSlot>>,
+    pending: VecDeque<GroupSlot>,
     /// `true` while a leader is active (holding `file` mutex, writing+syncing).
     leader_active: bool,
+    /// Ticket to hand to the next enqueuing writer.
+    ///
+    /// Tickets are issued under this mutex in queue order, and batches drain a
+    /// FIFO prefix under a single active leader, so a batch's tickets are
+    /// always contiguous and strictly above every previously committed one.
+    /// That is what makes a single "highest completed ticket" watermark a
+    /// sufficient signal for every waiter.
+    next_ticket: u64,
+}
+
+/// Commit watermark broadcast to every waiting writer (HEA-1959).
+///
+/// The original design gave each writer its own `Mutex` + `Condvar` and had the
+/// leader `notify_one` each slot in turn. At batch = 110 that is 110 futex
+/// wakes serialized on the leader's critical path — measured at ~2.6 us/entry,
+/// the largest remaining serial cost once the write syscalls were coalesced.
+///
+/// Replacing it with one watermark plus one `notify_all` makes the leader's
+/// signalling cost O(1) per batch instead of O(batch).
+struct CommitSignal {
+    /// Highest ticket whose commit has finished, successfully or not.
+    ///
+    /// Monotonically non-decreasing. A writer holding ticket `t` is durable
+    /// once `completed >= t` and no failure covers `t`.
+    completed: u64,
+    /// First failed ticket and its error, if a commit has ever failed.
+    ///
+    /// A write fault fences the WAL permanently, so failure is monotone: once
+    /// set, every ticket at or above `.0` failed. Writers below it committed
+    /// before the fault and keep their successful acknowledgement.
+    failed_from: Option<(u64, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -467,13 +488,14 @@ struct GroupState {
 /// that `Drop` is a no-op on the happy path.
 struct LeaderGuard<'a> {
     group: &'a Mutex<GroupState>,
-    /// Slots drained from `pending` into the in-flight commit batch.
+    signal: &'a (Mutex<CommitSignal>, Condvar),
+    /// Lowest ticket in the in-flight commit batch, if one is in progress.
     ///
-    /// `lead_group_commit` populates this field immediately after the drain and
-    /// before calling `commit_batch`, so that a panic inside `commit_batch`
-    /// (e.g. the `pre_rotate` memtable-flush closure) causes `Drop` to signal
-    /// these writers rather than leaving them blocked on their condvars forever.
-    in_flight: Vec<Arc<GroupSlot>>,
+    /// `lead_group_commit` sets this immediately after the drain and before
+    /// calling `commit_batch`, so that a panic inside `commit_batch` (e.g. the
+    /// `pre_rotate` memtable-flush closure) causes `Drop` to fail these writers
+    /// rather than leaving them blocked forever.
+    in_flight_from: Option<u64>,
     /// `true` once the leader finishes normally — suppresses the panic-path
     /// drain in `Drop`.
     disarmed: bool,
@@ -484,34 +506,45 @@ impl Drop for LeaderGuard<'_> {
         if self.disarmed {
             return;
         }
-        // Panic / hard-error path: restore a clean state so that any threads
-        // blocked on their slot condvars fail fast rather than waiting forever.
-        // R2: use `unwrap_or_else` (matching how every slot mutex is handled
-        // below) so a poisoned group mutex does not silently skip the entire
-        // body — that would strand writers on their condvars indefinitely.
-        {
+        // Panic / hard-error path: restore a clean state so that any blocked
+        // writer fails fast rather than waiting forever.
+        // R2: use `unwrap_or_else` (matching how the signal mutex is handled)
+        // so a poisoned group mutex does not silently skip the entire body —
+        // that would strand writers indefinitely.
+        let (highest_issued, first_queued) = {
             let mut gs = self.group.lock().unwrap_or_else(|e| e.into_inner());
             gs.leader_active = false;
-            let pending: Vec<_> = gs.pending.drain(..).collect();
-            drop(gs); // release the lock before signalling
-                      // Signal in-flight batch (already drained from pending before
-                      // commit_batch was called — the original bug left these stranded).
-            for slot in self.in_flight.drain(..) {
-                if let Ok(mut state) = slot.state.lock() {
-                    state.done = true;
-                    state.error = Some("WAL leader exited unexpectedly; write failed".to_string());
-                    slot.cv.notify_one();
+            // Discard queued entries: the WAL is in an indeterminate state, so
+            // nothing after the fault may be written and acked.
+            let first_queued = gs.pending.front().map(|slot| slot.ticket);
+            gs.pending.clear();
+            (gs.next_ticket.saturating_sub(1), first_queued)
+        };
+
+        // The failure covers every ticket that was NOT committed: the in-flight
+        // batch if there was one, otherwise the queue we just discarded.
+        //
+        // It must NOT default to ticket 0 when neither exists. Doing so would
+        // retroactively fail every writer this leader already acked — the same
+        // ghost-write class as the R1 bug, in a new form (caught by
+        // `leader_guard_drop_does_not_fail_committed_writer`).
+        let failed_from = self.in_flight_from.or(first_queued);
+
+        let (lock, cv) = self.signal;
+        {
+            let mut sig = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(from) = failed_from {
+                if sig.failed_from.is_none() {
+                    sig.failed_from = Some((
+                        from,
+                        "WAL leader exited unexpectedly; write failed".to_string(),
+                    ));
                 }
             }
-            // Signal any writers that arrived after the drain.
-            for slot in pending {
-                if let Ok(mut state) = slot.state.lock() {
-                    state.done = true;
-                    state.error = Some("WAL leader exited unexpectedly; write failed".to_string());
-                    slot.cv.notify_one();
-                }
-            }
+            // Release every waiter regardless, so no writer blocks forever.
+            sig.completed = sig.completed.max(highest_issued);
         }
+        cv.notify_all();
     }
 }
 
@@ -594,6 +627,11 @@ pub struct Wal {
     /// file mutex, then signals each slot.  `SyncMode::None` bypasses this
     /// path entirely.
     group: Mutex<GroupState>,
+    /// Commit watermark every pending writer waits on.
+    ///
+    /// One `notify_all` per batch replaces one `notify_one` per entry, taking
+    /// the leader's signalling cost off the per-entry serial path (HEA-1959).
+    commit_signal: (Mutex<CommitSignal>, Condvar),
     /// Cumulative count of successful `sync_all` calls on this WAL.
     ///
     /// Incremented after each `commit_batch` sync completes.  Used by the
@@ -918,9 +956,17 @@ impl Wal {
             kek_id,
             fs,
             record_start: V1_RECORD_OFFSET,
+            commit_signal: (
+                Mutex::new(CommitSignal {
+                    completed: 0,
+                    failed_from: None,
+                }),
+                Condvar::new(),
+            ),
             group: Mutex::new(GroupState {
                 pending: VecDeque::new(),
                 leader_active: false,
+                next_ticket: 1,
             }),
             sync_count: AtomicU64::new(0),
             commit_profile: CommitProfile::default(),
@@ -1002,30 +1048,20 @@ impl Wal {
         // `|| self.trigger_flush()` to both enqueue_entry and await_entry_durable).
         drop(pre_rotate);
 
-        let slot = Arc::new(GroupSlot {
-            plaintext,
-            state: Mutex::new(GroupSlotState {
-                done: false,
-                error: None,
-            }),
-            cv: Condvar::new(),
-        });
-
-        let am_leader = {
+        let (am_leader, ticket) = {
             let mut gs = self
                 .group
                 .lock()
                 .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
-            gs.pending.push_back(Arc::clone(&slot));
-            if gs.leader_active {
-                false
-            } else {
-                gs.leader_active = true;
-                true
-            }
+            let ticket = gs.next_ticket;
+            gs.next_ticket += 1;
+            gs.pending.push_back(GroupSlot { plaintext, ticket });
+            let am_leader = !gs.leader_active;
+            gs.leader_active = true;
+            (am_leader, ticket)
         };
 
-        Ok(WalDurabilityHandle::Pending { am_leader, slot })
+        Ok(WalDurabilityHandle::Pending { am_leader, ticket })
     }
 
     /// Block until the WAL entry represented by `handle` is durable.
@@ -1047,9 +1083,9 @@ impl Wal {
     where
         F: FnOnce() -> Result<(), StorageError>,
     {
-        let (am_leader, slot) = match handle {
+        let (am_leader, ticket) = match handle {
             WalDurabilityHandle::Immediate => return Ok(()),
-            WalDurabilityHandle::Pending { am_leader, slot } => (am_leader, slot),
+            WalDurabilityHandle::Pending { am_leader, ticket } => (am_leader, ticket),
         };
 
         // Test hook: rendezvous all concurrent writers here — after callers
@@ -1066,21 +1102,8 @@ impl Wal {
         }
         // Follower: the looping leader handles this slot; pre_rotate is dropped.
 
-        // Read the slot outcome. The looping leader sets done=true and calls
-        // notify_one() before any waiter could miss the signal.
-        let mut state = slot
-            .state
-            .lock()
-            .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
-        while !state.done {
-            state = slot.cv.wait(state).map_err(|_| {
-                StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
-            })?;
-        }
-        match state.error.take() {
-            None => Ok(()),
-            Some(msg) => Err(StorageError::Io(std::io::Error::other(msg))),
-        }
+        // Wait for the commit watermark to reach this writer's ticket.
+        self.await_ticket(ticket)
     }
 
     // ── Original combined-phase append (unchanged) ────────────────────────────
@@ -1132,28 +1155,18 @@ impl Wal {
         //
         // Push a slot to the shared queue.  The first writer to find the queue
         // empty becomes the leader and runs the commit loop; all others wait on
-        // their slot's condvar until the leader marks them done.
-        let slot = Arc::new(GroupSlot {
-            plaintext,
-            state: Mutex::new(GroupSlotState {
-                done: false,
-                error: None,
-            }),
-            cv: Condvar::new(),
-        });
-
-        let am_leader = {
+        // the shared commit watermark until it covers their ticket.
+        let (am_leader, ticket) = {
             let mut gs = self
                 .group
                 .lock()
                 .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
-            gs.pending.push_back(Arc::clone(&slot));
-            if gs.leader_active {
-                false
-            } else {
-                gs.leader_active = true;
-                true
-            }
+            let ticket = gs.next_ticket;
+            gs.next_ticket += 1;
+            gs.pending.push_back(GroupSlot { plaintext, ticket });
+            let am_leader = !gs.leader_active;
+            gs.leader_active = true;
+            (am_leader, ticket)
         };
 
         // Test hook: rendezvous all concurrent writers before the leader
@@ -1173,22 +1186,35 @@ impl Wal {
         }
         // Follower: the looping leader handles this slot; pre_rotate is dropped.
 
-        // Read the slot outcome.  The looping leader sets done=true on every
-        // slot it commits before returning, so the wait below is typically a
-        // no-op for the leader thread (its own slot was in the first batch) and
-        // a single condvar wait for each follower thread.
-        let mut state = slot
-            .state
+        // Wait for the commit watermark to reach this writer's ticket.  The
+        // looping leader publishes the watermark for every batch it commits
+        // before returning, so this is typically a no-op for the leader thread
+        // (its own ticket was in the first batch).
+        self.await_ticket(ticket)
+    }
+
+    /// Blocks until the commit watermark covers `ticket`, then reports its
+    /// outcome.
+    ///
+    /// Waking is edge-free: `completed` is a monotone watermark rather than a
+    /// per-writer flag, so a wakeup can never be "missed" — a writer that
+    /// checks late simply observes an already-satisfied condition and returns
+    /// without waiting at all.
+    fn await_ticket(&self, ticket: u64) -> Result<(), StorageError> {
+        let (lock, cv) = &self.commit_signal;
+        let mut sig = lock
             .lock()
-            .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
-        while !state.done {
-            state = slot.cv.wait(state).map_err(|_| {
-                StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
+            .map_err(|_| StorageError::Io(std::io::Error::other("WAL commit mutex poisoned")))?;
+        while sig.completed < ticket {
+            sig = cv.wait(sig).map_err(|_| {
+                StorageError::Io(std::io::Error::other("WAL commit condvar poisoned"))
             })?;
         }
-        match state.error.take() {
-            None => Ok(()),
-            Some(msg) => Err(StorageError::Io(std::io::Error::other(msg))),
+        match &sig.failed_from {
+            Some((from, msg)) if ticket >= *from => {
+                Err(StorageError::Io(std::io::Error::other(msg.clone())))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -1264,13 +1290,15 @@ impl Wal {
         // Disarmed on the normal empty-queue exit.
         let mut guard = LeaderGuard {
             group: &self.group,
-            in_flight: Vec::new(),
+            signal: &self.commit_signal,
+            in_flight_from: None,
             disarmed: false,
         };
 
         // Wrap in Option so the FnOnce can be consumed on the first rotation-
         // triggering batch and passed as None to subsequent batches.
         let mut pre_rotate_opt = Some(pre_rotate);
+        let mut batch: Vec<GroupSlot>;
 
         loop {
             // Drain atomically.  Exit when the queue is empty.
@@ -1278,22 +1306,23 @@ impl Wal {
                 let mut gs = self.group.lock().map_err(|_| {
                     StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
                 })?;
-                let b: Vec<_> = gs.pending.drain(..).collect();
-                if b.is_empty() {
+                batch = gs.pending.drain(..).collect();
+                if batch.is_empty() {
                     gs.leader_active = false;
                     guard.disarmed = true;
                     return Ok(());
                 }
-                // Place batch in the guard before commit_batch so Drop can
-                // signal these writers on a panic (HEA-1924 / HEA-1925).
-                guard.in_flight = b;
+                // Record the batch's first ticket in the guard before
+                // commit_batch so Drop can fail these writers on a panic
+                // (HEA-1924 / HEA-1925).
+                guard.in_flight_from = Some(batch[0].ticket);
             }
 
             // Write every slot + ONE fsync for this batch.
-            self.commit_batch(&guard.in_flight, pre_rotate_opt.take())?;
-            // Clear so Drop does not re-signal committed slots on a later
+            self.commit_batch(&batch, pre_rotate_opt.take())?;
+            // Clear so Drop does not re-fail committed writers on a later
             // error in this same call (R1 ghost-write fix).
-            guard.in_flight.clear();
+            guard.in_flight_from = None;
 
             // Loop immediately: drain the next batch without waking a
             // follower.  This is the HEA-1955 efficiency improvement.
@@ -1309,7 +1338,7 @@ impl Wal {
     /// to the caller.
     fn commit_batch<F>(
         &self,
-        batch: &[Arc<GroupSlot>],
+        batch: &[GroupSlot],
         pre_rotate: Option<F>,
     ) -> Result<(), StorageError>
     where
@@ -1428,19 +1457,33 @@ impl Wal {
         // the signal and strand a writer waiting on the condvar forever.
         let err_msg = commit_result.as_ref().err().map(|e| e.to_string());
         let t_signal = Instant::now();
-        for slot in batch {
+
+        // Publish the watermark ONCE for the whole batch, then a single
+        // `notify_all`.  The previous design took one slot mutex and one
+        // `notify_one` futex wake per entry — ~2.6 µs/entry serialized on the
+        // leader's critical path, which at batch=110 was ~0.29 ms of the
+        // commit cycle (HEA-1959).  This is O(1) per batch instead.
+        //
+        // INVARIANT: `batch` is a FIFO prefix of the queue committed by the
+        // single active leader, so its tickets are contiguous and strictly
+        // above every previously completed one.  Publishing the last ticket
+        // therefore releases exactly the writers this batch made durable.
+        //
+        // INVARIANT: the mutex is released before `notify_all` so woken
+        // writers do not immediately re-block on it.  The watermark is already
+        // visible at that point, so no wakeup can be lost.
+        if let Some(last) = batch.last() {
+            let (lock, cv) = &self.commit_signal;
             {
-                let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.done = true;
-                state.error = err_msg.clone();
+                let mut sig = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(msg) = err_msg {
+                    if sig.failed_from.is_none() {
+                        sig.failed_from = Some((batch[0].ticket, msg));
+                    }
+                }
+                sig.completed = sig.completed.max(last.ticket);
             }
-            // Notify *after* releasing the slot mutex.  Waking a writer while
-            // still holding its mutex makes it immediately re-block on that
-            // mutex, costing a second futex round-trip per slot — ~2.6 µs/entry
-            // on the leader's serial path at batch=110 (HEA-1959).  Setting
-            // `done` before the unlock means a writer that wakes spuriously in
-            // the gap still observes completion, so no wakeup can be lost.
-            slot.cv.notify_one();
+            cv.notify_all();
         }
         self.commit_profile
             .signal_ns
@@ -2285,81 +2328,84 @@ mod tests {
 
     // ── HEA-1935: LeaderGuard hardening ──────────────────────────────────────
 
-    /// R1 regression: `Drop` must not overwrite a committed slot's `error` field.
-    ///
-    /// Before the fix, `lead_group_commit` did not clear `in_flight` after a
-    /// successful `commit_batch`.  If the subsequent group-mutex lock failed,
-    /// `Drop` fired with `disarmed=false` and iterated `in_flight`, overwriting
-    /// each slot's `error` with a spurious failure message — a ghost write.
-    ///
-    /// The fix calls `guard.in_flight.clear()` immediately after `commit_batch`
-    /// returns `Ok`.  This test verifies the post-fix invariant at the `Drop`
-    /// level: clearing `in_flight` before any armed-drop path is what prevents
-    /// the overwrite.
-    #[test]
-    fn leader_guard_drop_does_not_overwrite_committed_slot() {
-        let slot = Arc::new(GroupSlot {
-            plaintext: vec![],
-            state: Mutex::new(GroupSlotState {
-                done: true,
-                error: None,
+    /// Builds a fresh signal pair for the LeaderGuard tests.
+    fn test_signal() -> (Mutex<CommitSignal>, Condvar) {
+        (
+            Mutex::new(CommitSignal {
+                completed: 0,
+                failed_from: None,
             }),
-            cv: Condvar::new(),
-        });
+            Condvar::new(),
+        )
+    }
+
+    /// R1 regression: `Drop` must not retroactively fail an already-committed
+    /// writer.
+    ///
+    /// Before the fix, `lead_group_commit` did not clear its in-flight marker
+    /// after a successful `commit_batch`.  If the subsequent group-mutex lock
+    /// failed, `Drop` fired with `disarmed=false` and failed writers that had
+    /// already been acked — a ghost write.
+    ///
+    /// Post-HEA-1959 the marker is `in_flight_from`, cleared immediately after
+    /// `commit_batch` returns `Ok`.  A drop with no in-flight batch must leave
+    /// the already-published watermark reporting success.
+    #[test]
+    fn leader_guard_drop_does_not_fail_committed_writer() {
+        let signal = test_signal();
+        // Simulate: tickets 1..=3 committed successfully and published.
+        signal
+            .0
+            .lock()
+            .expect("fresh mutex")
+            .completed = 3;
 
         let group = Mutex::new(GroupState {
             pending: VecDeque::new(),
             leader_active: true,
+            next_ticket: 4,
         });
 
-        // Simulate the state at the R1 fix site: commit_batch succeeded, so
-        // in_flight has been cleared.  Drop with disarmed=false must be a
-        // no-op for the committed slot (which is no longer in in_flight).
-        let mut guard = LeaderGuard {
+        // commit_batch succeeded, so in_flight_from was cleared. An armed drop
+        // must not invent a failure for the committed tickets.
+        let guard = LeaderGuard {
             group: &group,
-            in_flight: vec![Arc::clone(&slot)],
+            signal: &signal,
+            in_flight_from: None,
             disarmed: false,
         };
-        guard.in_flight.clear(); // mirrors the R1 fix in lead_group_commit
         drop(guard);
 
-        let state = slot
-            .state
-            .lock()
-            .expect("slot state mutex must not be poisoned");
-        assert!(
-            state.done,
-            "committed slot must remain done=true after armed guard drop"
+        let sig = signal.0.lock().expect("signal mutex must not be poisoned");
+        assert_eq!(
+            sig.completed, 3,
+            "watermark must not regress on an armed drop"
         );
-        assert!(
-            state.error.is_none(),
-            "committed slot must keep error=None after armed guard drop; got {:?}",
-            state.error
-        );
+        // in_flight_from was None, so failure starts at ticket 0 only if the
+        // guard invented one. Committed tickets 1..=3 must still read as OK.
+        match &sig.failed_from {
+            None => {}
+            Some((from, msg)) => panic!(
+                "committed writers must not be retroactively failed; \
+                 got failed_from=({from}, {msg})"
+            ),
+        }
     }
 
-    /// R2 regression: `Drop` must signal in-flight writers even when the group
+    /// R2 regression: `Drop` must release in-flight writers even when the group
     /// mutex is poisoned.
     ///
     /// Pre-fix, `Drop` used `if let Ok(mut gs) = self.group.lock()`, which
-    /// silently no-ops on a poisoned mutex — leaving all in-flight writers
-    /// stranded on their condvars forever (the HEA-1924 failure mode).  The fix
-    /// switches to `unwrap_or_else(|e| e.into_inner())`, matching how each
-    /// slot mutex is handled elsewhere in the same function.
+    /// silently no-ops on a poisoned mutex — leaving every in-flight writer
+    /// stranded forever (the HEA-1924 failure mode).  The fix uses
+    /// `unwrap_or_else(|e| e.into_inner())`.
     #[test]
-    fn leader_guard_drop_on_poisoned_group_mutex_signals_in_flight() {
-        let slot = Arc::new(GroupSlot {
-            plaintext: vec![],
-            state: Mutex::new(GroupSlotState {
-                done: false,
-                error: None,
-            }),
-            cv: Condvar::new(),
-        });
-
+    fn leader_guard_drop_on_poisoned_group_mutex_releases_in_flight() {
+        let signal = test_signal();
         let group = Arc::new(Mutex::new(GroupState {
             pending: VecDeque::new(),
             leader_active: true,
+            next_ticket: 3, // tickets 1 and 2 issued
         }));
 
         // Poison the group mutex via a thread that panics while holding it.
@@ -2377,27 +2423,53 @@ mod tests {
             "group mutex must be poisoned after thread panic"
         );
 
-        // Armed guard with an uncommitted slot.  Pre-fix Drop no-ops on a
-        // poisoned mutex, leaving slot.done=false (stranded writer).  Post-fix
-        // Drop recovers the poisoned guard via unwrap_or_else and signals it.
+        // Armed guard with ticket 1 in flight.  Pre-fix Drop no-ops on a
+        // poisoned mutex, stranding the writer.  Post-fix Drop recovers via
+        // unwrap_or_else, advances the watermark past every issued ticket, and
+        // records the failure.
         let guard = LeaderGuard {
             group: &group,
-            in_flight: vec![Arc::clone(&slot)],
+            signal: &signal,
+            in_flight_from: Some(1),
             disarmed: false,
         };
         drop(guard);
 
-        let state = slot
-            .state
-            .lock()
-            .expect("slot state mutex must not be poisoned");
-        assert!(
-            state.done,
-            "in-flight slot must be signalled even when group mutex is poisoned"
+        let sig = signal.0.lock().expect("signal mutex must not be poisoned");
+        assert_eq!(
+            sig.completed, 2,
+            "watermark must cover every issued ticket so no writer waits forever"
         );
-        assert!(
-            state.error.is_some(),
-            "in-flight slot must receive an error string on the drop path"
-        );
+        let (from, msg) = sig
+            .failed_from
+            .as_ref()
+            .expect("in-flight writer must receive an error on the drop path");
+        assert_eq!(*from, 1, "failure must start at the in-flight batch");
+        assert!(!msg.is_empty(), "error message must be populated");
+    }
+
+    /// A writer whose ticket the watermark already covers must not block, and
+    /// must not be failed by a *later* batch's failure.
+    ///
+    /// This is the property that replaces per-slot `done` flags: correctness now
+    /// rests on `failed_from` being a lower bound, so an early success cannot be
+    /// retroactively invalidated by a subsequent write fault.
+    #[test]
+    fn earlier_tickets_keep_their_ack_when_a_later_batch_fails() {
+        let signal = test_signal();
+        {
+            let mut sig = signal.0.lock().expect("fresh mutex");
+            sig.completed = 10;
+            sig.failed_from = Some((6, "write fault".to_string()));
+        }
+        let sig = signal.0.lock().expect("mutex");
+        for t in 1..=5u64 {
+            let failed = matches!(&sig.failed_from, Some((from, _)) if t >= *from);
+            assert!(!failed, "ticket {t} committed before the fault must stay OK");
+        }
+        for t in 6..=10u64 {
+            let failed = matches!(&sig.failed_from, Some((from, _)) if t >= *from);
+            assert!(failed, "ticket {t} at or after the fault must report failure");
+        }
     }
 }
