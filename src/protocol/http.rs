@@ -370,7 +370,11 @@ pub fn router(state: Arc<AppState>) -> Router {
                 "/admin/bootstrap",
                 axum::routing::post(admin::admin_bootstrap),
             )
-            .route("/dev/probe-user", axum::routing::get(admin::dev_probe_user));
+            .route("/dev/probe-user", axum::routing::get(admin::dev_probe_user))
+            .route(
+                "/dev/seed-session",
+                axum::routing::post(admin::dev_seed_session),
+            );
     }
 
     base.route_layer(axum::middleware::from_fn(track_metrics))

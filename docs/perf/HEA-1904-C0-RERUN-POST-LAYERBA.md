@@ -115,7 +115,17 @@ Endpoint-to-endpoint slope: **2,805 B/user**
 
 ## 4. Session Measurement
 
-**Still NOT MEASURABLE** — same blocker as HEA-1868 (ROPC removed by HEA-1862; no session seeding path).
+**MEASURED (HEA-1907, 2026-07-28)** — `POST /dev/seed-session` endpoint added to unblock this.
+
+| N sessions | VmRSS delta | B/session |
+|------------|-------------|-----------|
+| 200 | −49,152 B | — (page-granularity noise) |
+| 1,000 | 13,582,336 B | inflated (startup overhead dominates at low N) |
+| 4,000 | 3,252,224 B | **813 B/session** |
+
+**Result: ~813 B/session** (N=4,000 paired-process VmRSS delta; ±4 KB page noise → range 600–1,100 B/session).
+
+Full methodology and analysis in `docs/perf/HEA-1907-C0-SESSION-MEMORY.md`.
 
 ---
 

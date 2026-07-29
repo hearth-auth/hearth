@@ -31,7 +31,7 @@ use tracing::error;
 
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
-    identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
+    extract_realm_id, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
     require_admin_permission, require_any_admin_permission, verify_manifest_signature, AdminAuth,
     AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
@@ -2511,6 +2511,55 @@ pub(super) async fn dev_probe_user(
     // not correctness. A missing user (e.g. index > corpus_size) contributes
     // a fast cached-miss path, which is fine noise for the sweep.
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+/// POST /dev/seed-session — creates a raw session record for the given user.
+///
+/// Dev-only: the route is registered only when the server runs with `--dev`.
+/// Used by the load-test seed harness so `--sessions-frac > 0` can create real
+/// session records without re-introducing ROPC (removed by HEA-1862, HEA-1907).
+///
+/// Required headers: `X-Realm-ID: <realm-uuid>`
+/// Request body:  `{"user_id": "<user-uuid>"}`
+/// Response body: `{"session_id": "<session-uuid>"}`
+pub(super) async fn dev_seed_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DevSeedSessionRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let user_uuid = match body.user_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user_id"})),
+            )
+                .into_response()
+        }
+    };
+    let user_id = UserId::new(user_uuid);
+    match state
+        .identity
+        .create_session(&realm_id, &user_id, &crate::identity::SessionContext::default())
+    {
+        Ok(session) => (
+            StatusCode::CREATED,
+            Json(
+                serde_json::json!({"session_id": session.id().as_uuid().to_string()}),
+            ),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DevSeedSessionRequest {
+    user_id: String,
 }
 
 /// Fixed dev-mode password for `admin@hearth.test`.

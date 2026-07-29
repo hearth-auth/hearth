@@ -36,8 +36,8 @@ Current tally across the 30 rows in §3 (29 from v0 + L6 split into L6a/L6b per 
 |---|---|---|
 | PASS | 13 | K8, K9, L1, L2, L3, L4, L5, L8, T1, T3, E1, E2, E3 |
 | MISS | 6 | K4, K5, K6, K7, T4, E4 |
-| NOT-MEASURABLE | 4 | K2, K3, E7, L6b |
-| NOT-MEASURED | 7 | K1, K10, L6a, L7, T2, E5, E6 |
+| NOT-MEASURABLE | 3 | K3, E7, L6b |
+| NOT-MEASURED | 8 | K1, K2, K10, L6a, L7, T2, E5, E6 |
 
 **Scope note on PASS rows L1–L5, L8, T1, T3, E1–E3.** All thirteen rows were settled at the
 **engine layer** — `EmbeddedStorageEngine` driven in-process with no HTTP server and no load
@@ -191,7 +191,7 @@ All engine-level. HTTP delta NOT-MEASURABLE on this host — see §0 scope note.
 | T1 | Token validation (read-heavy) | 200,000+ | 3,000,000+ | **574,363** (hot, 1T) | **7,733,497** (hot, 16T) | `dev-ryzen-7840hs` | **PASS** (engine; HTTP NOT-MEASURABLE) | C7 `b29e57dd` |
 | T2 | Mixed read/write (95/5) | 100,000+ | 1,500,000+ | — | — | — | `NOT-MEASURED` | 95/5 workload mix not constructed; C7 measured operations individually |
 | T3 | Permission checks (JWT claim lookup) | 1,000,000+ | 15,000,000+ | **14,799,198** (1T, cache-hit) | 3,126,679 (16T — contention, see below) | `dev-ryzen-7840hs` | **PASS** (engine, 1T; HTTP NOT-MEASURABLE) | C7 `b29e57dd` |
-| T4 | Session creation | 50,000+ | 500,000+ | **31** (fsync-bound) | 67 (16T) | `dev-ryzen-7840hs` | **MISS** (fsync/audit-chain serialized; 1,600× off target) | C7 `b29e57dd` |
+| T4 | Session creation | 50,000+ | 500,000+ | **158** (fsync-bound, post-Layer-B) | ~270 est. (16T) | `dev-ryzen-7840hs` | **MISS** (fsync/audit-chain serialized; 316× off target) | HEA-1907 re-run post `faec7e66` |
 
 > **T1 headline.** `validate_token` hot scales **near-linearly** (exponent +0.933, R² 0.999,
 > 84% efficiency 1→16T). It clears the 200 k/core target by **2.9×** and the 3 M aggregate target
@@ -205,12 +205,13 @@ All engine-level. HTTP delta NOT-MEASURABLE on this host — see §0 scope note.
 > issue time), so it only bites during concurrent token issuance. Sharding the mutex is the fix
 > (follow-up candidate). See R5.
 
-> **T4 host caveat.** The 31 ops/s/core figure is dominated by `/scratch` fsync latency on this
-> machine (~32 ms/op). On production NVMe with appropriate `SyncMode`, session-create throughput will
-> be materially higher — but this measurement is still a MISS: the WAL `fsync`
-> (`SyncMode::EveryWrite`) and the per-realm audit hash-chain lock **both** serialize writes
-> independently of storage hardware. The scaling shape (exponent +0.197, nearly flat) is
-> hardware-independent and robust.
+> **T4 host caveat.** The 158 ops/s/core figure (re-measured post-Layer-B, HEA-1907) is a 5.1×
+> improvement over the C7 baseline (31 ops/s/core). The gain comes from the SkipMap replacing the
+> CoW BTreeMap (HEA-1897), which eliminated O(N)-per-write cloning between fsyncs. The `/scratch`
+> fsync latency (~6.3 ms/op on this machine) and per-realm audit hash-chain lock still serialise
+> every write; the scaling shape remains nearly flat (exponent ≈ +0.033). On production NVMe with
+> appropriate `SyncMode`, throughput will be materially higher, but this is still a MISS at 316×
+> below the 50 k/core target. Closing that gap requires WAL batching or async-durability modes.
 
 > **T2 note.** A 95/5 mixed workload was never constructed as a harness. C7 measured each operation
 > independently. NOT-MEASURED; derivable from C7's per-operation numbers if a mix model is assumed,
@@ -223,7 +224,7 @@ All engine-level. HTTP delta NOT-MEASURABLE on this host — see §0 scope note.
 | # | Metric | Target | Measured | Host | Verdict | Source |
 |---|---|---|---|---|---|---|
 | K1 | Users per node (total managed) | 100M+ | — | — | `NOT-MEASURED` | C8 all rungs swap-voided; this host holds ~600k users |
-| K2 | Active sessions per node | 10M+ | — | — | `NOT-MEASURABLE` | ROPC (`grant_type=password`) removed by HEA-1862; seed binary cannot create sessions; no alternative seeding path |
+| K2 | Active sessions per node | 10M+ | **~813 B/session** resident (VmRSS delta, N=4,000) → 10M sessions ≈ 8.1 GB incremental | `dev-ryzen-7840hs` | `NOT-MEASURED` (absolute capacity ceiling not validated; measurement gives per-session cost only) | HEA-1907 `docs/perf/HEA-1907-C0-SESSION-MEMORY.md` |
 | K3 | Role assignments per node | 100M+ | — | — | `NOT-MEASURABLE` | RBAC seeder does not exist; seed binary creates no per-user role assignments |
 | K4 | Memory footprint (idle, 1M hot users) | < 500 MB | pre: **≈ 22.5 GiB** (24,141 B/user × 1M + 37.6 MB) → post: **≈ 9.76 GiB** (9,960 B/user × 1M + 39.7 MB, HEA-1904) | `dev-ryzen-7840hs` | **MISS (20×, was 46×)** | HEA-1904 `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md` |
 | K5 | Memory footprint (idle, 10M hot users) | < 8 GB | pre: **≈ 225 GiB** → post: **≈ 99.6 GiB** (9,960 B/user × 10M, HEA-1904) | `dev-ryzen-7840hs` | **MISS (12×, was 29×)** | HEA-1904 extrapolated from 9,960 B/user slope |
@@ -386,7 +387,7 @@ Method: OLS regression on 4-point sweep {200, 1k, 4k, 12k} users, generator-free
 | **bytes-resident-per-user (memtable, pre-compaction)** | **24,141 B/user** (EP: 24,627) | **9,960 B/user** (EP: 10,133) | OLS slope R²=0.9974 (pre) / 0.9320 (post) | `dev-ryzen-7840hs` |
 | **Fixed RSS overhead (intercept)** | **37.6 MB** | **39.7 MB** | OLS intercept | `dev-ryzen-7840hs` |
 | bytes-resident-per-hot-user (analytical, post-compaction hot tier) | **~673 B/user** | **~673 B/user** (unchanged — structural) | Struct accounting; 2 hot-tier entries | — |
-| bytes-resident-per-session | — | — | **NOT-MEASURABLE** — ROPC removed (HEA-1862) | — |
+| bytes-resident-per-session | — | **~813 B/session** (VmRSS delta, N=4,000) | Paired-process VmRSS delta; ±4 KB page noise → range 600–1,100 B/session; HEA-1907 `docs/perf/HEA-1907-C0-SESSION-MEMORY.md` | `dev-ryzen-7840hs` |
 | **bytes-on-disk-per-user** | **4,573 B/user** (EP: 4,508) | **2,840 B/user** (EP: 2,805) | OLS slope R²=0.9975 (pre) / 0.9991 (post) | `dev-ryzen-7840hs` |
 
 **Agreement check: still FAILED** (narrowed). Post-fix slope (9,960 B) vs. analytical hot-tier (673 B) → 14.8× gap (was 35.9×).
@@ -492,6 +493,7 @@ All children done. HEA-1877 (duplicate C9) cancelled in favour of HEA-1879.
 |---|---|---|---|---|
 | C0 | HEA-1868 | Real per-user / per-session memory cost | **done** | K4–K7 MISS; 24 KB/user memtable; session NOT-MEASURABLE |
 | C0-R | HEA-1904 | C0 re-run after Layers B+A (`c82d8eb8`) | **done** | 9,960 B/user RSS (−59%); 2,840 B/user disk (−38%); 0.34 ms/user write (−96%); K4–K7 MISS (improved 46×→20×, 2.1×→1.4×) |
+| C0-S | HEA-1907 | Session seeding path + per-session memory | **done** | ~813 B/session (N=4,000 VmRSS delta); T4 re-run: 158 ops/s/core (+5.1× vs C7 baseline) |
 | C1 | HEA-1869 | Hot-tier observability | **done** | `hearth_storage_get_total{outcome}` live; purity confirmed by C5 |
 | C2 | HEA-1870 | SST-count growth vs corpus size | **done** | E4 MISS default (exponent 1.0); remediation split to HEA-1881/HEA-1885 |
 | C3 | HEA-1871 | Separate load generator from server | **done** | Cliff is server-owned (Argon2id queue stall); `taskset -c` isolation committed |

@@ -1,39 +1,31 @@
-//! Seed-step orchestration (HEA-1789).
+//! Seed-step orchestration (HEA-1789, updated HEA-1907).
 //!
-//! Boots (well, *attaches* to) a running dev Hearth, then drives the admin/OAuth
+//! Boots (well, *attaches* to) a running dev Hearth, then drives the admin
 //! REST surface to build the deterministic corpus described by [`SeedParams`]
 //! and persists a [`SeedHandle`].
 //!
-//! ## Server-capability constraints (discovered against the current server)
-//!
-//! Two assumptions in the original plan (HEA-1787 §5) do not hold against the
-//! live REST surface, so the achievable seed is narrower than the plan text:
+//! ## Server-capability constraints
 //!
 //! * **`POST /admin/realms` is disabled** (returns `405`; realms are declared
 //!   in `hearth.yaml`). The boot-local path therefore seeds only the single
 //!   dev realm that `POST /admin/bootstrap` creates. `--realms > 1` is clamped
 //!   with a warning; true multi-realm corpora require realms pre-declared in
 //!   `hearth.yaml` plus a per-realm admin token (the `--target-host` path).
-//! * **`POST /admin/users` cannot set a password.** Admin-created users have no
-//!   credential, so they cannot drive the ROPC (`/token` password grant)
-//!   journey. Live tokens are therefore minted for the well-known dev-realm
-//!   admin (`admin@dev.local` / `HearthDev123!`), which yields multiple live
-//!   sessions for one subject. Multi-*subject* live tokens require users
-//!   pre-seeded with passwords in `hearth.yaml` (reconcile seed users) — the
-//!   large-corpus `--target-host` path. The user *records* created here still
-//!   populate a realistic `lookup_user` / session-count corpus.
-//!
-//! These gaps are tracked for a server-side decision (see the HEA-1789 thread).
+//! * **ROPC (`grant_type=password`) was removed** (HEA-1862). Sessions are now
+//!   seeded via the dev-only `POST /dev/seed-session` endpoint (HEA-1907),
+//!   which writes a real session record directly to storage for each seeded user.
+//!   This is sufficient for the C0 per-session memory sweep and T4 throughput
+//!   re-measurement; `--sessions-frac > 0` now works.
 
 use crate::client::{SeedClient, SeedError};
-use crate::handle::{SeedHandle, SeededRealm, SeededToken, SeededUser};
+use crate::handle::{SeedHandle, SeededRealm, SeededSession, SeededUser};
 use crate::params::SeedParams;
 
 /// Well-known dev-realm admin created by `POST /admin/bootstrap` in `--dev`
-/// mode. These are fixed dev constants baked into the server (not secrets); we
-/// ROPC as this user to mint live tokens because admin-created users have no
-/// password. The load journeys (`crate::scenarios`) reuse them to drive the
-/// issuance and revoke→re-validate flows against the same dev subject.
+/// mode. These are fixed dev constants baked into the server (not secrets).
+/// The load journeys (`crate::scenarios`) use them to drive the interactive
+/// login / issuance flows against the admin subject. Not used for session
+/// seeding (which now goes through `POST /dev/seed-session`, HEA-1907).
 pub(crate) const DEV_ADMIN_EMAIL: &str = "admin@dev.local";
 pub(crate) const DEV_ADMIN_PASSWORD: &str = "HearthDev123!";
 
@@ -49,7 +41,6 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
     if params.allow_remote_target {
         println!(
             "  WARNING: --allow-remote-target set — seeding a NON-loopback host. \
-             This mints live tokens against it and writes them to the seed handle. \
              Only do this to an isolated lab instance you control."
         );
     }
@@ -104,17 +95,16 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
     let out = std::path::Path::new(&params.seed_out);
     handle.write_to(out)?;
     println!(
-        "  wrote seed handle: {} ({} users, {} live tokens, {} revoked)",
+        "  wrote seed handle: {} ({} users, {} sessions)",
         params.seed_out,
         handle.realms.iter().map(|r| r.users.len()).sum::<usize>(),
-        handle.total_tokens(),
-        handle.total_revoked(),
+        handle.total_sessions(),
     );
 
     Ok(handle)
 }
 
-/// Seeds one realm: users, a password client, live tokens, and revocations.
+/// Seeds one realm: users and raw sessions.
 async fn seed_realm(
     client: &SeedClient,
     params: &SeedParams,
@@ -130,40 +120,28 @@ async fn seed_realm(
     }
     println!("    created {} users", users.len());
 
-    // 2. Password-grant client for the ROPC + revoke journeys.
-    let client_id = client
-        .register_password_client("hearth-loadtest-seed")
-        .await?;
-
-    // 3. Mint live tokens for the dev admin (see module docs for why the
-    //    subject is the admin, not each seeded user).
+    // 2. Create raw session records for a fraction of the seeded users via the
+    //    dev-only endpoint (HEA-1907). ROPC was removed by HEA-1862; this path
+    //    bypasses OAuth and writes session records directly to storage so that
+    //    `--sessions-frac > 0` produces a real per-session memory measurement.
     let want_sessions = params.sessions_per_realm() as usize;
-    let want_revoked = params.revoked_per_realm() as usize;
-    let mut tokens = Vec::with_capacity(want_sessions);
-    for i in 0..want_sessions {
-        let access_token = client
-            .password_grant(&client_id, DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD)
-            .await?;
-        let revoked = i < want_revoked;
-        if revoked {
-            client.revoke(&client_id, &access_token).await?;
-        }
-        tokens.push(SeededToken {
-            user_email: DEV_ADMIN_EMAIL.to_string(),
-            access_token,
-            revoked,
+    let mut sessions = Vec::with_capacity(want_sessions);
+    for user in users.iter().take(want_sessions) {
+        let session_id = client.create_dev_session(&user.id).await?;
+        sessions.push(SeededSession {
+            user_id: user.id.clone(),
+            session_id,
         });
     }
-    println!(
-        "    minted {} live tokens ({} pre-revoked)",
-        tokens.len(),
-        want_revoked
-    );
+    if !sessions.is_empty() {
+        println!("    created {} sessions", sessions.len());
+    }
 
     Ok(SeededRealm {
         realm_id: client.realm_id().to_string(),
-        client_id,
+        client_id: String::new(), // ROPC client no longer registered (HEA-1862/HEA-1907)
         users,
-        tokens,
+        tokens: Vec::new(), // ROPC tokens no longer minted (HEA-1862/HEA-1907)
+        sessions,
     })
 }
