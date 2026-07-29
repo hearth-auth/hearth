@@ -11,7 +11,7 @@ use ring::rand::SecureRandom as _;
 
 use crate::codec;
 use crate::core::{AuditEventId, Clock, RealmId, Timestamp};
-use crate::storage::StorageEngine;
+use crate::storage::{StorageDurabilityHandle, StorageEngine, StorageError};
 
 use super::error::AuditError;
 use super::keys;
@@ -459,7 +459,41 @@ impl EmbeddedAuditEngine {
 
 impl AuditEngine for EmbeddedAuditEngine {
     fn append(&self, request: &CreateAuditEvent) -> Result<AuditEvent, AuditError> {
-        // ── Phase 1: hash-chain RMW + WAL enqueue (under chain lock) ─────────
+        // Delegate to `with_pending_append`, passing a closure that enqueues only
+        // the audit KV pairs (no merged caller data). This preserves the original
+        // one-audit-record semantics while sharing the chain-lock + RMW logic.
+        let storage = Arc::clone(&self.storage);
+        let realm_id = request.realm_id.clone();
+        let pending = self.with_pending_append(
+            request,
+            Box::new(move |audit_kvs| storage.enqueue_batch(&realm_id, audit_kvs)),
+        )?;
+
+        // ── Phase 2: fsync wait (OUTSIDE the chain lock) ─────────────────────
+        //
+        // `with_pending_append` already released the chain lock. Concurrent
+        // appenders can now enqueue their events and pipeline into the same
+        // group-commit batch (HEA-1948).
+        let durable_result = self.storage.await_batch_durable(pending.handle);
+        if durable_result.is_err() {
+            (pending.on_failure)();
+        } else {
+            (pending.on_success)();
+        }
+        durable_result?;
+
+        Ok(pending.event)
+    }
+
+    fn with_pending_append(
+        &self,
+        request: &CreateAuditEvent,
+        enqueue_fn: Box<
+            dyn FnOnce(&[(Vec<u8>, Vec<u8>)]) -> Result<StorageDurabilityHandle, StorageError>
+                + '_,
+        >,
+    ) -> Result<super::AuditPendingWrite, AuditError> {
+        // ── Phase 1: hash-chain RMW + caller enqueue (under chain lock) ──────
         //
         // The chain lock serves two purposes:
         //
@@ -476,108 +510,103 @@ impl AuditEngine for EmbeddedAuditEngine {
         // The lock does NOT need to cover the WAL fsync wait. Releasing it
         // before `await_batch_durable` allows concurrent appenders to enqueue
         // within the first writer's fsync window, enabling group-commit
-        // coalescing (HEA-1948).
+        // coalescing (HEA-1948, HEA-1954).
 
         let chain_lock = self.realm_chain_lock(&request.realm_id);
-        let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
+        let chain_lock_for_rollback = Arc::clone(&chain_lock);
 
-        let hmac_key = self.get_realm_hmac_key(&request.realm_id)?;
+        let (event, durable_handle) = {
+            let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
 
-        // The signed head is the source of truth for the previous hash and the
-        // monotonic sequence. Prefer the cache; otherwise load (and MAC-verify)
-        // the persisted head so tampering with it fails the append fast.
-        let head = match cached.as_ref() {
-            Some(h) => h.clone(),
-            None => self.load_or_init_head(&request.realm_id, &hmac_key)?,
-        };
-        let prev_hash = head.last_hash.clone();
-        let seq = head.seq + 1;
+            let hmac_key = self.get_realm_hmac_key(&request.realm_id)?;
 
-        let event_id = AuditEventId::generate();
-        let timestamp = self.clock.now();
+            // The signed head is the source of truth for the previous hash and
+            // the monotonic sequence. Prefer the cache; otherwise load (and
+            // MAC-verify) the persisted head so tampering fails fast.
+            let head = match cached.as_ref() {
+                Some(h) => h.clone(),
+                None => self.load_or_init_head(&request.realm_id, &hmac_key)?,
+            };
+            let prev_hash = head.last_hash.clone();
+            let seq = head.seq + 1;
 
-        let mut event = AuditEvent {
-            id: event_id,
-            realm_id: request.realm_id.clone(),
-            actor: request.actor.clone(),
-            action: request.action.clone(),
-            resource_type: request.resource_type.clone(),
-            resource_id: request.resource_id.clone(),
-            timestamp,
-            metadata: request.metadata.clone(),
-            integrity_hash: String::new(),
-        };
+            let event_id = AuditEventId::generate();
+            let timestamp = self.clock.now();
 
-        event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
+            let mut event = AuditEvent {
+                id: event_id,
+                realm_id: request.realm_id.clone(),
+                actor: request.actor.clone(),
+                action: request.action.clone(),
+                resource_type: request.resource_type.clone(),
+                resource_id: request.resource_id.clone(),
+                timestamp,
+                metadata: request.metadata.clone(),
+                integrity_hash: String::new(),
+            };
 
-        let value = encode_event(&event)?;
+            event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
 
-        let primary_key = keys::encode_event_key(timestamp, seq, &event.id);
-        let actor_key = keys::encode_actor_index(&request.actor, timestamp, &event.id);
-        let action_key = keys::encode_action_index(request.action.as_str(), timestamp, &event.id);
+            let value = encode_event(&event)?;
 
-        let new_head = Self::signed_head(
-            &hmac_key,
-            head.anchor.clone(),
-            event.integrity_hash.clone(),
-            seq,
-            head.count + 1,
-        );
-        let head_value = Self::head_bytes(&new_head)?;
+            let primary_key = keys::encode_event_key(timestamp, seq, &event.id);
+            let actor_key = keys::encode_actor_index(&request.actor, timestamp, &event.id);
+            let action_key =
+                keys::encode_action_index(request.action.as_str(), timestamp, &event.id);
 
-        // Optimistically advance the cache NOW, while holding the lock, so the
-        // next appender can chain off `new_head.last_hash` immediately after
-        // acquiring the lock — without waiting for our fsync to complete.
-        //
-        // If the durability wait fails below, we invalidate the cache so the
-        // next append re-reads the persisted head (which will not include this
-        // event since the WAL write failed).
-        *cached = Some(new_head);
+            let new_head = Self::signed_head(
+                &hmac_key,
+                head.anchor.clone(),
+                event.integrity_hash.clone(),
+                seq,
+                head.count + 1,
+            );
+            let head_value = Self::head_bytes(&new_head)?;
 
-        // Enqueue the WAL batch UNDER the chain lock to guarantee that the WAL
-        // record order matches the logical chain order. The enqueue does NOT
-        // block for the fsync; it only pushes the entry to the group-commit
-        // queue and returns a handle.
-        let durable_handle = match self.storage.enqueue_batch(
-            &request.realm_id,
-            &[
+            // Optimistically advance the cache NOW, while holding the lock, so
+            // the next appender can chain off `new_head.last_hash` immediately
+            // after acquiring the lock — without waiting for our fsync to complete.
+            *cached = Some(new_head);
+
+            // Call the caller's enqueue closure UNDER the chain lock so the WAL
+            // record order matches the logical chain order. The closure typically
+            // combines the audit KV pairs with its own KV pairs and calls
+            // `storage.enqueue_batch(...)`.
+            let audit_kvs = [
                 (primary_key.clone(), value),
                 (actor_key, primary_key.clone()),
                 (action_key, primary_key),
                 (keys::chain_head_key(), head_value),
-            ],
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                // Enqueue failed (e.g. WAL fenced). Rollback the optimistic
-                // cache update so the next append does not chain off a head
-                // that was never persisted.
-                *cached = None;
-                return Err(AuditError::from(e));
-            }
+            ];
+
+            let durable_handle = match enqueue_fn(&audit_kvs) {
+                Ok(h) => h,
+                Err(e) => {
+                    // Enqueue failed (e.g. WAL fenced). Rollback the optimistic
+                    // cache update so the next append does not chain off a head
+                    // that was never persisted.
+                    *cached = None;
+                    return Err(AuditError::from(e));
+                }
+            };
+
+            // `cached` (the chain lock guard) drops here, releasing the lock.
+            (event, durable_handle)
         };
 
-        // ── Phase 2: fsync wait (OUTSIDE the chain lock) ─────────────────────
-        //
-        // Drop the chain lock before blocking. Concurrent appenders can now
-        // acquire it, enqueue their events, and pipeline into the same
-        // group-commit batch as this write — reducing `fsyncs_per_write` from
-        // ~1.0 to ~1/N under N-way concurrent load (HEA-1948).
-        drop(cached);
+        // Build the rollback closure (captures the lock Arc so it can re-acquire
+        // on failure without holding the lock across the fsync wait).
+        let on_failure: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let mut c = chain_lock_for_rollback.lock().expect("realm chain lock poisoned");
+            *c = None;
+        });
 
-        let durable_result = self.storage.await_batch_durable(durable_handle);
-
-        if durable_result.is_err() {
-            // The WAL fsync failed. Invalidate the cache so the next append
-            // reloads from the last successfully persisted head rather than
-            // chaining off a head that may not be on disk.
-            let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
-            *cached = None;
-        }
-
-        durable_result?;
-
-        Ok(event)
+        Ok(super::AuditPendingWrite {
+            event,
+            handle: durable_handle,
+            on_failure,
+            on_success: Box::new(|| {}),
+        })
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {

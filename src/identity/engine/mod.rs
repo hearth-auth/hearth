@@ -6293,12 +6293,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             absolute_timeout_secs,
         );
 
-        // Persist the session record and its user→session index entry as one
-        // atomic WAL record. Two separate `put` calls cost two fsyncs on the
-        // production path and leave a crash window that can strand the index
-        // entry (HEA-1945).
+        // ── Merged write: session + index + audit event → 1 WAL record (HEA-1954) ──
+        //
+        // Build the session and index KV pairs, then pass them alongside the
+        // audit KV pairs via `with_pending_append`'s closure so that all writes
+        // land in a single `enqueue_batch` call — one fsync, one WAL record.
+        //
+        // Failure model:
+        //  • MergedAppendNotSupported → non-embedded audit engine; fall back to
+        //    the two-record path (session write + separate audit append).
+        //  • Other Err → audit setup failed before enqueue; session not written.
+        //    SessionCreated is LogOnly so we write the session alone and attempt
+        //    a standalone audit append.
+        //  • Ok + await failure → both session and audit failed together; return
+        //    storage error.
+        let session_bytes = Self::serialize_session(&session)?;
+        let id_key = keys::encode_session_id(session.id());
         let user_session_key = keys::encode_user_session(user_id, &session_id);
-        self.persist_session_with(realm_id, &session, vec![(user_session_key, Vec::new())])?;
+        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (id_key, session_bytes),
+            (user_session_key, Vec::new()),
+        ];
 
         let session_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
@@ -6307,13 +6322,75 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 "ua": context.user_agent_raw,
             })),
         };
-        self.record_audit(
-            realm_id,
-            Some(&session_audit_ctx),
-            AuditAction::SessionCreated,
-            "session",
-            &session_id.as_uuid().to_string(),
-        )?;
+        let audit_request = CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: Actor::User(user_id.clone()).label(),
+            action: AuditAction::SessionCreated,
+            resource_type: "session".to_string(),
+            resource_id: session_id.as_uuid().to_string(),
+            metadata: session_audit_ctx.metadata.clone(),
+        };
+
+        let storage_for_enqueue = Arc::clone(&self.storage);
+        let realm_id_for_enqueue = realm_id.clone();
+        let merged = self.audit.with_pending_append(
+            &audit_request,
+            Box::new(move |audit_kvs| {
+                // Combine session KV pairs with audit KV pairs in a single batch.
+                let mut combined = session_kvs;
+                combined.extend_from_slice(audit_kvs);
+                storage_for_enqueue.enqueue_batch(&realm_id_for_enqueue, &combined)
+            }),
+        );
+
+        match merged {
+            Ok(pending) => {
+                let dur = self.storage.await_batch_durable(pending.handle);
+                if dur.is_err() {
+                    (pending.on_failure)();
+                } else {
+                    (pending.on_success)();
+                    if session.is_valid(self.clock.now()) {
+                        self.session_cache_insert(realm_id, &session);
+                    } else {
+                        self.session_cache_evict(realm_id, session.id());
+                    }
+                }
+                dur.map_err(Self::storage_err)?;
+            }
+            Err(crate::audit::AuditError::MergedAppendNotSupported) => {
+                // Non-embedded audit engine: two-record fallback (HEA-1945 behaviour).
+                let user_session_key = keys::encode_user_session(user_id, &session_id);
+                self.persist_session_with(
+                    realm_id,
+                    &session,
+                    vec![(user_session_key, Vec::new())],
+                )?;
+                self.record_audit(
+                    realm_id,
+                    Some(&session_audit_ctx),
+                    AuditAction::SessionCreated,
+                    "session",
+                    &session_id.as_uuid().to_string(),
+                )?;
+            }
+            Err(e) => {
+                // Audit setup failed before the enqueue; session not yet written.
+                // SessionCreated is LogOnly: write session without merged audit.
+                tracing::warn!(
+                    error = %e,
+                    "audit pre-enqueue failed for SessionCreated (LogOnly); \
+                     falling back to session-only write"
+                );
+                let user_session_key = keys::encode_user_session(user_id, &session_id);
+                self.persist_session_with(
+                    realm_id,
+                    &session,
+                    vec![(user_session_key, Vec::new())],
+                )?;
+                let _ = self.audit.append(&audit_request);
+            }
+        }
 
         Ok(session)
     }

@@ -28,6 +28,25 @@ pub use types::{
 };
 
 use crate::core::{RealmId, Timestamp};
+use crate::storage::{StorageDurabilityHandle, StorageError};
+
+/// Outcome of a successful [`AuditEngine::with_pending_append`] call.
+///
+/// The caller must:
+/// 1. Call [`crate::storage::StorageEngine::await_batch_durable`] on `handle`.
+/// 2. On success: call `on_success()` (e.g. to broadcast the event to webhook listeners).
+/// 3. On failure: call `on_failure()` to invalidate the audit chain cache so the next
+///    [`AuditEngine::append`] re-reads the last-good head from storage.
+pub struct AuditPendingWrite {
+    /// The computed audit event (for use in responses or further processing).
+    pub event: AuditEvent,
+    /// Durability handle for the combined (caller + audit) WAL batch.
+    pub handle: StorageDurabilityHandle,
+    /// Invalidates the audit chain cache. Call this if `await_batch_durable` fails.
+    pub on_failure: Box<dyn FnOnce() + Send>,
+    /// Post-durability hook. Call this after a successful `await_batch_durable`.
+    pub on_success: Box<dyn FnOnce() + Send>,
+}
 
 /// Trait defining the audit engine interface.
 ///
@@ -91,4 +110,36 @@ pub trait AuditEngine: Send + Sync {
     /// Returns the number of primary events actually deleted (may be less than
     /// `n` if the realm has fewer events).
     fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, AuditError>;
+
+    /// Merged-write variant: builds the audit KV pairs under the chain lock and
+    /// delegates the WAL enqueue to the caller's closure, so the caller can merge
+    /// the audit event into its own `put_batch` — one fsync for caller data + audit
+    /// event (W 2 → 1, HEA-1954).
+    ///
+    /// The chain lock is held while `enqueue_fn` executes, guaranteeing that
+    /// audit-chain ordering matches WAL ordering. The closure receives the computed
+    /// audit KV pairs (primary event record + two index entries + chain-head update);
+    /// it should combine them with its own KV pairs and call
+    /// `storage.enqueue_batch(...)`, returning the resulting handle.
+    ///
+    /// The caller must call [`StorageEngine::await_batch_durable`] on
+    /// `AuditPendingWrite::handle`, then call `on_success` (durability confirmed)
+    /// or `on_failure` (durability failed).
+    ///
+    /// Implementations that do not support the merged path return
+    /// `Err(AuditError::MergedAppendNotSupported)`. The caller must then fall back
+    /// to a separate storage write followed by [`append`][AuditEngine::append].
+    ///
+    /// [`StorageEngine::await_batch_durable`]: crate::storage::StorageEngine::await_batch_durable
+    fn with_pending_append(
+        &self,
+        request: &CreateAuditEvent,
+        enqueue_fn: Box<
+            dyn FnOnce(&[(Vec<u8>, Vec<u8>)]) -> Result<StorageDurabilityHandle, StorageError>
+                + '_,
+        >,
+    ) -> Result<AuditPendingWrite, AuditError> {
+        let _ = (request, enqueue_fn);
+        Err(AuditError::MergedAppendNotSupported)
+    }
 }

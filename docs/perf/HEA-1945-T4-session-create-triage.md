@@ -1,8 +1,9 @@
 # HEA-1945 · T4 — `session_create` fsync-bound: CTO triage
 
 **Status:** `W` 3→2 landed (`abf179ba`); HEA-1948 chain-lock split landed (`daf65d9c`) and
-**re-measured — 323 → 15,841 ops/s at T=256 (49×)**. T4 remains **MISS at 3.2×** (was 316×);
-two quantified levers remain, children opened. Units-restatement escalated to the board.
+**re-measured — 323 → 15,841 ops/s at T=256 (49×)**. `W` 2→1 landed (`HEA-1954`, pending SHA);
+T4 remains **MISS at 3.2×** (pre-HEA-1954); HEA-1955 (coalescing efficiency) open.
+Units-restatement escalated to the board.
 **Parent:** HEA-1940 (PERFORMANCE_REPORT v2) · **Ancestor:** HEA-1867
 **Source data:** `docs/perf/artifacts/c7-saturation-v2-raw.json` (HEA-1875 C7-v2, HEAD `981516f1`)
 
@@ -213,9 +214,11 @@ below target and the honest label is MISS.
 What changed is the *character* of the gap. It is no longer architectural — nothing is
 serialized behind a lock any more. It is now two ordinary, quantified inefficiencies:
 
-1. **`W` is still 2.** The session write and its audit event are two separate WAL records.
-   Merging them into one halves the fsync budget per op — a straight ~2× on ceiling and,
-   at fixed efficiency, on measured throughput.
+1. ~~**`W` is still 2.**~~ **`W` is now 1 — HEA-1954 landed.** `SessionCreated` audit event merged
+   into the session `put_batch` via `AuditEngine::with_pending_append`. One WAL record, one fsync
+   per `create_session`. Pinned by `tests/session_create_write_amplification.rs` (steady-state
+   count = 1, crash-atomicity proven). Predicted ~2× on ceiling and, at fixed efficiency, on
+   measured throughput; re-measurement pending.
 2. **Coalescing efficiency decays with concurrency**: 92% (T=1) → 43% (T=64) → **23%**
    (T=256), while p99 climbs 6.0 → 23.0 ms. The engine is leaving three quarters of the
    device fsync budget on the floor at the top of the ladder. The batch window / wakeup
@@ -248,3 +251,43 @@ Option B (`SyncMode::Async`) remains rejected as a default and is now also unnec
 the target is reachable *with* durability intact once HEA-1948 lands. Relaxed durability
 would only ever be a non-default, opted-in mode with a documented RPO, and there is no
 longer a performance argument for it.
+
+## HEA-1954: W 2 → 1 — `SessionCreated` merged into session `put_batch`
+
+**Mechanism.** The `AuditEngine` trait gained a `with_pending_append` method that performs the
+hash-chain RMW *and* WAL enqueue under the chain lock but delegates the `enqueue_batch` call to
+a closure supplied by the caller. The caller (`create_session`) combines its session KV pairs
+with the audit KV pairs and passes them to the storage engine as a single batch. One call to
+`storage.enqueue_batch`, one group-commit slot, one fsync.
+
+**Why the chain lock placement is safe.** The lock must cover the enqueue (not just the RMW),
+because releasing it before enqueue would allow event N+1 to reach the WAL queue ahead of
+event N, which would break chain recovery. The lock must *not* cover the fsync wait — that
+would re-introduce the one-audit-append-in-flight ceiling that HEA-1948 removed. The split
+(`enqueue_fn` under lock, `await_batch_durable` after lock drops) preserves both invariants.
+
+**Atomicity.** Before HEA-1954 there was a crash window between the session write and the
+audit write: a `kill -9` between the two records would strand a session without a
+`SessionCreated` event. After HEA-1954 the two are one WAL record. A CRC failure on the merged
+record discards *both*, eliminating the window. Proven by
+`create_session_torn_wal_record_leaves_neither_session_nor_audit_event`: corrupt the last WAL
+record's CRC, reopen storage, assert exactly 1 session (warm-up) and 1 `SessionCreated` event.
+
+**Fallback.** `with_pending_append` has a default trait impl that returns
+`AuditError::MergedAppendNotSupported`. Any non-embedded audit engine (mocks, test doubles, or
+future alternative implementations) automatically falls back to the HEA-1945 two-record path
+without any code changes at the call site. `NotifyingAuditEngine` (webhook decorator) overrides
+`with_pending_append` to delegate to its inner engine and wrap `on_success` with the webhook
+broadcast, preserving delivery guarantees.
+
+**Predicted effect.** `W` 2 → 1 halves the fsync budget per op. At fixed coalescing efficiency
+and the device's measured 528.7 fsyncs/s:
+
+| T | pre-1954 ceiling | post-1954 ceiling | gain |
+|--:|----------------:|------------------:|-----:|
+|   1 | 264 ops/s | **529 ops/s** | 2× |
+|  64 | 16,928 ops/s | **33,856 ops/s** | 2× |
+| 128 | 33,856 ops/s | **67,713 ops/s** | 2× |
+
+Re-measurement against this commit will replace the predictions above. The remaining open
+child is **HEA-1955** (coalescing efficiency decay: 92% → 23% across the concurrency ladder).
