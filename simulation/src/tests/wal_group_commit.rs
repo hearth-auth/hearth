@@ -513,3 +513,61 @@ fn concurrent_crash_mid_batch_leaves_valid_prefix() {
         &missing[..missing.len().min(5)],
     );
 }
+
+/// A panic inside `pre_rotate` must not strand the in-flight batch.
+///
+/// Regression for HEA-1924: `LeaderGuard::drop` previously only drained
+/// `gs.pending`, which is empty by the time the leader calls `commit_batch`.
+/// A panic inside `commit_batch` (e.g. the memtable-flush closure passed as
+/// `pre_rotate`) therefore left every writer in the already-drained batch
+/// blocked on its condvar forever.  The fix moves the drained batch into
+/// `guard.in_flight` so `Drop` can signal those writers on the panic path.
+#[test]
+fn leader_panic_in_pre_rotate_does_not_strand_in_flight_batch() {
+    const N: usize = 3;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("panic.wal");
+
+    let mut wal = open_wal(
+        &wal_path,
+        WalConfig {
+            // max_size=1 forces every commit_batch to call pre_rotate.
+            max_size: 1,
+            sync_mode: SyncMode::EveryWrite,
+        },
+    );
+    // commit_barrier ensures all N writers have pushed their slots before the
+    // leader drains the queue, making batch membership deterministic.
+    wal.commit_barrier = Some(Arc::new(std::sync::Barrier::new(N)));
+    let wal = Arc::new(wal);
+
+    let (tx, rx) = std::sync::mpsc::channel::<usize>();
+    for t in 0..N {
+        let wal = Arc::clone(&wal);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = wal
+                    .append_with_pre_rotate(&make_entry(format!("p-{t}").as_bytes(), b"v"), || {
+                        panic!("simulated memtable-flush panic inside pre_rotate")
+                    });
+            }));
+            let _ = tx.send(t);
+        });
+    }
+    drop(tx);
+
+    let mut finished = 0;
+    while finished < N {
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(_) => finished += 1,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        finished, N,
+        "all {N} writers must return after a leader panic; only {finished} did — \
+         in-flight batch members are stranded on their condvars"
+    );
+}

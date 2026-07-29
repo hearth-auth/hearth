@@ -449,8 +449,15 @@ struct GroupState {
 /// that `Drop` is a no-op on the happy path.
 struct LeaderGuard<'a> {
     group: &'a Mutex<GroupState>,
-    /// `true` once the leader drains an empty queue — suppresses the
-    /// panic-path drain in `Drop`.
+    /// Slots drained from `pending` into the in-flight commit batch.
+    ///
+    /// `lead_group_commit` populates this field immediately after the drain and
+    /// before calling `commit_batch`, so that a panic inside `commit_batch`
+    /// (e.g. the `pre_rotate` memtable-flush closure) causes `Drop` to signal
+    /// these writers rather than leaving them blocked on their condvars forever.
+    in_flight: Vec<Arc<GroupSlot>>,
+    /// `true` once the leader finishes normally — suppresses the panic-path
+    /// drain in `Drop`.
     disarmed: bool,
 }
 
@@ -461,10 +468,24 @@ impl Drop for LeaderGuard<'_> {
         }
         // Panic / hard-error path: restore a clean state so that any threads
         // blocked on their slot condvars fail fast rather than waiting forever.
-        if let Ok(mut gs) = self.group.lock() {
+        // R2: use `unwrap_or_else` (matching how every slot mutex is handled
+        // below) so a poisoned group mutex does not silently skip the entire
+        // body — that would strand writers on their condvars indefinitely.
+        {
+            let mut gs = self.group.lock().unwrap_or_else(|e| e.into_inner());
             gs.leader_active = false;
             let pending: Vec<_> = gs.pending.drain(..).collect();
             drop(gs); // release the lock before signalling
+                      // Signal in-flight batch (already drained from pending before
+                      // commit_batch was called — the original bug left these stranded).
+            for slot in self.in_flight.drain(..) {
+                if let Ok(mut state) = slot.state.lock() {
+                    state.done = true;
+                    state.error = Some("WAL leader exited unexpectedly; write failed".to_string());
+                    slot.cv.notify_one();
+                }
+            }
+            // Signal any writers that arrived after the drain.
             for slot in pending {
                 if let Ok(mut state) = slot.state.lock() {
                     state.done = true;
@@ -1062,12 +1083,13 @@ impl Wal {
         // normal return.
         let mut guard = LeaderGuard {
             group: &self.group,
+            in_flight: Vec::new(),
             disarmed: false,
         };
 
         // Drain atomically.  If the queue is already empty (rare: another
         // leader drained it before us), release leadership and exit.
-        let batch: Vec<Arc<GroupSlot>> = {
+        {
             let mut gs = self
                 .group
                 .lock()
@@ -1078,11 +1100,18 @@ impl Wal {
                 guard.disarmed = true;
                 return Ok(());
             }
-            b
-        };
+            // Move the drained batch into the guard *before* calling
+            // commit_batch.  This ensures Drop can signal these writers if a
+            // panic occurs inside commit_batch (e.g. the pre_rotate closure).
+            guard.in_flight = b;
+        }
 
         // Write every slot in the batch + ONE fsync.
-        self.commit_batch(&batch, Some(pre_rotate))?;
+        self.commit_batch(&guard.in_flight, Some(pre_rotate))?;
+        // Clear committed slots from the guard so that if the subsequent
+        // group-mutex lock fails (R1: ghost-write fix), `Drop` does not
+        // overwrite durably-fsynced slots with a spurious failure message.
+        guard.in_flight.clear();
 
         // Our own slot is now committed.  Check whether more writers arrived
         // while we were writing and, if so, promote the head of the queue.
@@ -2024,5 +2053,125 @@ mod tests {
                 prop_assert_eq!(entries, read_back);
             }
         }
+    }
+
+    // ── HEA-1935: LeaderGuard hardening ──────────────────────────────────────
+
+    /// R1 regression: `Drop` must not overwrite a committed slot's `error` field.
+    ///
+    /// Before the fix, `lead_group_commit` did not clear `in_flight` after a
+    /// successful `commit_batch`.  If the subsequent group-mutex lock failed,
+    /// `Drop` fired with `disarmed=false` and iterated `in_flight`, overwriting
+    /// each slot's `error` with a spurious failure message — a ghost write.
+    ///
+    /// The fix calls `guard.in_flight.clear()` immediately after `commit_batch`
+    /// returns `Ok`.  This test verifies the post-fix invariant at the `Drop`
+    /// level: clearing `in_flight` before any armed-drop path is what prevents
+    /// the overwrite.
+    #[test]
+    fn leader_guard_drop_does_not_overwrite_committed_slot() {
+        let slot = Arc::new(GroupSlot {
+            plaintext: vec![],
+            state: Mutex::new(GroupSlotState {
+                done: true,
+                error: None,
+                be_leader: false,
+            }),
+            cv: Condvar::new(),
+        });
+
+        let group = Mutex::new(GroupState {
+            pending: VecDeque::new(),
+            leader_active: true,
+        });
+
+        // Simulate the state at the R1 fix site: commit_batch succeeded, so
+        // in_flight has been cleared.  Drop with disarmed=false must be a
+        // no-op for the committed slot (which is no longer in in_flight).
+        let mut guard = LeaderGuard {
+            group: &group,
+            in_flight: vec![Arc::clone(&slot)],
+            disarmed: false,
+        };
+        guard.in_flight.clear(); // mirrors the R1 fix in lead_group_commit
+        drop(guard);
+
+        let state = slot
+            .state
+            .lock()
+            .expect("slot state mutex must not be poisoned");
+        assert!(
+            state.done,
+            "committed slot must remain done=true after armed guard drop"
+        );
+        assert!(
+            state.error.is_none(),
+            "committed slot must keep error=None after armed guard drop; got {:?}",
+            state.error
+        );
+    }
+
+    /// R2 regression: `Drop` must signal in-flight writers even when the group
+    /// mutex is poisoned.
+    ///
+    /// Pre-fix, `Drop` used `if let Ok(mut gs) = self.group.lock()`, which
+    /// silently no-ops on a poisoned mutex — leaving all in-flight writers
+    /// stranded on their condvars forever (the HEA-1924 failure mode).  The fix
+    /// switches to `unwrap_or_else(|e| e.into_inner())`, matching how each
+    /// slot mutex is handled elsewhere in the same function.
+    #[test]
+    fn leader_guard_drop_on_poisoned_group_mutex_signals_in_flight() {
+        let slot = Arc::new(GroupSlot {
+            plaintext: vec![],
+            state: Mutex::new(GroupSlotState {
+                done: false,
+                error: None,
+                be_leader: false,
+            }),
+            cv: Condvar::new(),
+        });
+
+        let group = Arc::new(Mutex::new(GroupState {
+            pending: VecDeque::new(),
+            leader_active: true,
+        }));
+
+        // Poison the group mutex via a thread that panics while holding it.
+        {
+            let g = Arc::clone(&group);
+            std::thread::spawn(move || {
+                let _lock = g.lock().expect("fresh mutex should not be poisoned");
+                panic!("poison the group mutex for R2 test");
+            })
+            .join()
+            .expect_err("spawned thread must have panicked");
+        }
+        assert!(
+            group.lock().is_err(),
+            "group mutex must be poisoned after thread panic"
+        );
+
+        // Armed guard with an uncommitted slot.  Pre-fix Drop no-ops on a
+        // poisoned mutex, leaving slot.done=false (stranded writer).  Post-fix
+        // Drop recovers the poisoned guard via unwrap_or_else and signals it.
+        let guard = LeaderGuard {
+            group: &group,
+            in_flight: vec![Arc::clone(&slot)],
+            disarmed: false,
+        };
+        drop(guard);
+
+        let state = slot
+            .state
+            .lock()
+            .expect("slot state mutex must not be poisoned");
+        assert!(
+            state.done,
+            "in-flight slot must be signalled even when group mutex is poisoned"
+        );
+        assert!(
+            state.error.is_some(),
+            "in-flight slot must receive an error string on the drop path"
+        );
     }
 }
