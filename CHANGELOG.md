@@ -22,6 +22,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
 ### Changed
+- **WAL commit path: `fdatasync` + batched writes + O(1) commit signalling (HEA-1959)** —
+  the group-commit leader now issues one `write_all` per batch instead of three syscalls
+  per entry, expands the AES-256-GCM key schedule once per batch instead of once per
+  entry, reserves the batch's record numbers in a single rotation-mutex critical section,
+  and releases waiting writers via one `notify_all` on a shared commit watermark instead
+  of one `notify_one` per writer. The per-batch sync also switched from `sync_all`
+  (`fsync`) to `sync_data` (`fdatasync`): a WAL segment is created and parent-dir-fsynced
+  at open and thereafter append-only, so the only metadata replay needs is the file
+  length, which `fdatasync` persists — this halved the measured per-batch sync (3.87 ms →
+  1.90 ms, matching the device microbenchmark) and made it flat in batch size rather than
+  growing to 7.38 ms at batch = 131. **The durability guarantee is unchanged**: the WAL is
+  still synced before any write is acknowledged and still survives `kill -9`;
+  `SyncMode::Async` remains rejected as a default. Operators should see substantially
+  higher `session_create` throughput at high concurrency with no configuration change.
+  (HEA-1959)
 - **Count-triggered SST compaction is now ON by default; merge I/O runs off the flush
   lock (HEA-1931)** — `storage.compaction.max_sst_count` now defaults to `12` (was `0` =
   off), so partial size-tiered compaction is triggered automatically once live SST files
