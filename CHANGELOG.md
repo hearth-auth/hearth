@@ -132,6 +132,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   called after WAL/SST create and after each finalizing rename (HEA-1855).
 
 ### Changed
+- **Memtable flush no longer stalls writers or doubles memory (HEA-1908)** — a
+  memtable flush previously materialised a full `Vec` copy of every key and value
+  and held the write lock across the whole SST encrypt+`fsync`, so at the 64 MiB
+  default flush threshold a ~64 MiB duplicate of the memtable was live for the
+  flush and *every* writer blocked for the full SST write. The SST writer now
+  streams directly off the lock-free skiplist (no duplicate copy), and the flush
+  holds the write lock only for an O(1) swap — the SST write runs outside it, so
+  concurrent writes are no longer blocked for the flush's `fsync`. The
+  never-drop-a-racing-write guarantee is unchanged. (HEA-1908)
 - **User, session, and credential records now use binary (postcard) encoding on
   disk (HEA-1898)** — the per-record value stored in the WAL/SST was previously
   JSON, carrying field-name overhead on every write and read. Records are now
