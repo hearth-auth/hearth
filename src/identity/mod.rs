@@ -139,6 +139,7 @@ pub use webauthn::{
     WebAuthnAuthResult, WebAuthnCredentialInfo,
 };
 
+use crate::audit::AuditContext;
 use crate::core::{
     AgentId, ClientId, InvitationId, OrganizationId, PageRequest, PagedResult, RealmId,
     ResourceServerId, SessionId, Timestamp, UserId, WebhookId,
@@ -383,6 +384,44 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<usize, IdentityError>;
+
+    /// Creates a new user and emits exactly one `UserCreated` audit event
+    /// attributed to the provided actor.
+    ///
+    /// Equivalent to [`Self::create_user`] but the caller supplies the audit
+    /// context (actor identity + optional metadata such as `{"via":"admin_api"}`).
+    /// Use this from protocol handlers that have an authenticated principal —
+    /// it replaces the pattern of calling `create_user` then appending a second
+    /// `UserCreated` event manually.
+    fn create_user_attributed(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateUserRequest,
+        audit_ctx: &AuditContext,
+    ) -> Result<User, IdentityError>;
+
+    /// Updates an existing user and emits exactly one `UserUpdated` audit event
+    /// attributed to the provided actor.
+    ///
+    /// See [`Self::create_user_attributed`] for the design rationale.
+    fn update_user_attributed(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        request: &UpdateUserRequest,
+        audit_ctx: &AuditContext,
+    ) -> Result<User, IdentityError>;
+
+    /// Deletes a user and emits exactly one `UserDeleted` audit event
+    /// attributed to the provided actor.
+    ///
+    /// See [`Self::create_user_attributed`] for the design rationale.
+    fn delete_user_attributed(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        audit_ctx: &AuditContext,
+    ) -> Result<(), IdentityError>;
 
     /// Sets (or replaces) the password for a user.
     ///
