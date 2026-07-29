@@ -429,7 +429,7 @@ impl EmbeddedStorageEngine {
                 // Atomic freeze: snapshot + SST write/register + reset all happen
                 // under the memtable write lock, so a write racing with this
                 // rotation flush is never silently dropped.
-                cb_memtable.flush_under_lock(|entries| {
+                cb_memtable.flush_streaming(|map| {
                     let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
                     let system_kek = cb_key_registry
@@ -440,9 +440,14 @@ impl EmbeddedStorageEngine {
                     let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
                     let dek = encryption::generate_dek()?;
                     let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+                    // Collect entries: crossbeam_skiplist Entry::key/value lifetimes
+                    // are tied to &self (the entry guard), not the map, so we must
+                    // materialise the pairs before passing to write_sst_with_fs.
+                    let entries: Vec<_> = map.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
                     SstWriter::write_sst_with_fs(
                         &sst_path,
-                        entries,
+                        entries.iter().map(|(k, v)| (k, v)),
+                        entries.len(),
                         &*cb_fs,
                         sst_num,
                         &dek,
@@ -506,13 +511,15 @@ impl EmbeddedStorageEngine {
 
     /// Flushes the memtable to a new SST file and clears it.
     ///
-    /// The snapshot, SST write/registration, and the reset of the in-memory map
-    /// all happen inside a single hold of the memtable's write lock (see
-    /// [`Memtable::flush_under_lock`]). This makes the flush atomic against
-    /// concurrent writers — a `put`/`put_batch` racing with a flush is either
-    /// captured in the SST or kept in the fresh map, never silently dropped. The
-    /// outer `flush_lock` still serializes flushes against each other so SST
-    /// numbering can't collide.
+    /// The in-memory swap (park the full map, install a fresh empty one) happens
+    /// under the memtable's write lock; the SST write/registration then streams
+    /// off the parked map *outside* that lock (see
+    /// [`Memtable::flush_streaming`]). A `put`/`put_batch` racing with a flush is
+    /// either captured in the SST or kept in the fresh map, never silently
+    /// dropped, and stays readable from the parked map meanwhile — but writers
+    /// are no longer blocked for the SST encrypt+`fsync`. The outer `flush_lock`
+    /// still serializes flushes against each other so SST numbering can't collide
+    /// and only one map is ever parked for flushing at a time.
     fn trigger_flush(&self) -> Result<(), StorageError> {
         let Ok(_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
@@ -520,7 +527,7 @@ impl EmbeddedStorageEngine {
             )));
         };
 
-        self.active_memtable.flush_under_lock(|entries| {
+        self.active_memtable.flush_streaming(|map| {
             // Generate sequential SST filename
             let sst_num = self
                 .sst_counter
@@ -538,9 +545,13 @@ impl EmbeddedStorageEngine {
             let dek = encryption::generate_dek()?;
             let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
 
+            // Collect entries: crossbeam_skiplist Entry::key/value lifetimes are
+            // tied to &self (the entry guard), not the map, so materialise first.
+            let entries: Vec<_> = map.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
             SstWriter::write_sst_with_fs(
                 &sst_path,
-                entries,
+                entries.iter().map(|(k, v)| (k, v)),
+                entries.len(),
                 &*self.fs,
                 sst_num,
                 &dek,
@@ -1594,7 +1605,7 @@ mod tests {
     // concurrently while those flushes run. EVERY acknowledged write must still
     // be readable. The old flush (lock-free `iter_all()` then a later `clear()`)
     // could drop a write that landed between the snapshot and the clear; the
-    // atomic `flush_under_lock` makes that impossible.
+    // streaming `flush_streaming` (park-then-stream) makes that impossible.
     #[test]
     fn concurrent_writes_during_flush_are_not_lost() {
         let dir = tempfile::tempdir().expect("tempdir");

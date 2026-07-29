@@ -24,15 +24,29 @@
 //! epoch-reclaimed) and **do not yield**. Writes still hold a `Mutex` — not to
 //! protect the map (the skiplist is internally concurrent) but to keep the
 //! read-old-size / insert / size-delta sequence atomic against other writers and
-//! to give [`flush_under_lock`](Memtable::flush_under_lock) a barrier so its
+//! to give [`flush_streaming`](Memtable::flush_streaming) a barrier so its
 //! atomic swap-to-empty can never drop a concurrent put. Writes are off the hot
 //! path, so serializing them is acceptable; the defect was the O(N) clone under
 //! that lock, not the lock itself.
+//!
+//! ## Streaming flush without a full copy (HEA-1908)
+//!
+//! [`flush_streaming`](Memtable::flush_streaming) holds the write lock only for
+//! an O(1) swap: it parks the full map in an immutable `flushing` slot and
+//! installs a fresh empty active map, then streams the parked map to the SST
+//! **outside** the lock. Two wins over the previous "materialise a `Vec` copy and
+//! `write_sst` under the lock" shape: no ~64 MiB duplicate of the memtable is
+//! live during a flush, and concurrent writers are not blocked for the SST
+//! encrypt+`fsync`. Reads consult the active map first, then the `flushing` slot,
+//! so a key mid-flush is always visible from one or the other; on SST-write
+//! failure the parked map is folded back into the active map so no acknowledged
+//! write is dropped (the HEA-1897 no-loss property).
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_skiplist::SkipMap;
 
 use crate::core::RealmId;
@@ -104,13 +118,20 @@ impl Default for MemtableConfig {
 /// writers (see the module docs) — reads never take it.
 pub(crate) struct Memtable {
     /// The sorted key-value data. The skiplist itself is concurrently mutable;
-    /// the `ArcSwap` wrapper exists only so [`flush_under_lock`](Self::flush_under_lock)
+    /// the `ArcSwap` wrapper exists only so [`flush_streaming`](Self::flush_streaming)
     /// and [`clear`](Self::clear) can atomically swap in an empty map.
     data: ArcSwap<SkipMap<CompositeKey, MemtableValue>>,
+    /// The immutable map currently being streamed to an SST, if a flush is in
+    /// progress (`None` otherwise). Parked here by [`flush_streaming`](Self::flush_streaming)
+    /// so its keys stay readable while the SST is written *outside* the write
+    /// lock. Only ever one at a time — the engine's flush lock serializes flushes.
+    flushing: ArcSwapOption<SkipMap<CompositeKey, MemtableValue>>,
     /// Serializes write operations (put, delete, clear) so size accounting and
     /// the flush swap-to-empty are race-free. Reads never acquire it.
     write_lock: Mutex<()>,
-    /// Approximate total byte size of all entries.
+    /// Approximate total byte size of all entries in the **active** map. The
+    /// map parked in `flushing` is excluded — it is on its way to an SST and
+    /// must not keep re-triggering the size-based flush.
     approximate_size: AtomicUsize,
     /// Configuration (flush threshold).
     config: MemtableConfig,
@@ -121,6 +142,7 @@ impl Memtable {
     pub(crate) fn new(config: MemtableConfig) -> Self {
         Self {
             data: ArcSwap::from_pointee(SkipMap::new()),
+            flushing: ArcSwapOption::empty(),
             write_lock: Mutex::new(()),
             approximate_size: AtomicUsize::new(0),
             config,
@@ -208,51 +230,93 @@ impl Memtable {
         Ok(())
     }
 
-    /// Atomically flushes the memtable to an SST and resets it to empty.
+    /// Flushes the memtable to an SST by **streaming** its backing map, holding
+    /// the write lock only for an O(1) swap rather than across the SST write.
     ///
-    /// Holds the write lock for the **entire** operation — snapshot, the
-    /// caller-supplied `write_sst` (which writes and registers the SST), and the
-    /// reset to empty all happen in one critical section. This is what makes a
-    /// flush safe against concurrent writers: a `put`/`put_batch` racing with a
-    /// flush either completes *before* the snapshot (and is captured in the SST)
-    /// or *after* the reset (and stays in the fresh map) — it can never land in a
-    /// window where it is wiped without being persisted (the bug in the old
-    /// lock-free `iter_all()` + later `clear()` pair).
+    /// Two phases:
     ///
-    /// Reads are unaffected: they never take the write lock, and `write_sst`
-    /// registers the new SST *before* this method empties the in-memory map, so
-    /// a just-flushed key is always readable from one tier or the other.
+    /// 1. **Under the write lock (O(1)):** park the current map in the `flushing`
+    ///    slot, install a fresh empty active map, and reset the active size to
+    ///    zero. Writers block only for this swap — microseconds — not for the SST
+    ///    encrypt+`fsync` below.
+    /// 2. **Outside the write lock:** run the caller-supplied `write_sst`, which
+    ///    receives the parked map and streams it to the SST (and registers it).
+    ///    Concurrent `put`/`put_batch` proceed against the fresh active map.
     ///
-    /// `write_sst` receives the entries sorted by composite key. If it returns
-    /// `Err`, the memtable is left untouched (no data is dropped). Returns
-    /// `Ok(false)` when the memtable was empty (nothing flushed).
-    pub(crate) fn flush_under_lock<F>(&self, write_sst: F) -> Result<bool, StorageError>
+    /// **No-loss property (HEA-1897, pinned by
+    /// `concurrent_writes_during_flush_are_not_lost`):** a write racing the flush
+    /// either lands in the parked map before the swap — captured in the SST — or
+    /// in the fresh active map after it. It is never dropped. And because reads
+    /// consult the active map *then* the `flushing` slot, a key is always visible
+    /// from one or the other while the SST is being written.
+    ///
+    /// If `write_sst` returns `Err`, the parked map is folded back into the
+    /// active map (active wins on any key re-written during the flush window), so
+    /// no acknowledged write is dropped on a failed flush. Returns `Ok(false)`
+    /// when the memtable was empty (nothing flushed).
+    ///
+    /// `write_sst` receives the map sorted by composite key: iterate it with
+    /// `.iter()` (entries are yielded in key order) and size it with `.len()`.
+    pub(crate) fn flush_streaming<F>(&self, write_sst: F) -> Result<bool, StorageError>
     where
-        F: FnOnce(&[(CompositeKey, MemtableValue)]) -> Result<(), StorageError>,
+        F: FnOnce(&SkipMap<CompositeKey, MemtableValue>) -> Result<(), StorageError>,
     {
+        // Phase 1 — O(1) swap under the write lock.
+        let parked = {
+            let _guard = self
+                .write_lock
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
+
+            let current = self.data.load_full();
+            if current.is_empty() {
+                return Ok(false);
+            }
+
+            // Install a fresh empty active map and park the old one so reads keep
+            // seeing its keys while the SST is written.
+            self.data.store(Arc::new(SkipMap::new()));
+            self.approximate_size.store(0, Ordering::Relaxed);
+            self.flushing.store(Some(Arc::clone(&current)));
+            current
+        };
+
+        // Phase 2 — stream the parked map to the SST *without* the write lock.
+        match write_sst(&parked) {
+            Ok(()) => {
+                // Persisted + registered by the closure; drop the parked copy.
+                self.flushing.store(None);
+                Ok(true)
+            }
+            Err(e) => {
+                // Persist failed: fold the parked entries back so nothing is
+                // dropped, then clear the flushing slot.
+                self.reabsorb(&parked)?;
+                self.flushing.store(None);
+                Err(e)
+            }
+        }
+    }
+
+    /// Folds a parked (failed-flush) map back into the active map under the write
+    /// lock, inserting only keys the active map does not already hold — a write
+    /// that raced the flush is newer and must win — and restoring their size.
+    fn reabsorb(&self, parked: &SkipMap<CompositeKey, MemtableValue>) -> Result<(), StorageError> {
         let _guard = self
             .write_lock
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
-        let current = self.data.load();
-        if current.is_empty() {
-            return Ok(false);
+        let active = self.data.load();
+        let mut restored: usize = 0;
+        for entry in parked.iter() {
+            if active.get(entry.key()).is_none() {
+                restored += Self::entry_size(entry.key().key(), entry.value());
+                active.insert(entry.key().clone(), entry.value().clone());
+            }
         }
-
-        let entries: Vec<(CompositeKey, MemtableValue)> = current
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-
-        // Persist + register the SST while still holding the write lock. On
-        // failure we return without resetting, so nothing is lost.
-        write_sst(&entries)?;
-
-        self.data.store(Arc::new(SkipMap::new()));
-        self.approximate_size.store(0, Ordering::Relaxed);
-
-        Ok(true)
+        self.approximate_size.fetch_add(restored, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Inserts a tombstone for the given key, marking it as deleted.
@@ -288,30 +352,35 @@ impl Memtable {
     /// Retrieves a value by realm and key. Returns `None` for both
     /// absent keys and tombstones. This is a lock-free read.
     pub(crate) fn get(&self, realm_id: &RealmId, key: &[u8]) -> Option<Vec<u8>> {
-        let composite = CompositeKey {
-            realm_id: realm_id.clone(),
-            key: key.to_vec(),
-        };
-        let snapshot = self.data.load();
-        let entry = snapshot.get(&composite);
-        match entry.as_ref().map(crossbeam_skiplist::map::Entry::value) {
-            Some(MemtableValue::Data(v)) => Some(v.clone()),
+        match self.get_entry(realm_id, key) {
+            Some(MemtableValue::Data(v)) => Some(v),
             Some(MemtableValue::Tombstone) | None => None,
         }
     }
 
-    /// Looks up the raw memtable entry for a key via the backing `BTreeMap`.
+    /// Looks up the raw memtable entry for a key via the backing `SkipMap`.
     ///
     /// Returns `Some(Data)`, `Some(Tombstone)`, or `None` (absent). Unlike
     /// [`get`](Self::get) this distinguishes a tombstone from an absent key, so
     /// the storage engine can stop searching deeper layers on a delete without
     /// materialising the realm's entries. O(log n) lock-free read.
+    ///
+    /// Consults the active map first, then the map parked for flushing (if a
+    /// flush is in progress): the active map holds any newer write for the key,
+    /// and the parked map holds a value still on its way to an SST (HEA-1908).
     pub(crate) fn get_entry(&self, realm_id: &RealmId, key: &[u8]) -> Option<MemtableValue> {
         let composite = CompositeKey {
             realm_id: realm_id.clone(),
             key: key.to_vec(),
         };
-        self.data.load().get(&composite).map(|e| e.value().clone())
+        if let Some(v) = self.data.load().get(&composite).map(|e| e.value().clone()) {
+            return Some(v);
+        }
+        // Fall back to the map being streamed to an SST, if any.
+        self.flushing
+            .load()
+            .as_ref()
+            .and_then(|parked| parked.get(&composite).map(|e| e.value().clone()))
     }
 
     /// Returns whether the memtable has reached its flush threshold.
@@ -329,13 +398,35 @@ impl Memtable {
     /// Includes tombstones. The returned keys are the raw data keys
     /// (without the realm prefix).
     pub(crate) fn iter_realm(&self, realm_id: &RealmId) -> Vec<(Vec<u8>, MemtableValue)> {
-        let snapshot = self.data.load();
+        let active = self.data.load();
+        let flushing = self.flushing.load();
+        let Some(parked) = flushing.as_ref() else {
+            // Common case — no flush in progress: scan the active map directly,
+            // no merge allocation.
+            return Self::scan_realm(&active, realm_id);
+        };
+        // A flush is in progress: merge the parked (older) map under the active
+        // (newer) one, active winning on any re-written key.
+        let mut merged: BTreeMap<Vec<u8>, MemtableValue> = BTreeMap::new();
+        for (k, v) in Self::scan_realm(parked, realm_id) {
+            merged.insert(k, v);
+        }
+        for (k, v) in Self::scan_realm(&active, realm_id) {
+            merged.insert(k, v);
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Realm-scoped full scan of a single backing map, sorted by key.
+    fn scan_realm(
+        map: &SkipMap<CompositeKey, MemtableValue>,
+        realm_id: &RealmId,
+    ) -> Vec<(Vec<u8>, MemtableValue)> {
         let start = CompositeKey {
             realm_id: realm_id.clone(),
             key: vec![],
         };
-        snapshot
-            .range(start..)
+        map.range(start..)
             .take_while(|entry| entry.key().realm_id == *realm_id)
             .map(|entry| (entry.key().key.clone(), entry.value().clone()))
             .collect()
@@ -352,13 +443,36 @@ impl Memtable {
         start: &[u8],
         end: &[u8],
     ) -> Vec<(Vec<u8>, bool)> {
-        let snapshot = self.data.load();
+        let active = self.data.load();
+        let flushing = self.flushing.load();
+        let Some(parked) = flushing.as_ref() else {
+            // Common case — no flush in progress: scan the active map directly.
+            return Self::scan_realm_range_keys(&active, realm_id, start, end);
+        };
+        // A flush is in progress: merge parked (older) under active (newer).
+        let mut merged: BTreeMap<Vec<u8>, bool> = BTreeMap::new();
+        for (k, alive) in Self::scan_realm_range_keys(parked, realm_id, start, end) {
+            merged.insert(k, alive);
+        }
+        for (k, alive) in Self::scan_realm_range_keys(&active, realm_id, start, end) {
+            merged.insert(k, alive);
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Realm-scoped key-only range scan of a single backing map — `(key, alive)`
+    /// pairs for `start <= key < end`, sorted by key.
+    fn scan_realm_range_keys(
+        map: &SkipMap<CompositeKey, MemtableValue>,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, bool)> {
         let start_key = CompositeKey {
             realm_id: realm_id.clone(),
             key: start.to_vec(),
         };
-        snapshot
-            .range(start_key..)
+        map.range(start_key..)
             .take_while(|entry| {
                 entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end
             })
@@ -375,11 +489,23 @@ impl Memtable {
     ///
     /// Used for flushing to SST files. Includes tombstones.
     pub(crate) fn iter_all(&self) -> Vec<(CompositeKey, MemtableValue)> {
-        let snapshot = self.data.load();
-        snapshot
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect()
+        let active = self.data.load();
+        let flushing = self.flushing.load();
+        let Some(parked) = flushing.as_ref() else {
+            return active
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect();
+        };
+        // Merge parked (older) under active (newer), active winning per key.
+        let mut merged: BTreeMap<CompositeKey, MemtableValue> = BTreeMap::new();
+        for entry in parked.iter() {
+            merged.insert(entry.key().clone(), entry.value().clone());
+        }
+        for entry in active.iter() {
+            merged.insert(entry.key().clone(), entry.value().clone());
+        }
+        merged.into_iter().collect()
     }
 
     /// Applies a WAL entry to the memtable (for crash recovery replay).
@@ -435,6 +561,7 @@ impl Memtable {
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
 
         self.data.store(Arc::new(SkipMap::new()));
+        self.flushing.store(None);
         self.approximate_size.store(0, Ordering::Relaxed);
 
         Ok(())
@@ -599,12 +726,11 @@ mod tests {
         assert_eq!(mt.approximate_size(), 0);
     }
 
-    // `flush_under_lock` hands the closure the full snapshot, then empties the
-    // memtable only after the closure succeeds. (Concurrency — that a write
-    // racing the flush is never lost — is covered by an integration test, since
-    // a same-thread write inside the closure would deadlock on the write lock.)
+    // `flush_streaming` hands the closure the full parked map, then empties the
+    // active map once the closure succeeds. (Concurrency — that a write racing
+    // the flush is never lost — is covered by an integration test.)
     #[test]
-    fn flush_under_lock_snapshots_then_empties() {
+    fn flush_streaming_snapshots_then_empties() {
         let mt = Memtable::new(MemtableConfig::default());
         let realm = RealmId::generate();
         mt.put(&realm, b"k1", b"v1").expect("put 1");
@@ -612,10 +738,10 @@ mod tests {
 
         let mut captured: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let flushed = mt
-            .flush_under_lock(|entries| {
-                for (k, v) in entries {
-                    if let MemtableValue::Data(bytes) = v {
-                        captured.push((k.key().to_vec(), bytes.clone()));
+            .flush_streaming(|map| {
+                for entry in map.iter() {
+                    if let MemtableValue::Data(bytes) = entry.value() {
+                        captured.push((entry.key().key().to_vec(), bytes.clone()));
                     }
                 }
                 Ok(())
@@ -623,20 +749,20 @@ mod tests {
             .expect("flush");
 
         assert!(flushed, "non-empty memtable must report a flush");
-        assert_eq!(captured.len(), 2, "closure must see the full snapshot");
+        assert_eq!(captured.len(), 2, "closure must see the full parked map");
         assert!(
             mt.iter_all().is_empty(),
-            "memtable must be empty after flush"
+            "memtable must be empty after a successful flush"
         );
         assert_eq!(mt.approximate_size(), 0);
     }
 
     #[test]
-    fn flush_under_lock_empty_is_noop() {
+    fn flush_streaming_empty_is_noop() {
         let mt = Memtable::new(MemtableConfig::default());
         let mut called = false;
         let flushed = mt
-            .flush_under_lock(|_| {
+            .flush_streaming(|_| {
                 called = true;
                 Ok(())
             })
@@ -645,23 +771,138 @@ mod tests {
         assert!(!called, "closure must not run for an empty memtable");
     }
 
+    // A key parked for flushing MUST stay readable while the SST is being
+    // written — reads fall through the active map to the parked map. This is
+    // what closes the read gap the streaming flush would otherwise open between
+    // emptying the active map and registering the SST (HEA-1908).
     #[test]
-    fn flush_under_lock_preserves_data_on_error() {
+    fn flush_streaming_parked_keys_readable_mid_flush() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"parked", b"old").expect("put");
+
+        let flushed = mt
+            .flush_streaming(|map| {
+                // Inside the closure the active map is already empty, but the
+                // parked key must resolve from the flushing slot.
+                assert_eq!(
+                    mt.get(&realm, b"parked"),
+                    Some(b"old".to_vec()),
+                    "parked key must be readable during the flush"
+                );
+                assert!(matches!(
+                    mt.get_entry(&realm, b"parked"),
+                    Some(MemtableValue::Data(_))
+                ));
+                // And a concurrent write to the fresh active map must win over
+                // the parked value when the same key is re-written.
+                mt.put(&realm, b"parked", b"new").expect("racing put");
+                assert_eq!(mt.get(&realm, b"parked"), Some(b"new".to_vec()));
+                // The parked map is untouched (still holds the old value).
+                assert_eq!(map.len(), 1);
+                Ok(())
+            })
+            .expect("flush");
+
+        assert!(flushed);
+        // After the flush the racing write survives and the flushing slot is gone.
+        assert_eq!(mt.get(&realm, b"parked"), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn flush_streaming_preserves_data_on_error() {
         let mt = Memtable::new(MemtableConfig::default());
         let realm = RealmId::generate();
         mt.put(&realm, b"k1", b"v1").expect("put");
+        mt.put(&realm, b"k2", b"v2").expect("put");
         let before = mt.approximate_size();
 
-        let res = mt.flush_under_lock(|_| {
+        let res = mt.flush_streaming(|_| {
             Err(StorageError::Io(std::io::Error::other(
                 "simulated SST failure",
             )))
         });
 
         assert!(res.is_err(), "flush must surface the SST write error");
-        // Critical: a failed flush must NOT drop the data.
+        // Critical: a failed flush must NOT drop the data — it is folded back
+        // into the active map, and the size accounting is restored exactly.
         assert_eq!(mt.get(&realm, b"k1"), Some(b"v1".to_vec()));
+        assert_eq!(mt.get(&realm, b"k2"), Some(b"v2".to_vec()));
         assert_eq!(mt.approximate_size(), before);
+        // The flushing slot must be cleared so a subsequent flush is clean.
+        assert!(mt.flushing.load().is_none());
+    }
+
+    // On a failed flush, a key re-written to the fresh active map during the
+    // flush window MUST win over the parked (older) copy the reabsorb folds
+    // back — reabsorb inserts only keys the active map does not already hold.
+    #[test]
+    fn flush_streaming_error_reabsorb_active_wins() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"shared", b"old").expect("put");
+
+        let res = mt.flush_streaming(|_| {
+            // Racing write of the same key to the fresh active map, then fail.
+            mt.put(&realm, b"shared", b"new").expect("racing put");
+            Err(StorageError::Io(std::io::Error::other("boom")))
+        });
+
+        assert!(res.is_err());
+        // The newer active value must survive the reabsorb, not be clobbered by
+        // the parked "old".
+        assert_eq!(mt.get(&realm, b"shared"), Some(b"new".to_vec()));
+        assert!(mt.flushing.load().is_none());
+    }
+
+    // DoD (HEA-1908): writers MUST NOT be blocked for the full SST write. The
+    // streaming flush holds the write lock only for the O(1) swap, then runs the
+    // SST write outside it — so a concurrent `put` completes promptly even while
+    // a slow "SST write" is in flight.
+    #[test]
+    fn flush_streaming_does_not_block_writers_for_sst_write() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let mt = Arc::new(Memtable::new(MemtableConfig::default()));
+        let realm = RealmId::generate();
+        mt.put(&realm, b"flushme", b"v").expect("put");
+
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let flush_dur = Duration::from_millis(400);
+
+        let mt_flush = Arc::clone(&mt);
+        let handle = std::thread::spawn(move || {
+            mt_flush
+                .flush_streaming(|_map| {
+                    // Signal that we are inside the SST write, then simulate a
+                    // slow encrypt+fsync while NOT holding the write lock.
+                    started_tx.send(()).expect("signal");
+                    std::thread::sleep(flush_dur);
+                    Ok(())
+                })
+                .expect("flush");
+        });
+
+        // Wait until the flush is inside its slow "SST write".
+        started_rx.recv().expect("flush started");
+
+        // A concurrent writer must complete well before the slow flush finishes.
+        let start = Instant::now();
+        mt.put(&realm, b"concurrent", b"w").expect("concurrent put");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < flush_dur / 2,
+            "writer blocked for {elapsed:?} during a {flush_dur:?} flush — the SST \
+             write must not hold the write lock"
+        );
+
+        handle.join().expect("flush thread");
+        // The concurrent write (to the fresh active map) survives the flush. The
+        // parked "flushme" was handed to the no-op closure and not persisted here
+        // — engine-level durability is covered by
+        // `concurrent_writes_during_flush_are_not_lost`.
+        assert_eq!(mt.get(&realm, b"concurrent"), Some(b"w".to_vec()));
     }
 
     // TEST_SCENARIOS.md: "Update existing key overwrites value"

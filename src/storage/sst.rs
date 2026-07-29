@@ -95,7 +95,21 @@ impl BloomFilter {
     /// optimum of 9.6 bits for FPR = 1%, k = 7, for a round number.
     /// An empty entry slice returns an empty (always-passing) filter.
     fn build(entries: &[(CompositeKey, MemtableValue)]) -> Self {
-        let n = entries.len();
+        let mut filter = Self::empty_for(entries.len());
+        for (key, _) in entries {
+            filter.insert(key.realm_id(), key.key());
+        }
+        filter
+    }
+
+    /// Allocates an empty filter sized for `n` entries at ≈ 1% FPR with k = 7,
+    /// ready to have each key `insert`ed. Sizing is decoupled from insertion so
+    /// the SST writer can size the filter from a known entry count and then fill
+    /// it in the same single pass it uses to serialize entries — no fully
+    /// materialised entry slice required (HEA-1908).
+    ///
+    /// `n == 0` returns an empty (always-passing) filter.
+    fn empty_for(n: usize) -> Self {
         if n == 0 {
             return Self {
                 bits: Vec::new(),
@@ -104,14 +118,10 @@ impl BloomFilter {
         }
         let bit_count = n.saturating_mul(10).max(64);
         let byte_count = bit_count.div_ceil(8);
-        let mut filter = Self {
+        Self {
             bits: vec![0u8; byte_count],
             k: 7,
-        };
-        for (key, _) in entries {
-            filter.insert(key.realm_id(), key.key());
         }
-        filter
     }
 
     /// Sets k bit positions for the given `(realm_id, key)` pair.
@@ -199,18 +209,39 @@ impl SstWriter {
         dek: &DataEncryptionKey,
         enc_header: &EncryptionHeader,
     ) -> Result<SstMetadata, StorageError> {
-        Self::write_sst_with_fs(path, entries, &RealFs, sst_number, dek, enc_header)
+        Self::write_sst_with_fs(
+            path,
+            entries.iter().map(|(k, v)| (k, v)),
+            entries.len(),
+            &RealFs,
+            sst_number,
+            dek,
+            enc_header,
+        )
     }
 
-    /// Writes an SST file using a custom filesystem implementation.
-    pub(crate) fn write_sst_with_fs(
+    /// Writes an SST file from an **ordered iterator** of entries using a custom
+    /// filesystem implementation.
+    ///
+    /// `entries` MUST yield `(CompositeKey, MemtableValue)` references in sorted
+    /// `CompositeKey` order, and `entry_count` MUST be its length. Taking an
+    /// iterator rather than a slice lets a memtable flush stream directly off its
+    /// lock-free `SkipMap` without first materialising a full `Vec` copy of every
+    /// key and value (HEA-1908) — the bloom filter and the serialized payload are
+    /// both produced in a **single pass** over the iterator, with the filter sized
+    /// up front from `entry_count`.
+    pub(crate) fn write_sst_with_fs<'a, I>(
         path: &Path,
-        entries: &[(CompositeKey, MemtableValue)],
+        entries: I,
+        entry_count: usize,
         fs: &dyn Fs,
         sst_number: u64,
         dek: &DataEncryptionKey,
         enc_header: &EncryptionHeader,
-    ) -> Result<SstMetadata, StorageError> {
+    ) -> Result<SstMetadata, StorageError>
+    where
+        I: IntoIterator<Item = (&'a CompositeKey, &'a MemtableValue)>,
+    {
         let mut file = fs.create(path)?;
 
         // --- Build Bloom filter and V2 plaintext section ---
@@ -220,8 +251,18 @@ impl SstWriter {
         //   [1B] bloom_k           — only present if bloom_byte_count > 0
         //   [N B] bloom bits       — only present if bloom_byte_count > 0
         //   [entry bytes]          — same serialisation as V1
-        let filter = BloomFilter::build(entries);
-        let entry_payload = Self::serialize_entries(entries);
+        //
+        // Single streaming pass: size the filter from the known count, then fill
+        // the filter bits and the serialized entry payload together while
+        // iterating once. No full slice of the entries is ever materialised.
+        let mut filter = BloomFilter::empty_for(entry_count);
+        let mut entry_payload = Vec::new();
+        let mut written: u32 = 0;
+        for (key, value) in entries {
+            filter.insert(key.realm_id(), key.key());
+            Self::serialize_entry(&mut entry_payload, key, value);
+            written = written.saturating_add(1);
+        }
 
         #[allow(clippy::cast_possible_truncation)]
         let bloom_byte_count = filter.bits.len() as u32;
@@ -241,8 +282,9 @@ impl SstWriter {
         let crc = crc32fast::hash(&plaintext);
 
         // --- Write base header (V2 magic) ---
-        #[allow(clippy::cast_possible_truncation)]
-        let entry_count = entries.len() as u32;
+        // Header count is the actual number of entries streamed, which the caller
+        // guarantees equals `entry_count`.
+        let entry_count = written;
         file.write_all(SST_MAGIC_V2)?;
         file.write_all(&entry_count.to_le_bytes())?;
         file.write_all(&crc.to_le_bytes())?;
@@ -272,15 +314,6 @@ impl SstWriter {
             entry_count,
             file_size,
         })
-    }
-
-    /// Serializes entries into the data section binary format.
-    fn serialize_entries(entries: &[(CompositeKey, MemtableValue)]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        for (key, value) in entries {
-            Self::serialize_entry(&mut buf, key, value);
-        }
-        buf
     }
 
     /// Serializes a single entry into the buffer.
@@ -806,7 +839,8 @@ pub(crate) fn compact_with_fs_opts(
 
     SstWriter::write_sst_with_fs(
         output_path,
-        &live_entries,
+        live_entries.iter().map(|(k, v)| (k, v)),
+        live_entries.len(),
         fs,
         output_sst_number,
         dek,
