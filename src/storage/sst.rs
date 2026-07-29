@@ -56,7 +56,7 @@ use crate::storage::encryption::{
     SST_FOOTER_BLOCK_INDEX,
 };
 use crate::storage::error::StorageError;
-use crate::storage::fs::{FileBacking, Fs, RealFs};
+use crate::storage::fs::{FileBacking, Fs, FsFile, RealFs};
 use crate::storage::memtable::{CompositeKey, MemtableValue};
 
 /// SST format V1 magic bytes — original format, no bloom filter.
@@ -83,6 +83,18 @@ const V3_BLOCK_TARGET_BYTES: usize = 4096;
 /// Fixed v3 trailer written at the very end of the file:
 /// `[8B footer_offset (u64 LE)] [4B footer_ciphertext_len (u32 LE)]`.
 const V3_TRAILER_SIZE: usize = 12;
+
+/// Minimum byte length of a serialized entry: type(1) + realm(16) + key_len(4)
+/// + val_len(4), with an empty key and an empty/tombstone value.
+///
+/// The base header's `entry_count` is *unauthenticated* — it sits outside both
+/// the AEAD and the CRC on every format version — so it MUST NOT size an
+/// allocation directly. Every pre-allocation derived from it is clamped by this
+/// constant against a length that *is* authenticated (a decrypted section's
+/// plaintext length, or the sealed footer's per-block plaintext lengths), which
+/// bounds the reservation to something the real file could actually contain
+/// (HEA-1917).
+const SST_MIN_ENTRY_BYTES: usize = 1 + 16 + 4 + 4;
 
 /// One entry of the v3 footer's block index. Loaded eagerly at open (size is
 /// `O(#blocks)`, not `O(#entries)`); the block payloads stay on disk / mmap.
@@ -495,6 +507,195 @@ impl SstWriter {
             }
         }
     }
+
+    /// Writes a v3 SST from an **ordered, streaming** iterator, flushing each
+    /// sealed block straight to the file instead of buffering the whole output
+    /// in memory (HEA-1922). Peak heap during the write is one block's plaintext
+    /// plus the footer index + Bloom filter — `O(#blocks + entries/8)`, not
+    /// `O(corpus)`. This is what lets compaction merge an arbitrarily large
+    /// corpus past a bounded working set; the eager [`Self::write_sst_with_fs`]
+    /// buffers the entire file and is reserved for the bounded memtable flush.
+    ///
+    /// `entries` MUST yield items in ascending `CompositeKey` order.
+    /// `entry_count_hint` sizes the Bloom filter up front; it MAY exceed the
+    /// true post-merge count (e.g. before duplicate/tombstone elimination) —
+    /// an over-estimate only lowers the filter's false-positive rate. Tombstones
+    /// are dropped when `drop_tombstones` is set. The header's `entry_count` is
+    /// the *actual* number written, matching the eager writer.
+    fn write_sst_streaming_with_fs<I>(
+        path: &Path,
+        entries: I,
+        entry_count_hint: usize,
+        drop_tombstones: bool,
+        fs: &dyn Fs,
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+        enc_header: &EncryptionHeader,
+    ) -> Result<SstMetadata, StorageError>
+    where
+        I: IntoIterator<Item = Result<(CompositeKey, MemtableValue), StorageError>>,
+    {
+        let mut file = fs.create(path)?;
+
+        // Reserve the base header (magic + entry_count + footer_crc) — its final
+        // values are only known once the whole body is written — then emit the
+        // already-known encryption header. Blocks begin at TOTAL_HEADER_SIZE and
+        // are written incrementally; the base header is backfilled via a seek to
+        // offset 0 at the end.
+        file.write_all(&[0u8; BASE_HEADER_SIZE])?;
+        file.write_all(&enc_header.to_bytes())?;
+        let mut file_offset: u64 = TOTAL_HEADER_SIZE as u64;
+
+        let mut filter = BloomFilter::empty_for(entry_count_hint);
+        let mut index: Vec<BlockIndexEntry> = Vec::new();
+        let mut cur_block: Vec<u8> = Vec::new();
+        let mut cur_first_key: Option<CompositeKey> = None;
+        let mut min_key: Option<CompositeKey> = None;
+        let mut max_key: Option<CompositeKey> = None;
+        let mut written: u32 = 0;
+
+        for item in entries {
+            let (key, value) = item?;
+            if drop_tombstones && matches!(value, MemtableValue::Tombstone) {
+                continue;
+            }
+            filter.insert(key.realm_id(), key.key());
+            if cur_first_key.is_none() {
+                cur_first_key = Some(key.clone());
+            }
+            if min_key.is_none() {
+                min_key = Some(key.clone());
+            }
+            max_key = Some(key.clone());
+            Self::serialize_entry(&mut cur_block, &key, &value);
+            written = written.saturating_add(1);
+            if cur_block.len() >= V3_BLOCK_TARGET_BYTES {
+                Self::seal_block_streaming(
+                    &mut *file,
+                    &mut file_offset,
+                    &mut index,
+                    &mut cur_block,
+                    &mut cur_first_key,
+                    sst_number,
+                    dek,
+                )?;
+            }
+        }
+        // Flush the final partial block.
+        Self::seal_block_streaming(
+            &mut *file,
+            &mut file_offset,
+            &mut index,
+            &mut cur_block,
+            &mut cur_first_key,
+            sst_number,
+            dek,
+        )?;
+
+        // --- Build and encrypt the footer index (layout identical to the eager
+        // writer so both produce byte-compatible v3 files) ---
+        let mut footer = Vec::new();
+        #[allow(clippy::cast_possible_truncation)]
+        footer.extend_from_slice(&(index.len() as u32).to_le_bytes());
+        for e in &index {
+            footer.extend_from_slice(&e.file_offset.to_le_bytes());
+            footer.extend_from_slice(&e.ciphertext_len.to_le_bytes());
+            footer.extend_from_slice(&e.plaintext_len.to_le_bytes());
+            write_footer_key(&mut footer, &e.first_key);
+        }
+        match (&min_key, &max_key) {
+            (Some(mn), Some(mx)) => {
+                footer.push(1);
+                write_footer_key(&mut footer, mn);
+                write_footer_key(&mut footer, mx);
+            }
+            _ => footer.push(0),
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let bloom_byte_count = filter.bits.len() as u32;
+        footer.extend_from_slice(&bloom_byte_count.to_le_bytes());
+        if bloom_byte_count > 0 {
+            footer.push(filter.k);
+            footer.extend_from_slice(&filter.bits);
+        }
+
+        let footer_nonce = block_nonce(sst_number, SST_FOOTER_BLOCK_INDEX);
+        let footer_ct = encryption::encrypt_section(&footer, dek, &footer_nonce, &footer_nonce)?;
+        let footer_offset = file_offset;
+        let footer_crc = crc32fast::hash(&footer_ct);
+
+        file.write_all(&footer_ct)?;
+        file_offset = file_offset.saturating_add(footer_ct.len() as u64);
+
+        // Trailer: footer_offset (u64 LE) + footer_ct_len (u32 LE).
+        file.write_all(&footer_offset.to_le_bytes())?;
+        #[allow(clippy::cast_possible_truncation)]
+        let footer_ct_len_le = (footer_ct.len() as u32).to_le_bytes();
+        file.write_all(&footer_ct_len_le)?;
+        file_offset = file_offset.saturating_add(V3_TRAILER_SIZE as u64);
+        let file_size = file_offset;
+
+        // Backfill the base header now that entry_count and footer_crc are known.
+        // The encryption header written at offset BASE_HEADER_SIZE is untouched.
+        file.seek(std::io::SeekFrom::Start(0))?;
+        let mut base_header = [0u8; BASE_HEADER_SIZE];
+        base_header[0..4].copy_from_slice(SST_MAGIC_V3);
+        base_header[4..8].copy_from_slice(&written.to_le_bytes());
+        base_header[8..12].copy_from_slice(&footer_crc.to_le_bytes());
+        file.write_all(&base_header)?;
+
+        file.sync_all()?;
+        // Fsync the parent directory so the freshly created SST's directory entry
+        // is durable (HEA-1855). Compaction additionally fsyncs the dir after the
+        // finalizing rename.
+        if let Some(parent) = path.parent() {
+            fs.sync_dir(parent)?;
+        }
+
+        Ok(SstMetadata {
+            entry_count: written,
+            file_size,
+        })
+    }
+
+    /// Encrypts one accumulated block plaintext, writes its ciphertext straight
+    /// to `file`, and records its index entry — the streaming counterpart of
+    /// [`Self::seal_block`], which buffers into an in-memory `Vec` (HEA-1922).
+    /// Advances `file_offset`, clears `plaintext`, and takes `first_key`. A no-op
+    /// on an empty block.
+    fn seal_block_streaming(
+        file: &mut dyn FsFile,
+        file_offset: &mut u64,
+        index: &mut Vec<BlockIndexEntry>,
+        plaintext: &mut Vec<u8>,
+        first_key: &mut Option<CompositeKey>,
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+    ) -> Result<(), StorageError> {
+        if plaintext.is_empty() {
+            return Ok(());
+        }
+        let first_key = first_key
+            .take()
+            .ok_or_else(|| StorageError::InvalidSstFormat {
+                reason: "v3 writer: non-empty block without a first key".to_string(),
+            })?;
+        #[allow(clippy::cast_possible_truncation)]
+        let block_index = index.len() as u32;
+        let nonce = block_nonce(sst_number, block_index);
+        let ct = encryption::encrypt_section(plaintext, dek, &nonce, &nonce)?;
+        #[allow(clippy::cast_possible_truncation)]
+        index.push(BlockIndexEntry {
+            first_key,
+            file_offset: *file_offset,
+            ciphertext_len: ct.len() as u32,
+            plaintext_len: plaintext.len() as u32,
+        });
+        file.write_all(&ct)?;
+        *file_offset = file_offset.saturating_add(ct.len() as u64);
+        plaintext.clear();
+        Ok(())
+    }
 }
 
 /// Backing representation of an SST reader's entries.
@@ -579,6 +780,37 @@ impl BlockedBody {
         let block = Arc::new(CachedBlock::new(entries, plaintext.len()));
         self.cache.insert(id, Arc::clone(&block));
         Ok(block)
+    }
+
+    /// Decrypts one block **without** consulting or populating the shared block
+    /// cache. Compaction streams every block of every input exactly once, in
+    /// order (HEA-1922); routing those one-shot reads through the bounded LRU
+    /// would evict the query-path working set for no benefit. Slices the backing
+    /// and decrypts in place, returning the decoded entries directly. Surfaces
+    /// AEAD/format errors rather than a wrong or absent value.
+    fn decode_block_uncached(
+        &self,
+        block_index: usize,
+        sst_number: u64,
+    ) -> Result<Vec<(CompositeKey, MemtableValue)>, StorageError> {
+        let entry = self
+            .index
+            .get(block_index)
+            .ok_or_else(|| StorageError::InvalidSstFormat {
+                reason: "v3 block index out of range".to_string(),
+            })?;
+        let start = entry.file_offset as usize;
+        let end = start
+            .checked_add(entry.ciphertext_len as usize)
+            .filter(|end| *end <= self.backing.len())
+            .ok_or_else(|| StorageError::InvalidSstFormat {
+                reason: "v3 block extends past end of file".to_string(),
+            })?;
+        #[allow(clippy::cast_possible_truncation)]
+        let nonce = block_nonce(sst_number, block_index as u32);
+        let plaintext =
+            encryption::decrypt_section(&self.backing[start..end], &self.dek, &nonce, &nonce)?;
+        SstReader::parse_entries(&plaintext, None)
     }
 }
 
@@ -933,7 +1165,19 @@ impl SstReader {
         match &self.body {
             SstBody::Eager(entries) => Ok(entries.clone()),
             SstBody::Blocked(body) => {
-                let mut out = Vec::with_capacity(self.entry_count as usize);
+                // The header `entry_count` is unauthenticated (outside the footer
+                // AEAD and its CRC) and, for v3, never checked against reality, so
+                // it must not size an allocation directly — a tampered or corrupted
+                // value would drive a multi-gigabyte `Vec::with_capacity` and abort
+                // the process on the compaction path (HEA-1917). Clamp it to an
+                // upper bound derived from the authenticated footer: no block can
+                // hold more than `plaintext_len / V3_MIN_ENTRY_BYTES` entries.
+                let cap_bound: usize = body
+                    .index
+                    .iter()
+                    .map(|e| e.plaintext_len as usize / SST_MIN_ENTRY_BYTES)
+                    .fold(0usize, |acc, n| acc.saturating_add(n));
+                let mut out = Vec::with_capacity((self.entry_count as usize).min(cap_bound));
                 for bi in 0..body.index.len() {
                     let block = body.fetch_block(bi, self.sst_number)?;
                     out.extend(block.entries.iter().cloned());
@@ -1149,7 +1393,15 @@ impl SstReader {
         data: &[u8],
         expected_count: Option<u32>,
     ) -> Result<Vec<(CompositeKey, MemtableValue)>, StorageError> {
-        let mut entries = Vec::with_capacity(expected_count.unwrap_or(0) as usize);
+        // `expected_count` originates from the unauthenticated base header, and
+        // the count-mismatch check below only runs *after* the decode loop — so
+        // an oversized reservation here aborts the process (uncatchable) long
+        // before that error can be returned. Clamp against `data.len()`, which
+        // IS authenticated at this point (V1/V2: the AEAD-decrypted section;
+        // V3: an AEAD-decrypted block), so a tampered or bit-rotted count can
+        // only ever under-reserve, never over-reserve (HEA-1917).
+        let cap = (expected_count.unwrap_or(0) as usize).min(data.len() / SST_MIN_ENTRY_BYTES);
+        let mut entries = Vec::with_capacity(cap);
         let mut pos = 0;
 
         while pos < data.len() {
@@ -1248,6 +1500,183 @@ impl SstReader {
     }
 }
 
+/// Streaming cursor over one input SST during compaction.
+///
+/// Holds at most one decoded block (V3) resident at a time, refilling from the
+/// next block on demand, so a k-way merge across `N` inputs needs only
+/// `O(N × block)` heap rather than materialising every entry (HEA-1922). A V1/V2
+/// eager reader already keeps its whole entry vector resident, so the cursor
+/// simply clones through it once.
+struct SstCursor<'a> {
+    reader: &'a SstReader,
+    buf: std::collections::VecDeque<(CompositeKey, MemtableValue)>,
+    next_block: usize,
+    exhausted: bool,
+}
+
+impl<'a> SstCursor<'a> {
+    fn new(reader: &'a SstReader) -> Self {
+        Self {
+            reader,
+            buf: std::collections::VecDeque::new(),
+            next_block: 0,
+            exhausted: false,
+        }
+    }
+
+    /// Ensures `buf` holds at least one entry while the input is not exhausted,
+    /// decoding the next block (V3) or loading the eager vector (V1/V2) as needed.
+    fn fill(&mut self) -> Result<(), StorageError> {
+        while self.buf.is_empty() && !self.exhausted {
+            match &self.reader.body {
+                SstBody::Eager(entries) => {
+                    self.buf.extend(entries.iter().cloned());
+                    self.exhausted = true;
+                }
+                SstBody::Blocked(body) => {
+                    if self.next_block >= body.index.len() {
+                        self.exhausted = true;
+                        break;
+                    }
+                    let block =
+                        body.decode_block_uncached(self.next_block, self.reader.sst_number)?;
+                    self.next_block += 1;
+                    self.buf.extend(block);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the next entry's key without consuming it.
+    fn peek_key(&mut self) -> Result<Option<&CompositeKey>, StorageError> {
+        self.fill()?;
+        Ok(self.buf.front().map(|(k, _)| k))
+    }
+
+    /// Removes and returns the next entry.
+    fn pop(&mut self) -> Result<Option<(CompositeKey, MemtableValue)>, StorageError> {
+        self.fill()?;
+        Ok(self.buf.pop_front())
+    }
+}
+
+/// Heap element: the current head key of input `idx`. `Ord` is inverted so a
+/// `BinaryHeap` (a max-heap) yields the *smallest* key — and, among equal keys,
+/// the *lowest* input index — first.
+struct MergeHead {
+    key: CompositeKey,
+    idx: usize,
+}
+
+impl PartialEq for MergeHead {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.idx == other.idx
+    }
+}
+impl Eq for MergeHead {}
+impl Ord for MergeHead {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.idx.cmp(&self.idx))
+    }
+}
+impl PartialOrd for MergeHead {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// K-way merge over compaction inputs, yielding entries in ascending
+/// `CompositeKey` order with newest-input-wins on duplicate keys (HEA-1922).
+///
+/// Inputs are ordered oldest-to-newest (index 0 oldest). Only one entry per
+/// input lives in the heap at a time, and each input's payload is streamed one
+/// block at a time through its [`SstCursor`], so peak resident state is
+/// `O(#inputs × block)` regardless of corpus size. A decode/AEAD failure on any
+/// input is surfaced as an `Err` item so the caller aborts the compaction.
+struct KMergeIter<'a> {
+    cursors: Vec<SstCursor<'a>>,
+    heap: std::collections::BinaryHeap<MergeHead>,
+    seeded: bool,
+}
+
+impl<'a> KMergeIter<'a> {
+    fn new(inputs: &[&'a SstReader]) -> Self {
+        Self {
+            cursors: inputs.iter().map(|r| SstCursor::new(r)).collect(),
+            heap: std::collections::BinaryHeap::new(),
+            seeded: false,
+        }
+    }
+
+    /// Loads each input's first key into the heap.
+    fn seed(&mut self) -> Result<(), StorageError> {
+        for idx in 0..self.cursors.len() {
+            if let Some(key) = self.cursors[idx].peek_key()? {
+                let key = key.clone();
+                self.heap.push(MergeHead { key, idx });
+            }
+        }
+        self.seeded = true;
+        Ok(())
+    }
+
+    /// Re-seeds the heap with input `idx`'s new head, if any.
+    fn repush(&mut self, idx: usize) -> Result<(), StorageError> {
+        if let Some(key) = self.cursors[idx].peek_key()? {
+            let key = key.clone();
+            self.heap.push(MergeHead { key, idx });
+        }
+        Ok(())
+    }
+
+    /// Produces the next merged entry, or `None` when every input is drained.
+    fn advance(&mut self) -> Result<Option<(CompositeKey, MemtableValue)>, StorageError> {
+        if !self.seeded {
+            self.seed()?;
+        }
+        let Some(MergeHead { key: min_key, idx }) = self.heap.pop() else {
+            return Ok(None);
+        };
+        // Gather every input whose head equals `min_key`. Each input has at most
+        // one head in the heap, and keys within an input are strictly increasing,
+        // so no input appears twice.
+        let mut equal = vec![idx];
+        while self.heap.peek().is_some_and(|top| top.key == min_key) {
+            if let Some(head) = self.heap.pop() {
+                equal.push(head.idx);
+            }
+        }
+        // Highest index = newest input = surviving value; the rest are shadowed
+        // but still advanced.
+        let newest = equal.iter().copied().max().unwrap_or(idx);
+        let mut winner: Option<MemtableValue> = None;
+        for ci in equal {
+            if let Some((_, value)) = self.cursors[ci].pop()? {
+                if ci == newest {
+                    winner = Some(value);
+                }
+            }
+            self.repush(ci)?;
+        }
+        let value = winner.ok_or_else(|| StorageError::InvalidSstFormat {
+            reason: "compaction merge: winning entry vanished".to_string(),
+        })?;
+        Ok(Some((min_key, value)))
+    }
+}
+
+impl Iterator for KMergeIter<'_> {
+    type Item = Result<(CompositeKey, MemtableValue), StorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.advance().transpose()
+    }
+}
+
 /// Compacts multiple SST files into a single output SST.
 ///
 /// Input SSTs are ordered oldest-to-newest. For duplicate keys, the newest
@@ -1311,22 +1740,26 @@ pub(crate) fn compact_with_fs_opts(
     enc_header: &EncryptionHeader,
     drop_tombstones: bool,
 ) -> Result<SstMetadata, StorageError> {
-    let mut merged = std::collections::BTreeMap::new();
-    for sst in input_ssts {
-        for (key, value) in sst.iter_all()? {
-            merged.insert(key, value);
-        }
-    }
+    // Stream a k-way merge of the inputs straight into the block-filling writer:
+    // no `BTreeMap`/`Vec` of the whole corpus is ever materialised, so peak heap
+    // is `O(#inputs × block)` rather than `O(corpus)` — the flat-RAM criterion
+    // the query path already met, now extended to the compaction path (HEA-1922).
+    //
+    // `entry_count_hint` is an upper bound (pre dedup/tombstone drop) that only
+    // sizes the Bloom filter; the header's real count comes from the writer's
+    // single pass. `u32` sums are saturated so a corrupt count can't wrap.
+    let entry_count_hint: usize = input_ssts
+        .iter()
+        .map(|r| r.entry_count as usize)
+        .fold(0usize, |acc, n| acc.saturating_add(n));
 
-    let live_entries: Vec<(CompositeKey, MemtableValue)> = merged
-        .into_iter()
-        .filter(|(_, v)| !(drop_tombstones && matches!(v, MemtableValue::Tombstone)))
-        .collect();
+    let merged = KMergeIter::new(input_ssts);
 
-    SstWriter::write_sst_with_fs(
+    SstWriter::write_sst_streaming_with_fs(
         output_path,
-        live_entries.iter().map(|(k, v)| (k, v)),
-        live_entries.len(),
+        merged,
+        entry_count_hint,
+        drop_tombstones,
         fs,
         output_sst_number,
         dek,
@@ -1495,6 +1928,178 @@ mod tests {
         assert_eq!(all[0].1, MemtableValue::Data(b"v1-new".to_vec()));
         assert_eq!(all[1].0.key(), b"key2");
         assert_eq!(all[1].1, MemtableValue::Data(b"v2".to_vec()));
+    }
+
+    /// Streaming compaction (HEA-1922) must produce identical results to the old
+    /// materialise-everything path across **many blocks** — the merge, dedup, and
+    /// tombstone drop all have to work across V3 block boundaries, not just within
+    /// a single block as the small fixtures above test. Uses a corpus far larger
+    /// than `V3_BLOCK_TARGET_BYTES` so both inputs and the output span dozens of
+    /// blocks, then verifies newest-wins, deletion, ordering, and point lookups.
+    #[test]
+    fn streaming_compaction_merges_correctly_across_many_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        // Zero-padded keys so lexicographic order matches numeric order.
+        let key = |i: usize| CompositeKey::new(realm.clone(), format!("key{i:06}").into_bytes());
+        const N: usize = 2000;
+
+        // Older SST: every key present with an "old" value.
+        let mut old_entries: Vec<(CompositeKey, MemtableValue)> = (0..N)
+            .map(|i| (key(i), MemtableValue::Data(format!("old-{i}").into_bytes())))
+            .collect();
+        old_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let (dek_old, enc_old) = test_encryption_context();
+        let old_path = dir.path().join("old.sst");
+        SstWriter::write_sst(&old_path, &old_entries, 1, &dek_old, &enc_old).expect("write old");
+
+        // Newer SST: multiples of 10 deleted; other evens overwritten; odds absent.
+        let mut new_entries: Vec<(CompositeKey, MemtableValue)> = (0..N)
+            .filter_map(|i| {
+                if i % 10 == 0 {
+                    Some((key(i), MemtableValue::Tombstone))
+                } else if i % 2 == 0 {
+                    Some((key(i), MemtableValue::Data(format!("new-{i}").into_bytes())))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        new_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let (dek_new, enc_new) = test_encryption_context();
+        let new_path = dir.path().join("new.sst");
+        SstWriter::write_sst(&new_path, &new_entries, 2, &dek_new, &enc_new).expect("write new");
+
+        // Sanity: the inputs really do span multiple blocks (else this test would
+        // silently degrade to the single-block case the small fixtures cover).
+        let old_reader = SstReader::open(&old_path, 1, &dek_old).expect("open old");
+        let new_reader = SstReader::open(&new_path, 2, &dek_new).expect("open new");
+        if let SstBody::Blocked(body) = &old_reader.body {
+            assert!(body.index.len() > 1, "corpus must span multiple blocks");
+        } else {
+            panic!("expected a v3 blocked SST");
+        }
+
+        // Full compaction (oldest first) — tombstones dropped.
+        let (dek_out, enc_out) = test_encryption_context();
+        let out_path = dir.path().join("compacted.sst");
+        let meta = compact(
+            &[&old_reader, &new_reader],
+            &out_path,
+            3,
+            &dek_out,
+            &enc_out,
+        )
+        .expect("compact");
+
+        // Expected surviving set: drop multiples of 10, evens→new, odds→old.
+        let expected: Vec<(String, String)> = (0..N)
+            .filter_map(|i| {
+                if i % 10 == 0 {
+                    None
+                } else if i % 2 == 0 {
+                    Some((format!("key{i:06}"), format!("new-{i}")))
+                } else {
+                    Some((format!("key{i:06}"), format!("old-{i}")))
+                }
+            })
+            .collect();
+        assert_eq!(meta.entry_count as usize, expected.len());
+
+        let compacted = SstReader::open(&out_path, 3, &dek_out).expect("open compacted");
+        let all = compacted.iter_all().expect("iter_all");
+        assert_eq!(all.len(), expected.len());
+        for (i, (got, (exp_key, exp_val))) in all.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got.0.key(), exp_key.as_bytes(), "key order mismatch at {i}");
+            assert_eq!(
+                got.1,
+                MemtableValue::Data(exp_val.clone().into_bytes()),
+                "value mismatch at {i}"
+            );
+        }
+        // Ordering must be strictly ascending across the whole (multi-block) file.
+        for w in all.windows(2) {
+            assert!(w[0].0 < w[1].0, "entries not strictly sorted");
+        }
+
+        // Point lookups exercise the footer block index + per-block decrypt.
+        assert!(
+            compacted.get(&realm, b"key000010").expect("get").is_none(),
+            "deleted key must be absent"
+        );
+        assert_eq!(
+            compacted.get(&realm, b"key000002").expect("get"),
+            Some(MemtableValue::Data(b"new-2".to_vec())),
+            "even key overwritten by newer SST"
+        );
+        assert_eq!(
+            compacted.get(&realm, b"key001997").expect("get"),
+            Some(MemtableValue::Data(b"old-1997".to_vec())),
+            "odd key retained from older SST"
+        );
+    }
+
+    /// A **partial** streaming compaction (`drop_tombstones = false`) must retain
+    /// tombstones across block boundaries so a deleted key is not resurrected from
+    /// an older, un-merged SST (HEA-1885, exercised through the HEA-1922 streaming
+    /// writer).
+    #[test]
+    fn streaming_partial_compaction_preserves_tombstones_across_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let key = |i: usize| CompositeKey::new(realm.clone(), format!("key{i:06}").into_bytes());
+        const N: usize = 1500;
+
+        let mut a: Vec<(CompositeKey, MemtableValue)> = (0..N)
+            .map(|i| (key(i), MemtableValue::Data(format!("a-{i}").into_bytes())))
+            .collect();
+        a.sort_by(|x, y| x.0.cmp(&y.0));
+        let (dek_a, enc_a) = test_encryption_context();
+        let a_path = dir.path().join("a.sst");
+        SstWriter::write_sst(&a_path, &a, 5, &dek_a, &enc_a).expect("write a");
+
+        // Newer member deletes every 7th key.
+        let mut b: Vec<(CompositeKey, MemtableValue)> = (0..N)
+            .filter(|i| i % 7 == 0)
+            .map(|i| (key(i), MemtableValue::Tombstone))
+            .collect();
+        b.sort_by(|x, y| x.0.cmp(&y.0));
+        let (dek_b, enc_b) = test_encryption_context();
+        let b_path = dir.path().join("b.sst");
+        SstWriter::write_sst(&b_path, &b, 6, &dek_b, &enc_b).expect("write b");
+
+        let reader_a = SstReader::open(&a_path, 5, &dek_a).expect("open a");
+        let reader_b = SstReader::open(&b_path, 6, &dek_b).expect("open b");
+        let (dek_out, enc_out) = test_encryption_context();
+        let out_path = dir.path().join("partial.sst");
+        compact_with_fs_opts(
+            &[&reader_a, &reader_b],
+            &out_path,
+            &RealFs,
+            6,
+            &dek_out,
+            &enc_out,
+            false, // partial merge: tombstones MUST survive
+        )
+        .expect("partial compact");
+
+        let compacted = SstReader::open(&out_path, 6, &dek_out).expect("open partial");
+        // Deleted keys survive as tombstones (shadow the older, un-merged SST).
+        assert_eq!(
+            compacted.get(&realm, b"key000007").expect("get"),
+            Some(MemtableValue::Tombstone),
+            "tombstone must be preserved in a partial merge"
+        );
+        assert_eq!(
+            compacted.get(&realm, b"key001400").expect("get"),
+            Some(MemtableValue::Tombstone),
+            "tombstone in a late block must be preserved too"
+        );
+        // A non-deleted key keeps its data value.
+        assert_eq!(
+            compacted.get(&realm, b"key000008").expect("get"),
+            Some(MemtableValue::Data(b"a-8".to_vec())),
+        );
     }
 
     #[test]
@@ -2285,6 +2890,39 @@ mod tests {
         std::fs::write(path, &out).expect("write v2");
     }
 
+    /// Security regression (HEA-1917, CTO review): the same unauthenticated
+    /// `entry_count` that drove the oversized `Vec::with_capacity` on the V3
+    /// path also reaches the **legacy V1/V2** read path via `parse_entries`,
+    /// where the count-mismatch check only fires *after* the decode loop — i.e.
+    /// after the reservation. Tampering the header count on an otherwise-valid
+    /// V2 file must surface as a clean `InvalidSstFormat`, not a process abort.
+    ///
+    /// Under nextest (one process per test) the pre-fix code fails this test by
+    /// aborting on `handle_alloc_error`; post-fix it returns `Err`.
+    #[test]
+    fn v2_tampered_entry_count_does_not_oversize_allocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("bad_count_v2.sst");
+        let realm = RealmId::generate();
+        let entries = fixed_entries(&realm, 200);
+        let (dek, enc) = test_encryption_context();
+        write_v2_manual(&sst_path, &entries, 7, &dek, &enc);
+
+        // Bytes 4..8 are covered by neither the section AEAD (whose AAD is only
+        // `sst_number`) nor the CRC (which is over the decrypted plaintext), so
+        // the body still authenticates and the corruption is invisible.
+        let mut raw = std::fs::read(&sst_path).expect("read");
+        raw[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&sst_path, &raw).expect("rewrite");
+
+        let err = SstReader::open(&sst_path, 7, &dek).expect_err("tampered count must be rejected");
+        assert!(
+            matches!(err, StorageError::InvalidSstFormat { ref reason }
+                if reason.contains("entry count mismatch")),
+            "expected a clean count-mismatch error, got: {err:?}"
+        );
+    }
+
     #[test]
     fn v1_and_v2_legacy_files_still_read() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2348,6 +2986,40 @@ mod tests {
                 3,
                 "{name}: iter_all"
             );
+        }
+    }
+
+    /// Security regression (HEA-1917): the header `entry_count` is unauthenticated
+    /// (outside the footer AEAD and CRC) and is never validated for v3. A tampered
+    /// value must NOT drive an oversized allocation in `iter_all` — before the fix,
+    /// `Vec::with_capacity(entry_count)` would attempt a multi-gigabyte reservation
+    /// and abort the process on the compaction path. After the fix the capacity is
+    /// clamped to an authenticated bound and `iter_all` returns the true entries.
+    #[test]
+    fn v3_tampered_entry_count_does_not_oversize_allocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("bad_count.sst");
+        let realm = RealmId::generate();
+        let entries = fixed_entries(&realm, 200);
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+
+        // Tamper the unauthenticated header entry_count to u32::MAX. This byte
+        // range is covered by neither the footer AEAD nor the footer CRC, so the
+        // file still opens: the corruption is invisible to integrity checks.
+        let mut raw = std::fs::read(&sst_path).expect("read");
+        raw[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&sst_path, &raw).expect("rewrite");
+
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+        assert_eq!(reader.entry_count(), u32::MAX, "tampered count is loaded");
+
+        // Must complete without a giant allocation (would abort pre-fix), and must
+        // return exactly the real entries — the block AEAD still authenticates them.
+        let all = reader.iter_all().expect("iter_all");
+        assert_eq!(all.len(), entries.len(), "real entries recovered");
+        for (orig, got) in entries.iter().zip(all.iter()) {
+            assert_eq!(orig, got);
         }
     }
 

@@ -275,7 +275,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Measure process baseline before any engine is opened.
     let process_baseline = read_rss_bytes();
-    println!("Process baseline RSS = {} MiB\n", process_baseline / (1024 * 1024));
+    println!(
+        "Process baseline RSS = {} MiB\n",
+        process_baseline / (1024 * 1024)
+    );
 
     // Run all rungs.
     let mut rungs: Vec<Rung> = Vec::with_capacity(LADDER.len());
@@ -297,9 +300,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" Results");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
-    println!("baseline RSS = {:.1} MiB   block_cache_bytes = {} MiB\n",
+    println!(
+        "baseline RSS = {:.1} MiB   block_cache_bytes = {} MiB\n",
         process_baseline as f64 / (1024.0 * 1024.0),
-        BLOCK_CACHE_BYTES / (1024 * 1024));
+        BLOCK_CACHE_BYTES / (1024 * 1024)
+    );
 
     println!(
         "{:>12} | {:>10} | {:>10} | {:>12} | {:>12} | {:>8}",
@@ -340,7 +345,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (exp, r2) = linreg(&log_n, &log_d);
         println!(
             "Log-log fit (post-cap rungs N > {}k):  exponent = {:.4}  R² = {:.4}",
-            CACHE_BIND_N_APPROX / 1000, exp, r2
+            CACHE_BIND_N_APPROX / 1000,
+            exp,
+            r2
         );
         if exp <= 0.1 {
             format!("PASS — exponent {exp:.4} ≤ 0.10 (near-O(1) plateau confirmed)")
@@ -355,7 +362,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── per-rung exit-criteria verdict ─────────────────────────────────────
     println!("Per-rung exit-criteria (target: δRSS/user ≤ 4,200 B):\n");
-    println!("{:>12} | {:>12} | {:>8} | {:>6}", "N users", "δRSS/user (B)", "on-disk (B)", "verdict");
+    println!(
+        "{:>12} | {:>12} | {:>8} | {:>6}",
+        "N users", "δRSS/user (B)", "on-disk (B)", "verdict"
+    );
     println!("{}", "─".repeat(52));
     let mut all_pass = true;
     for r in &rungs {
@@ -380,8 +390,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" Verdict");
     println!("═══════════════════════════════════════════════════════════════════\n");
 
-    println!("(1) δRSS/user ≤ 4,200 B at all rungs:  {}", if all_pass { "PASS ✓" } else { "MISS ✗" });
-    println!("(2) RAM flat once cache cap binds:      {}", flatness_verdict);
+    println!(
+        "(1) δRSS/user ≤ 4,200 B at all rungs:  {}",
+        if all_pass { "PASS ✓" } else { "MISS ✗" }
+    );
+    println!(
+        "(2) RAM flat once cache cap binds:      {}",
+        flatness_verdict
+    );
     println!();
 
     // Comparison with pre-v3 baseline (HEA-1904).

@@ -35,6 +35,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   durability are unchanged. (HEA-1915)
 
 ### Fixed
+- **SST compaction memory is now `O(#inputs × block)` instead of `O(corpus)` (HEA-1922)** —
+  compaction previously materialized every input entry into a `BTreeMap` and then a `Vec`
+  before writing the output SST, so merging a large corpus briefly allocated roughly twice
+  the corpus size (≈1 GB while compacting 1 M users) — memory the system allocator retains
+  as elevated RSS afterward. Compaction now streams a k-way merge of the inputs (one block
+  resident per input, decrypted outside the shared block cache to avoid evicting the query
+  working set) directly into a writer that flushes each sealed block straight to disk rather
+  than buffering the whole output. Peak transient heap during a merge is now a handful of
+  blocks regardless of corpus size; on the C0 harness, post-compaction δRSS at 1 M users
+  dropped from ~606 MiB to ~35 MiB (37 B/user). Output files are byte-compatible v3 SSTs and
+  compaction semantics (newest-input-wins, tombstone drop on full merge / retention on
+  partial merge) are unchanged. (HEA-1922)
 - **WAL group-commit leader bounded to one batch (HEA-1921)** — the group-commit leader
   now commits exactly one batch then either releases leadership (queue empty) or promotes
   the head of the remaining queue to leader and exits. Previously the leader looped until
