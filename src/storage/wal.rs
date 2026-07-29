@@ -468,8 +468,7 @@ impl Drop for LeaderGuard<'_> {
             for slot in pending {
                 if let Ok(mut state) = slot.state.lock() {
                     state.done = true;
-                    state.error =
-                        Some("WAL leader exited unexpectedly; write failed".to_string());
+                    state.error = Some("WAL leader exited unexpectedly; write failed".to_string());
                     slot.cv.notify_one();
                 }
             }
@@ -1069,9 +1068,10 @@ impl Wal {
         // Drain atomically.  If the queue is already empty (rare: another
         // leader drained it before us), release leadership and exit.
         let batch: Vec<Arc<GroupSlot>> = {
-            let mut gs = self.group.lock().map_err(|_| {
-                StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
-            })?;
+            let mut gs = self
+                .group
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
             let b: Vec<_> = gs.pending.drain(..).collect();
             if b.is_empty() {
                 gs.leader_active = false;
@@ -1089,9 +1089,10 @@ impl Wal {
         // Keeping leader_active=true prevents new arrivals from racing to
         // elect themselves over the promoted leader.
         let next_leader: Option<Arc<GroupSlot>> = {
-            let mut gs = self.group.lock().map_err(|_| {
-                StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
-            })?;
+            let mut gs = self
+                .group
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
             if gs.pending.is_empty() {
                 gs.leader_active = false;
                 guard.disarmed = true;

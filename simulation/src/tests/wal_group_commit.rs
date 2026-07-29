@@ -502,9 +502,7 @@ fn concurrent_crash_mid_batch_leaves_valid_prefix() {
         entries.iter().map(|e| e.key.clone()).collect();
 
     let missing: Vec<String> = (0..N)
-        .flat_map(|t| {
-            (0..K_BEFORE).map(move |k| format!("pre-{t}-{k}"))
-        })
+        .flat_map(|t| (0..K_BEFORE).map(move |k| format!("pre-{t}-{k}")))
         .filter(|k| !recovered_keys.contains(k.as_bytes()))
         .collect();
 
