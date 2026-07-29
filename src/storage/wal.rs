@@ -42,9 +42,11 @@ use crate::storage::encryption::{
 use crate::storage::error::StorageError;
 use crate::storage::fs::{Fs, FsFile};
 use crate::storage::migrations::{self, WAL_MAGIC, WAL_VERSION_CURRENT, WAL_VERSION_HEADER_SIZE};
+use std::collections::VecDeque;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use uuid::Uuid;
 
 /// The type of mutation in a WAL entry.
@@ -399,6 +401,36 @@ struct RotationState {
     record_counter: u64,
 }
 
+// ─── Group-commit types ──────────────────────────────────────────────────────
+
+/// A single writer's entry waiting to be committed by the group leader.
+struct GroupSlot {
+    /// Pre-serialised WAL entry payload (plaintext before encryption).
+    plaintext: Vec<u8>,
+    /// Outcome written by the leader once the entry is written + synced.
+    state: Mutex<GroupSlotState>,
+    /// Notifies the owning writer when `state.done` flips to `true`.
+    cv: Condvar,
+}
+
+/// Outcome state inside a `GroupSlot`.
+struct GroupSlotState {
+    /// `true` once the leader has written and synced (or errored) this slot.
+    done: bool,
+    /// `None` = success; `Some(msg)` = the error message from the commit.
+    error: Option<String>,
+}
+
+/// Shared group-commit queue and leader flag.
+struct GroupState {
+    /// Writers waiting for the current leader to commit their entries.
+    pending: VecDeque<Arc<GroupSlot>>,
+    /// `true` while a leader is active (holding `file` mutex, writing+syncing).
+    leader_active: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Write-ahead log providing durable, ordered storage of mutations.
 ///
 /// Thread-safe via `std::sync::Mutex`. WAL writes are blocking I/O and
@@ -432,6 +464,19 @@ pub struct Wal {
     /// Without this, a `kill -9` between truncation and the next regular
     /// memtable flush would lose every write since the last SST flush.
     pre_rotate_fn: Option<Arc<dyn Fn() -> Result<(), StorageError> + Send + Sync>>,
+    /// Group-commit queue and leader flag.
+    ///
+    /// Writers push a `GroupSlot` here before competing for the file mutex.
+    /// The leader drains the queue, writes and syncs all entries under the
+    /// file mutex, then signals each slot.  `SyncMode::None` bypasses this
+    /// path entirely.
+    group: Mutex<GroupState>,
+    /// Cumulative count of successful `sync_all` calls on this WAL.
+    ///
+    /// Incremented after each `commit_batch` sync completes.  Used by the
+    /// saturation-throughput benchmark to measure fsyncs/write under group
+    /// commit.  Off the hot path (relaxed ordering is sufficient).
+    sync_count: Arc<AtomicU64>,
 }
 
 /// Outcome of scanning the record region of a WAL segment.
@@ -727,6 +772,11 @@ impl Wal {
             kek_id,
             fs,
             record_start: V1_RECORD_OFFSET,
+            group: Mutex::new(GroupState {
+                pending: VecDeque::new(),
+                leader_active: false,
+            }),
+            sync_count: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -752,14 +802,19 @@ impl Wal {
     /// Appends an entry to the WAL, calling `pre_rotate` before rotating if
     /// rotation is needed.
     ///
-    /// `pre_rotate` fires while the WAL file mutex is held — no other write
-    /// can append to (or rotate) the WAL until `pre_rotate` returns. This
-    /// lets the storage engine flush the in-memory memtable to an SST before
-    /// the old WAL entries are discarded, closing the crash-loss window
-    /// described in HEA-1050.
+    /// When `SyncMode::EveryWrite` is configured (the production default) this
+    /// uses **leader/follower group commit**: multiple concurrent callers share
+    /// a single `fsync` call rather than each paying a private one.  The leader
+    /// — whichever thread first finds the queue empty — writes every pending
+    /// entry under the file mutex and calls `sync_all` once.  Followers wait on
+    /// a per-slot condvar and return as soon as their bytes are covered.
     ///
-    /// If `pre_rotate` returns an error, rotation is cancelled and the error
-    /// is propagated. The WAL is unmodified in that case.
+    /// Durability guarantee: no writer returns `Ok` until a `sync_all` that
+    /// covered its bytes has completed.
+    ///
+    /// `pre_rotate` fires while the WAL file mutex is held (exactly as before);
+    /// with group commit the leader calls the per-batch `pre_rotate` on the
+    /// first batch that triggers rotation.
     pub fn append_with_pre_rotate<F>(
         &self,
         entry: &WalEntry,
@@ -770,28 +825,83 @@ impl Wal {
     {
         let plaintext = entry.serialize();
 
+        // ── Fast path: SyncMode::None (dev / test only) ───────────────────
+        if self.config.sync_mode != SyncMode::EveryWrite {
+            return self.write_entry_no_sync(plaintext, pre_rotate);
+        }
+
+        // ── Group-commit path (SyncMode::EveryWrite) ──────────────────────
+        //
+        // Push a slot to the shared queue.  The first writer to find the queue
+        // empty becomes the leader and runs the commit loop; all others wait on
+        // their slot's condvar until the leader marks them done.
+        let slot = Arc::new(GroupSlot {
+            plaintext,
+            state: Mutex::new(GroupSlotState {
+                done: false,
+                error: None,
+            }),
+            cv: Condvar::new(),
+        });
+
+        let am_leader = {
+            let mut gs = self
+                .group
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
+            gs.pending.push_back(Arc::clone(&slot));
+            if gs.leader_active {
+                false
+            } else {
+                gs.leader_active = true;
+                true
+            }
+        };
+
+        if am_leader {
+            // Propagate only hard (unrecoverable) failures from the leader
+            // loop.  Per-entry I/O errors travel through slot.state.error.
+            self.lead_group_commit(pre_rotate)?;
+        }
+
+        // Wait for our slot — either set by us as leader, or by another leader.
+        let mut state = slot
+            .state
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("WAL slot mutex poisoned")))?;
+        while !state.done {
+            state = slot.cv.wait(state).map_err(|_| {
+                StorageError::Io(std::io::Error::other("WAL slot condvar poisoned"))
+            })?;
+        }
+        match state.error.take() {
+            None => Ok(()),
+            Some(msg) => Err(StorageError::Io(std::io::Error::other(msg))),
+        }
+    }
+
+    // ── Group-commit internals ────────────────────────────────────────────────
+
+    /// Writes one entry directly to the file without fsync (`SyncMode::None`).
+    ///
+    /// The file mutex is held for the whole operation to preserve nonce ordering.
+    fn write_entry_no_sync<F>(&self, plaintext: Vec<u8>, pre_rotate: F) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
         let mut file = self
             .file
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("WAL mutex poisoned")))?;
 
-        // Check if rotation is needed
         let file_size = file.seek(SeekFrom::End(0))?;
         #[allow(clippy::cast_possible_truncation)]
         let approx_record_size = 4 + plaintext.len() as u64 + encryption::TAG_SIZE as u64 + 4;
         if self.config.max_size > 0 && file_size + approx_record_size > self.config.max_size {
-            // Flush the memtable to an SST before truncating the WAL. The
-            // file mutex is held for the entire pre_rotate + rotate_locked
-            // sequence, so no concurrent write can slip between flush and
-            // truncation and recreate the crash-loss window.
             pre_rotate()?;
             self.rotate_locked(&mut **file)?;
         }
 
-        // Atomically read-and-increment the nonce counter and snapshot the DEK
-        // under a single mutex lock (HEA-SEC-08).  This ensures (DEK, counter)
-        // are always consistent: no thread can observe the new DEK with a
-        // pre-reset counter after a rotation.
         let (nonce, aad, dek) = {
             let mut rot = self
                 .rotation
@@ -806,21 +916,139 @@ impl Wal {
             (nonce, aad, DataEncryptionKey::from_bytes(dek_bytes))
         };
 
-        // Encrypt outside the rotation mutex — crypto does not need the lock.
         let ciphertext = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
         let crc = crc32fast::hash(&ciphertext);
 
-        // Write: [payload_length: u32 LE][ciphertext][crc32: u32 LE]
         #[allow(clippy::cast_possible_truncation)]
         let payload_len = ciphertext.len() as u32;
         file.write_all(&payload_len.to_le_bytes())?;
         file.write_all(&ciphertext)?;
         file.write_all(&crc.to_le_bytes())?;
 
-        if self.config.sync_mode == SyncMode::EveryWrite {
+        // Intentionally no fsync — this path is SyncMode::None (dev/test only).
+        Ok(())
+    }
+
+    /// Leader commit loop: drain the pending queue and commit each batch under
+    /// the file mutex with a single `sync_all`.  Loops until the queue is empty,
+    /// then releases the leader role atomically with the empty check.
+    ///
+    /// `pre_rotate` is forwarded to the first batch only (it is `FnOnce`);
+    /// subsequent batches rely on `rotate_locked` calling `pre_rotate_fn`.
+    fn lead_group_commit<F>(&self, pre_rotate: F) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
+        let mut pre_rotate = Some(pre_rotate);
+
+        loop {
+            // Drain atomically.  If the queue is empty, release leadership and
+            // exit — the release is inside the lock so no writer can push and
+            // miss the leader before we exit.
+            let batch: Vec<Arc<GroupSlot>> = {
+                let mut gs = self.group.lock().map_err(|_| {
+                    StorageError::Io(std::io::Error::other("WAL group mutex poisoned"))
+                })?;
+                let b: Vec<_> = gs.pending.drain(..).collect();
+                if b.is_empty() {
+                    gs.leader_active = false;
+                    return Ok(());
+                }
+                b
+            };
+
+            // Write every slot in the batch + ONE fsync.
+            self.commit_batch(&batch, pre_rotate.take())?;
+
+            // Loop: drain any writers that arrived while we were committing.
+        }
+    }
+
+    /// Writes every slot in `batch` to the WAL file and calls `sync_all` once.
+    ///
+    /// All I/O runs under the file mutex so writes are in record-number order
+    /// and rotation is atomic with respect to concurrent appenders.  Each slot
+    /// is marked done (success or error string) before this function returns;
+    /// per-slot errors never propagate out of here so the leader loop can
+    /// continue with subsequent batches.
+    fn commit_batch<F>(
+        &self,
+        batch: &[Arc<GroupSlot>],
+        pre_rotate: Option<F>,
+    ) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
+        // All writes + the single fsync happen under the file mutex.
+        let commit_result: Result<(), StorageError> = (|| {
+            let mut file = self
+                .file
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL file mutex poisoned")))?;
+
+            // Estimate total on-disk size to decide whether to rotate before
+            // assigning any record numbers (rotation resets the counter to 0).
+            let file_size = file.seek(SeekFrom::End(0))?;
+            #[allow(clippy::cast_possible_truncation)]
+            let approx_total: u64 = batch
+                .iter()
+                .map(|s| 4 + s.plaintext.len() as u64 + encryption::TAG_SIZE as u64 + 4)
+                .sum();
+
+            if self.config.max_size > 0 && file_size + approx_total > self.config.max_size {
+                if let Some(f) = pre_rotate {
+                    f()?;
+                }
+                self.rotate_locked(&mut **file)?;
+            }
+
+            // Assign record numbers and write entries in queue order so that
+            // nonce ordering on disk matches the record-number sequence.  The
+            // rotation mutex is locked once per entry inside the file-mutex
+            // critical section to uphold HEA-SEC-08.
+            for slot in batch {
+                let (nonce, aad, dek) = {
+                    let mut rot = self.rotation.lock().map_err(|_| {
+                        StorageError::Io(std::io::Error::other("rotation mutex poisoned"))
+                    })?;
+                    let record_num = rot.record_counter;
+                    rot.record_counter += 1;
+                    let nonce = counter_nonce(record_num);
+                    let aad = record_num.to_le_bytes();
+                    let mut dek_bytes = [0u8; 32];
+                    dek_bytes.copy_from_slice(rot.dek.as_bytes());
+                    (nonce, aad, DataEncryptionKey::from_bytes(dek_bytes))
+                };
+
+                let ciphertext = encryption::encrypt_section(&slot.plaintext, &dek, &nonce, &aad)?;
+                let crc = crc32fast::hash(&ciphertext);
+
+                #[allow(clippy::cast_possible_truncation)]
+                let payload_len = ciphertext.len() as u32;
+                file.write_all(&payload_len.to_le_bytes())?;
+                file.write_all(&ciphertext)?;
+                file.write_all(&crc.to_le_bytes())?;
+            }
+
+            // ONE fsync for the entire group — the group-commit throughput win.
             file.sync_all()?;
+            self.sync_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })();
+
+        // Propagate the outcome to every slot; errors travel as strings so
+        // callers receive a typed `StorageError::Io` with a message.
+        let err_msg = commit_result.as_ref().err().map(|e| e.to_string());
+        for slot in batch {
+            if let Ok(mut state) = slot.state.lock() {
+                state.done = true;
+                state.error = err_msg.clone();
+                slot.cv.notify_one();
+            }
         }
 
+        // Per-entry errors are communicated through the slot; only return Err
+        // for hard failures that prevent signalling (mutex poisoning).
         Ok(())
     }
 
@@ -866,6 +1094,14 @@ impl Wal {
             .map_err(|_| StorageError::Io(std::io::Error::other("WAL mutex poisoned")))?;
         file.sync_all()?;
         Ok(())
+    }
+
+    /// Returns the cumulative number of successful `sync_all` calls on this WAL.
+    ///
+    /// Useful for benchmarking group-commit efficiency: dividing this by the
+    /// number of committed writes gives the fsyncs-per-write ratio.
+    pub fn sync_count(&self) -> u64 {
+        self.sync_count.load(Ordering::Relaxed)
     }
 
     /// Registers a callback that is invoked inside `rotate_locked` before the

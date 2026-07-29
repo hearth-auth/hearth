@@ -14,4 +14,5 @@ mod txn_concurrent;
 mod txn_raft_concurrent;
 mod txn_single_use;
 mod wal_crash;
+mod wal_group_commit;
 mod wal_rotation_crash;

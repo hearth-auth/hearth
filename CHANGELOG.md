@@ -22,6 +22,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
 ### Changed
+- **WAL group commit — fsyncs coalesced across concurrent writers (HEA-1915)** — the
+  write-ahead log now uses a leader/follower group-commit protocol: multiple concurrent
+  `append` callers share a single `sync_all` call instead of each paying a private fsync.
+  The leader drains the pending queue under the file mutex, writes all entries in
+  record-number order (preserving AES-256-GCM nonce ordering), and calls `sync_all` once
+  for the entire group; followers wait on per-slot condvars and return as soon as their
+  bytes are covered. Durability guarantee is unchanged: no caller returns `Ok` until a
+  `sync_all` covering its bytes has completed. `SyncMode::None` (dev/test) is unaffected.
+  At concurrency ≥ 8, fsyncs-per-write drops well below 1.0 and the session_create
+  scaling exponent moves from near-zero toward positive; single-thread throughput and
+  durability are unchanged. (HEA-1915)
+
 - **CSRF rejection copy is now plain language, with a recovery link (HEA-1913)** — the
   login, MFA-challenge, and registration forms previously rejected a stale CSRF token
   with "Invalid security token. Please reload the page and try again." Users have no

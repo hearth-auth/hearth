@@ -83,6 +83,9 @@ pub struct FaultConfig {
     pub latency_jitter_us: Arc<AtomicU64>,
     /// Seed for the splitmix64 jitter sequence. Advanced once per op.
     pub latency_seed: Arc<AtomicU64>,
+    /// Monotonically increasing count of `sync_all` calls that succeeded.
+    /// Useful for asserting group commit reduces fsyncs-per-write.
+    pub sync_count: Arc<AtomicU64>,
 }
 
 impl Default for FaultConfig {
@@ -98,6 +101,7 @@ impl Default for FaultConfig {
             sync_latency_us: Arc::new(AtomicU64::new(0)),
             latency_jitter_us: Arc::new(AtomicU64::new(0)),
             latency_seed: Arc::new(AtomicU64::new(0)),
+            sync_count: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -307,7 +311,11 @@ impl FsFile for FaultFsFile {
         if self.config.fail_next_sync.swap(false, Ordering::SeqCst) {
             return Err(io::Error::other("injected sync fault"));
         }
-        self.inner.sync_all()
+        let result = self.inner.sync_all();
+        if result.is_ok() {
+            self.config.sync_count.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
