@@ -1171,12 +1171,8 @@ impl SstReader {
                 // value would drive a multi-gigabyte `Vec::with_capacity` and abort
                 // the process on the compaction path (HEA-1917). Clamp it to an
                 // upper bound derived from the authenticated footer: no block can
-                // hold more than `plaintext_len / V3_MIN_ENTRY_BYTES` entries.
-                let cap_bound: usize = body
-                    .index
-                    .iter()
-                    .map(|e| e.plaintext_len as usize / SST_MIN_ENTRY_BYTES)
-                    .fold(0usize, |acc, n| acc.saturating_add(n));
+                // hold more than `plaintext_len / SST_MIN_ENTRY_BYTES` entries.
+                let cap_bound = self.authenticated_max_entries();
                 let mut out = Vec::with_capacity((self.entry_count as usize).min(cap_bound));
                 for bi in 0..body.index.len() {
                     let block = body.fetch_block(bi, self.sst_number)?;
@@ -1323,6 +1319,31 @@ impl SstReader {
     /// Returns the entry count as declared in the SST header.
     pub(crate) fn entry_count(&self) -> u32 {
         self.entry_count
+    }
+
+    /// Returns an authenticated upper bound on the number of entries this SST
+    /// can hold, derived only from integrity-protected data.
+    ///
+    /// The header `entry_count` (bytes 4..8) is *unauthenticated* — covered by
+    /// neither the footer AEAD nor the footer CRC — so it MUST NOT size an
+    /// allocation directly: a tampered or bit-rotted value (e.g. `u32::MAX`)
+    /// would drive a multi-gigabyte reservation and abort the process via an
+    /// uncatchable `handle_alloc_error` (HEA-1917). This bound is safe to size
+    /// Bloom filters or `Vec` capacities against:
+    /// - **Blocked (v3):** the footer block index is AEAD-authenticated, and no
+    ///   block can hold more than `plaintext_len / SST_MIN_ENTRY_BYTES` entries;
+    ///   summed (saturating) over every block.
+    /// - **Eager (v1/v2):** the entries are already resident and decrypted, so
+    ///   their true count is known.
+    pub(crate) fn authenticated_max_entries(&self) -> usize {
+        match &self.body {
+            SstBody::Eager(entries) => entries.len(),
+            SstBody::Blocked(body) => body
+                .index
+                .iter()
+                .map(|e| e.plaintext_len as usize / SST_MIN_ENTRY_BYTES)
+                .fold(0usize, |acc, n| acc.saturating_add(n)),
+        }
     }
 
     /// Returns the SST file number used for path derivation.
@@ -1747,10 +1768,16 @@ pub(crate) fn compact_with_fs_opts(
     //
     // `entry_count_hint` is an upper bound (pre dedup/tombstone drop) that only
     // sizes the Bloom filter; the header's real count comes from the writer's
-    // single pass. `u32` sums are saturated so a corrupt count can't wrap.
+    // single pass. It MUST be derived from each reader's *authenticated* bound,
+    // not the raw header `entry_count` (bytes 4..8), which is covered by neither
+    // the footer AEAD nor CRC: a tampered/bit-rotted `entry_count = u32::MAX`
+    // would size `BloomFilter::empty_for` at ~10 GiB and abort via an
+    // uncatchable `handle_alloc_error` (HEA-1917 class, HEA-1933). Over-estimates
+    // are harmless — they only lower the filter's false-positive rate. `u32`
+    // sums are saturated so a corrupt count can't wrap.
     let entry_count_hint: usize = input_ssts
         .iter()
-        .map(|r| r.entry_count as usize)
+        .map(|r| r.authenticated_max_entries())
         .fold(0usize, |acc, n| acc.saturating_add(n));
 
     let merged = KMergeIter::new(input_ssts);
@@ -3017,6 +3044,65 @@ mod tests {
         // Must complete without a giant allocation (would abort pre-fix), and must
         // return exactly the real entries — the block AEAD still authenticates them.
         let all = reader.iter_all().expect("iter_all");
+        assert_eq!(all.len(), entries.len(), "real entries recovered");
+        for (orig, got) in entries.iter().zip(all.iter()) {
+            assert_eq!(orig, got);
+        }
+    }
+
+    /// Security regression (HEA-1933): the streaming compaction rewrite
+    /// (919b66a4) sized the merged Bloom filter from a pre-read
+    /// `entry_count_hint` summed over each input reader's *unauthenticated*
+    /// header `entry_count` (bytes 4..8). A tampered/bit-rotted `u32::MAX` count
+    /// on an input SST would drive `BloomFilter::empty_for` at ~10 GiB and abort
+    /// the process via an uncatchable `handle_alloc_error` — the same class
+    /// HEA-1917 fixed at `iter_all`/`parse_entries` but left live on this new
+    /// sizing site. After the fix the hint is clamped to the authenticated
+    /// footer bound, so compaction completes and returns the real entries.
+    #[test]
+    fn compaction_tampered_input_entry_count_does_not_oversize_allocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let src_path = dir.path().join("tampered_input.sst");
+        let entries = fixed_entries(&realm, 200);
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&src_path, &entries, 1, &dek, &enc).expect("write");
+
+        // Tamper the unauthenticated header entry_count to u32::MAX. Bytes 4..8
+        // are covered by neither the footer AEAD nor CRC, so the file opens
+        // cleanly — the corruption is invisible to integrity checks.
+        let mut raw = std::fs::read(&src_path).expect("read");
+        raw[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&src_path, &raw).expect("rewrite");
+
+        let tampered = SstReader::open(&src_path, 1, &dek).expect("open");
+        assert_eq!(tampered.entry_count(), u32::MAX, "tampered count is loaded");
+
+        // Compact through the streaming entry point. Pre-fix this sums the
+        // header count into `entry_count_hint` and attempts a ~10 GiB Bloom
+        // allocation; post-fix the hint is bounded by the authenticated footer.
+        let (dek_out, enc_out) = test_encryption_context();
+        let out_path = dir.path().join("compacted.sst");
+        let meta = compact_with_fs_opts(
+            &[&tampered],
+            &out_path,
+            &RealFs,
+            2,
+            &dek_out,
+            &enc_out,
+            true,
+        )
+        .expect("compaction must not abort on a tampered input count");
+
+        // The output header carries the *real* merged count, and every entry
+        // round-trips — the block AEAD still authenticates the data.
+        assert_eq!(
+            meta.entry_count as usize,
+            entries.len(),
+            "real count written"
+        );
+        let compacted = SstReader::open(&out_path, 2, &dek_out).expect("open compacted");
+        let all = compacted.iter_all().expect("iter_all");
         assert_eq!(all.len(), entries.len(), "real entries recovered");
         for (orig, got) in entries.iter().zip(all.iter()) {
             assert_eq!(orig, got);

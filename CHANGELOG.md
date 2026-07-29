@@ -85,6 +85,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `entry_count` is now clamped against an authenticated length (the decrypted section's or
   block's plaintext size, and the sealed footer's per-block lengths), so a bogus count can
   only under-reserve. Tampered files now surface a clean `InvalidSstFormat`. (HEA-1917)
+- **SST compaction Bloom-filter sizing clamped to an authenticated bound (HEA-1933)** —
+  the HEA-1922 streaming-compaction rewrite sized the merged Bloom filter from a pre-read
+  hint summed over each input SST's *unauthenticated* header `entry_count`, reintroducing
+  the HEA-1917 allocation-abort class on a new site: two inputs with a tampered/bit-rotted
+  `entry_count = u32::MAX` drove a ~10 GiB `BloomFilter::empty_for` reservation that can
+  abort the process (`handle_alloc_error`) on no-overcommit hosts, cgroup memory limits,
+  musl, or 32-bit. The hint is now derived from each reader's authenticated maximum
+  (the sealed footer's per-block plaintext lengths for v3, the resident entry count for
+  V1/V2), so a bogus header count can no longer size the allocation. (HEA-1933)
 - **Step-up MFA grant now routes through the shared KDF admission gate (HEA-1910)** —
   the `urn:hearth:params:grant-type:step-up-mfa` grant at `/token` previously called
   `step_up_mfa_grant_token` inline in the async handler with neither a gate permit nor
