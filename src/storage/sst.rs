@@ -2129,6 +2129,107 @@ mod tests {
         );
     }
 
+    /// Pins the *streaming* nature of compaction (HEA-1922), not just its output.
+    ///
+    /// The two behavioural compaction tests above pass byte-for-byte identically
+    /// whether the k-way merge streams block-by-block or eagerly materialises the
+    /// whole corpus in a `BTreeMap`/`Vec` first — so neither guards the memory
+    /// property HEA-1922 actually changed (606 → 35.5 MiB transient peak; pinned
+    /// otherwise only by `examples/sst_v3_c0_memory`, which is not a `nextest`
+    /// gate). This test drives the merge one entry at a time and asserts that the
+    /// entries held resident across all input cursors never exceed a bound that is
+    /// `O(#inputs × block)` — a constant *independent of corpus size*. An eager
+    /// whole-corpus merge would hold `Θ(N)` entries and blow the bound; a revert
+    /// that removes [`KMergeIter`] fails to compile. Proven RED under HEA-1939 by
+    /// making `SstCursor::fill` decode every block at once.
+    #[test]
+    fn streaming_compaction_holds_bounded_entries_regardless_of_corpus() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let key = |i: usize| CompositeKey::new(realm.clone(), format!("key{i:06}").into_bytes());
+        const N: usize = 4000;
+
+        // Two disjoint, interleaved inputs (evens vs odds) so the merge must keep
+        // alternating between cursors — both stay live across the whole merge.
+        let mut a_entries: Vec<(CompositeKey, MemtableValue)> = (0..N)
+            .step_by(2)
+            .map(|i| (key(i), MemtableValue::Data(format!("a-{i}").into_bytes())))
+            .collect();
+        a_entries.sort_by(|x, y| x.0.cmp(&y.0));
+        let (dek_a, enc_a) = test_encryption_context();
+        let a_path = dir.path().join("a.sst");
+        SstWriter::write_sst(&a_path, &a_entries, 1, &dek_a, &enc_a).expect("write a");
+
+        let mut b_entries: Vec<(CompositeKey, MemtableValue)> = (1..N)
+            .step_by(2)
+            .map(|i| (key(i), MemtableValue::Data(format!("b-{i}").into_bytes())))
+            .collect();
+        b_entries.sort_by(|x, y| x.0.cmp(&y.0));
+        let (dek_b, enc_b) = test_encryption_context();
+        let b_path = dir.path().join("b.sst");
+        SstWriter::write_sst(&b_path, &b_entries, 2, &dek_b, &enc_b).expect("write b");
+
+        let reader_a = SstReader::open(&a_path, 1, &dek_a).expect("open a");
+        let reader_b = SstReader::open(&b_path, 2, &dek_b).expect("open b");
+
+        // Largest single block, and a sanity check that the corpus really spans
+        // many blocks — else "one block per cursor" would vacuously be the whole
+        // corpus and the bound below would prove nothing.
+        let max_block_entries = |reader: &SstReader| -> usize {
+            match &reader.body {
+                SstBody::Blocked(body) => {
+                    assert!(
+                        body.index.len() >= 8,
+                        "corpus must span many blocks (got {})",
+                        body.index.len()
+                    );
+                    (0..body.index.len())
+                        .map(|b| {
+                            body.decode_block_uncached(b, reader.sst_number)
+                                .expect("decode block")
+                                .len()
+                        })
+                        .max()
+                        .unwrap_or(0)
+                }
+                SstBody::Eager(_) => panic!("expected a v3 blocked SST"),
+            }
+        };
+        let block_cap = max_block_entries(&reader_a).max(max_block_entries(&reader_b));
+
+        // Each cursor holds at most one decoded block at a time; the bound gives
+        // one extra block of headroom over the `#inputs × block` worst case.
+        let inputs = [&reader_a, &reader_b];
+        let bound = block_cap * (inputs.len() + 1);
+
+        let mut merge = KMergeIter::new(&inputs);
+        let mut produced = 0usize;
+        let mut peak = 0usize;
+        while let Some(item) = merge.next() {
+            item.expect("merge item");
+            produced += 1;
+            let resident: usize = merge.cursors.iter().map(|c| c.buf.len()).sum();
+            peak = peak.max(resident);
+            assert!(
+                resident <= bound,
+                "streaming merge held {resident} entries (> bound {bound} = \
+                 {block_cap} block × {} inputs + 1); compaction is materialising \
+                 more than O(#inputs × block) — the HEA-1922 streaming property \
+                 is broken",
+                inputs.len()
+            );
+        }
+
+        assert_eq!(produced, N, "merge must yield every key exactly once");
+        // The bound is a real constraint only if it sits far below the corpus:
+        // an eager merge (peak ≈ N) must clearly violate it.
+        assert!(
+            peak < N / 4,
+            "peak residency {peak} is not meaningfully below corpus {N}; the \
+             bound would not distinguish streaming from an eager merge"
+        );
+    }
+
     #[test]
     fn may_contain_prunes_keys_outside_range() {
         let dir = tempfile::tempdir().expect("tempdir");

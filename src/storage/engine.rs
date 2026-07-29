@@ -2923,10 +2923,19 @@ mod tests {
         };
 
         // If compaction reaches its merge `.tmp` while the flush is still parked, it
-        // snapshotted the stale reader set (the pre-fix bug). Give it a bounded
-        // window: the fixed code blocks at snapshot on `flush_lock` and cannot
-        // reach the merge until we release the flush.
-        let _ = comp_reached_rx.recv_timeout(std::time::Duration::from_millis(500));
+        // snapshotted the stale reader set (the pre-fix bug). The fixed code blocks
+        // at snapshot on `flush_lock` and cannot reach the merge until we release the
+        // flush, so this receive MUST time out. Asserting the timeout pins the
+        // *mechanism* (compaction parked at snapshot), not just the final outcome, so
+        // the test stays red under any future refactor that reintroduces the stale
+        // snapshot by a different route while keeping numbering correct.
+        assert!(
+            comp_reached_rx
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "compact_ssts reached its merge while a flush held flush_lock — \
+             snapshot/alloc is not ordered against flushes (HEA-1937 F1)"
+        );
 
         // Release the parked flush so both operations complete.
         {
@@ -2935,7 +2944,18 @@ mod tests {
             cv.notify_all();
         }
         flush_worker.join().expect("flush thread");
-        compact_worker.join().expect("compact thread");
+        let merged_inputs = compact_worker.join().expect("compact thread");
+
+        // The merge must actually have consumed the older SSTs. Without this, an
+        // `Ok(0)` early return (e.g. a future refactor that skips the merge) would
+        // leave the OLD SST unmerged and let the final recency check pass for a
+        // reason unrelated to what is under test (TESTING.md anti-pattern class B).
+        assert!(
+            merged_inputs >= 3,
+            "compact_ssts must merge at least the three older SSTs \
+             (merged {merged_inputs}); a vacuous 0-input compaction would make the \
+             recency assertion below pass for the wrong reason"
+        );
 
         // The NEW value flushed concurrently must win — recency was not inverted.
         assert_eq!(
