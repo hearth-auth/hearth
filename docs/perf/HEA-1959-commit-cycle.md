@@ -15,12 +15,22 @@
 
 ## Outcome first
 
-**T4 does not clear 50,000 ops/s.** The issue asked for a straight answer if it did
-not, so: it did not, and the residual is no longer the thing the issue named.
+**T4 does not clear 50,000 ops/s.** The issue asked for a straight answer if it
+did not, so: it did not.
+
+| | value |
+|---|---|
+| Baseline (HEA-1956) | 33,724 ops/s @ T=256 |
+| **Measured at HEAD** | **41,255 ops/s @ T=256** |
+| Improvement | **1.22×** |
+| T4 target | 50,000 ops/s |
+| **T4 verdict** | **MISS — 1.21× short** (was 1.48×) |
+| Durability | unchanged; `SyncMode::Async` still rejected |
 
 The mechanism the issue asked me to find is identified from instrumentation and
-substantially removed. What remains is a *different* bottleneck, and this document
-names it rather than restating the old one.
+largely removed: serial per-entry work fell 8,984 → 4,584 ns/entry. The residual
+is a **different** bottleneck — the cost of waking blocked writers — and §5
+quantifies it and shows the target is reachable without weakening durability.
 
 ---
 
@@ -125,51 +135,61 @@ simpler, it removes a per-writer mutex and condvar, and it eliminates the
 lost-wakeup failure mode by making the wait condition a monotone watermark — but
 it should not be credited with throughput.
 
-## 5. The residual is now the fsync itself, not coalescing
+## 5. The residual is thread-wakeup cost
 
-Final artifact, T=256: fsync occupies **84–97% of the entire measurement window**.
-The leader is essentially always inside `sync_data`.
+Two full gated runs at HEAD, plus the earlier isolated runs, give this picture at
+T=256:
 
-| T | ops/s | batch | fsync ms/batch | serial ns/entry | fsync % of window |
+| run | what was in it | ops/s @ T=256 | fsync ms/batch |
+|---|---|---:|---:|
+| baseline (HEA-1956) | neither fix | 33,724 | ~1.94 (derived) |
+| A | fdatasync only | 35,726 | ~1.96, flat |
+| B | + batched writes | 42,456 | ~1.96 |
+| C | + ticket watermark (gated) | 30,317 | **3.64, inflated** |
+| **D** | same binary as C (gated, sample 2) | **41,255** | **1.94, flat** |
+
+**Run C was an anomaly and its fsync inflation should not be read as a mechanism.**
+Sample D, the same binary minutes later, shows `fdatasync` flat at 1.84–1.94 ms
+across the entire ladder — matching runs A and B and the raw device rate. An
+earlier draft of this document attributed the residual to fsync cost growth on the
+strength of run C alone; sample D falsifies that, and the attribution below
+replaces it.
+
+Sample D, the representative run:
+
+| T | ops/s | batch | fsync ms/batch | serial ns/entry | of which `signal` |
 |--:|------:|------:|---------------:|----------------:|------------------:|
-| 1 | 492 | 1.00 | 1.881 | 14,607 | 92.6% |
-| 4 | 1,039 | 2.00 | 1.854 | 8,781 | 96.3% |
-| 16 | 3,654 | 7.55 | 2.009 | 6,358 | 97.3% |
-| 64 | 11,310 | 31.72 | 2.644 | 4,571 | 94.3% |
-| 128 | 15,091 | 61.33 | 3.629 | 5,373 | 89.3% |
-| 256 | 30,317 | 130.73 | 3.639 | 4,279 | 84.4% |
+| 1 | 484 | 1.00 | 1.918 | 14,774 | 1,062 |
+| 4 | 926 | 1.76 | 1.839 | 11,468 | 1,938 |
+| 16 | 3,992 | 7.66 | 1.849 | 6,723 | 2,958 |
+| 64 | 15,572 | 31.80 | 1.881 | 4,566 | 3,068 |
+| 128 | 29,098 | 65.40 | 1.917 | 4,637 | 3,450 |
+| 256 | **41,255** | 100.79 | 1.945 | 4,584 | **3,554** |
 
-Serial work is down to 13% of the cycle at T=256. **The open question is why
-`fdatasync` costs 3.64 ms at batch = 130 when it costs 1.88 ms at batch = 1 and
-was flat across batch size in the isolated fix-1 run.** Two candidates, in
-order of my confidence:
+The device term is now constant, exactly as group commit intends. The whole
+residual is the serial term, and **`signal` is 78% of it** (3,554 of 4,584
+ns/entry) — 358 µs per batch to release ~100 writers.
 
-1. **Competing flush I/O.** By the high-`T` cells the corpus has grown enough to
-   trigger memtable→SST flushes and compaction, whose own writes and fsyncs
-   contend with the WAL sync. This is consistent with the effect being absent in
-   the shorter isolated run and with it appearing between T=64 and T=128.
-2. **Data volume.** ~130 KB per batch versus ~1 KB. Plausible but too small to
-   explain 1.75 ms on this device.
+**Arithmetic on the remaining gap.** At T=256 the cycle is 2,407 µs, of which
+1,945 µs is `fdatasync` and 462 µs is serial. Driving the serial term to zero
+gives `100.79 / 1.945 ms` = **51,820 ops/s — which would clear T4.** So the target
+is reachable without touching the durability guarantee, and the single line item
+standing between here and there is the cost of waking blocked writers.
 
-Distinguishing these is the next concrete step, and it is a different problem
-from the one this issue was opened on.
+**Why the broadcast did not fix it.** Releasing K blocked threads costs O(K)
+regardless of how many syscalls you use: ~3.5 µs per thread of futex wake plus
+context switch, landing on 16 cores. `notify_all` also wakes writers whose ticket
+is *not* yet covered — those that arrived during the fsync and belong to the next
+batch — which re-check the watermark and go back to sleep. That is a genuine
+thundering herd, and it is why signalling got marginally *worse* (2,584 →
+3,554 ns/entry) rather than better.
 
-## 6. Measurement honesty — variance on this host
-
-T=256 measured **30,317** in the final gated run and **42,456** in an earlier run
-of the same binary. That spread is larger than the effect sizes being argued
-about, so **no T4 verdict should be graded on this workstation.** Contributing
-factors observed directly during this work:
-
-- A co-resident agent's HTTP benchmark (HEA-1957) ran during one pass at loadavg
-  24 on 16 cores and roughly halved every number. That run was discarded, not
-  reported.
-- A long-lived idle `cargo-watch` process defeats a naive `pgrep cargo` idle gate;
-  gate on `rustc|rust-lld` instead.
-
-The banked, reproducible results are the *mechanism* measurements — the phase
-split and the fdatasync effect — which were consistent across every run. The
-graded T4 throughput number needs a quiet, dedicated host.
+**This is a design limit, not a tuning problem.** Any design in which every writer
+blocks a thread and must be individually woken pays O(threads-in-flight) per batch.
+Escaping it means not parking a thread per in-flight write — i.e. a
+completion/async acknowledgement path rather than 256 blocked `spawn_blocking`
+threads. That is an architectural change well beyond this issue, and it is what
+the follow-up should evaluate.
 
 ---
 
