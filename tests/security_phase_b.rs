@@ -758,8 +758,18 @@ async fn admin_login_mismatched_csrf_token_shows_error() {
         .expect("read body bytes");
     let body_str = std::str::from_utf8(&body_bytes).expect("body is utf-8");
     assert!(
-        body_str.contains("Invalid security token"),
+        body_str.contains("Your session has expired"),
         "response must contain the CSRF-specific error message"
+    );
+    assert!(
+        !body_str.contains("Invalid security token"),
+        "the old engineer-speak CSRF copy must not resurface (HEA-1913)"
+    );
+    // The banner must offer a recovery link back to the login form, which
+    // re-issues a fresh CSRF token (HEA-1913).
+    assert!(
+        body_str.contains(r#"href="/ui/admin/login""#) && body_str.contains("Reload the page"),
+        "CSRF banner must link back to the originating form"
     );
 }
 

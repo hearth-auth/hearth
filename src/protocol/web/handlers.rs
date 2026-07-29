@@ -207,6 +207,10 @@ struct LoginTemplate {
     resend_verification_url: Option<String>,
     /// Shown alongside error when a magic link is expired — "Request a new magic link".
     new_magic_link_url: Option<String>,
+    /// Shown alongside error when the form's CSRF token went stale — links back
+    /// to this same login form so the user lands on a page bearing a fresh
+    /// token without hunting for the browser reload button (HEA-1913).
+    reload_url: Option<String>,
     /// Federation sign-in buttons, one per configured connector.
     federation_buttons: Vec<FederationButton>,
     chrome: bool,
@@ -271,6 +275,7 @@ impl LoginTemplate {
             recovery_code_url: "/ui/mfa-recovery".to_string(),
             resend_verification_url: None,
             new_magic_link_url: None,
+            reload_url: None,
             federation_buttons: Vec::new(),
             chrome: false,
             active: "",
@@ -469,6 +474,10 @@ struct MfaChallengeTemplate {
     recovery_code_url: String,
     /// Carry through the post-login redirect.
     return_to: Option<String>,
+    /// Shown alongside error when the form's CSRF token went stale — links back
+    /// to this same challenge form so the user lands on a page bearing a fresh
+    /// token without hunting for the browser reload button (HEA-1913).
+    reload_url: Option<String>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -494,6 +503,7 @@ impl MfaChallengeTemplate {
             form_action: "/ui/mfa-challenge".to_string(),
             recovery_code_url: "/ui/mfa-recovery".to_string(),
             return_to,
+            reload_url: None,
             chrome: false,
             active: "",
             user_email: None,
@@ -1030,12 +1040,26 @@ impl LoginRenderCtx {
     }
 
     /// The CSRF failure page (422). No email is echoed.
+    ///
+    /// The copy avoids "security token" — users read that as a hardware dongle
+    /// or a TOTP code and conclude their MFA device is wrong or the site is
+    /// compromised, when in fact the hidden form token simply went stale. The
+    /// banner also links back to this login form, which re-issues a fresh token
+    /// (HEA-1913). Fail-closed behaviour from HEA-1367 is unchanged.
     fn csrf_error(&self) -> Response {
-        self.error_page(
-            "Invalid security token. Please reload the page and try again.",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            None,
-        )
+        let mut tmpl = LoginTemplate::new(
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
+            self.return_to.clone(),
+            &self.action_prefix,
+            self.show_register,
+            self.locale,
+            self.product_name.clone(),
+            self.logo_url.clone(),
+        );
+        tmpl.reload_url = Some(tmpl.form_action.clone());
+        tmpl.realm_theme_url.clone_from(&self.realm_theme);
+        tmpl.inline_theme_css.clone_from(&self.inline_theme_css);
+        render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
     }
 }
 
@@ -1830,12 +1854,16 @@ pub async fn mfa_challenge_submit(
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
     if !csrf_ok {
-        let tmpl = MfaChallengeTemplate::new(
-            Some("Invalid security token. Please reload the page and try again.".to_string()),
+        // Copy deliberately avoids "security token" — see `LoginRenderCtx::csrf_error`
+        // for the rationale (HEA-1913). The banner links back to the challenge
+        // form, which re-issues a fresh token.
+        let mut tmpl = MfaChallengeTemplate::new(
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
             state.product_name.clone(),
             state.logo_url.clone(),
             pending.return_to.clone(),
         );
+        tmpl.reload_url = Some(tmpl.form_action.clone());
         return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
@@ -3122,6 +3150,10 @@ struct RegisterTemplate {
     form_action: String,
     /// URL for the "Sign in" link at the bottom of the form.
     login_url: String,
+    /// Shown alongside error when the form's CSRF token went stale — links back
+    /// to this same registration form so the user lands on a page bearing a
+    /// fresh token without hunting for the browser reload button (HEA-1913).
+    reload_url: Option<String>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -3158,6 +3190,7 @@ impl RegisterTemplate {
             error,
             form_action,
             login_url,
+            reload_url: None,
             chrome: false,
             active: "",
             user_email: None,
@@ -3451,7 +3484,7 @@ fn register_submit_impl(
     let sent_url = format!("{action_prefix}/register/sent");
     let captcha_widget_html = state.captcha_provider.widget_html().to_string();
 
-    let render_err = |msg: String, email: String| {
+    let render_err_with_reload = |msg: String, email: String, reload_url: Option<String>| {
         let mut tmpl = RegisterTemplate::new(
             disabled,
             invite_only,
@@ -3463,10 +3496,12 @@ fn register_submit_impl(
             logo_url.clone(),
             captcha_widget_html.clone(),
         );
+        tmpl.reload_url = reload_url;
         tmpl.realm_theme_url.clone_from(&realm_theme);
         tmpl.inline_theme_css.clone_from(&inline_css);
         render_status(&tmpl, StatusCode::BAD_REQUEST)
     };
+    let render_err = |msg: String, email: String| render_err_with_reload(msg, email, None);
 
     // F6: CSRF double-submit check — fail-closed in non-dev mode.
     let csrf_ok = match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
@@ -3474,9 +3509,13 @@ fn register_submit_impl(
         None => state.dev_mode,
     };
     if !csrf_ok {
-        return render_err(
-            "Invalid security token. Please reload the page and try again.".to_string(),
+        // Copy deliberately avoids "security token" — see `LoginRenderCtx::csrf_error`
+        // for the rationale (HEA-1913). The banner links back to the registration
+        // form, which re-issues a fresh token.
+        return render_err_with_reload(
+            "Your session has expired. Please reload the page and try again.".to_string(),
             form.email.clone(),
+            Some(form_action.clone()),
         );
     }
 

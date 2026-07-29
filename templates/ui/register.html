@@ -18,7 +18,18 @@
 
     {% match error %}
       {% when Some with (msg) %}
-        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
+        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm text-danger-fg" role="alert">
+          <p class="font-medium">{{ msg }}</p>
+          {% match reload_url %}
+            {% when Some with (url) %}
+              <p class="mt-2">
+                <a href="{{ url }}" class="font-semibold underline underline-offset-2 hover:no-underline focus:outline-none focus-visible:ring-1 focus-visible:ring-danger-fg rounded">
+                  Reload the page
+                </a>
+              </p>
+            {% when None %}
+          {% endmatch %}
+        </div>
       {% when None %}
     {% endmatch %}
 

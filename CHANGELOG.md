@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **CSRF rejection copy is now plain language, with a recovery link (HEA-1913)** — the
+  login, MFA-challenge, and registration forms previously rejected a stale CSRF token
+  with "Invalid security token. Please reload the page and try again." Users have no
+  mental model for "security token" as a hidden form field — in everyday language it
+  means a hardware dongle or a TOTP code — so the message read as "your MFA device is
+  wrong" or "you've been hacked". All three surfaces now render "Your session has
+  expired. Please reload the page and try again." plus a "Reload the page" link back to
+  the originating form, which re-issues a fresh token. Status codes (422 login, 422 MFA
+  challenge, 400 register), the `dev_mode` bypass, and the fail-closed check from
+  HEA-1367 are unchanged — this is a copy and affordance fix only. (HEA-1913)
+
 ### Security
 - **Step-up MFA grant now routes through the shared KDF admission gate (HEA-1910)** —
   the `urn:hearth:params:grant-type:step-up-mfa` grant at `/token` previously called

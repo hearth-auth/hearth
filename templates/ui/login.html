@@ -43,6 +43,15 @@
             </p>
           {% when None %}
         {% endmatch %}
+        {% match reload_url %}
+          {% when Some with (url) %}
+            <p class="mt-2">
+              <a href="{{ url }}" class="font-semibold underline underline-offset-2 hover:no-underline focus:outline-none focus-visible:ring-1 focus-visible:ring-danger-fg rounded">
+                Reload the page
+              </a>
+            </p>
+          {% when None %}
+        {% endmatch %}
       </div>
     {% when None %}
   {% endmatch %}
