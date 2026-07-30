@@ -231,3 +231,63 @@ async fn admin_login_survives_a_saturated_shared_realm_gate() {
 
     holder.await.expect("holder task joins");
 }
+
+/// F3 (HEA-1981): a bad-CSRF register submission is rejected before consuming a
+/// KDF permit.  With the shared gate saturated, the pre-HEA-1981 code (CSRF
+/// check inside the gate) would have shed the request with `503`; the hoisted
+/// pre-gate check returns `422` regardless of gate pressure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_csrf_register_rejected_before_consuming_a_kdf_permit() {
+    // dev_mode=false → CSRF double-submit is fail-closed.
+    let app = build_rig(false);
+    let holder = saturate_shared_gate().await;
+
+    let body =
+        "email=victim@example.test&password=secret123456&password_confirm=secret123456&_csrf=forged-token";
+    let (status, headers) = post_form(&app, "/ui/register", body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "bad-CSRF register must be rejected with 422 by the pre-gate check, NOT shed with 503 by \
+         the saturated gate — the reject must not consume admission capacity"
+    );
+    assert!(
+        !headers.contains_key(axum::http::header::RETRY_AFTER),
+        "a pre-gate CSRF reject must not carry the gate's Retry-After shed header"
+    );
+
+    // Control: still 422 when the gate is free — gate-independent.
+    holder.await.expect("holder task joins");
+    let (status_free, _) = post_form(&app, "/ui/register", body).await;
+    assert_eq!(
+        status_free,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the CSRF reject is gate-independent"
+    );
+}
+
+/// F4 (HEA-1981): a password-mismatch reset-password submission is rejected
+/// before consuming a KDF permit.  Password validation now runs pre-gate so a
+/// flood of trivially-invalid requests cannot exhaust the admission pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn password_mismatch_reset_rejected_before_consuming_a_kdf_permit() {
+    // dev_mode=true → CSRF bypassed (reset-password form carries no CSRF field).
+    let app = build_rig(true);
+    let holder = saturate_shared_gate().await;
+
+    let body = "token=any-token&password=newpassword1&password_confirm=different";
+    let (status, headers) = post_form(&app, "/ui/reset-password", body).await;
+
+    assert_ne!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "password-mismatch reset must be rejected pre-gate, not shed as 503 by the saturated gate"
+    );
+    assert!(
+        !headers.contains_key(axum::http::header::RETRY_AFTER),
+        "a pre-gate password-mismatch reject must not carry Retry-After"
+    );
+
+    holder.await.expect("holder task joins");
+}

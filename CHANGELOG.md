@@ -65,6 +65,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   durability are unchanged. (HEA-1915)
 
 ### Fixed
+- **KDF-shed 503 on browser auth flows now renders a themed HTML page (HEA-1979)** —
+  The login, admin login, register, reset-password, account change-password, and TOTP
+  step-up paths previously returned a raw `text/plain` 503 when the Argon2id KDF gate
+  was saturated. They now render a THEME-compliant HTML error page that pre-fills the
+  submitted email, carries a fresh CSRF token, surfaces the `Retry-After` seconds, and
+  shows a "Try again" retry form (or a "Back to home" link where no re-submit URL is
+  available). The plain-text shed response is retained for the REST/gRPC plane
+  (`run_kdf_gated`). (HEA-1979)
 - **Audit appends no longer hold the chain lock across the WAL fsync (HEA-1948)** —
   `EmbeddedAuditEngine::append` previously held the per-realm chain lock for the entire
   `put_batch` call, including the WAL `fsync` wait. This serialised all audit writes to the

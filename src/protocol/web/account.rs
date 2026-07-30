@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
@@ -165,6 +165,7 @@ pub struct ChangePasswordForm {
 pub async fn account_change_password(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    headers: HeaderMap,
     Form(form): Form<ChangePasswordForm>,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
@@ -198,7 +199,14 @@ pub async fn account_change_password(
     {
         Ok(r) => r,
         Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
-            return super::handlers::kdf_shed_response(retry_after);
+            return super::handlers::kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                None,
+                None,
+                None,
+            );
         }
         Err(crate::identity::KdfGateError::Join(e)) => {
             tracing::warn!(error = %e, "change_password KDF task panicked");
@@ -538,6 +546,7 @@ pub struct ActivateTotpForm {
 pub async fn totp_activate(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    headers: HeaderMap,
     Form(form): Form<ActivateTotpForm>,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
@@ -564,7 +573,14 @@ pub async fn totp_activate(
             );
         }
         Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
-            return super::handlers::kdf_shed_response(retry_after);
+            return super::handlers::kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                None,
+                None,
+                None,
+            );
         }
         Err(crate::identity::KdfGateError::Join(e)) => {
             tracing::warn!(error = %e, "verify_password KDF task panicked");

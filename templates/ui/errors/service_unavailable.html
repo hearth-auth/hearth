@@ -1,0 +1,62 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Service unavailable{% endblock %}
+{% block body %}
+<div class="rounded-md bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+  <div class="mb-6 flex items-center justify-center">
+    <a href="/ui" class="flex items-center" aria-label="Home">
+      <img src="{{ logo_url }}" alt="{{ product_name }}" class="w-24">
+    </a>
+  </div>
+
+  <div class="mb-6 flex flex-col items-center text-center">
+    <div class="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-warning/[0.12]">
+      <svg class="h-7 w-7 text-warning-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/>
+        <line x1="12" y1="17" x2="12.01" y2="17"/>
+      </svg>
+    </div>
+    <h1 class="mb-2 font-display text-xl font-medium text-ht-content-primary">
+      Service temporarily unavailable
+    </h1>
+    <p class="text-sm text-ht-content-secondary">
+      The server is busy verifying credentials. Please try again in
+      <strong class="font-semibold text-ht-content-primary">{{ retry_after_secs }} second{% if retry_after_secs != 1 %}s{% endif %}</strong>.
+    </p>
+  </div>
+
+  {% match form_action %}
+    {% when Some with (action) %}
+    {# ── Retry form: pre-fills email and return_to so the user doesn't lose context ── #}
+    <form method="post" action="{{ action }}" class="space-y-4" data-testid="kdf-shed-retry-form">
+      {% match csrf %}
+        {% when Some with (c) %}
+          <input type="hidden" name="_csrf" value="{{ c }}">
+        {% when None %}
+      {% endmatch %}
+      {% if !email.is_empty() %}
+        <input type="hidden" name="email" value="{{ email }}">
+      {% endif %}
+      {% match return_to %}
+        {% when Some with (r) %}
+          <input type="hidden" name="return_to" value="{{ r }}">
+        {% when None %}
+      {% endmatch %}
+      <button type="submit"
+              data-testid="kdf-shed-retry-button"
+              class="w-full btn-ember rounded px-4 py-2.5 text-sm font-semibold">
+        Try again
+      </button>
+    </form>
+    {% when None %}
+    {# ── No form action available: show a back link ── #}
+    <div class="text-center">
+      <a href="/ui"
+         class="text-sm font-medium text-ht-content-brand hover:text-ht-brand-deep focus:outline-none focus-visible:ring-1 focus-visible:ring-ht-content-brand rounded">
+        Back to home
+      </a>
+    </div>
+  {% endmatch %}
+</div>
+{% endblock %}
