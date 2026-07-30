@@ -181,10 +181,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pre-delete value while the merged output no longer shadowed it — so a lookup fell through
   to the orphan and a deleted user or session came back. A runtime unlink failure is now
   **fatal to the commit**: the merge aborts and leaves the pre-commit (tombstone-bearing)
-  reader set in place, so deleted keys stay shadowed until a retry succeeds. The unlinks are
+  reader set in place, so deleted keys stay shadowed until a retry succeeds. Inputs are
+  unlinked **oldest-first** so a value-bearing SST is always retired before the newer
+  tombstone that shadows it; any partial prefix of unlinks — whether a mid-loop error aborts
+  or a crash lands mid-loop — can then only leave *extra* tombstones on disk, never a
+  resurrectable value orphaned ahead of its tombstone, and a `NotFound` is treated as success
+  so a retry after a prior aborted attempt converges (HEA-1986). The unlinks are
   also `sync_dir`-durable before the tombstone-free output becomes the sole authority,
   shrinking (but not yet closing — a crash between the rename and the unlinks still needs a
-  compaction manifest, HEA-1857) the crash window. (HEA-1982)
+  compaction manifest, HEA-1857) the crash window. (HEA-1982, HEA-1986)
 - **SST `entry_count` no longer sizes an allocation from unauthenticated bytes (HEA-1917)** —
   the SST header's `entry_count` field lies outside the AEAD and the CRC on *every* format
   version and is never validated before use, yet it was passed straight to
