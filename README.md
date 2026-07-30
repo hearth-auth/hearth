@@ -195,6 +195,8 @@ All figures measured on `dev-ryzen-7840hs` (AMD Ryzen 7 7840HS, 8 cores / 16 thr
 
 Do not place engine figures beside competitor HTTP figures — that is a category error.
 
+**We publish no competitor comparison.** Every competitor's published figure is end-to-end HTTP, and the only HTTP-plane figure we can currently stand behind is password login below. Producing the rest requires a quiesced server-class host (isolated cores, performance governor, no battery); the host above is a mobile laptop part and is disqualified for that purpose. We would rather ship no multiplier than a wrong one — so until that hardware exists, the numbers below are ours alone, unratioed.
+
 ### Hot path (engine plane)
 
 All engine-plane figures are HEAD-verified at `1b6b7745`. Published values are conservative: where re-verification measured better than the prior report, the older lower figure is used.
