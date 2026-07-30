@@ -1039,14 +1039,17 @@ impl LoginRenderCtx {
         )
     }
 
-    /// The CSRF failure page (422). No email is echoed.
+    /// The CSRF failure page (422).
     ///
-    /// The copy avoids "security token" — users read that as a hardware dongle
-    /// or a TOTP code and conclude their MFA device is wrong or the site is
-    /// compromised, when in fact the hidden form token simply went stale. The
-    /// banner also links back to this login form, which re-issues a fresh token
-    /// (HEA-1913). Fail-closed behaviour from HEA-1367 is unchanged.
-    fn csrf_error(&self) -> Response {
+    /// Mints a **fresh** CSRF token so the user can resubmit immediately without
+    /// a separate page reload (HEA-1983). Echoes `submitted_email` back into the
+    /// form so the address field is not cleared. The `reload_url` preserves any
+    /// `return_to` destination so deep-linked users are not dropped to bare
+    /// `/login` on recovery.
+    ///
+    /// Copy avoids "security token" — see HEA-1913 for rationale.
+    fn csrf_error(&self, submitted_email: &str, secure: bool) -> Response {
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
         let mut tmpl = LoginTemplate::new(
             Some("Your session has expired. Please reload the page and try again.".to_string()),
             self.return_to.clone(),
@@ -1056,10 +1059,23 @@ impl LoginRenderCtx {
             self.product_name.clone(),
             self.logo_url.clone(),
         );
-        tmpl.reload_url = Some(tmpl.form_action.clone());
+        tmpl.email = submitted_email.to_string();
+        tmpl.csrf = Some(csrf_value);
+        // Preserve return_to in the reload link so a deep-linked user who hits
+        // a stale token still lands at their original destination after reload.
+        tmpl.reload_url = Some(match &self.return_to {
+            Some(rt) => format!(
+                "{}/login?return_to={}",
+                self.action_prefix,
+                form_urlencoded::byte_serialize(rt.as_bytes()).collect::<String>()
+            ),
+            None => format!("{}/login", self.action_prefix),
+        });
         tmpl.realm_theme_url.clone_from(&self.realm_theme);
         tmpl.inline_theme_css.clone_from(&self.inline_theme_css);
-        render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        resp
     }
 }
 
@@ -1181,7 +1197,8 @@ fn login_prepare(
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
     if !csrf_ok {
-        return Err(render_ctx.csrf_error());
+        let secure = state.is_secure_request(headers);
+        return Err(render_ctx.csrf_error(&email, secure));
     }
 
     // Login CSRF guard: reject cross-origin POSTs.
@@ -1855,16 +1872,21 @@ pub async fn mfa_challenge_submit(
     };
     if !csrf_ok {
         // Copy deliberately avoids "security token" — see `LoginRenderCtx::csrf_error`
-        // for the rationale (HEA-1913). The banner links back to the challenge
-        // form, which re-issues a fresh token.
+        // for the rationale (HEA-1913). The form now carries a fresh token so
+        // direct resubmission succeeds without an extra page load (HEA-1983).
+        let secure = state.is_secure_request(&headers);
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
         let mut tmpl = MfaChallengeTemplate::new(
             Some("Your session has expired. Please reload the page and try again.".to_string()),
             state.product_name.clone(),
             state.logo_url.clone(),
             pending.return_to.clone(),
         );
+        tmpl.csrf = Some(csrf_value);
         tmpl.reload_url = Some(tmpl.form_action.clone());
-        return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        return resp;
     }
 
     let code = form.code.trim();
@@ -3510,13 +3532,28 @@ fn register_submit_impl(
     };
     if !csrf_ok {
         // Copy deliberately avoids "security token" — see `LoginRenderCtx::csrf_error`
-        // for the rationale (HEA-1913). The banner links back to the registration
-        // form, which re-issues a fresh token.
-        return render_err_with_reload(
-            "Your session has expired. Please reload the page and try again.".to_string(),
+        // for the rationale (HEA-1913). The form now carries a fresh token so
+        // direct resubmission succeeds without an extra page load (HEA-1983).
+        let secure = state.is_secure_request(&headers);
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+        let mut tmpl = RegisterTemplate::new(
+            disabled,
+            invite_only,
             form.email.clone(),
-            Some(form_action.clone()),
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
+            form_action.clone(),
+            login_url.clone(),
+            product_name.clone(),
+            logo_url.clone(),
+            captcha_widget_html.clone(),
         );
+        tmpl.reload_url = Some(form_action.clone());
+        tmpl.csrf = Some(csrf_value);
+        tmpl.realm_theme_url.clone_from(&realm_theme);
+        tmpl.inline_theme_css.clone_from(&inline_css);
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        return resp;
     }
 
     if !captcha_ok {
