@@ -183,19 +183,24 @@ impl SeedClient {
         Ok(user.id)
     }
 
-    /// Registers a public OAuth client authorized for the ROPC password grant
-    /// via `POST /clients`, returning its `client_id`.
+    /// Registers a public OAuth client (authorization_code grant) via
+    /// `POST /clients`, returning its `client_id`.
+    ///
+    /// The client is used as the authenticating party for introspect and revoke
+    /// calls during the load run. ROPC (`grant_type=password`) was removed by
+    /// HEA-1862; we no longer need a password-grant client, but the journeys
+    /// still require a registered public client for endpoint authentication.
     ///
     /// # Errors
     /// Returns [`SeedError`] on transport failure or a non-2xx response.
-    pub async fn register_password_client(&self, name: &str) -> Result<String, SeedError> {
+    pub async fn register_client(&self, name: &str) -> Result<String, SeedError> {
         let resp = self
             .http
             .post(format!("{}/clients", self.base_url))
             .json(&serde_json::json!({
                 "client_name": name,
                 "redirect_uris": ["https://loadtest.test/callback"],
-                "grant_types": ["password"],
+                "grant_types": ["authorization_code"],
             }))
             .send()
             .await?;
@@ -203,29 +208,23 @@ impl SeedClient {
         Ok(client.client_id)
     }
 
-    /// Resource-owner password-credentials grant (`POST /token`). Returns the
-    /// live access token.
+    /// Mints an access token for `user_id` via `POST /dev/seed-token` (dev-only).
+    ///
+    /// Creates a session and issues a real JWT for the given user. Used both
+    /// during seeding (to populate the token corpus) and during load journeys
+    /// that need to mint tokens dynamically (issuance + revoke). Replaces ROPC
+    /// which was removed by HEA-1862 (HEA-1991).
     ///
     /// # Errors
     /// Returns [`SeedError`] on transport failure or a non-2xx response.
-    pub async fn password_grant(
-        &self,
-        client_id: &str,
-        email: &str,
-        password: &str,
-    ) -> Result<String, SeedError> {
+    pub async fn seed_token(&self, user_id: &str) -> Result<String, SeedError> {
         let resp = self
             .http
-            .post(format!("{}/token", self.base_url))
-            .json(&serde_json::json!({
-                "grant_type": "password",
-                "client_id": client_id,
-                "username": email,
-                "password": password,
-            }))
+            .post(format!("{}/dev/seed-token", self.base_url))
+            .json(&serde_json::json!({"user_id": user_id}))
             .send()
             .await?;
-        let token: TokenResponse = json_or_err("password_grant", resp).await?;
+        let token: TokenResponse = json_or_err("seed_token", resp).await?;
         Ok(token.access_token)
     }
 

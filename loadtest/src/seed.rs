@@ -11,23 +11,15 @@
 //!   dev realm that `POST /admin/bootstrap` creates. `--realms > 1` is clamped
 //!   with a warning; true multi-realm corpora require realms pre-declared in
 //!   `hearth.yaml` plus a per-realm admin token (the `--target-host` path).
-//! * **ROPC (`grant_type=password`) was removed** (HEA-1862). Sessions are now
-//!   seeded via the dev-only `POST /dev/seed-session` endpoint (HEA-1907),
-//!   which writes a real session record directly to storage for each seeded user.
-//!   This is sufficient for the C0 per-session memory sweep and T4 throughput
-//!   re-measurement; `--sessions-frac > 0` now works.
+//! * **ROPC (`grant_type=password`) was removed** (HEA-1862). Access tokens are
+//!   now minted via the dev-only `POST /dev/seed-token` endpoint (HEA-1991),
+//!   which creates a real session + issues a signed JWT for each seeded user.
+//!   Sessions for the C0 memory sweep are still created via `POST /dev/seed-session`
+//!   (HEA-1907).
 
 use crate::client::{SeedClient, SeedError};
-use crate::handle::{SeedHandle, SeededRealm, SeededSession, SeededUser};
+use crate::handle::{SeedHandle, SeededRealm, SeededSession, SeededToken, SeededUser};
 use crate::params::SeedParams;
-
-/// Well-known dev-realm admin created by `POST /admin/bootstrap` in `--dev`
-/// mode. These are fixed dev constants baked into the server (not secrets).
-/// The load journeys (`crate::scenarios`) use them to drive the interactive
-/// login / issuance flows against the admin subject. Not used for session
-/// seeding (which now goes through `POST /dev/seed-session`, HEA-1907).
-pub(crate) const DEV_ADMIN_EMAIL: &str = "admin@dev.local";
-pub(crate) const DEV_ADMIN_PASSWORD: &str = "HearthDev123!";
 
 /// Runs the full seed flow and returns the persisted handle.
 ///
@@ -104,13 +96,21 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
     Ok(handle)
 }
 
-/// Seeds one realm: users and raw sessions.
+/// Seeds one realm: an OAuth client, users, raw sessions, and live tokens.
 async fn seed_realm(
     client: &SeedClient,
     params: &SeedParams,
     realm_index: u32,
 ) -> Result<SeededRealm, SeedError> {
-    // 1. User records (deterministic emails). No credential — populates the
+    // 1. Register a public OAuth client. Its client_id authenticates the
+    //    introspect and revoke calls during the load run. ROPC was removed by
+    //    HEA-1862 so we use authorization_code (no PKCE required; client is
+    //    public and never actually exchanges a code here — it only provides a
+    //    valid client_id for endpoint authentication). (HEA-1991)
+    let client_id = client.register_client("hearth-loadtest").await?;
+    println!("    registered OAuth client {}", &client_id[..8]);
+
+    // 2. User records (deterministic emails). No credential — populates the
     //    lookup/session-count corpus.
     let mut users = Vec::with_capacity(params.users_per_realm as usize);
     for user_index in 0..params.users_per_realm {
@@ -120,10 +120,25 @@ async fn seed_realm(
     }
     println!("    created {} users", users.len());
 
-    // 2. Create raw session records for a fraction of the seeded users via the
-    //    dev-only endpoint (HEA-1907). ROPC was removed by HEA-1862; this path
-    //    bypasses OAuth and writes session records directly to storage so that
-    //    `--sessions-frac > 0` produces a real per-session memory measurement.
+    // 3. Mint one access token per user via the dev-only endpoint (HEA-1991).
+    //    ROPC was removed by HEA-1862; POST /dev/seed-token creates a real
+    //    session + issues a signed JWT so that introspect returns active:true
+    //    and userinfo resolves a real session.
+    let mut tokens = Vec::with_capacity(users.len());
+    for user in &users {
+        let access_token = client.seed_token(&user.id).await?;
+        tokens.push(SeededToken {
+            user_email: user.email.clone(),
+            access_token,
+            revoked: false,
+        });
+    }
+    println!("    minted {} access tokens", tokens.len());
+
+    // 4. Create raw session records for a fraction of the seeded users via the
+    //    dev-only endpoint (HEA-1907). These are storage-level session IDs used
+    //    for the C0 per-session memory sweep; distinct from the token sessions
+    //    above.
     let want_sessions = params.sessions_per_realm() as usize;
     let mut sessions = Vec::with_capacity(want_sessions);
     for user in users.iter().take(want_sessions) {
@@ -139,9 +154,9 @@ async fn seed_realm(
 
     Ok(SeededRealm {
         realm_id: client.realm_id().to_string(),
-        client_id: String::new(), // ROPC client no longer registered (HEA-1862/HEA-1907)
+        client_id,
         users,
-        tokens: Vec::new(), // ROPC tokens no longer minted (HEA-1862/HEA-1907)
+        tokens,
         sessions,
     })
 }

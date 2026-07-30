@@ -2550,6 +2550,59 @@ pub(super) struct DevSeedSessionRequest {
     user_id: String,
 }
 
+/// POST /dev/seed-token — creates a session and issues an access token for the given user.
+///
+/// Dev-only: the route is registered only when the server runs with `--dev`.
+/// Used by the load-test harness to populate a live token corpus (seed step)
+/// and to mint tokens dynamically during issuance + revoke journeys, without
+/// re-introducing ROPC (removed by HEA-1862, fixed by HEA-1991).
+///
+/// Required headers: `X-Realm-ID: <realm-uuid>`
+/// Request body:  `{"user_id": "<user-uuid>"}`
+/// Response body: `{"access_token": "<jwt>"}`
+pub(super) async fn dev_seed_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DevSeedTokenRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let user_uuid = match body.user_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user_id"})),
+            )
+                .into_response()
+        }
+    };
+    let user_id = UserId::new(user_uuid);
+    let session = match state.identity.create_session(
+        &realm_id,
+        &user_id,
+        &crate::identity::SessionContext::default(),
+    ) {
+        Ok(s) => s,
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+    match state.identity.issue_tokens(&realm_id, &user_id, session.id()) {
+        Ok(tokens) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"access_token": tokens.access_token()})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DevSeedTokenRequest {
+    user_id: String,
+}
+
 /// Fixed dev-mode password for `admin@hearth.test`.
 ///
 /// Using a stable value (rather than a random one) lets the Playwright UI

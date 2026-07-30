@@ -32,7 +32,6 @@ use crate::handle::SeedHandle;
 use crate::latency::{self, LatencyExtremes};
 use crate::report::{self, LoadReport, RampStep, RunMetadata, SoakBucket, SCHEMA_VERSION};
 use crate::scenarios::{self, ContextError, LoadContext, TierMissContext, Weights};
-use crate::seed::{DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD};
 use crate::saturate;
 
 /// Run mode selecting the load profile.
@@ -524,8 +523,7 @@ async fn run_journey_modes(
     guard_run_host(&host, params.allow_remote_target)?;
 
     let context = Arc::new(
-        LoadContext::from_handle(&handle, DEV_ADMIN_EMAIL, DEV_ADMIN_PASSWORD)
-            .map_err(LoadError::Context)?,
+        LoadContext::from_handle(&handle).map_err(LoadError::Context)?,
     );
 
     // Saturate mode drives the corpus directly via Arc<LoadContext>; it does

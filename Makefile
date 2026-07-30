@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -85,9 +85,26 @@ else
 	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- $(ARGS)
 endif
 
-## Typecheck the excluded loadtest crate so it cannot silently rot out of tree.
+## Check the loadtest crate: typecheck + unit tests.
+## Unit tests cover LoadContext construction and scenario weights — a pure
+## cargo check cannot catch runtime "no live tokens" aborts (HEA-1991).
 loadtest-check:
 	PROTOC=$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo nextest run --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
+
+## Run a short loadtest smoke against a fresh dev instance (CI gate, HEA-1991).
+## Small corpus (500 users total), 20 concurrent Goose users, 15 s — enough to
+## prove the harness is alive without taking CI minutes. Corpus knobs keep
+## build+seed time short; USERS_PER_REALM=50 keeps the token pool small.
+loadtest-smoke:
+ifeq ($(strip $(ARGS)),)
+	PROTOC=$(PROTOC) USERS=20 RUN_TIME=15s \
+	  CORPUS_ACME=200 CORPUS_GLOBEX=150 CORPUS_INITECH=100 CORPUS_UMBRELLA=50 \
+	  USERS_PER_REALM=50 SEED_WAIT=120 \
+	  loadtest/scripts/run-loadtest.sh
+else
+	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- $(ARGS)
+endif
 
 ## Seed a deterministic, parameterized corpus onto a running dev Hearth and
 ## write a JSON seed-handle (HEA-1789). Requires a dev instance already running

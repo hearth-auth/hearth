@@ -1,0 +1,83 @@
+name: loadtest-smoke
+
+# PR gate that proves the load-test harness is alive (HEA-1991).
+#
+# A typecheck-only `loadtest-check` cannot catch runtime failures like
+# "no live tokens" (the root cause of HEA-1989 S3). This job runs a real
+# end-to-end smoke — build, seed, 15 s of Goose — on every PR that touches
+# the loadtest crate or the server source it exercises.
+#
+# Scale is kept deliberately small (corpus=500 users, USERS=20, 15 s) so the
+# job completes in under 5 minutes on a standard GitHub runner.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'loadtest/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/loadtest-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'loadtest/**'
+      - 'src/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  loadtest-smoke:
+    name: loadtest-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713d3210312d # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-loadtest-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-loadtest-smoke-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@375e0fe4ec286b085c48d7b9e78f66fb58ce0fcd # v2.48.5
+        with:
+          tool: nextest
+
+      - name: loadtest-check (typecheck + unit tests)
+        run: make loadtest-check
+        env:
+          PROTOC: protoc
+
+      - name: loadtest-smoke (end-to-end, small corpus)
+        run: make loadtest-smoke
+        env:
+          PROTOC: protoc

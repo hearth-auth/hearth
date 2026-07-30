@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`POST /dev/seed-token` endpoint (dev-only, HEA-1991)** — mints a real signed access
+  token for a given `user_id` (creates a session + issues a JWT via the identity engine).
+  Used by the load-test harness to populate the live token corpus and to drive issuance +
+  revoke journeys without ROPC (removed in HEA-1862). Only available when the server runs
+  with `--dev`; refused in production.
 - **Block-structured SST format (v3) with mmap + bounded block cache (HEA-1914)** — SST
   files now use a block-based on-disk format (magic `HSS3`): the data section is split
   into ~4 KiB independently-encrypted blocks with a footer block index, and readers
