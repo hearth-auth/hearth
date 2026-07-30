@@ -165,6 +165,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   HEA-1367 are unchanged — this is a copy and affordance fix only. (HEA-1913)
 
 ### Security
+- **Compaction no longer resurrects a deleted key when an input SST cannot be unlinked (HEA-1982)** —
+  both the full-merge (`compact_ssts`) and partial/size-tiered (`compact_partial`) paths
+  treated a `remove_file` failure on a merged-away input SST as warn-and-continue, then
+  called `reload_sst_readers()`, which re-opened the orphan. Because a tombstone-dropping
+  merge writes an output with no delete markers, the surviving older SST still carried the
+  pre-delete value while the merged output no longer shadowed it — so a lookup fell through
+  to the orphan and a deleted user or session came back. A runtime unlink failure is now
+  **fatal to the commit**: the merge aborts and leaves the pre-commit (tombstone-bearing)
+  reader set in place, so deleted keys stay shadowed until a retry succeeds. The unlinks are
+  also `sync_dir`-durable before the tombstone-free output becomes the sole authority,
+  shrinking (but not yet closing — a crash between the rename and the unlinks still needs a
+  compaction manifest, HEA-1857) the crash window. (HEA-1982)
 - **SST `entry_count` no longer sizes an allocation from unauthenticated bytes (HEA-1917)** —
   the SST header's `entry_count` field lies outside the AEAD and the CRC on *every* format
   version and is never validated before use, yet it was passed straight to

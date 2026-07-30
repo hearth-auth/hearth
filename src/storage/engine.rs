@@ -887,19 +887,34 @@ impl EmbeddedStorageEngine {
         // (HEA-1855).
         self.fs.sync_dir(&self.data_dir)?;
 
-        // Delete old SST files (best-effort — warn on failure). Only the merged
-        // inputs are removed; any SST a flush added *during* the merge (higher
-        // number, not in `old_sst_nums`) is left untouched.
-        for old_num in old_sst_nums {
+        // Delete the merged-away input SSTs. A failure here is FATAL to the
+        // commit. This is a full merge, so the output dropped every tombstone
+        // (`compact_with_fs`); an input that survives still carries its pre-delete
+        // value while the merged output no longer carries the shadowing tombstone,
+        // so a lookup would fall through to the orphan and resurrect a deleted key
+        // (HEA-1982). Rather than warn-and-continue — which then lets
+        // `reload_sst_readers()` re-open the orphan — abort and leave the in-memory
+        // reader set untouched, so the still-present inputs keep shadowing deleted
+        // keys until a retry succeeds. Only the merged inputs are removed; any SST
+        // a flush added *during* the merge (higher number, not in `old_sst_nums`)
+        // is left untouched.
+        for old_num in &old_sst_nums {
             let old_path = self.data_dir.join(format!("{old_num:06}.sst"));
             if let Err(e) = self.fs.remove_file(&old_path) {
-                tracing::warn!(
-                    path = %old_path.display(),
-                    error = %e,
-                    "compaction: failed to delete old SST file",
-                );
+                return Err(StorageError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "compaction: failed to unlink merged-away SST {}: {e}; aborting \
+                         commit to avoid resurrecting a deleted key (HEA-1982)",
+                        old_path.display()
+                    ),
+                )));
             }
         }
+        // Make the unlinks durable before the tombstone-free output becomes the
+        // sole on-disk authority, shrinking the crash window in which a surviving
+        // orphan could still be observed (HEA-1855 / HEA-1857).
+        self.fs.sync_dir(&self.data_dir)?;
 
         // Rematerialise the reader list from disk rather than assuming the merged
         // output is the only live SST: a flush that landed while the merge ran
@@ -948,9 +963,12 @@ impl EmbeddedStorageEngine {
     ///
     /// Same contract as [`Self::compact_ssts`]: the merge is written to a `.tmp`
     /// path and atomically renamed over the run's newest file; a crash before the
-    /// rename leaves the original files intact, and a crash after it leaves the
-    /// merged (newer) output shadowing any not-yet-deleted older run members —
-    /// harmless orphans cleaned up on the next compaction.
+    /// rename leaves the original files intact. A *runtime* unlink failure on an
+    /// older run member is fatal to the commit (see the commit phase), so a
+    /// tombstone-dropping merge can never leave a surviving orphan behind a
+    /// tombstone-free output. A crash landing between the rename and the unlinks
+    /// can still leave such an orphan on disk; closing that window durably needs a
+    /// compaction manifest (HEA-1857).
     ///
     /// Serializes against other compactions via the compaction lock; `flush_lock`
     /// (which writers contend on) is held only for the brief commit phase, never
@@ -1040,18 +1058,30 @@ impl EmbeddedStorageEngine {
         self.fs.rename(&tmp_path, &final_path)?;
         self.fs.sync_dir(&self.data_dir)?;
 
-        // Delete the other (older) run members. Best-effort: a leftover is a
-        // harmless orphan shadowed by the merged output.
+        // Delete the other (older) run members. A failure here is FATAL to the
+        // commit. When `drop_tombstones` was set (the run reached the oldest SST)
+        // the merged output carries no delete markers, so an older run member that
+        // survives would resurrect a deleted key on the next reload (HEA-1982);
+        // warn-and-continue then let `reload_sst_readers()` re-open that orphan.
+        // Aborting instead leaves the pre-commit reader set in place, so the
+        // original (tombstone-bearing) run members keep shadowing deleted keys
+        // until a retry succeeds.
         for old_num in &other_nums {
             let old_path = self.data_dir.join(format!("{old_num:06}.sst"));
             if let Err(e) = self.fs.remove_file(&old_path) {
-                tracing::warn!(
-                    path = %old_path.display(),
-                    error = %e,
-                    "partial compaction: failed to delete merged-in SST file",
-                );
+                return Err(StorageError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "partial compaction: failed to unlink merged-in SST {}: {e}; aborting \
+                         commit to avoid resurrecting a deleted key (HEA-1982)",
+                        old_path.display()
+                    ),
+                )));
             }
         }
+        // Make the unlinks durable before the merged output becomes the sole
+        // authority for the run's key band (HEA-1855 / HEA-1857).
+        self.fs.sync_dir(&self.data_dir)?;
 
         // Rematerialise the reader list from disk (newest-first). The merged file
         // now sits at `target_num`, exactly where the run's newest member was.
@@ -2476,6 +2506,200 @@ mod tests {
                 Some(format!("val-{i:04}").into_bytes()),
             );
         }
+    }
+
+    /// A [`Fs`] decorator that makes every `*.sst` `remove_file` fail with
+    /// `PermissionDenied`, emulating a compaction unlink that cannot retire a
+    /// merged-away input SST (a full disk, a read-only mount, or a crash landing
+    /// between the rename and the unlinks). Every other operation delegates
+    /// straight to [`RealFs`], so real files, mmaps, and fsyncs behave exactly as
+    /// in production. Used to prove a failed unlink cannot resurrect a deleted key
+    /// (HEA-1982).
+    struct UnlinkFailFs {
+        inner: RealFs,
+    }
+
+    impl crate::storage::fs::Fs for UnlinkFailFs {
+        fn open_append(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_append(path)
+        }
+
+        fn create(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.create(path)
+        }
+
+        fn open_read(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+
+        fn map_readonly(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<crate::storage::fs::FileBacking> {
+            self.inner.map_readonly(path)
+        }
+
+        fn write(&self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+
+        fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            if path.extension().is_some_and(|e| e == "sst") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected unlink failure",
+                ));
+            }
+            self.inner.remove_file(path)
+        }
+
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+
+        fn sync_dir(&self, dir: &std::path::Path) -> std::io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    /// HEA-1982 — a **full** compaction that cannot unlink a merged-away input SST
+    /// MUST NOT resurrect a deleted key. The full merge drops tombstones, so if the
+    /// old value-bearing SST survives while the merged output no longer carries the
+    /// tombstone, a lookup falls through to the orphan and the deleted key comes
+    /// back. The unlink failure must instead abort the commit and leave the
+    /// tombstone-bearing reader set in place.
+    #[test]
+    fn full_compaction_unlink_failure_keeps_deleted_key_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.compaction = CompactionConfig {
+            enabled: false,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 4,
+        };
+        let engine =
+            EmbeddedStorageEngine::open_with_fs(config, Arc::new(UnlinkFailFs { inner: RealFs }))
+                .expect("open");
+
+        // doomed=value in the oldest SST, its tombstone in a newer SST, plus a live
+        // key so the merge has real content and there are >= 2 SSTs to compact.
+        engine
+            .put(&realm, b"doomed", b"secret")
+            .expect("put doomed");
+        engine.trigger_flush().expect("flush 1");
+        engine.delete(&realm, b"doomed").expect("delete doomed");
+        engine.trigger_flush().expect("flush 2");
+        engine.put(&realm, b"live", b"present").expect("put live");
+        engine.trigger_flush().expect("flush 3");
+
+        // Baseline: the delete is visible before compaction.
+        assert_eq!(
+            engine.get(&realm, b"doomed").expect("get"),
+            None,
+            "doomed must read as deleted before compaction"
+        );
+
+        // The compaction merges + drops tombstones, then fails to unlink the old
+        // inputs. That failure MUST be fatal to the commit.
+        let err = engine.compact_ssts(2);
+        assert!(
+            err.is_err(),
+            "compaction must fail the commit when an input SST cannot be unlinked"
+        );
+
+        // The deleted key must STAY deleted — no resurrection from the un-unlinked
+        // value-bearing input SST.
+        assert_eq!(
+            engine
+                .get(&realm, b"doomed")
+                .expect("get after failed compaction"),
+            None,
+            "a failed unlink must not resurrect the deleted key"
+        );
+        // The live key must still be reachable.
+        assert_eq!(
+            engine.get(&realm, b"live").expect("get live"),
+            Some(b"present".to_vec()),
+            "live key must survive the failed compaction"
+        );
+    }
+
+    /// HEA-1982 — the same guarantee for the **partial** (size-tiered) path. When
+    /// the selected run reaches the oldest SST the merge drops tombstones; a
+    /// surviving older run member would then resurrect a deleted key. Two same-size
+    /// SSTs (value, then tombstone) form a `merge_min = 2` run that reaches the
+    /// oldest, and the older member's unlink is injected to fail.
+    #[test]
+    fn partial_compaction_unlink_failure_keeps_deleted_key_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.compaction = CompactionConfig {
+            enabled: true,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 8,
+            merge_min: 2,
+        };
+        let engine =
+            EmbeddedStorageEngine::open_with_fs(config, Arc::new(UnlinkFailFs { inner: RealFs }))
+                .expect("open");
+
+        // SST0 (oldest): doomed=value. SST1 (newest): doomed=tombstone. Both hold a
+        // single entry, so they share a size tier and form one mergeable run whose
+        // end is the oldest SST => the merge drops the tombstone.
+        engine
+            .put(&realm, b"doomed", b"secret")
+            .expect("put doomed");
+        engine.trigger_flush().expect("flush 1");
+        engine.delete(&realm, b"doomed").expect("delete doomed");
+        engine.trigger_flush().expect("flush 2");
+
+        assert_eq!(
+            engine.get(&realm, b"doomed").expect("get"),
+            None,
+            "doomed must read as deleted before compaction"
+        );
+
+        let err = engine.compact_partial();
+        assert!(
+            err.is_err(),
+            "partial compaction must fail the commit when a run member cannot be unlinked"
+        );
+
+        assert_eq!(
+            engine
+                .get(&realm, b"doomed")
+                .expect("get after failed compaction"),
+            None,
+            "a failed unlink must not resurrect the deleted key in the partial path"
+        );
     }
 
     /// Counts `*.sst` files (ignoring `.tmp`) in a data directory.
