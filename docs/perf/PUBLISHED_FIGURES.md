@@ -80,9 +80,9 @@ document depends on relaxed durability.
 
 | ID | Operation | **Plane** | p50 | p99 | Concurrency | Host | Artifact · SHA | Reproduced at HEAD? |
 |----|-----------|-----------|-----|-----|-------------|------|----------------|---------------------|
-| **L1** | `validate_token` (hot tier) | **engine** | **1.31 µs** | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD measured 0.779–0.795 µs (1.65–1.69× faster), 2.0% spread across 2 samples |
+| **L1** | `validate_token` (hot tier) | **engine** | **1.31 µs** | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD measured 0.779–0.795 µs (1.65–1.69× faster); 2 samples only — see §4.2 methodology note |
 | **L1-H** | `validate_token` + user fetch → `GET /userinfo` | **HTTP** | **50.1 µs** | 153.7 µs | T=1 | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ⚠️ **not reproduced** — see §4.1 |
-| **L2** | Session lookup (hot tier) | **engine** | **0.118 µs** | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD 0.0678–0.0693 µs, 2.2% spread |
+| **L2** | Session lookup (hot tier) | **engine** | **0.118 µs** | — | T=1 | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD 0.0678–0.0693 µs; 2 samples only — see §4.2 methodology note |
 | **L2-H** | Session lookup over HTTP | **HTTP** | *no endpoint exists* | — | — | — | — | n/a — exercised only inside L1-H |
 | **L5** | `lookup_user` (hot tier) | **engine** | ⛔ **WITHDRAWN** | — | T=1 | dev-ryzen-7840hs | `hea1967-c7-saturation-sample{1,2}-raw.json` · `1b6b7745` | ❌ **failed to reproduce — 236% spread.** See §4.2 |
 | **L9** | `introspect_token` (RFC 7662) | **engine** | **44.0 µs** | — | T=1 | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ✅ **exceeded** — HEAD 39.2 µs |
@@ -103,11 +103,11 @@ throughput advantage or disadvantage without that context.
 
 | ID | Operation | **Plane** | Single-thread | Peak | Scaling exponent | Durability | Host | Artifact · SHA | Reproduced at HEAD? |
 |----|-----------|-----------|---------------|------|------------------|------------|------|----------------|---------------------|
-| **T1** | `validate_token` (hot) | **engine** | **760,877 /core/s** | **9,409,220 /s** @16T | +0.889 | n/a (read) | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD 1,257,784–1,283,112 /core; 12.39 M @16T |
+| **T1** | `validate_token` (hot) | **engine** | **760,877 /core/s** | **9,409,220 /s** @16T | +0.889 | n/a (read) | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — 10-run range 830,013–1,338,873 /core (~61%); 2-sample mid-session: 1,257,784–1,283,112; see §4.2 |
 | **T1-H** | → `GET /userinfo` | **HTTP** | **16,642 /s** @T=1 | **106,641 /s** @T=32 | — | n/a | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ⚠️ **not reproduced** at T≤8; **exceeded** at T=32 (142,426 /s). See §4.1 |
-| **T3** | Permission check | **engine** | **5,987,782 /core/s** | **52,048,086 /s** @16T | +0.796 | n/a (read) | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — HEAD 11.39–12.45 M /core (9.3% spread) |
+| **T3** | Permission check | **engine** | **5,987,782 /core/s** | **52,048,086 /s** @16T | +0.796 | n/a (read) | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — 10-run range 10.9–13.7 M /core (~25%); 2-sample: 11.39–12.45 M /core; see §4.2 |
 | **T3-H** | Permission check over HTTP | — | *not on the HTTP surface by design* | — | — | — | — | — | n/a — permissions are embedded in the JWT at issue time |
-| **T4** | Session creation (durable) | **engine** | **484 /s** @T=1 | **41,255 /s** @T=256 | +0.851 | **fsync-before-ack, `W`=1.000** | dev-ryzen-7840hs | `c7-saturation-post-hea1959-sample2-raw.json` · `873263d0` | ✅ **exceeded** — HEAD 47,215–47,978 /s @T=256, 1.6% spread |
+| **T4** | Session creation (durable) | **engine** | **484 /s** @T=1 | **41,255 /s** @T=256 | +0.851 | **fsync-before-ack, `W`=1.000** | dev-ryzen-7840hs | `c7-saturation-post-hea1959-sample2-raw.json` · `873263d0` | ✅ **exceeded** — 10-run range 30,466–48,648 /s @T=256 (~60%); 2-sample mid-session: 47,215–47,978 /s; see §4.2 |
 | **T4-H** | Session creation over HTTP | — | *no end-to-end counterpart exists* | — | — | — | — | — | n/a — no single endpoint isolates it |
 | **T5** | Password login, end-to-end | **HTTP** | **49 /s** @T=1 | **185 /s** @T=8 | — | durable session create included | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ✅ **reproduced** — HEAD 51 /s @T=1, 215 /s @T=8 |
 | **L9-T** | `introspect_token` | **engine** | **21,802 /s** @T=1 | **125,613 /s** @T=32 | — | n/a | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ✅ **exceeded** — HEAD 24,664 /s @T=1 |
@@ -290,9 +290,17 @@ Two back-to-back C7 samples at HEAD, same binary, nothing changed between them:
 | HEA-1967 sample 2 | **0.2296 µs** |
 | **Spread across samples** | **236.6%** |
 
-For context, every other metric from the *same two runs* held tight: `session_create`
-1.6%, `validate_token` 2.0%, `session_lookup` 2.2%, device fsync rate 2.6%,
-`permission_check` 9.3%. L5 is an outlier by two orders of magnitude in stability.
+For context from the *same two runs*: `session_create` 1.6%, `validate_token` 2.0%,
+`session_lookup` 2.2%, device fsync rate 2.6%, `permission_check` 9.3%. **These n=2
+mid-session figures understate true run-to-run variance by ~30×.** A subsequent 10-run
+alternating A/B sweep (5 runs each, 2026-07-30) measured `validate_token`
+830,013–1,338,873 /core (~61%), `session_create` 30,466–48,648 /s (~60%), and
+`permission_check` 10.9–13.7 M /core (~25%). The cause is a monotonic warm-up ramp
+across a benchmarking session: two consecutive samples taken mid-session agree closely
+and give false precision. **A spread computed from fewer than 5 runs on
+`dev-ryzen-7840hs` is not a variance estimate.** L5 remains an outlier relative to
+these corrected baselines, though by a narrower margin (~3–4× in stability, not two
+orders of magnitude).
 
 The 2.1a value sits between the two samples, so this is **not evidence of a
 regression** — it is evidence that **L5 was never a stable point measurement.** It
