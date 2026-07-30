@@ -22,6 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
 ### Changed
+- **`security.password.kdf.max_queue_wait_ms: 0` is now rejected at startup (HEA-1984)** —
+  a `0` ms shared-pool queue-wait sheds every *contended* login with `503` while reading
+  like a valid tuning value. It now fails config validation with a message naming the key,
+  matching the existing rejection of `admin_max_queue_wait_ms: 0`. Omit the key to default
+  to 250 ms. (HEA-1984)
 - **WAL commit path: `fdatasync` + batched writes + O(1) commit signalling (HEA-1959)** —
   the group-commit leader now issues one `write_all` per batch instead of three syscalls
   per entry, expands the AES-256-GCM key schedule once per batch instead of once per

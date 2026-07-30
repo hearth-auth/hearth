@@ -523,12 +523,13 @@ impl Config {
 }
 
 impl SecurityYaml {
-    /// Validates `security.password.kdf`, rejecting `max_in_flight: 0`.
+    /// Validates `security.password.kdf`, rejecting any `0` bound or queue-wait.
     ///
     /// An explicit bound of `0` would produce a gate that admits no Argon2id
-    /// work — every login would shed with `503`. That is never intended, so it
-    /// is a config error rather than a silent clamp. `null`/absent is valid and
-    /// resolves to the core count at boot.
+    /// work — every login would shed with `503`. A queue-wait of `0` ms sheds
+    /// every *contended* login. Neither is ever intended, so both are config
+    /// errors rather than silent clamps. `null`/absent is valid and resolves to
+    /// the documented default at boot (core count / 250 ms).
     pub fn validate_kdf_admission(&self) -> Result<(), ConfigError> {
         if self.password.kdf.max_in_flight == Some(0) {
             return Err(invalid(
@@ -542,6 +543,13 @@ impl SecurityYaml {
                 "security.password.kdf.admin_max_in_flight",
                 "must be >= 1 (a bound of 0 would shed every admin login); \
                  omit the key to default to the small reserved admin pool",
+            ));
+        }
+        if self.password.kdf.max_queue_wait_ms == 0 {
+            return Err(invalid(
+                "security.password.kdf.max_queue_wait_ms",
+                "must be >= 1 (a 0 ms wait would shed every contended login with 503); \
+                 omit the key to default to 250 ms",
             ));
         }
         if self.password.kdf.admin_max_queue_wait_ms == Some(0) {
