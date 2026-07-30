@@ -19,13 +19,27 @@ const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 
 const KDF_SHED_BODY = `<!doctype html>
 <html><head><meta charset="utf-8"></head><body>
-<div data-testid="kdf-shed-retry-form">
+<div>
   <form method="post" action="/ui/login" data-testid="kdf-shed-retry-form">
     <input type="hidden" name="_csrf" value="mock-csrf">
     <input type="hidden" name="email" value="alice@example.com">
     <button type="submit" data-testid="kdf-shed-retry-button">Try again</button>
   </form>
 </div>
+</body></html>`;
+
+// Minimal login form served for the GET of the intercepted login route. Bare
+// `/ui/login` returns 400 with no form in multi-realm mode (no default realm),
+// so the test cannot rely on the real page to expose the fields it submits.
+// The whole test is mock-based (the 503 body is fabricated too), so providing
+// the trigger form here keeps the assertion — themed-HTML shed on POST — intact.
+const LOGIN_FORM_BODY = `<!doctype html>
+<html><head><meta charset="utf-8"></head><body>
+  <form method="post">
+    <input name="email" type="email">
+    <input name="password" type="password">
+    <button type="submit">Sign in</button>
+  </form>
 </body></html>`;
 
 test.describe('KDF shed — themed HTML 503 (HEA-1979)', () => {
@@ -41,7 +55,13 @@ test.describe('KDF shed — themed HTML 503 (HEA-1979)', () => {
           body: KDF_SHED_BODY,
         });
       } else {
-        await route.continue();
+        // Serve a self-contained login form so the trigger fields exist
+        // regardless of the server's realm configuration.
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/html; charset=utf-8',
+          body: LOGIN_FORM_BODY,
+        });
       }
     });
 

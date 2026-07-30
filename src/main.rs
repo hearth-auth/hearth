@@ -2099,9 +2099,7 @@ async fn run_serve(
              and weakened Argon2 parameters — exposing them on a routable interface \
              is a critical security risk. Use --bind 127.0.0.1 or --bind ::1."
         );
-        return Err(
-            "dev mode: refusing to start with non-loopback bind address".into(),
-        );
+        return Err("dev mode: refusing to start with non-loopback bind address".into());
     }
 
     let load_test_unthrottled = match loadtest_unthrottle_decision(
