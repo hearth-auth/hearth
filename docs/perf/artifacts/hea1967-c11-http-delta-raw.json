@@ -1,0 +1,483 @@
+{
+  "admissibility": {
+    "min_generator_headroom": 2.0,
+    "min_ok_pct": 99.0,
+    "rule": "nothing graded on a run whose ceiling attribution was the generator"
+  },
+  "argon2id": {
+    "memory_cost_kib": 19456,
+    "note": "production CredentialConfig::default(), NOT fast_for_testing()",
+    "parallelism": 1,
+    "time_cost": 2
+  },
+  "axis": "C11 — end-to-end HTTP delta",
+  "corpus": {
+    "login_users": 32,
+    "users": 256,
+    "warm_sessions": 1024
+  },
+  "deltas": [
+    {
+      "added_latency_p50_us": 180.599,
+      "engine_op": "introspect_token",
+      "engine_ops_per_sec": 24663.81444778371,
+      "engine_p50_us": 39.214,
+      "engine_p99_us": 57.849,
+      "generator_headroom": 19.697543953432366,
+      "http_op": "introspect",
+      "http_ops_per_sec": 3240.9286315106056,
+      "http_p50_us": 219.813,
+      "http_p99_us": 2339.912,
+      "threads": 1,
+      "throughput_delta_ratio": 7.610107241481537,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": 296.70799999999997,
+      "engine_op": "introspect_token",
+      "engine_ops_per_sec": 145526.34313604212,
+      "engine_p50_us": 50.415,
+      "engine_p99_us": 87.265,
+      "generator_headroom": 22.516212186153002,
+      "http_op": "introspect",
+      "http_ops_per_sec": 15403.669884919302,
+      "http_p50_us": 347.123,
+      "http_p99_us": 3097.837,
+      "threads": 8,
+      "throughput_delta_ratio": 9.44751115956576,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": 812.389,
+      "engine_op": "introspect_token",
+      "engine_ops_per_sec": 160421.57253962883,
+      "engine_p50_us": 92.864,
+      "engine_p99_us": 3551.342,
+      "generator_headroom": 17.91964388154757,
+      "http_op": "introspect",
+      "http_ops_per_sec": 31413.982794732554,
+      "http_p50_us": 905.253,
+      "http_p99_us": 3511.255,
+      "threads": 32,
+      "throughput_delta_ratio": 5.106693206903012,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": 77.846,
+      "engine_op": "validate_token+get_user",
+      "engine_ops_per_sec": 951949.63980587,
+      "engine_p50_us": 0.952,
+      "engine_p99_us": 2.314,
+      "generator_headroom": 6.672822406958174,
+      "http_op": "userinfo",
+      "http_ops_per_sec": 9566.916407448412,
+      "http_p50_us": 78.798,
+      "http_p99_us": 737.207,
+      "threads": 1,
+      "throughput_delta_ratio": 99.50433339887037,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": 64.953,
+      "engine_op": "validate_token+get_user",
+      "engine_ops_per_sec": 5436620.889741174,
+      "engine_p50_us": 1.362,
+      "engine_p99_us": 2.004,
+      "generator_headroom": 6.597876273361245,
+      "http_op": "userinfo",
+      "http_ops_per_sec": 52567.26334421038,
+      "http_p50_us": 66.315,
+      "http_p99_us": 1995.514,
+      "threads": 8,
+      "throughput_delta_ratio": 103.42217844102301,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": 203.552,
+      "engine_op": "validate_token+get_user",
+      "engine_ops_per_sec": 7282435.955279143,
+      "engine_p50_us": 1.894,
+      "engine_p99_us": 2.355,
+      "generator_headroom": 3.952424305566512,
+      "http_op": "userinfo",
+      "http_ops_per_sec": 142425.84830526792,
+      "http_p50_us": 205.446,
+      "http_p99_us": 822.768,
+      "threads": 32,
+      "throughput_delta_ratio": 51.13142060892177,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": 3157.540000000001,
+      "engine_op": "verify_password+create_session",
+      "engine_ops_per_sec": 56.998828503077775,
+      "engine_p50_us": 16431.143,
+      "engine_p99_us": 29808.701,
+      "generator_headroom": 1259.9946633802138,
+      "http_op": "login",
+      "http_ops_per_sec": 50.66555916820881,
+      "http_p50_us": 19588.683,
+      "http_p99_us": 22355.577,
+      "threads": 1,
+      "throughput_delta_ratio": 1.1250014692198032,
+      "verdict": "ADMISSIBLE"
+    },
+    {
+      "added_latency_p50_us": -7231.092000000004,
+      "engine_op": "verify_password+create_session",
+      "engine_ops_per_sec": 161.6239284512663,
+      "engine_p50_us": 43994.006,
+      "engine_p99_us": 150939.401,
+      "generator_headroom": 1615.71479062692,
+      "http_op": "login",
+      "http_ops_per_sec": 214.6618336270365,
+      "http_p50_us": 36762.914,
+      "http_p99_us": 50617.851,
+      "threads": 8,
+      "throughput_delta_ratio": 0.7529234504354383,
+      "verdict": "ADMISSIBLE"
+    }
+  ],
+  "engine": [
+    {
+      "cells": [
+        {
+          "ok": 73993,
+          "ok_pct": 100.0,
+          "ops_per_sec": 24663.81444778371,
+          "p50_us": 39.214,
+          "p99_us": 57.849,
+          "samples": 73993,
+          "statuses": [],
+          "threads": 1
+        },
+        {
+          "ok": 436589,
+          "ok_pct": 100.0,
+          "ops_per_sec": 145526.34313604212,
+          "p50_us": 50.415,
+          "p99_us": 87.265,
+          "samples": 436589,
+          "statuses": [],
+          "threads": 8
+        },
+        {
+          "ok": 481275,
+          "ok_pct": 100.0,
+          "ops_per_sec": 160421.57253962883,
+          "p50_us": 92.864,
+          "p99_us": 3551.342,
+          "samples": 481275,
+          "statuses": [],
+          "threads": 32
+        }
+      ],
+      "op": "introspect_token"
+    },
+    {
+      "cells": [
+        {
+          "ok": 2855917,
+          "ok_pct": 100.0,
+          "ops_per_sec": 951949.63980587,
+          "p50_us": 0.952,
+          "p99_us": 2.314,
+          "samples": 2855917,
+          "statuses": [],
+          "threads": 1
+        },
+        {
+          "ok": 16310198,
+          "ok_pct": 100.0,
+          "ops_per_sec": 5436620.889741174,
+          "p50_us": 1.362,
+          "p99_us": 2.004,
+          "samples": 16310198,
+          "statuses": [],
+          "threads": 8
+        },
+        {
+          "ok": 21912244,
+          "ok_pct": 100.0,
+          "ops_per_sec": 7282435.955279143,
+          "p50_us": 1.894,
+          "p99_us": 2.355,
+          "samples": 21912244,
+          "statuses": [],
+          "threads": 32
+        }
+      ],
+      "op": "validate_token+get_user"
+    },
+    {
+      "cells": [
+        {
+          "ok": 171,
+          "ok_pct": 100.0,
+          "ops_per_sec": 56.998828503077775,
+          "p50_us": 16431.143,
+          "p99_us": 29808.701,
+          "samples": 171,
+          "statuses": [],
+          "threads": 1
+        },
+        {
+          "ok": 485,
+          "ok_pct": 100.0,
+          "ops_per_sec": 161.6239284512663,
+          "p50_us": 43994.006,
+          "p99_us": 150939.401,
+          "samples": 485,
+          "statuses": [],
+          "threads": 8
+        }
+      ],
+      "op": "verify_password+create_session"
+    }
+  ],
+  "excluded_from_measurement": [
+    "TLS termination",
+    "physical network / NIC / RTT (loopback only)",
+    "client-server core isolation (co-resident, bounded by the null calibration)"
+  ],
+  "generator_calibration_null": [
+    {
+      "ok": 191519,
+      "ok_pct": 100.0,
+      "ops_per_sec": 63838.33416911756,
+      "p50_us": 13.856,
+      "p99_us": 31.629,
+      "samples": 191519,
+      "statuses": [
+        {
+          "count": 191519,
+          "status": 200
+        }
+      ],
+      "threads": 1
+    },
+    {
+      "ok": 1040518,
+      "ok_pct": 100.0,
+      "ops_per_sec": 346832.29957429797,
+      "p50_us": 21.371,
+      "p99_us": 42.59,
+      "samples": 1040518,
+      "statuses": [
+        {
+          "count": 1040518,
+          "status": 200
+        }
+      ],
+      "threads": 8
+    },
+    {
+      "ok": 1688822,
+      "ok_pct": 100.0,
+      "ops_per_sec": 562927.3845826699,
+      "p50_us": 38.903,
+      "p99_us": 230.364,
+      "samples": 1688822,
+      "statuses": [
+        {
+          "count": 1688822,
+          "status": 200
+        }
+      ],
+      "threads": 32
+    }
+  ],
+  "harness": "examples/http_delta.rs",
+  "http": [
+    {
+      "cells": [
+        {
+          "ok": 59962,
+          "ok_pct": 100.0,
+          "ops_per_sec": 19986.8683721521,
+          "p50_us": 44.955,
+          "p99_us": 97.263,
+          "samples": 59962,
+          "statuses": [
+            {
+              "count": 59962,
+              "status": 200
+            }
+          ],
+          "threads": 1
+        },
+        {
+          "ok": 79387,
+          "ok_pct": 100.0,
+          "ops_per_sec": 26461.788573312573,
+          "p50_us": 133.0,
+          "p99_us": 1951.821,
+          "samples": 79387,
+          "statuses": [
+            {
+              "count": 79387,
+              "status": 200
+            }
+          ],
+          "threads": 8
+        },
+        {
+          "ok": 156846,
+          "ok_pct": 100.0,
+          "ops_per_sec": 52280.85811635093,
+          "p50_us": 438.956,
+          "p99_us": 3383.485,
+          "samples": 156846,
+          "statuses": [
+            {
+              "count": 156846,
+              "status": 200
+            }
+          ],
+          "threads": 32
+        }
+      ],
+      "op": "healthz"
+    },
+    {
+      "cells": [
+        {
+          "ok": 9723,
+          "ok_pct": 100.0,
+          "ops_per_sec": 3240.9286315106056,
+          "p50_us": 219.813,
+          "p99_us": 2339.912,
+          "samples": 9723,
+          "statuses": [
+            {
+              "count": 9723,
+              "status": 200
+            }
+          ],
+          "threads": 1
+        },
+        {
+          "ok": 46214,
+          "ok_pct": 100.0,
+          "ops_per_sec": 15403.669884919302,
+          "p50_us": 347.123,
+          "p99_us": 3097.837,
+          "samples": 46214,
+          "statuses": [
+            {
+              "count": 46214,
+              "status": 200
+            }
+          ],
+          "threads": 8
+        },
+        {
+          "ok": 94244,
+          "ok_pct": 100.0,
+          "ops_per_sec": 31413.982794732554,
+          "p50_us": 905.253,
+          "p99_us": 3511.255,
+          "samples": 94244,
+          "statuses": [
+            {
+              "count": 94244,
+              "status": 200
+            }
+          ],
+          "threads": 32
+        }
+      ],
+      "op": "introspect"
+    },
+    {
+      "cells": [
+        {
+          "ok": 28710,
+          "ok_pct": 100.0,
+          "ops_per_sec": 9566.916407448412,
+          "p50_us": 78.798,
+          "p99_us": 737.207,
+          "samples": 28710,
+          "statuses": [
+            {
+              "count": 28710,
+              "status": 200
+            }
+          ],
+          "threads": 1
+        },
+        {
+          "ok": 157705,
+          "ok_pct": 100.0,
+          "ops_per_sec": 52567.26334421038,
+          "p50_us": 66.315,
+          "p99_us": 1995.514,
+          "samples": 157705,
+          "statuses": [
+            {
+              "count": 157705,
+              "status": 200
+            }
+          ],
+          "threads": 8
+        },
+        {
+          "ok": 427292,
+          "ok_pct": 100.0,
+          "ops_per_sec": 142425.84830526792,
+          "p50_us": 205.446,
+          "p99_us": 822.768,
+          "samples": 427292,
+          "statuses": [
+            {
+              "count": 427292,
+              "status": 200
+            }
+          ],
+          "threads": 32
+        }
+      ],
+      "op": "userinfo"
+    },
+    {
+      "cells": [
+        {
+          "ok": 152,
+          "ok_pct": 100.0,
+          "ops_per_sec": 50.66555916820881,
+          "p50_us": 19588.683,
+          "p99_us": 22355.577,
+          "samples": 152,
+          "statuses": [
+            {
+              "count": 152,
+              "status": 303
+            }
+          ],
+          "threads": 1
+        },
+        {
+          "ok": 644,
+          "ok_pct": 100.0,
+          "ops_per_sec": 214.6618336270365,
+          "p50_us": 36762.914,
+          "p99_us": 50617.851,
+          "samples": 644,
+          "statuses": [
+            {
+              "count": 644,
+              "status": 303
+            }
+          ],
+          "threads": 8
+        }
+      ],
+      "op": "login"
+    }
+  ],
+  "issue": "HEA-1957",
+  "measure_window_secs": 3,
+  "physical_cores_visible": 16,
+  "server_tokio_worker_threads": 8,
+  "warmup_ms": 400
+}
