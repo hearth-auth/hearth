@@ -467,12 +467,14 @@ JWT issuance parameters.
 | `audience` | string | `oidc.issuer` | The `aud` claim value. Defaults to `oidc.issuer` when omitted. Override only if your resource server expects a different audience (e.g. a separate API gateway URL). |
 | `access_token_ttl` | duration | `"15m"` | Access token lifetime. |
 | `refresh_token_ttl` | duration | `"7d"` | Refresh token lifetime. |
+| `claims_cache_max` | integer | `65536` | Maximum entries in the in-process token-claims cache on the `validate_token` hot path. A cache hit skips the Ed25519 verify + JSON parse. The cache is TTL-aware and evicts expired, then soonest-to-expire, entries once full (rather than refusing inserts), so the fast path stays reachable in steady state. Size this to the expected number of distinct access tokens validated concurrently; values are clamped to at least `1`. |
 
 ```yaml
 token:
   audience: "my-app"
   access_token_ttl: "30m"
   refresh_token_ttl: "14d"
+  claims_cache_max: 131072
 ```
 
 ### `auth`

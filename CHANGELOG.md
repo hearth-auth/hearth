@@ -26,6 +26,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   remain readable via the eager path; new writes and compaction output are v3. Greenfield
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
+### Fixed
+- **Token-claims cache now evicts instead of refusing inserts at capacity (HEA-1990)** —
+  the in-process cache that lets `validate_token` skip the Ed25519 verify + JSON parse
+  previously stopped accepting new tokens once it filled (hardcoded 2048 entries) and had
+  no eviction or TTL sweep. The first N distinct tokens after boot held their slots for the
+  process lifetime; once they expired (≤ 15 min at the default access-token TTL) the cache
+  became permanently-dead entries and the steady-state hit rate converged to zero, so the
+  fast path was unreachable in production. The cache is now TTL-aware and, when full, evicts
+  expired entries then the soonest-to-expire ones so an insert always **replaces** rather
+  than being dropped. Its capacity is configurable via the new **`token.claims_cache_max`**
+  key (default 65,536, up from the fixed 2,048) — size it to the expected concurrent
+  access-token working set. Hot-path reads remain wait-free and zero-allocation. (HEA-1990)
+
 ### Changed
 - **`security.password.kdf.max_queue_wait_ms: 0` is now rejected at startup (HEA-1984)** —
   a `0` ms shared-pool queue-wait sheds every *contended* login with `503` while reading

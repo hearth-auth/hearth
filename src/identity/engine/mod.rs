@@ -208,9 +208,6 @@ const CLOCK_SKEW_SECS: i64 = 60;
 /// Maximum entries in the in-process session cache (S12-F1).
 const SESSION_CACHE_MAX: usize = 4096;
 
-/// Maximum entries in the in-process token claims cache (S12-F2).
-const TOKEN_CLAIMS_CACHE_MAX: usize = 2048;
-
 /// Persisted state for a pending email-verification token.
 ///
 /// Stored under `email:verify:{sha256_hex_of_token}`. The plaintext
@@ -724,7 +721,8 @@ pub struct EmbeddedIdentityEngine {
     /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
     /// Eliminates `serde_json` allocation for repeated validations of the same
     /// access token. Hot-path readers call `load()`. Bounded to
-    /// [`TOKEN_CLAIMS_CACHE_MAX`].
+    /// `config.token.claims_cache_max`; a full cache evicts expired then
+    /// soonest-to-expire entries rather than refusing inserts (HEA-1990).
     token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
     /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
     ///
@@ -3354,15 +3352,62 @@ impl EmbeddedIdentityEngine {
         digest.as_ref().try_into().ok()
     }
 
-    /// Inserts parsed claims into the token claims cache.
+    /// Inserts parsed claims into the token claims cache, evicting to stay
+    /// within `config.token.claims_cache_max` (HEA-1990).
     ///
-    /// Silently skips at capacity.
+    /// This runs only on a cache **miss**, which already performed the Ed25519
+    /// verify + `serde_json` parse — it is off the zero-allocation hot path, so
+    /// the O(n) rebuild and eviction scan here are acceptable. The hot-path
+    /// read (`validate_token`) is unchanged: one wait-free `ArcSwap::load` plus
+    /// an `Arc` refcount bump.
+    ///
+    /// Eviction policy when the cache is full:
+    /// 1. Drop every entry whose access-token `exp` is at or before now (a TTL
+    ///    sweep — dead JWTs never hold a slot for the process lifetime).
+    /// 2. If still at capacity, evict the soonest-to-expire remaining entries.
+    ///    Those have the least remaining life and are the least likely to be
+    ///    re-validated, approximating a clock/LRU policy without any hot-path
+    ///    write to track recency.
+    ///
+    /// The result is that a full cache always *replaces* rather than refusing
+    /// inserts, so the steady-state hit rate no longer collapses to zero once
+    /// the first `claims_cache_max` distinct tokens have been seen.
     fn token_claims_cache_insert(&self, key: [u8; 32], claims: Arc<TokenClaims>) {
-        if self.token_claims_cache.load().len() >= TOKEN_CLAIMS_CACHE_MAX {
-            return;
-        }
+        let max = self.config.token.claims_cache_max.max(1);
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
         self.token_claims_cache.rcu(|map| {
-            let mut m = HashMap::clone(map);
+            // Fast path: room to spare, or we are updating an existing key.
+            if map.len() < max || map.contains_key(&key) {
+                let mut m = HashMap::clone(map);
+                m.insert(key, Arc::clone(&claims));
+                return m;
+            }
+
+            // Full: rebuild without expired entries (TTL sweep).
+            let mut m: HashMap<[u8; 32], Arc<TokenClaims>> = map
+                .iter()
+                .filter(|(_, v)| v.exp > now_secs)
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect();
+
+            // Still full after the sweep: evict the soonest-to-expire entries.
+            if m.len() >= max {
+                let overflow = m.len() - max + 1;
+                let mut exps: Vec<i64> = m.values().map(|v| v.exp).collect();
+                // `overflow <= m.len()`, so `overflow - 1` is a valid index.
+                exps.select_nth_unstable(overflow - 1);
+                let threshold = exps[overflow - 1];
+                let mut removed = 0usize;
+                m.retain(|_, v| {
+                    if removed < overflow && v.exp <= threshold {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+
             m.insert(key, Arc::clone(&claims));
             m
         });
@@ -17920,6 +17965,136 @@ mod tests {
         assert!(
             matches!(err, IdentityError::InvalidToken),
             "expected InvalidToken, got {err:?}"
+        );
+    }
+
+    /// Builds an engine whose token-claims cache is capped at `max` entries,
+    /// so eviction behaviour is exercised without minting tens of thousands of
+    /// tokens. Mirrors [`setup_engine`].
+    fn setup_engine_with_claims_cache_max(
+        max: usize,
+    ) -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let storage =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            token: TokenConfig {
+                claims_cache_max: max,
+                ..TokenConfig::default()
+            },
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
+        (dir, engine, clock)
+    }
+
+    /// HEA-1990/AC-1: once the cache is full, further inserts must **replace**
+    /// entries, not be refused. The most-recently-validated token must remain
+    /// resolvable from the cache (under the pre-fix code it never landed).
+    #[test]
+    fn token_claims_cache_evicts_when_full_keeping_recent() {
+        const MAX: usize = 4;
+        let (_dir, engine, clock) = setup_engine_with_claims_cache_max(MAX);
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        clock.advance(1_000_000);
+
+        // Mint and validate MAX + 2 distinct tokens (distinct `jti`).
+        let mut tokens = Vec::new();
+        for _ in 0..MAX + 2 {
+            let pair = engine
+                .issue_tokens(&realm_id, user.id(), session.id())
+                .expect("issue tokens");
+            engine
+                .validate_token(&realm_id, pair.access_token())
+                .expect("validate_token");
+            tokens.push(pair.access_token().to_string());
+        }
+
+        // The cache never exceeds its configured bound.
+        assert!(
+            engine.token_claims_cache.load().len() <= MAX,
+            "cache must stay within its configured maximum"
+        );
+
+        // The most-recent token is still resolvable — the whole point of the fix.
+        let newest = tokens.last().expect("at least one token");
+        let key = EmbeddedIdentityEngine::token_cache_hash(newest)
+            .expect("SHA-256 must produce a 32-byte key");
+        assert!(
+            engine.token_claims_cache.load().contains_key(&key),
+            "most-recently-validated token must be cached after eviction"
+        );
+    }
+
+    /// HEA-1990/AC-2: a full cache of expired tokens must not permanently block
+    /// fresh inserts. After the access-token TTL elapses, a newly-validated
+    /// token must land (the pre-fix code refused it forever).
+    #[test]
+    fn token_claims_cache_ttl_sweep_admits_fresh_after_expiry() {
+        const MAX: usize = 4;
+        let (_dir, engine, clock) = setup_engine_with_claims_cache_max(MAX);
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        clock.advance(1_000_000);
+
+        // Fill the cache to capacity with tokens issued at T0.
+        for _ in 0..MAX {
+            let pair = engine
+                .issue_tokens(&realm_id, user.id(), session.id())
+                .expect("issue tokens");
+            engine
+                .validate_token(&realm_id, pair.access_token())
+                .expect("validate_token");
+        }
+        assert_eq!(
+            engine.token_claims_cache.load().len(),
+            MAX,
+            "cache should be full before TTL expiry"
+        );
+
+        // Advance past the access-token TTL so every cached entry is expired,
+        // then mint + validate a fresh token.
+        let ttl = engine.config.token.access_token_ttl_secs;
+        clock.advance((ttl + 1) * 1_000_000);
+        let fresh = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        engine
+            .validate_token(&realm_id, fresh.access_token())
+            .expect("fresh token must validate after expiry");
+
+        let key = EmbeddedIdentityEngine::token_cache_hash(fresh.access_token())
+            .expect("SHA-256 must produce a 32-byte key");
+        let cache = engine.token_claims_cache.load();
+        assert!(
+            cache.contains_key(&key),
+            "fresh token must land in cache after the TTL sweep evicts dead entries"
+        );
+        // The dead entries were swept, not retained alongside the fresh one.
+        assert!(
+            cache.len() <= MAX,
+            "expired entries must be evicted, not accumulated"
         );
     }
 

@@ -817,6 +817,14 @@ pub struct TokenYamlConfig {
     /// rotation (e.g. `"24h"`). Default: 24 hours.
     #[serde(default)]
     pub signing_key_rotation_grace_period: Option<String>,
+    /// Maximum entries in the in-process token-claims cache on the
+    /// `validate_token` hot path (HEA-1990). Default: 65,536.
+    ///
+    /// Size this to the expected number of distinct access tokens validated
+    /// concurrently; the fast path is only reachable for tokens that fit the
+    /// cache. Values are clamped to at least 1 at startup.
+    #[serde(default)]
+    pub claims_cache_max: Option<usize>,
 }
 
 // ===== Security / rate-limiting YAML config =====

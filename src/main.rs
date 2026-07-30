@@ -1032,6 +1032,10 @@ async fn run_serve(
                 tc.signing_key_rotation_grace_period_secs = (micros / 1_000_000) as u64;
             }
         }
+        if let Some(max) = config.token.claims_cache_max {
+            // Clamp to at least 1 so the hot-path cache can always hold one entry.
+            tc.claims_cache_max = max.max(1);
+        }
         // Warn when the audience is still the placeholder value but oidc.issuer is a
         // real URL.  This only triggers when token.audience is explicitly set to "hearth"
         // in the config file while oidc.issuer is configured — the implicit default case
