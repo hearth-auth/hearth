@@ -92,6 +92,11 @@ struct TokenResponse {
     access_token: String,
 }
 
+#[derive(Deserialize)]
+struct DevSessionResponse {
+    session_id: String,
+}
+
 /// A realm-scoped seeding client. All admin calls carry the bootstrap token
 /// and `X-Realm-ID`; the anonymous OAuth calls (`/token`, `/revoke`) carry only
 /// `X-Realm-ID`.
@@ -222,6 +227,28 @@ impl SeedClient {
             .await?;
         let token: TokenResponse = json_or_err("password_grant", resp).await?;
         Ok(token.access_token)
+    }
+
+    /// Creates a raw session record for `user_id` via `POST /dev/seed-session`.
+    ///
+    /// The endpoint is dev-only and bypasses OAuth, writing a session record
+    /// directly to storage. Use when `--sessions-frac > 0` to populate the
+    /// session corpus without ROPC (removed by HEA-1862; this path added by
+    /// HEA-1907).
+    ///
+    /// Returns the created session's ID (UUID string).
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn create_dev_session(&self, user_id: &str) -> Result<String, SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/dev/seed-session", self.base_url))
+            .json(&serde_json::json!({"user_id": user_id}))
+            .send()
+            .await?;
+        let session: DevSessionResponse = json_or_err("create_dev_session", resp).await?;
+        Ok(session.session_id)
     }
 
     /// Revokes a token via `POST /revoke` (RFC 7009). The public `client_id`

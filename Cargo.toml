@@ -38,6 +38,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 crc32fast = "1"
 crossbeam-epoch = "0.9"
+crossbeam-skiplist = "0.1"
 data-encoding = "2"
 flate2 = "1"
 hyper = "1"
@@ -53,6 +54,10 @@ maxminddb = "0.28"
 memmap2 = "0.9"
 password-hash = "0.5"
 pbkdf2 = { version = "0.12", default-features = false }
+# default features pull heapless-cas → atomic-polyfill (RUSTSEC-2023-0089,
+# unmaintained). We only use the alloc-based `to_allocvec`/`from_bytes`, so drop
+# the default heapless features to keep the crate out of the dependency graph.
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 quick-xml = "0.41"
 # rcgen with the `aws_lc_rs` backend provides RSA-2048 key generation

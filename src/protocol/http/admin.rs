@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::CreateAuditEvent;
+use crate::audit::{Actor, AuditContext, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::UpdateRealmRequest;
@@ -31,7 +31,7 @@ use tracing::error;
 
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
-    identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
+    extract_realm_id, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
     require_admin_permission, require_any_admin_permission, verify_manifest_signature, AdminAuth,
     AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
@@ -311,6 +311,33 @@ async fn admin_list_users(
         || params.attr.is_some();
 
     if has_field_filters {
+        // Fast path: exact email-index lookup (O(1)) when only ?email= is given.
+        // This exercises the hot-tier storage path without a full corpus scan,
+        // making it suitable for tier-miss latency profiling (HEA-1876).
+        if params.email.is_some()
+            && params.username.is_none()
+            && params.status.is_none()
+            && params.attr.is_none()
+        {
+            let email_raw = params.email.as_deref().unwrap_or("");
+            return match state.identity.get_user_by_email(&auth.realm_id, email_raw) {
+                Ok(Some(user)) => {
+                    let item = proto_to_rest_json(&pb::User::from(&user));
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"items": [item], "next_cursor": null, "total": 1})),
+                    )
+                        .into_response()
+                }
+                Ok(None) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"items": [], "next_cursor": null, "total": 0})),
+                )
+                    .into_response(),
+                Err(e) => identity_error_to_response(&e).into_response(),
+            };
+        }
+
         // Parse the status filter value if provided.
         let status_filter = if let Some(s) = &params.status {
             let parsed = match s.as_str() {
@@ -653,29 +680,35 @@ async fn admin_create_user(
 
     let identity = Arc::clone(&state.identity);
     let realm_id = auth.realm_id.clone();
-    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "admin_create_user spawn_blocking panicked");
+    let admin_actor = auth.user_id.clone();
+    // create_user hashes an Argon2id credential — route through the shared KDF
+    // admission gate so bulk provisioning can't oversubscribe the blocking pool
+    // and blow the peak-memory ceiling (HEA-1891 / F3).
+    let result = match super::run_kdf_gated_rest(
+        move || {
+            let audit_ctx = AuditContext {
+                actor: Actor::User(admin_actor),
+                metadata: Some(serde_json::json!({"via": "admin_api"})),
+            };
+            identity.create_user_attributed(&realm_id, &request, &audit_ctx)
+        },
+        |e| {
+            tracing::error!(error = %e, "admin_create_user KDF task failed");
             Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        });
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(shed) => return shed,
+    };
 
     match result {
-        Ok(user) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::UserCreated,
-                resource_type: "user".to_string(),
-                resource_id: user.id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
-            (
-                StatusCode::CREATED,
-                Json(proto_to_rest_json(&pb::User::from(&user))),
-            )
-                .into_response()
-        }
+        Ok(user) => (
+            StatusCode::CREATED,
+            Json(proto_to_rest_json(&pb::User::from(&user))),
+        )
+            .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
@@ -762,23 +795,20 @@ async fn admin_update_user(
 
     let request = crate::identity::UpdateUserRequest::from(body);
     let uid = UserId::new(user_uuid);
+    let audit_ctx = AuditContext {
+        actor: Actor::User(auth.user_id.clone()),
+        metadata: Some(serde_json::json!({"via": "admin_api"})),
+    };
 
-    match state.identity.update_user(&auth.realm_id, &uid, &request) {
-        Ok(user) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::UserUpdated,
-                resource_type: "user".to_string(),
-                resource_id: uid.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
-            (
-                StatusCode::OK,
-                Json(proto_to_rest_json(&pb::User::from(&user))),
-            )
-                .into_response()
-        }
+    match state
+        .identity
+        .update_user_attributed(&auth.realm_id, &uid, &request, &audit_ctx)
+    {
+        Ok(user) => (
+            StatusCode::OK,
+            Json(proto_to_rest_json(&pb::User::from(&user))),
+        )
+            .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
@@ -808,21 +838,16 @@ async fn admin_delete_user(
         }
     };
 
+    let audit_ctx = AuditContext {
+        actor: Actor::User(auth.user_id.clone()),
+        metadata: Some(serde_json::json!({"via": "admin_api"})),
+    };
+
     match state
         .identity
-        .delete_user(&auth.realm_id, &UserId::new(user_uuid))
+        .delete_user_attributed(&auth.realm_id, &UserId::new(user_uuid), &audit_ctx)
     {
-        Ok(()) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::UserDeleted,
-                resource_type: "user".to_string(),
-                resource_id: user_uuid.to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
@@ -2425,6 +2450,106 @@ async fn admin_get_user_effective_permissions(
 // === Dev Bootstrap Endpoint ===
 
 /// Generates a random 32-character alphanumeric password using the OS CSPRNG.
+/// `GET /dev/probe-user?realm_id={uuid}&email={email}` — dev-mode-only storage
+/// latency probe for the tier-miss load sweep (C8, HEA-1876).
+///
+/// Performs a hot-tier-aware indexed user lookup (`get_user_by_email`) and
+/// returns 200 OK whether or not the user exists. No bearer token is required;
+/// the route is unregistered in production so it cannot be fingerprinted or
+/// reached in a non-dev deployment. The loopback-only bind constraint (enforced
+/// at config validation) ensures only local processes can reach this endpoint.
+pub(super) async fn dev_probe_user(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let realm_str = match params.get("realm_id") {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing realm_id"})),
+            )
+                .into_response()
+        }
+    };
+    let email = match params.get("email") {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing email"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_uuid = match realm_str.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid realm_id"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = crate::core::RealmId::new(realm_uuid);
+    // Drive the same two-step indexed storage lookup that ROPC used, so the
+    // hot-vs-cold tier split is visible in the latency distribution.
+    let _result = state.identity.get_user_by_email(&realm_id, email);
+    // Return 200 regardless of found/not-found — the measurement is latency,
+    // not correctness. A missing user (e.g. index > corpus_size) contributes
+    // a fast cached-miss path, which is fine noise for the sweep.
+    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+}
+
+/// POST /dev/seed-session — creates a raw session record for the given user.
+///
+/// Dev-only: the route is registered only when the server runs with `--dev`.
+/// Used by the load-test seed harness so `--sessions-frac > 0` can create real
+/// session records without re-introducing ROPC (removed by HEA-1862, HEA-1907).
+///
+/// Required headers: `X-Realm-ID: <realm-uuid>`
+/// Request body:  `{"user_id": "<user-uuid>"}`
+/// Response body: `{"session_id": "<session-uuid>"}`
+pub(super) async fn dev_seed_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DevSeedSessionRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let user_uuid = match body.user_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user_id"})),
+            )
+                .into_response()
+        }
+    };
+    let user_id = UserId::new(user_uuid);
+    match state.identity.create_session(
+        &realm_id,
+        &user_id,
+        &crate::identity::SessionContext::default(),
+    ) {
+        Ok(session) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"session_id": session.id().as_uuid().to_string()})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DevSeedSessionRequest {
+    user_id: String,
+}
+
 /// Fixed dev-mode password for `admin@hearth.test`.
 ///
 /// Using a stable value (rather than a random one) lets the Playwright UI

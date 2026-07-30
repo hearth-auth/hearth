@@ -308,6 +308,72 @@ impl User {
     pub(crate) fn set_updated_at(&mut self, ts: Timestamp) {
         self.updated_at = ts;
     }
+
+    /// Converts to a flat storage record for binary (postcard) encoding.
+    ///
+    /// Unlike [`User`]'s serde impl, [`UserStorageRecord`] has no
+    /// `skip_serializing_if` attributes so postcard can write every field
+    /// positionally without misalignment.
+    pub(crate) fn to_storage_record(&self) -> UserStorageRecord {
+        UserStorageRecord {
+            id: self.id.clone(),
+            email: self.email.clone(),
+            display_name: self.display_name.clone(),
+            first_name: self.first_name.clone(),
+            last_name: self.last_name.clone(),
+            attributes: self.attributes.clone(),
+            status: self.status,
+            required_actions: self.required_actions.clone(),
+            email_verified: self.email_verified,
+            phone_number: self.phone_number.clone(),
+            phone_verified: self.phone_verified,
+            email_otp_enabled: self.email_otp_enabled,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
+    /// Reconstructs a [`User`] from a [`UserStorageRecord`] decoded by postcard.
+    pub(crate) fn from_storage_record(r: UserStorageRecord) -> Self {
+        Self {
+            id: r.id,
+            email: r.email,
+            display_name: r.display_name,
+            first_name: r.first_name,
+            last_name: r.last_name,
+            attributes: r.attributes,
+            status: r.status,
+            required_actions: r.required_actions,
+            email_verified: r.email_verified,
+            phone_number: r.phone_number,
+            phone_verified: r.phone_verified,
+            email_otp_enabled: r.email_otp_enabled,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+/// Binary-storage mirror of [`User`] without `skip_serializing_if` attributes.
+///
+/// All fields are always written so that `postcard` can encode/decode the
+/// struct positionally. Never exposes this type outside the storage layer.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct UserStorageRecord {
+    pub(crate) id: UserId,
+    pub(crate) email: String,
+    pub(crate) display_name: String,
+    pub(crate) first_name: String,
+    pub(crate) last_name: String,
+    pub(crate) attributes: BTreeMap<String, String>,
+    pub(crate) status: UserStatus,
+    pub(crate) required_actions: Vec<RequiredAction>,
+    pub(crate) email_verified: bool,
+    pub(crate) phone_number: Option<String>,
+    pub(crate) phone_verified: bool,
+    pub(crate) email_otp_enabled: bool,
+    pub(crate) created_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
 }
 
 /// Masks an E.164 phone number for admin display.
@@ -424,4 +490,101 @@ pub struct UpdateUserRequest {
     pub phone_verified: Option<bool>,
     /// Set the email OTP enrolled flag. `None` leaves unchanged.
     pub email_otp_enabled: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Timestamp;
+    use proptest::prelude::*;
+    use uuid::Uuid;
+
+    fn arb_uuid() -> impl Strategy<Value = Uuid> {
+        any::<[u8; 16]>().prop_map(Uuid::from_bytes)
+    }
+
+    fn arb_timestamp() -> impl Strategy<Value = Timestamp> {
+        any::<i64>().prop_map(Timestamp::from_micros)
+    }
+
+    fn arb_user_status() -> impl Strategy<Value = UserStatus> {
+        prop_oneof![
+            Just(UserStatus::Active),
+            Just(UserStatus::Disabled),
+            Just(UserStatus::PendingVerification),
+        ]
+    }
+
+    fn arb_required_action() -> impl Strategy<Value = RequiredAction> {
+        prop_oneof![
+            Just(RequiredAction::VerifyEmail),
+            Just(RequiredAction::UpdatePassword),
+            Just(RequiredAction::EnrollMfa),
+            Just(RequiredAction::EnrollPhoneOtp),
+            Just(RequiredAction::EnrollEmailOtp),
+        ]
+    }
+
+    // Split into two nested tuples to stay within proptest's 12-tuple limit.
+    fn arb_user_storage_record() -> impl Strategy<Value = UserStorageRecord> {
+        (
+            (
+                arb_uuid(),
+                ".*",
+                ".*",
+                ".*",
+                ".*",
+                proptest::collection::btree_map(".*", ".*", 0..4),
+                arb_user_status(),
+            ),
+            (
+                proptest::collection::vec(arb_required_action(), 0..3),
+                any::<bool>(),
+                proptest::option::of(".*"),
+                any::<bool>(),
+                any::<bool>(),
+                arb_timestamp(),
+                arb_timestamp(),
+            ),
+        )
+            .prop_map(
+                |(
+                    (uuid, email, display_name, first_name, last_name, attributes, status),
+                    (
+                        required_actions,
+                        email_verified,
+                        phone_number,
+                        phone_verified,
+                        email_otp_enabled,
+                        created_at,
+                        updated_at,
+                    ),
+                )| UserStorageRecord {
+                    id: UserId::new(uuid),
+                    email,
+                    display_name,
+                    first_name,
+                    last_name,
+                    attributes,
+                    status,
+                    required_actions,
+                    email_verified,
+                    phone_number,
+                    phone_verified,
+                    email_otp_enabled,
+                    created_at,
+                    updated_at,
+                },
+            )
+    }
+
+    proptest! {
+        /// Property: `UserStorageRecord` survives a postcard encode→decode round-trip.
+        #[test]
+        fn user_storage_record_roundtrip(rec in arb_user_storage_record()) {
+            let bytes = crate::codec::encode(&rec).expect("encode");
+            let decoded: UserStorageRecord = crate::codec::decode(&bytes).expect("decode");
+            prop_assert_eq!(rec, decoded);
+        }
+    }
 }

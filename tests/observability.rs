@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hearth::audit::{AuditAction, CreateAuditEvent};
+use hearth::audit::{AuditAction, CreateAuditEvent, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SystemClock};
 use hearth::identity::{CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine};
 use hearth::protocol::http::{router, AppState};
@@ -288,11 +288,14 @@ async fn metrics_audit_integrity_failure_increments() {
         "should have at least one stored audit event"
     );
 
-    let mut event_json: serde_json::Value =
-        serde_json::from_slice(&entries[0].value).expect("deserialize stored event");
-    event_json["integrity_hash"] =
-        serde_json::json!("tampered_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-    let tampered = serde_json::to_vec(&event_json).expect("reserialize tampered event");
+    let mut event =
+        EmbeddedAuditEngine::decode_for_test(&entries[0].value).expect("deserialize stored event");
+    // Must be valid 64-char lowercase hex (StoredAuditEvent validates the format),
+    // but deliberately wrong so the HMAC check fails.
+    event.integrity_hash =
+        "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    let tampered =
+        EmbeddedAuditEngine::encode_for_test(&event).expect("reserialize tampered event");
 
     h.storage()
         .put(&realm, &entries[0].key, &tampered)

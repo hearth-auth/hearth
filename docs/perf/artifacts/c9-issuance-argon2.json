@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "child_issue": "HEA-1879",
+  "axis": "L6",
+  "git_sha": "8c94c9bb",
+  "timestamp_utc": "2026-07-28T17:46:05Z",
+
+  "host": {
+    "profile": "dev-ryzen-7840hs",
+    "cpu_model": "AMD Ryzen 7 7840HS",
+    "cores_physical": 8, "threads": 16,
+    "governor": "powersave",
+    "ram_total_gib": 54, "ram_available_gib": 17.4,
+    "generator_placement": "co-resident"
+  },
+
+  "swap": {
+    "swap_in_pages": 773, "swap_out_pages": 0, "void_due_to_swap": false
+  },
+
+  "ceiling": {
+    "attribution": "server",
+    "reason": "In-process Argon2id compute microbenchmark: no HTTP layer and no load generator run, so the only actor doing work is Hearth's own KDF. Rule-3 generator-attribution risk is therefore not applicable to the compute floor and slope; rungs that induced swap-in are individually marked void_due_to_swap."
+  },
+
+  "measurements": [
+    { "name": "argon2_per_hash_p50_us", "value": 29219, "unit": "us", "concurrency": 1, "total_hashes": 24, "p99_us": 36064, "max_us": 36064, "throughput_hashes_per_s": 34.5, "wall_ms": 696.0, "swap_in_pages": 252, "swap_out_pages": 0, "mem_avail_delta_kib": -8948, "void_due_to_swap": false },
+    { "name": "argon2_per_hash_p50_us", "value": 27301, "unit": "us", "concurrency": 2, "total_hashes": 48, "p99_us": 34072, "max_us": 34072, "throughput_hashes_per_s": 71.4, "wall_ms": 672.5, "swap_in_pages": 76, "swap_out_pages": 0, "mem_avail_delta_kib": 12272, "void_due_to_swap": false },
+    { "name": "argon2_per_hash_p50_us", "value": 23064, "unit": "us", "concurrency": 4, "total_hashes": 96, "p99_us": 36247, "max_us": 37961, "throughput_hashes_per_s": 161.6, "wall_ms": 594.2, "swap_in_pages": 28, "swap_out_pages": 0, "mem_avail_delta_kib": 6644, "void_due_to_swap": false },
+    { "name": "argon2_per_hash_p50_us", "value": 39139, "unit": "us", "concurrency": 8, "total_hashes": 192, "p99_us": 52336, "max_us": 60246, "throughput_hashes_per_s": 186.9, "wall_ms": 1027.3, "swap_in_pages": 195, "swap_out_pages": 0, "mem_avail_delta_kib": -1888, "void_due_to_swap": false },
+    { "name": "argon2_per_hash_p50_us", "value": 48289, "unit": "us", "concurrency": 16, "total_hashes": 384, "p99_us": 127817, "max_us": 223725, "throughput_hashes_per_s": 241.3, "wall_ms": 1591.4, "swap_in_pages": 130, "swap_out_pages": 0, "mem_avail_delta_kib": 332160, "void_due_to_swap": false },
+    { "name": "argon2_per_hash_p50_us", "value": 48376, "unit": "us", "concurrency": 32, "total_hashes": 768, "p99_us": 511504, "max_us": 654684, "throughput_hashes_per_s": 247.5, "wall_ms": 3103.2, "swap_in_pages": 28, "swap_out_pages": 0, "mem_avail_delta_kib": -110928, "void_due_to_swap": false },
+    { "name": "argon2_per_hash_p50_us", "value": 120457, "unit": "us", "concurrency": 64, "total_hashes": 1536, "p99_us": 953791, "max_us": 1232310, "throughput_hashes_per_s": 246.8, "wall_ms": 6222.6, "swap_in_pages": 64, "swap_out_pages": 0, "mem_avail_delta_kib": -540308, "void_due_to_swap": false }
+  ],
+
+  "fit": {
+    "model": "log(per_hash_p50_us) ~ log(concurrency), concurrency >= cores",
+    "exponent": 0.6594, "ci95_low": null, "ci95_high": null,
+    "r_squared": 0.7515, "n_points": 3,
+    "throughput_scaling_past_cores": 1.023, "latency_growth_past_cores": 2.495,
+    "dominating_term": "queueing/oversubscription (throughput plateaus at the core count while per-hash latency grows with pool depth — Little's-Law queue delay, not compute)"
+  },
+
+  "compute_floor_ms_p50": 29.219,
+  "verdict": "NOT-MEASURABLE",
+  "verdict_reason": "L6 issuance p99 cannot be graded admissibly on host dev-ryzen-7840hs: an end-to-end HTTP issuance p99 requires the isolated generator host (C3/HEA-1871) to satisfy rule 3, and this swapping host voids any load run under rule 5. What IS measured here, admissibly, is the queue-vs-compute decomposition the row's red flag demanded: the Argon2id COMPUTE FLOOR is p50=29.2 ms per hash at concurrency=1 (production params 19 MiB/t=2/p=1). That floor alone is ~5.8x the 5 ms p99 issuance target, so any password-bearing issuance is physically incompatible with VISION L6's <5 ms p99 REGARDLESS of queueing. On top of that floor, the log-log slope of per-hash latency vs pool depth past the 16-core count is 0.66 (R^2=0.75) — queueing/oversubscription (throughput plateaus at the core count while per-hash latency grows with pool depth — Little's-Law queue delay, not compute) — which confirms the ~7 s baseline p99 is dominated by unbounded spawn_blocking oversubscription (no admission control; tokio's 512-thread blocking pool x 19 MiB is memory-unsafe under load), NOT by Argon2id being slow. CTO owns the resulting spec decision (correct VISION L6, or split issuance into token-minting vs password-grant paths); engineer owns the bounded-admission fix, whose default calibration waits on C7.",
+  "reproduction": "cargo run --release --example argon2_saturation -- $(git rev-parse --short HEAD) $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}

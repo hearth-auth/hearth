@@ -33,12 +33,21 @@ async fn create_user(
     let request = crate::identity::CreateUserRequest::from(body);
 
     let identity = Arc::clone(&state.identity);
-    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "create_user spawn_blocking panicked");
+    // create_user hashes an Argon2id credential — route through the shared KDF
+    // admission gate (HEA-1891 / F3) so it shares the one permit pool with the
+    // UI auth paths rather than oversubscribing the blocking pool.
+    let result = match super::run_kdf_gated_rest(
+        move || identity.create_user(&realm_id, &request),
+        |e| {
+            tracing::error!(error = %e, "create_user KDF task failed");
             Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        });
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(shed) => return shed,
+    };
 
     match result {
         Ok(user) => (

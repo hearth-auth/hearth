@@ -366,6 +366,31 @@ pub(crate) fn encode_user_email(email: &str) -> Vec<u8> {
     format!("{USER_EMAIL_PREFIX}{email}").into_bytes()
 }
 
+/// Encodes the *value* stored under an email-index key: 16 raw UUID bytes.
+///
+/// This is the single canonical writer for the `usr:email:` index value.
+/// Every site that populates the index MUST go through it — HEA-1896 changed
+/// only the `create_user` writer to raw bytes and left three others emitting
+/// a 36-char hyphenated string, which broke `get_user_by_email` for every
+/// affected user (HEA-1902).
+pub(crate) fn encode_user_id_value(user_id: &UserId) -> Vec<u8> {
+    user_id.as_uuid().as_bytes().to_vec()
+}
+
+/// Decodes a user id previously written by [`encode_user_id_value`].
+///
+/// Returns `None` if `bytes` is neither the canonical 16-byte form nor a
+/// hyphenated UUID string. The string form is accepted only to heal index
+/// entries written during the mixed-format window on this branch; new writes
+/// are always canonical.
+pub(crate) fn decode_user_id_value(bytes: &[u8]) -> Option<UserId> {
+    if let Ok(uuid) = uuid::Uuid::from_slice(bytes) {
+        return Some(UserId::new(uuid));
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    uuid::Uuid::parse_str(text).ok().map(UserId::new)
+}
+
 /// Returns the scan prefix for listing all user records.
 ///
 /// Format: `usr:id:`
@@ -2235,6 +2260,37 @@ mod tests {
         let key = encode_user_email("alice@example.com");
         let key_str = std::str::from_utf8(&key).expect("utf8");
         assert_eq!(key_str, "usr:email:alice@example.com");
+    }
+
+    #[test]
+    fn user_id_value_round_trips_canonically() {
+        let user_id = UserId::generate();
+        let encoded = encode_user_id_value(&user_id);
+        assert_eq!(encoded.len(), 16, "canonical form is 16 raw UUID bytes");
+        assert_eq!(
+            decode_user_id_value(&encoded).expect("decodes"),
+            user_id,
+            "canonical encoding must round-trip"
+        );
+    }
+
+    #[test]
+    fn user_id_value_heals_legacy_string_form() {
+        let user_id = UserId::generate();
+        let legacy = user_id.as_uuid().to_string().into_bytes();
+        assert_eq!(legacy.len(), 36);
+        assert_eq!(
+            decode_user_id_value(&legacy).expect("decodes"),
+            user_id,
+            "index entries from the mixed-format window must still resolve"
+        );
+    }
+
+    #[test]
+    fn user_id_value_rejects_garbage() {
+        assert!(decode_user_id_value(b"not-a-uuid").is_none());
+        assert!(decode_user_id_value(&[0xff, 0xfe, 0xfd]).is_none());
+        assert!(decode_user_id_value(b"").is_none());
     }
 
     #[test]

@@ -48,6 +48,17 @@ pub struct SeedParams {
     #[arg(long, env = "HEARTH_LOADTEST_SESSIONS_FRAC", default_value_t = 0.5)]
     pub sessions_frac: f64,
 
+    /// Absolute number of sessions to mint per realm, overriding
+    /// `--sessions-frac` when set (C4, HEA-1872).
+    ///
+    /// `--sessions-frac` computes `round(users_per_realm × frac)`. For the
+    /// high-concurrency open-loop driver you may want to drive 10 000
+    /// connections from a pool of 1 000 distinct tokens — seed 1 000 sessions
+    /// directly here rather than inflating `--users-per-realm` to make the
+    /// fraction work. Clamped to `users_per_realm` if set higher.
+    #[arg(long, env = "HEARTH_LOADTEST_SESSIONS_COUNT")]
+    pub sessions_count: Option<u32>,
+
     /// Fraction of the live tokens (0.0..=1.0) that are pre-revoked, so the
     /// revoke-cache / `active:false` path has real data on the first hit.
     #[arg(long, env = "HEARTH_LOADTEST_REVOKED_FRAC", default_value_t = 0.1)]
@@ -107,6 +118,7 @@ impl std::fmt::Debug for SeedParams {
             .field("realms", &self.realms)
             .field("users_per_realm", &self.users_per_realm)
             .field("sessions_frac", &self.sessions_frac)
+            .field("sessions_count", &self.sessions_count)
             .field("revoked_frac", &self.revoked_frac)
             .field("seed", &self.seed)
             .field("seed_out", &self.seed_out)
@@ -228,10 +240,17 @@ impl SeedParams {
         }
     }
 
-    /// Number of live sessions to mint per realm, rounded to nearest.
+    /// Number of live sessions to mint per realm.
+    ///
+    /// Returns `--sessions-count` directly (clamped to `users_per_realm`) when
+    /// set, otherwise falls back to `round(users_per_realm × sessions_frac)`.
     #[must_use]
     pub fn sessions_per_realm(&self) -> u32 {
-        frac_of(self.users_per_realm, self.sessions_frac)
+        if let Some(n) = self.sessions_count {
+            n.min(self.users_per_realm)
+        } else {
+            frac_of(self.users_per_realm, self.sessions_frac)
+        }
     }
 
     /// Number of the minted sessions (per realm) to pre-revoke, rounded to
@@ -287,14 +306,18 @@ impl SeedParams {
     /// and log output. Contains no secret material.
     #[must_use]
     pub fn dataset_shape_summary(&self) -> String {
+        let sessions_source = if let Some(n) = self.sessions_count {
+            format!("sessions_count={n}")
+        } else {
+            format!("sessions_frac={}", self.sessions_frac)
+        };
         format!(
             "realms={} users/realm={} sessions/realm={} revoked/realm={} \
-             (sessions_frac={} revoked_frac={} seed={})",
+             ({sessions_source} revoked_frac={} seed={})",
             self.realms,
             self.users_per_realm,
             self.sessions_per_realm(),
             self.revoked_per_realm(),
-            self.sessions_frac,
             self.revoked_frac,
             self.seed,
         )
@@ -547,5 +570,48 @@ mod tests {
         assert!(s.contains("users/realm=200"));
         // The summary must never leak a derived password.
         assert!(!s.contains(&p.user_password(0, 0)));
+    }
+
+    /// C4 (HEA-1872): absolute session count overrides the fraction, enabling
+    /// a small token pool to back a much larger connection count.
+    #[test]
+    fn sessions_count_overrides_frac() {
+        // Count below users_per_realm → used directly.
+        let p = parse(&["--users-per-realm", "200", "--sessions-count", "50"]);
+        assert_eq!(p.sessions_per_realm(), 50);
+
+        // Count above users_per_realm → clamped.
+        let p2 = parse(&["--users-per-realm", "100", "--sessions-count", "1000"]);
+        assert_eq!(p2.sessions_per_realm(), 100);
+
+        // Fraction is ignored when count is set.
+        let p3 = parse(&[
+            "--users-per-realm",
+            "200",
+            "--sessions-frac",
+            "0.1",
+            "--sessions-count",
+            "80",
+        ]);
+        assert_eq!(p3.sessions_per_realm(), 80);
+    }
+
+    #[test]
+    fn sessions_count_absent_falls_back_to_frac() {
+        let p = parse(&["--users-per-realm", "200", "--sessions-frac", "0.25"]);
+        assert!(p.sessions_count.is_none());
+        assert_eq!(p.sessions_per_realm(), 50); // 200 * 0.25 = 50
+    }
+
+    #[test]
+    fn dataset_summary_shows_count_source_when_explicit() {
+        let p = parse(&["--sessions-count", "500"]);
+        let s = p.dataset_shape_summary();
+        assert!(s.contains("sessions_count=500"), "got: {s}");
+        assert!(!s.contains("sessions_frac"), "frac must not appear when count is set: {s}");
+
+        let p2 = parse(&[]);
+        let s2 = p2.dataset_shape_summary();
+        assert!(s2.contains("sessions_frac="), "frac must appear when count is absent: {s2}");
     }
 }

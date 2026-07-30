@@ -147,4 +147,24 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
     fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, crate::audit::AuditError> {
         self.inner.prune_oldest(realm_id, n)
     }
+
+    fn with_pending_append(
+        &self,
+        request: &crate::audit::CreateAuditEvent,
+        enqueue_fn: crate::audit::AuditEnqueueFn<'_>,
+    ) -> Result<crate::audit::AuditPendingWrite, crate::audit::AuditError> {
+        let mut pending = self.inner.with_pending_append(request, enqueue_fn)?;
+        // Wrap on_success to broadcast the event to webhook subscribers after
+        // the merged batch is confirmed durable.
+        let event_for_broadcast = pending.event.clone();
+        let sender = self.sender.clone();
+        let inner_on_success = pending.on_success;
+        pending.on_success = Box::new(move || {
+            inner_on_success();
+            if let Err(e) = sender.send(event_for_broadcast) {
+                tracing::debug!("webhook broadcast send failed (no receivers?): {e}");
+            }
+        });
+        Ok(pending)
+    }
 }

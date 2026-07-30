@@ -36,15 +36,15 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
 
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
-    AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams, IdentityError,
-    SessionContext,
+    admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
+    IdentityError, KdfGateError, SessionContext,
 };
 use crate::protocol::client_info::build_session_context;
 
@@ -207,6 +207,10 @@ struct LoginTemplate {
     resend_verification_url: Option<String>,
     /// Shown alongside error when a magic link is expired — "Request a new magic link".
     new_magic_link_url: Option<String>,
+    /// Shown alongside error when the form's CSRF token went stale — links back
+    /// to this same login form so the user lands on a page bearing a fresh
+    /// token without hunting for the browser reload button (HEA-1913).
+    reload_url: Option<String>,
     /// Federation sign-in buttons, one per configured connector.
     federation_buttons: Vec<FederationButton>,
     chrome: bool,
@@ -271,6 +275,7 @@ impl LoginTemplate {
             recovery_code_url: "/ui/mfa-recovery".to_string(),
             resend_verification_url: None,
             new_magic_link_url: None,
+            reload_url: None,
             federation_buttons: Vec::new(),
             chrome: false,
             active: "",
@@ -469,6 +474,10 @@ struct MfaChallengeTemplate {
     recovery_code_url: String,
     /// Carry through the post-login redirect.
     return_to: Option<String>,
+    /// Shown alongside error when the form's CSRF token went stale — links back
+    /// to this same challenge form so the user lands on a page bearing a fresh
+    /// token without hunting for the browser reload button (HEA-1913).
+    reload_url: Option<String>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -494,6 +503,7 @@ impl MfaChallengeTemplate {
             form_action: "/ui/mfa-challenge".to_string(),
             recovery_code_url: "/ui/mfa-recovery".to_string(),
             return_to,
+            reload_url: None,
             chrome: false,
             active: "",
             user_email: None,
@@ -909,17 +919,79 @@ pub struct LoginForm {
     pub csrf: String,
 }
 
+/// Runs a blocking Argon2id-bearing closure under the bounded KDF admission
+/// gate (HEA-1887 / R1, extended by HEA-1891).
+///
+/// Every UI handler whose engine call performs an Argon2id hash or verify —
+/// Builds the `503 Service Unavailable` shed response for an overloaded KDF gate.
+///
+/// Carries a `Retry-After` header (seconds) so well-behaved clients back off
+/// instead of retrying immediately and deepening the overload.
+// Used by unit tests in this module; browser-facing handlers use `kdf_shed_html_response`.
+#[allow(dead_code)]
+pub(crate) fn kdf_shed_response(retry_after: std::time::Duration) -> Response {
+    // Never advertise 0 — clients treat `Retry-After: 0` inconsistently.
+    let secs = retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Server is busy verifying credentials. Please retry shortly.\n",
+    )
+        .into_response();
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    resp
+}
+
+/// Builds an HTML `503 Service Unavailable` shed page for browser-facing routes.
+///
+/// Unlike [`kdf_shed_response`] (plain-text), this returns a styled HTML page
+/// with a fresh CSRF cookie and optionally pre-fills the submitted email and
+/// retry action, so the user can retry the form without retyping their address
+/// (HEA-1979 / HEA-1981).
+pub(crate) fn kdf_shed_html_response(
+    state: &super::WebState,
+    headers: &HeaderMap,
+    retry_after: std::time::Duration,
+    email: Option<String>,
+    return_to: Option<String>,
+    form_action: Option<String>,
+) -> Response {
+    let secs = retry_after.as_secs().max(1);
+    let secure = state.is_secure_request(headers);
+    let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+    let tmpl = super::handlers_common::KdfShedTemplate {
+        retry_after_secs: secs,
+        email: email.unwrap_or_default(),
+        return_to,
+        form_action,
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        flash: None,
+        csrf: Some(csrf_value),
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    let mut resp = super::templates::render_status(&tmpl, StatusCode::SERVICE_UNAVAILABLE);
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    if let Ok(v) = HeaderValue::from_str(&csrf_cookie) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    resp
+}
+
 /// Handles login submission at the bare `/ui/login` URL.
 pub async fn login_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || {
-        login_submit_impl(state, headers, form, RealmSource::Path(None))
-    })
-    .await
-    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    login_submit_gated(state, headers, form, RealmSource::Path(None)).await
 }
 
 /// Handles login submission at `/ui/realms/<name>/login`.
@@ -929,11 +1001,7 @@ pub async fn login_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || {
-        login_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
-    })
-    .await
-    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    login_submit_gated(state, headers, form, RealmSource::Path(Some(realm_name))).await
 }
 
 /// Handles admin login submission at `/ui/admin/login`. On success,
@@ -943,24 +1011,187 @@ pub async fn admin_login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || login_submit_impl(state, headers, form, RealmSource::Admin))
-        .await
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    login_submit_gated(state, headers, form, RealmSource::Admin).await
 }
 
-/// Shared login submit. On success: creates a session, issues the
-/// `hearth_ui_session` and `hearth_ui_csrf` cookies, then redirects.
-/// When MFA is enabled, redirects to `/ui/mfa-challenge` with a
-/// pending cookie instead. All auth failures collapse into a single
-/// generic error (enumeration resistance).
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-fn login_submit_impl(
+/// Rendering inputs shared by every login error surface. Resolved once in the
+/// pre-gate phase ([`login_prepare`]) so both the pre-gate fast-rejects and the
+/// gated verify path render identical, enumeration-safe pages.
+struct LoginRenderCtx {
+    action_prefix: String,
+    return_to: Option<String>,
+    show_register: bool,
+    locale: &'static str,
+    product_name: String,
+    logo_url: String,
+    realm_theme: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+impl LoginRenderCtx {
+    /// Builds a login error page. `email` echoes the submitted address back
+    /// into the form (constant message ⇒ leaks nothing); pass `None` to leave it
+    /// blank.
+    fn error_page(&self, message: &str, status: StatusCode, email: Option<&str>) -> Response {
+        let mut tmpl = LoginTemplate::new(
+            Some(message.to_string()),
+            self.return_to.clone(),
+            &self.action_prefix,
+            self.show_register,
+            self.locale,
+            self.product_name.clone(),
+            self.logo_url.clone(),
+        );
+        if let Some(email) = email {
+            tmpl.email = email.to_string();
+        }
+        tmpl.realm_theme_url.clone_from(&self.realm_theme);
+        tmpl.inline_theme_css.clone_from(&self.inline_theme_css);
+        render_status(&tmpl, status)
+    }
+
+    /// The single generic "sign-in failed" page (401). The message is constant
+    /// regardless of whether the account exists (enumeration resistance).
+    fn generic_error(&self, submitted_email: &str) -> Response {
+        self.error_page(
+            "Sign-in failed. Check your credentials and try again.",
+            StatusCode::UNAUTHORIZED,
+            Some(submitted_email),
+        )
+    }
+
+    /// The CSRF failure page (422).
+    ///
+    /// Mints a **fresh** CSRF token so the user can resubmit immediately without
+    /// a separate page reload (HEA-1983). Echoes `submitted_email` back into the
+    /// form so the address field is not cleared. The `reload_url` preserves any
+    /// `return_to` destination so deep-linked users are not dropped to bare
+    /// `/login` on recovery.
+    ///
+    /// Copy avoids "security token" — see HEA-1913 for rationale.
+    fn csrf_error(&self, submitted_email: &str, secure: bool) -> Response {
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+        let mut tmpl = LoginTemplate::new(
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
+            self.return_to.clone(),
+            &self.action_prefix,
+            self.show_register,
+            self.locale,
+            self.product_name.clone(),
+            self.logo_url.clone(),
+        );
+        tmpl.email = submitted_email.to_string();
+        tmpl.csrf = Some(csrf_value);
+        // Preserve return_to in the reload link so a deep-linked user who hits
+        // a stale token still lands at their original destination after reload.
+        tmpl.reload_url = Some(match &self.return_to {
+            Some(rt) => format!(
+                "{}/login?return_to={}",
+                self.action_prefix,
+                form_urlencoded::byte_serialize(rt.as_bytes()).collect::<String>()
+            ),
+            None => format!("{}/login", self.action_prefix),
+        });
+        tmpl.realm_theme_url.clone_from(&self.realm_theme);
+        tmpl.inline_theme_css.clone_from(&self.inline_theme_css);
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        resp
+    }
+}
+
+/// Realm + render context carried across the KDF gate. Built by
+/// [`login_prepare`] in the async handler (outside the gate) and consumed by
+/// [`login_finish`] on the blocking pool (inside the gate).
+struct PreparedLogin {
+    realm: Realm,
+    render_ctx: LoginRenderCtx,
+    session_ctx: SessionContext,
+    client_ip: String,
+    /// Trimmed submitted email.
+    email: String,
+    /// `true` for the `/ui/admin/login` surface — routed to the reserved admin
+    /// gate (HEA-1892 / F2).
+    is_admin: bool,
+}
+
+/// Orchestrates a login submission across the bounded KDF admission gate
+/// (HEA-1887 / R1, hardened by HEA-1892).
+///
+/// The allocation-free abuse fast-rejects — CSRF double-submit, cross-origin
+/// POST, realm auth-method policy, and the per-IP login rate limit — run in
+/// [`login_prepare`] **before** a KDF permit is acquired (HEA-1892 / F1), so
+/// rejected traffic never consumes admission capacity: a distributed
+/// sub-threshold flood of bad-CSRF or rate-limited requests can no longer
+/// saturate the gate with soon-to-be-rejected work. Every reject is
+/// username-independent, so enumeration properties are unchanged.
+///
+/// Only the surviving request — whose dominant cost is the inline Argon2id
+/// verify — is admitted to the gate; on saturation it is shed with `503` +
+/// `Retry-After`. Admin logins draw from a *separate* reserved gate
+/// (HEA-1892 / F2) so a flood against a tenant realm cannot lock the operator
+/// out of the admin console.
+async fn login_submit_gated(
     state: Arc<WebState>,
     headers: HeaderMap,
     form: LoginForm,
     source: RealmSource,
 ) -> Response {
-    let email = form.email.trim();
+    let prepared = match login_prepare(&state, &headers, &form, source) {
+        Ok(prepared) => prepared,
+        // Rejected pre-gate: no KDF permit was ever acquired.
+        Err(response) => return response,
+    };
+
+    let is_admin = prepared.is_admin;
+    // Extract shed context before all values are moved into the closure.
+    let shed_email = prepared.email.clone();
+    let shed_return_to = form.return_to.clone();
+    let shed_state = state.clone();
+    let shed_headers = headers.clone();
+    let run = move || login_finish(state, headers, form, prepared);
+    let gated = if is_admin {
+        admin_gate().run(run).await
+    } else {
+        gate().run(run).await
+    };
+    let form_action = if is_admin {
+        "/ui/admin/login"
+    } else {
+        "/ui/login"
+    };
+    match gated {
+        Ok(response) => response,
+        Err(KdfGateError::Overloaded { retry_after }) => kdf_shed_html_response(
+            &shed_state,
+            &shed_headers,
+            retry_after,
+            Some(shed_email),
+            shed_return_to,
+            Some(form_action.to_string()),
+        ),
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Pre-gate phase (HEA-1892 / F1): resolves the realm and render context, then
+/// runs the allocation-free abuse fast-rejects that MUST NOT consume a KDF
+/// permit — CSRF double-submit, cross-origin POST, realm auth-method policy,
+/// and the per-IP login rate limit.
+///
+/// Returns the [`PreparedLogin`] to admit to the gate, or the complete
+/// rejection response to return immediately (never touching the gate). Every
+/// reject is username-independent, so login enumeration properties are
+/// identical to the pre-split handler.
+#[allow(clippy::needless_pass_by_value)]
+fn login_prepare(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    form: &LoginForm,
+    source: RealmSource,
+) -> Result<PreparedLogin, Response> {
+    let is_admin = matches!(source, RealmSource::Admin);
+    let email = form.email.trim().to_string();
     let return_to = form.return_to.as_deref().and_then(sanitize_return_to);
     let locale = resolve_login_locale(
         form.locale.as_deref(),
@@ -968,75 +1199,44 @@ fn login_submit_impl(
             .get(header::ACCEPT_LANGUAGE)
             .and_then(|v| v.to_str().ok()),
     );
-    let session_ctx = build_session_context(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let session_ctx = build_session_context(headers, FALLBACK_PEER, &state.trusted_proxies);
 
-    let (realm, action_prefix) = match resolve_for_source(&state, source, true) {
+    let (realm, action_prefix) = match resolve_for_source(state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
         } => (realm, action_prefix),
-        PreAuthRealm::Handled(resp) => return resp,
+        PreAuthRealm::Handled(resp) => return Err(resp),
     };
 
-    let product_name = state.product_name_for(realm.id());
-    let logo_url = state.logo_url.clone();
-    let realm_theme = state.realm_theme_url_for(realm.id());
-    let inline_theme_css_val = state.inline_theme_css();
-    let show_register = registration_enabled(&realm);
+    let render_ctx = LoginRenderCtx {
+        action_prefix,
+        return_to,
+        show_register: registration_enabled(&realm),
+        locale,
+        product_name: state.product_name_for(realm.id()),
+        logo_url: state.logo_url.clone(),
+        realm_theme: state.realm_theme_url_for(realm.id()),
+        inline_theme_css: state.inline_theme_css(),
+    };
+
     // Extract the client IP once, after trusted-proxy stripping, for the
     // per-IP rate limiter. Empty string = no IP available (skipped by engine).
     let client_ip = session_ctx.ip_address.clone().unwrap_or_default();
 
-    let generic_error = {
-        let action_prefix = action_prefix.clone();
-        let return_to = return_to.clone();
-        let realm_theme = realm_theme.clone();
-        let inline_theme_css_val = inline_theme_css_val.clone();
-        let submitted_email = email.to_string();
-        let product_name = product_name.clone();
-        let logo_url = logo_url.clone();
-        move || {
-            let mut tmpl = LoginTemplate::new(
-                Some("Sign-in failed. Check your credentials and try again.".to_string()),
-                return_to.clone(),
-                &action_prefix,
-                show_register,
-                locale,
-                product_name.clone(),
-                logo_url.clone(),
-            );
-            // Echo the submitted email back into the form so the user
-            // doesn't have to retype it. The error message is constant
-            // regardless of whether the address matches a real account
-            // (enumeration resistance), so this leaks nothing.
-            tmpl.email.clone_from(&submitted_email);
-            tmpl.realm_theme_url.clone_from(&realm_theme);
-            tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
-            render_status(&tmpl, StatusCode::UNAUTHORIZED)
-        }
-    };
+    // --- Abuse fast-rejects, all BEFORE the KDF gate (HEA-1892 / F1) ---
 
     // F6: CSRF double-submit check — fail-closed in non-dev mode.
     // In production (dev_mode = false), an absent hearth_ui_csrf cookie is
     // treated as a CSRF failure (not a pass-through). In dev mode the bypass
     // is preserved so direct-POST tooling continues to work.
-    let csrf_ok = match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
     if !csrf_ok {
-        let mut tmpl = LoginTemplate::new(
-            Some("Invalid security token. Please reload the page and try again.".to_string()),
-            return_to.clone(),
-            &action_prefix,
-            show_register,
-            locale,
-            product_name.clone(),
-            logo_url.clone(),
-        );
-        tmpl.realm_theme_url.clone_from(&realm_theme);
-        tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
-        return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        let secure = state.is_secure_request(headers);
+        return Err(render_ctx.csrf_error(&email, secure));
     }
 
     // Login CSRF guard: reject cross-origin POSTs.
@@ -1045,14 +1245,14 @@ fn login_submit_impl(
     // response from leaking whether the address or realm exists (enumeration
     // resistance).
     if let Some(origin_val) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let expected = state.public_origin_str(&headers);
+        let expected = state.public_origin_str(headers);
         if origin_val != expected {
             tracing::warn!(
                 origin = origin_val,
                 expected = %expected,
                 "login: CSRF origin mismatch"
             );
-            return generic_error();
+            return Err(render_ctx.generic_error(&email));
         }
     }
 
@@ -1060,23 +1260,60 @@ fn login_submit_impl(
     if let Some(ref methods) = realm.config().allowed_auth_methods {
         if !methods.iter().any(|m| m == "password") {
             tracing::warn!(realm = %realm.id(), "login: password auth blocked by realm policy");
-            return generic_error();
+            return Err(render_ctx.generic_error(&email));
         }
     }
 
     // Per-IP rate limit check. Must happen before user lookup so a blocked
-    // IP cannot probe which email addresses exist.
+    // IP cannot probe which email addresses exist — and before the gate so a
+    // flood cannot saturate admission with soon-to-be-rejected requests
+    // (HEA-1892 / F1).
     if state
         .identity
         .check_ip_login_rate_limit(realm.id(), &client_ip)
         .is_err()
     {
         tracing::warn!(ip = %client_ip, "login: IP rate limit exceeded");
-        return generic_error();
+        return Err(render_ctx.generic_error(&email));
     }
 
+    Ok(PreparedLogin {
+        realm,
+        render_ctx,
+        session_ctx,
+        client_ip,
+        email,
+        is_admin,
+    })
+}
+
+/// Gated phase (runs on the blocking pool under a KDF permit): the Argon2id
+/// verify and everything downstream — MFA gate, required-action gate, and
+/// session issuance. All abuse fast-rejects already passed in [`login_prepare`].
+///
+/// On success: creates a session, issues the `hearth_ui_session` and
+/// `hearth_ui_csrf` cookies, then redirects. When MFA is enabled, shows the
+/// inline TOTP form (or redirects to forced enrollment). All auth failures
+/// collapse into a single generic error (enumeration resistance).
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+fn login_finish(
+    state: Arc<WebState>,
+    headers: HeaderMap,
+    form: LoginForm,
+    prepared: PreparedLogin,
+) -> Response {
+    let PreparedLogin {
+        realm,
+        render_ctx,
+        session_ctx,
+        client_ip,
+        email,
+        is_admin: _,
+    } = prepared;
+    let return_to = render_ctx.return_to.clone();
+
     // Resolved realm → single targeted lookup. No walk.
-    let Ok(Some(user)) = state.identity.get_user_by_email(realm.id(), email) else {
+    let Ok(Some(user)) = state.identity.get_user_by_email(realm.id(), &email) else {
         // Run dummy hash so timing is indistinguishable from a real user lookup + failed verify.
         state
             .identity
@@ -1084,7 +1321,7 @@ fn login_submit_impl(
         state
             .identity
             .record_ip_login_attempt(realm.id(), &client_ip);
-        return generic_error();
+        return render_ctx.generic_error(&email);
     };
 
     let password = CleartextPassword::from_string(form.password.clone());
@@ -1097,14 +1334,14 @@ fn login_submit_impl(
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
-            return generic_error();
+            return render_ctx.generic_error(&email);
         }
         Err(e) => {
             tracing::warn!(error = %e, "login: password verification failed");
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
-            return generic_error();
+            return render_ctx.generic_error(&email);
         }
     }
 
@@ -1130,16 +1367,17 @@ fn login_submit_impl(
         let mut tmpl = LoginTemplate::new(
             None,
             return_to.clone(),
-            &action_prefix,
-            show_register,
-            locale,
-            product_name.clone(),
-            state.logo_url.clone(),
+            &render_ctx.action_prefix,
+            render_ctx.show_register,
+            render_ctx.locale,
+            render_ctx.product_name.clone(),
+            render_ctx.logo_url.clone(),
         );
         tmpl.show_totp = true;
-        tmpl.email = email.to_string();
-        tmpl.realm_theme_url.clone_from(&realm_theme);
-        tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
+        tmpl.email = email.clone();
+        tmpl.realm_theme_url.clone_from(&render_ctx.realm_theme);
+        tmpl.inline_theme_css
+            .clone_from(&render_ctx.inline_theme_css);
         let mut response = render(&tmpl);
         append_cookie(&mut response, &cookie);
         return response;
@@ -1210,28 +1448,15 @@ fn login_submit_impl(
             );
             response
         }
-        Err(IdentityError::UserNotVerified) => {
-            let mut tmpl = LoginTemplate::new(
-                Some(
-                    "Your email is not verified yet. Check your inbox (or the server \
-                     logs) for the verification link and click it before signing in."
-                        .to_string(),
-                ),
-                return_to.clone(),
-                &action_prefix,
-                show_register,
-                locale,
-                product_name.clone(),
-                state.logo_url.clone(),
-            );
-            tmpl.email = email.to_string();
-            tmpl.realm_theme_url = realm_theme;
-            tmpl.inline_theme_css = inline_theme_css_val;
-            render_status(&tmpl, StatusCode::FORBIDDEN)
-        }
+        Err(IdentityError::UserNotVerified) => render_ctx.error_page(
+            "Your email is not verified yet. Check your inbox (or the server \
+             logs) for the verification link and click it before signing in.",
+            StatusCode::FORBIDDEN,
+            Some(&email),
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "login: create_session failed");
-            generic_error()
+            render_ctx.generic_error(&email)
         }
     }
 }
@@ -1684,13 +1909,22 @@ pub async fn mfa_challenge_submit(
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
     if !csrf_ok {
-        let tmpl = MfaChallengeTemplate::new(
-            Some("Invalid security token. Please reload the page and try again.".to_string()),
+        // Copy deliberately avoids "security token" — see `LoginRenderCtx::csrf_error`
+        // for the rationale (HEA-1913). The form now carries a fresh token so
+        // direct resubmission succeeds without an extra page load (HEA-1983).
+        let secure = state.is_secure_request(&headers);
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+        let mut tmpl = MfaChallengeTemplate::new(
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
             state.product_name.clone(),
             state.logo_url.clone(),
             pending.return_to.clone(),
         );
-        return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        tmpl.csrf = Some(csrf_value);
+        tmpl.reload_url = Some(tmpl.form_action.clone());
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        return resp;
     }
 
     let code = form.code.trim();
@@ -2868,38 +3102,132 @@ pub struct ResetPasswordFormData {
     pub password_confirm: String,
 }
 
+/// Context resolved pre-gate for reset-password submissions. Built outside the
+/// KDF admission gate so cheap validation rejects (password mismatch, minimum
+/// length) never consume a permit (HEA-1981 / F4).
+struct PreparedReset {
+    realm: Realm,
+    action_prefix: String,
+}
+
+/// Resolves the realm and validates cheap form constraints before the KDF gate.
+///
+/// Password mismatch and minimum-length checks run here so that a flood of
+/// trivially-invalid requests cannot exhaust the Argon2id admission pool.
+fn reset_prepare(
+    state: &Arc<WebState>,
+    form: &ResetPasswordFormData,
+    path_realm: Option<String>,
+) -> Result<PreparedReset, Response> {
+    let (realm, action_prefix) = match resolve_pre_auth_realm(state, path_realm, true) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return Err(resp),
+    };
+    let product_name = state.product_name.clone();
+    let logo_url = state.logo_url.clone();
+    let realm_theme = state.realm_theme_url_for(realm.id());
+    let inline_css = state.inline_theme_css();
+    // Clone so the closure captures its own copy and `action_prefix` can be
+    // moved into `PreparedReset` at the end.
+    let action_prefix_for_err = action_prefix.clone();
+    let reset_err = move |token: String, msg: String| {
+        let mut tmpl = ResetPasswordTemplate::new(
+            token,
+            Some(msg),
+            &action_prefix_for_err,
+            product_name.clone(),
+            logo_url.clone(),
+        );
+        tmpl.realm_theme_url.clone_from(&realm_theme);
+        tmpl.inline_theme_css.clone_from(&inline_css);
+        render(&tmpl)
+    };
+    if form.password != form.password_confirm {
+        return Err(reset_err(
+            form.token.clone(),
+            "Passwords do not match.".to_string(),
+        ));
+    }
+    if form.password.len() < 8 {
+        return Err(reset_err(
+            form.token.clone(),
+            "Password must be at least 12 characters.".to_string(),
+        ));
+    }
+    Ok(PreparedReset {
+        realm,
+        action_prefix,
+    })
+}
+
 /// Handles reset-password form submission at the bare URL.
 pub async fn reset_password_submit(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    reset_password_submit_impl(state, form, None)
+    // Cheap pre-gate validation — password mismatch/length never consumes a KDF
+    // permit (HEA-1981 / F4).
+    let prepared = match reset_prepare(&state, &form, None) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let shed_state = Arc::clone(&state);
+    let shed_headers = headers.clone();
+    match gate()
+        .run(move || reset_password_submit_impl(state, form, prepared))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => {
+            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
+        }
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Handles reset-password form submission at `/ui/realms/<name>/reset-password`.
 pub async fn reset_password_submit_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    reset_password_submit_impl(state, form, Some(realm_name))
+    let prepared = match reset_prepare(&state, &form, Some(realm_name)) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let shed_state = Arc::clone(&state);
+    let shed_headers = headers.clone();
+    match gate()
+        .run(move || reset_password_submit_impl(state, form, prepared))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => {
+            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
+        }
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
-/// Shared implementation — validates the token against the resolved
-/// realm only, no walk.
+/// Shared implementation — runs inside the KDF admission gate.
+///
+/// Receives a pre-validated realm and action prefix from [`reset_prepare`];
+/// password mismatch and length checks already ran pre-gate.
 #[allow(clippy::needless_pass_by_value)]
 fn reset_password_submit_impl(
     state: Arc<WebState>,
     form: ResetPasswordFormData,
-    path_realm: Option<String>,
+    prepared: PreparedReset,
 ) -> Response {
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, true) {
-        PreAuthRealm::Ok {
-            realm,
-            action_prefix,
-        } => (realm, action_prefix),
-        PreAuthRealm::Handled(resp) => return resp,
-    };
+    let PreparedReset {
+        realm,
+        action_prefix,
+    } = prepared;
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
     let realm_theme = state.realm_theme_url_for(realm.id());
@@ -2917,17 +3245,6 @@ fn reset_password_submit_impl(
         tmpl.inline_theme_css.clone_from(&inline_css);
         render(&tmpl)
     };
-
-    if form.password != form.password_confirm {
-        return reset_err(form.token, "Passwords do not match.".to_string());
-    }
-
-    if form.password.len() < 8 {
-        return reset_err(
-            form.token,
-            "Password must be at least 12 characters.".to_string(),
-        );
-    }
 
     let password = CleartextPassword::from_string(form.password);
 
@@ -2974,6 +3291,10 @@ struct RegisterTemplate {
     form_action: String,
     /// URL for the "Sign in" link at the bottom of the form.
     login_url: String,
+    /// Shown alongside error when the form's CSRF token went stale — links back
+    /// to this same registration form so the user lands on a page bearing a
+    /// fresh token without hunting for the browser reload button (HEA-1913).
+    reload_url: Option<String>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -3010,6 +3331,7 @@ impl RegisterTemplate {
             error,
             form_action,
             login_url,
+            reload_url: None,
             chrome: false,
             active: "",
             user_email: None,
@@ -3245,6 +3567,94 @@ async fn captcha_check(state: &Arc<super::WebState>, headers: &HeaderMap, token:
         .unwrap_or(true)
 }
 
+/// Context resolved pre-gate for registration submissions. Built outside the
+/// KDF admission gate so CSRF and captcha rejects never consume a permit
+/// (HEA-1981 / F3).
+struct PreparedRegister {
+    realm: Realm,
+    action_prefix: String,
+}
+
+/// Resolves the realm and validates the cheap pre-gate conditions (CSRF and
+/// captcha) before the KDF admission gate.
+///
+/// Returns `Err(response)` for any rejection that doesn't require Argon2id.
+/// Returns `Ok(PreparedRegister)` when the request is safe to admit to the gate.
+fn register_pre_gate(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    form: &RegisterForm,
+    path_realm: Option<String>,
+    captcha_ok: bool,
+) -> Result<PreparedRegister, Response> {
+    let (realm, action_prefix) = match resolve_pre_auth_realm(state, path_realm, true) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return Err(resp),
+    };
+    let product_name = state.product_name.clone();
+    let logo_url = state.logo_url.clone();
+    let realm_theme = state.realm_theme_url_for(realm.id());
+    let inline_css = state.inline_theme_css();
+    let (disabled, invite_only) = registration_policy_flags(&realm);
+    let form_action = format!("{action_prefix}/register");
+    let login_url = format!("{action_prefix}/login");
+    let captcha_widget_html = state.captcha_provider.widget_html().to_string();
+
+    // CSRF double-submit check — fail-closed in non-dev mode (HEA-1981 / F3).
+    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        // Mint a fresh CSRF token so the user can resubmit immediately (HEA-1983).
+        let secure = state.is_secure_request(headers);
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+        let mut tmpl = RegisterTemplate::new(
+            disabled,
+            invite_only,
+            form.email.clone(),
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
+            form_action.clone(),
+            login_url.clone(),
+            product_name.clone(),
+            logo_url.clone(),
+            captcha_widget_html.clone(),
+        );
+        tmpl.reload_url = Some(form_action);
+        tmpl.csrf = Some(csrf_value);
+        tmpl.realm_theme_url.clone_from(&realm_theme);
+        tmpl.inline_theme_css.clone_from(&inline_css);
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        return Err(resp);
+    }
+
+    if !captcha_ok {
+        let mut tmpl = RegisterTemplate::new(
+            disabled,
+            invite_only,
+            form.email.clone(),
+            Some("CAPTCHA verification failed. Please try again.".to_string()),
+            form_action,
+            login_url,
+            product_name,
+            logo_url,
+            captcha_widget_html,
+        );
+        tmpl.realm_theme_url.clone_from(&realm_theme);
+        tmpl.inline_theme_css.clone_from(&inline_css);
+        return Err(render_status(&tmpl, StatusCode::BAD_REQUEST));
+    }
+
+    Ok(PreparedRegister {
+        realm,
+        action_prefix,
+    })
+}
+
 /// Handles registration form submission (bare `/ui/register`).
 pub async fn register_submit(
     State(state): State<Arc<WebState>>,
@@ -3252,7 +3662,31 @@ pub async fn register_submit(
     Form(form): Form<RegisterForm>,
 ) -> Response {
     let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
-    register_submit_impl(state, headers, form, None, captcha_ok)
+    // CSRF and captcha validated pre-gate so a flood of rejected requests never
+    // exhausts the Argon2id admission pool (HEA-1981 / F3).
+    let prepared = match register_pre_gate(&state, &headers, &form, None, captcha_ok) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let shed_state = Arc::clone(&state);
+    let shed_email = form.email.trim().to_string();
+    let shed_headers = headers.clone();
+    let shed_action = format!("{}/register", prepared.action_prefix);
+    match gate()
+        .run(move || register_submit_impl(state, headers, form, prepared))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => kdf_shed_html_response(
+            &shed_state,
+            &shed_headers,
+            retry_after,
+            Some(shed_email),
+            None,
+            Some(shed_action),
+        ),
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Handles registration form submission for `/ui/realms/<name>/register`.
@@ -3263,10 +3697,36 @@ pub async fn register_submit_scoped(
     Form(form): Form<RegisterForm>,
 ) -> Response {
     let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
-    register_submit_impl(state, headers, form, Some(realm_name), captcha_ok)
+    let prepared = match register_pre_gate(&state, &headers, &form, Some(realm_name), captcha_ok) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let shed_state = Arc::clone(&state);
+    let shed_email = form.email.trim().to_string();
+    let shed_headers = headers.clone();
+    let shed_action = format!("{}/register", prepared.action_prefix);
+    match gate()
+        .run(move || register_submit_impl(state, headers, form, prepared))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => kdf_shed_html_response(
+            &shed_state,
+            &shed_headers,
+            retry_after,
+            Some(shed_email),
+            None,
+            Some(shed_action),
+        ),
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Shared implementation for bare and realm-scoped register submits.
+///
+/// Runs inside the KDF admission gate. Receives a pre-validated realm and
+/// action prefix from [`register_pre_gate`]; CSRF and captcha checks already
+/// ran pre-gate.
 ///
 /// On success, creates a `PendingVerification` user, issues a verification
 /// token, emails it, and redirects to the scope's `register/sent` page.
@@ -3278,17 +3738,12 @@ fn register_submit_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
     form: RegisterForm,
-    path_realm: Option<String>,
-    captcha_ok: bool,
+    prepared: PreparedRegister,
 ) -> Response {
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, true) {
-        PreAuthRealm::Ok {
-            realm,
-            action_prefix,
-        } => (realm, action_prefix),
-        PreAuthRealm::Handled(resp) => return resp,
-    };
-
+    let PreparedRegister {
+        realm,
+        action_prefix,
+    } = prepared;
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
     let realm_theme = state.realm_theme_url_for(realm.id());
@@ -3299,7 +3754,7 @@ fn register_submit_impl(
     let sent_url = format!("{action_prefix}/register/sent");
     let captcha_widget_html = state.captcha_provider.widget_html().to_string();
 
-    let render_err = |msg: String, email: String| {
+    let render_err_with_reload = |msg: String, email: String, reload_url: Option<String>| {
         let mut tmpl = RegisterTemplate::new(
             disabled,
             invite_only,
@@ -3311,29 +3766,12 @@ fn register_submit_impl(
             logo_url.clone(),
             captcha_widget_html.clone(),
         );
+        tmpl.reload_url = reload_url;
         tmpl.realm_theme_url.clone_from(&realm_theme);
         tmpl.inline_theme_css.clone_from(&inline_css);
         render_status(&tmpl, StatusCode::BAD_REQUEST)
     };
-
-    // F6: CSRF double-submit check — fail-closed in non-dev mode.
-    let csrf_ok = match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
-        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
-        None => state.dev_mode,
-    };
-    if !csrf_ok {
-        return render_err(
-            "Invalid security token. Please reload the page and try again.".to_string(),
-            form.email.clone(),
-        );
-    }
-
-    if !captcha_ok {
-        return render_err(
-            "CAPTCHA verification failed. Please try again.".to_string(),
-            form.email.clone(),
-        );
-    }
+    let render_err = |msg: String, email: String| render_err_with_reload(msg, email, None);
 
     if disabled {
         return render_err(
@@ -4273,6 +4711,33 @@ pub async fn ra_verify_email_success(
 mod tests {
     use super::*;
 
+    /// HEA-1887 / R1: an overloaded KDF gate sheds with `503` + a non-zero
+    /// `Retry-After`, so login degrades honestly under saturation instead of
+    /// inflating p99 by queueing. Pairs with the primitive-level shed test in
+    /// `identity::kdf_gate` (which proves past-bound ops return `Overloaded`).
+    #[test]
+    fn kdf_shed_response_is_503_with_retry_after() {
+        let resp = kdf_shed_response(std::time::Duration::from_secs(3));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .expect("Retry-After header present");
+        assert_eq!(retry.to_str().expect("ascii"), "3");
+    }
+
+    /// A sub-second retry hint is floored to 1 — `Retry-After: 0` is handled
+    /// inconsistently by clients and would invite immediate retry storms.
+    #[test]
+    fn kdf_shed_response_floors_retry_after_to_one() {
+        let resp = kdf_shed_response(std::time::Duration::from_millis(200));
+        let retry = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .expect("Retry-After header present");
+        assert_eq!(retry.to_str().expect("ascii"), "1");
+    }
+
     #[test]
     fn derive_base_url_uses_configured_origin() {
         let mut h = HeaderMap::new();
@@ -4367,5 +4832,108 @@ mod tests {
             admin_password: "super-secret-123".to_string(),
         };
         assert!(validate_setup_form(&form).is_ok());
+    }
+
+    // ── HEA-1979: KDF shed HTML page tests ──────────────────────────────────
+
+    /// The themed shed page must carry the `data-testid="kdf-shed-retry-form"`
+    /// attribute so the Playwright regression can assert on it without relying
+    /// on fragile text content.
+    #[test]
+    fn kdf_shed_template_renders_retry_form_when_action_is_provided() {
+        use askama::Template as _;
+        let tmpl = super::super::handlers_common::KdfShedTemplate {
+            retry_after_secs: 5,
+            email: "alice@example.com".to_string(),
+            return_to: None,
+            form_action: Some("/ui/login".to_string()),
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: Some("test-csrf-token".to_string()),
+            narrow: true,
+            product_name: "Hearth".to_string(),
+            logo_url: "/_/logo.svg".to_string(),
+            realm_theme_url: None,
+            inline_theme_css: None,
+        };
+        let html = tmpl.render().expect("template renders");
+        assert!(
+            html.contains("kdf-shed-retry-form"),
+            "retry form testid present in: {html}"
+        );
+        assert!(
+            html.contains("alice@example.com"),
+            "email pre-filled in: {html}"
+        );
+        assert!(
+            html.contains("5 second"),
+            "retry-after count present in: {html}"
+        );
+    }
+
+    /// When no `form_action` is set the template must NOT render the retry form
+    /// — it should show a "back to home" link instead. This path is hit by
+    /// `account_change_password` and `totp_activate` where there is no
+    /// meaningful POST URL to re-submit.
+    #[test]
+    fn kdf_shed_template_renders_back_link_when_no_form_action() {
+        use askama::Template as _;
+        let tmpl = super::super::handlers_common::KdfShedTemplate {
+            retry_after_secs: 2,
+            email: String::new(),
+            return_to: None,
+            form_action: None,
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: None,
+            narrow: true,
+            product_name: "Hearth".to_string(),
+            logo_url: "/_/logo.svg".to_string(),
+            realm_theme_url: None,
+            inline_theme_css: None,
+        };
+        let html = tmpl.render().expect("template renders");
+        assert!(
+            !html.contains("kdf-shed-retry-form"),
+            "no retry form when action is None in: {html}"
+        );
+        assert!(
+            html.contains("Back to home"),
+            "back-to-home link present in: {html}"
+        );
+    }
+
+    /// The plural/singular second copy must agree: 1 → "second", ≠1 → "seconds".
+    #[test]
+    fn kdf_shed_template_pluralises_seconds_correctly() {
+        use askama::Template as _;
+        let make = |secs: u64| super::super::handlers_common::KdfShedTemplate {
+            retry_after_secs: secs,
+            email: String::new(),
+            return_to: None,
+            form_action: None,
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: None,
+            narrow: true,
+            product_name: "Hearth".to_string(),
+            logo_url: "/_/logo.svg".to_string(),
+            realm_theme_url: None,
+            inline_theme_css: None,
+        };
+        let singular = make(1).render().expect("renders");
+        assert!(singular.contains("1 second"), "singular: {singular}");
+        assert!(!singular.contains("1 seconds"), "no trailing s: {singular}");
+        let plural = make(30).render().expect("renders");
+        assert!(plural.contains("30 seconds"), "plural: {plural}");
     }
 }

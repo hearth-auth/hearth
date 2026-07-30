@@ -6,7 +6,9 @@
 mod common;
 
 use hearth::core::RealmId;
-use hearth::identity::{CleartextPassword, CreateUserRequest, IdentityError, User};
+use hearth::identity::{
+    CleartextPassword, CreateUserRequest, IdentityError, StoredCredential, User,
+};
 
 /// Helper: creates a user with a unique email in the given realm.
 fn create_user(harness: &common::TestHarness, realm: &RealmId) -> User {
@@ -25,19 +27,19 @@ fn create_user(harness: &common::TestHarness, realm: &RealmId) -> User {
         .expect("create user")
 }
 
-/// Helper: loads the raw stored credential JSON for a user.
+/// Helper: loads the stored credential for a user (postcard-decoded).
 fn load_stored_credential(
     harness: &common::TestHarness,
     realm: &RealmId,
     user_id: &hearth::core::UserId,
-) -> serde_json::Value {
+) -> StoredCredential {
     let key = format!("cred:user:{}", user_id.as_uuid());
     let bytes = harness
         .storage()
         .get(realm, key.as_bytes())
         .expect("load credential bytes")
         .expect("credential exists");
-    serde_json::from_slice(&bytes).expect("credential json")
+    hearth::codec::decode(&bytes).expect("credential binary")
 }
 
 // ===== Scenario 5: Full credential lifecycle =====
@@ -547,7 +549,7 @@ async fn set_password_uses_realm_argon2_parameters() {
         .expect("set password");
 
     let stored = load_stored_credential(&harness, realm.id(), user.id());
-    let hash = stored["hash"].as_str().expect("hash string");
+    let hash = &stored.hash;
     assert!(
         hash.starts_with("$argon2id$"),
         "expected argon2id hash, got: {hash}"
@@ -620,7 +622,7 @@ async fn legacy_verify_rehash_uses_realm_argon2_parameters_and_keeps_age() {
     assert!(ok, "legacy credential should verify");
 
     let stored = load_stored_credential(&harness, realm.id(), user.id());
-    let hash = stored["hash"].as_str().expect("hash string");
+    let hash = &stored.hash;
     assert!(
         hash.starts_with("$argon2id$"),
         "expected upgrade to argon2id after verify, got: {hash}"
@@ -634,8 +636,7 @@ async fn legacy_verify_rehash_uses_realm_argon2_parameters_and_keeps_age() {
         "expected realm time override in upgraded hash, got: {hash}"
     );
     assert_eq!(
-        stored["created_at"].as_i64(),
-        Some(imported_created_at),
+        stored.created_at, imported_created_at,
         "rehash should preserve original credential age for expiry policy"
     );
 }
@@ -777,8 +778,8 @@ async fn argon2_param_change_triggers_lazy_rehash_on_login() {
 
     // Verify the stored hash reflects the original params.
     let stored = load_stored_credential(&harness, realm.id(), user.id());
-    let original_hash = stored["hash"].as_str().expect("hash").to_string();
-    let original_created_at = stored["created_at"].as_i64().expect("created_at");
+    let original_hash = stored.hash.clone();
+    let original_created_at = stored.created_at;
     assert!(
         original_hash.contains("m=512"),
         "expected m=512 in hash, got: {original_hash}"
@@ -811,7 +812,7 @@ async fn argon2_param_change_triggers_lazy_rehash_on_login() {
 
     // Stored hash should now use the new params.
     let stored_after = load_stored_credential(&harness, realm.id(), user.id());
-    let new_hash = stored_after["hash"].as_str().expect("hash after rehash");
+    let new_hash = &stored_after.hash;
     assert!(
         new_hash.contains("m=1024"),
         "expected m=1024 after lazy rehash, got: {new_hash}"
@@ -821,8 +822,7 @@ async fn argon2_param_change_triggers_lazy_rehash_on_login() {
         "expected t=2 after lazy rehash, got: {new_hash}"
     );
     assert_eq!(
-        stored_after["created_at"].as_i64(),
-        Some(original_created_at),
+        stored_after.created_at, original_created_at,
         "lazy rehash must preserve original credential age"
     );
 

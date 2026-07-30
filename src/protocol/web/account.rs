@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
@@ -165,6 +165,7 @@ pub struct ChangePasswordForm {
 pub async fn account_change_password(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    headers: HeaderMap,
     Form(form): Form<ChangePasswordForm>,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
@@ -184,10 +185,40 @@ pub async fn account_change_password(
     let current = CleartextPassword::from_string(form.current_password);
     let new_pw = CleartextPassword::from_string(form.new_password);
 
-    match state
-        .identity
-        .change_password(&session.realm_id, &session.user_id, &current, &new_pw)
+    // Change-password performs *two* Argon2id ops (verify current + hash new),
+    // so route it through the shared KDF admission gate (HEA-1891 / F3) instead
+    // of running inline on the async worker. This bounds the peak-memory
+    // contribution of a change-password flood the same way login is bounded and
+    // moves the blocking hash off the runtime thread.
+    let identity = state.identity.clone();
+    let realm_id = session.realm_id.clone();
+    let user_id = session.user_id.clone();
+    let change_result = match crate::identity::gate()
+        .run(move || identity.change_password(&realm_id, &user_id, &current, &new_pw))
+        .await
     {
+        Ok(r) => r,
+        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+            return super::handlers::kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                None,
+                None,
+                None,
+            );
+        }
+        Err(crate::identity::KdfGateError::Join(e)) => {
+            tracing::warn!(error = %e, "change_password KDF task panicked");
+            return render_with_password_error(
+                &state,
+                &session,
+                "Unable to change password right now.",
+            );
+        }
+    };
+
+    match change_result {
         Ok(()) => {
             // Audit the change (best-effort — never block the response).
             if let Err(e) = audit_password_changed(&state, &session) {
@@ -515,6 +546,7 @@ pub struct ActivateTotpForm {
 pub async fn totp_activate(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    headers: HeaderMap,
     Form(form): Form<ActivateTotpForm>,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
@@ -526,10 +558,11 @@ pub async fn totp_activate(
     let realm_id = session.realm_id.clone();
     let user_id = session.user_id.clone();
     let identity = state.identity.clone();
-    let pw_result = tokio::task::spawn_blocking(move || {
-        identity.verify_password(&realm_id, &user_id, &password)
-    })
-    .await;
+    // Step-up password verify is an Argon2id op — route it through the shared
+    // KDF admission gate (HEA-1891 / F3) rather than an ungated spawn_blocking.
+    let pw_result = crate::identity::gate()
+        .run(move || identity.verify_password(&realm_id, &user_id, &password))
+        .await;
     match pw_result {
         Ok(Ok(true)) => {} // password correct, proceed
         Ok(Ok(false) | Err(_)) => {
@@ -539,8 +572,18 @@ pub async fn totp_activate(
                 "Current password is incorrect. Please try again.",
             );
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "verify_password spawn_blocking panicked");
+        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+            return super::handlers::kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                None,
+                None,
+                None,
+            );
+        }
+        Err(crate::identity::KdfGateError::Join(e)) => {
+            tracing::warn!(error = %e, "verify_password KDF task panicked");
             return render_totp_error(&state, &session, "Unable to verify password right now.");
         }
     }

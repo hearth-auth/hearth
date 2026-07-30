@@ -1,0 +1,69 @@
+HEA-1957 · C11 — end-to-end HTTP delta
+
+Argon2id (production defaults): m = 19456 KiB, t = 2, p = 1
+seeding 256 users …
+creating 1024 warm sessions + minting access tokens …
+provisioning 32 Argon2id password credentials (m=19456 KiB — this is slow by design) …
+warming hot tier + saturating the claims cache …
+
+── phase 1/3: generator calibration (null TCP server) ──
+
+  null   T=1           63838 ops/s   p50     13.9 µs
+  null   T=8          346832 ops/s   p50     21.4 µs
+  null   T=32         562927 ops/s   p50     38.9 µs
+
+── phase 2/3: engine-direct (no HTTP) ──
+
+  introspect_token               T=1           24664 ops/s   p50     39.2 µs   p99      57.8 µs   ok 100.0%
+  introspect_token               T=8          145526 ops/s   p50     50.4 µs   p99      87.3 µs   ok 100.0%
+  introspect_token               T=32         160422 ops/s   p50     92.9 µs   p99    3551.3 µs   ok 100.0%
+  validate_token+get_user        T=1          951950 ops/s   p50      1.0 µs   p99       2.3 µs   ok 100.0%
+  validate_token+get_user        T=8         5436621 ops/s   p50      1.4 µs   p99       2.0 µs   ok 100.0%
+  validate_token+get_user        T=32        7282436 ops/s   p50      1.9 µs   p99       2.4 µs   ok 100.0%
+  verify_password+create_session T=1              57 ops/s   p50  16431.1 µs   p99   29808.7 µs   ok 100.0%
+  verify_password+create_session T=8             162 ops/s   p50  43994.0 µs   p99  150939.4 µs   ok 100.0%
+
+── phase 3/3: end-to-end HTTP ──
+
+  api  listening on 127.0.0.1:37927
+  web  listening on 127.0.0.1:40811
+  healthz                        T=1           19987 ops/s   p50     45.0 µs   p99      97.3 µs   ok 100.0%  statuses 200×59962
+  healthz                        T=8           26462 ops/s   p50    133.0 µs   p99    1951.8 µs   ok 100.0%  statuses 200×79387
+  healthz                        T=32          52281 ops/s   p50    439.0 µs   p99    3383.5 µs   ok 100.0%  statuses 200×156846
+  introspect                     T=1            3241 ops/s   p50    219.8 µs   p99    2339.9 µs   ok 100.0%  statuses 200×9723
+  introspect                     T=8           15404 ops/s   p50    347.1 µs   p99    3097.8 µs   ok 100.0%  statuses 200×46214
+  introspect                     T=32          31414 ops/s   p50    905.3 µs   p99    3511.3 µs   ok 100.0%  statuses 200×94244
+  userinfo                       T=1            9567 ops/s   p50     78.8 µs   p99     737.2 µs   ok 100.0%  statuses 200×28710
+  userinfo                       T=8           52567 ops/s   p50     66.3 µs   p99    1995.5 µs   ok 100.0%  statuses 200×157705
+  userinfo                       T=32         142426 ops/s   p50    205.4 µs   p99     822.8 µs   ok 100.0%  statuses 200×427292
+  login                          T=1              51 ops/s   p50  19588.7 µs   p99   22355.6 µs   ok 100.0%  statuses 303×152
+  login                          T=8             215 ops/s   p50  36762.9 µs   p99   50617.9 µs   ok 100.0%  statuses 303×644
+
+════════ HTTP DELTA ════════
+
+Argon2id in force: m = 19456 KiB, t = 2, p = 1   (production defaults, not fast_for_testing)
+
+HTTP envelope floor (GET /healthz, no engine work): 19987 ops/s 1T, p50 45.0 µs
+→ every engine-backed row below pays ≈ 45.0 µs of axum/tokio/TCP before its engine call starts.
+
+operation                           T  engine ops/s    http ops/s    ratio  eng p50µs http p50µs  headroom verdict
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+introspect_token → /introspect      1         24664          3241     7.6×      39.21     219.81     19.7× ADMISSIBLE
+introspect_token → /introspect      8        145526         15404     9.4×      50.41     347.12     22.5× ADMISSIBLE
+introspect_token → /introspect     32        160422         31414     5.1×      92.86     905.25     17.9× ADMISSIBLE
+validate_token+get_user → /userinfo    1        951950          9567    99.5×       0.95      78.80      6.7× ADMISSIBLE
+validate_token+get_user → /userinfo    8       5436621         52567   103.4×       1.36      66.31      6.6× ADMISSIBLE
+validate_token+get_user → /userinfo   32       7282436        142426    51.1×       1.89     205.45      4.0× ADMISSIBLE
+verify_password+create_session → /login    1            57            51     1.1×   16431.14   19588.68   1260.0× ADMISSIBLE
+verify_password+create_session → /login    8           162           215     0.8×   43994.01   36762.91   1615.7× ADMISSIBLE
+
+Generator calibration (null TCP server — the driver's own ceiling):
+  T=1          63838 ops/s   p50   13.86 µs
+  T=8         346832 ops/s   p50   21.37 µs
+  T=32        562927 ops/s   p50   38.90 µs
+
+A row is ADMISSIBLE only when generator headroom ≥ 2.0× and success ≥ 99%%.
+Excluded from every number above: TLS, physical network, client/server core isolation.
+The HTTP figures are therefore an UPPER bound and the ratios a LOWER bound.
+
+raw artifact → docs/perf/artifacts/c11-http-delta-raw.json

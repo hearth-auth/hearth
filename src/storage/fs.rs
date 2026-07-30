@@ -7,7 +7,37 @@
 //! testing.
 
 use std::io;
+use std::ops::Deref;
 use std::path::Path;
+
+/// Read-only byte backing for an SST file.
+///
+/// Production ([`RealFs`]) memory-maps the file so ciphertext pages are backed
+/// by the OS page cache and evictable under memory pressure — the block-based
+/// v3 reader (HEA-1914) slices decryptable blocks straight out of it without
+/// ever pulling the whole file into a heap `Vec`. Test and simulation
+/// filesystems that have no real on-disk file fall back to a heap buffer via
+/// the default [`Fs::map_readonly`]; correctness is identical, only the
+/// residency characteristics differ.
+pub enum FileBacking {
+    /// Whole-file contents read into the heap (test/simulation fallback).
+    Heap(Vec<u8>),
+    /// A read-only memory map of the file (production).
+    #[cfg(unix)]
+    Mmap(memmap2::Mmap),
+}
+
+impl Deref for FileBacking {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            FileBacking::Heap(v) => v,
+            #[cfg(unix)]
+            FileBacking::Mmap(m) => m,
+        }
+    }
+}
 
 /// A file handle returned by [`Fs::open`] or [`Fs::create`].
 ///
@@ -21,6 +51,22 @@ pub trait FsFile: Send + Sync {
 
     /// Flushes and syncs the file to durable storage.
     fn sync_all(&self) -> io::Result<()>;
+
+    /// Syncs file *data* to durable storage, skipping non-essential metadata.
+    ///
+    /// Maps to `fdatasync(2)`. The kernel still persists any metadata required
+    /// to read the written bytes back after a crash — critically, the file
+    /// length — but skips the journal commit for fields the WAL does not
+    /// depend on (`mtime`, `ctime`). For an append-only, pre-created WAL
+    /// segment this is the same durability guarantee as [`Self::sync_all`] at
+    /// roughly half the device round-trips (HEA-1959).
+    ///
+    /// The default implementation delegates to `sync_all`, so alternate
+    /// filesystems (simulation, fault injection) remain correct without
+    /// change — they simply give up the optimisation.
+    fn sync_data(&self) -> io::Result<()> {
+        self.sync_all()
+    }
 
     /// Seeks to a position in the file.
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64>;
@@ -46,6 +92,17 @@ pub trait Fs: Send + Sync {
 
     /// Reads the entire contents of a file into a byte vector.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+
+    /// Maps a file read-only for random access without decrypting it eagerly.
+    ///
+    /// The default implementation reads the whole file into a heap buffer,
+    /// which is correct for any filesystem but keeps the ciphertext resident.
+    /// [`RealFs`] overrides this to `mmap(2)` the file so pages stay in the OS
+    /// page cache and are evictable under pressure — the mechanism by which the
+    /// v3 SST reader keeps resident RAM independent of corpus size (HEA-1914).
+    fn map_readonly(&self, path: &Path) -> io::Result<FileBacking> {
+        Ok(FileBacking::Heap(self.read(path)?))
+    }
 
     /// Writes data to a file, creating it if needed, truncating if it exists.
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
@@ -97,6 +154,10 @@ impl FsFile for RealFsFile {
         self.0.sync_all()
     }
 
+    fn sync_data(&self) -> io::Result<()> {
+        self.0.sync_data()
+    }
+
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         io::Seek::seek(&mut self.0, pos)
     }
@@ -128,6 +189,21 @@ impl Fs for RealFs {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    #[cfg(unix)]
+    fn map_readonly(&self, path: &Path) -> io::Result<FileBacking> {
+        let file = std::fs::File::open(path)?;
+        // SAFETY: `Mmap::map` is unsafe because the mapping's bytes may change
+        // if another process truncates or writes the file concurrently. Hearth
+        // SST files are write-once: created via a temp file + atomic rename,
+        // fsync'd, and never modified in place afterward — the compaction path
+        // writes a *new* file number and unlinks the old one, and an unlinked
+        // file's pages remain valid for the lifetime of this mapping. No other
+        // writer ever mutates a live SST, so the mapped range is stable for as
+        // long as this `FileBacking` (and the `SstReader` owning it) lives.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        Ok(FileBacking::Mmap(mmap))
     }
 
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {

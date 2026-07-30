@@ -250,7 +250,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 #### Benchmark
 
 - [x] Session lookup by ID: p50 < 10 μs, p99 < 100 μs (regression: +20%) `P0` `standard`
-- [x] Session creation throughput: > 50,000 ops/sec/core `P1` `standard`
+- [x] Session creation throughput: > 30,000 /s aggregate @ T=256, fsync-before-ack `P1` `standard`
 
 ---
 
@@ -877,7 +877,7 @@ All benchmark thresholds from VISION.md §7.1. Regression threshold for all oper
 | User lookup by email/ID | < 50 μs | < 500 μs | < 5 ms | — |
 | Token issuance (full OAuth2 flow) | < 1 ms | < 5 ms | < 10 ms | — |
 | User creation (Argon2id) | < 50 ms | < 100 ms | N/A (write) | 50K+ ops/sec/core |
-| Session creation | — | — | N/A (write) | 50K+ ops/sec/core |
+| Session creation | — | — | N/A (write) | > 30,000 /s @T=256 aggregate (fsync-before-ack) |
 | Cold-to-hot promotion | — | — | < 5 ms (NVMe) | — |
 
 ### Phase 1 Benchmark Targets

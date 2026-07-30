@@ -1,0 +1,163 @@
+{
+  "schema": 1,
+  "child_issue": "HEA-1876",
+  "axis": "K1,K2,K3,E4",
+  "git_sha": "b29e57dd",
+  "timestamp_utc": "2026-07-28T18:16:44Z",
+  "host": {
+    "profile": "dev-ryzen-7840hs",
+    "cpu_model": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+    "cores_physical": 8,
+    "threads": 16,
+    "governor": "powersave",
+    "ram_total_gib": 54.7,
+    "ram_available_gib": 19.0,
+    "generator_placement": "co-resident"
+  },
+  "sweep_config": {
+    "hot_tier_capacity": 100000,
+    "hot_set_size": 10000,
+    "tier_miss_users": 50,
+    "tier_miss_run_time": "90s",
+    "ladder": [
+      100000,
+      300000,
+      1000000,
+      3000000
+    ]
+  },
+  "rungs": [
+    {
+      "corpus_size": 100000,
+      "outcome": "MEASURED",
+      "seed_wall_seconds": 2,
+      "idle_rss_bytes": 280506368,
+      "post_load_rss_bytes": 1010012160,
+      "sst_count": 12,
+      "data_dir_bytes": 123563697,
+      "swap": {
+        "swap_in_pages_delta": 503648,
+        "swap_out_pages_delta": 1061693,
+        "void_due_to_swap": true
+      },
+      "tier_miss_users": 50,
+      "tier_miss_run_time": "90s",
+      "hot_tier_capacity": 100000,
+      "hot_set_size": 10000,
+      "latency": {
+        "hot_p50_ms": 160,
+        "hot_p99_ms": 800,
+        "hot_p999_ms": null,
+        "hot_reqs": null,
+        "cold_p50_ms": 340,
+        "cold_p99_ms": 1000,
+        "cold_p999_ms": null,
+        "cold_reqs": null,
+        "achieved_rps": 170.66666666666666,
+        "failure_rate": 0.0,
+        "ceiling": "unknown",
+        "tm_hot_p99_ms": 800,
+        "tm_cold_p99_ms": 1000
+      }
+    },
+    {
+      "corpus_size": 300000,
+      "outcome": "MEASURED",
+      "seed_wall_seconds": 9,
+      "idle_rss_bytes": 599416832,
+      "post_load_rss_bytes": 1343971328,
+      "sst_count": 38,
+      "data_dir_bytes": 245719248,
+      "swap": {
+        "swap_in_pages_delta": 253764,
+        "swap_out_pages_delta": 2025518,
+        "void_due_to_swap": true
+      },
+      "tier_miss_users": 50,
+      "tier_miss_run_time": "90s",
+      "hot_tier_capacity": 100000,
+      "hot_set_size": 10000,
+      "latency": {
+        "hot_p50_ms": 130,
+        "hot_p99_ms": 600,
+        "hot_p999_ms": null,
+        "hot_reqs": null,
+        "cold_p50_ms": 320,
+        "cold_p99_ms": 700,
+        "cold_p999_ms": null,
+        "cold_reqs": null,
+        "achieved_rps": 205.75555555555556,
+        "failure_rate": 0.0,
+        "ceiling": "unknown",
+        "tm_hot_p99_ms": 600,
+        "tm_cold_p99_ms": 700
+      }
+    },
+    {
+      "corpus_size": 1000000,
+      "outcome": "MEASURED",
+      "seed_wall_seconds": 51,
+      "idle_rss_bytes": 3393728512,
+      "post_load_rss_bytes": 2737254400,
+      "sst_count": 127,
+      "data_dir_bytes": 662419540,
+      "swap": {
+        "swap_in_pages_delta": 714928,
+        "swap_out_pages_delta": 1388191,
+        "void_due_to_swap": true
+      },
+      "tier_miss_users": 50,
+      "tier_miss_run_time": "90s",
+      "hot_tier_capacity": 100000,
+      "hot_set_size": 10000,
+      "latency": {
+        "hot_p50_ms": 130,
+        "hot_p99_ms": 600,
+        "hot_p999_ms": null,
+        "hot_reqs": null,
+        "cold_p50_ms": 320,
+        "cold_p99_ms": 700,
+        "cold_p999_ms": null,
+        "cold_reqs": null,
+        "achieved_rps": 210.3,
+        "failure_rate": 0.0,
+        "ceiling": "unknown",
+        "tm_hot_p99_ms": 600,
+        "tm_cold_p99_ms": 700
+      }
+    },
+    {
+      "corpus_size": 3000000,
+      "outcome": "MEASURED",
+      "seed_wall_seconds": 516,
+      "idle_rss_bytes": 5381423104,
+      "post_load_rss_bytes": 5858533376,
+      "sst_count": 381,
+      "data_dir_bytes": 1989473596,
+      "swap": {
+        "swap_in_pages_delta": 2368824,
+        "swap_out_pages_delta": 6760509,
+        "void_due_to_swap": true
+      },
+      "tier_miss_users": 50,
+      "tier_miss_run_time": "90s",
+      "hot_tier_capacity": 100000,
+      "hot_set_size": 10000,
+      "latency": {
+        "hot_p50_ms": 300,
+        "hot_p99_ms": 1000,
+        "hot_p999_ms": null,
+        "hot_reqs": null,
+        "cold_p50_ms": 340,
+        "cold_p99_ms": 1000,
+        "cold_p999_ms": null,
+        "cold_reqs": null,
+        "achieved_rps": 151.9111111111111,
+        "failure_rate": 0.0,
+        "ceiling": "unknown",
+        "tm_hot_p99_ms": 1000,
+        "tm_cold_p99_ms": 1000
+      }
+    }
+  ]
+}

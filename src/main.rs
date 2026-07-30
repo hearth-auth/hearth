@@ -677,6 +677,50 @@ fn loadtest_unthrottle_decision(
     }
 }
 
+/// Outcome of the dev-mode loopback startup gate (HEA-1980).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevBindCheck {
+    /// Not in dev mode — gate does not apply.
+    NotDev,
+    /// Dev mode, all effective binds are loopback — server may start.
+    Ok,
+    /// Dev mode, at least one bind is non-loopback — refuse to start.
+    RefusedNonLoopback,
+}
+
+/// Hard startup gate for `--dev` mode: refuses to start when any effective
+/// bind (HTTP or gRPC) is non-loopback (HEA-1980).
+///
+/// Unlike the config-file check in `validate.rs`, this runs **after** CLI
+/// `--bind`/`--port` overrides are applied, so `hearth serve --dev --bind
+/// 0.0.0.0` is caught here even when no config file is present
+/// (`Config::dev()` skips `validate()`).
+///
+/// Pure (no logging / I/O) so the gate is unit-testable; the caller emits the
+/// operator-facing error.
+fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> DevBindCheck {
+    if !dev {
+        return DevBindCheck::NotDev;
+    }
+    let is_loopback = |bind: &str| {
+        bind.eq_ignore_ascii_case("localhost")
+            || bind
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    };
+    let all_loopback = is_loopback(http_bind)
+        && match grpc_bind {
+            Some(g) => is_loopback(g),
+            None => true,
+        };
+    if all_loopback {
+        DevBindCheck::Ok
+    } else {
+        DevBindCheck::RefusedNonLoopback
+    }
+}
+
 /// Resolves the dev-mode on-disk data directory, if one is explicitly
 /// configured (HEA-1805).
 ///
@@ -839,7 +883,10 @@ async fn run_serve(
             enabled: config.storage.compaction.enabled,
             interval_secs: config.storage.compaction.interval_secs,
             min_sst_count: config.storage.compaction.min_sst_count,
+            max_sst_count: config.storage.compaction.max_sst_count,
+            merge_min: config.storage.compaction.merge_min,
         };
+        storage_config.block_cache_bytes = config.storage.block_cache_bytes;
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     } else {
@@ -871,7 +918,10 @@ async fn run_serve(
             enabled: config.storage.compaction.enabled,
             interval_secs: config.storage.compaction.interval_secs,
             min_sst_count: config.storage.compaction.min_sst_count,
+            max_sst_count: config.storage.compaction.max_sst_count,
+            merge_min: config.storage.compaction.merge_min,
         };
+        storage_config.block_cache_bytes = config.storage.block_cache_bytes;
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     };
@@ -1083,6 +1133,30 @@ async fn run_serve(
             "argon2 pepper enabled from security.password.pepper"
         );
     }
+
+    // Install the bounded KDF admission gate (HEA-1887 / R1) from
+    // `security.password.kdf`. This caps concurrent Argon2id work so offered
+    // concurrency past the core count sheds (503) instead of oversubscribing the
+    // blocking pool and inflating p99 (C9/HEA-1879). Absent config → core-count
+    // bound. First-wins; safe to call before the engine is built.
+    let kdf_gate_cfg = config.security.resolve_kdf_gate();
+    hearth::identity::init_gate(kdf_gate_cfg);
+    info!(
+        max_in_flight = kdf_gate_cfg.max_in_flight,
+        max_queue_wait_ms = kdf_gate_cfg.max_queue_wait.as_millis() as u64,
+        "kdf admission gate installed from security.password.kdf"
+    );
+
+    // Install the separate admin-reserved KDF gate (HEA-1892 / F2). Admin login
+    // draws from this small isolated pool so a flood against a tenant realm's
+    // login form cannot exhaust the shared gate and lock the operator out of the
+    // admin console.
+    let kdf_admin_gate_cfg = config.security.resolve_admin_kdf_gate();
+    hearth::identity::init_admin_gate(kdf_admin_gate_cfg);
+    info!(
+        admin_max_in_flight = kdf_admin_gate_cfg.max_in_flight,
+        "kdf admin-reserved admission gate installed from security.password.kdf"
+    );
 
     let identity_config = if config.dev_mode {
         IdentityConfig {
@@ -1701,27 +1775,60 @@ async fn run_serve(
         });
     }
 
-    // Background periodic SST compaction.
-    if config.storage.compaction.enabled && config.storage.compaction.interval_secs > 0 {
+    // Background SST compaction: a periodic full sweep and/or a count-triggered
+    // partial (size-tiered) merge (HEA-1885). Both run off the write path via
+    // `spawn_blocking`; the partial merge is woken by the storage engine's
+    // count-trigger `Notify` rather than a timer.
+    let periodic_enabled =
+        config.storage.compaction.enabled && config.storage.compaction.interval_secs > 0;
+    let partial_enabled =
+        config.storage.compaction.enabled && config.storage.compaction.max_sst_count > 0;
+    if periodic_enabled || partial_enabled {
         let storage_engine = Arc::clone(&inner_storage);
         let interval_secs = config.storage.compaction.interval_secs;
         let min_sst_count = config.storage.compaction.min_sst_count;
+        let compaction_notify = inner_storage.compaction_notify();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            // A periodic ticker only when the interval sweep is enabled; otherwise
+            // a future that never fires, so the `select!` runs the notify arm only.
+            let mut interval = tokio::time::interval(Duration::from_secs(if periodic_enabled {
+                interval_secs
+            } else {
+                1
+            }));
             // Skip the immediate first tick so the server finishes warm-up.
             interval.tick().await;
             loop {
-                interval.tick().await;
+                #[derive(Clone, Copy)]
+                enum Wake {
+                    Periodic,
+                    Partial,
+                }
+                let wake = tokio::select! {
+                    _ = interval.tick(), if periodic_enabled => Wake::Periodic,
+                    () = compaction_notify.notified(), if partial_enabled => Wake::Partial,
+                };
                 let engine = Arc::clone(&storage_engine);
-                match tokio::task::spawn_blocking(move || engine.compact_ssts(min_sst_count)).await
-                {
-                    Ok(Ok(n)) if n > 0 => {
+                let result = match wake {
+                    Wake::Periodic => {
+                        tokio::task::spawn_blocking(move || engine.compact_ssts(min_sst_count))
+                            .await
+                    }
+                    Wake::Partial => {
+                        tokio::task::spawn_blocking(move || engine.compact_partial()).await
+                    }
+                };
+                match (wake, result) {
+                    (Wake::Periodic, Ok(Ok(n))) if n > 0 => {
                         info!(merged = n, "background SST compaction complete");
                     }
-                    Ok(Err(e)) => {
+                    (Wake::Partial, Ok(Ok(n))) if n > 0 => {
+                        info!(merged = n, "partial SST compaction complete");
+                    }
+                    (_, Ok(Err(e))) => {
                         warn!(error = %e, "background SST compaction failed");
                     }
-                    Err(join_err) => {
+                    (_, Err(join_err)) => {
                         warn!(error = %join_err, "compaction task panicked");
                     }
                     _ => {}
@@ -1977,6 +2084,24 @@ async fn run_serve(
             .unwrap_or(config.server.bind_address.as_str())
             .trim()
     });
+    // Hard gate: dev mode must never expose on a non-loopback address (HEA-1980).
+    // The config-file validation in validate.rs catches a non-loopback
+    // bind_address when a config file is used, but (a) the CLI --bind override
+    // is applied after that validation, and (b) Config::dev() (the no-config-file
+    // path) skips validate() entirely — so both cases bypass the earlier check.
+    if let DevBindCheck::RefusedNonLoopback = dev_mode_bind_check(config.dev_mode, bind, grpc_bind)
+    {
+        error!(
+            bind_address = %bind,
+            grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
+            "dev mode refused: all effective binds must be loopback (HEA-1980). \
+             --dev enables unauthenticated endpoints (/dev/seed-session, /admin/bootstrap) \
+             and weakened Argon2 parameters — exposing them on a routable interface \
+             is a critical security risk. Use --bind 127.0.0.1 or --bind ::1."
+        );
+        return Err("dev mode: refusing to start with non-loopback bind address".into());
+    }
+
     let load_test_unthrottled = match loadtest_unthrottle_decision(
         config.security.load_test_unthrottled.unwrap_or(false),
         config.dev_mode,
@@ -3403,7 +3528,7 @@ fn run_migrate_rotate_pepper(
 
         for cred_entry in &cred_entries {
             let cred_bytes = &cred_entry.value;
-            let cred: StoredCredential = match serde_json::from_slice(cred_bytes) {
+            let cred: StoredCredential = match hearth::codec::decode(cred_bytes) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -4479,6 +4604,86 @@ mod tests {
             "non-dev mode must not override smtp"
         );
         assert!(!warned);
+    }
+
+    // ── dev_mode_bind_check (HEA-1980 startup gate) ───────────────────────
+
+    #[test]
+    fn dev_bind_check_not_dev_always_ok() {
+        // Gate only applies in --dev mode; production mode always passes through.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "127.0.0.1"] {
+            assert_eq!(
+                dev_mode_bind_check(false, bind, None),
+                DevBindCheck::NotDev,
+                "non-dev mode must not be refused for bind {bind}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_dev_loopback_http_no_grpc() {
+        // Dev + loopback HTTP, gRPC disabled → Ok.
+        for bind in ["127.0.0.1", "::1", "localhost", "LOCALHOST", "127.0.0.53"] {
+            assert_eq!(
+                dev_mode_bind_check(true, bind, None),
+                DevBindCheck::Ok,
+                "{bind} is loopback and must be allowed in dev mode"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_refused_non_loopback_http() {
+        // Dev + non-loopback HTTP bind → refused, even when gRPC is disabled.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
+            assert_eq!(
+                dev_mode_bind_check(true, bind, None),
+                DevBindCheck::RefusedNonLoopback,
+                "dev mode with http bind {bind} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_refused_non_loopback_grpc() {
+        // Dev + loopback HTTP but non-loopback gRPC → refused (both binds must be loopback).
+        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
+            assert_eq!(
+                dev_mode_bind_check(true, "127.0.0.1", Some(grpc)),
+                DevBindCheck::RefusedNonLoopback,
+                "dev mode with grpc bind {grpc} must be refused even when http is loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_dev_both_binds_loopback() {
+        // Dev + loopback HTTP + loopback gRPC → Ok.
+        assert_eq!(
+            dev_mode_bind_check(true, "127.0.0.1", Some("::1")),
+            DevBindCheck::Ok
+        );
+        assert_eq!(
+            dev_mode_bind_check(true, "::1", Some("127.0.0.1")),
+            DevBindCheck::Ok
+        );
+    }
+
+    #[test]
+    fn dev_bind_check_refused_cli_override_non_loopback() {
+        // `hearth serve --dev --bind 0.0.0.0` — the CLI override path that
+        // config-file validation misses because it runs before the override is
+        // applied (HEA-1980).
+        assert_eq!(
+            dev_mode_bind_check(true, "0.0.0.0", None),
+            DevBindCheck::RefusedNonLoopback,
+            "--dev --bind 0.0.0.0 must be refused at startup"
+        );
+        assert_eq!(
+            dev_mode_bind_check(true, "::", None),
+            DevBindCheck::RefusedNonLoopback,
+            "--dev --bind :: must be refused at startup"
+        );
     }
 
     // ── HEA-SEC-10: setup token truncation ───────────────────────────────────

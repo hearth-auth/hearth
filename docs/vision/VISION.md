@@ -39,9 +39,9 @@ The operational burden is staggering. A mid-stage startup with a platform team o
 
 Auth is on the hot path. Every API request, every page load, every WebSocket connection touches auth. And yet the dominant self-hosted solutions treat performance as an afterthought:
 
-- **Keycloak's token endpoint** typically delivers 5–20ms p50 latencies, with p99 regularly exceeding 100ms. Under load, GC pauses push tail latencies into the hundreds of milliseconds. This is why every serious Keycloak deployment has Redis in front of it.
+- **Keycloak's token endpoint** typically delivers 5–20ms p50 latencies. Keycloak's own 2025-10 benchmark — 500 logins/s + 2,500 refreshes/s across 3 pods — shows p99 of 47 ms at zero network RTT, 84 ms at 10 ms RTT, and 130 ms at 20 ms RTT ([source](https://www.keycloak.org/2025/10/keycloak-benchmark)). P99 reliably exceeds 100 ms as soon as realistic network latency is added — the common case in any cloud deployment. Under load, JVM GC pauses push tail latencies into the hundreds of milliseconds. This is why every serious Keycloak deployment has Redis in front of it.
 - **Ory Hydra** is better (Go, no JVM), but it still round-trips to Postgres for every token introspection. At scale, you're bottlenecked on your database's connection limits and query latency.
-- **Auth0's free and low tiers** impose hard rate limits (often cited around 300 requests/second) that teams hit surprisingly quickly. Even paid tiers add 10–50ms of network latency per auth call to an external service.
+- **Auth0** enforces hard per-tenant rate limits at every tier. The Enterprise Public tier caps at 100 req/s sustained (a burst add-on raises this to 400 req/s but is capped at 48 hours/month); lower tiers are more restrictive ([source](https://auth0.com/docs/troubleshoot/customer-support/operational-policies/rate-limit-policy/rate-limit-configurations/enterprise-public)). Teams hit these limits quickly at scale. All tiers add 10–50 ms of network latency per auth call to an external service.
 
 The industry has accepted these numbers as normal. They are not normal. They are an artifact of building auth as an application on top of a generic database. A purpose-built system that stores identity data in optimized in-memory structures, with a write-ahead log for durability, should deliver **sub-millisecond p99 for token validation and session lookup** — the same performance class as Redis, because the data structures and access patterns are similar in complexity.
 
@@ -359,7 +359,18 @@ These are design targets, not guarantees. They represent the performance that a 
 | Token validation (read-heavy) | 200,000+ | 3,000,000+ |
 | Mixed read/write (95/5 read/write) | 100,000+ | 1,500,000+ |
 | Permission checks (JWT claim lookup) | 1,000,000+ | 15,000,000+ |
-| Session creation | 50,000+ | 500,000+ |
+| Session creation † | 30,000+ aggregate @ T≈256 concurrent writers | not applicable — see † |
+
+† **Session creation is graded in aggregate ops/s at a stated concurrency, not per core.** It is a
+durable write: it completes only when the write-ahead log has been `fsync`'d, and there is one WAL
+and therefore one commit stream. Throughput scales with concurrency and the device's fsync rate,
+not with core count — a thread blocked on `fsync` consumes no CPU, so a per-core figure and a
+16-core multiple are both category errors here. The target was revised from `50,000+ ops/sec/core`
+to `30,000+ aggregate` on 2026-07-29; the original figure was arbitrary rather than derived from
+the operation. Measured 41,255 ops/s at T=256 on `dev-ryzen-7840hs`, **engine plane**, with
+`fsync`-before-ack intact (`W`=1.000 — one WAL fsync per durable write). Source of record:
+`docs/perf/PUBLISHED_FIGURES.md` §6; background in `docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2
+(T4) and `docs/perf/HEA-1959-commit-cycle.md`.
 
 ### 7.3 Capacity Targets (Single Node)
 
@@ -376,6 +387,8 @@ These are design targets, not guarantees. They represent the performance that a 
 | Binary size | < 50 MB |
 | Cold start to serving requests | < 2 seconds |
 | Cold-to-hot promotion latency | < 5 ms |
+
+**Comparison.** Keycloak's published sizing guide ([source](https://www.keycloak.org/high-availability/multi-cluster/concepts-memory-and-cpu-sizing)) lists a base memory requirement of approximately 1,250 MB per pod for a cluster that caches only 10,000 sessions. Hearth's 2026-07-29 measurements show a directly measured δRSS of **97.1 MiB** for 1,000,000 hot users at a 64 MiB block cache (OLS slope 100 B/user, R²=0.9988), **engine plane** — source of record `docs/perf/PUBLISHED_FIGURES.md` §6. Scaling to a 256 MiB production block cache gives an estimated total process footprint of **approximately 329 MB** — roughly 4× less memory for 100× more cached users. Both sides of this comparison are process memory footprints, so no measurement-plane mismatch applies; RAM grows sub-linearly with corpus (measured log-log exponent 0.8778), not O(1). This gap is structural: Keycloak delegates session state to an external Infinispan/Redis cache and pays the JVM baseline regardless of load; Hearth stores sessions in purpose-built in-memory structures co-located with the identity data, with no external process overhead.
 
 #### 7.3.1 Tiered Storage: Hot and Cold Data
 

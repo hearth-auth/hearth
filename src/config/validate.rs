@@ -136,6 +136,7 @@ impl Config {
                 hot_tier_capacity: Some(1_000),
                 hot_tier_max_memory: None,
                 fsync: false,
+                block_cache_bytes: 4 * 1024 * 1024,
                 compaction: CompactionSection::default(),
             },
             observability: ObservabilityConfig {
@@ -513,11 +514,95 @@ impl Config {
         // without a pepper.
         self.security.resolve_pepper()?;
 
+        // Fail fast on a nonsensical `security.password.kdf` bound — a gate that
+        // can never admit is a self-inflicted outage on the auth path.
+        self.security.validate_kdf_admission()?;
+
         Ok(())
     }
 }
 
 impl SecurityYaml {
+    /// Validates `security.password.kdf`, rejecting any `0` bound or queue-wait.
+    ///
+    /// An explicit bound of `0` would produce a gate that admits no Argon2id
+    /// work — every login would shed with `503`. A queue-wait of `0` ms sheds
+    /// every *contended* login. Neither is ever intended, so both are config
+    /// errors rather than silent clamps. `null`/absent is valid and resolves to
+    /// the documented default at boot (core count / 250 ms).
+    pub fn validate_kdf_admission(&self) -> Result<(), ConfigError> {
+        if self.password.kdf.max_in_flight == Some(0) {
+            return Err(invalid(
+                "security.password.kdf.max_in_flight",
+                "must be >= 1 (a bound of 0 would shed every password verification); \
+                 omit the key to default to the host core count",
+            ));
+        }
+        if self.password.kdf.admin_max_in_flight == Some(0) {
+            return Err(invalid(
+                "security.password.kdf.admin_max_in_flight",
+                "must be >= 1 (a bound of 0 would shed every admin login); \
+                 omit the key to default to the small reserved admin pool",
+            ));
+        }
+        if self.password.kdf.max_queue_wait_ms == 0 {
+            return Err(invalid(
+                "security.password.kdf.max_queue_wait_ms",
+                "must be >= 1 (a 0 ms wait would shed every contended login with 503); \
+                 omit the key to default to 250 ms",
+            ));
+        }
+        if self.password.kdf.admin_max_queue_wait_ms == Some(0) {
+            return Err(invalid(
+                "security.password.kdf.admin_max_queue_wait_ms",
+                "must be >= 1 (a 0 ms wait would shed every queued admin login); \
+                 omit the key to default to the longer admin queue-wait",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolves `security.password.kdf` into a [`crate::identity::KdfGateConfig`].
+    ///
+    /// `max_in_flight: null`/absent resolves to the host core count via
+    /// [`KdfGateConfig::default`](crate::identity::KdfGateConfig). Assumes
+    /// [`Self::validate_kdf_admission`] already ran (so `0` cannot reach here).
+    #[must_use]
+    pub fn resolve_kdf_gate(&self) -> crate::identity::KdfGateConfig {
+        let yaml = &self.password.kdf;
+        let default = crate::identity::KdfGateConfig::default();
+        crate::identity::KdfGateConfig {
+            max_in_flight: yaml.max_in_flight.unwrap_or(default.max_in_flight),
+            max_queue_wait: std::time::Duration::from_millis(yaml.max_queue_wait_ms),
+            retry_after: std::time::Duration::from_secs(yaml.retry_after_seconds),
+        }
+    }
+
+    /// Resolves `security.password.kdf` into the **admin-reserved**
+    /// [`crate::identity::KdfGateConfig`] (HEA-1892 / F2).
+    ///
+    /// `admin_max_in_flight: null`/absent resolves to
+    /// [`crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT`]. `admin_max_queue_wait_ms:
+    /// null`/absent resolves to [`crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS`]
+    /// — a *longer* wait than the shared gate (HEA-1895): admin login prefers
+    /// queueing over shedding, so a distributed flood cannot hold the console in a
+    /// steady-state `503`. `retry_after` is shared with the main gate. Assumes
+    /// [`Self::validate_kdf_admission`] already ran (so `0` cannot reach here).
+    #[must_use]
+    pub fn resolve_admin_kdf_gate(&self) -> crate::identity::KdfGateConfig {
+        let yaml = &self.password.kdf;
+        crate::identity::KdfGateConfig {
+            max_in_flight: yaml
+                .admin_max_in_flight
+                .unwrap_or(crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT),
+            max_queue_wait: std::time::Duration::from_millis(
+                yaml.admin_max_queue_wait_ms
+                    .unwrap_or(crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS),
+            ),
+            retry_after: std::time::Duration::from_secs(yaml.retry_after_seconds),
+        }
+    }
+
     /// Resolves `security.password.pepper` into a [`PepperConfig`].
     ///
     /// Returns `Ok(None)` when no pepper is configured (the default), leaving
@@ -2300,7 +2385,10 @@ mod tests {
 
     fn security_with_pepper(pepper: Option<PepperYaml>) -> SecurityYaml {
         SecurityYaml {
-            password: PasswordSecurityYaml { pepper },
+            password: PasswordSecurityYaml {
+                pepper,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -2354,6 +2442,133 @@ mod tests {
         let err = sec.resolve_pepper().expect_err("zero key rejected");
         let msg = err.to_string();
         assert!(msg.contains("all-zero"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn kdf_admission_absent_resolves_to_core_count_default() {
+        // Default (no `security.password.kdf`) → core-count bound + 250ms/1s.
+        let sec = SecurityYaml::default();
+        sec.validate_kdf_admission().expect("default is valid");
+        let resolved = sec.resolve_kdf_gate();
+        let expected_cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        assert_eq!(resolved.max_in_flight, expected_cores);
+        assert_eq!(
+            resolved.max_queue_wait,
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(resolved.retry_after, std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn kdf_admission_rejects_zero_max_in_flight() {
+        // An explicit bound of 0 would shed every login — must be a config error.
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.max_in_flight = Some(0);
+        let err = sec
+            .validate_kdf_admission()
+            .expect_err("zero bound rejected");
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn kdf_admission_explicit_values_resolve_through() {
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.max_in_flight = Some(8);
+        sec.password.kdf.max_queue_wait_ms = 100;
+        sec.password.kdf.retry_after_seconds = 2;
+        sec.validate_kdf_admission().expect("valid");
+        let resolved = sec.resolve_kdf_gate();
+        assert_eq!(resolved.max_in_flight, 8);
+        assert_eq!(
+            resolved.max_queue_wait,
+            std::time::Duration::from_millis(100)
+        );
+        assert_eq!(resolved.retry_after, std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn kdf_admin_gate_absent_resolves_to_small_default() {
+        // HEA-1892 / F2: absent `admin_max_in_flight` → small reserved pool,
+        // NOT the core count. HEA-1895: absent `admin_max_queue_wait_ms` → the
+        // *longer* admin queue-wait (prefer queueing over shedding), NOT the
+        // shared gate's 250 ms. retry-after still mirrors the main gate.
+        let sec = SecurityYaml::default();
+        sec.validate_kdf_admission().expect("default is valid");
+        let admin = sec.resolve_admin_kdf_gate();
+        assert_eq!(
+            admin.max_in_flight,
+            crate::identity::DEFAULT_ADMIN_MAX_IN_FLIGHT
+        );
+        assert_eq!(
+            admin.max_queue_wait,
+            std::time::Duration::from_millis(crate::identity::DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS)
+        );
+        // The admin wait must strictly exceed the shared gate's shed threshold,
+        // else a targeted flood could hold the console in steady-state 503.
+        assert!(
+            admin.max_queue_wait
+                > std::time::Duration::from_millis(
+                    sec.resolve_kdf_gate().max_queue_wait.as_millis() as u64
+                ),
+            "admin queue-wait must exceed the shared gate's"
+        );
+        assert_eq!(admin.retry_after, std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn kdf_admin_queue_wait_explicit_and_zero_rejected() {
+        // HEA-1895: an explicit `admin_max_queue_wait_ms` resolves through and is
+        // independent of the shared gate's `max_queue_wait_ms`.
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.max_queue_wait_ms = 250;
+        sec.password.kdf.admin_max_queue_wait_ms = Some(5_000);
+        sec.validate_kdf_admission().expect("valid");
+        assert_eq!(
+            sec.resolve_admin_kdf_gate().max_queue_wait,
+            std::time::Duration::from_secs(5)
+        );
+        // The shared gate is unaffected.
+        assert_eq!(
+            sec.resolve_kdf_gate().max_queue_wait,
+            std::time::Duration::from_millis(250)
+        );
+
+        // Explicit 0 is a config error (a 0 ms wait would shed every queued
+        // admin login, defeating the point).
+        sec.password.kdf.admin_max_queue_wait_ms = Some(0);
+        let err = sec
+            .validate_kdf_admission()
+            .expect_err("zero admin queue-wait rejected");
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn kdf_admin_gate_rejects_zero_and_resolves_explicit() {
+        // Explicit 0 is a config error (would shed every admin login).
+        let mut sec = SecurityYaml::default();
+        sec.password.kdf.admin_max_in_flight = Some(0);
+        let err = sec
+            .validate_kdf_admission()
+            .expect_err("zero admin bound rejected");
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "unexpected error: {err}"
+        );
+
+        // A valid explicit value resolves through independently of the main pool.
+        sec.password.kdf.admin_max_in_flight = Some(3);
+        sec.password.kdf.max_in_flight = Some(16);
+        sec.validate_kdf_admission().expect("valid");
+        assert_eq!(sec.resolve_admin_kdf_gate().max_in_flight, 3);
+        assert_eq!(sec.resolve_kdf_gate().max_in_flight, 16);
     }
 
     #[test]

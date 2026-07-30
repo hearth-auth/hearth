@@ -11,6 +11,8 @@
 
 pub mod auto_size;
 #[allow(dead_code)]
+pub(crate) mod block_cache;
+#[allow(dead_code)]
 pub(crate) mod breach_corpus;
 pub mod encryption;
 mod engine;
@@ -56,6 +58,24 @@ pub fn prefix_scan_end(prefix: &[u8]) -> Vec<u8> {
     end
 }
 
+/// Opaque handle returned by [`StorageEngine::enqueue_batch`].
+///
+/// Pass to [`StorageEngine::await_batch_durable`] to block until all entries in
+/// the batch are guaranteed durable (covered by a WAL `fsync`). The caller must
+/// NOT treat the data as durable until after `await_batch_durable` returns `Ok`.
+///
+/// This type is intentionally opaque: the inner representation is
+/// implementation-specific.
+pub struct StorageDurabilityHandle(pub(crate) StorageDurabilityHandleKind);
+
+/// Inner representation of a [`StorageDurabilityHandle`].
+pub(crate) enum StorageDurabilityHandleKind {
+    /// Batch already written synchronously. `await_batch_durable` is a no-op.
+    Immediate,
+    /// Batch is pending in the WAL group-commit queue.
+    Pending(crate::storage::engine::PendingBatchHandle),
+}
+
 /// Trait defining the public storage engine interface.
 ///
 /// Synchronous for Phase 0 — callers should use `spawn_blocking` for async
@@ -99,6 +119,45 @@ pub trait StorageEngine: Send + Sync {
         for (key, value) in entries {
             self.put(realm_id, key, value)?;
         }
+        Ok(())
+    }
+
+    /// Enqueue an atomic batch write without blocking for the WAL fsync.
+    ///
+    /// Returns a [`StorageDurabilityHandle`] that the caller must pass to
+    /// [`await_batch_durable`] before treating the data as durable. This
+    /// split allows callers to release any serialising lock (e.g. an audit
+    /// chain lock) between the enqueue and the fsync wait, enabling concurrent
+    /// writers to coalesce into a single group-commit `sync_all`.
+    ///
+    /// **Ordering guarantee**: entries pushed by the *same caller* via sequential
+    /// `enqueue_batch` calls appear in the WAL in call order. Callers that need
+    /// cross-writer ordering must hold an external serialising lock *across the
+    /// enqueue call* (not across the fsync wait).
+    ///
+    /// The default implementation calls [`put_batch`] synchronously and returns
+    /// an `Immediate` handle (correct for non-group-commit implementations).
+    fn enqueue_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<StorageDurabilityHandle, StorageError> {
+        self.put_batch(realm_id, entries)?;
+        Ok(StorageDurabilityHandle(
+            StorageDurabilityHandleKind::Immediate,
+        ))
+    }
+
+    /// Block until the batch write represented by `handle` is durable.
+    ///
+    /// For `Immediate` handles (from the default impl or `SyncMode::None`),
+    /// this is a no-op. For `Pending` handles, waits for the WAL group-commit
+    /// `sync_all` that covers the batch.
+    ///
+    /// Returns the same error semantics as [`put_batch`]: `Ok(())` means the
+    /// data is on disk and recoverable after a crash; `Err` means the write
+    /// failed and the data must be considered lost.
+    fn await_batch_durable(&self, _handle: StorageDurabilityHandle) -> Result<(), StorageError> {
         Ok(())
     }
 

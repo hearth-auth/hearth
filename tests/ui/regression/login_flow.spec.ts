@@ -48,4 +48,45 @@ test.describe('Login flow', () => {
     await page.waitForURL(/\/ui\/(?:admin\/)?login/, { timeout: 10_000 });
     await expect(page.locator('input[name="email"]')).toBeVisible();
   });
+
+  // HEA-1983: CSRF error page must carry a fresh token so the user can
+  // resubmit immediately without a separate reload.
+  test('stale CSRF token → error page has fresh token → resubmit succeeds', async ({ page }) => {
+    await page.goto(`${BASE_URL}/ui/admin/login`);
+    await expect(page.locator('input[name="email"]')).toBeVisible();
+
+    await page.fill('input[name="email"]', ADMIN_EMAIL);
+    await page.fill('input[name="password"]', ADMIN_PASSWORD);
+
+    // Corrupt the embedded _csrf field so the double-submit check fails while
+    // the cookie still carries the original valid value.
+    await page.evaluate(() => {
+      const csrf = document.querySelector('input[name="_csrf"]') as HTMLInputElement | null;
+      if (csrf) csrf.value = 'deliberately-invalid-csrf-token';
+    });
+
+    await page.click('button[type="submit"]');
+
+    // Server should re-render with a 422 error banner.
+    await expect(page.locator('[role="alert"]').first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[role="alert"]').first()).toContainText('expired');
+
+    // The error page must embed a non-empty, non-stale _csrf value.
+    const freshCsrf = await page.locator('input[name="_csrf"]').inputValue();
+    expect(freshCsrf).not.toBe('');
+    expect(freshCsrf).not.toBe('deliberately-invalid-csrf-token');
+
+    // Email field should be pre-filled (not cleared) after CSRF error.
+    await expect(page.locator('input[name="email"]')).toHaveValue(ADMIN_EMAIL);
+
+    // Fill password again (it is always cleared for security) and resubmit.
+    await page.fill('input[name="password"]', ADMIN_PASSWORD);
+    await Promise.all([
+      page.waitForURL(/\/ui(?:\/|$)/, { timeout: 15_000 }),
+      page.click('button[type="submit"]'),
+    ]);
+
+    // Successful login — authenticated admin shell is visible.
+    await expect(page.locator('nav[aria-label="Admin"]')).toBeVisible();
+  });
 });

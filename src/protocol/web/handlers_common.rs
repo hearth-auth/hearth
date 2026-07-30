@@ -115,6 +115,39 @@ impl ServerErrorTemplate {
     }
 }
 
+/// Themed `503 Service Unavailable` page for the browser KDF shed path.
+///
+/// Replaces the raw `text/plain` fallback that `kdf_shed_response` used to
+/// emit on every browser auth route (login, register, reset-password, etc.).
+/// Carries a fresh CSRF token and optionally pre-fills the submitted email and
+/// `return_to` so the user can retry the form without retyping their address.
+#[derive(askama::Template)]
+#[template(path = "ui/errors/service_unavailable.html")]
+pub(crate) struct KdfShedTemplate {
+    /// Number of seconds the client should wait before retrying. Always ≥ 1.
+    pub(crate) retry_after_secs: u64,
+    /// Submitted email address echoed back for the retry form pre-fill.
+    /// Empty string when not available (e.g. reset-password path).
+    pub(crate) email: String,
+    /// Sanitized `return_to` carried through so the retry doesn't lose it.
+    pub(crate) return_to: Option<String>,
+    /// URL the retry form POSTs to. `None` on paths that have no clear
+    /// action to re-submit (e.g. unauthenticated account pages); in that
+    /// case the template shows a "back to home" link instead.
+    pub(crate) form_action: Option<String>,
+    pub(crate) chrome: bool,
+    pub(crate) active: &'static str,
+    pub(crate) user_email: Option<String>,
+    pub(crate) is_admin: bool,
+    pub(crate) flash: Option<Flash>,
+    pub(crate) csrf: Option<String>,
+    pub(crate) narrow: bool,
+    pub(crate) product_name: String,
+    pub(crate) logo_url: String,
+    pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Convenience renderers
 // ---------------------------------------------------------------------------

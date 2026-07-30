@@ -21,6 +21,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::params::SeedParams;
 
+/// A raw session record seeded via `POST /dev/seed-session` (HEA-1907).
+///
+/// Unlike [`SeededToken`], this carries no JWT — it is a storage-level session
+/// ID used for the C0 per-session memory sweep and the T4 throughput
+/// re-measurement after the Layer B (SkipMap) fix.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SeededSession {
+    /// The seeded user's ID (UUID string).
+    pub user_id: String,
+    /// The created session's ID (UUID string).
+    pub session_id: String,
+}
+
 /// A live access token minted for the load run.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SeededToken {
@@ -59,11 +72,17 @@ pub struct SeededRealm {
     /// Realm ID (UUID string).
     pub realm_id: String,
     /// OAuth client registered for the ROPC/revoke journeys (public client).
+    /// Empty string when ROPC is not used (HEA-1907: ROPC removed by HEA-1862).
     pub client_id: String,
     /// User records created in this realm.
     pub users: Vec<SeededUser>,
     /// Live access tokens minted in this realm (a fraction pre-revoked).
+    /// Empty when sessions are seeded via `sessions` instead (HEA-1907).
     pub tokens: Vec<SeededToken>,
+    /// Raw sessions seeded via `POST /dev/seed-session` (HEA-1907).
+    /// One entry per user when `--sessions-frac > 0`.
+    #[serde(default)]
+    pub sessions: Vec<SeededSession>,
 }
 
 /// The persisted seed-handle. Serialized as JSON to `--seed-out`.
@@ -105,6 +124,12 @@ impl SeedHandle {
             .flat_map(|r| &r.tokens)
             .filter(|t| t.revoked)
             .count()
+    }
+
+    /// Total raw sessions seeded via `POST /dev/seed-session` across all realms.
+    #[must_use]
+    pub fn total_sessions(&self) -> usize {
+        self.realms.iter().map(|r| r.sessions.len()).sum()
     }
 
     /// Serializes the handle to pretty JSON.
@@ -202,6 +227,10 @@ mod tests {
                         revoked: true,
                     },
                 ],
+                sessions: vec![SeededSession {
+                    user_id: "user-uuid".into(),
+                    session_id: "session-uuid".into(),
+                }],
             }],
         }
     }
@@ -233,12 +262,33 @@ mod tests {
         let h = sample_handle();
         assert_eq!(h.total_tokens(), 2);
         assert_eq!(h.total_revoked(), 1);
+        assert_eq!(h.total_sessions(), 1);
         let json = h.to_json().expect("serialize");
         let back: SeedHandle = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.total_tokens(), 2);
+        assert_eq!(back.total_sessions(), 1);
         assert_eq!(back.realms[0].realm_id, "realm-uuid");
+        assert_eq!(back.realms[0].sessions[0].session_id, "session-uuid");
         // The JSON form intentionally carries the live token (Goose needs it).
         assert!(json.contains("SUPER-SECRET-TOKEN"));
+    }
+
+    #[test]
+    fn sessions_default_on_old_handle_deserialization() {
+        // Old handle JSON without the `sessions` field must deserialize cleanly.
+        let old_json = r#"{
+            "target_host": "http://127.0.0.1:8420",
+            "seed": 1,
+            "dataset_shape": "realms=1 users/realm=1",
+            "realms": [{
+                "realm_id": "old-realm",
+                "client_id": "old-client",
+                "users": [],
+                "tokens": []
+            }]
+        }"#;
+        let h: SeedHandle = serde_json::from_str(old_json).expect("deserialize old handle");
+        assert_eq!(h.total_sessions(), 0, "sessions defaults to empty");
     }
 
     #[test]

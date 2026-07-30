@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use ring::hmac;
 use ring::rand::SecureRandom as _;
 
+use crate::codec;
 use crate::core::{AuditEventId, Clock, RealmId, Timestamp};
 use crate::storage::StorageEngine;
 
@@ -19,6 +20,99 @@ use super::AuditEngine;
 
 /// The genesis hash used as the "previous hash" for the first event in a realm.
 const GENESIS_HASH: &str = "genesis";
+
+/// Compact binary storage record for an audit event (HEA-1899).
+///
+/// Fields mirror [`AuditEvent`] except:
+/// - `integrity_hash` is 32 raw HMAC-SHA256 bytes instead of 64-char hex (saves 32 B).
+/// - `metadata` is raw JSON bytes instead of `serde_json::Value` (avoids the
+///   postcard-encoding a recursive JSON enum, keeps the exact JSON bytes needed
+///   for HMAC verification on re-read).
+///
+/// Serialised with `postcard` via [`crate::codec`].  The format is NOT
+/// self-describing; field order matches declaration order and must not change
+/// without a storage-format migration note (greenfield = no compat required).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredAuditEvent {
+    id: AuditEventId,
+    realm_id: RealmId,
+    actor: String,
+    action: AuditAction,
+    resource_type: String,
+    resource_id: String,
+    timestamp: Timestamp,
+    /// Raw JSON bytes of the metadata object, or `None`.
+    metadata_json: Option<Vec<u8>>,
+    /// HMAC-SHA256 integrity hash as 32 raw bytes.
+    integrity_hash: [u8; 32],
+}
+
+impl StoredAuditEvent {
+    fn from_event(event: &AuditEvent) -> Result<Self, AuditError> {
+        let hash_bytes: [u8; 32] = hex_decode(&event.integrity_hash)
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| AuditError::Serialization {
+                reason: "integrity_hash must be 64-char lowercase hex (HMAC-SHA256)".into(),
+            })?;
+
+        let metadata_json = event
+            .metadata
+            .as_ref()
+            .map(|m| serde_json::to_vec(m))
+            .transpose()
+            .map_err(|e| AuditError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        Ok(Self {
+            id: event.id.clone(),
+            realm_id: event.realm_id.clone(),
+            actor: event.actor.clone(),
+            action: event.action.clone(),
+            resource_type: event.resource_type.clone(),
+            resource_id: event.resource_id.clone(),
+            timestamp: event.timestamp,
+            metadata_json,
+            integrity_hash: hash_bytes,
+        })
+    }
+
+    fn into_event(self) -> Result<AuditEvent, AuditError> {
+        let metadata = self
+            .metadata_json
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|e| AuditError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        Ok(AuditEvent {
+            id: self.id,
+            realm_id: self.realm_id,
+            actor: self.actor,
+            action: self.action,
+            resource_type: self.resource_type,
+            resource_id: self.resource_id,
+            timestamp: self.timestamp,
+            metadata,
+            integrity_hash: hex_encode(&self.integrity_hash),
+        })
+    }
+}
+
+/// Serialises an audit event for storage using compact binary encoding.
+fn encode_event(event: &AuditEvent) -> Result<Vec<u8>, AuditError> {
+    let record = StoredAuditEvent::from_event(event)?;
+    codec::encode(&record).map_err(|e| AuditError::Serialization { reason: e })
+}
+
+/// Deserialises an audit event from its compact binary storage representation.
+fn decode_event(bytes: &[u8]) -> Result<AuditEvent, AuditError> {
+    let record: StoredAuditEvent =
+        codec::decode(bytes).map_err(|e| AuditError::Serialization { reason: e })?;
+    record.into_event()
+}
 
 /// Persisted, HMAC-signed summary of a realm's audit chain (HEA-1756).
 ///
@@ -301,11 +395,7 @@ impl EmbeddedAuditEngine {
         let entries = self.storage.scan(realm_id, &prefix, &end)?;
         let count = entries.len() as u64;
         let last_hash = if let Some(last) = entries.last() {
-            let event: AuditEvent =
-                serde_json::from_slice(&last.value).map_err(|e| AuditError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            event.integrity_hash
+            decode_event(&last.value)?.integrity_hash
         } else {
             GENESIS_HASH.to_string()
         };
@@ -343,10 +433,7 @@ impl EmbeddedAuditEngine {
         let mut deleted: u64 = 0;
 
         for entry in entries {
-            let event: AuditEvent =
-                serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let event = decode_event(&entry.value)?;
             let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
             let action_key =
                 keys::encode_action_index(event.action.as_str(), event.timestamp, &event.id);
@@ -372,87 +459,153 @@ impl EmbeddedAuditEngine {
 
 impl AuditEngine for EmbeddedAuditEngine {
     fn append(&self, request: &CreateAuditEvent) -> Result<AuditEvent, AuditError> {
-        // Acquire the per-realm chain lock BEFORE reading the last hash. The
-        // chain's integrity guarantee ("every event's prev_hash is the
-        // previous event's integrity_hash") is only preserved if no other
-        // append can interleave between our read of last_hash and our
-        // storage write. The lock doubles as a cache for the last hash
-        // to avoid a full O(n) scan per append after the first.
+        // Delegate to `with_pending_append`, passing a closure that enqueues only
+        // the audit KV pairs (no merged caller data). This preserves the original
+        // one-audit-record semantics while sharing the chain-lock + RMW logic.
+        let storage = Arc::clone(&self.storage);
+        let realm_id = request.realm_id.clone();
+        let pending = self.with_pending_append(
+            request,
+            Box::new(move |audit_kvs| storage.enqueue_batch(&realm_id, audit_kvs)),
+        )?;
+
+        // ── Phase 2: fsync wait (OUTSIDE the chain lock) ─────────────────────
+        //
+        // `with_pending_append` already released the chain lock. Concurrent
+        // appenders can now enqueue their events and pipeline into the same
+        // group-commit batch (HEA-1948).
+        let durable_result = self.storage.await_batch_durable(pending.handle);
+        if durable_result.is_err() {
+            (pending.on_failure)();
+        } else {
+            (pending.on_success)();
+        }
+        durable_result?;
+
+        Ok(pending.event)
+    }
+
+    fn with_pending_append(
+        &self,
+        request: &CreateAuditEvent,
+        enqueue_fn: super::AuditEnqueueFn<'_>,
+    ) -> Result<super::AuditPendingWrite, AuditError> {
+        // ── Phase 1: hash-chain RMW + caller enqueue (under chain lock) ──────
+        //
+        // The chain lock serves two purposes:
+        //
+        // 1. Serialises the hash-chain read-modify-write (read `last_hash` →
+        //    compute new HMAC → produce `new_head`) so no two events can race
+        //    on the same `prev_hash`.
+        //
+        // 2. Serialises the WAL *enqueue* so events reach the WAL queue in the
+        //    same order they appear in the logical chain. Releasing the lock
+        //    before enqueue would let event N+1 reach the WAL ahead of event N,
+        //    breaking chain recovery (a persisted head referencing an event that
+        //    is not yet in the log).
+        //
+        // The lock does NOT need to cover the WAL fsync wait. Releasing it
+        // before `await_batch_durable` allows concurrent appenders to enqueue
+        // within the first writer's fsync window, enabling group-commit
+        // coalescing (HEA-1948, HEA-1954).
+
         let chain_lock = self.realm_chain_lock(&request.realm_id);
-        let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
+        let chain_lock_for_rollback = Arc::clone(&chain_lock);
 
-        let hmac_key = self.get_realm_hmac_key(&request.realm_id)?;
+        let (event, durable_handle) = {
+            let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
 
-        // The signed head is the source of truth for the previous hash and the
-        // monotonic sequence. Prefer the cache; otherwise load (and MAC-verify)
-        // the persisted head so tampering with it fails the append fast.
-        let head = match cached.as_ref() {
-            Some(h) => h.clone(),
-            None => self.load_or_init_head(&request.realm_id, &hmac_key)?,
-        };
-        let prev_hash = head.last_hash.clone();
-        let seq = head.seq + 1;
+            let hmac_key = self.get_realm_hmac_key(&request.realm_id)?;
 
-        let event_id = AuditEventId::generate();
-        let timestamp = self.clock.now();
+            // The signed head is the source of truth for the previous hash and
+            // the monotonic sequence. Prefer the cache; otherwise load (and
+            // MAC-verify) the persisted head so tampering fails fast.
+            let head = match cached.as_ref() {
+                Some(h) => h.clone(),
+                None => self.load_or_init_head(&request.realm_id, &hmac_key)?,
+            };
+            let prev_hash = head.last_hash.clone();
+            let seq = head.seq + 1;
 
-        // Build the event (integrity_hash will be filled after computation)
-        let mut event = AuditEvent {
-            id: event_id,
-            realm_id: request.realm_id.clone(),
-            actor: request.actor.clone(),
-            action: request.action.clone(),
-            resource_type: request.resource_type.clone(),
-            resource_id: request.resource_id.clone(),
-            timestamp,
-            metadata: request.metadata.clone(),
-            integrity_hash: String::new(),
-        };
+            let event_id = AuditEventId::generate();
+            let timestamp = self.clock.now();
 
-        // Compute and set HMAC-SHA256 integrity hash.
-        event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
+            let mut event = AuditEvent {
+                id: event_id,
+                realm_id: request.realm_id.clone(),
+                actor: request.actor.clone(),
+                action: request.action.clone(),
+                resource_type: request.resource_type.clone(),
+                resource_id: request.resource_id.clone(),
+                timestamp,
+                metadata: request.metadata.clone(),
+                integrity_hash: String::new(),
+            };
 
-        // Serialize the complete event
-        let value = serde_json::to_vec(&event).map_err(|e| AuditError::Serialization {
-            reason: e.to_string(),
-        })?;
+            event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
 
-        // Single atomic write: primary + actor index + action index + the
-        // updated signed head all land together, or not at all. `put_batch`
-        // guarantees that a crash mid-write can never leave a "half-indexed"
-        // event or a head that disagrees with the persisted events. This is
-        // what makes the hash chain recoverable and tail-truncation-detectable:
-        // every persisted event is fully observable through every query path,
-        // and the head always reflects exactly the events on disk.
-        let primary_key = keys::encode_event_key(timestamp, seq, &event.id);
-        let actor_key = keys::encode_actor_index(&request.actor, timestamp, &event.id);
-        let action_key = keys::encode_action_index(request.action.as_str(), timestamp, &event.id);
+            let value = encode_event(&event)?;
 
-        let new_head = Self::signed_head(
-            &hmac_key,
-            head.anchor.clone(),
-            event.integrity_hash.clone(),
-            seq,
-            head.count + 1,
-        );
-        let head_value = Self::head_bytes(&new_head)?;
+            let primary_key = keys::encode_event_key(timestamp, seq, &event.id);
+            let actor_key = keys::encode_actor_index(&request.actor, timestamp, &event.id);
+            let action_key =
+                keys::encode_action_index(request.action.as_str(), timestamp, &event.id);
 
-        self.storage.put_batch(
-            &request.realm_id,
-            &[
+            let new_head = Self::signed_head(
+                &hmac_key,
+                head.anchor.clone(),
+                event.integrity_hash.clone(),
+                seq,
+                head.count + 1,
+            );
+            let head_value = Self::head_bytes(&new_head)?;
+
+            // Optimistically advance the cache NOW, while holding the lock, so
+            // the next appender can chain off `new_head.last_hash` immediately
+            // after acquiring the lock — without waiting for our fsync to complete.
+            *cached = Some(new_head);
+
+            // Call the caller's enqueue closure UNDER the chain lock so the WAL
+            // record order matches the logical chain order. The closure typically
+            // combines the audit KV pairs with its own KV pairs and calls
+            // `storage.enqueue_batch(...)`.
+            let audit_kvs = [
                 (primary_key.clone(), value),
                 (actor_key, primary_key.clone()),
                 (action_key, primary_key),
                 (keys::chain_head_key(), head_value),
-            ],
-        )?;
+            ];
 
-        // Only advance the cached head after the storage write succeeds. On
-        // error we leave the cache unchanged so the next append will re-read
-        // the persisted head and recover from whatever state actually landed.
-        *cached = Some(new_head);
+            let durable_handle = match enqueue_fn(&audit_kvs) {
+                Ok(h) => h,
+                Err(e) => {
+                    // Enqueue failed (e.g. WAL fenced). Rollback the optimistic
+                    // cache update so the next append does not chain off a head
+                    // that was never persisted.
+                    *cached = None;
+                    return Err(AuditError::from(e));
+                }
+            };
 
-        Ok(event)
+            // `cached` (the chain lock guard) drops here, releasing the lock.
+            (event, durable_handle)
+        };
+
+        // Build the rollback closure (captures the lock Arc so it can re-acquire
+        // on failure without holding the lock across the fsync wait).
+        let on_failure: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let mut c = chain_lock_for_rollback
+                .lock()
+                .expect("realm chain lock poisoned");
+            *c = None;
+        });
+
+        Ok(super::AuditPendingWrite {
+            event,
+            handle: durable_handle,
+            on_failure,
+            on_success: Box::new(|| {}),
+        })
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
@@ -482,10 +635,7 @@ impl AuditEngine for EmbeddedAuditEngine {
         let mut events = Vec::new();
 
         for entry in entries {
-            let event: AuditEvent =
-                serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let event = decode_event(&entry.value)?;
 
             // Apply agent_id / tool metadata filters before counting toward limit.
             if !Self::event_matches_metadata_filters(&event, query) {
@@ -549,11 +699,15 @@ impl AuditEngine for EmbeddedAuditEngine {
             let all_start = keys::event_scan_prefix();
             let all_entries = self.storage.scan(realm_id, &all_start, &scan_start)?;
             if let Some(last) = all_entries.last() {
-                let event: AuditEvent =
-                    serde_json::from_slice(&last.value).map_err(|e| AuditError::Serialization {
-                        reason: e.to_string(),
-                    })?;
-                event.integrity_hash
+                match decode_event(&last.value) {
+                    Ok(ev) => ev.integrity_hash,
+                    Err(_) => {
+                        crate::metrics::metrics()
+                            .audit_integrity_failures_total
+                            .inc();
+                        return Ok(false);
+                    }
+                }
             } else {
                 GENESIS_HASH.to_string()
             }
@@ -561,10 +715,15 @@ impl AuditEngine for EmbeddedAuditEngine {
 
         let mut count: u64 = 0;
         for entry in entries {
-            let event: AuditEvent =
-                serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let event = match decode_event(&entry.value) {
+                Ok(ev) => ev,
+                Err(_) => {
+                    crate::metrics::metrics()
+                        .audit_integrity_failures_total
+                        .inc();
+                    return Ok(false);
+                }
+            };
 
             let expected_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
             if event.integrity_hash != expected_hash {
@@ -759,10 +918,7 @@ impl EmbeddedAuditEngine {
             let event_value = self.storage.get(&query.realm_id, &index_entry.value)?;
 
             if let Some(value) = event_value {
-                let event: AuditEvent =
-                    serde_json::from_slice(&value).map_err(|e| AuditError::Serialization {
-                        reason: e.to_string(),
-                    })?;
+                let event = decode_event(&value)?;
 
                 // Apply time range filter
                 if let Some(start) = query.start_time {
@@ -804,10 +960,7 @@ impl EmbeddedAuditEngine {
             let event_value = self.storage.get(&query.realm_id, &index_entry.value)?;
 
             if let Some(value) = event_value {
-                let event: AuditEvent =
-                    serde_json::from_slice(&value).map_err(|e| AuditError::Serialization {
-                        reason: e.to_string(),
-                    })?;
+                let event = decode_event(&value)?;
 
                 // Apply time range filter
                 if let Some(start) = query.start_time {
@@ -832,6 +985,21 @@ impl EmbeddedAuditEngine {
         }
 
         Ok(events)
+    }
+
+    /// Encodes an [`AuditEvent`] into its postcard storage format.
+    ///
+    /// Only used by integration tests that write tampered bytes directly to
+    /// storage (tamper-detection scenarios) and need the correct binary format.
+    pub fn encode_for_test(event: &AuditEvent) -> Result<Vec<u8>, AuditError> {
+        encode_event(event)
+    }
+
+    /// Decodes postcard storage bytes into an [`AuditEvent`].
+    ///
+    /// Counterpart to [`Self::encode_for_test`] for tamper-detection tests.
+    pub fn decode_for_test(bytes: &[u8]) -> Result<AuditEvent, AuditError> {
+        decode_event(bytes)
     }
 }
 
@@ -1539,6 +1707,75 @@ mod tests {
             .verify_integrity(&realm_id, None, None)
             .expect("verify");
         assert!(!valid, "a head with an invalid MAC must be rejected");
+    }
+
+    /// HEA-1899: a stored event whose value has been silently mutated (e.g. actor
+    /// field overwritten) must be caught by the hash-chain HMAC even after the
+    /// compact binary key encoding change.
+    #[test]
+    fn tampered_event_value_detected_by_hash_chain() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let realm_id = RealmId::generate();
+
+        for i in 0..3_u32 {
+            engine
+                .append(&CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: format!("actor_{i}"),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: format!("u{i}"),
+                    metadata: None,
+                })
+                .expect("append");
+            clock.advance(1_000_000);
+        }
+
+        // Baseline: the untouched chain verifies.
+        assert!(
+            engine
+                .verify_integrity(&realm_id, None, None)
+                .expect("verify"),
+            "baseline chain must be valid"
+        );
+
+        // Simulate an attacker overwriting the first event's actor field in
+        // storage directly, bypassing the append-only engine.
+        let prefix = keys::event_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = storage.scan(&realm_id, &prefix, &end).expect("scan");
+        let first_key = entries.first().expect("at least one event").key.clone();
+
+        let original_bytes = storage
+            .get(&realm_id, &first_key)
+            .expect("get")
+            .expect("event exists");
+
+        // Parse and mutate the actor field (must use binary codec — events are no longer JSON).
+        let mut event: AuditEvent = decode_event(&original_bytes).expect("deserialize event");
+        event.actor = "attacker".to_string();
+        let tampered_bytes = encode_event(&event).expect("serialize tampered event");
+
+        // Write the tampered value back under the same key.
+        storage
+            .put(&realm_id, &first_key, &tampered_bytes)
+            .expect("overwrite event");
+
+        // The chain HMAC must catch the mutation.
+        let valid = engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify");
+        assert!(
+            !valid,
+            "tampered event value must be detected by the hash chain"
+        );
     }
 
     #[test]

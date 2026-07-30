@@ -18,6 +18,7 @@ use std::sync::Arc;
 use crate::core::{RealmId, SessionId, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
+use crate::identity::types::session::SessionStorageRecord;
 use crate::identity::types::{Page, Session};
 use crate::storage::StorageEngine;
 
@@ -109,11 +110,9 @@ impl SessionStore for EmbeddedSessionStore {
         let key = keys::encode_session_id(session_id);
         match self.storage.get(realm_id, &key) {
             Ok(Some(data)) => {
-                let session = serde_json::from_slice::<Session>(&data).map_err(|e| {
-                    IdentityError::Serialization {
-                        reason: e.to_string(),
-                    }
-                })?;
+                let session = crate::codec::decode::<SessionStorageRecord>(&data)
+                    .map(Session::from_storage_record)
+                    .map_err(|reason| IdentityError::Serialization { reason })?;
                 Ok(Some(session))
             }
             Ok(None) => Ok(None),
@@ -123,9 +122,8 @@ impl SessionStore for EmbeddedSessionStore {
 
     fn save_session(&self, realm_id: &RealmId, session: &Session) -> Result<(), IdentityError> {
         let key = keys::encode_session_id(session.id());
-        let bytes = serde_json::to_vec(session).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
+        let bytes = crate::codec::encode(&session.to_storage_record())
+            .map_err(|reason| IdentityError::Serialization { reason })?;
         self.storage
             .put(realm_id, &key, &bytes)
             .map_err(|e| IdentityError::Storage(Box::new(e)))
@@ -179,10 +177,9 @@ impl SessionStore for EmbeddedSessionStore {
                 .get(realm_id, &session_key)
                 .map_err(|e| IdentityError::Storage(Box::new(e)))?
             {
-                let session: Session =
-                    serde_json::from_slice(&data).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
+                let session: Session = crate::codec::decode::<SessionStorageRecord>(&data)
+                    .map(Session::from_storage_record)
+                    .map_err(|reason| IdentityError::Serialization { reason })?;
                 items.push(session);
             }
         }
@@ -235,10 +232,9 @@ impl SessionStore for EmbeddedSessionStore {
             if items.len() > limit {
                 break;
             }
-            let session: Session =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
+            let session: Session = crate::codec::decode::<SessionStorageRecord>(&entry.value)
+                .map(Session::from_storage_record)
+                .map_err(|reason| IdentityError::Serialization { reason })?;
             items.push(session);
         }
 

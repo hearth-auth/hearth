@@ -5,7 +5,7 @@
 
 mod common;
 
-use hearth::audit::{AuditAction, AuditEngine, AuditQuery, CreateAuditEvent};
+use hearth::audit::{AuditAction, AuditEngine, AuditQuery, CreateAuditEvent, EmbeddedAuditEngine};
 use hearth::core::RealmId;
 use hearth::identity::CreateRealmRequest;
 
@@ -281,8 +281,10 @@ async fn tamper_detection_detects_modified_entries() {
     // Take the third event, modify its actor, and write it back
     let mut tampered_event = events[2].clone();
     tampered_event.actor = "TAMPERED_ACTOR".to_string();
-    // Keep the same integrity_hash (which is now wrong)
-    let tampered_value = serde_json::to_vec(&tampered_event).expect("serialize");
+    // Keep the same integrity_hash (which is now wrong).
+    // Must use encode_for_test so bytes are in the correct postcard format.
+    let tampered_value =
+        EmbeddedAuditEngine::encode_for_test(&tampered_event).expect("encode tampered");
 
     // Reconstruct the storage key for this event
     let key = format!(

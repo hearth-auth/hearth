@@ -1,0 +1,45 @@
+HEA-1951 · C0 disk-slope sweep — WAL/SST split across N
+Commit:         abf179ba (duplicate-UserCreated NOT yet fixed)
+Checkpoints:    [5000, 20000, 60000, 100000, 150000, 200000]
+Max N:          200000
+WAL max_size:   64 MiB (StorageConfig::dev default)
+Rotation at ~N: ~22,600 users (64 MiB ÷ 2,840 B/user)
+
+        N |     WAL bytes |     SST bytes |  WAL/user |  SST/user |  tot/user | rot
+----------------------------------------------------------------------------------
+     5000 |       8289266 |       4617805 |      1658 |       924 |      2581 | 
+    20000 |      33239266 |      23087283 |      1662 |      1154 |      2816 | 
+    60000 |      32730756 |      71531203 |       546 |      1192 |      1738 | #1
+   100000 |      32342328 |     119877850 |       323 |      1199 |      1522 | #2
+   150000 |      48733746 |     177441183 |       325 |      1183 |      1508 | 
+   200000 |      65125072 |     239635849 |       326 |      1198 |      1524 | 
+
+Sweep time: 26.1 s  (0.130 ms/user)
+WAL rotations detected: 2
+
+=== OLS fit — SST bytes vs N (post-rotation, N >= 60k) ===
+  SST_bytes = 1195.58 × N  +  -314700
+  R²         = 0.999772  (1.0 = perfect linear fit)
+
+          N   SST/user     fitted   residual
+  ---------------------------------------------
+      60000     1192.2     1190.3       +1.9
+     100000     1198.8     1192.4       +6.3
+     150000     1182.9     1193.5      -10.5
+     200000     1198.2     1194.0       +4.2
+
+=== K7 verdict ===
+  OLS SST/user slope : 1195.6 B/user
+  K7 budget          : 2147 B/user  (200 GiB @ 100M)
+  Projected @ 100M   : 111.3 GiB
+  Headroom           : 1.80×
+  K7 VERDICT         : PASS
+
+  The WAL term is O(1) (max 64 MiB, confirmed by 2 rotations).
+  Asymptotically disk/user → SST/user = 1195.6 B, which extrapolates to
+  111.3 GiB @100M — 1.80× inside the 200 GiB K7 budget.
+  The K7 MISS in PERFORMANCE_REPORT v2 was a small-N measurement artifact.
+
+  NOTE: measured on code with the duplicate-UserCreated bug (HEA-1946 §3.3).
+  After that fix lands, SST/user is expected to drop by ~39.5% → ~723 B/user.
+  Re-run this sweep after the fix to update the K7 projection.

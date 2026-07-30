@@ -84,11 +84,13 @@ Embedded storage engine tuning. These control WAL, memtable, and hot tier behavi
 | `hot_tier_capacity` | integer | auto | When set, uses this exact number of hot tier entries. When omitted, auto-sizes from system memory (or `hot_tier_max_memory` if set). |
 | `hot_tier_max_memory` | integer | none | Maximum bytes to allocate for the hot tier. Overrides system memory detection during auto-sizing. Ignored when `hot_tier_capacity` is explicitly set. |
 | `fsync` | bool | `true` | Whether to `fsync` WAL writes. **MUST be `true` in production.** Dev mode disables this for faster iteration. |
+| `block_cache_bytes` | integer | `268435456` (256 MiB) | Process-wide byte budget for the decrypted SST block cache (HEA-1914). All v3 SST readers share a single cache bounded to this size, keeping cold-tier resident memory independent of corpus size. This is a real resident-memory commitment — budget for it alongside `hot_tier_max_memory`. Tune down on memory-constrained hosts; tune up when the cold-read working set exceeds the hot tier. |
 
 ```yaml
 storage:
   data_dir: "/var/lib/hearth/data"
   fsync: true
+  block_cache_bytes: 268435456  # 256 MiB — default; lower on memory-constrained hosts
   # Option A: explicit entry count
   hot_tier_capacity: 500000
   # Option B: memory budget (triggers auto-sizing, ignored when capacity is set)
@@ -132,6 +134,40 @@ make dev
 > in memory, so any `storage.data_dir` setting in `hearth.yaml` was silently
 > ignored. Upgrade to the HEA-1805 build or later to pick up the new precedence
 > behaviour.
+
+#### `storage.compaction`
+
+Background SST compaction. Two independent mechanisms share this section: a
+**periodic full compaction** (merges every SST into one, time-triggered) and a
+**count-triggered partial (size-tiered) compaction** (merges one size tier at a
+time when live SST count crosses a threshold). All fields are optional; the
+defaults preserve pre-HEA-1885 behaviour (partial compaction **off**).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Whether the background compaction task runs at all. When `false`, neither the periodic sweep nor the count trigger fires. |
+| `interval_secs` | integer | `3600` (1 h) | Seconds between periodic **full** compaction sweeps. A sweep merges all live SSTs into one. |
+| `min_sst_count` | integer | `3` | Floor gate *inside* the periodic sweep: a full compaction runs only when the live SST count is at least this. Not a trigger. |
+| `max_sst_count` | integer | `0` (OFF) | Count **trigger** for **partial (size-tiered)** compaction (HEA-1885). When live SST files reach this many, the engine merges one same-size tier off the write path, bounding cold-read SST fan-out at ~`merge_min·log(corpus)` between periodic sweeps. `0` disables the trigger entirely (default — current behaviour for existing operators). Prefer this over lowering `interval_secs` for bulk-import / high-write-rate deployments. A good starting value is `12`; **validate the per-merge write-stall on your hardware before enabling** — partial compaction still holds `flush_lock` for one tier's worth of data. |
+| `merge_min` | integer | `4` | Number of same-size-tier SSTs a single partial compaction merges at once (the per-merge fan-in). Larger values reduce merge frequency but increase each merge's stall; smaller values keep stalls short at the cost of more frequent merges. Clamped to a minimum of 2 internally. |
+
+Partial compaction is deliberately **size-tiered** rather than a full merge on
+every trigger: it re-writes a run of similarly-sized SSTs only once per size
+tier, keeping total write amplification `O(N log N)` under a sustained bulk
+import. A naive "full-merge whenever count crosses the threshold" trigger would
+rewrite the entire dataset roughly every few flushes — `O(N²)` write
+amplification — which is why the count trigger drives `compact_partial`, not the
+full-merge path (HEA-1881 lever 1).
+
+```yaml
+storage:
+  compaction:
+    enabled: true
+    interval_secs: 3600   # hourly full sweep
+    min_sst_count: 3
+    max_sst_count: 12     # cap transient fan-out during bulk writes (0 = off)
+    merge_min: 4
+```
 
 ### `cluster`
 
@@ -196,6 +232,12 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_tokens_issued_total` | counter | `realm`, `grant_type` | Tokens issued by OAuth 2.0 grant type |
 | `hearth_active_sessions` | gauge | — | Current active session count across all realms |
 | `hearth_storage_operation_duration_seconds` | histogram | `operation` | Storage write/scan latency |
+| `hearth_kdf_in_flight` | gauge | — | Argon2id operations currently executing (holding an admission permit) |
+| `hearth_kdf_permits` | gauge | — | Configured max concurrent Argon2id operations (`security.password.kdf.max_in_flight`) |
+| `hearth_kdf_admin_permits` | gauge | — | Configured max concurrent Argon2id operations reserved for admin login (`security.password.kdf.admin_max_in_flight`) |
+| `hearth_kdf_queue_wait_seconds` | histogram | — | Seconds spent waiting for a KDF permit (successful acquisitions only) |
+| `hearth_kdf_compute_seconds` | histogram | — | Wall-clock seconds for one Argon2id operation (excludes queue wait) |
+| `hearth_kdf_shed_total` | counter | — | Argon2id operations shed (`503`/`Retry-After`) due to a full KDF queue (HEA-1887) |
 
 ### `observability`
 
@@ -533,6 +575,51 @@ restart, then run `hearth migrate rotate-pepper --data-dir <dir>` to monitor how
 many credentials remain on the old pepper. Re-hashing happens lazily on each user's
 next successful login. Once the report reaches zero (or the grace window ends),
 drop the `previous_*` fields.
+
+#### `security.password.kdf`
+
+Bounded **admission control** for the Argon2id KDF path (HEA-1887 / R1). Password
+hashing and verification run on Tokio's blocking pool; without a bound, offered
+concurrency past the core count oversubscribes the CPU and — at ~19 MiB per
+OWASP-parameter op — memory, turning a modest login burst into a multi-second p99
+tail (this was the confirmed mechanism behind the C9/HEA-1879 issuance tail, *not*
+Argon2id compute). The gate caps concurrent KDF work; requests wait briefly for a
+slot and then **shed with `503 Service Unavailable` + `Retry-After`** rather than
+queueing unboundedly.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_in_flight` | integer | host **core count** | Maximum concurrent Argon2id operations. Omit (or `null`) to default to [`available_parallelism`] — the Little's-Law bound at which Argon2id throughput saturates, so higher values buy no throughput and only add queue latency. An explicit `0` is **rejected at startup**. Calibrate against your hardware using the C7/HEA-1875 saturation sweep. |
+| `admin_max_in_flight` | integer | `2` | Maximum concurrent Argon2id operations reserved for **admin login** (`/ui/admin/login`), in a *separate* permit pool (HEA-1892 / F2). Admin login never draws from the shared `max_in_flight` pool, so a flood against a tenant realm's login form cannot exhaust it and lock the operator out of the admin console. Omit to default to a small reserved lane; an explicit `0` is **rejected at startup**. |
+| `max_queue_wait_ms` | integer | `250` | Milliseconds a request waits for a permit before it is shed with `503`. Applies to the **shared** pool. Set it to roughly the patience of a user staring at the login form: too low sheds logins that a slightly longer wait would have served, too high converts shedding into queue latency. Omit to default; an explicit `0` is **rejected at startup** (it would shed every *contended* login). |
+| `admin_max_queue_wait_ms` | integer | `2500` | Milliseconds an **admin login** waits for a permit before it is shed (HEA-1895). Deliberately far longer than `max_queue_wait_ms`: admin login prefers *queueing* over *shedding* — its latency budget is seconds and its volume is low, so a longer wait on the tiny reserved pool denies a distributed flood the steady-state `503` it would otherwise hold the console in. The pool is only a couple of permits, so a longer wait cannot grow its memory footprint unboundedly. Omit to default; an explicit `0` is **rejected at startup**. |
+| `retry_after_seconds` | integer | `1` | `Retry-After` value (seconds) advertised on a shed response. Shared by both pools. |
+
+```yaml
+security:
+  password:
+    kdf:
+      max_in_flight: 16              # omit to default to the host core count
+      admin_max_in_flight: 2         # reserved pool for /ui/admin/login (HEA-1892)
+      max_queue_wait_ms: 250         # shared-pool shed threshold
+      admin_max_queue_wait_ms: 2500  # admin prefers queueing over shedding (HEA-1895)
+      retry_after_seconds: 1
+```
+
+The allocation-free abuse fast-rejects on the login form — CSRF double-submit,
+cross-origin POST, and the per-IP login rate limit — run **before** a KDF permit
+is acquired (HEA-1892 / F1), so a flood of soon-to-be-rejected requests cannot
+saturate the admission pool with real Argon2id verifies.
+
+Observability: the gate exports `hearth_kdf_in_flight`, `hearth_kdf_permits`,
+`hearth_kdf_admin_permits`, `hearth_kdf_queue_wait_seconds`,
+`hearth_kdf_compute_seconds`, and `hearth_kdf_shed_total` (see the
+[`/metrics`](#metrics) families table). A rising
+`hearth_kdf_shed_total` or a `hearth_kdf_queue_wait_seconds` mass pushing toward
+`max_queue_wait_ms` means the KDF path is saturated — raise `max_in_flight` only if
+CPU/memory headroom exists, since the bound exists to protect them.
+
+[`available_parallelism`]: https://doc.rust-lang.org/std/thread/fn.available_parallelism.html
 
 #### `security.backup`
 

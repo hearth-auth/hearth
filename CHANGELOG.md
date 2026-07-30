@@ -7,6 +7,325 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Block-structured SST format (v3) with mmap + bounded block cache (HEA-1914)** — SST
+  files now use a block-based on-disk format (magic `HSS3`): the data section is split
+  into ~4 KiB independently-encrypted blocks with a footer block index, and readers
+  memory-map the file and decrypt individual blocks on demand through a process-wide,
+  byte-bounded cache instead of decrypting the entire file into the heap at open. This
+  removes the previous `Θ(corpus)` resident-RAM ceiling — an open SST now holds only its
+  footer index (`O(#blocks)`), so a node's users-per-node is no longer bounded by having
+  every cold record permanently resident. New config key **`storage.block_cache_bytes`**
+  (default 256 MiB) caps decrypted-block residency across all readers. Each block is
+  sealed with an AEAD nonce/AAD derived from `(sst_number, block_index)`, so a block
+  cannot be replayed at a different position or spliced into another file. V1/V2 SSTs
+  remain readable via the eager path; new writes and compaction output are v3. Greenfield
+  — no migration tooling; old files are absorbed by compaction. (HEA-1914)
+
+### Changed
+- **`security.password.kdf.max_queue_wait_ms: 0` is now rejected at startup (HEA-1984)** —
+  a `0` ms shared-pool queue-wait sheds every *contended* login with `503` while reading
+  like a valid tuning value. It now fails config validation with a message naming the key,
+  matching the existing rejection of `admin_max_queue_wait_ms: 0`. Omit the key to default
+  to 250 ms. (HEA-1984)
+- **WAL commit path: `fdatasync` + batched writes + O(1) commit signalling (HEA-1959)** —
+  the group-commit leader now issues one `write_all` per batch instead of three syscalls
+  per entry, expands the AES-256-GCM key schedule once per batch instead of once per
+  entry, reserves the batch's record numbers in a single rotation-mutex critical section,
+  and releases waiting writers via one `notify_all` on a shared commit watermark instead
+  of one `notify_one` per writer. The per-batch sync also switched from `sync_all`
+  (`fsync`) to `sync_data` (`fdatasync`): a WAL segment is created and parent-dir-fsynced
+  at open and thereafter append-only, so the only metadata replay needs is the file
+  length, which `fdatasync` persists — this halved the measured per-batch sync (3.87 ms →
+  1.90 ms, matching the device microbenchmark) and made it flat in batch size rather than
+  growing to 7.38 ms at batch = 131. **The durability guarantee is unchanged**: the WAL is
+  still synced before any write is acknowledged and still survives `kill -9`;
+  `SyncMode::Async` remains rejected as a default. Operators should see substantially
+  higher `session_create` throughput at high concurrency with no configuration change.
+  (HEA-1959)
+- **Count-triggered SST compaction is now ON by default; merge I/O runs off the flush
+  lock (HEA-1931)** — `storage.compaction.max_sst_count` now defaults to `12` (was `0` =
+  off), so partial size-tiered compaction is triggered automatically once live SST files
+  reach that count. This bounds cold-read SST fan-out at roughly `merge_min * log(corpus)`
+  instead of letting it grow linearly with corpus size. Enabling it by default is now safe
+  because the O(tier-data) merge I/O no longer runs under the flush lock: compactions
+  serialize against each other on a dedicated compaction lock and hold the flush lock only
+  for the brief metadata-only commit (rename + directory fsync + reader reload), so a merge
+  no longer stalls writers for its full duration. Set `max_sst_count: 0` to restore the
+  previous behavior (periodic full sweep only). (HEA-1931)
+- **WAL group commit — fsyncs coalesced across concurrent writers (HEA-1915)** — the
+  write-ahead log now uses a leader/follower group-commit protocol: multiple concurrent
+  `append` callers share a single `sync_all` call instead of each paying a private fsync.
+  The leader drains the pending queue under the file mutex, writes all entries in
+  record-number order (preserving AES-256-GCM nonce ordering), and calls `sync_all` once
+  for the entire group; followers wait on per-slot condvars and return as soon as their
+  bytes are covered. Durability guarantee is unchanged: no caller returns `Ok` until a
+  `sync_all` covering its bytes has completed. `SyncMode::None` (dev/test) is unaffected.
+  At concurrency ≥ 8, fsyncs-per-write drops well below 1.0 and the session_create
+  scaling exponent moves from near-zero toward positive; single-thread throughput and
+  durability are unchanged. (HEA-1915)
+
+### Fixed
+- **KDF-shed 503 on browser auth flows now renders a themed HTML page (HEA-1979)** —
+  The login, admin login, register, reset-password, account change-password, and TOTP
+  step-up paths previously returned a raw `text/plain` 503 when the Argon2id KDF gate
+  was saturated. They now render a THEME-compliant HTML error page that pre-fills the
+  submitted email, carries a fresh CSRF token, surfaces the `Retry-After` seconds, and
+  shows a "Try again" retry form (or a "Back to home" link where no re-submit URL is
+  available). The plain-text shed response is retained for the REST/gRPC plane
+  (`run_kdf_gated`). (HEA-1979)
+- **Audit appends no longer hold the chain lock across the WAL fsync (HEA-1948)** —
+  `EmbeddedAuditEngine::append` previously held the per-realm chain lock for the entire
+  `put_batch` call, including the WAL `fsync` wait. This serialised all audit writes to the
+  same realm behind a single mutex, capping coalescing at exactly one fsync per append
+  regardless of concurrency. The chain lock now covers only the hash-chain RMW and the WAL
+  *enqueue*; the fsync wait happens outside the lock via a new split-phase
+  `enqueue_batch` / `await_batch_durable` API on `StorageEngine`. Concurrent audit appenders
+  on the same realm can now enqueue within the same fsync window and share a single
+  group-commit `sync_all`. At 8 concurrent writers, measured `fsyncs_per_write` drops
+  well below 1.0; chain integrity is preserved by an optimistic cache update that is rolled
+  back on durability failure. Single-threaded throughput and durability guarantees are
+  unchanged. (HEA-1948)
+- **Session creation now costs exactly one WAL fsync (HEA-1954)** — the `SessionCreated`
+  audit event was written as a second WAL record after the session itself, so every
+  `create_session` paid two fsyncs on the durable path. The audit event is now merged into
+  the session's own `put_batch` via a new `AuditEngine::with_pending_append` method, which
+  performs the hash-chain RMW and WAL enqueue under the chain lock but delegates the batch
+  call to the caller. One WAL record, one fsync. This also closes a crash window: a
+  `kill -9` between the two former records could strand a session with no `SessionCreated`
+  event, whereas a CRC failure on the merged record now discards both. Audit engines that
+  do not implement the merged path fall back automatically to the two-record behaviour.
+  Durability semantics are unchanged — the WAL is still fsync'd before acknowledgement.
+  (HEA-1954)
+- **WAL group-commit leader loops instead of re-electing per batch (HEA-1955)** — the
+  group-commit leader previously exited after each `sync_all`, so the next batch had to
+  wake and elect a new leader, leaving a thread-wakeup gap between consecutive fsyncs
+  during which arriving writes could not be coalesced. The leader now loops while work
+  remains. Measured effect at 256 concurrent `session_create` writers: p99 latency roughly
+  halves (23.0 → 11.9 ms), improving at every concurrency level. Throughput effect is
+  small (coalescing efficiency 23.2% → 25.5%); the remaining efficiency decay at high
+  queue depth is tracked separately. (HEA-1955)
+- **Admin-API user mutations now emit exactly one audit event each (HEA-1950)** —
+  `POST /admin/users`, `PATCH /admin/users/{id}`, and `DELETE /admin/users/{id}` previously
+  wrote two audit events per operation: one from the identity layer (actor=`"system"`) and a
+  second from the handler (actor=admin user ID). Auditors counting `UserCreated` events got
+  2× the true number with half the entries unattributed. The fix threads the admin actor and
+  `{"via":"admin_api"}` metadata into the identity layer via new
+  `create_user_attributed` / `update_user_attributed` / `delete_user_attributed` trait
+  methods, so the handler emits exactly one event with the correct actor and drops the
+  redundant second append. Storage impact: ~39.5% of per-user audit bytes were redundant;
+  removing the duplicate reduces SST bytes/user from ~1,192 B to ~721 B (~67 GiB saved at
+  100 M users). Self-registration, SCIM, gRPC, and import paths are unaffected. (HEA-1950)
+- **Session creation is now a single atomic write (HEA-1945)** — `create_session` wrote the
+  session record and its user→session index entry as two separate storage puts, so a crash
+  between them could leave an index entry pointing at a session that was never persisted,
+  and each put cost a separate WAL `fsync` on the production durability path. Both now land
+  in one atomic `put_batch` (one WAL record, one fsync), cutting `session_create` from 3
+  fsyncs per operation to 2. Durability semantics are unchanged — the WAL is still fsync'd
+  before the write is acknowledged. (HEA-1945)
+- **SST compaction memory is now `O(#inputs × block)` instead of `O(corpus)` (HEA-1922)** —
+  compaction previously materialized every input entry into a `BTreeMap` and then a `Vec`
+  before writing the output SST, so merging a large corpus briefly allocated roughly twice
+  the corpus size (≈1 GB while compacting 1 M users) — memory the system allocator retains
+  as elevated RSS afterward. Compaction now streams a k-way merge of the inputs (one block
+  resident per input, decrypted outside the shared block cache to avoid evicting the query
+  working set) directly into a writer that flushes each sealed block straight to disk rather
+  than buffering the whole output. Peak transient heap during a merge is now a handful of
+  blocks regardless of corpus size; on the C0 harness, post-compaction δRSS at 1 M users
+  dropped from ~606 MiB to ~35 MiB (37 B/user). Output files are byte-compatible v3 SSTs and
+  compaction semantics (newest-input-wins, tombstone drop on full merge / retention on
+  partial merge) are unchanged. (HEA-1922)
+- **WAL group-commit leader bounded to one batch (HEA-1921)** — the group-commit leader
+  now commits exactly one batch then either releases leadership (queue empty) or promotes
+  the head of the remaining queue to leader and exits. Previously the leader looped until
+  the queue drained, which under sustained load could pin a `spawn_blocking` thread
+  indefinitely after its own write was already durable, degrading tail latency for the
+  unlucky thread that drew leader. Each caller now holds the leader role for at most one
+  fsync round. (HEA-1921 / F4)
+- **WAL write fault fences subsequent appends (HEA-1921)** — a mid-batch write error
+  now sets an internal fence flag; any subsequent `append` call returns `Err` rather than
+  silently acking data that `scan_records` will discard on recovery after a torn record.
+  (HEA-1921 / F6)
+- **WAL slot-mutex poison no longer strands a follower (HEA-1921)** — the slot-state
+  lock is now recovered with `unwrap_or_else` instead of silently skipping the condvar
+  signal on poison, ensuring a poisoned slot always gets its `done` flag set. (HEA-1921 / F5)
+- **WAL `LeaderGuard` no longer reports phantom write failures (HEA-1935)** — after a
+  successful group-commit `commit_batch`, committed slots are now cleared from the guard's
+  `in_flight` list immediately. Previously, if the subsequent queue-re-check lock failed,
+  an armed guard drop would overwrite each durably-fsynced slot's `error` field with a
+  spurious failure string — causing callers to see `Err` for records that would replay
+  correctly on recovery (ghost write). (HEA-1935 / R1)
+- **WAL `LeaderGuard::drop` now recovers a poisoned group mutex (HEA-1935)** — the guard's
+  `Drop` implementation previously used `if let Ok` on the group mutex, silently no-opping
+  the entire guard body (including the in-flight signal loop) when the mutex was poisoned.
+  Writers blocked on their condvars would be stranded indefinitely — the same failure mode
+  as HEA-1924. The group mutex now uses `unwrap_or_else(|e| e.into_inner())`, matching
+  every slot-mutex call in the same function. (HEA-1935 / R2)
+
+- **CSRF rejection copy is now plain language, with a recovery link (HEA-1913)** — the
+  login, MFA-challenge, and registration forms previously rejected a stale CSRF token
+  with "Invalid security token. Please reload the page and try again." Users have no
+  mental model for "security token" as a hidden form field — in everyday language it
+  means a hardware dongle or a TOTP code — so the message read as "your MFA device is
+  wrong" or "you've been hacked". All three surfaces now render "Your session has
+  expired. Please reload the page and try again." plus a "Reload the page" link back to
+  the originating form, which re-issues a fresh token. Status codes (422 login, 422 MFA
+  challenge, 400 register), the `dev_mode` bypass, and the fail-closed check from
+  HEA-1367 are unchanged — this is a copy and affordance fix only. (HEA-1913)
+- **CSRF 422 error pages now mint a fresh token and preserve email + return_to (HEA-1983)** —
+  when a pre-authentication form (login, register, reset-password) is submitted with a
+  stale or missing CSRF token, the server now re-renders the form with a freshly-minted
+  CSRF token, the previously-submitted email pre-filled, and the `return_to` redirect
+  parameter preserved. Previously the 422 response contained a stale token, so the user's
+  next submission also failed. (HEA-1983)
+- **KDF admission gate now applies to register and password-reset flows (HEA-1981)** —
+  `POST /ui/{realm}/register` and `POST /ui/{realm}/reset-password` previously bypassed
+  the Argon2id KDF admission semaphore, so they could drive the KDF queue above the
+  configured shed threshold even when login was already being shed. Both browser-plane
+  paths now run through the KDF gate and return a themed 503 page when the pool is
+  saturated, matching the behaviour of the login and admin-login forms. (HEA-1981)
+
+### Security
+- **`--dev` mode now refuses to start if any bind address is non-loopback (HEA-1980)** —
+  previously `hearth serve --dev --bind 0.0.0.0` started successfully and exposed
+  unauthenticated endpoints (`POST /dev/seed-session`, `POST /admin/bootstrap`) and
+  weakened Argon2id parameters on a routable interface. Config-file validation rejected a
+  non-loopback `server.bind_address`, but the CLI `--bind` override was applied *after*
+  that validation, and the no-config-file path (`Config::dev()`) skipped `validate()`
+  entirely — so both bypass paths were reachable. A new `dev_mode_bind_check` gate now
+  runs after all CLI overrides and the effective gRPC bind are resolved; it returns a hard
+  startup error when dev mode is active and any effective bind (HTTP or gRPC) is
+  non-loopback. (HEA-1980)
+- **Compaction no longer resurrects a deleted key when an input SST cannot be unlinked (HEA-1982)** —
+  both the full-merge (`compact_ssts`) and partial/size-tiered (`compact_partial`) paths
+  treated a `remove_file` failure on a merged-away input SST as warn-and-continue, then
+  called `reload_sst_readers()`, which re-opened the orphan. Because a tombstone-dropping
+  merge writes an output with no delete markers, the surviving older SST still carried the
+  pre-delete value while the merged output no longer shadowed it — so a lookup fell through
+  to the orphan and a deleted user or session came back. A runtime unlink failure is now
+  **fatal to the commit**: the merge aborts and leaves the pre-commit (tombstone-bearing)
+  reader set in place, so deleted keys stay shadowed until a retry succeeds. Inputs are
+  unlinked **oldest-first** so a value-bearing SST is always retired before the newer
+  tombstone that shadows it; any partial prefix of unlinks — whether a mid-loop error aborts
+  or a crash lands mid-loop — can then only leave *extra* tombstones on disk, never a
+  resurrectable value orphaned ahead of its tombstone, and a `NotFound` is treated as success
+  so a retry after a prior aborted attempt converges (HEA-1986). The unlinks are
+  also `sync_dir`-durable before the tombstone-free output becomes the sole authority,
+  shrinking (but not yet closing — a crash between the rename and the unlinks still needs a
+  compaction manifest, HEA-1857) the crash window. (HEA-1982, HEA-1986)
+- **SST `entry_count` no longer sizes an allocation from unauthenticated bytes (HEA-1917)** —
+  the SST header's `entry_count` field lies outside the AEAD and the CRC on *every* format
+  version and is never validated before use, yet it was passed straight to
+  `Vec::with_capacity` on both the v3 path (`SstReader::iter_all`) and the legacy V1/V2 path
+  (`parse_entries`, whose count-mismatch check only runs *after* the decode loop). A tampered
+  or bit-rotted value (e.g. `u32::MAX`) drove a ~275 GB reservation that aborts the process —
+  on v3 when the file is next compacted, on V1/V2 at open — defeating the format's
+  "corruption surfaces as an error, never a crash" contract. Every reservation derived from
+  `entry_count` is now clamped against an authenticated length (the decrypted section's or
+  block's plaintext size, and the sealed footer's per-block lengths), so a bogus count can
+  only under-reserve. Tampered files now surface a clean `InvalidSstFormat`. (HEA-1917)
+- **SST compaction Bloom-filter sizing clamped to an authenticated bound (HEA-1933)** —
+  the HEA-1922 streaming-compaction rewrite sized the merged Bloom filter from a pre-read
+  hint summed over each input SST's *unauthenticated* header `entry_count`, reintroducing
+  the HEA-1917 allocation-abort class on a new site: two inputs with a tampered/bit-rotted
+  `entry_count = u32::MAX` drove a ~10 GiB `BloomFilter::empty_for` reservation that can
+  abort the process (`handle_alloc_error`) on no-overcommit hosts, cgroup memory limits,
+  musl, or 32-bit. The hint is now derived from each reader's authenticated maximum
+  (the sealed footer's per-block plaintext lengths for v3, the resident entry count for
+  V1/V2), so a bogus header count can no longer size the allocation. (HEA-1933)
+- **Step-up MFA grant now routes through the shared KDF admission gate (HEA-1910)** —
+  the `urn:hearth:params:grant-type:step-up-mfa` grant at `/token` previously called
+  `step_up_mfa_grant_token` inline in the async handler with neither a gate permit nor
+  `spawn_blocking`. A distributed flood of step-up requests could independently
+  oversubscribe the blocking pool (falsifying the `permits × 19 MiB` ceiling) and block
+  Tokio workers, degrading the `validate_token` hot path. The path is now wrapped in
+  `run_kdf_gated_rest` at both callsites (header-based and realm-name-routed `/token`),
+  matching the pattern used for `create_user` and `import_user`. Saturated gate sheds
+  with `503 + Retry-After`. (HEA-1910)
+- **KDF admission gate hardening (HEA-1892 / HEA-1889 F1+F2)** — two abuse-resistance
+  fixes over the R1 gate. **F1:** the allocation-free login abuse fast-rejects (CSRF
+  double-submit, cross-origin POST, and the per-IP login rate limit) now run
+  **before** a KDF permit is acquired, so a distributed sub-threshold flood of
+  soon-to-be-rejected requests can no longer saturate the Argon2id admission pool
+  with real verifies; every reject remains username-independent, so login
+  enumeration properties are unchanged. **F2:** admin login (`/ui/admin/login`) now
+  draws from a **separate reserved permit pool** (new `security.password.kdf.admin_max_in_flight`,
+  default `2`) instead of the shared gate, so a flood against one tenant realm can no
+  longer shed the operator out of the admin console. New metric
+  `hearth_kdf_admin_permits`; `admin_max_in_flight: 0` is rejected at config-load
+  time. (HEA-1892)
+- **Pool-specific KDF admission telemetry (HEA-1894)** — the admin-reserved gate now
+  reports its own in-flight and shed counters instead of writing the shared-pool
+  metrics. New metrics `hearth_kdf_admin_in_flight` and `hearth_kdf_admin_shed_total`
+  make operator-console shedding — the exact condition the F2 isolation exists to
+  prevent — directly alertable, and keep `hearth_kdf_in_flight` bounded by
+  `hearth_kdf_permits` so shared-pool saturation alerts no longer misfire on admin
+  traffic. (HEA-1894)
+- **Admin KDF gate prefers queueing over shedding (HEA-1895)** — the admin-reserved
+  pool now has its own, far longer queue-wait (new `security.password.kdf.admin_max_queue_wait_ms`,
+  default `2500` ms) instead of reusing the shared gate's `250` ms shed threshold.
+  F2 stopped a tenant-realm flood from starving admin login, but reusing the 250 ms
+  wait made a *targeted* flood of `/ui/admin/login` cheap — an attacker had only to
+  occupy the pool's ~2 permits to hold the console in steady-state `503`. A seconds-long
+  admin wait — costless on a 2-permit pool that cannot blow up memory — lets genuine
+  operator logins queue for a slot instead. `admin_max_queue_wait_ms: 0` is rejected at
+  config-load time. (HEA-1895)
+
+### Added
+- **Bounded KDF admission control on the Argon2id path (HEA-1887 / R1)** — password
+  verification/hashing now runs behind a bounded async admission gate so offered
+  concurrency past the core count is **shed, not queued unboundedly**. C9/HEA-1879
+  confirmed the multi-second token-issuance p99 was queueing under `spawn_blocking`
+  oversubscription, not Argon2id compute. New config block
+  `security.password.kdf`: `max_in_flight` (default = host core count — the
+  Little's-Law bound where Argon2id throughput saturates), `max_queue_wait_ms`
+  (default `250`), `retry_after_seconds` (default `1`). When the gate is saturated,
+  **login requests receive `503 Service Unavailable` with a `Retry-After` header**
+  instead of piling onto the blocking pool (this also collapses peak resident
+  memory from `offered × 19 MiB` to `permits × 19 MiB`). New Prometheus metrics on
+  a path that previously had **zero** telemetry: `hearth_kdf_in_flight`,
+  `hearth_kdf_permits`, `hearth_kdf_queue_wait_seconds`, `hearth_kdf_compute_seconds`,
+  `hearth_kdf_shed_total`. An explicit `max_in_flight: 0` is rejected at
+  config-load time. (Gated on C7/HEA-1875 calibration + SecurityAuditor review
+  before release.)
+- **`hearth-loadtest saturate` — open-loop high-concurrency driver (C4)** — a new
+  `saturate` subcommand drives `N` concurrent TCP connections against a single
+  read-only hot-path journey in an open loop, **decoupling connection concurrency
+  from the session-token pool size**: 10 000 connections can cycle through 1 000
+  tokens because multiple connections share tokens. Each connection is a Tokio task
+  with its own `reqwest::Client` (one idle connection per host); no Goose per-task
+  overhead. The `report.json` ceiling block distinguishes `server` from
+  `generator_saturated` by correlating error rate, latency, and generator CPU%.
+  New CLI flags: `--saturate-connections` (env `HEARTH_LOADTEST_SATURATE_CONNECTIONS`,
+  default `100`), `--saturate-journey` (env `HEARTH_LOADTEST_SATURATE_JOURNEY`,
+  default `validate`). Verified ≥10 000 concurrent connections with ceiling
+  attribution `server` (HEA-1872).
+- **`--sessions-count` absolute session knob** — `hearth-loadtest seed
+  --sessions-count N` mints exactly `N` sessions per realm, overriding
+  `--sessions-frac`. Decouples the distinct-session-population axis from the
+  user-count axis so Axis B (session scale) is independently reachable without
+  inflating `--users-per-realm` to make a fraction work. Clamped to
+  `users_per_realm` if set higher; env `HEARTH_LOADTEST_SESSIONS_COUNT` (HEA-1872).
+- **Count-triggered partial (size-tiered) SST compaction** — two new
+  `storage.compaction` keys bound cold-read SST fan-out without the write
+  amplification of a full merge (HEA-1885). `max_sst_count` (default `0` = off)
+  is a count trigger: once the live SST file count reaches it after a flush, the
+  background task merges a single same-size tier of SSTs off the write path,
+  capping operational fan-out at roughly `merge_min * log(corpus)` instead of
+  growing linearly with corpus size. `merge_min` (default `4`) sets the per-tier
+  fan-in. Both default to the prior behaviour (periodic full compaction only);
+  enable `max_sst_count` after validating write-stall on your hardware. Measured
+  on the corpus ladder: peak fan-out flat (exponent ≈ 0 vs the linear baseline),
+  write amplification ≈ 4× (see `docs/perf/HEA-1885-partial-compaction.md`).
+- **Hot-tier / storage `get` observability** — the storage engine now exports
+  Prometheus metrics attributing every read to the tier that served it:
+  `hearth_storage_get_total{outcome="hot_hit|memtable_hit|sst_hit|miss"}`
+  (all four series present from the first scrape, so `hot_hit / sum` is an
+  *observed* hot-tier hit ratio), `hearth_storage_get_duration_seconds` (fall-through
+  latency by outcome), `hearth_storage_get_ssts_probed` (SST fan-out per cold read),
+  `hearth_storage_hot_tier_promotions_total`, `hearth_storage_hot_tier_evictions_total`,
+  and the live `hearth_storage_sst_files` gauge. The hot-tier-hit path adds only a
+  single lock-free counter increment and is deliberately not timed, preserving the
+  zero-syscall hot-path contract (no `bench-gate` regression) (HEA-1869).
 - **Argon2id password pepper is now configurable** — set `security.password.pepper`
   (`version` + `key_hex`, plus optional `previous_version`/`previous_key_hex` for
   rotation) in `hearth.yaml` to apply a server-side HMAC-SHA256 pepper before Argon2id
@@ -16,6 +335,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   block preserves the prior no-pepper behaviour (HEA-1838).
 
 ### Fixed
+- **Permission resolution now scales with cores under concurrent token issuance (HEA-1906)** —
+  the RBAC decision cache that memoizes full permission resolutions was a single global
+  `Mutex`; every `resolve_permissions` took it, so under concurrency throughput *fell* as
+  cores were added (the C7 saturation sweep measured a negative scaling exponent). The cache
+  is now a sharded, lock-free structure: reads are wait-free `ArcSwap` loads with no mutex,
+  and a fill clones only the one shard the key maps to. The per-realm version-gated
+  invalidation is unchanged, so a mutation still atomically renders every prior cached
+  resolution for that realm unreachable — no stale-permission read is possible. Behaviour is
+  identical for callers; only concurrent throughput changes (HEA-1906).
 - **WAL recovery now truncates a corrupt tail instead of appending behind it** —
   after recovering from a torn or corrupt WAL tail (e.g. power loss), the append
   cursor was positioned at physical end-of-file, *after* the surviving garbage.
@@ -37,7 +365,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   class through a narrower window). The `Fs` abstraction gains `sync_dir`, now
   called after WAL/SST create and after each finalizing rename (HEA-1855).
 
+### Changed
+- **Memtable flush no longer stalls writers or copies the whole map (HEA-1908)** — a
+  memtable flush previously held the write lock across the whole SST
+  encrypt+`fsync`, so at the default flush threshold *every* writer blocked for the
+  full SST write, and both flush paths additionally materialised a full `Vec` copy
+  of every key and value before writing the SST. The flush now holds the write lock
+  only for an O(1) swap (park the full map, install a fresh empty one) and streams
+  entries into the SST writer per entry via a sink, so no duplicate copy of the map
+  is allocated and the SST write runs outside the lock. The
+  never-drop-a-racing-write guarantee is unchanged. (HEA-1908)
+- **User, session, and credential records now use binary (postcard) encoding on
+  disk (HEA-1898)** — the per-record value stored in the WAL/SST was previously
+  JSON, carrying field-name overhead on every write and read. Records are now
+  encoded with `postcard` (positional, ULEB128-compressed integers, no field
+  names). The email index value is now 16 raw UUID bytes instead of a 36-character
+  string. Together these reduce the on-disk footprint per user from ~4.5 KB to
+  ~1.5 KB. Realm records remain JSON due to schema complexity. **On-disk format
+  change — Hearth has no backward-compatibility obligation for storage format
+  (Greenfield).** (HEA-1898)
+- **Audit log records now use binary (postcard) encoding and compact binary keys
+  (HEA-1899)** — audit events were previously stored as JSON values with 64-char
+  hex integrity hashes and 19/20-char zero-padded decimal timestamp/sequence keys.
+  Events are now encoded with `postcard` (same codec as HEA-1898), the HMAC-SHA256
+  integrity hash is stored as 32 raw bytes instead of 64 hex chars (saves 32 B/event),
+  and primary/index keys use 8-byte big-endian integers instead of decimal strings
+  (42-byte primary key vs ~48+ bytes; order-preserving). Both `audit:actor:` and
+  `audit:action:` secondary indexes are kept — each is load-bearing for its
+  respective query dimension. Hash-chain tamper-evidence is preserved: the HMAC
+  is computed over the same canonical JSON fields as before; only the storage
+  representation changes. **On-disk format change (Greenfield).** (HEA-1899)
+
 ### Security
+- **KDF admission gate now fronts *every* Argon2id caller, not just login
+  (HEA-1891 / HEA-1889 F3)** — the original R1 gate (HEA-1887) only wrapped the
+  three login handlers, leaving self-service registration (`POST /ui/register`,
+  unauthenticated), password-reset confirm (`POST /ui/reset-password`), account
+  change-password, MFA step-up password verify, and the REST `create_user`
+  endpoints (`POST /users`, `POST /admin/users`) free to independently
+  oversubscribe the blocking pool. A flood on the unauthenticated
+  `/ui/register` alone could re-introduce the unbounded `offered × 19 MiB`
+  memory blowup the gate exists to prevent, so the true peak was
+  `(permits + concurrent registrations + resets + …) × 19 MiB` rather than the
+  advertised `permits × 19 MiB`. All of those callers now route through the
+  shared process-global gate; when it is saturated they are shed with
+  `503 Service Unavailable` + `Retry-After` (JSON body on the REST paths). The
+  `permits × 19 MiB` peak-memory ceiling now holds server-wide. Registration
+  and change-password hashing also no longer runs inline on the async worker
+  (HEA-1891).
 - **OAuth client-auth failures now return the RFC 6749 `invalid_client` code** —
   the endpoint-client authentication path (used by `client_credentials`,
   token-exchange, `/revoke`, and `/introspect`) previously returned a

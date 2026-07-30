@@ -1,0 +1,145 @@
+HEA-1875 · C7 — Saturation-throughput benches (VISION §7.2)
+
+host: 16 logical cores | measure window = 2s/cell | users = 1000, warm sessions = 2048, miss sessions = 512
+in-process engine drive — no HTTP / axum / tokio / load generator in the loop
+
+read ladder:  [1, 2, 4, 8, 16] threads  (CPU-bound ops)
+write ladder: [1, 4, 16, 64, 128, 256] threads  (I/O-bound, blocked-on-fsync oversubscription)
+
+seeding 1000 users …
+creating 2048 warm sessions + minting warm tokens …
+creating 512 sessions + minting miss tokens …
+measuring device fsync rate (200 sequential sync_all calls) …
+warming hot tier (24 passes) + saturating claims cache …
+
+Device fsync rate: 521.5 fsyncs/s  (200 sequential sync_all calls on scratch file)
+
+── validate_token [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |          656470 |         656470 |              1.00×
+      2 |         1497238 |         748619 |              1.14×
+      4 |         2748773 |         687193 |              1.05×
+      8 |         5667339 |         708417 |              1.08×
+     16 |         8782516 |         548907 |              0.84×
+  scaling exponent = +0.940 (R² = 0.991)  [1.0 = linear, 0.0 = serialized] → SCALES (near-linear)
+  single-core throughput = 656470 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 1.523 µs/op (single thread, 16-core host)
+
+── validate_token [miss] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |           20390 |          20390 |              1.00×
+      2 |           38795 |          19398 |              0.95×
+      4 |           70622 |          17656 |              0.87×
+      8 |           96613 |          12077 |              0.59×
+     16 |          117732 |           7358 |              0.36×
+  scaling exponent = +0.638 (R² = 0.950)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 20390 ops/s → 200 k/core bar: MISS
+  ⇒ engine cost ≈ 49.044 µs/op (single thread, 16-core host)
+
+── session_lookup [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |        12260410 |       12260410 |              1.00×
+      2 |        21308277 |       10654138 |              0.87×
+      4 |        33766325 |        8441581 |              0.69×
+      8 |        61055257 |        7631907 |              0.62×
+     16 |        71556026 |        4472252 |              0.36×
+  scaling exponent = +0.661 (R² = 0.976)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 12260410 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.082 µs/op (single thread, 16-core host)
+
+── session_lookup [miss] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         1677902 |        1677902 |              1.00×
+      2 |         2751381 |        1375691 |              0.82×
+      4 |         3744495 |         936124 |              0.56×
+      8 |         5556791 |         694599 |              0.41×
+     16 |         6551369 |         409461 |              0.24×
+  scaling exponent = +0.494 (R² = 0.976)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 1677902 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.596 µs/op (single thread, 16-core host)
+
+── user_lookup [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         3680089 |        3680089 |              1.00×
+      2 |         6824619 |        3412309 |              0.93×
+      4 |        11055766 |        2763941 |              0.75×
+      8 |        16514125 |        2064266 |              0.56×
+     16 |        19372527 |        1210783 |              0.33×
+  scaling exponent = +0.607 (R² = 0.960)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 3680089 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.272 µs/op (single thread, 16-core host)
+
+── user_lookup [miss] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |         2661452 |        2661452 |              1.00×
+      2 |         3710803 |        1855402 |              0.70×
+      4 |         4350695 |        1087674 |              0.41×
+      8 |         5822013 |         727752 |              0.27×
+     16 |         7262801 |         453925 |              0.17×
+  scaling exponent = +0.355 (R² = 0.991)  [1.0 = linear, 0.0 = serialized] → CONTENDS (serialized/shared bottleneck)
+  single-core throughput = 2661452 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.376 µs/op (single thread, 16-core host)
+
+── permission_check [hot] ──
+threads | aggregate ops/s | per-core ops/s | scaling eff (vs 1T)
+--------+-----------------+----------------+--------------------
+      1 |        11011296 |       11011296 |              1.00×
+      2 |        21554660 |       10777330 |              0.98×
+      4 |        40159442 |       10039861 |              0.91×
+      8 |        61861895 |        7732737 |              0.70×
+     16 |        72966738 |        4560421 |              0.41×
+  scaling exponent = +0.698 (R² = 0.956)  [1.0 = linear, 0.0 = serialized] → PARTIAL (some contention)
+  single-core throughput = 11011296 ops/s → 200 k/core bar: MET
+  ⇒ engine cost ≈ 0.091 µs/op (single thread, 16-core host)
+
+── session_create [write] (I/O-bound: oversubscribed write ladder + coalescing analysis) ──
+Device fsync rate F = 521.5 fsyncs/s  |  W = 1.000 WAL syncs/op (at T=1)  |  T×F/W ceiling formula
+
+threads | agg ops/s | fsyncs/write | batch | T×F/W ceiling | coalescing eff | p99 µs
+--------+-----------+--------------+-------+---------------+----------------+-------
+      1 |       482 |        1.000 |  1.00 |           522 |          92.5%  |  3864.3
+      4 |       974 |        0.500 |  2.00 |          2086 |          46.7%  |  6149.5
+     16 |      3966 |        0.129 |  7.73 |          8345 |          47.5%  |  5642.6
+     64 |     15157 |        0.032 | 30.80 |         33379 |          45.4%  |  6303.6
+    128 |     29794 |        0.015 | 64.72 |         66758 |          44.6%  |  6177.8
+    256 |     42456 |        0.010 | 100.70 |        133516 |          31.8%  | 13063.7
+
+  scaling exponent = +0.861 (R² = 0.990) → CONTENDS (serialized/shared bottleneck)
+  T=1:   482 ops/s, p99 = 3.9 ms, fsyncs/write = 1.000, ceiling = 522, efficiency = 92.5%
+  T=256: 42456 ops/s agg, p99 = 13.1 ms, fsyncs/write = 0.010, ceiling = 133516, efficiency = 31.8%
+
+  ── T4 (50,000 ops/s) feasibility at this device ──
+  Formula: T_needed = ⌈50000 × W / F⌉ = ⌈50000 × 1.000 / 521.5⌉ = 96 writers
+  Perfect coalescing at T=256 yields a ceiling of 133516 ops/s ≥ 50,000 → T4 is theoretically reachable at this device if the engine fully coalesces.
+  Measured 42456 ops/s at T=256 (31.8% of ceiling) — T4 target NOT yet met; gap = 7544 ops/s attributable to incomplete coalescing.
+
+  group-commit target: fsyncs/write << 1.0 at concurrency ≥ 16 → MET
+
+═══ Summary ═══
+
+op [state]              | 1T/core ops/s | top-T agg ops/s | scaling | eff | 200k/core | verdict
+------------------------+---------------+-----------------+---------+-----+-----------+--------
+validate_token [hot]    |        656470 |         8782516 |  +0.940 | 0.84 |       MET | SCALES (near-linear)
+validate_token [miss]   |         20390 |          117732 |  +0.638 | 0.36 |      MISS | CONTENDS (serialized/shared bottleneck)
+session_lookup [hot]    |      12260410 |        71556026 |  +0.661 | 0.36 |       MET | CONTENDS (serialized/shared bottleneck)
+session_lookup [miss]   |       1677902 |         6551369 |  +0.494 | 0.24 |       MET | CONTENDS (serialized/shared bottleneck)
+user_lookup [hot]       |       3680089 |        19372527 |  +0.607 | 0.33 |       MET | CONTENDS (serialized/shared bottleneck)
+user_lookup [miss]      |       2661452 |         7262801 |  +0.355 | 0.17 |       MET | CONTENDS (serialized/shared bottleneck)
+permission_check [hot]  |      11011296 |        72966738 |  +0.698 | 0.41 |       MET | PARTIAL (some contention)
+session_create [write]  |           482 |           42456 |  +0.861 | 0.34 |       n/a | CONTENDS (serialized/shared bottleneck) (T=256, coalesce_eff=31.8%)
+
+Read ops: CPU-bound, measured on 16-core core-count ladder [1, 2, 4, 8, 16].
+Write op: I/O-bound (WAL fsync), measured on write ladder [1, 4, 16, 64, 128, 256].
+Engine-cost floor only. The HTTP/axum/tokio delta on top is NOT-MEASURABLE in this
+environment (HEA-1871 C3 / HEA-1876 C8: the generator, not the server, is the ceiling).
+Reads are lock-free hot-path (epoch-reclaimed, ArcSwap caches) and are expected to scale;
+session_create is WAL-fsync + group-commit (fsyncs/write drops with concurrency).
+Device F = 521.5 fsyncs/s; W = 1.000 WAL syncs/op; T4 ceiling at T=256: 133516 ops/s.
+===JSON===
+{"child_issue":"HEA-1949","parent_issue":"HEA-1875","host_logical_cores":16,"measure_secs":2,"users":1000,"warm_sessions":2048,"miss_sessions":512,"vision_ops_per_core":200000,"read_threads":[1, 2, 4, 8, 16],"write_threads":[1, 4, 16, 64, 128, 256],"device_fsyncs_s":521.55,"device_fsync_samples":200,"http_split":"NOT-MEASURABLE (HEA-1871/HEA-1876)","operations":[{"op":"validate_token","state":"hot","scaling_exponent":0.9404,"scaling_r2":0.9909,"efficiency_1_to_top":0.8361,"meets_200k_single_core":true,"points":[{"threads":1,"ops":1312960,"elapsed_s":2.0000,"agg_ops_s":656470.1,"per_core_ops_s":656470.1},{"threads":2,"ops":2994560,"elapsed_s":2.0001,"agg_ops_s":1497237.9,"per_core_ops_s":748618.9},{"threads":4,"ops":5497792,"elapsed_s":2.0001,"agg_ops_s":2748773.4,"per_core_ops_s":687193.3},{"threads":8,"ops":11335488,"elapsed_s":2.0001,"agg_ops_s":5667339.0,"per_core_ops_s":708417.4},{"threads":16,"ops":17566592,"elapsed_s":2.0002,"agg_ops_s":8782516.4,"per_core_ops_s":548907.3}]},{"op":"validate_token","state":"miss","scaling_exponent":0.6376,"scaling_r2":0.9504,"efficiency_1_to_top":0.3609,"meets_200k_single_core":false,"points":[{"threads":1,"ops":40832,"elapsed_s":2.0026,"agg_ops_s":20389.8,"per_core_ops_s":20389.8},{"threads":2,"ops":77696,"elapsed_s":2.0027,"agg_ops_s":38795.1,"per_core_ops_s":19397.5},{"threads":4,"ops":141376,"elapsed_s":2.0019,"agg_ops_s":70622.1,"per_core_ops_s":17655.5},{"threads":8,"ops":193536,"elapsed_s":2.0032,"agg_ops_s":96612.8,"per_core_ops_s":12076.6},{"threads":16,"ops":236544,"elapsed_s":2.0092,"agg_ops_s":117731.6,"per_core_ops_s":7358.2}]},{"op":"session_lookup","state":"hot","scaling_exponent":0.6609,"scaling_r2":0.9761,"efficiency_1_to_top":0.3648,"meets_200k_single_core":true,"points":[{"threads":1,"ops":24520832,"elapsed_s":2.0000,"agg_ops_s":12260410.4,"per_core_ops_s":12260410.4},{"threads":2,"ops":42616640,"elapsed_s":2.0000,"agg_ops_s":21308276.6,"per_core_ops_s":10654138.3},{"threads":4,"ops":67532864,"elapsed_s":2.0000,"agg_ops_s":33766325.1,"per_core_ops_s":8441581.3},{"threads":8,"ops":122111040,"elapsed_s":2.0000,"agg_ops_s":61055257.5,"per_core_ops_s":7631907.2},{"threads":16,"ops":143404416,"elapsed_s":2.0041,"agg_ops_s":71556026.5,"per_core_ops_s":4472251.7}]},{"op":"session_lookup","state":"miss","scaling_exponent":0.4944,"scaling_r2":0.9762,"efficiency_1_to_top":0.2440,"meets_200k_single_core":true,"points":[{"threads":1,"ops":3355840,"elapsed_s":2.0000,"agg_ops_s":1677902.0,"per_core_ops_s":1677902.0},{"threads":2,"ops":5502848,"elapsed_s":2.0000,"agg_ops_s":2751381.3,"per_core_ops_s":1375690.7},{"threads":4,"ops":7489152,"elapsed_s":2.0000,"agg_ops_s":3744494.9,"per_core_ops_s":936123.7},{"threads":8,"ops":11113984,"elapsed_s":2.0001,"agg_ops_s":5556790.9,"per_core_ops_s":694598.9},{"threads":16,"ops":13104256,"elapsed_s":2.0002,"agg_ops_s":6551369.2,"per_core_ops_s":409460.6}]},{"op":"user_lookup","state":"hot","scaling_exponent":0.6067,"scaling_r2":0.9605,"efficiency_1_to_top":0.3290,"meets_200k_single_core":true,"points":[{"threads":1,"ops":7360192,"elapsed_s":2.0000,"agg_ops_s":3680088.7,"per_core_ops_s":3680088.7},{"threads":2,"ops":13649344,"elapsed_s":2.0000,"agg_ops_s":6824618.6,"per_core_ops_s":3412309.3},{"threads":4,"ops":22111680,"elapsed_s":2.0000,"agg_ops_s":11055766.0,"per_core_ops_s":2763941.5},{"threads":8,"ops":33028608,"elapsed_s":2.0000,"agg_ops_s":16514125.4,"per_core_ops_s":2064265.7},{"threads":16,"ops":38765248,"elapsed_s":2.0010,"agg_ops_s":19372526.5,"per_core_ops_s":1210782.9}]},{"op":"user_lookup","state":"miss","scaling_exponent":0.3546,"scaling_r2":0.9913,"efficiency_1_to_top":0.1706,"meets_200k_single_core":true,"points":[{"threads":1,"ops":5322944,"elapsed_s":2.0000,"agg_ops_s":2661452.4,"per_core_ops_s":2661452.4},{"threads":2,"ops":7421696,"elapsed_s":2.0000,"agg_ops_s":3710803.4,"per_core_ops_s":1855401.7},{"threads":4,"ops":8701568,"elapsed_s":2.0000,"agg_ops_s":4350694.9,"per_core_ops_s":1087673.7},{"threads":8,"ops":11644480,"elapsed_s":2.0001,"agg_ops_s":5822013.1,"per_core_ops_s":727751.6},{"threads":16,"ops":14527104,"elapsed_s":2.0002,"agg_ops_s":7262800.8,"per_core_ops_s":453925.1}]},{"op":"permission_check","state":"hot","scaling_exponent":0.6978,"scaling_r2":0.9558,"efficiency_1_to_top":0.4142,"meets_200k_single_core":true,"points":[{"threads":1,"ops":22022592,"elapsed_s":2.0000,"agg_ops_s":11011295.6,"per_core_ops_s":11011295.6},{"threads":2,"ops":43109440,"elapsed_s":2.0000,"agg_ops_s":21554660.1,"per_core_ops_s":10777330.0},{"threads":4,"ops":80319168,"elapsed_s":2.0000,"agg_ops_s":40159442.1,"per_core_ops_s":10039860.5},{"threads":8,"ops":123724352,"elapsed_s":2.0000,"agg_ops_s":61861894.7,"per_core_ops_s":7732736.8},{"threads":16,"ops":145971520,"elapsed_s":2.0005,"agg_ops_s":72966738.3,"per_core_ops_s":4560421.1}]},{"op":"session_create","state":"write","scaling_exponent":0.8608,"scaling_r2":0.9903,"efficiency_1_to_top":0.3439,"meets_200k_single_core":false,"device_fsyncs_s":521.55,"w_per_op":1.000000,"t4_target_ops_s":50000,"t4_required_concurrency":95.9,"t4_ceiling_met_at_top":true,"t4_measured_met":false,"points":[{"threads":1,"ops":965,"elapsed_s":2.0010,"agg_ops_s":482.3,"per_core_ops_s":482.3,"fsyncs_per_write":1.000000,"p99_us":3864.29,"ceiling_ops_s":521.5,"coalescing_efficiency":0.924671,"coalescing_batch":1.0000},{"threads":4,"ops":1952,"elapsed_s":2.0036,"agg_ops_s":974.3,"per_core_ops_s":243.6,"fsyncs_per_write":0.500000,"p99_us":6149.49,"ceiling_ops_s":2086.2,"coalescing_efficiency":0.467001,"coalescing_batch":2.0000},{"threads":16,"ops":7947,"elapsed_s":2.0040,"agg_ops_s":3965.7,"per_core_ops_s":247.9,"fsyncs_per_write":0.129357,"p99_us":5642.59,"ceiling_ops_s":8344.7,"coalescing_efficiency":0.475228,"coalescing_batch":7.7305},{"threads":64,"ops":30371,"elapsed_s":2.0037,"agg_ops_s":15157.4,"per_core_ops_s":236.8,"fsyncs_per_write":0.032465,"p99_us":6303.63,"ceiling_ops_s":33378.9,"coalescing_efficiency":0.454101,"coalescing_batch":30.8022},{"threads":128,"ops":59732,"elapsed_s":2.0048,"agg_ops_s":29794.0,"per_core_ops_s":232.8,"fsyncs_per_write":0.015452,"p99_us":6177.81,"ceiling_ops_s":66757.9,"coalescing_efficiency":0.446299,"coalescing_batch":64.7151},{"threads":256,"ops":85901,"elapsed_s":2.0233,"agg_ops_s":42456.1,"per_core_ops_s":165.8,"fsyncs_per_write":0.009930,"p99_us":13063.71,"ceiling_ops_s":133515.7,"coalescing_efficiency":0.317986,"coalescing_batch":100.7046}]}]}

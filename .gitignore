@@ -63,7 +63,13 @@ tests/ui/node_modules/
 
 # Load-test harness reports + seed handles (HEA-1789). The seed handle holds
 # LIVE bearer tokens — it must never be committed.
-loadtest/reports/
+# Use /* (not /) so the published/ exception below can take effect — git cannot
+# un-ignore a file inside a directory-level ignore pattern (HEA-1880).
+loadtest/reports/*
+# Exception: committed subset backing cited figures in the performance report.
+# Seed handles, raw HTML, and log files are still ignored; only report JSONs
+# and the README in published/ are tracked.
+!loadtest/reports/published
 loadtest/target/
 
 *.tsbuildinfo

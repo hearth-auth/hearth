@@ -18,6 +18,13 @@ pub enum AuditError {
         /// Description of the serialization failure.
         reason: String,
     },
+    /// The audit engine does not support the merged-append path.
+    ///
+    /// Callers of [`crate::audit::AuditEngine::with_pending_append`] that
+    /// receive this error must fall back to two separate writes: their own
+    /// storage write followed by a call to
+    /// [`crate::audit::AuditEngine::append`].
+    MergedAppendNotSupported,
 }
 
 impl fmt::Display for AuditError {
@@ -28,6 +35,9 @@ impl fmt::Display for AuditError {
             }
             Self::Storage(err) => write!(f, "storage error: {err}"),
             Self::Serialization { reason } => write!(f, "serialization error: {reason}"),
+            Self::MergedAppendNotSupported => {
+                write!(f, "merged append not supported by this audit engine")
+            }
         }
     }
 }
@@ -36,7 +46,9 @@ impl std::error::Error for AuditError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Storage(err) => Some(&**err),
-            Self::IntegrityViolation { .. } | Self::Serialization { .. } => None,
+            Self::IntegrityViolation { .. }
+            | Self::Serialization { .. }
+            | Self::MergedAppendNotSupported => None,
         }
     }
 }
@@ -107,5 +119,6 @@ mod tests {
         })
         .source()
         .is_none());
+        assert!(AuditError::MergedAppendNotSupported.source().is_none());
     }
 }

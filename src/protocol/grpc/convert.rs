@@ -291,7 +291,9 @@ pub fn audit_error_to_status(err: AuditError) -> Status {
         AuditError::IntegrityViolation { .. } => {
             Status::new(Code::DataLoss, "audit chain integrity violation")
         }
-        AuditError::Storage(_) | AuditError::Serialization { .. } => {
+        AuditError::Storage(_)
+        | AuditError::Serialization { .. }
+        | AuditError::MergedAppendNotSupported => {
             let error_id = uuid::Uuid::new_v4();
             tracing::error!(error = %err, %error_id, "internal audit gRPC error");
             Status::new(Code::Internal, format!("internal error [{error_id}]"))

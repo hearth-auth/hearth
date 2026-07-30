@@ -3,18 +3,31 @@
 //! Audit events are stored with time-ordered keys for efficient range scans.
 //! All keys are realm-scoped via the `StorageEngine`'s `RealmId` requirement.
 //!
-//! Indexes maintained:
+//! ## Key format (HEA-1899 — compact binary encoding)
 //!
-//! - **Event primary**: `audit:evt:{timestamp_19d}:{seq_20d}:{uuid}` → JSON-serialized `AuditEvent`
-//! - **Actor index**: `audit:actor:{actor}:{timestamp_19d}:{uuid}` → event primary key
-//! - **Action index**: `audit:action:{action}:{timestamp_19d}:{uuid}` → event primary key
+//! | Index | Format | Size |
+//! |-------|--------|------|
+//! | Event primary | `audit:evt:{ts_8be}{seq_8be}{uuid_16raw}` | 42 bytes |
+//! | Actor index | `audit:actor:{actor}:{ts_8be}{uuid_16raw}` | 37 + len(actor) bytes |
+//! | Action index | `audit:action:{action}:{ts_8be}{uuid_16raw}` | 38 + len(action) bytes |
 //!
-//! Timestamps are zero-padded to 19 digits for correct lexicographic ordering.
-//! The primary key additionally embeds a per-realm monotonic sequence number
-//! (zero-padded to 20 digits) between the timestamp and the UUID. This makes
-//! the storage scan order deterministic and identical to append order even for
-//! events that share the same microsecond timestamp, so the hash chain verifies
-//! in exactly the order it was written (HEA-1756 U1).
+//! Timestamps and sequence numbers are 8-byte big-endian `u64` values. Big-endian
+//! integers compare lexicographically in the same order as numerically, so the
+//! existing range-scan semantics are preserved without any padding or separators.
+//! UUIDs are stored as 16 raw bytes (not the 36-character hyphenated string).
+//!
+//! The primary key embeds a per-realm monotonic sequence number between the timestamp
+//! and the UUID so that same-microsecond events sort in append order — `verify_integrity`
+//! walks the chain in exactly the order it was written (HEA-1756 U1).
+//!
+//! ## Scan-bound semantics
+//!
+//! `event_scan_start(ts)` / `event_scan_end(ts)` both return the 18-byte prefix
+//! `audit:evt:{ts_8be}`. An actual event key at that timestamp is 42 bytes; because
+//! any 42-byte key whose first 18 bytes equal the prefix sorts *after* the 18-byte
+//! value in lexicographic comparison, the prefix acts as a correct exclusive upper
+//! bound for events strictly before `ts` and a correct inclusive lower bound for
+//! events at-or-after `ts`.
 
 use crate::core::{AuditEventId, Timestamp};
 
@@ -44,40 +57,37 @@ const AUDIT_HMAC_KEY: &str = "audit:hmac:key";
 /// tail truncation and survive retention pruning (HEA-1756 U2/U3).
 const AUDIT_CHAIN_HEAD_KEY: &str = "audit:chain:head";
 
-/// Formats a timestamp as a 19-digit zero-padded string.
+/// Encodes a timestamp as 8 big-endian bytes.
 ///
-/// This ensures lexicographic ordering matches chronological ordering
-/// for all positive timestamp values.
-fn pad_timestamp(ts: Timestamp) -> String {
-    format!("{:019}", ts.as_micros())
+/// Real timestamps are microseconds since the Unix epoch (always non-negative),
+/// so casting `i64` to `u64` preserves chronological ordering in byte comparison.
+fn timestamp_bytes(ts: Timestamp) -> [u8; 8] {
+    #[allow(clippy::cast_sign_loss)]
+    (ts.as_micros() as u64).to_be_bytes()
 }
 
-/// Formats a per-realm sequence number as a 20-digit zero-padded string.
-///
-/// 20 digits accommodate the full `u64` range so that lexicographic ordering
-/// of the encoded sequence always matches numeric ordering.
-fn pad_seq(seq: u64) -> String {
-    format!("{seq:020}")
+/// Encodes a sequence number as 8 big-endian bytes.
+fn seq_bytes(seq: u64) -> [u8; 8] {
+    seq.to_be_bytes()
 }
 
 /// Encodes the primary key for an audit event.
 ///
-/// Format: `audit:evt:{timestamp_19d}:{seq_20d}:{uuid}`
+/// Format: `audit:evt:{ts_8be}{seq_8be}{uuid_16raw}` (42 bytes total)
 ///
-/// The monotonic `seq` guarantees that same-microsecond events sort in append
-/// order, so `verify_integrity` walks the chain in the exact order it was
-/// written (HEA-1756 U1).
+/// The monotonic `seq` guarantees same-microsecond events sort in append order,
+/// so `verify_integrity` walks the chain in exactly the order it was written
+/// (HEA-1756 U1).
 pub(crate) fn encode_event_key(timestamp: Timestamp, seq: u64, event_id: &AuditEventId) -> Vec<u8> {
-    format!(
-        "{EVENT_PREFIX}{}:{}:{}",
-        pad_timestamp(timestamp),
-        pad_seq(seq),
-        event_id.as_uuid()
-    )
-    .into_bytes()
+    let mut key = Vec::with_capacity(42);
+    key.extend_from_slice(EVENT_PREFIX.as_bytes());
+    key.extend_from_slice(&timestamp_bytes(timestamp));
+    key.extend_from_slice(&seq_bytes(seq));
+    key.extend_from_slice(event_id.as_uuid().as_bytes());
+    key
 }
 
-/// Returns the scan prefix for all audit events (used with time-range filtering).
+/// Returns the scan prefix for all audit events.
 ///
 /// Format: `audit:evt:`
 pub(crate) fn event_scan_prefix() -> Vec<u8> {
@@ -86,32 +96,39 @@ pub(crate) fn event_scan_prefix() -> Vec<u8> {
 
 /// Returns the scan start key for events at or after a given timestamp.
 ///
-/// Format: `audit:evt:{timestamp_19d}`
+/// Format: `audit:evt:{ts_8be}` (18 bytes)
 pub(crate) fn event_scan_start(timestamp: Timestamp) -> Vec<u8> {
-    format!("{EVENT_PREFIX}{}", pad_timestamp(timestamp)).into_bytes()
+    let mut key = Vec::with_capacity(18);
+    key.extend_from_slice(EVENT_PREFIX.as_bytes());
+    key.extend_from_slice(&timestamp_bytes(timestamp));
+    key
 }
 
-/// Returns the scan end key for events before a given timestamp (exclusive).
+/// Returns the scan end key for events strictly before a given timestamp (exclusive).
 ///
-/// Format: `audit:evt:{timestamp_19d}`
+/// Format: `audit:evt:{ts_8be}` (18 bytes) — identical to `event_scan_start`.
+///
+/// The 18-byte prefix is an exclusive upper bound for events before `ts` because any
+/// actual event key at `ts` is 42 bytes long and sorts *after* the 18-byte prefix in
+/// lexicographic byte comparison.
 pub(crate) fn event_scan_end(timestamp: Timestamp) -> Vec<u8> {
-    format!("{EVENT_PREFIX}{}", pad_timestamp(timestamp)).into_bytes()
+    event_scan_start(timestamp)
 }
 
 /// Encodes the actor index key for an audit event.
 ///
-/// Format: `audit:actor:{actor}:{timestamp_19d}:{uuid}`
+/// Format: `audit:actor:{actor}:{ts_8be}{uuid_16raw}`
 pub(crate) fn encode_actor_index(
     actor: &str,
     timestamp: Timestamp,
     event_id: &AuditEventId,
 ) -> Vec<u8> {
-    format!(
-        "{ACTOR_PREFIX}{actor}:{}:{}",
-        pad_timestamp(timestamp),
-        event_id.as_uuid()
-    )
-    .into_bytes()
+    let prefix = actor_scan_prefix(actor);
+    let mut key = Vec::with_capacity(prefix.len() + 8 + 16);
+    key.extend_from_slice(&prefix);
+    key.extend_from_slice(&timestamp_bytes(timestamp));
+    key.extend_from_slice(event_id.as_uuid().as_bytes());
+    key
 }
 
 /// Returns the scan prefix for all events by a given actor.
@@ -123,18 +140,18 @@ pub(crate) fn actor_scan_prefix(actor: &str) -> Vec<u8> {
 
 /// Encodes the action index key for an audit event.
 ///
-/// Format: `audit:action:{action}:{timestamp_19d}:{uuid}`
+/// Format: `audit:action:{action}:{ts_8be}{uuid_16raw}`
 pub(crate) fn encode_action_index(
     action: &str,
     timestamp: Timestamp,
     event_id: &AuditEventId,
 ) -> Vec<u8> {
-    format!(
-        "{ACTION_PREFIX}{action}:{}:{}",
-        pad_timestamp(timestamp),
-        event_id.as_uuid()
-    )
-    .into_bytes()
+    let prefix = action_scan_prefix(action);
+    let mut key = Vec::with_capacity(prefix.len() + 8 + 16);
+    key.extend_from_slice(&prefix);
+    key.extend_from_slice(&timestamp_bytes(timestamp));
+    key.extend_from_slice(event_id.as_uuid().as_bytes());
+    key
 }
 
 /// Returns the scan prefix for all events of a given action type.
@@ -175,30 +192,45 @@ mod tests {
     use super::*;
     use crate::core::AuditEventId;
 
+    // --- HEA-1899: compact binary key format ---
+
     #[test]
-    fn pad_timestamp_19_digits() {
-        let ts = Timestamp::from_micros(1_700_000_000_000_000);
-        let padded = pad_timestamp(ts);
-        assert_eq!(padded.len(), 19);
-        assert_eq!(padded, "0001700000000000000");
+    fn timestamp_bytes_order_preserving() {
+        let earlier = timestamp_bytes(Timestamp::from_micros(100));
+        let later = timestamp_bytes(Timestamp::from_micros(200));
+        assert!(
+            earlier < later,
+            "earlier timestamp must sort first as BE bytes"
+        );
     }
 
     #[test]
-    fn pad_timestamp_small_value() {
-        let ts = Timestamp::from_micros(42);
-        let padded = pad_timestamp(ts);
-        assert_eq!(padded.len(), 19);
-        assert_eq!(padded, "0000000000000000042");
+    fn seq_bytes_order_preserving() {
+        assert!(seq_bytes(0) < seq_bytes(1));
+        assert!(seq_bytes(1) < seq_bytes(u64::MAX));
     }
 
     #[test]
-    fn encode_event_key_format() {
+    fn encode_event_key_binary_layout() {
+        // Primary key: 10-byte prefix + 8-byte ts + 8-byte seq + 16-byte UUID = 42 bytes
         let ts = Timestamp::from_micros(1_700_000_000_000_000);
         let id = AuditEventId::generate();
         let key = encode_event_key(ts, 7, &id);
-        let key_str = std::str::from_utf8(&key).expect("utf8");
-        assert!(key_str.starts_with("audit:evt:0001700000000000000:00000000000000000007:"));
-        assert!(key_str.contains(&id.as_uuid().to_string()));
+
+        assert_eq!(key.len(), 42, "primary key must be exactly 42 bytes");
+        assert_eq!(&key[..10], b"audit:evt:", "ASCII prefix must be intact");
+
+        let expected_ts: [u8; 8] = (1_700_000_000_000_000u64).to_be_bytes();
+        assert_eq!(&key[10..18], expected_ts, "timestamp must be 8-byte BE u64");
+
+        let expected_seq: [u8; 8] = 7u64.to_be_bytes();
+        assert_eq!(&key[18..26], expected_seq, "sequence must be 8-byte BE u64");
+
+        assert_eq!(
+            &key[26..42],
+            id.as_uuid().as_bytes().as_slice(),
+            "UUID must be 16 raw bytes"
+        );
     }
 
     #[test]
@@ -226,10 +258,9 @@ mod tests {
     }
 
     #[test]
-    fn event_scan_prefix_format() {
+    fn event_scan_prefix_is_ascii() {
         let prefix = event_scan_prefix();
-        let prefix_str = std::str::from_utf8(&prefix).expect("utf8");
-        assert_eq!(prefix_str, "audit:evt:");
+        assert_eq!(prefix, b"audit:evt:");
     }
 
     #[test]
@@ -243,8 +274,13 @@ mod tests {
 
     #[test]
     fn event_key_within_time_range_bounds() {
-        // A key at exactly `ts` must fall within [event_scan_start(ts),
-        // event_scan_end(ts+1)) so seq-suffixed keys still satisfy range scans.
+        // A key at exactly `ts` with the maximum seq must still fall within
+        // [event_scan_start(ts), event_scan_end(ts+1)).
+        //
+        // With 8-byte BE encoding, event_scan_start(ts) is an 18-byte prefix.
+        // An event key is 42 bytes; because the first 18 bytes equal the prefix
+        // and the key is longer, the key sorts *after* the 18-byte bound in
+        // lexicographic comparison — i.e. key >= start.
         let ts = Timestamp::from_micros(1000);
         let id = AuditEventId::generate();
         let key = encode_event_key(ts, u64::MAX, &id);
@@ -255,12 +291,45 @@ mod tests {
     }
 
     #[test]
-    fn encode_actor_index_format() {
+    fn event_scan_end_excludes_events_at_bound() {
+        // event_scan_end(ts) must be strictly less than any actual event at ts.
+        let ts = Timestamp::from_micros(5000);
+        let id = AuditEventId::generate();
+        let event_key = encode_event_key(ts, 0, &id);
+        let bound = event_scan_end(ts);
+        assert!(
+            event_key > bound,
+            "event at ts must sort AFTER event_scan_end(ts) so it is excluded from [start, end)"
+        );
+    }
+
+    #[test]
+    fn encode_actor_index_binary_layout() {
+        // Actor key: actor_scan_prefix + 8-byte ts + 16-byte UUID
         let ts = Timestamp::from_micros(1000);
         let id = AuditEventId::generate();
-        let key = encode_actor_index("user_123", ts, &id);
-        let key_str = std::str::from_utf8(&key).expect("utf8");
-        assert!(key_str.starts_with("audit:actor:user_123:"));
+        let actor = "user_123";
+        let key = encode_actor_index(actor, ts, &id);
+        let prefix = actor_scan_prefix(actor);
+
+        assert!(
+            key.starts_with(&prefix),
+            "actor key must start with actor prefix"
+        );
+
+        let ts_offset = prefix.len();
+        let expected_ts: [u8; 8] = (1000u64).to_be_bytes();
+        assert_eq!(
+            &key[ts_offset..ts_offset + 8],
+            expected_ts,
+            "8-byte BE timestamp after prefix"
+        );
+        assert_eq!(
+            &key[ts_offset + 8..],
+            id.as_uuid().as_bytes().as_slice(),
+            "16-byte raw UUID at end"
+        );
+        assert_eq!(key.len(), prefix.len() + 8 + 16);
     }
 
     #[test]
@@ -273,12 +342,26 @@ mod tests {
     }
 
     #[test]
-    fn encode_action_index_format() {
+    fn encode_action_index_starts_with_action_prefix() {
         let ts = Timestamp::from_micros(1000);
         let id = AuditEventId::generate();
         let key = encode_action_index("user_created", ts, &id);
-        let key_str = std::str::from_utf8(&key).expect("utf8");
-        assert!(key_str.starts_with("audit:action:user_created:"));
+        let prefix = action_scan_prefix("user_created");
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn action_index_binary_layout() {
+        let ts = Timestamp::from_micros(2000);
+        let id = AuditEventId::generate();
+        let action = "session_created";
+        let key = encode_action_index(action, ts, &id);
+        let prefix = action_scan_prefix(action);
+        assert_eq!(key.len(), prefix.len() + 8 + 16);
+
+        let expected_ts: [u8; 8] = (2000u64).to_be_bytes();
+        assert_eq!(&key[prefix.len()..prefix.len() + 8], expected_ts);
+        assert_eq!(&key[prefix.len() + 8..], id.as_uuid().as_bytes().as_slice());
     }
 
     #[test]
@@ -293,5 +376,15 @@ mod tests {
         let p1 = actor_scan_prefix("alice");
         let p2 = actor_scan_prefix("bob");
         assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn actor_keys_sort_chronologically_within_actor() {
+        let actor = "alice";
+        let id1 = AuditEventId::generate();
+        let id2 = AuditEventId::generate();
+        let k1 = encode_actor_index(actor, Timestamp::from_micros(100), &id1);
+        let k2 = encode_actor_index(actor, Timestamp::from_micros(200), &id2);
+        assert!(k1 < k2, "actor index entries must sort chronologically");
     }
 }

@@ -86,6 +86,57 @@ const BODY_LIMIT_SMALL: usize = 64 * 1024;
 /// Maximum body size (4 GiB) for the `POST /admin/backup/restore` endpoint.
 pub const BACKUP_RESTORE_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 
+// ── KDF admission gate (HEA-1887 / R1, extended by HEA-1891) ──────────────────
+
+/// Runs a blocking Argon2id-bearing REST closure under the shared process-global
+/// KDF admission gate, mapping shed to a `503` JSON response.
+///
+/// Every REST handler whose engine call performs an Argon2id hash or verify
+/// (`create_user`, `import_user`, …) MUST route through this helper so it shares
+/// the *one* permit pool with the UI login/register/reset/change-password paths.
+/// That shared bound is what makes the `permits × ~19 MiB` peak-memory guarantee
+/// hold across **all** Argon2 callers rather than per-callsite (HEA-1889 F3).
+///
+/// The permit is acquired *before* `spawn_blocking`, so a waiting request holds
+/// neither a blocking-pool thread nor a 19 MiB allocation. A `Join` failure
+/// (panic/cancel) is surfaced to the caller as [`IdentityError::Storage`] via
+/// `on_join`, matching the previous ad-hoc `spawn_blocking(...).unwrap_or_else`.
+pub(crate) async fn run_kdf_gated_rest<F, T>(
+    f: F,
+    on_join: impl FnOnce(crate::identity::KdfGateError) -> T,
+) -> Result<T, Response>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match crate::identity::gate().run(f).await {
+        Ok(v) => Ok(v),
+        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+            Err(kdf_shed_json_response(retry_after))
+        }
+        Err(e @ crate::identity::KdfGateError::Join(_)) => Ok(on_join(e)),
+    }
+}
+
+/// Builds the `503 Service Unavailable` JSON shed response for an overloaded
+/// KDF gate, carrying a `Retry-After` header (seconds, floored to 1).
+pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({
+            "error": "kdf_overloaded",
+            "error_description": "Server is busy hashing credentials. Please retry shortly.",
+        })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(secs),
+    );
+    resp
+}
+
 // ── Observability middleware ──────────────────────────────────────────────────
 
 /// Tower middleware that records HTTP request latency into the Prometheus
@@ -314,10 +365,16 @@ pub fn router(state: Arc<AppState>) -> Router {
     // Registered only in dev mode so the route is absent from the table in
     // production, preventing fingerprinting via port scanners (HEA-1138).
     if state.dev_mode {
-        base = base.route(
-            "/admin/bootstrap",
-            axum::routing::post(admin::admin_bootstrap),
-        );
+        base = base
+            .route(
+                "/admin/bootstrap",
+                axum::routing::post(admin::admin_bootstrap),
+            )
+            .route("/dev/probe-user", axum::routing::get(admin::dev_probe_user))
+            .route(
+                "/dev/seed-session",
+                axum::routing::post(admin::dev_seed_session),
+            );
     }
 
     base.route_layer(axum::middleware::from_fn(track_metrics))
