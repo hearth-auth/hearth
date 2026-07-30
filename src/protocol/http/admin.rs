@@ -2588,7 +2588,10 @@ pub(super) async fn dev_seed_token(
         Ok(s) => s,
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
-    match state.identity.issue_tokens(&realm_id, &user_id, session.id()) {
+    match state
+        .identity
+        .issue_tokens(&realm_id, &user_id, session.id())
+    {
         Ok(tokens) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"access_token": tokens.access_token()})),
