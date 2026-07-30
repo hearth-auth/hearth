@@ -171,8 +171,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the originating form, which re-issues a fresh token. Status codes (422 login, 422 MFA
   challenge, 400 register), the `dev_mode` bypass, and the fail-closed check from
   HEA-1367 are unchanged — this is a copy and affordance fix only. (HEA-1913)
+- **CSRF 422 error pages now mint a fresh token and preserve email + return_to (HEA-1983)** —
+  when a pre-authentication form (login, register, reset-password) is submitted with a
+  stale or missing CSRF token, the server now re-renders the form with a freshly-minted
+  CSRF token, the previously-submitted email pre-filled, and the `return_to` redirect
+  parameter preserved. Previously the 422 response contained a stale token, so the user's
+  next submission also failed. (HEA-1983)
+- **KDF admission gate now applies to register and password-reset flows (HEA-1981)** —
+  `POST /ui/{realm}/register` and `POST /ui/{realm}/reset-password` previously bypassed
+  the Argon2id KDF admission semaphore, so they could drive the KDF queue above the
+  configured shed threshold even when login was already being shed. Both browser-plane
+  paths now run through the KDF gate and return a themed 503 page when the pool is
+  saturated, matching the behaviour of the login and admin-login forms. (HEA-1981)
 
 ### Security
+- **`--dev` mode now refuses to start if any bind address is non-loopback (HEA-1980)** —
+  previously `hearth serve --dev --bind 0.0.0.0` started successfully and exposed
+  unauthenticated endpoints (`POST /dev/seed-session`, `POST /admin/bootstrap`) and
+  weakened Argon2id parameters on a routable interface. Config-file validation rejected a
+  non-loopback `server.bind_address`, but the CLI `--bind` override was applied *after*
+  that validation, and the no-config-file path (`Config::dev()`) skipped `validate()`
+  entirely — so both bypass paths were reachable. A new `dev_mode_bind_check` gate now
+  runs after all CLI overrides and the effective gRPC bind are resolved; it returns a hard
+  startup error when dev mode is active and any effective bind (HTTP or gRPC) is
+  non-loopback. (HEA-1980)
 - **Compaction no longer resurrects a deleted key when an input SST cannot be unlinked (HEA-1982)** —
   both the full-merge (`compact_ssts`) and partial/size-tiered (`compact_partial`) paths
   treated a `remove_file` failure on a merged-away input SST as warn-and-continue, then

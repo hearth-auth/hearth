@@ -677,6 +677,50 @@ fn loadtest_unthrottle_decision(
     }
 }
 
+/// Outcome of the dev-mode loopback startup gate (HEA-1980).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevBindCheck {
+    /// Not in dev mode — gate does not apply.
+    NotDev,
+    /// Dev mode, all effective binds are loopback — server may start.
+    Ok,
+    /// Dev mode, at least one bind is non-loopback — refuse to start.
+    RefusedNonLoopback,
+}
+
+/// Hard startup gate for `--dev` mode: refuses to start when any effective
+/// bind (HTTP or gRPC) is non-loopback (HEA-1980).
+///
+/// Unlike the config-file check in `validate.rs`, this runs **after** CLI
+/// `--bind`/`--port` overrides are applied, so `hearth serve --dev --bind
+/// 0.0.0.0` is caught here even when no config file is present
+/// (`Config::dev()` skips `validate()`).
+///
+/// Pure (no logging / I/O) so the gate is unit-testable; the caller emits the
+/// operator-facing error.
+fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> DevBindCheck {
+    if !dev {
+        return DevBindCheck::NotDev;
+    }
+    let is_loopback = |bind: &str| {
+        bind.eq_ignore_ascii_case("localhost")
+            || bind
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    };
+    let all_loopback = is_loopback(http_bind)
+        && match grpc_bind {
+            Some(g) => is_loopback(g),
+            None => true,
+        };
+    if all_loopback {
+        DevBindCheck::Ok
+    } else {
+        DevBindCheck::RefusedNonLoopback
+    }
+}
+
 /// Resolves the dev-mode on-disk data directory, if one is explicitly
 /// configured (HEA-1805).
 ///
@@ -2040,6 +2084,26 @@ async fn run_serve(
             .unwrap_or(config.server.bind_address.as_str())
             .trim()
     });
+    // Hard gate: dev mode must never expose on a non-loopback address (HEA-1980).
+    // The config-file validation in validate.rs catches a non-loopback
+    // bind_address when a config file is used, but (a) the CLI --bind override
+    // is applied after that validation, and (b) Config::dev() (the no-config-file
+    // path) skips validate() entirely — so both cases bypass the earlier check.
+    if let DevBindCheck::RefusedNonLoopback = dev_mode_bind_check(config.dev_mode, bind, grpc_bind)
+    {
+        error!(
+            bind_address = %bind,
+            grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
+            "dev mode refused: all effective binds must be loopback (HEA-1980). \
+             --dev enables unauthenticated endpoints (/dev/seed-session, /admin/bootstrap) \
+             and weakened Argon2 parameters — exposing them on a routable interface \
+             is a critical security risk. Use --bind 127.0.0.1 or --bind ::1."
+        );
+        return Err(
+            "dev mode: refusing to start with non-loopback bind address".into(),
+        );
+    }
+
     let load_test_unthrottled = match loadtest_unthrottle_decision(
         config.security.load_test_unthrottled.unwrap_or(false),
         config.dev_mode,
@@ -4542,6 +4606,86 @@ mod tests {
             "non-dev mode must not override smtp"
         );
         assert!(!warned);
+    }
+
+    // ── dev_mode_bind_check (HEA-1980 startup gate) ───────────────────────
+
+    #[test]
+    fn dev_bind_check_not_dev_always_ok() {
+        // Gate only applies in --dev mode; production mode always passes through.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "127.0.0.1"] {
+            assert_eq!(
+                dev_mode_bind_check(false, bind, None),
+                DevBindCheck::NotDev,
+                "non-dev mode must not be refused for bind {bind}"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_dev_loopback_http_no_grpc() {
+        // Dev + loopback HTTP, gRPC disabled → Ok.
+        for bind in ["127.0.0.1", "::1", "localhost", "LOCALHOST", "127.0.0.53"] {
+            assert_eq!(
+                dev_mode_bind_check(true, bind, None),
+                DevBindCheck::Ok,
+                "{bind} is loopback and must be allowed in dev mode"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_refused_non_loopback_http() {
+        // Dev + non-loopback HTTP bind → refused, even when gRPC is disabled.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
+            assert_eq!(
+                dev_mode_bind_check(true, bind, None),
+                DevBindCheck::RefusedNonLoopback,
+                "dev mode with http bind {bind} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_refused_non_loopback_grpc() {
+        // Dev + loopback HTTP but non-loopback gRPC → refused (both binds must be loopback).
+        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
+            assert_eq!(
+                dev_mode_bind_check(true, "127.0.0.1", Some(grpc)),
+                DevBindCheck::RefusedNonLoopback,
+                "dev mode with grpc bind {grpc} must be refused even when http is loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_bind_check_dev_both_binds_loopback() {
+        // Dev + loopback HTTP + loopback gRPC → Ok.
+        assert_eq!(
+            dev_mode_bind_check(true, "127.0.0.1", Some("::1")),
+            DevBindCheck::Ok
+        );
+        assert_eq!(
+            dev_mode_bind_check(true, "::1", Some("127.0.0.1")),
+            DevBindCheck::Ok
+        );
+    }
+
+    #[test]
+    fn dev_bind_check_refused_cli_override_non_loopback() {
+        // `hearth serve --dev --bind 0.0.0.0` — the CLI override path that
+        // config-file validation misses because it runs before the override is
+        // applied (HEA-1980).
+        assert_eq!(
+            dev_mode_bind_check(true, "0.0.0.0", None),
+            DevBindCheck::RefusedNonLoopback,
+            "--dev --bind 0.0.0.0 must be refused at startup"
+        );
+        assert_eq!(
+            dev_mode_bind_check(true, "::", None),
+            DevBindCheck::RefusedNonLoopback,
+            "--dev --bind :: must be refused at startup"
+        );
     }
 
     // ── HEA-SEC-10: setup token truncation ───────────────────────────────────
