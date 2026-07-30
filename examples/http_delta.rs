@@ -108,6 +108,9 @@ use hearth::protocol::web::{CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
+#[path = "support/hostenv.rs"]
+mod hostenv;
+
 /// Concurrency ladder. Both the engine phase and the HTTP phase are measured at
 /// every rung, so the ratio at each rung compares like with like.
 const LADDER: &[usize] = &[1, 8, 32];
@@ -146,32 +149,191 @@ const HOT_CAPACITY: usize = 40_000;
 /// Tokio worker threads for the axum server under test.
 const SERVER_WORKERS: usize = 8;
 
+/// Default number of independent samples of the full measurement.
+///
+/// HEA-1974 AC3: "a figure without a spread is not publishable — that is the
+/// lesson from L5's 236% spread." Three is the floor, not a target.
+const DEFAULT_SAMPLES: usize = 3;
+
+/// One complete pass over all three phases. Repeated `--samples` times so the
+/// artifact carries run-to-run spread rather than a single point.
+struct Sample {
+    null: Vec<Cell>,
+    engine: Vec<OpResult>,
+    http: Vec<OpResult>,
+}
+
+/// Parsed command line.
+struct Args {
+    samples: usize,
+    allow_contended: bool,
+    out: PathBuf,
+}
+
+impl Args {
+    fn parse() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut a = Self {
+            samples: DEFAULT_SAMPLES,
+            allow_contended: false,
+            out: PathBuf::from("docs/perf/artifacts/c11-http-delta-raw.json"),
+        };
+        let mut it = std::env::args().skip(1);
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "--samples" => {
+                    a.samples = it
+                        .next()
+                        .ok_or("--samples needs a value")?
+                        .parse::<usize>()?
+                        .max(1);
+                }
+                "--allow-contended-host" => a.allow_contended = true,
+                "--out" => a.out = PathBuf::from(it.next().ok_or("--out needs a value")?),
+                "--help" | "-h" => {
+                    println!(
+                        "usage: http_delta [--samples N] [--out PATH] [--allow-contended-host]\n\n\
+                         --samples N               independent passes (default {DEFAULT_SAMPLES}, minimum 1)\n\
+                         --out PATH                raw artifact destination\n\
+                         --allow-contended-host    run anyway on a host that fails the quiescence\n\
+                         \x20                         gate, stamping publishable:false in the artifact"
+                    );
+                    std::process::exit(0);
+                }
+                other => return Err(format!("unknown argument: {other}").into()),
+            }
+        }
+        Ok(a)
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("HEA-1957 · C11 — end-to-end HTTP delta\n");
+    let args = Args::parse()?;
+    println!(
+        "HEA-1974 · C11 — end-to-end HTTP delta ({} samples)\n",
+        args.samples
+    );
 
-    let fixture = Fixture::build()?;
+    // ── Quiescence preflight (HEA-1974 AC1) ──────────────────────────────────
+    // This runs *before* the fixture is built so a doomed run costs seconds, not
+    // the full Argon2id corpus seed.
+    let host = hostenv::HostProfile::capture();
+    let load_pre = hostenv::LoadSnapshot::capture();
+    println!("── preflight: host profile + quiescence gate ──\n");
+    println!(
+        "  cpu            {} ({} logical)",
+        host.cpu_model, host.cpus
+    );
+    println!(
+        "  governor       {}   boost {}   isolated '{}'",
+        host.governor.as_deref().unwrap_or("?"),
+        host.boost.map_or("?", |b| if b { "on" } else { "off" }),
+        host.isolated_cpus
+    );
+    println!(
+        "  battery        {}   package temp {}",
+        if host.has_battery {
+            "present"
+        } else {
+            "absent"
+        },
+        host.temp_c
+            .map_or_else(|| "?".to_string(), |t| format!("{t:.1}°C"))
+    );
+    println!(
+        "  load average   {:.2} {:.2} {:.2}   ({:.1}% of {} CPUs)",
+        load_pre.load1,
+        load_pre.load5,
+        load_pre.load15,
+        100.0 * load_pre.per_cpu(host.cpus),
+        host.cpus
+    );
 
-    println!("\n── phase 1/3: generator calibration (null TCP server) ──\n");
-    let null_addr = spawn_null_server()?;
-    let mut null_results = Vec::new();
-    for &t in LADDER {
-        let r = drive_http("null", null_addr, t, &fixture.null_requests(t));
+    let census_pre = hostenv::ProcessCensus::capture(std::process::id());
+    println!(
+        "  foreign CPU    {:.0}% of one core across the host; top consumers:",
+        census_pre.total_busy_pct
+    );
+    for p in census_pre.procs.iter().take(8) {
         println!(
-            "  null   T={t:<3}  {:>12.0} ops/s   p50 {:>8.1} µs",
-            r.ops_s, r.p50_us
+            "                   {:>6.1}%  {:<24} pid {:<8} rss {:>8} MiB",
+            p.cpu_pct,
+            p.comm,
+            p.pid,
+            p.rss_kib / 1024
         );
-        null_results.push(r);
     }
 
-    println!("\n── phase 2/3: engine-direct (no HTTP) ──\n");
-    let engine_results = fixture.measure_engine();
+    let verdict = hostenv::evaluate(&host, &load_pre, &census_pre);
+    println!();
+    if verdict.publishable {
+        println!("  ✅ QUIESCENCE GATE PASSED — this run's figures are publishable.\n");
+    } else {
+        println!("  ❌ QUIESCENCE GATE FAILED\n{}", verdict.explain());
+        if !args.allow_contended {
+            eprintln!(
+                "refusing to measure: a run on a contended or non-server-class box is not a \
+                 result (HEA-1974 AC1/AC6).\n\
+                 \x20 · If the objections are contention-only, quiesce the host and re-run.\n\
+                 \x20 · If any objection is host-class, this box cannot produce publishable\n\
+                 \x20   competitive figures at all — escalate for a server-class host.\n\
+                 \x20 · To collect non-publishable diagnostic data anyway, pass\n\
+                 \x20   --allow-contended-host (the artifact will be stamped publishable:false)."
+            );
+            std::process::exit(2);
+        }
+        println!(
+            "  ⚠️  --allow-contended-host set: continuing, but this artifact is stamped\n\
+             \x20     publishable:false and MUST NOT be cited in any competitive comparison.\n"
+        );
+    }
 
-    println!("\n── phase 3/3: end-to-end HTTP ──\n");
+    // ── Measurement ──────────────────────────────────────────────────────────
+    let fixture = Fixture::build()?;
+    let null_addr = spawn_null_server()?;
     let servers = fixture.spawn_servers()?;
-    let http_results = fixture.measure_http(&servers);
 
-    print_report(&fixture, &null_results, &engine_results, &http_results);
-    emit_json(&fixture, &null_results, &engine_results, &http_results)?;
+    let mut samples = Vec::new();
+    for s in 1..=args.samples {
+        println!("\n════ sample {s}/{} ════", args.samples);
+
+        println!("\n── phase 1/3: generator calibration (null TCP server) ──\n");
+        let mut null = Vec::new();
+        for &t in LADDER {
+            let r = drive_http("null", null_addr, t, &fixture.null_requests(t));
+            println!(
+                "  null   T={t:<3}  {:>12.0} ops/s   p50 {:>8.1} µs",
+                r.ops_s, r.p50_us
+            );
+            null.push(r);
+        }
+
+        println!("\n── phase 2/3: engine-direct (no HTTP) ──\n");
+        let engine = fixture.measure_engine();
+
+        println!("\n── phase 3/3: end-to-end HTTP ──\n");
+        let http = fixture.measure_http(&servers);
+
+        samples.push(Sample { null, engine, http });
+    }
+
+    let load_post = hostenv::LoadSnapshot::capture();
+    let census_post = hostenv::ProcessCensus::capture(std::process::id());
+
+    // INVARIANT: the loop above pushes at least one sample (`Args::parse` clamps
+    // `samples` to a minimum of 1), so `last()` is always `Some`.
+    #[allow(clippy::unwrap_used)]
+    let last = samples.last().unwrap();
+    print_report(&fixture, &last.null, &last.engine, &last.http);
+    print_spread(&samples);
+    emit_json(
+        &fixture,
+        &args,
+        &samples,
+        &host,
+        (&load_pre, &census_pre),
+        (&load_post, &census_post),
+        &verdict,
+    )?;
     Ok(())
 }
 
@@ -1055,11 +1217,124 @@ fn grade(c: &Cell, headroom: f64) -> &'static str {
     }
 }
 
+// ── Run-to-run spread (HEA-1974 AC3) ──────────────────────────────────────────
+
+/// Min / median / max of one metric across samples, plus the relative spread.
+struct Spread {
+    min: f64,
+    median: f64,
+    max: f64,
+    /// `(max - min) / min`, in percent. L5 was withdrawn at 236%.
+    pct: f64,
+}
+
+impl Spread {
+    fn of(mut v: Vec<f64>) -> Self {
+        v.sort_by(f64::total_cmp);
+        let (min, max) = (
+            v.first().copied().unwrap_or(f64::NAN),
+            v.last().copied().unwrap_or(f64::NAN),
+        );
+        Self {
+            min,
+            median: v.get(v.len() / 2).copied().unwrap_or(f64::NAN),
+            max,
+            pct: if min > 0.0 {
+                100.0 * (max - min) / min
+            } else {
+                f64::NAN
+            },
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "min": self.min, "median": self.median, "max": self.max,
+            "spread_pct": self.pct,
+        })
+    }
+}
+
+/// Every `(plane, op, threads)` coordinate present in the first sample.
+fn coordinates(samples: &[Sample]) -> Vec<(&'static str, String, usize)> {
+    let mut out = Vec::new();
+    let Some(first) = samples.first() else {
+        return out;
+    };
+    for c in &first.null {
+        out.push(("null", "null".to_string(), c.threads));
+    }
+    for (plane, set) in [("engine", &first.engine), ("http", &first.http)] {
+        for op in set {
+            for c in &op.cells {
+                out.push((plane, op.op.clone(), c.threads));
+            }
+        }
+    }
+    out
+}
+
+/// Pulls one cell's metrics from every sample at a given coordinate.
+fn series(samples: &[Sample], plane: &str, op: &str, threads: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut ops = Vec::new();
+    let mut p50 = Vec::new();
+    for s in samples {
+        let cell = match plane {
+            "null" => s.null.iter().find(|c| c.threads == threads),
+            "engine" => s
+                .engine
+                .iter()
+                .find(|o| o.op == op)
+                .and_then(|o| o.cell(threads)),
+            _ => s
+                .http
+                .iter()
+                .find(|o| o.op == op)
+                .and_then(|o| o.cell(threads)),
+        };
+        if let Some(c) = cell {
+            ops.push(c.ops_s);
+            p50.push(c.p50_us);
+        }
+    }
+    (ops, p50)
+}
+
+/// Prints the run-to-run spread table. A figure without a spread is not
+/// publishable, so this table — not the single-sample report above it — is what
+/// any published number must be sourced from.
+fn print_spread(samples: &[Sample]) {
+    println!(
+        "\n── run-to-run spread across {} samples ──\n",
+        samples.len()
+    );
+    println!(
+        "  {:<7} {:<22} {:>4}  {:>12} {:>12} {:>8}   {:>9} {:>8}",
+        "plane", "op", "T", "ops/s min", "ops/s max", "spread", "p50 med", "spread"
+    );
+    for (plane, op, threads) in coordinates(samples) {
+        let (ops, p50) = series(samples, plane, &op, threads);
+        if ops.len() < 2 {
+            continue;
+        }
+        let (so, sp) = (Spread::of(ops), Spread::of(p50));
+        let flag = if so.pct > 25.0 { " ⚠" } else { "" };
+        println!(
+            "  {:<7} {:<22} {:>4}  {:>12.0} {:>12.0} {:>7.1}%   {:>8.1}µ {:>7.1}%{}",
+            plane, op, threads, so.min, so.max, so.pct, sp.median, sp.pct, flag
+        );
+    }
+    println!("\n  ⚠ marks >25% throughput spread — treat as not publishable without explanation.");
+}
+
 fn emit_json(
     f: &Fixture,
-    null_cal: &[Cell],
-    engine: &[OpResult],
-    http: &[OpResult],
+    args: &Args,
+    samples: &[Sample],
+    host: &hostenv::HostProfile,
+    pre: (&hostenv::LoadSnapshot, &hostenv::ProcessCensus),
+    post: (&hostenv::LoadSnapshot, &hostenv::ProcessCensus),
+    verdict: &hostenv::Verdict,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cell_json = |c: &Cell| {
         serde_json::json!({
@@ -1086,45 +1361,111 @@ fn emit_json(
             .collect::<Vec<_>>()
     };
 
-    let mut deltas = Vec::new();
-    for (eng_name, http_name) in PAIRS {
-        let (Some(e), Some(h)) = (
-            engine.iter().find(|o| o.op == *eng_name),
-            http.iter().find(|o| o.op == *http_name),
-        ) else {
-            continue;
-        };
-        for hc in &h.cells {
-            let Some(ec) = e.cell(hc.threads) else {
+    let deltas_for = |s: &Sample| {
+        let mut deltas = Vec::new();
+        for (eng_name, http_name) in PAIRS {
+            let (Some(e), Some(h)) = (
+                s.engine.iter().find(|o| o.op == *eng_name),
+                s.http.iter().find(|o| o.op == *http_name),
+            ) else {
                 continue;
             };
-            let null_ops = null_cal
-                .iter()
-                .find(|c| c.threads == hc.threads)
-                .map_or(f64::NAN, |c| c.ops_s);
-            let headroom = null_ops / hc.ops_s;
-            deltas.push(serde_json::json!({
-                "engine_op": eng_name,
-                "http_op": http_name,
-                "threads": hc.threads,
-                "engine_ops_per_sec": ec.ops_s,
-                "http_ops_per_sec": hc.ops_s,
-                "throughput_delta_ratio": ec.ops_s / hc.ops_s,
-                "engine_p50_us": ec.p50_us,
-                "http_p50_us": hc.p50_us,
-                "engine_p99_us": ec.p99_us,
-                "http_p99_us": hc.p99_us,
-                "added_latency_p50_us": hc.p50_us - ec.p50_us,
-                "generator_headroom": headroom,
-                "verdict": grade(hc, headroom),
-            }));
+            for hc in &h.cells {
+                let Some(ec) = e.cell(hc.threads) else {
+                    continue;
+                };
+                let null_ops = s
+                    .null
+                    .iter()
+                    .find(|c| c.threads == hc.threads)
+                    .map_or(f64::NAN, |c| c.ops_s);
+                let headroom = null_ops / hc.ops_s;
+                deltas.push(serde_json::json!({
+                    "engine_op": eng_name,
+                    "http_op": http_name,
+                    "threads": hc.threads,
+                    "engine_ops_per_sec": ec.ops_s,
+                    "http_ops_per_sec": hc.ops_s,
+                    "throughput_delta_ratio": ec.ops_s / hc.ops_s,
+                    "engine_p50_us": ec.p50_us,
+                    "http_p50_us": hc.p50_us,
+                    "engine_p99_us": ec.p99_us,
+                    "http_p99_us": hc.p99_us,
+                    "added_latency_p50_us": hc.p50_us - ec.p50_us,
+                    "generator_headroom": headroom,
+                    "verdict": grade(hc, headroom),
+                }));
+            }
         }
-    }
+        deltas
+    };
+
+    let sample_json: Vec<_> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            serde_json::json!({
+                "sample": i + 1,
+                "generator_calibration_null": s.null.iter().map(cell_json).collect::<Vec<_>>(),
+                "engine": ops_json(&s.engine),
+                "http": ops_json(&s.http),
+                "deltas": deltas_for(s),
+            })
+        })
+        .collect();
+
+    // AC3: every coordinate carries its run-to-run spread. A single-sample
+    // figure is not publishable, so this is the block a published number cites.
+    let spread_json: Vec<_> = coordinates(samples)
+        .into_iter()
+        .filter_map(|(plane, op, threads)| {
+            let (ops, p50) = series(samples, plane, &op, threads);
+            (ops.len() >= 2).then(|| {
+                serde_json::json!({
+                    "plane": plane,
+                    "op": op,
+                    "threads": threads,
+                    "n_samples": ops.len(),
+                    "ops_per_sec": Spread::of(ops).to_json(),
+                    "p50_us": Spread::of(p50).to_json(),
+                })
+            })
+        })
+        .collect();
 
     let doc = serde_json::json!({
-        "issue": "HEA-1957",
+        "issue": "HEA-1974",
+        "supersedes": "HEA-1957 / HEA-1967 single-sample runs",
         "axis": "C11 — end-to-end HTTP delta",
         "harness": "examples/http_delta.rs",
+        "samples_requested": args.samples,
+        "samples_collected": samples.len(),
+
+        // Provenance first: whether these numbers may be cited at all.
+        "publishable": verdict.publishable,
+        "quiescence": {
+            "verdict": verdict.to_json(),
+            "host": host.to_json(),
+            "pre_run": {
+                "load": pre.0.to_json(host.cpus),
+                "process_census": pre.1.to_json(),
+            },
+            "post_run": {
+                "load": post.0.to_json(host.cpus),
+                "process_census": post.1.to_json(),
+            },
+            "allow_contended_host_override": args.allow_contended,
+        },
+        // AC4: state co-residency explicitly rather than leaving it to be
+        // inferred from the module docs.
+        "load_generator_co_resident_with_server": true,
+        "co_residency_note":
+            "The request generator and the server under test run as threads of THIS process on \
+             THIS host and share the same cores. The null-server calibration bounds the error \
+             this introduces but does not remove it. Co-residency is the leading suspect for the \
+             HEA-1967 HTTP-plane collapse: the HTTP phase is the only one that must sustain a \
+             generator and a server simultaneously, so it degrades first and worst under \
+             foreign load.",
         "measure_window_secs": MEASURE.as_secs(),
         "warmup_ms": WARMUP.as_millis(),
         "server_tokio_worker_threads": SERVER_WORKERS,
@@ -1146,13 +1487,11 @@ fn emit_json(
             "min_ok_pct": 99.0,
             "rule": "nothing graded on a run whose ceiling attribution was the generator"
         },
-        "generator_calibration_null": null_cal.iter().map(cell_json).collect::<Vec<_>>(),
-        "engine": ops_json(engine),
-        "http": ops_json(http),
-        "deltas": deltas,
+        "samples": sample_json,
+        "spread": spread_json,
     });
 
-    let path = PathBuf::from("docs/perf/artifacts/c11-http-delta-raw.json");
+    let path = args.out.clone();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

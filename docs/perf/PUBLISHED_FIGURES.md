@@ -232,6 +232,53 @@ asterisk — it is precisely the plane on which every competitor comparison is m
 Our least reproducible measurements are our only comparable ones. This should be
 staffed before, not after, anything customer-facing ships.
 
+### 4.1.1 HEA-1974 (2026-07-29) — the re-measurement was attempted and **stopped at AC6**
+
+The gate that §4.1 called for is implemented (`examples/support/hostenv.rs`,
+wired into `http_delta`; see §5 defect 4). It was then run, and it **refused**.
+The re-measurement therefore did not happen, and this is the finding, not a
+failure to deliver: the only host available is disqualified on grounds that
+quiescing cannot fix.
+
+Observed on the one host available, `dev-ryzen-7840hs`, across two runs minutes
+apart:
+
+| | run A | run B |
+|---|---|---|
+| pre-run load average (16 logical CPUs) | **17.24** (108% of capacity) | **10.72** (67%) |
+| foreign CPU across host | 247% of one core | 141% of one core |
+| gate objections raised | 9 | 6 |
+| exit code | **2 (refused)** | **2 (refused)** |
+
+Load moving 17.24 → 10.72 between two runs minutes apart is itself the point:
+this host's contention is not a fixed offset that could be subtracted out.
+
+**Three of those objections are host-class — quiescing clears none of them:**
+
+- **Mobile chassis.** AMD Ryzen 7 7840HS is a laptop part with thermal- and
+  power-limited sustained clocks (package temp 69.8–71.8 °C at idle-ish load).
+  Sustained throughput is not attributable to the code.
+- **Scaling governor `powersave`, boost on.** Clocks vary *during* the
+  measurement window.
+- **No isolated CPUs** (`isolcpus=` unset). Generator, server and every foreign
+  process share one schedulable set.
+
+Every competitor figure we compare against was taken on a server-class instance.
+A mobile part under DVFS is not a like-for-like denominator even when idle, so
+**no HTTP-plane competitive figure from this host is publishable at any load.**
+
+**AC6 disposition: stopped and escalated.** Per the issue's own instruction —
+"if a server-class host is not available to you, say so explicitly and stop; do
+not substitute another contended run" — no substitute run was taken. Host
+provisioning is with the CEO.
+
+**What a valid re-measurement needs:** a server-class host (no battery),
+`performance` governor, `isolcpus=` covering the measurement cores, pre-run load
+under 5% of capacity. Then `http_delta --samples 3` clears the gate on its own
+and emits spread per AC3. Ideally the load generator moves off-box as well — it
+is currently co-resident (AC4, and see the `co_residency_note` field in the
+artifact), which is the leading suspect for the collapse in the table above.
+
 ### 4.2 ❌ `lookup_user` (L5) — withdrawn, 236% run-to-run spread
 
 Two back-to-back C7 samples at HEAD, same binary, nothing changed between them:
@@ -269,8 +316,6 @@ CPU during this sweep, and I will not publish a number I cannot attribute.
 
 ## 5. Defects found in the measurement harness
 
-Reported, not fixed — HEA-1967 is explicitly scoped out of remediation.
-
 1. **`examples/saturation_throughput.rs` hardcodes the superseded T4 target.**
    It emits `"t4_target_ops_s": 50000` and consequently `"t4_measured_met": false`.
    **The raw artifact self-grades T4 as a MISS** against a target the board replaced
@@ -279,13 +324,26 @@ Reported, not fixed — HEA-1967 is explicitly scoped out of remediation.
 2. **`examples/disk_slope_sweep.rs:65` hardcodes `COMMIT_SHA = "abf179ba"`.**
    Run at `1b6b7745`, the K7 artifact still self-labels `abf179ba`. This is false
    provenance in a file whose entire purpose is provenance.
-3. **`examples/http_delta.rs:1155` writes to `docs/perf/artifacts/c11-http-delta-raw.json`**
-   — the same path as the *published* C11 artifact. Any re-run silently destroys the
-   cited evidence. It was backed up and restored by hand for this sweep. Output paths
-   should be run-scoped.
-4. **No host-quiescence gate.** `http_delta` has a `MIN_GENERATOR_HEADROOM` check
-   that passed (all rows ADMISSIBLE) while the measurement was being corrupted by
-   ambient load. The admissibility check does not test what it needs to test.
+3. ~~**`examples/http_delta.rs:1155` writes to `docs/perf/artifacts/c11-http-delta-raw.json`**
+   — the same path as the *published* C11 artifact.~~ **Fixed in HEA-1970**: the
+   output path is now controlled by `--out PATH`; the default still writes to the
+   canonical path, but each new measurement can be directed to a dated artefact name.
+   Run-scoped naming is the caller's responsibility.
+4. ~~**No host-quiescence gate.**~~ **Fixed in HEA-1974**: `http_delta` now calls
+   `hostenv::evaluate()` before building the fixture. The gate checks: load average
+   vs `MAX_PRERUN_LOAD_PER_CPU = 0.05`, per-process CPU census
+   (`MAX_FOREIGN_PROC_CPU_PCT = 5.0`), and host-class signals (battery, governor,
+   isolated CPUs). The gate exits with code 2 on any failure; `--allow-contended-host`
+   continues with `publishable:false` stamped in the artifact. Verified on
+   `dev-ryzen-7840hs`: 9 objections at load 17.24, 6 at load 10.72, both exiting
+   before the fixture is built (§4.1.1).
+
+   The gate is also proven in the *passing* direction — `tests/perf_quiescence_gate.rs`
+   (13 tests) pins that a synthetic quiesced server-class host is admitted, that each
+   objection is raised only by its own condition, that both thresholds are `<=`
+   boundaries, and that an unparseable load average fails closed. A gate only ever
+   observed to fail is indistinguishable from one hardcoded to fail; these tests are
+   what make the refusals above evidence rather than an assumption.
 5. **C0 admissibility warning fired and was not blocking:** `Swap used = 28,449 MiB
    — RSS measurements may be unreliable`. C0 reproduced anyway, but a warning that
    never blocks is not a guard.
@@ -312,12 +370,23 @@ Reported, not fixed — HEA-1967 is explicitly scoped out of remediation.
 
 ### ⚠️ Publish only with the "measured on a quiescent host, not re-verified" label
 
-`/userinfo` 50.1 µs p50 · 16,642 /s @T=1 · 106,641 /s @T=32 · `/introspect`
-93.0 µs p50 · 9,508 /s @T=1 · 55,700 /s @T=32. All HTTP plane, all from
-`1b2fda55`, none reproduced at HEAD. **Preferably: re-measure before publishing.**
+*(empty — the HTTP-plane read figures that sat here were moved to ⛔ by HEA-1974.)*
 
 ### ⛔ Do not publish
 
+- **`/userinfo` and `/introspect`, all rungs** — 50.1 µs p50 · 16,642 /s @T=1 ·
+  106,641 /s @T=32, and 93.0 µs p50 · 9,508 /s @T=1 · 55,700 /s @T=32
+  respectively. All HTTP plane, all from `1b2fda55`, none reproduced at HEAD, and
+  **HEA-1974 established that no host currently available can reproduce them**
+  (§4.1.1). Downgraded from ⚠️ because the ⚠️ label promised a re-verification
+  that is now known to be unschedulable without new hardware. Holding them at
+  "publish with a caveat" would ship a number we cannot stand behind — the CEO's
+  standing instruction is to ship no multiplier rather than a wrong one. These
+  return to ✅ or are withdrawn for good once a server-class host exists; the
+  decision is deferred to that measurement, not made here.
+- **Every HTTP-plane competitive multiplier** — `/userinfo` 44–63× and
+  `/introspect` 2.3–2.6× both moved by 2–4× on re-measurement (§4.1). The
+  multiplier is a ratio of two numbers, one of which is withdrawn.
 - **L5 `lookup_user` as a point latency** — 236% spread (§4.2).
 - **"O(1) RAM regardless of corpus size"** — measured exponent 0.8778 (§3.1).
 - **Any engine figure placed beside a competitor's HTTP figure** (§0.1).
@@ -339,9 +408,13 @@ cargo build --release --example saturation_throughput --example sst_v3_c0_memory
 "$CARGO_TARGET_DIR"/release/examples/disk_slope_sweep        # K7
 ```
 
-**Run these on an idle machine.** Per §4.1, ambient desktop load corrupts the
-HTTP-plane rows by up to 4.8× while leaving the engine rows looking fine — so the
-failure is silent. Check `uptime` before trusting any HTTP number.
+**`http_delta` now has a mandatory quiescence gate (HEA-1970).** It checks load
+average, per-process CPU census, and host-class signals before building the fixture.
+The gate exits with code 2 on contended or non-server-class hosts; use
+`--allow-contended-host` to collect non-publishable diagnostic data. The gate
+determined that `dev-ryzen-7840hs` (a laptop) cannot produce publishable competitive
+HTTP figures regardless of load — a server-class host with `performance` governor and
+`isolcpus=` is required for §4.1 re-measurement.
 
 ### 7.1 Artifacts committed by this sweep
 
