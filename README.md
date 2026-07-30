@@ -186,74 +186,55 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 
 ## Performance
 
-Hearth's storage engine is specialized for identity access patterns. Token validation, session lookup, and permission checks complete in microseconds — comparable to Redis — because the hot path runs in-process against memory-mapped structures with no network hop, no heap allocation, and no lock on the read path.
+All figures measured on `dev-ryzen-7840hs` (AMD Ryzen 7 7840HS, 8 cores / 16 threads, NVMe SSD, `powersave` governor — a mobile laptop part, not an isolated server). Figures from this host are a **floor, not a ceiling**: a server-class CPU on a performance governor should do better. Source of record for every figure below: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md) §6.
 
-All figures measured on `dev-ryzen-7840hs` (AMD Ryzen 7 7840HS, 8 cores / 16 threads, laptop, `powersave` governor). This is a floor, not a ceiling — a server-class part on a performance governor should do better. Full methodology, raw artifacts, and reproduction commands: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md).
+**Two measurement planes — not interchangeable:**
 
-### Engine-plane figures
+- **Engine** — a direct in-process call into the embedded engine, excluding HTTP parsing, TCP, TLS, and connection handling.
+- **HTTP** — a real loopback request to the running server, excluding TLS and network RTT.
 
-These measure a direct in-process call into the embedded engine. They exclude the HTTP stack, TCP, connection handling, and JSON serialization. Do not place these beside competitor HTTP figures — that is a category error. See the password-login comparison below for the one plane-matched axis.
+Do not place engine figures beside competitor HTTP figures — that is a category error.
 
-| Operation | p50 latency | Throughput |
+### Hot path (engine plane)
+
+All engine-plane figures are HEAD-verified at `1b6b7745`. Published values are conservative: where re-verification measured better than the prior report, the older lower figure is used.
+
+| Operation | p50 latency | Throughput | Plane |
+|---|---|---|---|
+| Token validation (`validate_token`, hot tier) | **1.31 µs** | **760,877 /core/s** · 9,409,220 /s @16T | engine |
+| Session lookup (hot tier) | **0.118 µs** | — | engine |
+| Token introspection (RFC 7662) | **44.0 µs** | 21,802 /s @T=1 | engine |
+| Permission check | — | **5,987,782 /core/s** · 52,048,086 /s @16T | engine |
+| Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** | — | engine |
+| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 · **41,255 /s** @T=256 | engine |
+
+`W=1.000` at T=1 means one WAL `fsync` per durable write — the theoretical floor. No write is acknowledged before it is on stable storage. `SyncMode::Async` was evaluated as a default and rejected; every write figure above carries full durability.
+
+### Password login (HTTP plane, re-verified)
+
+At `m=19,456 KiB t=2 p=1` (OWASP parameters), roughly 16 ms of Argon2id compute per login dominates server overhead by ~400:1, making this the one endpoint whose HTTP-plane figures reproduce reliably across host conditions. This figure reproduced within 2.4% at HEAD.
+
+| Endpoint | p50 | p99 | @T=1 | @T=8 | Plane |
+|---|---|---|---|---|---|
+| `POST /login` (loopback, no TLS) | **20.1 ms** | 22.4 ms | **49 /s** | **185 /s** | **HTTP** |
+
+Hearth is the only identity provider in its competitive set that publishes its KDF parameters alongside throughput — which lets you reproduce and verify the figures independently rather than taking a number on faith.
+
+### Memory and disk footprint (engine plane)
+
+No other self-hosted identity provider publishes a measured per-user memory or disk footprint. Hearth does:
+
+| Metric | Figure | Plane |
 |---|---|---|
-| Token validation (`validate_token`, hot tier) | **1.31 µs** | **760,877 /core/s** · 9.4 M /s @16T |
-| Session lookup (hot tier) | **0.118 µs** | — |
-| Token introspection | **44.0 µs** | — |
-| Permission check | — | **5,987,782 /core/s** · 52 M /s @16T |
-| Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** | — |
-| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 · **41,255 /s** @T=256 |
+| Marginal RAM per user (OLS slope, R²=0.9988) | **100 B/user** | engine |
+| δRSS at 1 million users (64 MiB block cache) | **97.1 MiB** | engine |
+| Total process RAM at 1 million hot users (256 MiB block cache, est.) | **~329 MB** | engine, est. |
+| Total process RAM at 10 million hot users (est.) | **~0.9 GB** | engine, est. |
+| Total process RAM at 100 million hot users (est.) | **~6.5 GB** | engine, est. |
+| Disk per user (asymptotic, OLS R²=0.999772, N≥60k) | **1,195.6 B/user** | engine |
+| Disk at 100 million users (extrapolated) | **≈111.3 GiB** | engine, est. |
 
-`W=1.000` at T=1 means one WAL `fsync` per durable write — the theoretical floor. No write is acknowledged before it is on stable storage. `SyncMode::Async` was evaluated as a default and rejected; every figure above carries full durability guarantees.
-
-### Capacity
-
-| Metric | Figure |
-|---|---|
-| Marginal RAM per user (OLS, R²=0.9988) | **100 B/user** |
-| Total RAM at 1 million hot users | **~329 MB** (est., 256 MiB block cache) |
-| Total RAM at 10 million hot users | **~0.9 GB** |
-| Total RAM at 100 million hot users | **~6.5 GB** |
-| Disk per user (asymptotic, OLS R²=0.999772) | **1,195.6 B/user** |
-| Disk at 100 million users | **≈111.3 GiB** |
-
-Measured basis: δRSS at 1M users is **97.1 MiB** with a 64 MiB block cache (directly measured; OLS slope 100 B/user, R²=0.9988). The 329 MB figure is an estimate that scales the measured δRSS to a 256 MiB production block cache plus baseline process overhead. RAM scales near-linearly with corpus (measured log-log exponent 0.8778). For comparison, Keycloak's published [sizing guide](https://www.keycloak.org/high-availability/multi-cluster/concepts-memory-and-cpu-sizing) lists a base requirement of ~1,250 MB per pod to cache 10,000 sessions; Hearth holds 1,000,000 hot users in ~329 MB — roughly 4× less memory for 100× more cached users. That gap is architectural: Keycloak delegates session state to an external Infinispan/Redis cache and pays the JVM baseline regardless of load.
-
-No competitor publishes a per-user memory or disk footprint. Hearth publishes both.
-
-### Password login — the plane-matched comparison
-
-Login throughput is an Argon2id benchmark, not a server benchmark. At `m=19,456 KiB t=2 p=1` (OWASP recommended), roughly 16 ms of KDF compute per login dominates server overhead by ~400:1, making this the one figure that reproduces reliably across measurement conditions and is directly comparable to other vendors' HTTP numbers.
-
-| | HTTP p50 | @T=1 | @T=8 | Source |
-|---|---|---|---|---|
-| **Hearth** (`POST /login`, loopback, no TLS) | **20.1 ms** | **49 /s** | **185 /s** | `c11-http-delta-raw.json` · `1b2fda55`, reproduced ±2.4% |
-| Keycloak (3-pod cluster + Aurora PostgreSQL HA) | — | ~15 /s / vCPU | — | [Keycloak 26.4 benchmark, 2025-10](https://www.keycloak.org/2025/10/keycloak-benchmark) |
-
-Hearth discloses its KDF parameters; no other vendor in this comparison does. Hearth's figures exclude TLS and a physical network hop and represent an upper bound on raw single-node throughput.
-
-### Token introspection — HTTP-plane comparison
-
-The one like-for-like end-to-end HTTP comparison available across vendors is token introspection (RFC 7662):
-
-| | Throughput | p50 | Conditions |
-|---|---|---|---|
-| Ory Hydra v1.9 ([source](https://www.ory.sh/hydra/docs/v1.9/benchmark/), ~2020) | 5,109 /s | 13.3 ms | 2 vCPU, in-memory adapter, no database |
-| **Hearth `POST /introspect`** ⚠️ | **55,700 /s** @T=32 | **93.0 µs** @T=1 | 16 cores, real storage engine, loopback |
-
-> ⚠️ Hearth's introspect figure is from `1b2fda55` and was not cleanly reproduced on the re-verification run (high ambient host load; see `PUBLISHED_FIGURES.md` §4.1). The direction holds even at the worst re-run value; treat the exact multiple as approximate. Ory's benchmark uses an in-memory adapter with no database engaged and has since been removed from their current documentation.
-
-### Managed services — contractual rate limits, not measured capacity
-
-The figures below are **per-tenant quotas** set by the vendor, not benchmark results. They say nothing about the underlying software's capacity — only about what a customer can actually send.
-
-| Vendor | Limit | Note | Source |
-|---|---|---|---|
-| Auth0 Enterprise Public | **100 req/s sustained** per tenant | Burst add-on raises to 400 req/s, capped 48 hrs/month | [Auth0 rate limits](https://auth0.com/docs/troubleshoot/customer-support/operational-policies/rate-limit-policy/rate-limit-configurations/enterprise-public) |
-| Auth0 Free | 300 req/**min** | ~5 req/s | same source |
-| Okta | **20 req/s** on `/oauth2/v1/authorize` | `/token` limited to 4 req/s per username | [Okta rate limits](https://developer.okta.com/docs/reference/rate-limits/) |
-| AWS Cognito | **120 RPS** (UserAuthentication) | Per-region quota, raiseable via support | [Cognito service quotas](https://docs.aws.amazon.com/cognito/latest/developerguide/quotas.html) |
-
-These are the numbers a prospect actually hits in production. A managed tenant's throughput ceiling is contractual and does not move when you buy a bigger machine. A self-hosted node's ceiling is hardware — and scales with it.
+RAM grows sub-linearly with corpus: measured log-log exponent 0.8778 above the block-cache saturation point (~213k users), asymptoting toward 100 B/user marginal cost. The block cache is bounded by `storage.block_cache_bytes` (default 64 MiB; 256 MiB used for production sizing above). Full methodology, hardware details, and reproduction commands: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md).
 
 ---
 
