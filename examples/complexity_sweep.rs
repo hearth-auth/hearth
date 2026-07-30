@@ -74,8 +74,32 @@ const ACTIVE_SET: usize = 2_000;
 const AXIS_A_HOT_CAPACITY: usize = 8_000;
 
 /// Corpus-size ladder for Axis A (record counts). Geometric so the log-log fit
-/// is evenly spaced.
-const AXIS_A_LADDER: &[usize] = &[10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
+/// is evenly spaced. The default tops out at 320 k (fast); set the environment
+/// variable `LADDER_MAX` to 640000 / 1280000 / 2560000 / 5120000 to extend into
+/// multi-million territory. Seeding cost scales linearly with n, so expect each
+/// extra doubling to roughly double the seeding wall-time.
+fn axis_a_ladder() -> Vec<usize> {
+    let max = std::env::var("LADDER_MAX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(320_000);
+    [
+        10_000usize,
+        20_000,
+        40_000,
+        80_000,
+        160_000,
+        320_000,
+        640_000,
+        1_280_000,
+        2_560_000,
+        5_120_000,
+    ]
+    .iter()
+    .copied()
+    .filter(|&n| n <= max)
+    .collect()
+}
 
 /// Fixed corpus size for Axis B (ratio sweep).
 const AXIS_B_CORPUS: usize = 160_000;
@@ -98,13 +122,75 @@ const VISION_USER_P99_HOT_US: f64 = 500.0;
 /// VISION §7.1 cold-path (first access) budget for user lookup (µs).
 const VISION_USER_COLD_US: f64 = 5_000.0;
 
+/// Returns the process RSS in KiB by reading `/proc/self/status` (Linux only;
+/// returns 0 on other platforms or if the file is unreadable).
+fn process_rss_kb() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    if let Some(n) = rest.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                        return n;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Verdict label for the RAM exponent. The standing exponent is 0.8778 (close to
+/// linear); we report PASS only when the slope is genuinely flat (hot-tier
+/// capacity fixed ⇒ RSS should plateau once the working set fits).
+fn ram_verdict(slope: f64) -> &'static str {
+    if slope.abs() < 0.05 {
+        "PASS — O(1) RAM (flat)"
+    } else if slope < 0.20 {
+        "NEAR-PASS — sub-linear but not flat; dominated by hot-tier structure"
+    } else {
+        "MISS — RAM grows with corpus; O(1) RAM claim is NOT supported at this scale"
+    }
+}
+
+/// Prints basic host conditions so results can be interpreted in context.
+fn print_host_conditions() {
+    println!("── Host conditions ──");
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(mem) = std::fs::read_to_string("/proc/meminfo") {
+            for line in mem.lines() {
+                if line.starts_with("MemTotal:") || line.starts_with("MemAvailable:") {
+                    println!("  {}", line.trim());
+                }
+            }
+        }
+        if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+            if let Some(model) = cpuinfo
+                .lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+            {
+                println!("  CPU: {}", model.trim());
+            }
+        }
+    }
+    println!(
+        "  LADDER_MAX env: {}",
+        std::env::var("LADDER_MAX").unwrap_or_else(|_| "320000 (default)".to_string())
+    );
+    println!();
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("HEA-1873 · C5 — Complexity-class sweep\n");
+    println!("HEA-1873 · C5 — Complexity-class sweep (extended: HEA-1992)\n");
     println!(
         "record value = {RECORD_VALUE_BYTES} B, flush threshold = {} KiB, \
          promote_sample_rate = 4 (production), active set = {ACTIVE_SET} keys\n",
         MEASURE_FLUSH_BYTES / 1024
     );
+
+    print_host_conditions();
 
     let axis_a = run_axis_a()?;
     let axis_b = run_axis_b()?;
@@ -126,24 +212,29 @@ struct RungA {
     hot_purity: f64,
     /// Fraction of the natural cold-phase gets that C1 counted as `sst_hit`.
     cold_purity: f64,
+    /// Process RSS in KiB after seeding + hot-tier warm-up (steady-state footprint).
+    rss_kb: u64,
 }
 
 fn run_axis_a() -> Result<Vec<RungA>, Box<dyn std::error::Error>> {
-    println!("── Axis A · corpus-size ladder (fixed active set = {ACTIVE_SET}, hot cap = {AXIS_A_HOT_CAPACITY}) ──\n");
-    let mut rungs = Vec::with_capacity(AXIS_A_LADDER.len());
-    for &n in AXIS_A_LADDER {
+    let ladder = axis_a_ladder();
+    println!("── Axis A · corpus-size ladder (fixed active set = {ACTIVE_SET}, hot cap = {AXIS_A_HOT_CAPACITY}) ──");
+    println!("   ladder: {:?}", ladder);
+    println!();
+    let mut rungs = Vec::with_capacity(ladder.len());
+    for n in ladder {
         rungs.push(measure_rung_a(n)?);
     }
 
     println!(
-        "corpus (n) | SSTs | hot p50/p99 (µs) | cold-nat p50/p99 (µs) | cold-cmp p50/p99 (µs) | hot% | cold%"
+        "corpus (n) | SSTs | hot p50/p99 (µs) | cold-nat p50/p99 (µs) | cold-cmp p50/p99 (µs) | hot% | cold% | RSS MiB"
     );
     println!(
-        "-----------+------+------------------+-----------------------+-----------------------+------+------"
+        "-----------+------+------------------+-----------------------+-----------------------+------+-------+---------"
     );
     for r in &rungs {
         println!(
-            "{:>10} | {:>4} | {:>7.1}/{:>7.1} | {:>10.1}/{:>10.1} | {:>10.1}/{:>10.1} | {:>4.0} | {:>4.0}",
+            "{:>10} | {:>4} | {:>7.1}/{:>7.1} | {:>10.1}/{:>10.1} | {:>10.1}/{:>10.1} | {:>4.0} | {:>5.0} | {:>7.1}",
             r.n,
             r.ssts_natural,
             r.hot.p50,
@@ -154,6 +245,7 @@ fn run_axis_a() -> Result<Vec<RungA>, Box<dyn std::error::Error>> {
             r.cold_compacted.p99,
             r.hot_purity * 100.0,
             r.cold_purity * 100.0,
+            r.rss_kb as f64 / 1024.0,
         );
     }
     println!();
@@ -177,6 +269,7 @@ fn measure_rung_a(n: usize) -> Result<RungA, Box<dyn std::error::Error>> {
     let cold_b = (ACTIVE_SET + cold_span)..(ACTIVE_SET + 2 * cold_span);
 
     warm_active_set(&engine, &realm);
+    let rss_kb = process_rss_kb();
     let (hot, hot_purity) = measure_hot(&engine, &realm);
 
     let ssts_natural = count_ssts(tmp.path())?;
@@ -195,6 +288,7 @@ fn measure_rung_a(n: usize) -> Result<RungA, Box<dyn std::error::Error>> {
         cold_compacted,
         hot_purity,
         cold_purity,
+        rss_kb,
     })
 }
 
@@ -217,6 +311,22 @@ fn print_axis_a_fits(rungs: &[RungA]) {
         .map(|r| (r.ssts_natural.max(1) as f64).ln())
         .collect());
 
+    // RSS fit uses only rungs where the OS reported a non-zero value, and must
+    // recompute log_n over that filtered subset to keep xs and ys aligned.
+    let log_n_ram: Vec<f64> = rungs
+        .iter()
+        .filter(|r| r.rss_kb > 0)
+        .map(|r| (r.n as f64).ln())
+        .collect();
+    let (ram_slope, ram_r2) = linreg(
+        &log_n_ram,
+        &rungs
+            .iter()
+            .filter(|r| r.rss_kb > 0)
+            .map(|r| (r.rss_kb as f64).ln())
+            .collect::<Vec<_>>(),
+    );
+
     println!(
         "Fit: log(p99) = slope · log(n) + c   [slope ≈ 0 → O(1); slope of a log term → O(log n)]"
     );
@@ -233,6 +343,12 @@ fn print_axis_a_fits(rungs: &[RungA]) {
         verdict(cc_slope)
     );
     println!("  #SSTs (natural) exponent = {sst_slope:+.3} (R² = {sst_r2:.3})  [confirms cold fan-out ∝ #SSTs]");
+    if !log_n_ram.is_empty() {
+        println!(
+            "  RAM (RSS)  exponent = {ram_slope:+.3}  (R² = {ram_r2:.3})  → {} (slope < 0.05 = O(1))",
+            ram_verdict(ram_slope)
+        );
+    }
     println!();
     println!(
         "  Interpretation: cold-path cost = (#SSTs probed) · (per-SST binary search). The\n  \
@@ -511,7 +627,7 @@ fn emit_json(axis_a: &[RungA], axis_b: &[RungB]) {
                 "{{\"n\":{},\"ssts_natural\":{},\"hot_p50_us\":{:.2},\"hot_p99_us\":{:.2},\
                  \"cold_natural_p50_us\":{:.2},\"cold_natural_p99_us\":{:.2},\
                  \"cold_compacted_p50_us\":{:.2},\"cold_compacted_p99_us\":{:.2},\
-                 \"hot_purity\":{:.4},\"cold_purity\":{:.4}}}",
+                 \"hot_purity\":{:.4},\"cold_purity\":{:.4},\"rss_kb\":{}}}",
                 r.n,
                 r.ssts_natural,
                 r.hot.p50,
@@ -522,6 +638,7 @@ fn emit_json(axis_a: &[RungA], axis_b: &[RungB]) {
                 r.cold_compacted.p99,
                 r.hot_purity,
                 r.cold_purity,
+                r.rss_kb,
             )
         })
         .collect();
@@ -536,7 +653,8 @@ fn emit_json(axis_a: &[RungA], axis_b: &[RungB]) {
         })
         .collect();
     println!(
-        "{{\"child_issue\":\"HEA-1873\",\"record_value_bytes\":{},\"flush_bytes\":{},\
+        "{{\"child_issue\":\"HEA-1873\",\"extension_issue\":\"HEA-1992\",\
+         \"record_value_bytes\":{},\"flush_bytes\":{},\
          \"active_set\":{},\"promote_sample_rate\":4,\
          \"vision_user_p99_hot_us\":{},\"vision_user_cold_us\":{},\
          \"axis_a\":[{}],\"axis_b\":[{}]}}",
