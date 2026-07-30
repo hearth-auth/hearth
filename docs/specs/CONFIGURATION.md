@@ -84,11 +84,13 @@ Embedded storage engine tuning. These control WAL, memtable, and hot tier behavi
 | `hot_tier_capacity` | integer | auto | When set, uses this exact number of hot tier entries. When omitted, auto-sizes from system memory (or `hot_tier_max_memory` if set). |
 | `hot_tier_max_memory` | integer | none | Maximum bytes to allocate for the hot tier. Overrides system memory detection during auto-sizing. Ignored when `hot_tier_capacity` is explicitly set. |
 | `fsync` | bool | `true` | Whether to `fsync` WAL writes. **MUST be `true` in production.** Dev mode disables this for faster iteration. |
+| `block_cache_bytes` | integer | `268435456` (256 MiB) | Process-wide byte budget for the decrypted SST block cache (HEA-1914). All v3 SST readers share a single cache bounded to this size, keeping cold-tier resident memory independent of corpus size. This is a real resident-memory commitment — budget for it alongside `hot_tier_max_memory`. Tune down on memory-constrained hosts; tune up when the cold-read working set exceeds the hot tier. |
 
 ```yaml
 storage:
   data_dir: "/var/lib/hearth/data"
   fsync: true
+  block_cache_bytes: 268435456  # 256 MiB — default; lower on memory-constrained hosts
   # Option A: explicit entry count
   hot_tier_capacity: 500000
   # Option B: memory budget (triggers auto-sizing, ignored when capacity is set)

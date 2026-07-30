@@ -98,6 +98,11 @@ storage:
   memtable_flush_bytes: 67108864          # 64 MiB  — memtable→SST flush threshold
   hot_tier_capacity: 10000                # entries cached in the hot tier
   fsync: true                             # MUST be true in production; dev mode disables this
+  # block_cache_bytes: 268435456          # 256 MiB — process-wide decrypted SST block cache
+  #                                       # (HEA-1914). Shared by all v3 SST readers. Caps
+  #                                       # cold-tier resident memory independent of corpus
+  #                                       # size. Lower on RAM-constrained hosts; raise if
+  #                                       # cold reads are common and frequently miss the cache.
   # compaction:                            # optional — all fields have defaults shown below
   #   enabled: true                       # whether background SST compaction runs
   #   interval_secs: 3600                 # seconds between periodic FULL compaction sweeps
@@ -379,6 +384,35 @@ oidc:
 #       active_hex: "${PEPPER_KEY_HEX}" # 32-byte (64 hex chars) secret
 #       # previous_version: 0           # uncomment during rotation grace window
 #       # previous_hex: "${OLD_PEPPER_HEX}"
+
+# --- Argon2id admission control (KDF gate) (HEA-1887 / R1) -----------------
+# Bounds concurrent Argon2id password hashing/verification. Without a limit,
+# a login burst oversubscribes the CPU (~19 MiB per op at OWASP parameters)
+# and creates multi-second p99 tail latency. Requests wait up to
+# max_queue_wait_ms for a permit; if no slot opens in time they are shed with
+# 503 Service Unavailable + Retry-After.
+#
+# Admin login uses a *separate* pool (admin_max_in_flight / admin_max_queue_wait_ms)
+# so a flood against a tenant login form cannot exhaust the shared pool and
+# lock operators out of the admin console.
+#
+# Observability: hearth_kdf_in_flight, hearth_kdf_permits, hearth_kdf_shed_total,
+# hearth_kdf_queue_wait_seconds (see /metrics).
+#
+# Tuning:
+#   max_in_flight — start at the host core count (the default). Raise only if
+#     hearth_kdf_shed_total is rising and CPU + memory headroom exists.
+#   max_queue_wait_ms — approximate user patience on the login page (default: 250 ms).
+#     Must be >= 1 when set; an explicit 0 is rejected at startup.
+#
+# security:
+#   password:
+#     kdf:
+#       max_in_flight: 16              # default: host core count (null/omit = auto)
+#       admin_max_in_flight: 2         # default: 2 — reserved pool for /ui/admin/login
+#       max_queue_wait_ms: 250         # default: 250 ms — shared pool shed threshold (>= 1)
+#       admin_max_queue_wait_ms: 2500  # default: 2500 ms — admin prefers queueing over shedding
+#       retry_after_seconds: 1         # default: 1 s — Retry-After header on shed 503 responses
 
 # --- Auth defaults (global) -------------------------------------------------
 # These apply to all realms unless overridden per-realm below.
