@@ -118,24 +118,34 @@ never ship a number we cannot re-measure.
 
 ---
 
-## 3. Session creation (T4) — our known failure, in context
+## 3. Session creation (T4) — formerly our known failure
 
-T4 is the one row we grade `MISS` against our own VISION target of 50,000 ops/s.
-Post-HEA-1948/1954/1955 it measures **15,841 ops/s at T=256** (up 49× from 323).
+**Updated 2026-07-29.** T4 was the one row we graded `MISS`. It now measures **41,255 ops/s at
+T=256** (head `873263d0`, post-HEA-1948/1954/1955/1959, up **162×** from 254) and grades a
+**PASS at 1.38×** against the target the board revised from 50,000 to **30,000 ops/s** — 50,000
+having been arbitrary rather than derived. Every figure here was obtained with the WAL `fsync`'d
+before acknowledgement; no durability guarantee was traded for any of it. The comparison table
+below is left in place because the strategic point survives the regrade: even the number we used
+to call a failure beat the field.
 
 | System | Comparable operation | Published rate |
 |---|---|---|
-| **Hearth (our `MISS`)** | durable session create | **15,841 /s** |
+| **Hearth (today, `PASS`)** | durable session create | **41,255 /s** |
+| **Hearth (the figure we once graded `MISS`)** | durable session create | **15,841 /s** |
 | Keycloak | refresh token | 120 /s/vCPU (tested to 435/s) |
 | Keycloak | client credentials | 120 /s/vCPU (tested to 2,000/s) |
 | Zitadel | machine JWT grant | 851 /s |
 | Zitadel | introspect | **18 /s** — vendor notes "a lot of over fetching on the database" |
 
-**Our failing grade is ~19× the best competitor number in this class and ~880× the
-worst.** This is the most important strategic finding in the document: our internal
-targets are set against physics, not against the market. That is the right way to set
-them — but the board should know we are not shipping a competitive weakness here. We
-are shipping a self-imposed standard nobody else attempts.
+**Even the grade we called a failure was ~19× the best competitor number in this class and
+~880× the worst; today's passing figure is ~48× and ~2,290× respectively.** This is the most
+important strategic finding in the document: our internal targets are set against physics, not
+against the market. That is the right way to set them — but the board should know we were never
+shipping a competitive weakness here. We are shipping a self-imposed standard nobody else
+attempts.
+
+**Caveat that applies to this whole section (unchanged):** our figures are engine-level, the
+competitors' are end-to-end HTTP. See §1 — do not publish the ratio without that qualifier.
 
 ---
 

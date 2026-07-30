@@ -359,7 +359,17 @@ These are design targets, not guarantees. They represent the performance that a 
 | Token validation (read-heavy) | 200,000+ | 3,000,000+ |
 | Mixed read/write (95/5 read/write) | 100,000+ | 1,500,000+ |
 | Permission checks (JWT claim lookup) | 1,000,000+ | 15,000,000+ |
-| Session creation | 50,000+ | 500,000+ |
+| Session creation † | 30,000+ aggregate @ T≈256 concurrent writers | not applicable — see † |
+
+† **Session creation is graded in aggregate ops/s at a stated concurrency, not per core.** It is a
+durable write: it completes only when the write-ahead log has been `fsync`'d, and there is one WAL
+and therefore one commit stream. Throughput scales with concurrency and the device's fsync rate,
+not with core count — a thread blocked on `fsync` consumes no CPU, so a per-core figure and a
+16-core multiple are both category errors here. The target was revised from `50,000+ ops/sec/core`
+to `30,000+ aggregate` on 2026-07-29; the original figure was arbitrary rather than derived from
+the operation. Measured 41,255 ops/s at T=256 on `dev-ryzen-7840hs` with `fsync`-before-ack
+intact — see `docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2 (T4) and
+`docs/perf/HEA-1959-commit-cycle.md`.
 
 ### 7.3 Capacity Targets (Single Node)
 
