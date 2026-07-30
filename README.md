@@ -203,7 +203,7 @@ All engine-plane figures are HEAD-verified at `1b6b7745`. Published values are c
 |---|---|---|---|
 | Token validation (`validate_token`, hot tier) | **1.31 µs** | **760,877 /core/s** · 9,409,220 /s @16T | engine |
 | Session lookup (hot tier) | **0.118 µs** | — | engine |
-| Token introspection (RFC 7662) | **44.0 µs** | 21,802 /s @T=1 | engine |
+| Token introspection (RFC 7662) | **44.0 µs** | — | engine |
 | Permission check | — | **5,987,782 /core/s** · 52,048,086 /s @16T | engine |
 | Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** | — | engine |
 | Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 · **41,255 /s** @T=256 | engine |
@@ -214,9 +214,9 @@ All engine-plane figures are HEAD-verified at `1b6b7745`. Published values are c
 
 At `m=19,456 KiB t=2 p=1` (OWASP parameters), roughly 16 ms of Argon2id compute per login dominates server overhead by ~400:1, making this the one endpoint whose HTTP-plane figures reproduce reliably across host conditions. This figure reproduced within 2.4% at HEAD.
 
-| Endpoint | p50 | p99 | @T=1 | @T=8 | Plane |
-|---|---|---|---|---|---|
-| `POST /login` (loopback, no TLS) | **20.1 ms** | 22.4 ms | **49 /s** | **185 /s** | **HTTP** |
+| Endpoint | p50 | @T=1 | @T=8 | Plane |
+|---|---|---|---|---|
+| `POST /login` (loopback, no TLS) | **20.1 ms** | **49 /s** | **185 /s** | **HTTP** |
 
 Hearth is the only identity provider in its competitive set that publishes its KDF parameters alongside throughput — which lets you reproduce and verify the figures independently rather than taking a number on faith.
 
