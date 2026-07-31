@@ -675,6 +675,8 @@ Global per-IP and per-account rate-limit thresholds. These are the server-wide d
 | `login_per_ip.window_seconds` | integer | `60` | Sliding window length in seconds for per-IP failed-login counting. |
 | `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
 | `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
+| `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user, shared across the REST and gRPC surfaces. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
+| `token_per_minute` | integer | `200` | Maximum OAuth token, introspection, and device-authorization requests per minute per `(realm, client)` pair. Set to `0` to disable the limiter entirely. |
 
 ```yaml
 security:
@@ -685,7 +687,30 @@ security:
     login_per_account:
       max_failures: 5
       lockout_seconds: 300
+    admin_per_minute: 100
+    token_per_minute: 200
 ```
+
+##### Disabling request-rate limiters for load tests
+
+`admin_per_minute: 0`, `token_per_minute: 0`, and `security.backup.export_rate_limit: 0`
+each turn the corresponding limiter off outright. This exists because a
+saturation test cannot find the server's knee while a fixed abuse cap sheds
+most of the offered load — at the compiled-in 100/min admin cap, every rung of
+a 1k→16k rps sweep shed ~2/3 of its requests as `429` regardless of the rate
+offered, so the measurement reported the limiter rather than the server.
+
+Unlike [`security.load_test_unthrottled`](#securityload_test_unthrottled),
+these keys are **not** gated on `--dev` or a loopback bind, because they are
+ordinary operator-tunable thresholds that happen to accept `0`. That makes them
+usable from a production-mode `serve` — and equally makes `0` a real removal of
+an abuse control. Setting any of them to `0`:
+
+- logs a `WARN` at startup naming the config key, and
+- raises `hearth_rate_limiters_disabled{reason="config_zero"}` to `1`, so a live
+  process reveals the state after the boot log has scrolled away.
+
+Alert on that gauge. Never ship `0` to a production bind.
 
 ##### Rate-Limit Durability After Restart
 
@@ -1654,6 +1679,8 @@ security:
     login_per_account:
       max_failures: 5
       lockout_seconds: 300
+    admin_per_minute: 100
+    token_per_minute: 200
   backup:
     verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"
     export_rate_limit: 10
@@ -1783,4 +1810,6 @@ Every field's default value at a glance.
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
 | `security.rate_limiting.login_per_account` | `max_failures` | `5` |
 | `security.rate_limiting.login_per_account` | `lockout_seconds` | `300` |
+| `security.rate_limiting` | `admin_per_minute` | `100` |
+| `security.rate_limiting` | `token_per_minute` | `200` |
 | `onboarding` | `enabled` | `true` |

@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`security.rate_limiting.admin_per_minute` and `security.rate_limiting.token_per_minute`
+  config keys (HEA-2010)** — the admin-API cap (previously a compiled-in 100 requests per
+  minute per admin user, shared by REST and gRPC) and the OAuth token/introspection cap
+  (previously a compiled-in 200 per minute per `(realm, client)`) are now operator-tunable.
+  Setting either to `0` disables that limiter entirely. Unlike
+  `security.load_test_unthrottled`, these are ordinary thresholds and are **not** gated on
+  `--dev` or a loopback bind, so they work under a production-mode `serve` — a `0` therefore
+  removes a real abuse control. Any `0` logs a startup `WARN` naming the key and raises
+  `hearth_rate_limiters_disabled{reason="config_zero"}` to `1`. Needed because a saturation
+  sweep could not reach the server's knee: every rung of a 1k→16k rps read-plane ramp shed
+  ~2/3 of its requests as HTTP 429 from the fixed admin cap, so the run measured the limiter
+  rather than the server. (HEA-2010)
 - **`dcr_policy` is now settable via `PATCH /admin/realms/{realm_id}/config` (HEA-2003)** —
   the request body accepts an optional `dcr_policy` field (`"disabled"`, `"open"`,
   `"authenticated"`, or `null`) alongside the existing config fields, letting an operator
@@ -42,6 +54,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
 ### Fixed
+- **`security.backup.export_rate_limit` is now actually applied (HEA-2010)** — the key was
+  documented with a default of `10`/hour and a documented `0`-disables behaviour, but was
+  never read at startup; the export limiter always used the compiled-in `10`. Operators who
+  had tuned or zeroed this value were silently running the default.
 - **`--dev --bind <ip>:<port>` now starts instead of being refused (HEA-2008)** — the dev-mode
   loopback startup gate parsed the whole `--bind` value as a bare `IpAddr`, so a legitimate
   `host:port` form (`--bind 127.0.0.1:8420`) failed to parse and was fail-closed as

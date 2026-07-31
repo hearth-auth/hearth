@@ -2198,6 +2198,44 @@ async fn run_serve(
         }
     });
 
+    // Operator-configured request-rate caps (HEA-2010).
+    //
+    // Before this, the admin (100/min) and token (200/min) caps were compiled-in
+    // constants and the only escape hatch was `security.load_test_unthrottled`,
+    // which is refused outside `--dev`. A saturation run therefore could not
+    // reach the server's knee: every rung shed ~2/3 of its requests as HTTP 429.
+    // `0` now disables a limiter outright. `security.backup.export_rate_limit`
+    // was documented but never read — it is wired here too.
+    let admin_rate_limit = config
+        .security
+        .rate_limiting
+        .as_ref()
+        .and_then(|rl| rl.admin_per_minute);
+    let token_rate_limit = config
+        .security
+        .rate_limiting
+        .as_ref()
+        .and_then(|rl| rl.token_per_minute);
+    let export_rate_limit = config.security.backup.export_rate_limit;
+    for (key, value) in [
+        ("security.rate_limiting.admin_per_minute", admin_rate_limit),
+        ("security.rate_limiting.token_per_minute", token_rate_limit),
+        ("security.backup.export_rate_limit", export_rate_limit),
+    ] {
+        match value {
+            Some(0) => {
+                tracing::warn!(
+                    config_key = key,
+                    "request-rate limiter DISABLED by config (limit 0) — this removes an \
+                     abuse cap. Load-test use only; never set 0 on a production bind."
+                );
+                hearth::metrics::metrics().mark_rate_limiters_disabled("config_zero");
+            }
+            Some(limit) => info!(config_key = key, limit, "request-rate limit overridden"),
+            None => {}
+        }
+    }
+
     let allowed_hosts = config.security.allowed_hosts.clone();
     if !allowed_hosts.is_empty() {
         info!(count = allowed_hosts.len(), "loaded allowed_hosts");
@@ -2219,6 +2257,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts.clone())
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
@@ -2243,6 +2282,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts)
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)

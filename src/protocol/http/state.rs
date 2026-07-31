@@ -336,6 +336,36 @@ impl AppState {
         self
     }
 
+    /// Applies operator-configured request-rate caps to the admin, token, and
+    /// export limiters (HEA-2010).
+    ///
+    /// Each argument is the configured value from `hearth.yaml`
+    /// (`security.rate_limiting.admin_per_minute`,
+    /// `security.rate_limiting.token_per_minute`,
+    /// `security.backup.export_rate_limit`). `None` leaves the compiled-in
+    /// default in force; `Some(0)` disables that limiter entirely.
+    ///
+    /// Call this **before** [`Self::with_rate_limiters_disabled`] so the
+    /// load-test unthrottle override still wins.
+    #[must_use]
+    pub fn with_rate_limits(
+        mut self,
+        admin_per_minute: Option<u32>,
+        token_per_minute: Option<u32>,
+        export_per_hour: Option<u32>,
+    ) -> Self {
+        if let Some(limit) = admin_per_minute {
+            self.admin_rate_limiter = Arc::new(AdminRateLimiter::with_limit(limit));
+        }
+        if let Some(limit) = token_per_minute {
+            self.token_rate_limiter = Arc::new(TokenRateLimiter::with_limit(limit));
+        }
+        if let Some(limit) = export_per_hour {
+            self.export_rate_limiter = Arc::new(ExportRateLimiter::with_limit(limit));
+        }
+        self
+    }
+
     /// Disables the token, admin, and export rate limiters when `disabled` is
     /// `true`.
     ///

@@ -1437,6 +1437,19 @@ pub struct GlobalRateLimitYaml {
     /// Per-account consecutive-failure lockout.
     #[serde(default)]
     pub login_per_account: Option<AccountRateLimitYaml>,
+    /// Maximum admin-API requests per minute per admin user. Default: 100.
+    ///
+    /// Set to `0` to disable the admin-API request limiter entirely. Zero
+    /// removes the admin abuse cap — intended for load testing on a private
+    /// bind, never for a production deployment (HEA-2010).
+    #[serde(default)]
+    pub admin_per_minute: Option<u32>,
+    /// Maximum OAuth token / introspection / device-authorization requests per
+    /// minute per `(realm, client)` pair. Default: 200.
+    ///
+    /// Set to `0` to disable. Same warning as `admin_per_minute`.
+    #[serde(default)]
+    pub token_per_minute: Option<u32>,
 }
 
 /// Per-IP rate limit config: sliding window of failed attempts.
