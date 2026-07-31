@@ -634,6 +634,45 @@ enum LoadtestUnthrottle {
     RefusedNotDev,
 }
 
+/// Returns whether an effective bind string resolves to a loopback address.
+///
+/// Effective binds arrive as either a bare host (`127.0.0.1`, `::1`,
+/// `localhost`) or a `host:port` pair (`127.0.0.1:8420`, `[::1]:8420`,
+/// `localhost:8420`) once CLI `--bind`/`--port` overrides are folded in. The
+/// full socket-address form is tried first so a legitimate loopback `host:port`
+/// (the HEA-1997 runbook §3A prescribes `--bind 127.0.0.1:8420`) is recognized;
+/// it falls back to a bare IP, then to hostname forms. Anything unparseable
+/// stays fail-closed — treated as non-loopback (HEA-2008).
+fn bind_is_loopback(bind: &str) -> bool {
+    if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    if let Ok(ip) = bind.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    // Hostname forms: `localhost` or `localhost:8420`. Strip a trailing
+    // `:port` if present (a bare `::1` was already handled as an `IpAddr`).
+    let host = bind.rsplit_once(':').map_or(bind, |(h, _)| h);
+    host.eq_ignore_ascii_case("localhost")
+}
+
+/// Normalizes a `--bind` CLI override into a `(host, embedded_port)` pair.
+///
+/// `--bind` maps to `server.bind_address`, which the listener rebuilds into
+/// `bind_address:port` at startup — so a bare host (`127.0.0.1`, `::1`,
+/// `localhost`) must pass through unchanged. When the operator supplies a full
+/// `host:port` (`127.0.0.1:8422`, `[::1]:8422`), the embedded port is peeled
+/// off so it seeds `server.port` instead of being re-appended into an invalid
+/// `host:port:port` address (HEA-2008 — the HEA-1997 runbook §3A prescribes the
+/// `host:port` form). Anything that does not parse as a socket address is
+/// treated as a bare host with no embedded port.
+fn split_bind_override(bind: &str) -> (String, Option<u16>) {
+    match bind.parse::<SocketAddr>() {
+        Ok(sock) => (sock.ip().to_string(), Some(sock.port())),
+        Err(_) => (bind.to_string(), None),
+    }
+}
+
 /// Decides whether the load-test unthrottle escape hatch applies. Gated on
 /// `--dev` mode AND every effective bind being loopback (HEA-1797). Pure (no
 /// logging / I/O) so the prod-safety gate is unit tested; the caller emits the
@@ -656,18 +695,11 @@ fn loadtest_unthrottle_decision(
     if !dev {
         return LoadtestUnthrottle::RefusedNotDev;
     }
-    let is_loopback = |bind: &str| {
-        bind.eq_ignore_ascii_case("localhost")
-            || bind
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false)
-    };
     // Every effective bind must be loopback. A disabled gRPC listener (`None`)
     // cannot be reached, so it does not gate the decision.
-    let all_loopback = is_loopback(http_bind)
+    let all_loopback = bind_is_loopback(http_bind)
         && match grpc_bind {
-            Some(g) => is_loopback(g),
+            Some(g) => bind_is_loopback(g),
             None => true,
         };
     if all_loopback {
@@ -702,16 +734,9 @@ fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> D
     if !dev {
         return DevBindCheck::NotDev;
     }
-    let is_loopback = |bind: &str| {
-        bind.eq_ignore_ascii_case("localhost")
-            || bind
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false)
-    };
-    let all_loopback = is_loopback(http_bind)
+    let all_loopback = bind_is_loopback(http_bind)
         && match grpc_bind {
-            Some(g) => is_loopback(g),
+            Some(g) => bind_is_loopback(g),
             None => true,
         };
     if all_loopback {
@@ -760,12 +785,21 @@ async fn run_serve(
     let mut config = load_config(dev, config_path.as_deref())?;
     let serve_start = std::time::Instant::now();
 
-    // Apply CLI overrides
+    // Apply CLI overrides. `--bind` may be a bare host (`127.0.0.1`) or a
+    // `host:port` pair (`127.0.0.1:8422`); in the latter form the embedded port
+    // seeds `server.port`. An explicit `--port` is applied afterwards so it
+    // always wins over a port embedded in `--bind` (HEA-2008 — the HEA-1997
+    // runbook §3A prescribes `--bind <ip>:<port>`, which the listener builds
+    // back into `bind_address:port` at startup).
+    if let Some(bind) = bind_override {
+        let (host, embedded_port) = split_bind_override(&bind);
+        config.server.bind_address = host;
+        if let Some(p) = embedded_port {
+            config.server.port = p;
+        }
+    }
     if let Some(port) = port_override {
         config.server.port = port;
-    }
-    if let Some(bind) = bind_override {
-        config.server.bind_address = bind;
     }
 
     // --verbose: promote log level to debug so startup diagnostics are visible.
@@ -4626,8 +4660,19 @@ mod tests {
 
     #[test]
     fn dev_bind_check_dev_loopback_http_no_grpc() {
-        // Dev + loopback HTTP, gRPC disabled → Ok.
-        for bind in ["127.0.0.1", "::1", "localhost", "LOCALHOST", "127.0.0.53"] {
+        // Dev + loopback HTTP, gRPC disabled → Ok. Covers both bare-host and
+        // `host:port` forms — the HEA-1997 runbook §3A prescribes the latter
+        // (`--bind 127.0.0.1:8420`), which HEA-2008 must accept.
+        for bind in [
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.53",
+            "127.0.0.1:8420",
+            "[::1]:8420",
+            "localhost:8420",
+        ] {
             assert_eq!(
                 dev_mode_bind_check(true, bind, None),
                 DevBindCheck::Ok,
@@ -4639,7 +4684,17 @@ mod tests {
     #[test]
     fn dev_bind_check_refused_non_loopback_http() {
         // Dev + non-loopback HTTP bind → refused, even when gRPC is disabled.
-        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
+        // `host:port` wildcard forms and unparseable garbage stay fail-closed.
+        for bind in [
+            "0.0.0.0",
+            "::",
+            "10.0.0.5",
+            "192.168.1.10",
+            "example.com",
+            "0.0.0.0:8420",
+            "192.168.1.10:8420",
+            "garbage",
+        ] {
             assert_eq!(
                 dev_mode_bind_check(true, bind, None),
                 DevBindCheck::RefusedNonLoopback,
@@ -4688,6 +4743,60 @@ mod tests {
             DevBindCheck::RefusedNonLoopback,
             "--dev --bind :: must be refused at startup"
         );
+    }
+
+    #[test]
+    fn bind_is_loopback_covers_host_and_host_port_forms() {
+        // HEA-2008: the shared gate helper must accept loopback in both bare
+        // and `host:port` forms, and stay fail-closed on wildcards / garbage.
+        for accept in [
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.53",
+            "127.0.0.1:8420",
+            "[::1]:8420",
+            "localhost:8420",
+            "127.0.0.1:0",
+        ] {
+            assert!(bind_is_loopback(accept), "{accept} must be loopback");
+        }
+        for refuse in [
+            "0.0.0.0",
+            "::",
+            "10.0.0.5",
+            "192.168.1.10",
+            "0.0.0.0:8420",
+            "[::]:8420",
+            "example.com",
+            "example.com:80",
+            "garbage",
+            "",
+        ] {
+            assert!(!bind_is_loopback(refuse), "{refuse} must not be loopback");
+        }
+    }
+
+    #[test]
+    fn split_bind_override_peels_embedded_port() {
+        // HEA-2008: a `host:port` --bind seeds server.port; a bare host does not.
+        assert_eq!(
+            split_bind_override("127.0.0.1:8422"),
+            ("127.0.0.1".to_string(), Some(8422))
+        );
+        assert_eq!(
+            split_bind_override("[::1]:8422"),
+            ("::1".to_string(), Some(8422))
+        );
+        assert_eq!(
+            split_bind_override("0.0.0.0:8422"),
+            ("0.0.0.0".to_string(), Some(8422))
+        );
+        // Bare hosts pass through unchanged with no embedded port.
+        for host in ["127.0.0.1", "::1", "localhost", "0.0.0.0"] {
+            assert_eq!(split_bind_override(host), (host.to_string(), None));
+        }
     }
 
     // ── HEA-SEC-10: setup token truncation ───────────────────────────────────

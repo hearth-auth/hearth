@@ -42,6 +42,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
 
 ### Fixed
+- **`--dev --bind <ip>:<port>` now starts instead of being refused (HEA-2008)** — the dev-mode
+  loopback startup gate parsed the whole `--bind` value as a bare `IpAddr`, so a legitimate
+  `host:port` form (`--bind 127.0.0.1:8420`) failed to parse and was fail-closed as
+  non-loopback — the HEA-1997 saturation runbook prescribes exactly that form, so an operator
+  following it could not start the seed phase. The gate now recognizes `host:port` (including
+  `[::1]:8420` and `localhost:8420`), and the `--bind` override peels an embedded port into
+  `server.port` so the listener no longer builds an invalid `host:port:port` address. A
+  wildcard bind (`--bind 0.0.0.0:8420`) is still refused in `--dev`. (HEA-2008)
 - **Token-claims cache now evicts instead of refusing inserts at capacity (HEA-1990)** —
   the in-process cache that lets `validate_token` skip the Ed25519 verify + JSON parse
   previously stopped accepting new tokens once it filled (hardcoded 2048 entries) and had
