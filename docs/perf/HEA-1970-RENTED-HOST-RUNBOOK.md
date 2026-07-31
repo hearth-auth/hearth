@@ -137,7 +137,125 @@ done
   gets withdrawn.
 - Re-check `uptime` and `vmstat 1 5` immediately after the last run.
 
-## 6. Measure the end-to-end plane (optional, second-order)
+## 6. Saturation sweep — two-host rig (HEA-1997/HEA-2014)
+
+The single-host `http_delta` in §5 measures per-op cost, not capacity.
+`http_saturation` measures the capacity knee. It requires **two droplets**:
+
+| Role | Label | What runs |
+|---|---|---|
+| Server | Host A | `hearth serve` + a background CPU sampler |
+| Generator | Host B | `http_saturation` binary |
+
+### 6A. Provision host A (server) and host B (generator)
+
+Same plan as §1 for each. Boot both, install Rust, clone the repo, build
+`--release` on each. Then quiesce both as in §3.
+
+> **NB:** the generator B **must not** run any other heavy workload during
+> the sweep. `http_saturation` checks generator headroom per-rung; any rung
+> where the generator used > 50 % of its own capacity is graded INADMISSIBLE
+> (reason `generator_headroom_2x`).
+
+### 6B. Loopback control on host A BEFORE the two-host sweep
+
+This is **required** (HEA-2014). It nails down what the droplet delivers on
+loopback, so the delta vs the two-host number is attributable to real-wire
+latency + any generator/host-class difference, not co-residency. Without it
+any difference is unexplained.
+
+On host A, with the server running (`make dev` or `hearth serve --dev`):
+
+```bash
+# Build the binary on host A (same SHA as host B).
+cargo build --release --example http_saturation
+
+# Seed the corpus — adjust params to match the two-host seed.
+curl -X POST http://127.0.0.1:8420/admin/bootstrap  # first boot only
+make seed ARGS="--users 50000 --sessions-frac 0.3"
+
+# Loopback control — read plane, same rungs as the two-host sweep.
+./target/release/examples/http_saturation \
+  --target http://127.0.0.1:8420 \
+  --seed-handle seed.json \
+  --plane read \
+  --rungs 500,1000,2000,4000,8000,13000,16000 \
+  --hold 20 --conns 256 \
+  --loopback-control \
+  > /root/artifacts/sat-read-loopback-control.json
+```
+
+The artifact will have `"run_type": "loopback_control"`. Softnet drops will be
+zero (loopback bypasses the NIC), so the rung grade reflects server CPU and
+generator headroom only. The knee from this run is the **loopback floor**.
+
+### 6C. Background CPU sampler on host A
+
+The saturation harness on host B reads host A's CPU % from a file that host A
+rewrites each second. Start the sampler before launching the sweep:
+
+```bash
+# On host A (in background/tmux). Appends one float per second.
+while true; do
+  awk '/cpu / {busy=$2+$3+$4+$6+$7+$8; total=busy+$5; printf "%.1f\n", 100*busy/total}' \
+    /proc/stat > /tmp/cpu-hostA.txt
+  sleep 1
+done &
+
+# Share the file to host B via a method of your choice, e.g.:
+# scp/rsync loop, NFS mount, or a one-liner HTTP server:
+python3 -m http.server 9999 --directory /tmp &
+# Then on host B: --server-cpu-file <(curl -s http://A_IP:9999/cpu-hostA.txt)
+# Simplest: have host B scp the file each rung (safe for 20 s hold windows).
+```
+
+### 6D. Two-host saturation sweep on host B
+
+```bash
+# On host B.
+cargo build --release --example http_saturation
+
+# Seed the same corpus as the loopback control (same SHA, same params).
+# The seed-handle JSON from host A must be available on host B.
+scp root@A_IP:/root/seed.json /root/seed.json
+
+for plane in read issuance; do
+  ./target/release/examples/http_saturation \
+    --target http://A_IP:8420 \
+    --seed-handle /root/seed.json \
+    --plane $plane \
+    --rungs 500,1000,2000,4000,8000,13000,16000 \
+    --hold 20 --conns 256 \
+    --server-cpu-file /root/cpu-hostA.txt \
+    --limiter-note "request_shaper ip_rps=200000 realm_rps=200000" \
+    > /root/artifacts/sat-${plane}-two-host.json
+  sleep 60  # let the server cool
+done
+```
+
+> Host A must have `security.request_shaper.ip_rps` and `realm_rps` pinned
+> above the top rung (e.g. 200 000). Any rung that still 429s is graded
+> INADMISSIBLE (reason `rate_limited`) — see §5 note on `--limiter-note`.
+
+### 6E. Reading the NIC accounting fields (HEA-2014)
+
+Each rung in the artifact now contains generator-side NIC counters:
+
+| Field | What it means |
+|---|---|
+| `attribution.generator_softnet_dropped` | kernel drops at generator NIC (must be 0) |
+| `attribution.softnet_drops_zero` | `true` iff drops = 0; `false` ⇒ INADMISSIBLE |
+| `attribution.generator_softnet_time_squeeze` | NAPI quota exhaustion events |
+| `attribution.generator_rx_pps` / `generator_tx_pps` | NIC packets/s |
+| `attribution.generator_time_wait` | TIME_WAIT socket count at rung end |
+| `attribution.generator_ephemeral_ports_ok` | `false` if TIME_WAIT > 95 % of range |
+| `generator_net_dev` | which NIC was sampled (artifact top level) |
+
+A rung with `softnet_drops_zero: false` or `generator_ephemeral_ports_ok: false`
+is graded INADMISSIBLE — the bottleneck was the generator NIC or port exhaustion,
+not Hearth. **Do not publish a knee from such a rung.**
+
+## 7. Measure the end-to-end plane (optional, second-order)
 
 ```bash
 MODE=steady USERS=500  RUN_TIME=60s make loadtest
@@ -150,7 +268,7 @@ non-loopback bind, so a second generator host cannot be wired in without a code
 change. On a 16 vCPU droplet expect the same shape as HEA-1989 §3: the read
 journeys pass, and the ceiling reported at 1,000 users is the *rig*, not Hearth.
 
-## 7. Land the evidence
+## 8. Land the evidence
 
 ```bash
 scp root@$DROPLET:/root/artifacts/*.json docs/perf/artifacts/
@@ -166,7 +284,7 @@ Then, in a normal PR:
    `HEA-1867-COMPETITIVE-COMPARISON.md` from the new envelope.
 4. Tell HEA-1968 exactly which rows it may quote.
 
-## 8. Destroy the droplet.
+## 9. Destroy both droplets.
 
 ---
 
@@ -178,6 +296,9 @@ Then, in a normal PR:
 | `vmstat` `st` | 0 | catches hypervisor steal (invisible to loadavg) |
 | fixed-work probe | ±2% across the sweep | catches clock movement without `cpufreq` |
 | generator headroom | ≥ 2.0× (`MIN_GENERATOR_HEADROOM`) | catches generator-bound rows |
+| softnet drops | 0 per rung | catches generator NIC saturation (HEA-2014) |
+| TIME_WAIT sockets | < 95 % of port range | catches ephemeral port exhaustion (HEA-2014) |
 
-The first three are host truth; the fourth is per-row admissibility. HEA-1967
-failed because only the fourth existed.
+The first three are host truth; the fourth through sixth are per-rung admissibility.
+HEA-1967 failed because only the fourth existed. HEA-2014 adds five and six to
+prevent a generator NIC or port exhaustion ceiling from being reported as Hearth's knee.

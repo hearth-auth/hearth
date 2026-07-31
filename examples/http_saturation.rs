@@ -557,6 +557,24 @@ struct Attribution {
     /// True when the rung saw ≥1 HTTP 429 — the request shaper shed load, so the
     /// ceiling measured is Hearth's own limiter, not the server (HEA-2007).
     rate_limited_shed: bool,
+    // ── Generator NIC accounting (HEA-2014) ─────────────────────────────────
+    /// Kernel packets dropped at the generator NIC (softnet column 1 delta).
+    /// Non-zero ⇒ the NIC, not Hearth, was the bottleneck — INADMISSIBLE.
+    generator_softnet_dropped: u64,
+    /// Softnet `time_squeeze` events on the generator (CPU ran out of NAPI quota).
+    generator_softnet_time_squeeze: u64,
+    /// Generator NIC receive packets/s during the measurement window.
+    generator_rx_pps: f64,
+    /// Generator NIC transmit packets/s during the measurement window.
+    generator_tx_pps: f64,
+    /// TIME_WAIT socket count on the generator at rung end.
+    generator_time_wait: u64,
+    /// True when no packets were dropped at the generator NIC.
+    softnet_drops_zero: bool,
+    /// True when TIME_WAIT count is below 95 % of the ephemeral port range.
+    /// Exhaustion looks exactly like a server-side latency cliff.
+    generator_ephemeral_ports_ok: bool,
+    // ────────────────────────────────────────────────────────────────────────
     /// Overall grade for the rung.
     grade: String,
     /// Which conditions failed (empty when ADMISSIBLE).
@@ -570,6 +588,7 @@ fn classify(
     connect_or_transport_errors: u64,
     error_rate: f64,
     rate_limited: u64,
+    net: &NetDelta,
 ) -> Attribution {
     let server_cpu_pinned = server_cpu_pct.map(|c| c >= SERVER_PINNED_PCT);
     let generator_headroom_2x = generator_headroom >= MIN_GENERATOR_HEADROOM;
@@ -581,9 +600,26 @@ fn classify(
     // error-rate threshold and of whether a server-CPU sample is present (HEA-2007).
     let rate_limited_shed = rate_limited > 0;
 
+    // HEA-2014: generator-side NIC accounting.
+    // Any softnet drops mean the kernel discarded packets at the NIC — the ceiling
+    // is the generator's NIC, not Hearth. Hard-INADMISSIBLE independent of server
+    // CPU (outranks INCOMPLETE, same as rate_limited_shed).
+    let softnet_drops_zero = net.softnet_dropped == 0;
+    // TIME_WAIT exhaustion looks exactly like a server-side latency cliff. Gate at
+    // 95 % of the ephemeral port range. Fail-open when the range is unreadable
+    // (port_range_size == u64::MAX).
+    let generator_ephemeral_ports_ok = net.port_range_size == u64::MAX
+        || net.time_wait < net.port_range_size * 95 / 100;
+
     let mut failing = Vec::new();
     if rate_limited_shed {
         failing.push("rate_limited".to_string());
+    }
+    if !softnet_drops_zero {
+        failing.push("generator_softnet_drops".to_string());
+    }
+    if !generator_ephemeral_ports_ok {
+        failing.push("generator_ephemeral_ports".to_string());
     }
     if !generator_headroom_2x {
         failing.push("generator_headroom_2x".to_string());
@@ -603,6 +639,11 @@ fn classify(
         // INADMISSIBLE even without a server-CPU sample (so it outranks
         // INCOMPLETE) — a shed rung can therefore never be a knee (HEA-2007).
         "INADMISSIBLE".to_string()
+    } else if !softnet_drops_zero || !generator_ephemeral_ports_ok {
+        // Generator NIC or port exhaustion is the ceiling — rig-bound. Hard
+        // INADMISSIBLE: we know the generator is the bottleneck independent of
+        // whether the server CPU sample is present (HEA-2014).
+        "INADMISSIBLE".to_string()
     } else if server_cpu_pct.is_none() {
         // Can't confirm the server saturated: incomplete, never silently ADMISSIBLE.
         "INCOMPLETE".to_string()
@@ -620,6 +661,13 @@ fn classify(
         transport_clean,
         degrading_by_queueing,
         rate_limited_shed,
+        generator_softnet_dropped: net.softnet_dropped,
+        generator_softnet_time_squeeze: net.softnet_time_squeeze,
+        generator_rx_pps: net.rx_pps,
+        generator_tx_pps: net.tx_pps,
+        generator_time_wait: net.time_wait,
+        softnet_drops_zero,
+        generator_ephemeral_ports_ok,
         grade,
         failing_conditions: failing,
     }
@@ -701,6 +749,144 @@ fn num_cpus() -> usize {
     thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+// ── Generator network accounting (host B, /proc and /sys) ────────────────────
+
+/// Raw network counters on the generator host, captured at a single instant.
+struct NetSnapshot {
+    softnet_dropped: u64,
+    softnet_time_squeeze: u64,
+    rx_packets: u64,
+    tx_packets: u64,
+    time_wait: u64,
+}
+
+impl NetSnapshot {
+    fn capture(dev: &str) -> Self {
+        let (softnet_dropped, softnet_time_squeeze) = read_softnet_stat();
+        Self {
+            softnet_dropped,
+            softnet_time_squeeze,
+            rx_packets: read_net_stat(dev, "rx_packets"),
+            tx_packets: read_net_stat(dev, "tx_packets"),
+            time_wait: read_time_wait(),
+        }
+    }
+}
+
+/// Generator-side network accounting derived over the measurement window.
+///
+/// `Default` is provided for unit tests and environments where `/proc` is absent.
+/// In production, these values are always computed from real snapshots.
+struct NetDelta {
+    softnet_dropped: u64,
+    softnet_time_squeeze: u64,
+    /// Receive packets/s on the generator NIC during this rung.
+    rx_pps: f64,
+    /// Transmit packets/s on the generator NIC during this rung.
+    tx_pps: f64,
+    time_wait: u64,
+    /// Ephemeral port range size; `u64::MAX` when unreadable (fails open).
+    port_range_size: u64,
+}
+
+impl Default for NetDelta {
+    fn default() -> Self {
+        Self {
+            softnet_dropped: 0,
+            softnet_time_squeeze: 0,
+            rx_pps: 0.0,
+            tx_pps: 0.0,
+            time_wait: 0,
+            port_range_size: u64::MAX,
+        }
+    }
+}
+
+/// Reads `/proc/net/softnet_stat`, returning `(total_dropped, total_time_squeeze)`
+/// summed across all CPUs.
+///
+/// `/proc/net/softnet_stat` format (hex values, one row per CPU):
+/// column 0 = total frames received, column 1 = dropped (NIC ring-buffer overflow),
+/// column 2 = time_squeeze (kernel ran out of NAPI quota). Non-zero dropped means
+/// the kernel discarded packets at the NIC layer — the rung is measuring the NIC
+/// ceiling, not Hearth's.
+fn read_softnet_stat() -> (u64, u64) {
+    let s = match std::fs::read_to_string("/proc/net/softnet_stat") {
+        Ok(s) => s,
+        Err(_) => return (0, 0),
+    };
+    let mut dropped = 0u64;
+    let mut time_squeeze = 0u64;
+    for line in s.lines() {
+        let mut cols = line.split_whitespace();
+        cols.next(); // column 0: total (skip)
+        if let Some(d) = cols.next().and_then(|v| u64::from_str_radix(v, 16).ok()) {
+            dropped += d;
+        }
+        if let Some(t) = cols.next().and_then(|v| u64::from_str_radix(v, 16).ok()) {
+            time_squeeze += t;
+        }
+    }
+    (dropped, time_squeeze)
+}
+
+/// Reads `/sys/class/net/<dev>/statistics/<stat>`.
+fn read_net_stat(dev: &str, stat: &str) -> u64 {
+    let path = format!("/sys/class/net/{dev}/statistics/{stat}");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Returns the primary network interface name (the one carrying the default route).
+///
+/// Reads `/proc/net/route` and returns the interface whose destination is
+/// `00000000` (the default route). Falls back to `"eth0"` if unreadable.
+fn primary_net_dev() -> String {
+    let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+    for line in route.lines().skip(1) {
+        let mut f = line.split_whitespace();
+        let Some(iface) = f.next() else { continue };
+        let Some(dest) = f.next() else { continue };
+        if dest == "00000000" {
+            return iface.to_string();
+        }
+    }
+    "eth0".to_string()
+}
+
+/// Returns the current TIME_WAIT socket count from `/proc/net/sockstat`.
+///
+/// FORMAT: `TCP: inuse N orphan N tw N alloc N mem N`
+fn read_time_wait() -> u64 {
+    let s = std::fs::read_to_string("/proc/net/sockstat").unwrap_or_default();
+    for line in s.lines() {
+        if !line.starts_with("TCP:") {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        while let Some(key) = parts.next() {
+            if key == "tw" {
+                if let Some(val) = parts.next().and_then(|v| v.parse::<u64>().ok()) {
+                    return val;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Returns the number of ports in the ephemeral range from
+/// `/proc/sys/net/ipv4/ip_local_port_range`.
+fn read_ephemeral_port_range_size() -> u64 {
+    let s = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap_or_default();
+    let mut parts = s.split_whitespace();
+    let low: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(32768);
+    let high: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(60999);
+    high.saturating_sub(low) + 1
 }
 
 /// Reads the last whitespace/newline-delimited float from the server-cpu file.
@@ -942,6 +1128,7 @@ fn run_rung(
     warmup: Duration,
     hold: Duration,
     conns: usize,
+    net_dev: &str,
     server_cpu_file: &Option<String>,
 ) -> RungResult {
     let backlog = Arc::new(Backlog {
@@ -1024,6 +1211,8 @@ fn run_rung(
     let cpu_start = process_cpu_seconds();
     let mut cpu_measure_start = cpu_start;
     let mut measure_wall_start = start;
+    // HEA-2014: network snapshot taken at measurement start, delta computed at end.
+    let mut net_snapshot_start: Option<NetSnapshot> = None;
     let mut i: u64 = 0;
     let mut turned_on = false;
     loop {
@@ -1036,6 +1225,7 @@ fn run_rung(
             measuring.store(true, Ordering::Relaxed);
             cpu_measure_start = process_cpu_seconds();
             measure_wall_start = Instant::now();
+            net_snapshot_start = Some(NetSnapshot::capture(net_dev));
             turned_on = true;
         }
         let target_time = start + interval.mul_f64(i as f64);
@@ -1087,6 +1277,32 @@ fn run_rung(
     let denom = (completed + connect_errors + transport_errors).max(1);
     let error_rate = (non_2xx + connect_errors + transport_errors) as f64 / denom as f64;
 
+    // HEA-2014: compute generator NIC delta over the measurement window.
+    let net_delta = match net_snapshot_start {
+        Some(start_snap) => {
+            let end_snap = NetSnapshot::capture(net_dev);
+            NetDelta {
+                softnet_dropped: end_snap
+                    .softnet_dropped
+                    .saturating_sub(start_snap.softnet_dropped),
+                softnet_time_squeeze: end_snap
+                    .softnet_time_squeeze
+                    .saturating_sub(start_snap.softnet_time_squeeze),
+                rx_pps: end_snap
+                    .rx_packets
+                    .saturating_sub(start_snap.rx_packets) as f64
+                    / measure_wall,
+                tx_pps: end_snap
+                    .tx_packets
+                    .saturating_sub(start_snap.tx_packets) as f64
+                    / measure_wall,
+                time_wait: end_snap.time_wait,
+                port_range_size: read_ephemeral_port_range_size(),
+            }
+        }
+        None => NetDelta::default(),
+    };
+
     let server_cpu_pct = read_server_cpu(server_cpu_file);
     let attribution = classify(
         server_cpu_pct,
@@ -1094,6 +1310,7 @@ fn run_rung(
         connect_errors + transport_errors,
         error_rate,
         rate_limited,
+        &net_delta,
     );
 
     RungResult {
@@ -1162,6 +1379,13 @@ fn real_main() -> Result<(), String> {
     let server_cpu_file = arg(&args, "--server-cpu-file");
     let login_password = arg(&args, "--login-password").unwrap_or_default();
     let allow_loopback = args.iter().any(|a| a == "--allow-loopback");
+    // HEA-2014: loopback control run — measures the read plane over loopback on
+    // the server droplet before the 2-host sweep. Same binary, same config. The
+    // delta between the loopback number and the two-host number attributes the
+    // difference to 'real wire + slower cores' vs 'co-residency', breaking the
+    // confound that changing two variables (machine class AND network transport)
+    // would otherwise leave.
+    let loopback_control = args.iter().any(|a| a == "--loopback-control");
     // Operator-supplied record of the measured host's shaper setting (HEA-2007):
     // e.g. `--limiter-note "request_shaper ip_rps=200000 realm_rps=200000"`. Echoed
     // verbatim into the artifact so the chosen setting is captured alongside the run.
@@ -1184,11 +1408,12 @@ fn real_main() -> Result<(), String> {
     }
     let (authority, host) = parse_authority(&target_url)?;
 
-    if target_is_loopback(&authority) && !allow_loopback {
+    if target_is_loopback(&authority) && !allow_loopback && !loopback_control {
         return Err(format!(
             "target {authority} resolves to loopback — generator and server would be co-resident, \
              which is the exact ceiling HEA-1997 requires two hosts to avoid. Refusing to grade. \
-             Pass --allow-loopback ONLY for a smoke test (the artifact will be stamped ungradable)."
+             Pass --loopback-control to run the loopback baseline (stamped run_type=loopback_control), \
+             or --allow-loopback for a smoke test (stamped run_type=loopback_smoke, ungradable)."
         ));
     }
 
@@ -1204,6 +1429,10 @@ fn real_main() -> Result<(), String> {
 
     let corpus = Arc::new(build_corpus(plane, &target, &handle)?);
 
+    // HEA-2014: detect the generator's primary NIC once; reused across rungs.
+    let net_dev = primary_net_dev();
+    eprintln_stderr(&format!("[net] generator primary NIC: {net_dev}"));
+
     let mut results = Vec::new();
     for &rate in &rungs {
         eprintln_stderr(&format!(
@@ -1217,6 +1446,7 @@ fn real_main() -> Result<(), String> {
             warmup,
             hold,
             conns,
+            &net_dev,
             &server_cpu_file,
         );
         // Name the shedding limiter inline: the operator's next action is to
@@ -1244,8 +1474,20 @@ fn real_main() -> Result<(), String> {
         }
     }
 
+    let run_type = if loopback_control {
+        "loopback_control"
+    } else if allow_loopback {
+        "loopback_smoke"
+    } else {
+        "two_host"
+    };
+
     let artifact = serde_json::json!({
         "schema": "hea-1997-saturation-1",
+        // HEA-2014: two_host = normal 2-host rig run; loopback_control = baseline
+        // measured over loopback on the server droplet (same binary, same config,
+        // same rungs) to attribute the delta between the loopback and 2-host numbers.
+        "run_type": run_type,
         "plane": plane.label(),
         "is_kdf_benchmark": plane.is_kdf(),
         "kdf_label": if plane.is_kdf() {
@@ -1271,6 +1513,8 @@ fn real_main() -> Result<(), String> {
         // 200x above the top rung.
         "rate_limited_by_total": rate_limited_by_total,
         "generator_cores": num_cpus(),
+        // HEA-2014: the NIC whose softnet/pps counters appear in each rung's attribution.
+        "generator_net_dev": net_dev,
         "conns": conns,
         "warmup_s": warmup.as_secs(),
         "hold_s": hold.as_secs(),
@@ -1284,7 +1528,8 @@ fn real_main() -> Result<(), String> {
             "Open-loop fixed-rate ramp; latency is coordinated-omission-corrected \
              (measured from intended send time).",
             "A rung is ADMISSIBLE only when server CPU is pinned, generator headroom \
-             >= 2x, transport is clean, and degradation is by queueing not errors.",
+             >= 2x, softnet drops are zero, ephemeral ports are not exhausted, \
+             transport is clean, and degradation is by queueing not errors.",
             "INCOMPLETE = no --server-cpu-file, so server saturation is unconfirmed; \
              never treat an INCOMPLETE rung as a published capacity number.",
             "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): a limiter \
@@ -1294,7 +1539,16 @@ fn real_main() -> Result<(), String> {
              security.request_shaper, `admin` = security.rate_limiting.admin_per_minute, \
              `token` = security.rate_limiting.token_per_minute, `export` = \
              security.backup.export_rate_limit. `unattributed` means the server \
-             predates the tagging — upgrade it before trusting the split."
+             predates the tagging — upgrade it before trusting the split.",
+            "HEA-2014 NIC accounting: `attribution.generator_softnet_dropped` is \
+             the kernel drop count at the generator NIC during the rung. Non-zero \
+             ⇒ INADMISSIBLE (reason `generator_softnet_drops`): the NIC, not Hearth, \
+             was the bottleneck. `generator_rx_pps`/`generator_tx_pps` give pps \
+             context. `generator_time_wait` near the port range ⇒ TIME_WAIT \
+             exhaustion: INADMISSIBLE (reason `generator_ephemeral_ports`).",
+            "run_type: two_host = 2-host rig (gradable); loopback_control = loopback \
+             baseline on the server droplet (for attribution only, never a knee); \
+             loopback_smoke = --allow-loopback smoke test (ungradable)."
         ]
     });
 
@@ -1368,7 +1622,7 @@ mod tests {
 
     #[test]
     fn classify_admissible_when_all_conditions_met() {
-        let a = classify(Some(95.0), 3.0, 0, 0.0, 0);
+        let a = classify(Some(95.0), 3.0, 0, 0.0, 0, &NetDelta::default());
         assert_eq!(a.grade, "ADMISSIBLE");
         assert!(a.failing_conditions.is_empty());
         assert_eq!(a.server_cpu_pinned, Some(true));
@@ -1377,14 +1631,14 @@ mod tests {
     #[test]
     fn classify_incomplete_without_server_cpu() {
         // Even with a perfect generator-side picture, no server CPU ⇒ INCOMPLETE.
-        let a = classify(None, 5.0, 0, 0.0, 0);
+        let a = classify(None, 5.0, 0, 0.0, 0, &NetDelta::default());
         assert_eq!(a.grade, "INCOMPLETE");
     }
 
     #[test]
     fn classify_inadmissible_on_generator_ceiling() {
         // Generator itself is the bottleneck (headroom < 2x): inadmissible.
-        let a = classify(Some(70.0), 1.2, 0, 0.0, 0);
+        let a = classify(Some(70.0), 1.2, 0, 0.0, 0, &NetDelta::default());
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a
             .failing_conditions
@@ -1399,7 +1653,7 @@ mod tests {
     #[test]
     fn classify_inadmissible_on_error_cliff() {
         // Server pinned & generator clear, but the ceiling is an error cliff.
-        let a = classify(Some(99.0), 4.0, 0, 0.20, 0);
+        let a = classify(Some(99.0), 4.0, 0, 0.20, 0, &NetDelta::default());
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a
             .failing_conditions
@@ -1409,7 +1663,7 @@ mod tests {
 
     #[test]
     fn classify_inadmissible_on_transport_errors() {
-        let a = classify(Some(99.0), 4.0, 5, 0.0, 0);
+        let a = classify(Some(99.0), 4.0, 5, 0.0, 0, &NetDelta::default());
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a.failing_conditions.iter().any(|c| c == "transport_clean"));
     }
@@ -1419,10 +1673,80 @@ mod tests {
         // A perfectly-attributed rung (server pinned, generator clear, transport
         // clean) with a single 429 whose error rate is *under* MAX_ERROR_RATE must
         // still be INADMISSIBLE — the shaper shed load, so it measured the limiter.
-        let a = classify(Some(99.0), 4.0, 0, MAX_ERROR_RATE / 2.0, 1);
+        let a = classify(Some(99.0), 4.0, 0, MAX_ERROR_RATE / 2.0, 1, &NetDelta::default());
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a.rate_limited_shed);
         assert!(a.failing_conditions.iter().any(|c| c == "rate_limited"));
+    }
+
+    #[test]
+    fn classify_inadmissible_on_softnet_drops() {
+        // Non-zero softnet drops: the generator NIC is the bottleneck — hard INADMISSIBLE.
+        let net = NetDelta {
+            softnet_dropped: 42,
+            softnet_time_squeeze: 0,
+            rx_pps: 15_000.0,
+            tx_pps: 15_000.0,
+            time_wait: 100,
+            port_range_size: 28_232,
+        };
+        let a = classify(Some(99.0), 4.0, 0, 0.0, 0, &net);
+        assert_eq!(a.grade, "INADMISSIBLE");
+        assert!(a
+            .failing_conditions
+            .iter()
+            .any(|c| c == "generator_softnet_drops"),
+            "expected generator_softnet_drops in {:?}", a.failing_conditions);
+        assert!(!a.softnet_drops_zero);
+    }
+
+    #[test]
+    fn classify_inadmissible_on_ephemeral_port_exhaustion() {
+        // TIME_WAIT at 96% of the port range: exhaustion is the ceiling.
+        let range_size = 28_232u64;
+        let net = NetDelta {
+            softnet_dropped: 0,
+            softnet_time_squeeze: 0,
+            rx_pps: 10_000.0,
+            tx_pps: 10_000.0,
+            time_wait: range_size * 96 / 100 + 1,
+            port_range_size: range_size,
+        };
+        let a = classify(Some(99.0), 4.0, 0, 0.0, 0, &net);
+        assert_eq!(a.grade, "INADMISSIBLE");
+        assert!(a
+            .failing_conditions
+            .iter()
+            .any(|c| c == "generator_ephemeral_ports"),
+            "expected generator_ephemeral_ports in {:?}", a.failing_conditions);
+        assert!(!a.generator_ephemeral_ports_ok);
+    }
+
+    #[test]
+    fn classify_softnet_inadmissible_outranks_incomplete() {
+        // Softnet drops hard-INADMISSIBLE even without a server-CPU sample —
+        // the generator NIC is the ceiling regardless of server state.
+        let net = NetDelta {
+            softnet_dropped: 1,
+            ..NetDelta::default()
+        };
+        let a = classify(None, 5.0, 0, 0.0, 0, &net);
+        assert_eq!(a.grade, "INADMISSIBLE");
+        assert!(a.failing_conditions.iter().any(|c| c == "generator_softnet_drops"));
+    }
+
+    #[test]
+    fn classify_ephemeral_ports_fail_open_when_range_unknown() {
+        // port_range_size == u64::MAX means we could not read the range — must not
+        // penalise the rung for something we cannot measure.
+        let net = NetDelta {
+            time_wait: 50_000,
+            port_range_size: u64::MAX,
+            ..NetDelta::default()
+        };
+        let a = classify(Some(95.0), 3.0, 0, 0.0, 0, &net);
+        assert_eq!(a.grade, "ADMISSIBLE");
+        assert!(a.generator_ephemeral_ports_ok);
     }
 
     // ── 429 attribution (HEA-2010) ───────────────────────────────────────────
@@ -1488,7 +1812,7 @@ mod tests {
     fn classify_429_outranks_incomplete_without_server_cpu() {
         // No server-CPU sample would normally give INCOMPLETE, but a 429 is a hard
         // INADMISSIBLE — otherwise a shed rung could sneak past as "not yet graded".
-        let a = classify(None, 5.0, 0, 0.0, 3);
+        let a = classify(None, 5.0, 0, 0.0, 3, &NetDelta::default());
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a.failing_conditions.iter().any(|c| c == "rate_limited"));
     }
@@ -1508,7 +1832,7 @@ mod tests {
             p50_ms: 1.0,
             p99_ms: 2.0,
             p999_ms: 3.0,
-            attribution: classify(Some(95.0), 4.0, 0, err, 0),
+            attribution: classify(Some(95.0), 4.0, 0, err, 0, &NetDelta::default()),
         }
     }
 
@@ -1518,7 +1842,7 @@ mod tests {
         // be excluded from knee detection (HEA-2007 AC: shed rung never ADMISSIBLE).
         let mut shed = rung(1000, 1000.0, "ADMISSIBLE", 0.0);
         shed.rate_limited = 42;
-        shed.attribution = classify(Some(99.0), 4.0, 0, 0.0, 42);
+        shed.attribution = classify(Some(99.0), 4.0, 0, 0.0, 42, &NetDelta::default());
         let rungs = vec![rung(500, 500.0, "ADMISSIBLE", 0.0), shed];
         // The only keeping-up rung with a valid grade is index 0, not the shed rung.
         assert_eq!(detect_knee(&rungs), Some(0));
@@ -1540,7 +1864,7 @@ mod tests {
     #[test]
     fn knee_none_when_no_rung_admissible() {
         let mut r = rung(500, 500.0, "ADMISSIBLE", 0.30);
-        r.attribution = classify(Some(50.0), 1.0, 3, 0.30, 0);
+        r.attribution = classify(Some(50.0), 1.0, 3, 0.30, 0, &NetDelta::default());
         assert_eq!(detect_knee(&[r]), None);
     }
 
