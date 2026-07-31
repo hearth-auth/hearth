@@ -21,7 +21,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **`security.rate_limiting.admin_per_minute` and `security.rate_limiting.token_per_minute`
   config keys (HEA-2010)** — the admin-API cap (previously a compiled-in 100 requests per
-  minute per admin user, shared by REST and gRPC) and the OAuth token/introspection cap
+  minute per admin user, shared by REST, gRPC **and** SCIM — SCIM buckets on the realm
+  UUID, so `admin_per_minute: 0` also removes SCIM's only rate limit) and the OAuth
+  token/introspection cap
   (previously a compiled-in 200 per minute per `(realm, client)`) are now operator-tunable.
   Setting either to `0` disables that limiter entirely. Unlike
   `security.load_test_unthrottled`, these are ordinary thresholds and are **not** gated on

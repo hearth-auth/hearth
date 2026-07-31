@@ -304,10 +304,19 @@ constants with no config key until HEA-2010:
 | Limiter | Scope | Default | Config key |
 |---|---|---|---|
 | `RequestShaper` | per source IP / per realm | 100 rps / 1 000 rps | `security.request_shaper.{ip_rps,realm_rps}` |
-| `AdminRateLimiter` | per admin user, REST **and** gRPC | 100 / min | `security.rate_limiting.admin_per_minute` |
+| `AdminRateLimiter` | per admin user, REST **and** gRPC; **also SCIM**, keyed on realm UUID | 100 / min | `security.rate_limiting.admin_per_minute` |
 | `TokenRateLimiter` | per `(realm, client)`, `/token` + `/introspect` | 200 / min | `security.rate_limiting.token_per_minute` |
 
 Set the last two to `0` (§3). They are **not** dev-gated, so they apply in phase 3B.
+
+**Coupling to know before you zero the admin cap:** SCIM shares the *same*
+`AdminRateLimiter` instance (`src/protocol/scim/auth.rs` `check_scim_rate_limit`),
+bucketed on the realm UUID rather than an admin user. So
+`admin_per_minute: 0` removes SCIM's only rate limit too. That is acceptable on a
+throwaway saturation rig; do **not** carry the zero into a production config.
+SCIM's 429 returns a `ScimError` (SCIM's own error envelope, no `limiter` field),
+so a SCIM shed lands in the harness's `unattributed` bucket — no saturation plane
+touches SCIM, so this cannot confound a read/login/issuance run.
 
 **Diagnostic worth keeping:** a shed fraction that is *flat* across a wide sweep
 is a **fixed cap**, not a rate limiter — a limiter tracking offered load sheds a
