@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —
+  config loading happens before the tracing subscriber is installed, so the failure was
+  reported through `tracing::error!` and written nowhere: an operator whose `hearth.yaml`
+  was missing a production-only field (e.g. `oidc.issuer`) got exit code 1 with no stdout
+  and no stderr, while `hearth config validate` on the same file printed a perfect
+  field-level report. `serve` now writes that same field-level diagnostic to stderr before
+  exiting. The same pre-subscriber path also swallowed the env-var config-warning
+  safety-net, the `HostKeyMismatch` KEK-recovery message, and `config validate`'s YAML
+  parse errors; all four now reach stderr. (HEA-2011)
+
 ### Changed
 - **Every rate-limiter `429` now names the limiter that shed the request (HEA-2010)** —
   the JSON body carries an additive `limiter` field: `"shaper"`

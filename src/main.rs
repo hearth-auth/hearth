@@ -411,8 +411,10 @@ async fn main() {
             )
             .await
             {
-                // Use eprintln! here — tracing may not be initialized yet if
-                // the error occurred during config loading.
+                // Route through report_startup_fatal — tracing may not be
+                // initialized yet if the error occurred during config loading,
+                // in which case a bare `tracing::error!` writes nowhere and the
+                // operator sees only the exit code (HEA-2011).
                 //
                 // HostKeyMismatch requires exit code 2 and an actionable message
                 // so operators know exactly how to recover.
@@ -423,19 +425,19 @@ async fn main() {
                         } = *storage_err
                         {
                             let realms = affected_realms.join(", ");
-                            tracing::error!(
+                            report_startup_fatal(&format!(
                                 "FATAL: Realm KEKs could not be decrypted with the current \
                                  HEARTH_MASTER_KEY.\nIf you recently rotated the master key, \
                                  set HEARTH_PREVIOUS_MASTER_KEY to the previous value. If the \
                                  previous key is unavailable, restore from backup.\n\
                                  Affected realms: {realms}"
-                            );
+                            ));
                             std::process::exit(2);
                         }
-                        tracing::error!("error: {storage_err}");
+                        report_startup_fatal(&format!("error: {storage_err}"));
                     }
                     Err(other) => {
-                        tracing::error!("error: {other}");
+                        report_startup_fatal(&format!("error: {other}"));
                     }
                 }
                 std::process::exit(1);
@@ -781,8 +783,21 @@ async fn run_serve(
     verbose: bool,
     allow_reflection_in_prod: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Load configuration
-    let mut config = load_config(dev, config_path.as_deref())?;
+    // Load configuration. This runs before `telemetry::init` below, so a
+    // failure here cannot be reported through `tracing` — write the same
+    // field-level diagnostic `hearth config validate` produces to stderr
+    // instead, or `serve` exits 1 with no output at all (HEA-2011).
+    let mut config = match load_config(dev, config_path.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            if let Some(path) = effective_config_path(config_path.as_deref()) {
+                if let Err(report) = config_validation_report(&path, dev) {
+                    report_startup_fatal(report.trim_end());
+                }
+            }
+            return Err(e);
+        }
+    };
     let serve_start = std::time::Instant::now();
 
     // Apply CLI overrides. `--bind` may be a bare host (`127.0.0.1`) or a
@@ -817,10 +832,10 @@ async fn run_serve(
                 .map(|w| w.var_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::error!(
+            report_startup_fatal(&format!(
                 "[hearth] {n} env-var config warnings; vars: {preview} and {} more",
                 n - 3
-            );
+            ));
         } else {
             let inline = config
                 .config_warnings
@@ -828,7 +843,7 @@ async fn run_serve(
                 .map(|w| format!("{} ({})", w.var_name, w.kind_label()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::error!("[hearth] config warnings: {inline}");
+            report_startup_fatal(&format!("[hearth] config warnings: {inline}"));
         }
     }
 
@@ -3181,6 +3196,20 @@ async fn run_serve_tls(
 }
 
 /// Loads configuration from file, dev mode, or defaults.
+/// Resolves the config file [`load_config`] would actually read.
+///
+/// Mirrors that function's resolution order: an explicit `-c` path wins, then
+/// a `hearth.yaml` in the working directory. Returns `None` when neither
+/// exists, i.e. when the config came from a built-in preset and there is no
+/// file to re-validate for diagnostics.
+fn effective_config_path(config_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    if let Some(path) = config_path {
+        return Some(path.to_path_buf());
+    }
+    let default_path = std::path::Path::new("hearth.yaml");
+    default_path.exists().then(|| default_path.to_path_buf())
+}
+
 fn load_config(
     dev: bool,
     config_path: Option<&std::path::Path>,
@@ -4113,21 +4142,24 @@ fn mime_for_logo(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Runs the `hearth config validate` command.
+/// Validates `file` the way `hearth config validate` does, returning either the
+/// parsed config or the field-level diagnostic report.
 ///
-/// Uses the all-collecting validator so every problem is reported in one pass.
-/// Exits 0 on success (with a human-readable summary) and 1 on any error.
-fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse without short-circuit so we can collect every issue.
-    let config = match Config::from_file_unchecked(file) {
+/// Uses the non-short-circuiting parser so every problem is collected in one
+/// pass. Callers on a failure path can print the `Err` verbatim; a clean `Ok`
+/// tells them the config itself was not the problem.
+///
+/// `force_dev` applies the same relaxations `--dev` does (`dev_mode`, no
+/// `fsync`) so the report matches the rules the caller was validated under.
+fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<Config, String> {
+    let mut config = match Config::from_file_unchecked(file) {
         Ok(c) => c,
-        Err(e) => {
-            tracing::error!("✗ Configuration invalid");
-            tracing::error!("");
-            tracing::error!("  parse error: {e}");
-            return Err("configuration validation failed".into());
-        }
+        Err(e) => return Err(format!("✗ Configuration invalid\n\n  parse error: {e}\n")),
     };
+    if force_dev {
+        config.dev_mode = true;
+        config.storage.fsync = false;
+    }
 
     // Collect all structural issues in one pass.
     let mut issues = config.validate_all();
@@ -4152,20 +4184,52 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
     }
 
     if issues.is_empty() {
-        println!("✓ Configuration valid");
-        println!();
-        config_validate_print_summary(&config);
-        Ok(())
-    } else {
-        eprintln!("✗ Configuration invalid — {} error(s):", issues.len());
-        eprintln!();
-        for issue in &issues {
-            eprintln!("  {}: {}", issue.field, issue.reason);
-            if let Some(hint) = config_validate_hint(&issue.field, &issue.reason) {
-                eprintln!("    → {hint}");
-            }
+        return Ok(config);
+    }
+
+    let mut report = format!("✗ Configuration invalid — {} error(s):\n\n", issues.len());
+    for issue in &issues {
+        report.push_str(&format!("  {}: {}\n", issue.field, issue.reason));
+        if let Some(hint) = config_validate_hint(&issue.field, &issue.reason) {
+            report.push_str(&format!("    → {hint}\n"));
         }
-        Err("configuration validation failed".into())
+    }
+    Err(report)
+}
+
+/// Emits a fatal startup message so it is visible even before tracing is up.
+///
+/// Config loading happens before `telemetry::init` installs the subscriber, so
+/// a `tracing::error!` on that path writes the message nowhere and the process
+/// exits 1 in total silence (HEA-2011). Writes straight to stderr when no
+/// global subscriber has been set; otherwise defers to `tracing` so structured
+/// sinks keep the record.
+fn report_startup_fatal(msg: &str) {
+    if tracing::dispatcher::has_been_set() {
+        tracing::error!("{msg}");
+    } else {
+        eprintln!("{msg}");
+    }
+}
+
+/// Runs the `hearth config validate` command.
+///
+/// Uses the all-collecting validator so every problem is reported in one pass.
+/// Exits 0 on success (with a human-readable summary) and 1 on any error.
+fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    match config_validation_report(file, false) {
+        Ok(config) => {
+            println!("✓ Configuration valid");
+            println!();
+            config_validate_print_summary(&config);
+            Ok(())
+        }
+        Err(report) => {
+            // No tracing subscriber is installed for the `config` subcommand,
+            // so the diagnostic must go to stderr directly.
+            eprint!("{report}");
+            Err("configuration validation failed".into())
+        }
     }
 }
 

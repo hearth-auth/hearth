@@ -97,16 +97,26 @@ on the private interface for the measured run. The two phases share **one
 `hearth.yaml`** so the on-disk corpus written in phase 3A is readable in phase 3B.
 
 **Config parity is load-bearing.** `serve --dev -c hearth.yaml` preserves
-`storage.data_dir` and `security.key_encryption_key` from the file and only flips
-`dev_mode=true` + `storage.fsync=false` (`Config::from_file_as_dev`). If the KEK or
-`data_dir` differed between the two phases, the persisted Ed25519 signing keys would
-not decrypt and every seeded token would fail validation after the restart. So the
-`hearth.yaml` you use **must** pin both, and both phases must use the **same file**:
+`storage.data_dir`, `security.key_encryption_key` and `oidc.issuer` from the file and
+only flips `dev_mode=true` + `storage.fsync=false` (`Config::from_file_as_dev`). If the
+KEK or `data_dir` differed between the two phases, the persisted Ed25519 signing keys
+would not decrypt and every seeded token would fail validation after the restart; if
+`oidc.issuer` differed, the phase-3A-minted tokens would carry an `iss` the phase-3B
+server rejects. So the `hearth.yaml` you use **must** pin all three, and both phases
+must use the **same file**:
 
 ```yaml
 # hearth.yaml (excerpt) — both phases use THIS file
 storage:
   data_dir: /var/lib/hearth-loadtest      # persists across the mode switch
+oidc:
+  # HEA-2011: REQUIRED in phase 3B. Production-mode validation rejects a missing
+  # oidc.issuer, so `serve -c hearth.yaml` (no --dev) exits 1 without it — after
+  # the corpus is already seeded and the dev server stopped. Phase 3A (--dev)
+  # relaxes this check, which is exactly why the gap is invisible until 3B.
+  # It is also the issuer phase-3A-minted tokens validate against: same value,
+  # both phases.
+  issuer: https://hearth-loadtest.internal   # any stable absolute URL; need not resolve
 security:
   key_encryption_key: ${HEARTH_KEK}       # identical in both phases (env-substituted)
   # HEA-2007: the shipped shaper defaults (ip_rps 100 / realm_rps 1000) shed every
@@ -164,20 +174,40 @@ server as a credential and you supply it to the harness separately (§5).
 
 ### 3B. Serve phase — NO `--dev`, private interface
 
+Production mode enforces two prerequisites that phase 3A's `--dev` relaxes. Both are
+in §3's config/env above; **check them before you stop the dev server**, because a
+failure here lands after the corpus is seeded:
+
+- `oidc.issuer` must be set (§3 config excerpt).
+- `HEARTH_SMS_OTP_HMAC_KEY` must be exported (≥ 32 bytes) whenever a real SMS
+  transport is configured.
+
 ```bash
-# Same config file, same data_dir + KEK, but production mode: the /dev/* and
-# /admin/bootstrap routes are absent, and the bind may be non-loopback.
+# Pre-flight: `config validate` runs the same production-mode validator `serve`
+# does and prints a field-level report. Do this while phase 3A is still up.
+./target/release/hearth config validate hearth.yaml   # expect: ✓ Configuration valid
+
+# Same config file, same data_dir + KEK + issuer, but production mode: the /dev/*
+# and /admin/bootstrap routes are absent, and the bind may be non-loopback.
 export HEARTH_KEK=...                      # same value as phase 3A
+export HEARTH_SMS_OTP_HMAC_KEY=...         # ≥32 bytes; only needed for a real SMS transport
 ./target/release/hearth serve -c hearth.yaml --bind 0.0.0.0:8420 &
 
 # REQUIRED smoke check — prove the corpus survived the mode switch before you
 # spend droplet-hours. Pick any live token from the seed handle and introspect it
-# over loopback on host A. `active:true` ⇒ KEK/data_dir parity held; anything else
-# ⇒ fix config parity (§3) before running the ramp.
+# over loopback on host A. `active:true` ⇒ KEK/data_dir/issuer parity held; anything
+# else ⇒ fix config parity (§3) before running the ramp.
+#
+# HEA-2011: X-Realm-ID is REQUIRED. Without it /introspect returns HTTP 400
+# {"error":"missing X-Realm-ID header"} and `.active` is null — which reads as a
+# parity failure and sends you debugging a KEK that is in fact fine. /userinfo and
+# /admin/* take the same header.
 TOK=$(jq -r '[.realms[0].tokens[] | select(.revoked | not) | .access_token][0]' /shared/seed.json)
 CID=$(jq -r '.realms[0].client_id' /shared/seed.json)
+RID=$(jq -r '.realms[0].realm_id' /shared/seed.json)
 curl -sf -X POST http://127.0.0.1:8420/introspect \
   -H 'Content-Type: application/json' \
+  -H "X-Realm-ID: $RID" \
   -d "{\"token\":\"$TOK\",\"client_id\":\"$CID\"}" | jq '.active'   # expect: true
 ```
 
