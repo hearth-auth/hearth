@@ -10,30 +10,38 @@ when the artifacts are copied back.
 
 ---
 
-## 0. Prerequisite — do NOT rent before this lands
+## 0. Host-class gate — satisfied (landed in `480e9829`)
 
-`HostProfile::non_server_class_reasons()` (`examples/support/hostenv.rs:127-152`)
-currently raises a **hard** host-class objection when:
+> **Branch provenance.** `480e9829` is on `feature/more-performance-fixes` (this
+> runbook's branch) and is **not yet merged to `main`**. `main` still carries the
+> old attribute-reading gate, under which every droplet run would be stamped
+> `publishable: false`. §4 says to pin `<SHA-under-test>` — that SHA must be a
+> descendant of `480e9829`, or this section does not apply to your checkout.
+
+`HostProfile::non_server_class_reasons()` (`examples/support/hostenv.rs:235`)
+raises a host-class objection on **two conditions only**:
 
 | check | on a DigitalOcean CPU-Optimized droplet |
 |---|---|
-| `has_battery` | ✅ passes (no battery) |
-| `governor == "performance"` | ❌ **fails** — KVM guests do not expose `cpufreq` at all, so `governor` is `None` → `"clock stability unverifiable"` |
-| `isolated_cpus` non-empty | ❌ **fails** — `isolcpus=` is unset on a stock cloud image |
+| `has_battery` | ✅ structurally passes — a cloud instance has no battery |
+| `clock_probe.max_drift_pct > MAX_CLOCK_DRIFT_PCT` (2%) | ⏱️ **measured at run time** — expected to pass on a *dedicated* vCPU, but not verified by us on any droplet yet |
 
-Two hard objections ⇒ `publishable: false` on every run ⇒ the rental produces
-nothing citable. Land the gate change first (tracked separately):
+Neither objection is a pre-rental blocker, so **you can rent the rig now** —
+this section no longer says otherwise.
 
-- replace the `governor` *attribute* read with a **measured fixed-work probe**
-  (interleaved through the sweep; flat to ±2% ⇒ the clock did not move),
-- replace `isolcpus` with **measured steal time** (`/proc/stat` field 8 delta)
-  plus the existing foreign-process census,
-- keep `governor` / `isolcpus` in the artifact as *informational* fields.
+⚠️ The drift check is a *measurement, not a property of the plan you bought*.
+Do not assume it passes. On a **shared/burstable** droplet it is expected to
+fail; on a dedicated vCPU it should clear, but the only thing that settles it
+is running the probe. The probe lives in the harness binary, so it cannot run
+until after §4 Build — §5 opens with a cheap one-sample gate check for exactly
+this reason. Run that before the 5-run sweep. If the box fails, destroy it and
+re-provision rather than sweeping on it.
 
-Rationale: measure the property, don't read the attribute that implies it.
-`governor=performance` never guaranteed a fixed clock on bare metal either
-(turbo decay, RAPL, thermal throttling all move it) — it was a provenance
-string, not a measurement.
+> `governor` and `isolated_cpus` are recorded in the artifact as **informational
+> fields** — they are not gate inputs. A missing or unset value does not fail the
+> check. Setting `governor=performance` via GRUB is still good practice on a
+> rented host (reduces DVFS variance between runs), but it is not required for a
+> publishable result.
 
 ---
 
@@ -91,8 +99,30 @@ cargo build --release --example http_delta
 only the single droplet. Five independent invocations, distinct `--out` paths —
 the default path **overwrites its own artifact**.
 
+**First, one cheap gate check.** The host-class gate (§0) is evaluated at run
+time, not inferred from the droplet plan, so settle it before spending the full
+sweep:
+
 ```bash
 mkdir -p /root/artifacts
+./target/release/examples/http_delta --samples 1 \
+  --out /root/artifacts/gate-precheck.json
+jq '{publishable,
+     host_class: .quiescence.verdict.host_class_objections,
+     contention: .quiescence.verdict.contention_objections,
+     drift_pct:  .quiescence.host.clock_probe.max_drift_pct,
+     clock_ok:   .quiescence.host.clock_probe.stable}' \
+  /root/artifacts/gate-precheck.json
+```
+
+`publishable: true` ⇒ proceed. `false` ⇒ read the reasons: clock drift >2% or
+steal time means this box cannot produce a citable figure. Destroy it and
+re-provision (a different droplet of the same plan often lands on a quieter
+host); do **not** reach for `--allow-contended-host`.
+
+Then the sweep proper:
+
+```bash
 for i in 1 2 3 4 5; do
   ./target/release/examples/http_delta --samples 3 \
     --out /root/artifacts/c11-http-delta-run$i.json
