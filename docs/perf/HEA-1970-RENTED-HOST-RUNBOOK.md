@@ -194,20 +194,43 @@ generator headroom only. The knee from this run is the **loopback floor**.
 The saturation harness on host B reads host A's CPU % from a file that host A
 rewrites each second. Start the sampler before launching the sweep:
 
+⚠️ **`--server-cpu-file` must be a real file on host B's own filesystem, kept
+fresh by a background loop.** `read_server_cpu()`
+(`examples/http_saturation.rs:1000`) does a plain `fs::read_to_string(path)`
+**once per rung** and takes the last whitespace-delimited float. Two ways to get
+this wrong, both of which silently cost you the whole rented run:
+
+| Anti-pattern | What happens |
+|---|---|
+| `--server-cpu-file <(curl -s http://A_IP:9999/cpu-hostA.txt)` | Process substitution is a `/dev/fd` pipe. It reads once, then every later rung reads empty ⇒ `server_cpu_pct: null` ⇒ **every rung after the first grades `INCOMPLETE`**. |
+| `scp` the file once before the sweep | The harness never shells out between rungs, so there is nothing to re-copy it. One frozen sample is reused for all rungs ⇒ `server_cpu_pinned` is decided from stale data. |
+
+Do this instead — sampler on A, **puller on B**, atomic rename so no rung ever
+reads a half-written file:
+
 ```bash
-# On host A (in background/tmux). Appends one float per second.
+# ── On host A (in background/tmux). One float per second, whole-file rewrite.
 while true; do
-  awk '/cpu / {busy=$2+$3+$4+$6+$7+$8; total=busy+$5; printf "%.1f\n", 100*busy/total}' \
-    /proc/stat > /tmp/cpu-hostA.txt
+  awk '/^cpu /{busy=$2+$3+$4+$6+$7+$8; total=busy+$5; printf "%.1f\n", 100*busy/total}' \
+    /proc/stat > /tmp/cpu-hostA.txt.tmp && mv /tmp/cpu-hostA.txt.tmp /tmp/cpu-hostA.txt
+  sleep 1
+done &
+python3 -m http.server 9999 --directory /tmp &
+
+# ── On host B, BEFORE launching the sweep. Keeps a local regular file fresh.
+while true; do
+  curl -sf http://A_IP:9999/cpu-hostA.txt -o /root/cpu-hostA.txt.tmp \
+    && mv /root/cpu-hostA.txt.tmp /root/cpu-hostA.txt
   sleep 1
 done &
 
-# Share the file to host B via a method of your choice, e.g.:
-# scp/rsync loop, NFS mount, or a one-liner HTTP server:
-python3 -m http.server 9999 --directory /tmp &
-# Then on host B: --server-cpu-file <(curl -s http://A_IP:9999/cpu-hostA.txt)
-# Simplest: have host B scp the file each rung (safe for 20 s hold windows).
+# ── Prove it is live before spending a sweep on it.
+a=$(cat /root/cpu-hostA.txt); sleep 3; b=$(cat /root/cpu-hostA.txt)
+[ "$a" != "$b" ] && echo "sampler LIVE ($a -> $b)" || echo "STALE — fix before sweeping"
 ```
+
+The `awk` pattern is anchored `/^cpu /` so it matches the aggregate line only,
+never `cpu0`, `cpu1`, ….
 
 ### 6D. Two-host saturation sweep on host B
 
@@ -236,6 +259,76 @@ done
 > Host A must have `security.request_shaper.ip_rps` and `realm_rps` pinned
 > above the top rung (e.g. 200 000). Any rung that still 429s is graded
 > INADMISSIBLE (reason `rate_limited`) — see §5 note on `--limiter-note`.
+
+### 6D-bis. The login/KDF ladder is a DIFFERENT ladder — do not reuse §6D's
+
+The `read`/`issuance` rungs above are 500 → 16 000. **The login plane's ceiling
+is three orders of magnitude lower**, because every request is an Argon2id
+verify behind a semaphore of `security.password.kdf.max_in_flight` permits —
+which defaults to `available_parallelism()`, i.e. **16 on the 16-vCPU droplet**
+(`src/identity/kdf_gate.rs:71`). Reusing the §6D ladder starts rung 1 far past
+the knee and the artifact comes back `degradation_shape: no-knee`, which is
+exactly what dry-run #6 saw (50 rps ⇒ `max_backlog: 64`, p50 4.14 s).
+
+**Step 1 — measure the permit ceiling on this box.** Do not guess it; Argon2id
+cost is host-specific.
+
+```bash
+# On host A. Single-shot login latency with no queueing (concurrency 1).
+./target/release/examples/http_saturation \
+  --target http://127.0.0.1:8420 --seed-handle /root/seed.json \
+  --plane login --login-password "$LOGIN_PW" \
+  --rungs 1 --hold 20 --conns 1 --loopback-control \
+  > /root/artifacts/login-single-shot.json
+
+jq '.rungs[0] | {p50_ms, p99_ms, completed, error_rate, grade: .attribution.grade}' \
+  /root/artifacts/login-single-shot.json
+```
+
+Let `t` = that p50 in seconds. The theoretical ceiling is `permits / t`
+(16 / t on this droplet). Example: `t = 0.060 s` ⇒ ceiling ≈ **266 rps**.
+
+**Step 2 — build the ladder: start ~5 rps, step ~1.5×, top out at ~2× ceiling**
+so the knee is bracketed rather than jumped over.
+
+```bash
+CEIL=266                      # <-- substitute permits / t from step 1
+python3 - "$CEIL" <<'PY'
+import sys
+ceil = float(sys.argv[1]); r, out = 5.0, []
+while r <= 2*ceil:
+    out.append(str(int(round(r)))); r *= 1.5
+print(",".join(out))
+PY
+# e.g. CEIL=266 -> 5,8,11,17,25,38,57,85,128,192,289,433
+```
+
+**Step 3 — run it, loopback control first, then two-host** (same order as the
+read plane):
+
+```bash
+for mode in loopback two-host; do
+  if [ "$mode" = loopback ]; then TGT=http://127.0.0.1:8420; EXTRA=--loopback-control
+  else TGT=http://A_IP:8420; EXTRA="--server-cpu-file /root/cpu-hostA.txt"; fi
+  ./target/release/examples/http_saturation \
+    --target $TGT --seed-handle /root/seed.json \
+    --plane login --login-password "$LOGIN_PW" \
+    --rungs "$LADDER" --hold 30 --conns 64 $EXTRA \
+    --limiter-note "request_shaper ip_rps=200000 realm_rps=200000" \
+    > /root/artifacts/sat-login-${mode}.json
+  sleep 60
+done
+```
+
+`--hold 30` (not 20): at 5 rps a 20 s hold is only 100 requests, too few for a
+stable p99. Note the login plane is graded `is_kdf_benchmark: true` — its
+throughput number is an **Argon2id cost measurement, not a Hearth capacity
+figure**, and must be labelled that way anywhere it is published.
+
+> A login rung that sheds `503` is the KDF gate doing its job (queue wait >
+> `max_queue_wait`, default 250 ms), **not** a rate-limiter 429. Both are
+> inadmissible as a capacity point, but they mean different things — check
+> `rate_limited_by` before concluding the shaper shed.
 
 ### 6E. Reading the NIC accounting fields (HEA-2014)
 
