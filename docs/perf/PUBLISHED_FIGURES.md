@@ -189,6 +189,50 @@ K8/K9 are carried forward from report 1.0/2.0 unchanged. They were not in the
 HEA-1967 headline scope. They are low-risk but are **not** HEAD-verified; label
 them as such if published.
 
+### 3.3 HTTP-plane capacity — "requests/s before it falls over" (HEA-1997)
+
+**We publish NO end-to-end HTTP capacity figure. This section states, in writing,
+why — and what it takes to earn one.** (HEA-1997, filed from the board's HEA-1970
+question: *"Isn't the whole point of a load test to see what load an app can handle
+on given hardware?"*)
+
+Every capacity number above is **engine-level per-op cost or corpus footprint** —
+none answers *how many requests/s this box serves before it falls over.* The two
+existing HTTP-adjacent harnesses cannot answer it either:
+
+- `examples/http_delta.rs` measures a **fixed 3-rung ladder** `[1, 8, 32]` of
+  concurrency. 32 is the top of the ladder, not a knee. It reports what one
+  `/userinfo` *costs*, and is silent on the box's *ceiling*.
+- Every Goose run to date was **generator-limited and inadmissible**: at 1,000
+  users HEA-1989 §3 saw **100 % `client error (Connect)`** while server CPU *fell*
+  to 48.7 % — a measurement of Goose, not Hearth. The HEA-1867 grading rule is
+  *nothing is PASS on a run whose ceiling attribution was the generator*, and these
+  fail it.
+
+**The measurement capability now exists but has not been run.** `examples/http_saturation.rs`
+(HEA-1997) is an **open-loop, fixed-rate, two-host** saturation ramp with
+coordinated-omission-corrected latency and **mandatory per-rung bottleneck
+attribution** (a rung grades ADMISSIBLE only when server CPU is pinned, generator
+headroom ≥ 2×, transport is clean, and degradation is by queueing not an error
+cliff). It refuses to grade a loopback target by construction. Per-plane:
+read / issuance / login(KDF) / blended.
+
+**What blocks a published number:** the run needs **two rented hosts** (generator
+on host B, Hearth on host A) — the same booking as HEA-1970 (~$4, DO CPU-Optimized),
+not yet executed. Two secondary gaps: (a) the login/KDF plane needs the loadtest
+seeder to seed users with a known password (the current corpus has none —
+`loadtest/src/seed.rs:114`), tracked as a follow-up; (b) the request limiter stays
+**ON** on a two-host rig (`security.load_test_unthrottled` requires all-loopback
+binds), so a reported ceiling must state whether the server's CPU or its own request
+shaper saturated first.
+
+> **Until that run lands: quote no HTTP requests/s figure.** HEA-1968 (external
+> figures) may quote the engine per-op and footprint numbers in §1–§3.2 **only**,
+> each with its `engine`/`HTTP` plane label intact. There is currently **no**
+> cleared HTTP-plane throughput claim.
+
+The runbook for executing the ramp on the rig is `docs/perf/HEA-1997-SATURATION-RUNBOOK.md`.
+
 ---
 
 ## 4. Figures that did NOT reproduce
