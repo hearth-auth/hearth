@@ -1,0 +1,195 @@
+{
+  "conns": 512,
+  "degradation_shape": "graceful",
+  "generator_cores": 16,
+  "hold_s": 15,
+  "is_kdf_benchmark": false,
+  "kdf_label": "Read plane: no KDF, no durable write.",
+  "knee_index": 4,
+  "knee_p50_ms": 328.877,
+  "knee_p99_ms": 402.968,
+  "knee_throughput": 13331.345508310049,
+  "limiter": "on (two-host rig cannot enable load_test_unthrottled; report which resource saturated)",
+  "limiter_setting": "shaper 200k/200k; admin=0 token=0",
+  "notes": [
+    "Open-loop fixed-rate ramp; latency is coordinated-omission-corrected (measured from intended send time).",
+    "A rung is ADMISSIBLE only when server CPU is pinned, generator headroom >= 2x, transport is clean, and degradation is by queueing not errors.",
+    "INCOMPLETE = no --server-cpu-file, so server saturation is unconfirmed; never treat an INCOMPLETE rung as a published capacity number.",
+    "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): a limiter shed load, so the ceiling is Hearth's limiter, not the server (HEA-2007).",
+    "`rate_limited_by` / `rate_limited_by_total` name WHICH limiter shed (HEA-2010). Raise that one, not the shaper by reflex: `shaper` = security.request_shaper, `admin` = security.rate_limiting.admin_per_minute, `token` = security.rate_limiting.token_per_minute, `export` = security.backup.export_rate_limit. `unattributed` means the server predates the tagging — upgrade it before trusting the split."
+  ],
+  "plane": "read",
+  "rate_limited_by_total": {},
+  "rungs": [
+    {
+      "achieved_rate": 9992.239368750728,
+      "attribution": {
+        "degrading_by_queueing": true,
+        "failing_conditions": [
+          "server_cpu_pinned"
+        ],
+        "generator_headroom": 27.993752891375294,
+        "generator_headroom_2x": true,
+        "grade": "INADMISSIBLE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": 61.5,
+        "server_cpu_pinned": false,
+        "transport_clean": true
+      },
+      "completed": 150000,
+      "connect_errors": 0,
+      "error_rate": 0.0,
+      "max_backlog": 21,
+      "non_2xx": 0,
+      "offered_rate": 10000,
+      "p50_ms": 0.757,
+      "p999_ms": 65.516,
+      "p99_ms": 27.725,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    },
+    {
+      "achieved_rate": 10992.759810000687,
+      "attribution": {
+        "degrading_by_queueing": true,
+        "failing_conditions": [
+          "server_cpu_pinned"
+        ],
+        "generator_headroom": 24.9386840423676,
+        "generator_headroom_2x": true,
+        "grade": "INADMISSIBLE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": 72.4,
+        "server_cpu_pinned": false,
+        "transport_clean": true
+      },
+      "completed": 165001,
+      "connect_errors": 0,
+      "error_rate": 0.0,
+      "max_backlog": 41,
+      "non_2xx": 0,
+      "offered_rate": 11000,
+      "p50_ms": 0.901,
+      "p999_ms": 58.482,
+      "p99_ms": 26.806,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    },
+    {
+      "achieved_rate": 11990.265309005425,
+      "attribution": {
+        "degrading_by_queueing": true,
+        "failing_conditions": [
+          "server_cpu_pinned"
+        ],
+        "generator_headroom": 23.14054481078999,
+        "generator_headroom_2x": true,
+        "grade": "INADMISSIBLE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": 80.7,
+        "server_cpu_pinned": false,
+        "transport_clean": true
+      },
+      "completed": 180003,
+      "connect_errors": 0,
+      "error_rate": 0.0,
+      "max_backlog": 266,
+      "non_2xx": 0,
+      "offered_rate": 12000,
+      "p50_ms": 1.414,
+      "p999_ms": 104.199,
+      "p99_ms": 67.274,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    },
+    {
+      "achieved_rate": 12989.828941689526,
+      "attribution": {
+        "degrading_by_queueing": true,
+        "failing_conditions": [
+          "server_cpu_pinned"
+        ],
+        "generator_headroom": 23.05078235547026,
+        "generator_headroom_2x": true,
+        "grade": "INADMISSIBLE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": 88.9,
+        "server_cpu_pinned": false,
+        "transport_clean": true
+      },
+      "completed": 195001,
+      "connect_errors": 0,
+      "error_rate": 0.0,
+      "max_backlog": 832,
+      "non_2xx": 0,
+      "offered_rate": 13000,
+      "p50_ms": 23.051,
+      "p999_ms": 142.733,
+      "p99_ms": 109.873,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    },
+    {
+      "achieved_rate": 13331.345508310049,
+      "attribution": {
+        "degrading_by_queueing": true,
+        "failing_conditions": [],
+        "generator_headroom": 28.799510510668227,
+        "generator_headroom_2x": true,
+        "grade": "ADMISSIBLE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": 90.5,
+        "server_cpu_pinned": true,
+        "transport_clean": true
+      },
+      "completed": 204686,
+      "connect_errors": 0,
+      "error_rate": 0.0,
+      "max_backlog": 4096,
+      "non_2xx": 0,
+      "offered_rate": 14000,
+      "p50_ms": 328.877,
+      "p999_ms": 433.91,
+      "p99_ms": 402.968,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    },
+    {
+      "achieved_rate": 13247.143695276325,
+      "attribution": {
+        "degrading_by_queueing": true,
+        "failing_conditions": [
+          "server_cpu_pinned"
+        ],
+        "generator_headroom": 28.955829416548458,
+        "generator_headroom_2x": true,
+        "grade": "INADMISSIBLE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": 85.7,
+        "server_cpu_pinned": false,
+        "transport_clean": true
+      },
+      "completed": 202819,
+      "connect_errors": 0,
+      "error_rate": 0.0,
+      "max_backlog": 4096,
+      "non_2xx": 0,
+      "offered_rate": 16000,
+      "p50_ms": 341.68,
+      "p999_ms": 461.526,
+      "p99_ms": 425.998,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    }
+  ],
+  "rungs_rate_limited": false,
+  "schema": "hea-1997-saturation-1",
+  "target_authority": "127.0.0.1:8422",
+  "warmup_s": 3
+}
