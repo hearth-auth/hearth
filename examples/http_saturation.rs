@@ -53,12 +53,14 @@
 //!
 //! * `read`     — `/introspect` + `/userinfo` + `/admin/users/{id}`. The number
 //!   directly comparable to competitors' published end-to-end HTTP figures.
-//! * `issuance` — `/dev/seed-token`: session-create + Ed25519 sign + WAL `fsync`.
-//!   **NB:** this is the *write/issuance* plane. It is **not** the Argon2id KDF
-//!   plane — the loadtest seeder creates users with no password credential
-//!   (`loadtest/src/seed.rs:114`), so no login/password-verify path is reachable
-//!   against the seeded corpus. The true KDF plane needs seeded passwords; that
-//!   is the `login` plane below, gated on a seeder extension (see runbook).
+//! * `issuance` — `POST /token` (`grant_type=client_credentials`): Ed25519 sign +
+//!   grant-family WAL `fsync`. This is a **production** grant — the seeder
+//!   registers a confidential `client_credentials` client and carries its
+//!   `client_id`/`client_secret` in the seed handle (HEA-2003), so the plane runs
+//!   on the two-host rig with the HEA-1980 `--dev` gate intact (no `/dev/*`
+//!   endpoint at run time). **NB:** this is the *write/issuance* plane, **not**
+//!   the Argon2id KDF plane — no password-verify path is exercised here. The true
+//!   KDF plane needs seeded passwords; that is the `login` plane below.
 //! * `login`    — `POST /ui/realms/{r}/login`, the Argon2id-bearing path, i.e.
 //!   the **KDF benchmark**. Requires `--login-password` and users seeded with
 //!   that password. The report MUST label any `login` number a KDF benchmark.
@@ -148,6 +150,13 @@ struct SeedHandle {
 struct SeededRealm {
     realm_id: String,
     client_id: String,
+    /// Confidential `client_credentials` client for the issuance plane (HEA-2003).
+    /// Empty on pre-HEA-2003 handles.
+    #[serde(default)]
+    cc_client_id: String,
+    /// Its secret (SECRET). Empty on pre-HEA-2003 handles.
+    #[serde(default)]
+    cc_client_secret: String,
     #[serde(default)]
     users: Vec<SeededUser>,
     #[serde(default)]
@@ -235,19 +244,19 @@ fn build_request(
     extra_headers: &[(&str, &str)],
     body: &[u8],
 ) -> Vec<u8> {
+    // NB: write directly to the `Vec` (its `io::Write` impl APPENDS). Wrapping
+    // each `write!` in a fresh `Cursor::new(&mut req)` would reset the write
+    // position to 0 every call and overwrite the previous bytes, producing a
+    // malformed request.
     let mut req = Vec::with_capacity(256 + body.len());
     let _ = write!(
-        std::io::Cursor::new(&mut req),
+        &mut req,
         "{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: keep-alive\r\n"
     );
     for (k, v) in extra_headers {
-        let _ = write!(std::io::Cursor::new(&mut req), "{k}: {v}\r\n");
+        let _ = write!(&mut req, "{k}: {v}\r\n");
     }
-    let _ = write!(
-        std::io::Cursor::new(&mut req),
-        "Content-Length: {}\r\n\r\n",
-        body.len()
-    );
+    let _ = write!(&mut req, "Content-Length: {}\r\n\r\n", body.len());
     req.extend_from_slice(body);
     req
 }
@@ -321,22 +330,41 @@ fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Co
     };
 
     let push_issuance = |templates: &mut Vec<ReqTemplate>| -> Result<(), String> {
-        if realm.users.is_empty() {
-            return Err("seed handle has no users; increase --users-per-realm".into());
+        // HEA-2003: mint over the PRODUCTION client_credentials grant, not the
+        // dev-only /dev/seed-token endpoint. This exercises the real issuance
+        // machinery (Ed25519 sign + grant-family WAL write) and needs no /dev/*
+        // route at run time, so it runs on the two-host rig with the HEA-1980
+        // gate intact. The confidential client is provisioned by the seeder.
+        if realm.cc_client_id.is_empty() || realm.cc_client_secret.is_empty() {
+            return Err(
+                "issuance plane requires a confidential client_credentials client in the seed \
+                 handle (cc_client_id/cc_client_secret); re-seed with a HEA-2003 seeder"
+                    .into(),
+            );
         }
-        for u in &realm.users {
-            let body = format!("{{\"user_id\":\"{}\"}}", u.id);
-            templates.push(ReqTemplate {
-                bytes: build_request(
-                    "POST",
-                    "/dev/seed-token",
-                    &host_header,
-                    &[realm_hdr, ("Content-Type", "application/json")],
-                    body.as_bytes(),
-                ),
-                op: "issuance_mint",
-            });
-        }
+        // A single client_credentials request template — every mint is a fresh
+        // token for the same M2M client (there is no per-user subject on this
+        // grant). The open-loop scheduler replays it at the offered rate.
+        //
+        // `scope=openid`: the DCR-registered client is ThirdParty, and the server
+        // requires a ThirdParty client to request at least one scope. `openid` is
+        // an OIDC standard scope that is always legal for any client (no declared
+        // scope needed) — its content is irrelevant to what this plane measures
+        // (Ed25519 sign + grant-family WAL write).
+        let body = format!(
+            "{{\"grant_type\":\"client_credentials\",\"client_id\":\"{}\",\"client_secret\":\"{}\",\"scope\":\"openid\"}}",
+            realm.cc_client_id, realm.cc_client_secret
+        );
+        templates.push(ReqTemplate {
+            bytes: build_request(
+                "POST",
+                "/token",
+                &host_header,
+                &[realm_hdr, ("Content-Type", "application/json")],
+                body.as_bytes(),
+            ),
+            op: "issuance_mint",
+        });
         Ok(())
     };
 
@@ -1299,6 +1327,8 @@ mod tests {
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
                 client_id: "c1".into(),
+                cc_client_id: String::new(),
+                cc_client_secret: String::new(),
                 users: vec![],
                 tokens: vec![],
             }],
@@ -1313,5 +1343,91 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("no live tokens"), "{err}");
+    }
+
+    #[test]
+    fn build_request_is_well_formed_and_appends_in_order() {
+        // Regression: an earlier version wrapped each write in a fresh
+        // Cursor::new(&mut req), which resets the position to 0 and overwrites
+        // prior bytes, producing a malformed request on every plane.
+        let raw = build_request(
+            "POST",
+            "/token",
+            "a",
+            &[("X-Realm-ID", "r1"), ("Content-Type", "application/json")],
+            b"{\"k\":\"v\"}",
+        );
+        let s = String::from_utf8(raw).expect("utf8");
+        assert!(s.starts_with("POST /token HTTP/1.1\r\n"), "{s:?}");
+        assert!(s.contains("\r\nHost: a\r\n"), "{s:?}");
+        assert!(s.contains("\r\nX-Realm-ID: r1\r\n"), "{s:?}");
+        assert!(s.contains("\r\nContent-Length: 9\r\n"), "{s:?}");
+        assert!(
+            s.ends_with("\r\n\r\n{\"k\":\"v\"}"),
+            "body must be last: {s:?}"
+        );
+    }
+
+    fn issuance_target() -> Target {
+        Target {
+            authority: "a:80".into(),
+            host: "a".into(),
+            login_password: String::new(),
+        }
+    }
+
+    #[test]
+    fn issuance_plane_mints_over_production_client_credentials_grant() {
+        // HEA-2003: the issuance plane must hit the production POST /token grant,
+        // NOT the dev-only /dev/seed-token endpoint (which the two-host gate
+        // forbids exposing).
+        let handle = SeedHandle {
+            admin_token: String::new(),
+            realms: vec![SeededRealm {
+                realm_id: "r1".into(),
+                client_id: "c1".into(),
+                cc_client_id: "cc-1".into(),
+                cc_client_secret: "cc-secret".into(),
+                users: vec![],
+                tokens: vec![],
+            }],
+        };
+        let corpus = build_corpus(Plane::Issuance, &issuance_target(), &handle)
+            .expect("issuance corpus builds with cc credentials");
+        let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
+        assert!(req.starts_with("POST /token "), "must POST /token: {req}");
+        assert!(
+            !req.contains("/dev/seed-token"),
+            "issuance must not touch the dev-only endpoint: {req}"
+        );
+        assert!(req.contains("client_credentials"), "{req}");
+        assert!(req.contains("cc-1") && req.contains("cc-secret"), "{req}");
+        // ThirdParty DCR clients must request a scope; openid is always legal.
+        assert!(req.contains("\"scope\":\"openid\""), "{req}");
+    }
+
+    #[test]
+    fn issuance_plane_errors_without_confidential_client() {
+        // A pre-HEA-2003 handle (no cc credentials) must fail the issuance plane
+        // with a clear message rather than silently minting nothing.
+        let handle = SeedHandle {
+            admin_token: String::new(),
+            realms: vec![SeededRealm {
+                realm_id: "r1".into(),
+                client_id: "c1".into(),
+                cc_client_id: String::new(),
+                cc_client_secret: String::new(),
+                users: vec![SeededUser {
+                    id: "u1".into(),
+                    email: "u1@loadtest.test".into(),
+                }],
+                tokens: vec![],
+            }],
+        };
+        let err = match build_corpus(Plane::Issuance, &issuance_target(), &handle) {
+            Ok(_) => panic!("issuance must fail without a confidential client"),
+            Err(e) => e,
+        };
+        assert!(err.contains("client_credentials"), "{err}");
     }
 }

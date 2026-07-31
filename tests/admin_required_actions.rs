@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::audit::{AuditAction, AuditQuery};
 use hearth::core::RealmId;
-use hearth::identity::{CreateUserRequest, SessionContext};
+use hearth::identity::{CreateUserRequest, DcrPolicy, SessionContext};
 use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use tower::ServiceExt as _;
@@ -509,5 +509,202 @@ async fn cross_realm_patch_realm_config_is_forbidden() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "realm-A admin must not modify config of realm-B (cross-realm BOLA)"
+    );
+}
+
+// ===== HEA-2003: dcr_policy via PATCH /config, and the issuance-plane path =====
+
+/// `PATCH /config` with `dcr_policy` must persist the new policy on the realm.
+/// This is the seeder's lever for the issuance plane: it flips the dev-realm to
+/// `authenticated` so it can register a confidential `client_credentials` client
+/// over `POST /register`, then flips it back to `disabled` (HEA-2003).
+#[tokio::test]
+async fn patch_realm_config_sets_dcr_policy() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+    let realm_uuid = realm.as_uuid().to_string();
+    let app = build_app(&h);
+
+    // Default realm config leaves dcr_policy unset (treated as Disabled).
+    assert!(
+        h.identity()
+            .get_realm(&realm)
+            .expect("get")
+            .expect("exists")
+            .config()
+            .dcr_policy
+            .is_none(),
+        "precondition: dcr_policy starts unset"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/realms/{realm_uuid}/config"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"dcr_policy":"authenticated"}"#))
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.identity()
+            .get_realm(&realm)
+            .expect("get")
+            .expect("exists")
+            .config()
+            .dcr_policy,
+        Some(DcrPolicy::Authenticated),
+        "dcr_policy must persist as Authenticated after PATCH"
+    );
+
+    // And flipping it back to disabled (the seeder's restore step) must work.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/realms/{realm_uuid}/config"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"dcr_policy":"disabled"}"#))
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        h.identity()
+            .get_realm(&realm)
+            .expect("get")
+            .expect("exists")
+            .config()
+            .dcr_policy,
+        Some(DcrPolicy::Disabled),
+        "dcr_policy must persist as Disabled after restore"
+    );
+}
+
+/// An unknown `dcr_policy` value must be rejected with 400, not silently ignored.
+#[tokio::test]
+async fn patch_realm_config_unknown_dcr_policy_returns_400() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+    let realm_uuid = realm.as_uuid().to_string();
+    let app = build_app(&h);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/realms/{realm_uuid}/config"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"dcr_policy":"wide_open"}"#))
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// End-to-end proof of the HEA-2003 issuance path: enable DCR → register a
+/// confidential `client_credentials` client via `POST /register` (the only
+/// server path that returns a secret) → mint over the **production**
+/// `POST /token` grant. This is exactly what the seeder provisions and the
+/// saturation harness exercises at run time — with no dev-only endpoint.
+#[tokio::test]
+async fn dcr_client_credentials_issuance_path_works_end_to_end() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+    let realm_uuid = realm.as_uuid().to_string();
+    let app = build_app(&h);
+
+    // 1. Seeder: flip DCR to authenticated.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/realms/{realm_uuid}/config"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"dcr_policy":"authenticated"}"#))
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Seeder: register a confidential client_credentials client via DCR.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"client_name":"hearth-loadtest-cc","grant_types":["client_credentials"]}"#,
+                ))
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let reg = body_json(resp).await;
+    let cc_client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let cc_secret = reg["client_secret"]
+        .as_str()
+        .expect("DCR must return a generated client_secret")
+        .to_string();
+    assert!(!cc_secret.is_empty());
+
+    // 3. Harness (run time): mint over the production POST /token grant. No
+    //    /dev/* endpoint involved.
+    let token_body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": cc_client_id,
+        "client_secret": cc_secret,
+        // DCR clients are ThirdParty and must request >=1 scope; openid is always legal.
+        "scope": "openid",
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&token_body).expect("serialize")))
+                .expect("build"),
+        )
+        .await
+        .expect("oneshot");
+    let status = resp.status();
+    let tok = body_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials mint over POST /token must succeed; body={tok}"
+    );
+    assert!(
+        tok["access_token"].as_str().is_some_and(|s| !s.is_empty()),
+        "POST /token must return a signed access token: {tok}"
     );
 }

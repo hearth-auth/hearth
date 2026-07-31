@@ -761,6 +761,8 @@ mod tests {
             realms: vec![SeededRealm {
                 realm_id: "realm-1".into(),
                 client_id: "client-1".into(),
+                cc_client_id: String::new(),
+                cc_client_secret: String::new(),
                 users,
                 tokens,
                 sessions: Vec::new(),

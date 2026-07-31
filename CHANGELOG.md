@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`dcr_policy` is now settable via `PATCH /admin/realms/{realm_id}/config` (HEA-2003)** —
+  the request body accepts an optional `dcr_policy` field (`"disabled"`, `"open"`,
+  `"authenticated"`, or `null`) alongside the existing config fields, letting an operator
+  (or automation holding `hearth.realm.admin`) change a realm's Dynamic Client Registration
+  policy for `POST /register` without editing `hearth.yaml`. An unknown value returns 400.
+  Used by the load-test seeder to provision the issuance-plane client; see below. (HEA-2003)
 - **`POST /dev/seed-password` endpoint (dev-only, HEA-1998)** — sets a known password
   credential on a given `user_id` (via the same `set_password` primitive the admin UI
   uses), so the load-test corpus has authenticatable users. This unblocks the login / KDF

@@ -1340,6 +1340,12 @@ async fn admin_patch_user_required_actions(
 ///
 /// Replaces the realm's default required-actions list. Only affects users
 /// created after this call. Unknown action strings return 400.
+///
+/// Optional fields applied only when present: `mfa_methods`,
+/// `sms_otp_expiry_seconds`, `sms_otp_max_attempts`, `email_otp_expiry_seconds`,
+/// `email_otp_max_attempts`, `fapi_profile` (`"baseline"`/`"advanced"`/`null`),
+/// and `dcr_policy` (`"disabled"`/`"open"`/`"authenticated"`/`null`) — the
+/// Dynamic Client Registration policy for `POST /register`.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn admin_patch_realm_config(
     State(state): State<Arc<AppState>>,
@@ -1461,6 +1467,35 @@ async fn admin_patch_realm_config(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "fapi_profile must be a string or null"
+                })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(v) = body.get("dcr_policy") {
+        use crate::identity::DcrPolicy;
+        if v.is_null() {
+            config.dcr_policy = None;
+        } else if let Some(s) = v.as_str() {
+            match s {
+                "disabled" => config.dcr_policy = Some(DcrPolicy::Disabled),
+                "open" => config.dcr_policy = Some(DcrPolicy::Open),
+                "authenticated" => config.dcr_policy = Some(DcrPolicy::Authenticated),
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("unknown dcr_policy value {other:?}; expected \"disabled\", \"open\", \"authenticated\", or null")
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "dcr_policy must be a string or null"
                 })),
             )
                 .into_response();

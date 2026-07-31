@@ -7,8 +7,11 @@
 //! client lets us stay on `rustls-tls` (matching `goose`).
 //!
 //! Only the endpoints the seed flow needs are implemented:
-//! `POST /admin/bootstrap`, `POST /admin/users`, `POST /clients` (register a
-//! password-grant client), `POST /token` (ROPC), and `POST /revoke`.
+//! `POST /admin/bootstrap`, `POST /admin/users`, `POST /clients` (register the
+//! public introspect/revoke client), `POST /register` (register the confidential
+//! `client_credentials` client for the issuance plane — HEA-2003),
+//! `PATCH /admin/realms/{id}/config` (toggle DCR policy), `POST /token`, and
+//! `POST /revoke`.
 //!
 //! Secrets discipline: this module never logs token or password material. The
 //! admin bootstrap token lives only inside the [`SeedClient`] default headers.
@@ -85,6 +88,17 @@ struct CreatedUser {
 #[derive(Deserialize)]
 struct RegisteredClient {
     client_id: String,
+}
+
+/// RFC 7591 Dynamic Client Registration response (`POST /register`). Unlike the
+/// admin `POST /clients` handler — which strips any secret and only mints public
+/// clients — the DCR endpoint generates and **returns** a confidential client's
+/// secret, which is why the issuance plane's `client_credentials` client is
+/// registered here (HEA-2003).
+#[derive(Deserialize)]
+struct DcrRegisteredClient {
+    client_id: String,
+    client_secret: String,
 }
 
 #[derive(Deserialize)]
@@ -207,6 +221,66 @@ impl SeedClient {
             .await?;
         let client: RegisteredClient = json_or_err("register_client", resp).await?;
         Ok(client.client_id)
+    }
+
+    /// Sets the realm's Dynamic Client Registration policy via
+    /// `PATCH /admin/realms/{realm_id}/config` (HEA-2003).
+    ///
+    /// `policy` is one of `"disabled"`, `"open"`, or `"authenticated"`. The
+    /// seeder briefly flips the dev-realm to `"authenticated"` so it can register
+    /// the confidential `client_credentials` client over `POST /register` (the
+    /// only server path that returns a generated secret), then flips it back to
+    /// `"disabled"` — so the measured (non-`--dev`) server in phase 3B carries no
+    /// residual DCR exposure. Requires the admin bearer (carried in the client's
+    /// default headers).
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn set_dcr_policy(&self, policy: &str) -> Result<(), SeedError> {
+        let resp = self
+            .http
+            .patch(format!(
+                "{}/admin/realms/{}/config",
+                self.base_url, self.realm_id
+            ))
+            .json(&serde_json::json!({"dcr_policy": policy}))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_err("set_dcr_policy", resp).await)
+        }
+    }
+
+    /// Registers a **confidential** OAuth client that supports the
+    /// `client_credentials` grant via `POST /register` (RFC 7591 DCR), returning
+    /// its `client_id` and server-generated `client_secret` (HEA-2003).
+    ///
+    /// The admin `POST /clients` handler deliberately strips any secret and only
+    /// mints public clients (HEA-1750), so DCR is the sole server path that hands
+    /// back a usable secret. The realm's `dcr_policy` must be `authenticated` (or
+    /// `open`) for this to succeed — see [`Self::set_dcr_policy`]. The returned
+    /// secret is a **secret**: the caller stores it in the `0600` seed handle and
+    /// never logs it.
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn register_confidential_client(
+        &self,
+        name: &str,
+    ) -> Result<(String, String), SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/register", self.base_url))
+            .json(&serde_json::json!({
+                "client_name": name,
+                "grant_types": ["client_credentials"],
+            }))
+            .send()
+            .await?;
+        let client: DcrRegisteredClient = json_or_err("register_confidential_client", resp).await?;
+        Ok((client.client_id, client.client_secret))
     }
 
     /// Mints an access token for `user_id` via `POST /dev/seed-token` (dev-only).

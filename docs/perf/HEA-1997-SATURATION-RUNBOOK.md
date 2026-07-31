@@ -51,21 +51,21 @@ That splits the planes by whether they touch a `/dev/*` endpoint at **run** time
 |---|---|---|
 | `read` | `/introspect`, `/userinfo`, `/admin/users/{id}` | **Yes** — tokens + admin token come from the seed handle |
 | `login` (KDF) | `POST /ui/realms/{r}/login` | **Yes** — real login, nothing dev-only |
-| `issuance` | **`POST /dev/seed-token`** | **No** — dev-only endpoint, see below |
-| `blended` | read + **`/dev/seed-token`** + login | **No** — inherits the issuance dependency |
+| `issuance` | `POST /token` (`grant_type=client_credentials`) | **Yes (HEA-2003)** — production grant; the confidential client is in the seed handle |
+| `blended` | read + `POST /token` + login | **Yes (HEA-2003)** — all three are production endpoints |
 
-`issuance` and `blended` mint tokens via the dev-only `/dev/seed-token` endpoint
-(`examples/http_saturation.rs` `push_issuance`). There is no non-`--dev`,
-gate-preserving way to expose that endpoint to host B, so **those two planes are out
-of scope for this rig** until the harness is changed to mint over a production grant.
-That work is tracked in **HEA-2003** (convert the issuance plane to `POST /token`
-client-credentials; seeder registers a load-test client and carries `client_id` /
-`client_secret` in the seed handle). Do **not** re-add `--dev --bind 0.0.0.0` to make
-issuance "work" — that is the exact risk vector HEA-1980 closes.
+**HEA-2003 removed the last dev dependency.** The `issuance` plane now mints over
+the **production** `POST /token` (`grant_type=client_credentials`), not the dev-only
+`/dev/seed-token`. The seeder registers a confidential `client_credentials` client
+during the loopback seed phase (over DCR, since the admin `POST /clients` handler
+strips secrets) and carries its `client_id` + `client_secret` in the seed handle —
+so at run time host B needs no `/dev/*` route. `blended` inherits this and is
+likewise runnable. **Do not** re-add `--dev --bind 0.0.0.0` for issuance — that is
+the exact risk vector HEA-1980 closes, and it is no longer needed.
 
-This rig therefore delivers the **read** knee (the competitor-comparable number) and
-the **login/KDF** benchmark. That is the primary board ask; issuance follows on
-HEA-2003.
+This rig therefore delivers **all four** planes: the **read** knee (the
+competitor-comparable number), the **login/KDF** benchmark, the **issuance** knee,
+and the **blended** operator-facing mix.
 
 ---
 
@@ -129,8 +129,12 @@ make seed ARGS="--target http://127.0.0.1:8420 --seed-out /shared/seed.json \
 kill -TERM %1 && wait      # or `hearth stop` if you started it under a service manager
 ```
 
-Copy `/shared/seed.json` to host B (it carries live bearer tokens + the admin token
-— treat it as a secret, `scp` over the private network, `chmod 600`). The seeded
+Copy `/shared/seed.json` to host B (it carries live bearer tokens, the admin token,
+**and the issuance client's `client_secret`** (HEA-2003) — treat it as a secret, `scp`
+over the private network, `chmod 600`). The seeder registers that confidential
+`client_credentials` client automatically during this phase (briefly enabling DCR on
+the dev-realm and restoring it to `disabled` afterward — no residual exposure on the
+phase-3B server); no operator action is required. The seeded
 password is **not** written to the handle (secrets discipline); it lives only on the
 server as a credential and you supply it to the harness separately (§5).
 
@@ -187,9 +191,29 @@ CPU=/shared/hostA-cpu.txt
   --server-cpu-file $CPU > sat-read.json
 ```
 
-The `issuance` and `blended` planes are **not** runnable on this rig (see §0a). Do not
-invoke them here — against a non-`--dev` server their `/dev/seed-token` requests
-return 404 and every rung grades INADMISSIBLE on transport/error-rate.
+The `issuance` and `blended` planes are also runnable here (HEA-2003) — they mint
+over the production `POST /token` grant using the confidential client the seeder put
+in the handle, so nothing dev-only is touched:
+
+```bash
+# Issuance plane — Ed25519 sign + grant-family WAL write, over POST /token.
+# Argon2id is NOT on this path (it is a write/issuance number, not a KDF one).
+./target/release/examples/http_saturation \
+  --target $T --seed-handle /shared/seed.json --plane issuance \
+  --rungs 500,1000,2000,4000,8000 --hold 30 --warmup 5 --conns 256 \
+  --server-cpu-file $CPU > sat-issuance.json
+
+# Blended — the realistic operator-facing 90/8/2 read/issuance/login mix.
+./target/release/examples/http_saturation \
+  --target $T --seed-handle /shared/seed.json --plane blended \
+  --login-password "$KNOWN_PW" \
+  --rungs 1000,2000,4000,8000,16000 --hold 30 --warmup 5 --conns 512 \
+  --server-cpu-file $CPU > sat-blended.json
+```
+
+If the handle predates HEA-2003 (no `cc_client_id`/`cc_client_secret`), the issuance
+and blended planes error out by design — re-seed with a current seeder. `blended`
+without `--login-password` runs read+issuance only (its login slice is skipped).
 
 **Ramp discipline:** start below the expected knee and step up. The knee is the
 **highest ADMISSIBLE rung whose achieved rate kept up with offered** (`knee_index` in
@@ -246,10 +270,10 @@ saturated first, read from the attribution fields:
   **degradation shape past it** (`degradation_shape`: graceful vs cliff) — all emitted
   fields.
 - Update `docs/perf/PUBLISHED_FIGURES.md` §3.3: replace the "no HTTP capacity claim"
-  statement with the measured knee(s) — **read** and **login/KDF** from this rig —
-  each with plane label, host, artifact + SHA, and the limiter/CPU attribution. The
-  login number carries an explicit "KDF benchmark" label. State plainly that
-  **issuance/blended remain unmeasured pending HEA-2003**.
+  statement with the measured knee(s) — **read**, **login/KDF**, **issuance**, and
+  **blended** from this rig — each with plane label, host, artifact + SHA, and the
+  limiter/CPU attribution. The login number carries an explicit "KDF benchmark" label;
+  the issuance number is a write/issuance figure (Ed25519 + WAL), **not** a KDF one.
 - Tell HEA-1968 exactly which figures (if any) it may quote.
 
 ## 8. Admissibility cheat-sheet (what the harness enforces per rung)

@@ -16,6 +16,11 @@
 //!   which creates a real session + issues a signed JWT for each seeded user.
 //!   Sessions for the C0 memory sweep are still created via `POST /dev/seed-session`
 //!   (HEA-1907).
+//! * **The issuance saturation plane mints over a production grant** (HEA-2003).
+//!   The seeder registers a confidential `client_credentials` client (via DCR,
+//!   since the admin `POST /clients` handler strips secrets) and carries its
+//!   `client_id` + `client_secret` in the handle; the harness mints with
+//!   `POST /token`, so the two-host rig needs no `/dev/*` endpoint for issuance.
 
 use crate::client::{SeedClient, SeedError};
 use crate::handle::{SeedHandle, SeededRealm, SeededSession, SeededToken, SeededUser};
@@ -111,6 +116,32 @@ async fn seed_realm(
     let client_id = client.register_client("hearth-loadtest").await?;
     println!("    registered OAuth client {}", &client_id[..8]);
 
+    // 1b. Register a CONFIDENTIAL client that supports `client_credentials`, for
+    //     the issuance saturation plane (HEA-2003). The harness mints tokens over
+    //     the production `POST /token` (grant_type=client_credentials) with these
+    //     credentials — so the issuance plane needs no dev-only endpoint at run
+    //     time and is measurable on the two-host rig with the HEA-1980 gate intact.
+    //
+    //     The admin `POST /clients` handler strips any secret (HEA-1750), so DCR
+    //     (`POST /register`) is the only server path that returns a usable secret.
+    //     DCR is disabled by default, so we flip the realm to `authenticated`
+    //     (registration still requires the admin bearer), register, then flip it
+    //     back to `disabled` — the measured phase-3B server carries no residual
+    //     DCR exposure.
+    client.set_dcr_policy("authenticated").await?;
+    let cc_result = client
+        .register_confidential_client("hearth-loadtest-cc")
+        .await;
+    // Always restore the policy, even if registration failed, so a partial seed
+    // never leaves DCR enabled on the corpus.
+    let restore = client.set_dcr_policy("disabled").await;
+    let (cc_client_id, cc_client_secret) = cc_result?;
+    restore?;
+    println!(
+        "    registered confidential client_credentials client {} (issuance plane)",
+        &cc_client_id[..8]
+    );
+
     // 2. User records (deterministic emails). When `--login-password` is set,
     //    each user is also given that known password via the dev-only
     //    `POST /dev/seed-password` endpoint (HEA-1998) so the login / KDF
@@ -171,6 +202,8 @@ async fn seed_realm(
     Ok(SeededRealm {
         realm_id: client.realm_id().to_string(),
         client_id,
+        cc_client_id,
+        cc_client_secret,
         users,
         tokens,
         sessions,
