@@ -117,6 +117,18 @@ security:
   request_shaper:
     ip_rps: 200000                        # > any rung; record this value in the artifact (§6)
     realm_rps: 200000
+  # HEA-2010: the shaper is NOT the only shedder. The admin-API cap (100/min per
+  # admin user) and the token/introspection cap (200/min per realm+client) were
+  # compiled-in constants with no config key, so pinning the shaper alone still
+  # left every read rung ~2/3 shed as 429 — flat across a 16x sweep, which is the
+  # signature of a fixed cap, not of a limiter tracking offered load. 0 disables
+  # each. Unlike load_test_unthrottled below these are ordinary operator
+  # thresholds, so they ARE honoured in phase 3B (non-dev, non-loopback) — which
+  # is the whole point. Record both in the artifact (§6). Each 0 raises
+  # hearth_rate_limiters_disabled{reason="config_zero"}; expect it on the scrape.
+  rate_limiting:
+    admin_per_minute: 0
+    token_per_minute: 0
   # Honoured ONLY in phase 3A (--dev + loopback); auto-refused in phase 3B (non-dev,
   # non-loopback) by the HEA-1980 gate, so it is safe to leave in the shared file.
   # Without it, the phase-3A seed dies at `create_user failed: HTTP 429`.
@@ -195,9 +207,10 @@ arguably better — note in the artifact which you used.
 ```bash
 T=http://<HOST_A_PRIVATE_IP>:8420
 CPU=/shared/hostA-cpu.txt
-# HEA-2007: record the pinned shaper setting from §3's hearth.yaml so the chosen
-# value is captured in every artifact. It must be > your top rung.
-LIM='request_shaper ip_rps=200000 realm_rps=200000'
+# HEA-2007/HEA-2010: record EVERY limiter setting from §3's hearth.yaml so the
+# chosen values are captured in every artifact. The shaper must be > your top
+# rung; the admin/token caps must be 0 or the read plane sheds ~2/3 of each rung.
+LIM='request_shaper ip_rps=200000 realm_rps=200000; admin_per_minute=0 token_per_minute=0'
 
 # Read plane — the competitor-comparable number.
 ./target/release/examples/http_saturation \
@@ -281,6 +294,26 @@ The harness **enforces** this: any rung that still sees a 429 is graded
 **INADMISSIBLE** with reason `rate_limited` (and `rate_limited_shed: true`), so a
 shaper-shed rung can **never** be reported as a knee. `rungs_rate_limited: true` in
 the artifact means your pin was too low — raise it and re-run.
+
+### The shaper is not the only shedder (HEA-2010)
+
+The first dry-run pinned the shaper correctly and **still** got `knee: null` with
+every rung 65–67% 429. Two more limiters sit behind it, and both were compiled-in
+constants with no config key until HEA-2010:
+
+| Limiter | Scope | Default | Config key |
+|---|---|---|---|
+| `RequestShaper` | per source IP / per realm | 100 rps / 1 000 rps | `security.request_shaper.{ip_rps,realm_rps}` |
+| `AdminRateLimiter` | per admin user, REST **and** gRPC | 100 / min | `security.rate_limiting.admin_per_minute` |
+| `TokenRateLimiter` | per `(realm, client)`, `/token` + `/introspect` | 200 / min | `security.rate_limiting.token_per_minute` |
+
+Set the last two to `0` (§3). They are **not** dev-gated, so they apply in phase 3B.
+
+**Diagnostic worth keeping:** a shed fraction that is *flat* across a wide sweep
+is a **fixed cap**, not a rate limiter — a limiter tracking offered load sheds a
+rising fraction as the rungs climb. If 1k and 16k rps both shed ~2/3, look for a
+per-minute counter, not a per-second one, and check *which* endpoint in the mix
+is failing before blaming the shaper.
 
 When you write the report, state which resource saturated first, from the
 attribution fields:
