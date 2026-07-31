@@ -1,0 +1,59 @@
+[rung] offered=200 req/s hold=10s …
+  achieved=200/s p50=0.39ms p99=1.42ms grade=INCOMPLETE err_rate=0.0180 429=0
+{
+  "conns": 16,
+  "degradation_shape": "no-knee",
+  "generator_cores": 16,
+  "hold_s": 10,
+  "is_kdf_benchmark": true,
+  "kdf_label": "This plane exercises Argon2id (login/password verify). Any throughput figure here is a KDF benchmark, not a server-capacity figure.",
+  "knee_index": null,
+  "knee_p50_ms": null,
+  "knee_p99_ms": null,
+  "knee_throughput": null,
+  "limiter": "on (two-host rig cannot enable load_test_unthrottled; report which resource saturated)",
+  "limiter_setting": null,
+  "notes": [
+    "Open-loop fixed-rate ramp; latency is coordinated-omission-corrected (measured from intended send time).",
+    "A rung is ADMISSIBLE only when server CPU is pinned, generator headroom >= 2x, transport is clean, and degradation is by queueing not errors.",
+    "INCOMPLETE = no --server-cpu-file, so server saturation is unconfirmed; never treat an INCOMPLETE rung as a published capacity number.",
+    "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): a limiter shed load, so the ceiling is Hearth's limiter, not the server (HEA-2007).",
+    "`rate_limited_by` / `rate_limited_by_total` name WHICH limiter shed (HEA-2010). Raise that one, not the shaper by reflex: `shaper` = security.request_shaper, `admin` = security.rate_limiting.admin_per_minute, `token` = security.rate_limiting.token_per_minute, `export` = security.backup.export_rate_limit. `unattributed` means the server predates the tagging — upgrade it before trusting the split."
+  ],
+  "plane": "blended",
+  "rate_limited_by_total": {},
+  "rungs": [
+    {
+      "achieved_rate": 199.9888974563666,
+      "attribution": {
+        "degrading_by_queueing": false,
+        "failing_conditions": [
+          "degrading_by_queueing"
+        ],
+        "generator_headroom": 1142.9205894857141,
+        "generator_headroom_2x": true,
+        "grade": "INCOMPLETE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": null,
+        "server_cpu_pinned": null,
+        "transport_clean": true
+      },
+      "completed": 2000,
+      "connect_errors": 0,
+      "error_rate": 0.018,
+      "max_backlog": 2,
+      "non_2xx": 36,
+      "offered_rate": 200,
+      "p50_ms": 0.388,
+      "p999_ms": 5.928,
+      "p99_ms": 1.421,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    }
+  ],
+  "rungs_rate_limited": false,
+  "schema": "hea-1997-saturation-1",
+  "target_authority": "127.0.0.1:8420",
+  "warmup_s": 2
+}
