@@ -53,6 +53,8 @@ pub struct LoadContext {
     live_tokens: Vec<String>,
     /// Seeded user IDs for the admin user-lookup and dynamic token-mint journeys.
     user_ids: Vec<String>,
+    /// Bootstrap admin token for journey 3 (`GET /admin/users/{id}`). SECRET.
+    admin_token: String,
     /// Round-robins token/user selection so load spreads across the corpus.
     cursor: AtomicUsize,
 }
@@ -68,6 +70,8 @@ pub enum ContextError {
     NoLiveTokens,
     /// The realm has no seeded users — the user-lookup journey has no target.
     NoUsers,
+    /// The handle has no admin token — re-seed to populate (HEA-1995).
+    NoAdminToken,
 }
 
 impl std::fmt::Display for ContextError {
@@ -79,6 +83,10 @@ impl std::fmt::Display for ContextError {
                 "seed handle has no live (non-revoked) tokens; increase --sessions-frac when seeding"
             ),
             Self::NoUsers => write!(f, "seed handle has no seeded users; increase --users-per-realm"),
+            Self::NoAdminToken => write!(
+                f,
+                "seed handle has no admin token; re-run the seed step to regenerate the handle"
+            ),
         }
     }
 }
@@ -110,11 +118,15 @@ impl LoadContext {
         if user_ids.is_empty() {
             return Err(ContextError::NoUsers);
         }
+        if handle.admin_token.is_empty() {
+            return Err(ContextError::NoAdminToken);
+        }
         Ok(Self {
             realm_id: realm.realm_id.clone(),
             client_id: realm.client_id.clone(),
             live_tokens,
             user_ids,
+            admin_token: handle.admin_token.clone(),
             cursor: AtomicUsize::new(0),
         })
     }
@@ -241,15 +253,15 @@ async fn journey_session_lookup(user: &mut GooseUser) -> TransactionResult {
 
 // ===== Journey 3 — User lookup (admin) =====
 
-/// `GET /admin/users/{id}` with an admin-authority bearer (the seeded dev-admin
-/// token). Exercises the user-lookup hot path over the admin surface.
+/// `GET /admin/users/{id}` with the bootstrap admin bearer token. Exercises the
+/// user-lookup hot path over the admin surface.
 async fn journey_user_lookup(user: &mut GooseUser) -> TransactionResult {
     let ctx = ctx();
     let path = format!("/admin/users/{}", ctx.user_id());
     let rb = user
         .get_request_builder(&GooseMethod::Get, &path)?
         .header(REALM_HEADER, &ctx.realm_id)
-        .bearer_auth(ctx.live_token());
+        .bearer_auth(&ctx.admin_token);
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name("user_lookup")
@@ -530,7 +542,6 @@ impl TierMissContext {
         let n = self.cursor.fetch_add(1, Ordering::Relaxed);
         (splitmix64(n) % self.corpus_size) + 1
     }
-
 }
 
 /// Publishes the tier-miss corpus. Call once before the tier-miss attack starts.
@@ -570,7 +581,10 @@ async fn tier_lookup(user: &mut GooseUser, index: u64, name: &'static str) -> Tr
     let email = ctx.email(index);
     let rb = user
         .get_request_builder(&GooseMethod::Get, "/dev/probe-user")?
-        .query(&[("realm_id", ctx.realm_id.as_str()), ("email", email.as_str())]);
+        .query(&[
+            ("realm_id", ctx.realm_id.as_str()),
+            ("email", email.as_str()),
+        ]);
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name(name)
@@ -743,6 +757,7 @@ mod tests {
             target_host: "http://127.0.0.1:8420".into(),
             seed: 1,
             dataset_shape: "test".into(),
+            admin_token: "test-admin-token".into(),
             realms: vec![SeededRealm {
                 realm_id: "realm-1".into(),
                 client_id: "client-1".into(),
@@ -800,6 +815,16 @@ mod tests {
         assert!(matches!(
             LoadContext::from_handle(&h),
             Err(ContextError::NoRealms)
+        ));
+    }
+
+    #[test]
+    fn context_requires_admin_token() {
+        let mut h = handle_with(2, 0, 2);
+        h.admin_token = String::new();
+        assert!(matches!(
+            LoadContext::from_handle(&h),
+            Err(ContextError::NoAdminToken)
         ));
     }
 

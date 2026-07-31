@@ -276,6 +276,112 @@ async fn bootstrap_does_not_reset_password_on_second_call() {
     );
 }
 
+/// HEA-1998: `POST /dev/seed-password` sets a credential the login path can
+/// verify, so the load-test login / KDF saturation plane has authenticatable
+/// users.
+#[tokio::test]
+async fn dev_seed_password_sets_verifiable_credential() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+
+    let realm = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: "seedpw-realm".to_string(),
+            config: None,
+        })
+        .expect("create realm");
+    let user = state
+        .identity
+        .create_user(
+            realm.id(),
+            &crate::identity::CreateUserRequest {
+                email: "loaduser@loadtest.test".to_string(),
+                display_name: "Load User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let pw = "L0adT3st!KnownPassword";
+    let body = serde_json::json!({
+        "user_id": user.id().as_uuid().to_string(),
+        "password": pw,
+    });
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/dev/seed-password")
+                .header("X-Realm-ID", realm.id().as_uuid().to_string())
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "seed-password must succeed in dev mode"
+    );
+
+    let cleartext = crate::identity::CleartextPassword::from_string(pw.to_string());
+    assert!(
+        state
+            .identity
+            .verify_password(realm.id(), user.id(), &cleartext)
+            .expect("verify"),
+        "seeded password must authenticate the user (login / KDF plane)"
+    );
+}
+
+/// HEA-1998: an invalid `user_id` is a 400, not a 500 or a panic.
+#[tokio::test]
+async fn dev_seed_password_rejects_invalid_user_id() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let realm = crate::core::RealmId::generate();
+
+    let body = serde_json::json!({"user_id": "not-a-uuid", "password": "x"});
+    let resp = router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/dev/seed-password")
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// HEA-1998: the dev seeding route MUST be absent in production mode (404),
+/// matching the fingerprint-resistance rule for the other `/dev/*` endpoints.
+#[tokio::test]
+async fn dev_seed_password_absent_in_production_mode() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(temp_dir.path());
+
+    let body = serde_json::json!({"user_id": uuid::Uuid::nil().to_string(), "password": "x"});
+    let resp = router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/dev/seed-password")
+                .header("X-Realm-ID", uuid::Uuid::nil().to_string())
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 /// HEA-1670: Unauthenticated re-bootstrap must return 401 after first bootstrap.
 #[tokio::test]
 async fn bootstrap_requires_auth_on_second_call() {

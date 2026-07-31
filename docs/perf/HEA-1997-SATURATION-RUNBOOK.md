@@ -120,13 +120,23 @@ CPU=/shared/hostA-cpu.txt
 the artifact). If the top rung is still ADMISSIBLE and keeping up, you have not found
 the knee — add higher rungs.
 
-## 5. The login / KDF plane (blocked on a seeder change)
+## 5. The login / KDF plane
 
 The KDF plane measures Argon2id login throughput over HTTP and **must be labelled a
-KDF benchmark** in any report. It needs users seeded with a **known password** — the
-current seeder creates users with no credential (`loadtest/src/seed.rs:114`). Until
-that follow-up lands, `--plane login` errors out by design. Once passwords are
-seeded:
+KDF benchmark** in any report. It needs users seeded with a **known password**. As of
+HEA-1998 the seeder can provision one: pass `--login-password` to the seed step, which
+sets that exact password on every seeded user via the dev-only
+`POST /dev/seed-password` endpoint. Re-run the §3 seed with the flag added (the same
+`$KNOWN_PW` you will pass to the harness):
+
+```bash
+KNOWN_PW='L0adT3st!KnownPassword'   # throwaway lab credential; must clear the realm policy
+make seed ARGS="--target http://127.0.0.1:8420 --seed-out /shared/seed.json \
+  --realms 1 --users-per-realm 5000 --sessions-frac 1.0 --login-password $KNOWN_PW"
+```
+
+The password is **not** written to the seed handle (secrets discipline) — it lives only
+on the server as a credential; you supply it to the harness separately. Then, on host B:
 
 ```bash
 ./target/release/examples/http_saturation \
@@ -134,6 +144,9 @@ seeded:
   --login-password "$KNOWN_PW" --rungs 50,100,200,400 --hold 30 --conns 64 \
   --server-cpu-file $CPU > sat-login.json
 ```
+
+Without `--login-password` at seed time, users have no credential and
+`--plane login` errors out by design; the read / issuance planes are unaffected.
 
 Keep the login ladder short and shallow — Argon2id is ~10–30 ms of CPU behind a
 bounded admission gate, so high rungs just fill the shed queue.

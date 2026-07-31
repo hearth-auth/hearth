@@ -378,6 +378,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             .route(
                 "/dev/seed-token",
                 axum::routing::post(admin::dev_seed_token),
+            )
+            .route(
+                "/dev/seed-password",
+                axum::routing::post(admin::dev_seed_password),
             );
     }
 

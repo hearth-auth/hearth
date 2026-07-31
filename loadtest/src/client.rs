@@ -60,15 +60,15 @@ impl From<std::io::Error> for SeedError {
     }
 }
 
-/// Result of the bootstrap call, holding only what the seed flow needs.
-///
-/// The admin bearer token is intentionally *not* surfaced here — it lives only
-/// inside the returned [`SeedClient`]'s default headers, so it cannot be
-/// accidentally logged or written to the seed handle.
+/// Result of the bootstrap call, holding what the seed flow needs.
 #[derive(Debug)]
 pub struct Bootstrap {
     /// The dev realm's ID (UUID string).
     pub realm_id: String,
+    /// The bootstrap admin bearer token. SECRET — stored in the seed handle
+    /// (0600 file) so the load run's `user_lookup` journey can authenticate
+    /// admin endpoints. Must not be logged.
+    pub admin_token: String,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +150,7 @@ impl SeedClient {
 
         let bootstrap = Bootstrap {
             realm_id: boot.realm_id.clone(),
+            admin_token: boot.access_token.clone(),
         };
         let client = Self {
             base_url,
@@ -248,6 +249,33 @@ impl SeedClient {
             .await?;
         let session: DevSessionResponse = json_or_err("create_dev_session", resp).await?;
         Ok(session.session_id)
+    }
+
+    /// Sets a password credential on `user_id` via `POST /dev/seed-password`
+    /// (dev-only, HEA-1998).
+    ///
+    /// `POST /admin/users` cannot set a credential, so this dev endpoint is the
+    /// only boot-local way to give a seeded user a login password. Provisioning
+    /// a **known** password is what enables the login / KDF saturation plane in
+    /// `examples/http_saturation.rs --plane login` (pass the same value to that
+    /// harness's `--login-password`).
+    ///
+    /// This never logs the password material.
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn set_password(&self, user_id: &str, password: &str) -> Result<(), SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/dev/seed-password", self.base_url))
+            .json(&serde_json::json!({"user_id": user_id, "password": password}))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_err("set_password", resp).await)
+        }
     }
 
     /// Revokes a token via `POST /revoke` (RFC 7009). The public `client_id`

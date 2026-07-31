@@ -82,6 +82,7 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
     let realm = seed_realm(&client, params, 0).await?;
 
     let mut handle = SeedHandle::new(params);
+    handle.admin_token = boot.admin_token;
     handle.realms.push(realm);
 
     let out = std::path::Path::new(&params.seed_out);
@@ -110,15 +111,30 @@ async fn seed_realm(
     let client_id = client.register_client("hearth-loadtest").await?;
     println!("    registered OAuth client {}", &client_id[..8]);
 
-    // 2. User records (deterministic emails). No credential — populates the
-    //    lookup/session-count corpus.
+    // 2. User records (deterministic emails). When `--login-password` is set,
+    //    each user is also given that known password via the dev-only
+    //    `POST /dev/seed-password` endpoint (HEA-1998) so the login / KDF
+    //    saturation plane can authenticate the corpus. The password MUST be set
+    //    before any token/session is minted below: `set_password` revokes all of
+    //    the user's sessions (A-42), which would otherwise wipe the read-plane
+    //    corpus. Users get no credential when the flag is unset.
     let mut users = Vec::with_capacity(params.users_per_realm as usize);
     for user_index in 0..params.users_per_realm {
         let email = params.user_email(realm_index, user_index);
         let id = client.create_user(&email, "Load Test User").await?;
+        if let Some(password) = params.login_password.as_deref() {
+            client.set_password(&id, password).await?;
+        }
         users.push(SeededUser { id, email });
     }
-    println!("    created {} users", users.len());
+    if params.login_password.is_some() {
+        println!(
+            "    created {} users (with login password for the login/KDF plane)",
+            users.len()
+        );
+    } else {
+        println!("    created {} users", users.len());
+    }
 
     // 3. Mint one access token per user via the dev-only endpoint (HEA-1991).
     //    ROPC was removed by HEA-1862; POST /dev/seed-token creates a real

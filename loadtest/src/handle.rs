@@ -86,7 +86,9 @@ pub struct SeededRealm {
 }
 
 /// The persisted seed-handle. Serialized as JSON to `--seed-out`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to redact `admin_token`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SeedHandle {
     /// Base URL the corpus was seeded against.
     pub target_host: String,
@@ -94,8 +96,26 @@ pub struct SeedHandle {
     pub seed: u64,
     /// Human-readable dataset shape (mirrors the report header).
     pub dataset_shape: String,
+    /// Bootstrap admin bearer token (SECRET). Stored here (0600 file) so the
+    /// load run's `user_lookup` journey can authenticate admin endpoints.
+    /// Defaults to empty string when loading pre-HEA-1995 handles; re-seed to
+    /// populate.
+    #[serde(default)]
+    pub admin_token: String,
     /// Seeded realms.
     pub realms: Vec<SeededRealm>,
+}
+
+impl std::fmt::Debug for SeedHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeedHandle")
+            .field("target_host", &self.target_host)
+            .field("seed", &self.seed)
+            .field("dataset_shape", &self.dataset_shape)
+            .field("admin_token", &"<redacted>")
+            .field("realms", &self.realms)
+            .finish()
+    }
 }
 
 impl SeedHandle {
@@ -106,6 +126,7 @@ impl SeedHandle {
             target_host: params.target_host.clone(),
             seed: params.seed,
             dataset_shape: params.dataset_shape_summary(),
+            admin_token: String::new(),
             realms: Vec::new(),
         }
     }
@@ -208,6 +229,7 @@ mod tests {
             target_host: "http://127.0.0.1:8420".into(),
             seed: 1,
             dataset_shape: "realms=1 users/realm=2".into(),
+            admin_token: "ADMIN-BOOTSTRAP-TOKEN".into(),
             realms: vec![SeededRealm {
                 realm_id: "realm-uuid".into(),
                 client_id: "client-uuid".into(),
@@ -255,6 +277,10 @@ mod tests {
         let dbg = format!("{:?}", sample_handle());
         assert!(!dbg.contains("SUPER-SECRET-TOKEN"));
         assert!(!dbg.contains("ANOTHER-SECRET"));
+        assert!(
+            !dbg.contains("ADMIN-BOOTSTRAP-TOKEN"),
+            "Debug must not reveal the admin token: {dbg}"
+        );
     }
 
     #[test]
@@ -269,8 +295,11 @@ mod tests {
         assert_eq!(back.total_sessions(), 1);
         assert_eq!(back.realms[0].realm_id, "realm-uuid");
         assert_eq!(back.realms[0].sessions[0].session_id, "session-uuid");
-        // The JSON form intentionally carries the live token (Goose needs it).
+        assert_eq!(back.admin_token, "ADMIN-BOOTSTRAP-TOKEN");
+        // The JSON form intentionally carries live tokens and the admin token
+        // (Goose needs them for load journeys).
         assert!(json.contains("SUPER-SECRET-TOKEN"));
+        assert!(json.contains("ADMIN-BOOTSTRAP-TOKEN"));
     }
 
     #[test]
@@ -289,6 +318,10 @@ mod tests {
         }"#;
         let h: SeedHandle = serde_json::from_str(old_json).expect("deserialize old handle");
         assert_eq!(h.total_sessions(), 0, "sessions defaults to empty");
+        assert!(
+            h.admin_token.is_empty(),
+            "admin_token defaults to empty on old handles"
+        );
     }
 
     #[test]

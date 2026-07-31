@@ -2606,6 +2606,56 @@ pub(super) struct DevSeedTokenRequest {
     user_id: String,
 }
 
+/// POST /dev/seed-password — sets a password credential on the given user.
+///
+/// Dev-only: the route is registered only when the server runs with `--dev`.
+/// Used by the load-test seed harness to provision the login / KDF saturation
+/// plane, which drives `POST /ui/realms/{realm}/login` (Argon2id `verify_password`)
+/// against the seeded corpus. The plain admin `POST /admin/users` path has no way
+/// to set a credential, so users would otherwise have no password to log in with
+/// (HEA-1998). The password is applied via the same `set_password` primitive the
+/// admin UI uses, so a subsequent login succeeds.
+///
+/// Because `set_password` revokes all of the user's existing sessions (A-42
+/// credential-change revocation), the seeder MUST call this **before** minting
+/// tokens/sessions for the user, or the read-plane corpus would be wiped.
+///
+/// Required headers: `X-Realm-ID: <realm-uuid>`
+/// Request body:  `{"user_id": "<user-uuid>", "password": "<cleartext>"}`
+/// Response: `204 No Content` on success.
+pub(super) async fn dev_seed_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DevSeedPasswordRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let user_uuid = match body.user_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user_id"})),
+            )
+                .into_response()
+        }
+    };
+    let user_id = UserId::new(user_uuid);
+    let password = crate::identity::CleartextPassword::from_string(body.password);
+    match state.identity.set_password(&realm_id, &user_id, &password) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DevSeedPasswordRequest {
+    user_id: String,
+    password: String,
+}
+
 /// Fixed dev-mode password for `admin@hearth.test`.
 ///
 /// Using a stable value (rather than a random one) lets the Playwright UI

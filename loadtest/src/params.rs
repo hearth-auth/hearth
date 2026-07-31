@@ -106,6 +106,22 @@ pub struct SeedParams {
     /// this.
     #[arg(long, env = "HEARTH_LOADTEST_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
+
+    /// Known password to set on every seeded user, enabling the login / KDF
+    /// saturation plane (HEA-1998).
+    ///
+    /// When set, the seed step provisions each user with this exact password via
+    /// the dev-only `POST /dev/seed-password` endpoint. Pass the **same** value
+    /// to `examples/http_saturation.rs --login-password` so its `--plane login`
+    /// ramp can authenticate the corpus (`POST /ui/realms/{realm}/login`, the
+    /// Argon2id path). When unset, users have no credential and the login plane
+    /// stays disabled — every other plane (read / issuance) is unaffected.
+    ///
+    /// It must clear the target realm's password policy. The value is a
+    /// throwaway lab credential, never a real secret; it is still redacted from
+    /// `{:?}` output and never logged.
+    #[arg(long, env = "HEARTH_LOADTEST_LOGIN_PASSWORD")]
+    pub login_password: Option<String>,
 }
 
 // Manual Debug so a `{:?}` of the params (e.g. in an error or a panic) never
@@ -126,6 +142,10 @@ impl std::fmt::Debug for SeedParams {
             .field(
                 "admin_token",
                 &self.admin_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "login_password",
+                &self.login_password.as_ref().map(|_| "<redacted>"),
             )
             .finish()
     }
@@ -604,14 +624,48 @@ mod tests {
     }
 
     #[test]
+    fn login_password_parses_and_is_redacted_in_debug() {
+        let p = parse(&["--login-password", "L0adT3st!KnownPassword"]);
+        assert_eq!(
+            p.login_password.as_deref(),
+            Some("L0adT3st!KnownPassword"),
+            "the flag value must be captured for the seed flow"
+        );
+        let dbg = format!("{p:?}");
+        assert!(
+            !dbg.contains("L0adT3st!KnownPassword"),
+            "Debug must not spill the login password: {dbg}"
+        );
+        assert!(
+            dbg.contains("login_password"),
+            "field should be present: {dbg}"
+        );
+    }
+
+    #[test]
+    fn login_password_defaults_to_none() {
+        let p = parse(&["--seed", "1"]);
+        assert!(
+            p.login_password.is_none(),
+            "without the flag, no credential is seeded and the login plane stays off"
+        );
+    }
+
+    #[test]
     fn dataset_summary_shows_count_source_when_explicit() {
         let p = parse(&["--sessions-count", "500"]);
         let s = p.dataset_shape_summary();
         assert!(s.contains("sessions_count=500"), "got: {s}");
-        assert!(!s.contains("sessions_frac"), "frac must not appear when count is set: {s}");
+        assert!(
+            !s.contains("sessions_frac"),
+            "frac must not appear when count is set: {s}"
+        );
 
         let p2 = parse(&[]);
         let s2 = p2.dataset_shape_summary();
-        assert!(s2.contains("sessions_frac="), "frac must appear when count is absent: {s2}");
+        assert!(
+            s2.contains("sessions_frac="),
+            "frac must appear when count is absent: {s2}"
+        );
     }
 }

@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`POST /dev/seed-password` endpoint (dev-only, HEA-1998)** — sets a known password
+  credential on a given `user_id` (via the same `set_password` primitive the admin UI
+  uses), so the load-test corpus has authenticatable users. This unblocks the login / KDF
+  saturation plane (`examples/http_saturation.rs --plane login`), which drives
+  `POST /ui/realms/{realm}/login` (the Argon2id path); the plain `POST /admin/users` path
+  cannot set a credential. The seed step exposes a matching **`--login-password`** flag
+  (env `HEARTH_LOADTEST_LOGIN_PASSWORD`) that provisions every seeded user with that
+  password — pass the same value to the harness's `--login-password`. Only available when
+  the server runs with `--dev`; refused in production. (HEA-1998)
 - **`POST /dev/seed-token` endpoint (dev-only, HEA-1991)** — mints a real signed access
   token for a given `user_id` (creates a session + issues a JWT via the identity engine).
   Used by the load-test harness to populate the live token corpus and to drive issuance +
