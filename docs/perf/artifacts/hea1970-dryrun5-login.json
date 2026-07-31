@@ -1,0 +1,68 @@
+{
+  "conns": 8,
+  "degradation_shape": "no-knee",
+  "generator_cores": 16,
+  "generator_net_dev": "wlo1",
+  "hold_s": 10,
+  "is_kdf_benchmark": true,
+  "kdf_label": "This plane exercises Argon2id (login/password verify). Any throughput figure here is a KDF benchmark, not a server-capacity figure.",
+  "knee_index": null,
+  "knee_p50_ms": null,
+  "knee_p99_ms": null,
+  "knee_throughput": null,
+  "limiter": "on (two-host rig cannot enable load_test_unthrottled; report which resource saturated)",
+  "limiter_setting": null,
+  "notes": [
+    "Open-loop fixed-rate ramp; latency is coordinated-omission-corrected (measured from intended send time).",
+    "A rung is ADMISSIBLE only when server CPU is pinned, generator headroom >= 2x, softnet drops are zero, ephemeral ports are not exhausted, transport is clean, and degradation is by queueing not errors.",
+    "INCOMPLETE = no --server-cpu-file, so server saturation is unconfirmed; never treat an INCOMPLETE rung as a published capacity number.",
+    "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): a limiter shed load, so the ceiling is Hearth's limiter, not the server (HEA-2007).",
+    "`rate_limited_by` / `rate_limited_by_total` name WHICH limiter shed (HEA-2010). Raise that one, not the shaper by reflex: `shaper` = security.request_shaper, `admin` = security.rate_limiting.admin_per_minute, `token` = security.rate_limiting.token_per_minute, `export` = security.backup.export_rate_limit. `unattributed` means the server predates the tagging — upgrade it before trusting the split.",
+    "HEA-2014 NIC accounting: `attribution.generator_softnet_dropped` is the kernel drop count at the generator NIC during the rung. Non-zero ⇒ INADMISSIBLE (reason `generator_softnet_drops`): the NIC, not Hearth, was the bottleneck. `generator_rx_pps`/`generator_tx_pps` give pps context. `generator_time_wait` near the port range ⇒ TIME_WAIT exhaustion: INADMISSIBLE (reason `generator_ephemeral_ports`).",
+    "run_type: two_host = 2-host rig (gradable); loopback_control = loopback baseline on the server droplet (for attribution only, never a knee); loopback_smoke = --allow-loopback smoke test (ungradable)."
+  ],
+  "plane": "login",
+  "rate_limited_by_total": {},
+  "run_type": "loopback_smoke",
+  "rungs": [
+    {
+      "achieved_rate": 49.99922982186367,
+      "attribution": {
+        "degrading_by_queueing": false,
+        "failing_conditions": [
+          "degrading_by_queueing"
+        ],
+        "generator_ephemeral_ports_ok": true,
+        "generator_headroom": 2666.7077434666667,
+        "generator_headroom_2x": true,
+        "generator_rx_pps": 170.99736599077374,
+        "generator_softnet_dropped": 0,
+        "generator_softnet_time_squeeze": 0,
+        "generator_time_wait": 53,
+        "generator_tx_pps": 78.5987892799697,
+        "grade": "INCOMPLETE",
+        "rate_limited_shed": false,
+        "server_cpu_pct": null,
+        "server_cpu_pinned": null,
+        "softnet_drops_zero": true,
+        "transport_clean": true
+      },
+      "completed": 500,
+      "connect_errors": 0,
+      "error_rate": 1.0,
+      "max_backlog": 1,
+      "non_2xx": 500,
+      "offered_rate": 50,
+      "p50_ms": 20.196,
+      "p999_ms": 27.333,
+      "p99_ms": 26.455,
+      "rate_limited": 0,
+      "rate_limited_by": {},
+      "transport_errors": 0
+    }
+  ],
+  "rungs_rate_limited": false,
+  "schema": "hea-1997-saturation-1",
+  "target_authority": "127.0.0.1:8420",
+  "warmup_s": 2
+}

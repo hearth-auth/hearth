@@ -280,7 +280,12 @@ fn build_request(
     req
 }
 
-fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Corpus, String> {
+fn build_corpus(
+    plane: Plane,
+    target: &Target,
+    handle: &SeedHandle,
+    login_csrf_token: Option<&str>,
+) -> Result<Corpus, String> {
     let realm = handle
         .realms
         .first()
@@ -387,7 +392,8 @@ fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Co
         Ok(())
     };
 
-    let push_login = |templates: &mut Vec<ReqTemplate>, password: &str| -> Result<(), String> {
+    let push_login =
+        |templates: &mut Vec<ReqTemplate>, password: &str, csrf_token: Option<&str>| -> Result<(), String> {
         if password.is_empty() {
             return Err(
                 "login/KDF plane requires --login-password AND users seeded with it \
@@ -412,23 +418,29 @@ fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Co
             );
         }
         let login_path = format!("/ui/realms/{}/login", realm.realm_name);
+        // HEA-2015: production mode enforces a double-submit CSRF check on
+        // POST /ui/realms/{name}/login. The token is pre-fetched once per
+        // corpus build and embedded in every login template as both a Cookie
+        // header and a `_csrf` body field. Without both, the server returns
+        // 422 before reaching Argon2id (p50 ≈ 0.39 ms, no KDF exercised).
+        let cookie_hdr_val = csrf_token.map(|t| format!("hearth_ui_csrf={t}"));
+        let csrf_suffix = csrf_token.map(|t| format!("&_csrf={}", urlencode(t)));
         for u in &realm.users {
             let body = format!(
-                "email={}&password={}",
+                "email={}&password={}{}",
                 urlencode(&u.email),
-                urlencode(password)
+                urlencode(password),
+                csrf_suffix.as_deref().unwrap_or(""),
             );
+            let mut headers = vec![
+                realm_hdr,
+                ("Content-Type", "application/x-www-form-urlencoded"),
+            ];
+            if let Some(c) = &cookie_hdr_val {
+                headers.push(("Cookie", c.as_str()));
+            }
             templates.push(ReqTemplate {
-                bytes: build_request(
-                    "POST",
-                    &login_path,
-                    &host_header,
-                    &[
-                        realm_hdr,
-                        ("Content-Type", "application/x-www-form-urlencoded"),
-                    ],
-                    body.as_bytes(),
-                ),
+                bytes: build_request("POST", &login_path, &host_header, &headers, body.as_bytes()),
                 op: "login",
             });
         }
@@ -438,7 +450,7 @@ fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Co
     match plane {
         Plane::Read => push_read()?,
         Plane::Issuance => push_issuance(&mut templates)?,
-        Plane::Login => push_login(&mut templates, &target.login_password)?,
+        Plane::Login => push_login(&mut templates, &target.login_password, login_csrf_token)?,
         Plane::Blended => {
             // Weight by replicating templates: 90/8/2. Read dominates the corpus.
             push_read()?;
@@ -456,7 +468,7 @@ fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Co
             }
             if !target.login_password.is_empty() {
                 let mut login = Vec::new();
-                push_login(&mut login, &target.login_password)?;
+                push_login(&mut login, &target.login_password, login_csrf_token)?;
                 let want_login = (read_len * 2 / 90).max(1);
                 for i in 0..want_login {
                     let t = &login[i % login.len()];
@@ -493,6 +505,102 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Issues a `GET` to the login page and extracts the CSRF token from the
+/// `Set-Cookie: hearth_ui_csrf=TOKEN` response header (double-submit pattern).
+///
+/// Called once per `build_corpus` invocation for the login/blended planes. One
+/// GET per corpus build (≤100 users standard corpus) adds negligible overhead.
+/// On failure (server down, no cookie set) the harness aborts before firing any
+/// load — a missing token means every login request would 422 immediately.
+fn fetch_csrf_token(authority: &str, host_header: &str, login_path: &str) -> Result<String, String> {
+    let mut stream = TcpStream::connect(authority)
+        .map_err(|e| format!("csrf prefetch connect({authority}): {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+
+    let req = format!(
+        "GET {login_path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("csrf prefetch write: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("csrf prefetch flush: {e}"))?;
+
+    // Read until the header terminator — body is not needed.
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("csrf prefetch read: {e}"))?;
+        if n == 0 {
+            if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                break pos + 4;
+            }
+            return Err("csrf prefetch: EOF before header terminator".into());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > 64 * 1024 {
+            return Err("csrf prefetch: response headers too large".into());
+        }
+    };
+
+    let head = std::str::from_utf8(&buf[..header_end])
+        .map_err(|_| "csrf prefetch: non-UTF-8 response headers")?;
+
+    // Scan for:  Set-Cookie: hearth_ui_csrf=TOKEN[; directives...]
+    for line in head.lines() {
+        let lower = line.to_ascii_lowercase();
+        if !lower.starts_with("set-cookie:") {
+            continue;
+        }
+        let val = line["set-cookie:".len()..].trim();
+        // cookie-string = name=value[; directives...]
+        let cookie_pair = val.split(';').next().unwrap_or(val);
+        if let Some(token) = cookie_pair.strip_prefix("hearth_ui_csrf=") {
+            let token = token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_string());
+            }
+        }
+    }
+
+    Err(format!(
+        "csrf prefetch: server did not set the hearth_ui_csrf cookie on GET {login_path}; \
+         verify the server is running in production mode (not --dev)"
+    ))
+}
+
+/// Pre-fetches the CSRF token for the login/blended planes from the server.
+///
+/// Returns `None` when no password is configured (login templates will be
+/// skipped; `push_login` will surface the real error if the plane needs one)
+/// or the realm name is not yet known (push_login will also error there).
+fn prefetch_login_csrf(target: &Target, handle: &SeedHandle) -> Result<Option<String>, String> {
+    if target.login_password.is_empty() {
+        return Ok(None);
+    }
+    let realm = handle
+        .realms
+        .first()
+        .ok_or("seed handle has no realms; re-seed the corpus")?;
+    if realm.realm_name.is_empty() {
+        return Ok(None); // push_login will emit the clear "realm_name" error
+    }
+    let login_path = format!("/ui/realms/{}/login", realm.realm_name);
+    eprintln_stderr(&format!(
+        "[csrf] pre-fetching CSRF token from GET {login_path} …"
+    ));
+    let token = fetch_csrf_token(&target.authority, &target.host_header(), &login_path)?;
+    eprintln_stderr("[csrf] CSRF token obtained");
+    Ok(Some(token))
 }
 
 // ── Target & args ───────────────────────────────────────────────────────────────
@@ -1427,7 +1535,15 @@ fn real_main() -> Result<(), String> {
     let handle: SeedHandle =
         serde_json::from_str(&raw).map_err(|e| format!("parse seed handle: {e}"))?;
 
-    let corpus = Arc::new(build_corpus(plane, &target, &handle)?);
+    // HEA-2015: login/blended planes require a CSRF token pre-fetched before the
+    // corpus is built. Fetch it once here; the corpus builder embeds it in each
+    // login template. Fails fast so the operator sees the blocker before any
+    // load is fired.
+    let login_csrf_token: Option<String> = match plane {
+        Plane::Login | Plane::Blended => prefetch_login_csrf(&target, &handle)?,
+        _ => None,
+    };
+    let corpus = Arc::new(build_corpus(plane, &target, &handle, login_csrf_token.as_deref())?);
 
     // HEA-2014: detect the generator's primary NIC once; reused across rungs.
     let net_dev = primary_net_dev();
@@ -1937,7 +2053,7 @@ mod tests {
             host: "a".into(),
             login_password: String::new(),
         };
-        let err = match build_corpus(Plane::Read, &target, &handle) {
+        let err = match build_corpus(Plane::Read, &target, &handle, None) {
             Ok(_) => panic!("expected read plane to fail with no live tokens"),
             Err(e) => e,
         };
@@ -1992,7 +2108,7 @@ mod tests {
                 tokens: vec![],
             }],
         };
-        let corpus = build_corpus(Plane::Issuance, &issuance_target(), &handle)
+        let corpus = build_corpus(Plane::Issuance, &issuance_target(), &handle, None)
             .expect("issuance corpus builds with cc credentials");
         let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
         assert!(req.starts_with("POST /token "), "must POST /token: {req}");
@@ -2025,7 +2141,7 @@ mod tests {
                 tokens: vec![],
             }],
         };
-        let err = match build_corpus(Plane::Issuance, &issuance_target(), &handle) {
+        let err = match build_corpus(Plane::Issuance, &issuance_target(), &handle, None) {
             Ok(_) => panic!("issuance must fail without a confidential client"),
             Err(e) => e,
         };
@@ -2067,8 +2183,10 @@ mod tests {
         // route and prove the id does NOT leak into it.
         let realm_id = "9a35bdcf-0000-4000-8000-000000000000";
         let handle = login_handle(realm_id, "dev-realm");
-        let corpus = build_corpus(Plane::Login, &login_target(), &handle)
-            .expect("login corpus builds with a realm name and a password");
+        // HEA-2015: pass a pre-fetched CSRF token so the template is realistic;
+        // the network call (fetch_csrf_token) is exercised separately.
+        let corpus = build_corpus(Plane::Login, &login_target(), &handle, Some("csrf-test-token"))
+            .expect("login corpus builds with a realm name, password, and csrf token");
         let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
         // The request LINE (path) is name-keyed; the realm id must not leak into
         // it. (The id still rides in the `X-Realm-ID` header — that is correct
@@ -2083,6 +2201,12 @@ mod tests {
             "the realm id must never appear in the login path (route is name-keyed): {request_line}"
         );
         assert!(req.contains("password=hunter2"), "{req}");
+        // CSRF fields must be embedded (HEA-2015).
+        assert!(
+            req.contains("Cookie: hearth_ui_csrf=csrf-test-token\r\n"),
+            "Cookie header with CSRF token missing: {req}"
+        );
+        assert!(req.contains("_csrf=csrf-test-token"), "_csrf body field missing: {req}");
     }
 
     #[test]
@@ -2091,10 +2215,43 @@ mod tests {
         // empty). The login plane must fail loud rather than emit
         // `/ui/realms//login` and silently 404 every request.
         let handle = login_handle("9a35bdcf-0000-4000-8000-000000000000", "");
-        let err = match build_corpus(Plane::Login, &login_target(), &handle) {
+        let err = match build_corpus(Plane::Login, &login_target(), &handle, None) {
             Ok(_) => panic!("login must fail when the handle carries no realm name"),
             Err(e) => e,
         };
         assert!(err.contains("realm_name"), "{err}");
+    }
+
+    #[test]
+    fn login_plane_embeds_csrf_token_and_cookie_header() {
+        // HEA-2015: when a CSRF token is pre-fetched and provided, every login
+        // template must carry both the `Cookie: hearth_ui_csrf=TOKEN` header and
+        // the `_csrf=TOKEN` body field. Without both the production-mode server
+        // returns 422 before reaching Argon2id — the KDF plane measures nothing.
+        let handle = login_handle("r1", "dev-realm");
+        let corpus =
+            build_corpus(Plane::Login, &login_target(), &handle, Some("tok-abc-123"))
+                .expect("login corpus with csrf token");
+        let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
+        assert!(
+            req.contains("Cookie: hearth_ui_csrf=tok-abc-123\r\n"),
+            "Cookie header with CSRF token missing: {req}"
+        );
+        assert!(
+            req.contains("_csrf=tok-abc-123"),
+            "_csrf body field missing: {req}"
+        );
+    }
+
+    #[test]
+    fn login_plane_omits_csrf_fields_when_no_token_provided() {
+        // When login_csrf_token is None (e.g. --dev bypass or future stateless
+        // mode), no CSRF cookie or body field must be injected.
+        let handle = login_handle("r1", "dev-realm");
+        let corpus = build_corpus(Plane::Login, &login_target(), &handle, None)
+            .expect("login corpus without csrf token");
+        let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
+        assert!(!req.contains("Cookie:"), "unexpected Cookie header: {req}");
+        assert!(!req.contains("_csrf="), "unexpected _csrf field: {req}");
     }
 }
