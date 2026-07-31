@@ -35,6 +35,40 @@ both when artifacts are copied back.
 
 ---
 
+## 0a. Which planes this rig can measure (READ THIS FIRST — HEA-2002)
+
+The HEA-1980 startup gate refuses `--dev` with **any** non-loopback bind, at two
+layers (`src/main.rs` `dev_mode_bind_check` **and** `src/config/validate.rs`),
+because `--dev` registers unauthenticated endpoints (`/admin/bootstrap`,
+`/dev/seed-session`, `/dev/seed-token`, `/dev/seed-password`). On a routable
+interface `/dev/seed-password` alone is instance-wide account takeover. **The gate
+is correct and is not weakened here** — the runbook works *around* it, it does not
+punch a hole in it.
+
+That splits the planes by whether they touch a `/dev/*` endpoint at **run** time:
+
+| Plane | Run-time endpoints | Two-host on this rig? |
+|---|---|---|
+| `read` | `/introspect`, `/userinfo`, `/admin/users/{id}` | **Yes** — tokens + admin token come from the seed handle |
+| `login` (KDF) | `POST /ui/realms/{r}/login` | **Yes** — real login, nothing dev-only |
+| `issuance` | **`POST /dev/seed-token`** | **No** — dev-only endpoint, see below |
+| `blended` | read + **`/dev/seed-token`** + login | **No** — inherits the issuance dependency |
+
+`issuance` and `blended` mint tokens via the dev-only `/dev/seed-token` endpoint
+(`examples/http_saturation.rs` `push_issuance`). There is no non-`--dev`,
+gate-preserving way to expose that endpoint to host B, so **those two planes are out
+of scope for this rig** until the harness is changed to mint over a production grant.
+That work is tracked in **HEA-2003** (convert the issuance plane to `POST /token`
+client-credentials; seeder registers a load-test client and carries `client_id` /
+`client_secret` in the seed handle). Do **not** re-add `--dev --bind 0.0.0.0` to make
+issuance "work" — that is the exact risk vector HEA-1980 closes.
+
+This rig therefore delivers the **read** knee (the competitor-comparable number) and
+the **login/KDF** benchmark. That is the primary board ask; issuance follows on
+HEA-2003.
+
+---
+
 ## 1. Provision
 
 - **Provider/plan:** DigitalOcean **CPU-Optimized (Dedicated vCPU)** ×2 — *not*
@@ -55,21 +89,71 @@ cargo build --release --example http_saturation      # host B (generator)
 cargo build --release                                # host A (hearth) + seeder
 ```
 
-## 3. Host A — start Hearth and seed the corpus
+## 3. Host A — seed over loopback, then serve on the private interface
+
+The corpus is seeded with `--dev` (the `/admin/bootstrap` + `/dev/seed-*` endpoints
+are dev-only) **bound to loopback**, then the server is restarted **without `--dev`**
+on the private interface for the measured run. The two phases share **one
+`hearth.yaml`** so the on-disk corpus written in phase 3A is readable in phase 3B.
+
+**Config parity is load-bearing.** `serve --dev -c hearth.yaml` preserves
+`storage.data_dir` and `security.key_encryption_key` from the file and only flips
+`dev_mode=true` + `storage.fsync=false` (`Config::from_file_as_dev`). If the KEK or
+`data_dir` differed between the two phases, the persisted Ed25519 signing keys would
+not decrypt and every seeded token would fail validation after the restart. So the
+`hearth.yaml` you use **must** pin both, and both phases must use the **same file**:
+
+```yaml
+# hearth.yaml (excerpt) — both phases use THIS file
+storage:
+  data_dir: /var/lib/hearth-loadtest      # persists across the mode switch
+security:
+  key_encryption_key: ${HEARTH_KEK}       # identical in both phases (env-substituted)
+```
+
+### 3A. Seed phase — `--dev`, loopback only
 
 ```bash
-# Bind on the PRIVATE interface so host B can reach it. Limiters stay ON (see §6).
-./target/release/hearth serve --dev --bind 0.0.0.0:8420   # or config bind
+export HEARTH_KEK=...                      # 32-byte hex; keep it out of shell history
+# Loopback bind keeps the gate satisfied; --dev enables /admin/bootstrap + /dev/seed-*.
+./target/release/hearth serve --dev -c hearth.yaml --bind 127.0.0.1:8420 &
 
-# Seed a corpus and write the handle (see loadtest/README.md for ARGS).
+# Seed the corpus and write the handle (see loadtest/README.md for ARGS).
+# For the login/KDF plane, seed a known password via the env form (NOT a CLI flag,
+# which is visible in `ps` / shell history).
+export HEARTH_LOADTEST_LOGIN_PASSWORD='L0adT3st!KnownPassword'   # throwaway lab cred; must clear realm policy
 make seed ARGS="--target http://127.0.0.1:8420 --seed-out /shared/seed.json \
   --realms 1 --users-per-realm 5000 --sessions-frac 1.0"
+
+# Graceful stop so the memtable flushes to SST (phase 3A runs fsync=false).
+kill -TERM %1 && wait      # or `hearth stop` if you started it under a service manager
 ```
 
 Copy `/shared/seed.json` to host B (it carries live bearer tokens + the admin token
-— treat it as a secret, `scp` over the private network, `chmod 600`).
+— treat it as a secret, `scp` over the private network, `chmod 600`). The seeded
+password is **not** written to the handle (secrets discipline); it lives only on the
+server as a credential and you supply it to the harness separately (§5).
 
-### 3a. Server-CPU sampler (REQUIRED for an ADMISSIBLE grade)
+### 3B. Serve phase — NO `--dev`, private interface
+
+```bash
+# Same config file, same data_dir + KEK, but production mode: the /dev/* and
+# /admin/bootstrap routes are absent, and the bind may be non-loopback.
+export HEARTH_KEK=...                      # same value as phase 3A
+./target/release/hearth serve -c hearth.yaml --bind 0.0.0.0:8420 &
+
+# REQUIRED smoke check — prove the corpus survived the mode switch before you
+# spend droplet-hours. Pick any live token from the seed handle and introspect it
+# over loopback on host A. `active:true` ⇒ KEK/data_dir parity held; anything else
+# ⇒ fix config parity (§3) before running the ramp.
+TOK=$(jq -r '[.realms[0].tokens[] | select(.revoked | not) | .access_token][0]' /shared/seed.json)
+CID=$(jq -r '.realms[0].client_id' /shared/seed.json)
+curl -sf -X POST http://127.0.0.1:8420/introspect \
+  -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$TOK\",\"client_id\":\"$CID\"}" | jq '.active'   # expect: true
+```
+
+### 3c. Server-CPU sampler (REQUIRED for an ADMISSIBLE grade)
 
 The harness cannot read host A's CPU across the network. Run a 1 Hz sampler on host A
 that rewrites a single number (busy %) to a file the harness reads at the end of each
@@ -90,7 +174,7 @@ Any sampler works as long as the **last whitespace-delimited token in the file i
 busy percentage**. `pidstat -p $(pgrep -x hearth) 1` (process-only) is acceptable and
 arguably better — note in the artifact which you used.
 
-## 4. Host B — run the ramp, per plane
+## 4. Host B — run the read ramp
 
 ```bash
 T=http://<HOST_A_PRIVATE_IP>:8420
@@ -101,19 +185,11 @@ CPU=/shared/hostA-cpu.txt
   --target $T --seed-handle /shared/seed.json --plane read \
   --rungs 1000,2000,4000,8000,16000,32000 --hold 30 --warmup 5 --conns 512 \
   --server-cpu-file $CPU > sat-read.json
-
-# Issuance/write plane (session-create + Ed25519 + WAL fsync; NOT the KDF).
-./target/release/examples/http_saturation \
-  --target $T --seed-handle /shared/seed.json --plane issuance \
-  --rungs 200,500,1000,2000,4000 --hold 30 --conns 256 \
-  --server-cpu-file $CPU > sat-issuance.json
-
-# Blended sizing mix (90/8/2 read/issuance/login).
-./target/release/examples/http_saturation \
-  --target $T --seed-handle /shared/seed.json --plane blended \
-  --rungs 1000,2000,4000,8000 --hold 30 --conns 512 \
-  --server-cpu-file $CPU > sat-blended.json
 ```
+
+The `issuance` and `blended` planes are **not** runnable on this rig (see §0a). Do not
+invoke them here — against a non-`--dev` server their `/dev/seed-token` requests
+return 404 and every rung grades INADMISSIBLE on transport/error-rate.
 
 **Ramp discipline:** start below the expected knee and step up. The knee is the
 **highest ADMISSIBLE rung whose achieved rate kept up with offered** (`knee_index` in
@@ -123,30 +199,26 @@ the knee — add higher rungs.
 ## 5. The login / KDF plane
 
 The KDF plane measures Argon2id login throughput over HTTP and **must be labelled a
-KDF benchmark** in any report. It needs users seeded with a **known password**. As of
-HEA-1998 the seeder can provision one: pass `--login-password` to the seed step, which
-sets that exact password on every seeded user via the dev-only
-`POST /dev/seed-password` endpoint. Re-run the §3 seed with the flag added (the same
-`$KNOWN_PW` you will pass to the harness):
+KDF benchmark** in any report. It needs users seeded with a **known password** — set
+via `HEARTH_LOADTEST_LOGIN_PASSWORD` in §3A above (the seeder applies it to every
+seeded user via the dev-only `POST /dev/seed-password`, over loopback). It uses
+`POST /ui/realms/{r}/login`, a production endpoint, so it runs against the
+non-`--dev` server from phase 3B with nothing dev-only at run time.
+
+On host B, pass the same known password to the harness. Note the harness reads it as
+a CLI flag (visible in `ps`); keep it a throwaway lab credential and clear your shell
+history after the run:
 
 ```bash
-KNOWN_PW='L0adT3st!KnownPassword'   # throwaway lab credential; must clear the realm policy
-make seed ARGS="--target http://127.0.0.1:8420 --seed-out /shared/seed.json \
-  --realms 1 --users-per-realm 5000 --sessions-frac 1.0 --login-password $KNOWN_PW"
-```
-
-The password is **not** written to the seed handle (secrets discipline) — it lives only
-on the server as a credential; you supply it to the harness separately. Then, on host B:
-
-```bash
+KNOWN_PW='L0adT3st!KnownPassword'   # same value you seeded in §3A
 ./target/release/examples/http_saturation \
   --target $T --seed-handle /shared/seed.json --plane login \
   --login-password "$KNOWN_PW" --rungs 50,100,200,400 --hold 30 --conns 64 \
   --server-cpu-file $CPU > sat-login.json
 ```
 
-Without `--login-password` at seed time, users have no credential and
-`--plane login` errors out by design; the read / issuance planes are unaffected.
+Without a seeded password, users have no credential and `--plane login` errors out by
+design; the read plane is unaffected.
 
 Keep the login ladder short and shallow — Argon2id is ~10–30 ms of CPU behind a
 bounded admission gate, so high rungs just fill the shed queue.
@@ -154,11 +226,12 @@ bounded admission gate, so high rungs just fill the shed queue.
 ## 6. Rate limiter — record the decision
 
 `security.load_test_unthrottled` requires `--dev` **AND** every effective bind
-loopback (`src/main.rs`), so a two-host rig **cannot** disable the request shaper.
-Limiters stay **ON**. That is deliberate — we report what the product actually does —
-but it means the observed ceiling may be Hearth's own limiter (429s), not CPU. The
-artifact stamps `limiter: "on"`. When you write the report you **must** state which
-resource saturated first, read from the attribution fields:
+loopback (`src/main.rs`). The measured run in phase 3B is **not** `--dev` and binds
+the private interface, so the escape hatch **cannot** be enabled and limiters stay
+**ON**. That is deliberate — we report what the product actually does — but it means
+the observed ceiling may be Hearth's own limiter (429s), not CPU. The artifact stamps
+`limiter: "on"`. When you write the report you **must** state which resource
+saturated first, read from the attribution fields:
 
 - `server_cpu_pinned: true` + `degrading_by_queueing: true` + no 429s ⇒ **CPU-bound**;
   the knee is a real hardware capacity number.
@@ -173,9 +246,10 @@ resource saturated first, read from the attribution fields:
   **degradation shape past it** (`degradation_shape`: graceful vs cliff) — all emitted
   fields.
 - Update `docs/perf/PUBLISHED_FIGURES.md` §3.3: replace the "no HTTP capacity claim"
-  statement with the measured knee(s), each with plane label, host, artifact + SHA,
-  and the limiter/CPU attribution. The KDF/login number carries an explicit
-  "KDF benchmark" label.
+  statement with the measured knee(s) — **read** and **login/KDF** from this rig —
+  each with plane label, host, artifact + SHA, and the limiter/CPU attribution. The
+  login number carries an explicit "KDF benchmark" label. State plainly that
+  **issuance/blended remain unmeasured pending HEA-2003**.
 - Tell HEA-1968 exactly which figures (if any) it may quote.
 
 ## 8. Admissibility cheat-sheet (what the harness enforces per rung)
@@ -189,3 +263,5 @@ resource saturated first, read from the attribution fields:
 
 A rung failing any of these is emitted `INADMISSIBLE` (or `INCOMPLETE`), **never
 silently included** in a published knee.
+</content>
+</invoke>
