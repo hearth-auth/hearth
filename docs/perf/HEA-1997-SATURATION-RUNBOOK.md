@@ -134,7 +134,7 @@ export HEARTH_KEK=...                      # 32-byte hex; keep it out of shell h
 # For the login/KDF plane, seed a known password via the env form (NOT a CLI flag,
 # which is visible in `ps` / shell history).
 export HEARTH_LOADTEST_LOGIN_PASSWORD='L0adT3st!KnownPassword'   # throwaway lab cred; must clear realm policy
-make seed ARGS="--target http://127.0.0.1:8420 --seed-out /shared/seed.json \
+make seed ARGS="--target-host http://127.0.0.1:8420 --seed-out /shared/seed.json \
   --realms 1 --users-per-realm 5000 --sessions-frac 1.0"
 
 # Graceful stop so the memtable flushes to SST (phase 3A runs fsync=false).
