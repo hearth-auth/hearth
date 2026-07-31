@@ -238,7 +238,6 @@ struct ReqTemplate {
     /// Full HTTP/1.1 request bytes (request line + headers + CRLF + body).
     bytes: Vec<u8>,
     /// Human name for the op (introspect/userinfo/user_lookup/mint/login).
-    #[allow(dead_code)]
     op: &'static str,
 }
 
@@ -1122,19 +1121,23 @@ fn dominant_limiter(hist: &BTreeMap<String, u64>) -> Option<(&str, u64)> {
 }
 
 /// Sends one request over an established keep-alive stream and reads the full
-/// response. Returns the HTTP status code and, for a `429`, the bucket index of
-/// the limiter that shed it, or an error string on transport failure. The
-/// connection is drained (Content-Length or chunked) so it can be reused.
-fn send_one(stream: &mut TcpStream, req: &[u8]) -> Result<(u16, Option<usize>), String> {
+/// response. Returns the HTTP status code, the shedding-limiter bucket index on
+/// a `429`, and the `location` header value on a 3xx, or an error string on
+/// transport failure. The connection is drained (Content-Length or chunked) so
+/// it can be reused.
+fn send_one(
+    stream: &mut TcpStream,
+    req: &[u8],
+) -> Result<(u16, Option<usize>, Option<String>), String> {
     stream.write_all(req).map_err(|e| format!("write: {e}"))?;
     stream.flush().map_err(|e| format!("flush: {e}"))?;
     read_response(stream)
 }
 
-/// Reads one HTTP/1.1 response, returns the status code (and the shedding
-/// limiter's bucket on a `429`), leaves the stream at the start of the next
-/// response.
-fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>), String> {
+/// Reads one HTTP/1.1 response, returns the status code, the shedding-limiter
+/// bucket index on a `429`, and the `location` header value on a 3xx. Leaves
+/// the stream at the start of the next response.
+fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>, Option<String>), String> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
     // Read until we have the header terminator.
@@ -1152,6 +1155,11 @@ fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>), String>
     };
     let head = std::str::from_utf8(&buf[..header_end]).map_err(|_| "non-utf8 headers")?;
     let status = parse_status(head)?;
+    let location = if (300..400).contains(&status) {
+        parse_location(head)
+    } else {
+        None
+    };
     let (content_len, chunked) = parse_body_framing(head);
     let mut body_have = buf.len() - header_end;
 
@@ -1168,7 +1176,7 @@ fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>), String>
             body.extend_from_slice(&tmp[..n]);
         }
         let bucket = (status == 429).then(|| limiter_bucket(&body));
-        return Ok((status, bucket));
+        return Ok((status, bucket, location));
     }
 
     let want = content_len.unwrap_or(0);
@@ -1193,7 +1201,7 @@ fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>), String>
         body_have += n;
     }
     let bucket = keep_body.then(|| limiter_bucket(&body));
-    Ok((status, bucket))
+    Ok((status, bucket, location))
 }
 
 fn parse_status(head: &str) -> Result<u16, String> {
@@ -1219,6 +1227,29 @@ fn parse_body_framing(head: &str) -> (Option<usize>, bool) {
         }
     }
     (content_len, chunked)
+}
+
+/// Extracts the `location` header value from a raw response head, or `None`.
+fn parse_location(head: &str) -> Option<String> {
+    for line in head.lines().skip(1) {
+        if line.len() >= 9 && line[..9].eq_ignore_ascii_case("location:") {
+            return Some(line[9..].trim().to_string());
+        }
+    }
+    None
+}
+
+/// Returns true when the response counts as success for the given op.
+///
+/// Login ops treat a 303 (or 302) redirect to `/ui` as success — that is the
+/// normal post-login redirect. A redirect back to the login page is a failed
+/// login rendered as a redirect; blanket-accepting 3xx would grade a
+/// 100%-wrong-password run green. Every other op requires a 2xx.
+fn is_response_success(op: &str, code: u16, location: Option<&str>) -> bool {
+    if op == "login" && matches!(code, 302 | 303) {
+        return location == Some("/ui");
+    }
+    (200..300).contains(&code)
 }
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1284,10 +1315,10 @@ fn run_rung(
                 }
                 let mut st = stats.lock().expect("stats lock");
                 match result {
-                    Ok((code, limiter)) => {
+                    Ok((code, limiter, location)) => {
                         st.completed += 1;
                         st.latencies_us.push(elapsed);
-                        if !(200..300).contains(&code) {
+                        if !is_response_success(tpl.op, code, location.as_deref()) {
                             st.non_2xx += 1;
                             if code == 429 {
                                 st.rate_limited += 1;
@@ -1922,6 +1953,38 @@ mod tests {
         assert_eq!(hist.len(), 2, "zero buckets must not appear: {hist:?}");
         assert_eq!(dominant_limiter(&hist), Some(("admin", 900)));
         assert_eq!(dominant_limiter(&BTreeMap::new()), None);
+    }
+
+    // ── login 303 scorer (HEA-2016) ─────────────────────────────────────────
+
+    #[test]
+    fn login_303_to_ui_counts_as_success() {
+        // A successful browser login returns 303 to /ui. The old scorer treated
+        // every non-2xx as an error, making every login request appear to fail.
+        assert!(is_response_success("login", 303, Some("/ui")));
+    }
+
+    #[test]
+    fn login_303_back_to_login_page_counts_as_non_2xx() {
+        // A failed login is rendered as a 303 redirect back to the login page.
+        // Blanket-accepting 3xx would grade a 100%-wrong-password run green;
+        // only a redirect to /ui (the post-login target) counts as success.
+        assert!(!is_response_success("login", 303, Some("/ui/realms/dev/login")));
+        assert!(!is_response_success("login", 302, Some("/ui/realms/dev/login")));
+    }
+
+    #[test]
+    fn read_op_303_counts_as_non_2xx() {
+        // Non-login ops must not inherit the login 3xx carve-out.
+        assert!(!is_response_success("introspect", 303, Some("/ui")));
+        assert!(!is_response_success("mint", 303, Some("/ui")));
+    }
+
+    #[test]
+    fn login_429_is_not_success_so_rate_limited_path_fires() {
+        // 429s must not be swallowed by the login-success check so that the
+        // rate_limited / rate_limited_by attribution counters still increment.
+        assert!(!is_response_success("login", 429, None));
     }
 
     #[test]
