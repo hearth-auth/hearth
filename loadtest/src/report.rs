@@ -962,7 +962,11 @@ mod tests {
         // without evidence. Pin to Unknown (inadmissible for grading).
         let rows = vec![row("session_lookup", 1_357, 1_357, Some(false))]; // breach
         let mut s = summarize(&rows, 700, 30.0);
-        assert_eq!(s.ceiling, Ceiling::Server, "pre-condition: initial attribution");
+        assert_eq!(
+            s.ceiling,
+            Ceiling::Server,
+            "pre-condition: initial attribution"
+        );
         correct_ceiling_with_resources(&mut s, None);
         assert_eq!(s.ceiling, Ceiling::Unknown);
         assert!(s.ceiling_reason.contains("inadmissible"));
@@ -976,7 +980,11 @@ mod tests {
         // TIME_WAIT), not the server.
         let rows = vec![row("session_lookup", 1_357, 1_357, Some(false))]; // breach
         let mut s = summarize(&rows, 700, 30.0);
-        assert_eq!(s.ceiling, Ceiling::Server, "pre-condition: initial attribution");
+        assert_eq!(
+            s.ceiling,
+            Ceiling::Server,
+            "pre-condition: initial attribution"
+        );
         let res = resource_report(0.0, 0.0);
         correct_ceiling_with_resources(&mut s, Some(&res));
         assert_eq!(s.ceiling, Ceiling::GeneratorSaturated);

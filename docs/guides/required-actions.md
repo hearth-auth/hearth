@@ -13,7 +13,6 @@ A **required action** is a user-level gate on authentication and token issuance.
 | Flow | Enforcement |
 |---|---|
 | OIDC authorization code (`GET /ui/oauth/authorize`) | Intercepted via browser redirect to the interstitial page |
-| Resource owner password credential (`POST /token`, `grant_type=password`) | Blocked with `400 required_actions_pending` |
 | Hearth Admin UI browser login (`/ui/login`) | Not enforced — this is a current limitation of the browser login form |
 
 Required actions are stored on the user record in the `required_actions` array and cleared individually when each action is completed. All pending actions must be cleared before a full access token is issued.
@@ -124,25 +123,6 @@ When a user with pending required actions visits the authorization endpoint:
 | `ENROLL_PHONE_OTP` | `/required-action/ENROLL_PHONE_OTP` |
 
 These pages are served by the Hearth browser UI. They require the `hearth_ra_session` cookie to be present; direct requests without the cookie are rejected.
-
----
-
-## ROPC error response
-
-For resource owner password credential grants, Hearth returns a `400` error when required actions are pending:
-
-```
-HTTP/1.1 400 Bad Request
-Content-Type: application/json
-
-{
-  "error": "required_actions_pending",
-  "error_code": "required_actions_pending",
-  "actions": ["VERIFY_EMAIL", "UPDATE_PASSWORD"]
-}
-```
-
-Your application is responsible for handling this response and redirecting the user to the appropriate completion UI.
 
 ---
 

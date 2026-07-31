@@ -31,8 +31,8 @@ use goose::prelude::*;
 use crate::handle::SeedHandle;
 use crate::latency::{self, LatencyExtremes};
 use crate::report::{self, LoadReport, RampStep, RunMetadata, SoakBucket, SCHEMA_VERSION};
-use crate::scenarios::{self, ContextError, LoadContext, TierMissContext, Weights};
 use crate::saturate;
+use crate::scenarios::{self, ContextError, LoadContext, TierMissContext, Weights};
 
 /// Run mode selecting the load profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -243,7 +243,6 @@ pub struct LoadParams {
     #[arg(long, env = "HEARTH_LOADTEST_TIER_REALM_ID")]
     pub tier_miss_realm_id: Option<String>,
 
-
     /// `tier-miss` mode: email domain of the bulk corpus (`user<idx>@<domain>`).
     #[arg(
         long,
@@ -290,7 +289,6 @@ pub struct LoadParams {
     pub tier_miss_weight_cold: usize,
 
     // ── Saturate profile (C4, HEA-1872) ─────────────────────────────────────
-
     /// `saturate` mode: concurrent TCP connections to maintain.
     ///
     /// Each connection is a separate Tokio task in a tight request/response
@@ -522,9 +520,7 @@ async fn run_journey_modes(
         .unwrap_or_else(|| handle.target_host.clone());
     guard_run_host(&host, params.allow_remote_target)?;
 
-    let context = Arc::new(
-        LoadContext::from_handle(&handle).map_err(LoadError::Context)?,
-    );
+    let context = Arc::new(LoadContext::from_handle(&handle).map_err(LoadError::Context)?);
 
     // Saturate mode drives the corpus directly via Arc<LoadContext>; it does
     // not go through Goose and does not need the process-global static.
@@ -552,9 +548,7 @@ async fn run_journey_modes(
         Mode::Steady => run_steady(params, &host, &weights, &handle, report_dir).await,
         Mode::Ramp => run_ramp(params, &host, &weights, &handle, report_dir).await,
         Mode::Soak => run_soak(params, &host, &weights, &handle, report_dir).await,
-        Mode::Saturate => {
-            saturate::run_saturate(params, &host, context, &handle, report_dir).await
-        }
+        Mode::Saturate => saturate::run_saturate(params, &host, context, &handle, report_dir).await,
         // TierMiss is dispatched before this function is reached.
         Mode::TierMiss => unreachable!("tier-miss is handled in run_load"),
     }
