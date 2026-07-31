@@ -73,6 +73,14 @@ pub struct SeededUser {
 pub struct SeededRealm {
     /// Realm ID (UUID string).
     pub realm_id: String,
+    /// Realm **name** (not id). The realm-scoped UI/OIDC routes are keyed by
+    /// name (`/ui/realms/{realm_name}/login`, `/realms/{realm_name}/token`, …),
+    /// so the login/KDF saturation plane MUST build its path from this, not
+    /// `realm_id` — a path built from the id 404s every request and never
+    /// exercises Argon2id (HEA-2006). Empty string on handles seeded before this
+    /// field existed; the harness rejects those with a clear error.
+    #[serde(default)]
+    pub realm_name: String,
     /// OAuth client registered for the ROPC/revoke journeys (public client).
     /// Empty string when ROPC is not used (HEA-1907: ROPC removed by HEA-1862).
     pub client_id: String,
@@ -107,6 +115,7 @@ impl std::fmt::Debug for SeededRealm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeededRealm")
             .field("realm_id", &self.realm_id)
+            .field("realm_name", &self.realm_name)
             .field("client_id", &self.client_id)
             .field("cc_client_id", &self.cc_client_id)
             .field("cc_client_secret", &"<redacted>")
@@ -264,6 +273,7 @@ mod tests {
             admin_token: "ADMIN-BOOTSTRAP-TOKEN".into(),
             realms: vec![SeededRealm {
                 realm_id: "realm-uuid".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "client-uuid".into(),
                 cc_client_id: "cc-client-uuid".into(),
                 cc_client_secret: "SUPER-SECRET-CLIENT-SECRET".into(),
@@ -352,6 +362,7 @@ mod tests {
         assert_eq!(back.total_tokens(), 2);
         assert_eq!(back.total_sessions(), 1);
         assert_eq!(back.realms[0].realm_id, "realm-uuid");
+        assert_eq!(back.realms[0].realm_name, "dev-realm");
         assert_eq!(back.realms[0].sessions[0].session_id, "session-uuid");
         assert_eq!(back.admin_token, "ADMIN-BOOTSTRAP-TOKEN");
         // The JSON form intentionally carries live tokens and the admin token
@@ -383,6 +394,10 @@ mod tests {
         assert!(
             h.realms[0].cc_client_id.is_empty() && h.realms[0].cc_client_secret.is_empty(),
             "confidential-client fields default to empty on pre-HEA-2003 handles"
+        );
+        assert!(
+            h.realms[0].realm_name.is_empty(),
+            "realm_name defaults to empty on pre-HEA-2006 handles"
         );
     }
 

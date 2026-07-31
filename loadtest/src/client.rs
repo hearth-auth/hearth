@@ -63,11 +63,24 @@ impl From<std::io::Error> for SeedError {
     }
 }
 
+/// The name of the realm `POST /admin/bootstrap` creates and re-uses.
+///
+/// Bootstrap is hardwired to the `dev-realm` (see `dev_seed_system_admin` /
+/// `get_realm_by_name("dev-realm")` in `src/protocol/http/admin.rs`), on both the
+/// first-call and re-bootstrap paths. The realm-scoped UI/OIDC routes are keyed
+/// by this **name**, not the realm id — the login/KDF saturation plane builds
+/// `/ui/realms/{name}/login` from it (HEA-2006). The bootstrap *response* does
+/// not echo the name, so the seeder records this invariant here.
+pub const DEV_REALM_NAME: &str = "dev-realm";
+
 /// Result of the bootstrap call, holding what the seed flow needs.
 #[derive(Debug)]
 pub struct Bootstrap {
     /// The dev realm's ID (UUID string).
     pub realm_id: String,
+    /// The dev realm's **name** — always [`DEV_REALM_NAME`]. Carried into the
+    /// seed handle so the name-keyed login route can be reconstructed (HEA-2006).
+    pub realm_name: String,
     /// The bootstrap admin bearer token. SECRET — stored in the seed handle
     /// (0600 file) so the load run's `user_lookup` journey can authenticate
     /// admin endpoints. Must not be logged.
@@ -117,6 +130,7 @@ struct DevSessionResponse {
 pub struct SeedClient {
     base_url: String,
     realm_id: String,
+    realm_name: String,
     http: reqwest::Client,
 }
 
@@ -164,11 +178,13 @@ impl SeedClient {
 
         let bootstrap = Bootstrap {
             realm_id: boot.realm_id.clone(),
+            realm_name: DEV_REALM_NAME.to_string(),
             admin_token: boot.access_token.clone(),
         };
         let client = Self {
             base_url,
             realm_id: boot.realm_id,
+            realm_name: DEV_REALM_NAME.to_string(),
             http,
         };
         Ok((client, bootstrap))
@@ -178,6 +194,13 @@ impl SeedClient {
     #[must_use]
     pub fn realm_id(&self) -> &str {
         &self.realm_id
+    }
+
+    /// The name of the realm this client is scoped to (always
+    /// [`DEV_REALM_NAME`]). The name-keyed login route is built from this.
+    #[must_use]
+    pub fn realm_name(&self) -> &str {
+        &self.realm_name
     }
 
     /// Creates a user via `POST /admin/users` and returns its ID.

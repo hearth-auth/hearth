@@ -149,6 +149,13 @@ struct SeedHandle {
 #[derive(Deserialize)]
 struct SeededRealm {
     realm_id: String,
+    /// Realm **name** (not id). The realm-scoped UI/OIDC routes are keyed by
+    /// name — `/ui/realms/{realm_name}/login`, etc. — so the login/KDF plane
+    /// MUST build its path from this, not `realm_id` (HEA-2006). Empty on
+    /// pre-HEA-2006 handles; the login plane rejects those with a clear error
+    /// rather than 404ing every request.
+    #[serde(default)]
+    realm_name: String,
     client_id: String,
     /// Confidential `client_credentials` client for the issuance plane (HEA-2003).
     /// Empty on pre-HEA-2003 handles.
@@ -379,7 +386,20 @@ fn build_corpus(plane: Plane, target: &Target, handle: &SeedHandle) -> Result<Co
         if realm.users.is_empty() {
             return Err("seed handle has no users for the login plane".into());
         }
-        let login_path = format!("/ui/realms/{}/login", realm.realm_id);
+        // The realm-scoped login route is keyed by realm NAME, not id:
+        // `/ui/realms/{realm_name}/login` (src/protocol/http.rs). Building the
+        // path from `realm_id` 404s every request — the KDF is never exercised
+        // and the plane silently measures nothing (HEA-2006). Fail loud when the
+        // handle predates the name-carrying seeder rather than emit a bad path.
+        if realm.realm_name.is_empty() {
+            return Err(
+                "login/KDF plane requires the realm NAME in the seed handle \
+                 (realm_name); the realm-scoped login route is keyed by name, not id. \
+                 Re-seed with a HEA-2006 seeder"
+                    .into(),
+            );
+        }
+        let login_path = format!("/ui/realms/{}/login", realm.realm_name);
         for u in &realm.users {
             let body = format!(
                 "email={}&password={}",
@@ -1326,6 +1346,7 @@ mod tests {
             admin_token: String::new(),
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "c1".into(),
                 cc_client_id: String::new(),
                 cc_client_secret: String::new(),
@@ -1385,6 +1406,7 @@ mod tests {
             admin_token: String::new(),
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "c1".into(),
                 cc_client_id: "cc-1".into(),
                 cc_client_secret: "cc-secret".into(),
@@ -1414,6 +1436,7 @@ mod tests {
             admin_token: String::new(),
             realms: vec![SeededRealm {
                 realm_id: "r1".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "c1".into(),
                 cc_client_id: String::new(),
                 cc_client_secret: String::new(),
@@ -1429,5 +1452,71 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("client_credentials"), "{err}");
+    }
+
+    fn login_target() -> Target {
+        Target {
+            authority: "a:80".into(),
+            host: "a".into(),
+            login_password: "hunter2".into(),
+        }
+    }
+
+    fn login_handle(realm_id: &str, realm_name: &str) -> SeedHandle {
+        SeedHandle {
+            admin_token: String::new(),
+            realms: vec![SeededRealm {
+                realm_id: realm_id.into(),
+                realm_name: realm_name.into(),
+                client_id: "c1".into(),
+                cc_client_id: String::new(),
+                cc_client_secret: String::new(),
+                users: vec![SeededUser {
+                    id: "u1".into(),
+                    email: "user@hearth.test".into(),
+                }],
+                tokens: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn login_plane_builds_path_from_realm_name_not_id() {
+        // HEA-2006: the realm-scoped login route is keyed by realm NAME
+        // (`/ui/realms/{realm_name}/login`, src/protocol/http.rs). An earlier
+        // version built the path from `realm_id`, which 404s every request and
+        // never exercises Argon2id. Pin the constructed path against the real
+        // route and prove the id does NOT leak into it.
+        let realm_id = "9a35bdcf-0000-4000-8000-000000000000";
+        let handle = login_handle(realm_id, "dev-realm");
+        let corpus = build_corpus(Plane::Login, &login_target(), &handle)
+            .expect("login corpus builds with a realm name and a password");
+        let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
+        // The request LINE (path) is name-keyed; the realm id must not leak into
+        // it. (The id still rides in the `X-Realm-ID` header — that is correct
+        // and required for realm routing — so scope the check to the path.)
+        let request_line = req.lines().next().unwrap_or_default();
+        assert_eq!(
+            request_line, "POST /ui/realms/dev-realm/login HTTP/1.1",
+            "login must POST the name-keyed route, not the id-keyed one"
+        );
+        assert!(
+            !request_line.contains(realm_id),
+            "the realm id must never appear in the login path (route is name-keyed): {request_line}"
+        );
+        assert!(req.contains("password=hunter2"), "{req}");
+    }
+
+    #[test]
+    fn login_plane_errors_without_realm_name() {
+        // A pre-HEA-2006 handle carries only `realm_id` (realm_name defaults to
+        // empty). The login plane must fail loud rather than emit
+        // `/ui/realms//login` and silently 404 every request.
+        let handle = login_handle("9a35bdcf-0000-4000-8000-000000000000", "");
+        let err = match build_corpus(Plane::Login, &login_target(), &handle) {
+            Ok(_) => panic!("login must fail when the handle carries no realm name"),
+            Err(e) => e,
+        };
+        assert!(err.contains("realm_name"), "{err}");
     }
 }

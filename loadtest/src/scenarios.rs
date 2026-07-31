@@ -760,6 +760,7 @@ mod tests {
             admin_token: "test-admin-token".into(),
             realms: vec![SeededRealm {
                 realm_id: "realm-1".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "client-1".into(),
                 cc_client_id: String::new(),
                 cc_client_secret: String::new(),

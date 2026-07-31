@@ -201,6 +201,7 @@ async fn seed_realm(
 
     Ok(SeededRealm {
         realm_id: client.realm_id().to_string(),
+        realm_name: client.realm_name().to_string(),
         client_id,
         cc_client_id,
         cc_client_secret,
