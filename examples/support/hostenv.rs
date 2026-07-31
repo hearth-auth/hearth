@@ -17,8 +17,10 @@
 //! # What this module does
 //!
 //! * Captures a [`HostProfile`] — CPU model, topology, scaling governor, CPU
-//!   isolation, chassis class, thermal state.
-//! * Captures a [`LoadSnapshot`] + [`ProcessCensus`] before and after a run.
+//!   isolation, chassis class, thermal state, and a fixed-work clock-stability
+//!   probe.
+//! * Captures a [`LoadSnapshot`] + [`ProcessCensus`] (including steal time)
+//!   before and after a run.
 //! * Applies a [`Gate`] that decides whether the resulting numbers may be
 //!   published, and records *why not* when they may not.
 //!
@@ -41,7 +43,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
 
@@ -60,11 +62,105 @@ pub const MAX_PRERUN_LOAD_PER_CPU: f64 = 0.05;
 /// the same core as the generator, so the aggregate bar is not sufficient alone.
 pub const MAX_FOREIGN_PROC_CPU_PCT: f64 = 5.0;
 
-/// Sampling interval for per-process CPU attribution.
+/// Sampling interval for per-process CPU attribution and steal measurement.
 pub const CENSUS_INTERVAL: Duration = Duration::from_millis(750);
 
 /// How many top CPU consumers to record in the artifact.
 pub const CENSUS_TOP_N: usize = 15;
+
+/// Maximum tolerated drift in the fixed-work clock-stability probe, as a
+/// percentage of the mean ns-per-unit across samples.
+///
+/// A value above this threshold means the CPU clock moved materially during the
+/// measurement window. On a cloud host this catches DVFS, thermal throttling,
+/// and RAPL power-capping that a sysfs `scaling_governor` attribute cannot see.
+pub const MAX_CLOCK_DRIFT_PCT: f64 = 2.0;
+
+/// Steal percentage below which steal is treated as zero.
+///
+/// Steal jiffies are integers; floating-point arithmetic over a short window
+/// can produce tiny non-zero values when the true steal is zero. Any steal at
+/// or above this threshold — roughly one stolen jiffy in a 750 ms window on a
+/// 16-CPU host — is a hard objection.
+pub const MIN_STEAL_PCT_OBJECTION: f64 = 0.001;
+
+/// Number of fixed-work probe samples taken during [`run_clock_probe`].
+pub const CLOCK_PROBE_SAMPLES: usize = 5;
+
+// ── Fixed-work clock stability probe ─────────────────────────────────────────
+
+/// Result of running the fixed-work clock-stability probe.
+///
+/// The probe runs a deterministic LCG loop N times, recording ns-per-unit-work
+/// for each sample. If the clock is stable, the samples will be nearly constant.
+/// A `max_drift_pct` above [`MAX_CLOCK_DRIFT_PCT`] indicates the CPU frequency
+/// moved during the measurement window.
+///
+/// This is strictly stronger evidence than reading `scaling_governor` from sysfs:
+/// `governor=performance` pins a *policy* but RAPL, thermal throttling, and
+/// turbo-decay still move the actual frequency under it.
+pub struct ClockProbe {
+    /// Measured ns-per-unit-work for each probe sample.
+    pub samples: Vec<f64>,
+    /// Arithmetic mean of `samples`.
+    pub mean_ns_per_unit: f64,
+    /// Maximum deviation from the mean, as a percentage of the mean.
+    pub max_drift_pct: f64,
+}
+
+impl ClockProbe {
+    /// Renders the probe result as JSON for inclusion in the artifact.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "samples_ns_per_unit": self.samples,
+            "mean_ns_per_unit": self.mean_ns_per_unit,
+            "max_drift_pct": self.max_drift_pct,
+            "stable": self.max_drift_pct <= MAX_CLOCK_DRIFT_PCT,
+        })
+    }
+}
+
+/// Runs a fixed-work clock-stability probe with `n_samples` samples.
+///
+/// Each sample times a sequential LCG loop (loop-carried dependency prevents
+/// compiler vectorisation). The number of units per sample is chosen so that
+/// the probe takes ~5 ms per sample on a modern 3 GHz core.
+pub fn run_clock_probe(n_samples: usize) -> ClockProbe {
+    // LCG multiplier and addend (Knuth MMIX constants). The loop-carried
+    // dependency on `acc` prevents the compiler from vectorising or folding
+    // this into a closed-form expression.
+    const UNITS: u64 = 5_000_000;
+    const LCG_MUL: u64 = 6_364_136_223_846_793_005;
+    const LCG_ADD: u64 = 1_442_695_040_888_963_407;
+
+    let mut samples: Vec<f64> = Vec::with_capacity(n_samples);
+    for _ in 0..n_samples {
+        let t0 = Instant::now();
+        let mut acc: u64 = 1;
+        for _ in 0..UNITS {
+            acc = acc.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
+        }
+        // Prevent the compiler from discarding the loop body as dead code.
+        let _ = std::hint::black_box(acc);
+        let elapsed_ns = t0.elapsed().as_nanos() as f64;
+        samples.push(elapsed_ns / UNITS as f64);
+    }
+    let n = n_samples as f64;
+    let mean = samples.iter().copied().sum::<f64>() / n;
+    let max_drift_pct = if mean > 0.0 {
+        samples
+            .iter()
+            .map(|&s| (s - mean).abs() / mean * 100.0)
+            .fold(0.0_f64, f64::max)
+    } else {
+        f64::NAN
+    };
+    ClockProbe {
+        samples,
+        mean_ns_per_unit: mean,
+        max_drift_pct,
+    }
+}
 
 // ── Host profile ──────────────────────────────────────────────────────────────
 
@@ -74,20 +170,27 @@ pub struct HostProfile {
     pub cpu_model: String,
     /// Logical CPUs visible to the process.
     pub cpus: usize,
-    /// `scaling_governor` of cpu0, if exposed.
+    /// `scaling_governor` of cpu0, if exposed. **Informational only** — not a
+    /// gate input. Cloud guests typically do not expose `cpufreq`; clock
+    /// stability is gated on the measured [`ClockProbe`] instead.
     pub governor: Option<String>,
     /// Whether turbo/boost is enabled, if exposed.
     pub boost: Option<bool>,
-    /// Contents of `/sys/devices/system/cpu/isolated`; empty means no isolation.
+    /// Contents of `/sys/devices/system/cpu/isolated`. **Informational only**
+    /// — not a gate input. Scheduler isolation is desirable but the failure
+    /// mode it guards against (a neighbour stealing the generator's core) is
+    /// already caught by the per-process census and steal-time checks.
     pub isolated_cpus: String,
     /// True when a battery is present — i.e. this is a laptop, not a server.
     pub has_battery: bool,
     /// Peak package temperature in °C at capture time, if exposed.
     pub temp_c: Option<f64>,
+    /// Fixed-work clock-stability probe run at capture time, if available.
+    pub clock_probe: Option<ClockProbe>,
 }
 
 impl HostProfile {
-    /// Reads the host profile from `/proc` and `/sys`.
+    /// Reads the host profile from `/proc` and `/sys` and runs the clock probe.
     pub fn capture() -> Self {
         let cpu_model = read_to_string("/proc/cpuinfo")
             .lines()
@@ -115,6 +218,7 @@ impl HostProfile {
             isolated_cpus,
             has_battery,
             temp_c: hottest_zone_c(),
+            clock_probe: Some(run_clock_probe(CLOCK_PROBE_SAMPLES)),
         }
     }
 
@@ -123,7 +227,11 @@ impl HostProfile {
     /// These are *host-class* objections, distinct from transient contention:
     /// quiescing the box does not fix any of them. Every competitor figure we
     /// compare against was taken on a server-class instance with a fixed clock,
-    /// so a mobile part under DVFS is not a like-for-like denominator.
+    /// so a mobile part under DVFS or a vCPU with an unstable clock is not a
+    /// like-for-like denominator.
+    ///
+    /// Note: steal time is checked separately in [`evaluate`] because it is
+    /// measured over the census window rather than being a static host property.
     pub fn non_server_class_reasons(&self) -> Vec<String> {
         let mut v = Vec::new();
         if self.has_battery {
@@ -133,21 +241,22 @@ impl HostProfile {
                 self.cpu_model
             ));
         }
-        match self.governor.as_deref() {
-            Some("performance") => {}
-            Some(g) => v.push(format!(
-                "scaling governor is '{g}', not 'performance' — clocks vary during the \
-                 measurement window, so throughput is not attributable to the code"
-            )),
-            None => v.push("scaling governor not exposed; clock stability unverifiable".into()),
+        if let Some(ref probe) = self.clock_probe {
+            // Fail closed when drift is NaN (probe ran but mean was zero — shouldn't
+            // happen on real hardware, but treat it as unverifiable).
+            let drifted =
+                !probe.max_drift_pct.is_finite() || probe.max_drift_pct > MAX_CLOCK_DRIFT_PCT;
+            if drifted {
+                v.push(format!(
+                    "clock drift {:.1}% exceeds the {:.1}% stability threshold — CPU \
+                     frequency moved during the probe window (DVFS, thermal throttle, or \
+                     RAPL capping); throughput is not attributable to the code",
+                    probe.max_drift_pct, MAX_CLOCK_DRIFT_PCT,
+                ));
+            }
         }
-        if self.isolated_cpus.trim().is_empty() {
-            v.push(
-                "no isolated CPUs (`isolcpus=` unset) — the generator, the server and every \
-                 foreign process share the same schedulable set"
-                    .into(),
-            );
-        }
+        // If no probe is present (e.g. constructed without capture()), we do NOT
+        // raise an objection — tests and synthetic hosts supply probes explicitly.
         v
     }
 
@@ -157,11 +266,13 @@ impl HostProfile {
         serde_json::json!({
             "cpu_model": self.cpu_model,
             "logical_cpus": self.cpus,
+            // governor and isolated_cpus are informational; they are not gate inputs.
             "scaling_governor": self.governor,
             "boost_enabled": self.boost,
             "isolated_cpus": self.isolated_cpus,
             "battery_present": self.has_battery,
             "package_temp_c": self.temp_c,
+            "clock_probe": self.clock_probe.as_ref().map(ClockProbe::to_json),
             "server_class": reasons.is_empty(),
             "non_server_class_reasons": reasons,
         })
@@ -173,8 +284,11 @@ impl HostProfile {
 /// A `/proc/loadavg` reading.
 #[derive(Clone, Copy)]
 pub struct LoadSnapshot {
+    /// 1-minute exponential moving average.
     pub load1: f64,
+    /// 5-minute exponential moving average.
     pub load5: f64,
+    /// 15-minute exponential moving average.
     pub load15: f64,
     /// Currently-runnable kernel scheduling entities.
     pub running: u64,
@@ -221,7 +335,9 @@ impl LoadSnapshot {
 
 /// One process's CPU attribution over the census interval.
 pub struct ProcSample {
+    /// Process ID.
     pub pid: u32,
+    /// Process name from `/proc/<pid>/stat`.
     pub comm: String,
     /// CPU used, in percent of a single core.
     pub cpu_pct: f64,
@@ -229,39 +345,56 @@ pub struct ProcSample {
     pub rss_kib: u64,
 }
 
-/// Top foreign CPU consumers, sampled over [`CENSUS_INTERVAL`].
+/// Top foreign CPU consumers, sampled over [`CENSUS_INTERVAL`], plus the
+/// hypervisor steal time measured over the same window.
 pub struct ProcessCensus {
+    /// Top CPU consumers (excluding the calling process), sorted descending.
     pub procs: Vec<ProcSample>,
     /// Total non-idle CPU across all cores, in percent of one core.
     pub total_busy_pct: f64,
+    /// Hypervisor steal time as a percentage of total CPU time across all
+    /// cores over the census window. Non-zero steal means a physical CPU was
+    /// taken away from this VM by the hypervisor; timing measurements taken
+    /// during stolen intervals are not attributable to the code under test.
+    pub steal_pct: f64,
 }
 
 impl ProcessCensus {
     /// Samples `/proc/[pid]/stat` twice over [`CENSUS_INTERVAL`] and attributes
-    /// CPU by jiffy delta.
+    /// CPU by jiffy delta. Also measures hypervisor steal from `/proc/stat`
+    /// over the same window.
     ///
     /// CPU share is computed against the *total* jiffy delta from `/proc/stat`
     /// rather than against a hardcoded `CLK_TCK`, so the result does not depend
     /// on the kernel's tick rate.
     pub fn capture(exclude_pid: u32) -> Self {
         let first = sample_procs();
-        let cpu_first = total_cpu_jiffies();
+        let cpu_first = total_cpu_stats();
         std::thread::sleep(CENSUS_INTERVAL);
         let second = sample_procs();
-        let cpu_second = total_cpu_jiffies();
+        let cpu_second = total_cpu_stats();
 
         // Total jiffies elapsed across all cores. One core's worth is this
         // divided by the CPU count, which is the denominator for "percent of
         // one core".
-        let (busy_d, total_d) = (
-            (cpu_second.0 - cpu_first.0) as f64,
-            (cpu_second.1 - cpu_first.1) as f64,
-        );
+        let total_d = (cpu_second.1 - cpu_first.1) as f64;
+        let busy_d = (cpu_second.0 - cpu_first.0) as f64;
+        // Steal jiffies are summed across all CPUs in the aggregate line.
+        let steal_d = cpu_second.2 - cpu_first.2;
+
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         let per_core_jiffies = if total_d > 0.0 {
             total_d / cpus as f64
         } else {
             f64::NAN
+        };
+
+        // Steal as a fraction of *total* CPU time across all cores — the same
+        // denominator the hypervisor uses when it decides how much to steal.
+        let steal_pct = if total_d > 0.0 {
+            100.0 * steal_d as f64 / total_d
+        } else {
+            0.0
         };
 
         let mut procs: Vec<ProcSample> = second
@@ -285,6 +418,7 @@ impl ProcessCensus {
         Self {
             procs,
             total_busy_pct: 100.0 * busy_d / per_core_jiffies,
+            steal_pct,
         }
     }
 
@@ -298,6 +432,7 @@ impl ProcessCensus {
         serde_json::json!({
             "interval_ms": CENSUS_INTERVAL.as_millis(),
             "total_busy_pct_of_one_core": self.total_busy_pct,
+            "steal_pct": self.steal_pct,
             "top": self.procs.iter().map(|p| serde_json::json!({
                 "pid": p.pid,
                 "comm": p.comm,
@@ -353,6 +488,8 @@ impl Verdict {
             "thresholds": {
                 "max_prerun_load_per_cpu": MAX_PRERUN_LOAD_PER_CPU,
                 "max_foreign_proc_cpu_pct": MAX_FOREIGN_PROC_CPU_PCT,
+                "max_clock_drift_pct": MAX_CLOCK_DRIFT_PCT,
+                "min_steal_pct_objection": MIN_STEAL_PCT_OBJECTION,
             },
         })
     }
@@ -392,7 +529,19 @@ pub fn evaluate(host: &HostProfile, load: &LoadSnapshot, census: &ProcessCensus)
         ));
     }
 
-    let host_class = host.non_server_class_reasons();
+    let mut host_class = host.non_server_class_reasons();
+
+    // Steal time is measured over the census window; it is a host-class objection
+    // because it reflects the hypervisor's placement policy, not transient load.
+    if census.steal_pct > MIN_STEAL_PCT_OBJECTION {
+        host_class.push(format!(
+            "steal time {:.3}% is non-zero — this vCPU shares a physical core with other \
+             VMs; timing measurements during stolen intervals are not attributable to the \
+             code under test",
+            census.steal_pct,
+        ));
+    }
+
     Verdict {
         publishable: contention.is_empty() && host_class.is_empty(),
         contention,
@@ -412,11 +561,15 @@ fn read_opt(p: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Returns `(busy_jiffies, total_jiffies)` summed across all cores.
-fn total_cpu_jiffies() -> (u64, u64) {
+/// Returns `(busy_jiffies, total_jiffies, steal_jiffies)` summed across all
+/// cores from the aggregate `cpu` line in `/proc/stat`.
+///
+/// `/proc/stat` fields after `cpu` (0-indexed):
+/// `user nice system idle iowait irq softirq steal guest guest_nice`
+fn total_cpu_stats() -> (u64, u64, u64) {
     let s = read_to_string("/proc/stat");
     let Some(line) = s.lines().next().filter(|l| l.starts_with("cpu ")) else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let vals: Vec<u64> = line
         .split_whitespace()
@@ -424,9 +577,11 @@ fn total_cpu_jiffies() -> (u64, u64) {
         .filter_map(|v| v.parse().ok())
         .collect();
     let total: u64 = vals.iter().sum();
-    // Fields 4 and 5 are idle and iowait.
+    // Fields 3 and 4 are idle and iowait.
     let idle: u64 = vals.iter().skip(3).take(2).sum();
-    (total.saturating_sub(idle), total)
+    // Field 7 is steal (0-indexed after skipping "cpu").
+    let steal: u64 = vals.get(7).copied().unwrap_or(0);
+    (total.saturating_sub(idle), total, steal)
 }
 
 /// `pid -> (comm, utime+stime jiffies, rss_kib)` for every readable process.
