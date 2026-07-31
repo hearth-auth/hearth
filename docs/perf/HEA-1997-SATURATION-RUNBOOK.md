@@ -320,9 +320,15 @@ attribution fields:
 
 - `server_cpu_pinned: true` + `degrading_by_queueing: true` + `rate_limited_shed:
   false` ⇒ **CPU-bound**; the knee is a real hardware capacity number.
-- any `rate_limited > 0` ⇒ the rung is INADMISSIBLE by construction; the shaper pin
-  was below the offered rate. This is never a publishable capacity number — raise
-  `request_shaper` and re-run.
+- any `rate_limited > 0` ⇒ the rung is INADMISSIBLE by construction; a limiter was
+  below the offered rate. This is never a publishable capacity number. **Read
+  `rate_limited_by` on the rung (and `rate_limited_by_total` on the run) to see
+  *which* limiter shed** — the harness names it rather than leaving you to assume
+  the shaper (HEA-2010). The console line carries the same thing as
+  `shed_by=<limiter>(<count>)`. Map the name to its key from the table above, raise
+  that one, and re-run. A count under `unattributed` means the measured server
+  predates the tagging — upgrade it before trusting the split, because a
+  pre-HEA-2010 binary also predates the config keys in §3.
 
 ## 7. Copy back, grade, publish
 

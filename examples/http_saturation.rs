@@ -110,7 +110,7 @@
     clippy::needless_range_loop
 )]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{Read, Write as IoWrite};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -631,9 +631,13 @@ struct RungResult {
     achieved_rate: f64,
     completed: u64,
     non_2xx: u64,
-    /// Subset of `non_2xx` that were HTTP 429 (request shaper shed). Any non-zero
+    /// Subset of `non_2xx` that were HTTP 429 (a limiter shed load). Any non-zero
     /// value forces the rung INADMISSIBLE with reason `rate_limited` (HEA-2007).
     rate_limited: u64,
+    /// `rate_limited` attributed to the limiter that shed it, keyed by the
+    /// server's `limiter` tag (HEA-2010). Zero-count limiters are omitted.
+    /// `unattributed` counts 429s whose body carried no recognised tag.
+    rate_limited_by: BTreeMap<String, u64>,
     connect_errors: u64,
     transport_errors: u64,
     error_rate: f64,
@@ -760,26 +764,83 @@ impl Backlog {
 struct WorkerStats {
     completed: u64,
     non_2xx: u64,
-    /// Subset of `non_2xx` that were HTTP 429 (request shaper shed load).
+    /// Subset of `non_2xx` that were HTTP 429 (a limiter shed load).
     rate_limited: u64,
+    /// `rate_limited` split by which limiter shed the request (HEA-2010).
+    rate_limited_by: LimiterCounts,
     connect_errors: u64,
     transport_errors: u64,
     latencies_us: Vec<u64>,
 }
 
+/// Server-side rate-limiter identifiers, as emitted in the `limiter` field of a
+/// `429` body (HEA-2010). Order matches [`LIMITER_IDS`] and the per-rung
+/// `rate_limited_by` histogram.
+const LIMITER_IDS: [&str; 5] = ["shaper", "admin", "token", "export", "login_ip"];
+
+/// Bucket index for a 429 whose body carried no recognised `limiter` field —
+/// an older server, or a 429 emitted by a path that is not yet tagged.
+const LIMITER_UNATTRIBUTED: usize = LIMITER_IDS.len();
+
+/// One counter per known limiter, plus a trailing `unattributed` bucket.
+type LimiterCounts = [u64; LIMITER_IDS.len() + 1];
+
+/// Extracts the `limiter` tag from a `429` body and maps it to its bucket index.
+///
+/// Deliberately a substring scan rather than a JSON parse: this runs on the
+/// generator's hot loop and must not allocate.
+fn limiter_bucket(body: &[u8]) -> usize {
+    let Some(pos) = find_subslice(body, b"\"limiter\"") else {
+        return LIMITER_UNATTRIBUTED;
+    };
+    let tail = &body[pos + b"\"limiter\"".len()..];
+    for (idx, id) in LIMITER_IDS.iter().enumerate() {
+        // The value follows within a few bytes (`: "admin"`); bound the scan so
+        // an unrelated later field cannot be mistaken for the value.
+        let window = &tail[..tail.len().min(id.len() + 8)];
+        if find_subslice(window, id.as_bytes()).is_some() {
+            return idx;
+        }
+    }
+    LIMITER_UNATTRIBUTED
+}
+
+/// Renders the per-limiter 429 counters as a named map, dropping zero buckets so
+/// the artifact names only the limiters that actually shed.
+fn limiter_histogram(counts: &LimiterCounts) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    for (idx, n) in counts.iter().enumerate() {
+        if *n == 0 {
+            continue;
+        }
+        let name = LIMITER_IDS.get(idx).copied().unwrap_or("unattributed");
+        out.insert(name.to_string(), *n);
+    }
+    out
+}
+
+/// The limiter that shed the most requests in a rung, for the operator-facing
+/// diagnosis. `None` when nothing was shed.
+fn dominant_limiter(hist: &BTreeMap<String, u64>) -> Option<(&str, u64)> {
+    hist.iter()
+        .max_by_key(|(_, n)| **n)
+        .map(|(k, n)| (k.as_str(), *n))
+}
+
 /// Sends one request over an established keep-alive stream and reads the full
-/// response. Returns the HTTP status code, or an error string on transport
-/// failure. The connection is drained (Content-Length or chunked) so it can be
-/// reused.
-fn send_one(stream: &mut TcpStream, req: &[u8]) -> Result<u16, String> {
+/// response. Returns the HTTP status code and, for a `429`, the bucket index of
+/// the limiter that shed it, or an error string on transport failure. The
+/// connection is drained (Content-Length or chunked) so it can be reused.
+fn send_one(stream: &mut TcpStream, req: &[u8]) -> Result<(u16, Option<usize>), String> {
     stream.write_all(req).map_err(|e| format!("write: {e}"))?;
     stream.flush().map_err(|e| format!("flush: {e}"))?;
     read_response(stream)
 }
 
-/// Reads one HTTP/1.1 response, returns the status code, leaves the stream at the
-/// start of the next response.
-fn read_response(stream: &mut TcpStream) -> Result<u16, String> {
+/// Reads one HTTP/1.1 response, returns the status code (and the shedding
+/// limiter's bucket on a `429`), leaves the stream at the start of the next
+/// response.
+fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>), String> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
     // Read until we have the header terminator.
@@ -812,10 +873,19 @@ fn read_response(stream: &mut TcpStream) -> Result<u16, String> {
             }
             body.extend_from_slice(&tmp[..n]);
         }
-        return Ok(status);
+        let bucket = (status == 429).then(|| limiter_bucket(&body));
+        return Ok((status, bucket));
     }
 
     let want = content_len.unwrap_or(0);
+    // Only a 429 body is retained — on every other status the bytes are counted
+    // and dropped, so the generator's hot loop keeps its zero-copy drain.
+    let keep_body = status == 429;
+    let mut body: Vec<u8> = if keep_body {
+        buf[header_end..].to_vec()
+    } else {
+        Vec::new()
+    };
     while body_have < want {
         let n = stream
             .read(&mut tmp)
@@ -823,9 +893,13 @@ fn read_response(stream: &mut TcpStream) -> Result<u16, String> {
         if n == 0 {
             return Err("eof mid-body".into());
         }
+        if keep_body {
+            body.extend_from_slice(&tmp[..n]);
+        }
         body_have += n;
     }
-    Ok(status)
+    let bucket = keep_body.then(|| limiter_bucket(&body));
+    Ok((status, bucket))
 }
 
 fn parse_status(head: &str) -> Result<u16, String> {
@@ -915,13 +989,14 @@ fn run_rung(
                 }
                 let mut st = stats.lock().expect("stats lock");
                 match result {
-                    Ok(code) => {
+                    Ok((code, limiter)) => {
                         st.completed += 1;
                         st.latencies_us.push(elapsed);
                         if !(200..300).contains(&code) {
                             st.non_2xx += 1;
                             if code == 429 {
                                 st.rate_limited += 1;
+                                st.rate_limited_by[limiter.unwrap_or(LIMITER_UNATTRIBUTED)] += 1;
                             }
                         }
                     }
@@ -991,6 +1066,7 @@ fn run_rung(
     let mut completed = 0u64;
     let mut non_2xx = 0u64;
     let mut rate_limited = 0u64;
+    let mut rate_limited_by: LimiterCounts = [0; LIMITER_IDS.len() + 1];
     let mut connect_errors = 0u64;
     let mut transport_errors = 0u64;
     let mut lat: Vec<u64> = Vec::new();
@@ -999,6 +1075,9 @@ fn run_rung(
         completed += st.completed;
         non_2xx += st.non_2xx;
         rate_limited += st.rate_limited;
+        for (agg, w) in rate_limited_by.iter_mut().zip(st.rate_limited_by.iter()) {
+            *agg += *w;
+        }
         connect_errors += st.connect_errors;
         transport_errors += st.transport_errors;
         lat.extend_from_slice(&st.latencies_us);
@@ -1023,6 +1102,7 @@ fn run_rung(
         completed,
         non_2xx,
         rate_limited,
+        rate_limited_by: limiter_histogram(&rate_limited_by),
         connect_errors,
         transport_errors,
         error_rate,
@@ -1139,8 +1219,15 @@ fn real_main() -> Result<(), String> {
             conns,
             &server_cpu_file,
         );
+        // Name the shedding limiter inline: the operator's next action is to
+        // raise *that* limit, and printing only a 429 count sends them to
+        // `security.request_shaper` by default (HEA-2010).
+        let shed_by = match dominant_limiter(&r.rate_limited_by) {
+            Some((name, n)) => format!(" shed_by={name}({n})"),
+            None => String::new(),
+        };
         eprintln_stderr(&format!(
-            "  achieved={:.0}/s p50={:.2}ms p99={:.2}ms grade={} err_rate={:.4} 429={}",
+            "  achieved={:.0}/s p50={:.2}ms p99={:.2}ms grade={} err_rate={:.4} 429={}{shed_by}",
             r.achieved_rate, r.p50_ms, r.p99_ms, r.attribution.grade, r.error_rate, r.rate_limited
         ));
         results.push(r);
@@ -1148,6 +1235,14 @@ fn real_main() -> Result<(), String> {
 
     let knee = detect_knee(&results);
     let shape = degradation_shape(&results, knee);
+
+    // HEA-2010: which limiter actually shed, summed across every rung.
+    let mut rate_limited_by_total: BTreeMap<String, u64> = BTreeMap::new();
+    for r in &results {
+        for (k, n) in &r.rate_limited_by {
+            *rate_limited_by_total.entry(k.clone()).or_default() += n;
+        }
+    }
 
     let artifact = serde_json::json!({
         "schema": "hea-1997-saturation-1",
@@ -1170,6 +1265,11 @@ fn real_main() -> Result<(), String> {
         // (reason `rate_limited`) so a shaper-shed rung can never be reported as a knee.
         "limiter_setting": limiter_note,
         "rungs_rate_limited": results.iter().any(|r| r.rate_limited > 0),
+        // HEA-2010: which limiter actually shed, summed across every rung. The
+        // shaper is only one of five; before this the artifact implied it was
+        // always the cause and sent operators to re-pin a limit that was already
+        // 200x above the top rung.
+        "rate_limited_by_total": rate_limited_by_total,
         "generator_cores": num_cpus(),
         "conns": conns,
         "warmup_s": warmup.as_secs(),
@@ -1187,9 +1287,14 @@ fn real_main() -> Result<(), String> {
              >= 2x, transport is clean, and degradation is by queueing not errors.",
             "INCOMPLETE = no --server-cpu-file, so server saturation is unconfirmed; \
              never treat an INCOMPLETE rung as a published capacity number.",
-            "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): the request \
-             shaper shed load, so the ceiling is Hearth's limiter, not the server — \
-             pin security.request_shaper above the top rung and re-run (HEA-2007)."
+            "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): a limiter \
+             shed load, so the ceiling is Hearth's limiter, not the server (HEA-2007).",
+            "`rate_limited_by` / `rate_limited_by_total` name WHICH limiter shed \
+             (HEA-2010). Raise that one, not the shaper by reflex: `shaper` = \
+             security.request_shaper, `admin` = security.rate_limiting.admin_per_minute, \
+             `token` = security.rate_limiting.token_per_minute, `export` = \
+             security.backup.export_rate_limit. `unattributed` means the server \
+             predates the tagging — upgrade it before trusting the split."
         ]
     });
 
@@ -1320,6 +1425,65 @@ mod tests {
         assert!(a.failing_conditions.iter().any(|c| c == "rate_limited"));
     }
 
+    // ── 429 attribution (HEA-2010) ───────────────────────────────────────────
+    //
+    // The HEA-1970 dry-run voided all five rungs and the artifact pointed the
+    // operator at `security.request_shaper`, which had already been pinned 200x
+    // above the top rung. The actual sheds came from the admin and token
+    // limiters. A 429 must name its own source.
+
+    #[test]
+    fn attributes_429_to_the_admin_limiter() {
+        let body = br#"{"error":"too_many_requests","error_description":"rate limit exceeded","limiter":"admin"}"#;
+        assert_eq!(LIMITER_IDS[limiter_bucket(body)], "admin");
+    }
+
+    #[test]
+    fn attributes_429_to_the_shaper() {
+        let body = br#"{"error":"too_many_requests","error_description":"rate limit exceeded","limiter":"shaper"}"#;
+        assert_eq!(LIMITER_IDS[limiter_bucket(body)], "shaper");
+    }
+
+    #[test]
+    fn attributes_export_429_despite_a_different_error_code() {
+        let body = br#"{"error":"export_rate_limit_exceeded","error_description":"export rate limit exceeded; maximum exports per hour reached","limiter":"export"}"#;
+        assert_eq!(LIMITER_IDS[limiter_bucket(body)], "export");
+    }
+
+    #[test]
+    fn untagged_429_is_unattributed_not_silently_blamed_on_the_shaper() {
+        // An older server emits no `limiter` field. Guessing "shaper" here is
+        // exactly the misdiagnosis this change exists to remove.
+        let body = br#"{"error":"too_many_requests"}"#;
+        assert_eq!(limiter_bucket(body), LIMITER_UNATTRIBUTED);
+        let hist = limiter_histogram(&{
+            let mut c: LimiterCounts = [0; LIMITER_IDS.len() + 1];
+            c[LIMITER_UNATTRIBUTED] = 7;
+            c
+        });
+        assert_eq!(hist.get("unattributed"), Some(&7));
+        assert!(!hist.contains_key("shaper"));
+    }
+
+    #[test]
+    fn a_later_unrelated_field_is_not_mistaken_for_the_limiter_value() {
+        // `admin` appears in the body but far past the `limiter` value, which is
+        // `token`. A greedy scan would report the wrong limiter.
+        let body = br#"{"limiter":"token","path":"/admin/users/1"}"#;
+        assert_eq!(LIMITER_IDS[limiter_bucket(body)], "token");
+    }
+
+    #[test]
+    fn histogram_omits_zero_buckets_and_dominant_names_the_worst_offender() {
+        let mut c: LimiterCounts = [0; LIMITER_IDS.len() + 1];
+        c[1] = 900; // admin
+        c[2] = 12; // token
+        let hist = limiter_histogram(&c);
+        assert_eq!(hist.len(), 2, "zero buckets must not appear: {hist:?}");
+        assert_eq!(dominant_limiter(&hist), Some(("admin", 900)));
+        assert_eq!(dominant_limiter(&BTreeMap::new()), None);
+    }
+
     #[test]
     fn classify_429_outranks_incomplete_without_server_cpu() {
         // No server-CPU sample would normally give INCOMPLETE, but a 429 is a hard
@@ -1336,6 +1500,7 @@ mod tests {
             completed: achieved as u64,
             non_2xx: 0,
             rate_limited: 0,
+            rate_limited_by: BTreeMap::new(),
             connect_errors: 0,
             transport_errors: 0,
             error_rate: err,

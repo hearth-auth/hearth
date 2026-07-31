@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Every rate-limiter `429` now names the limiter that shed the request (HEA-2010)** —
+  the JSON body carries an additive `limiter` field: `"shaper"`
+  (`security.request_shaper`), `"admin"` (`security.rate_limiting.admin_per_minute`),
+  `"token"` (`security.rate_limiting.token_per_minute`), `"export"`
+  (`security.backup.export_rate_limit`), or `"login_ip"` (the per-IP login limit on the
+  token and magic-link endpoints). Existing `error` codes are unchanged, so clients
+  matching on `too_many_requests` / `export_rate_limit_exceeded` keep working. Five
+  independent limiters could previously answer `429` with no way to tell them apart,
+  which sent operators to re-tune `security.request_shaper` when the shed actually came
+  from the admin or token cap. (HEA-2010)
+
 ### Added
 - **`security.rate_limiting.admin_per_minute` and `security.rate_limiting.token_per_minute`
   config keys (HEA-2010)** — the admin-API cap (previously a compiled-in 100 requests per
