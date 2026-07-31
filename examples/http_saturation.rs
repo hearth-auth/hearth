@@ -45,6 +45,11 @@
 //! * `degrading_by_queueing` — the non-2xx *rate* stayed under
 //!   [`MAX_ERROR_RATE`]; the ceiling is showing as latency/queueing, not an error
 //!   cliff.
+//! * `rate_limited_shed`     — **zero** HTTP 429s. A single 429 means the request
+//!   shaper shed offered load, so the ceiling measured is Hearth's own limiter,
+//!   not the server. This is a hard INADMISSIBLE independent of the error-rate
+//!   threshold and of whether a server-CPU sample is present — it outranks
+//!   `INCOMPLETE`, so a shed rung can never be a knee (HEA-2007).
 //!
 //! Any rung failing a condition is reported `INADMISSIBLE` (or `INCOMPLETE`) with
 //! the failing conditions named — it is **not** dropped from the artifact.
@@ -75,6 +80,13 @@
 //! It means the observed ceiling may be Hearth's own limiter; the artifact records
 //! `limiter: "on"` and the runbook requires the operator to state which resource
 //! saturated (server CPU vs limiter 429s) from the attribution fields.
+//!
+//! Because the shipped shaper defaults (`ip_rps: 100`, `realm_rps: 1000`) would
+//! shed every rung the runbook fires from a single generator IP, the measured host
+//! MUST pin `security.request_shaper` above the top rung (HEA-2007). The chosen
+//! setting is captured in the artifact via `--limiter-note`, and the harness voids
+//! any rung that still 429s (see `rate_limited_shed` above) so a limiter-shed rung
+//! is never mistaken for the server's knee.
 //!
 //! ## What this is NOT
 //!
@@ -542,6 +554,9 @@ struct Attribution {
     generator_headroom_2x: bool,
     transport_clean: bool,
     degrading_by_queueing: bool,
+    /// True when the rung saw ≥1 HTTP 429 — the request shaper shed load, so the
+    /// ceiling measured is Hearth's own limiter, not the server (HEA-2007).
+    rate_limited_shed: bool,
     /// Overall grade for the rung.
     grade: String,
     /// Which conditions failed (empty when ADMISSIBLE).
@@ -554,13 +569,22 @@ fn classify(
     generator_headroom: f64,
     connect_or_transport_errors: u64,
     error_rate: f64,
+    rate_limited: u64,
 ) -> Attribution {
     let server_cpu_pinned = server_cpu_pct.map(|c| c >= SERVER_PINNED_PCT);
     let generator_headroom_2x = generator_headroom >= MIN_GENERATOR_HEADROOM;
     let transport_clean = connect_or_transport_errors == 0;
     let degrading_by_queueing = error_rate <= MAX_ERROR_RATE;
+    // A single 429 means the request shaper shed offered load: the ceiling we would
+    // report is Hearth's own rate limiter, not the server. That contaminates the
+    // measurement outright, so it is a hard-fail condition independent of the
+    // error-rate threshold and of whether a server-CPU sample is present (HEA-2007).
+    let rate_limited_shed = rate_limited > 0;
 
     let mut failing = Vec::new();
+    if rate_limited_shed {
+        failing.push("rate_limited".to_string());
+    }
     if !generator_headroom_2x {
         failing.push("generator_headroom_2x".to_string());
     }
@@ -574,7 +598,12 @@ fn classify(
         failing.push("server_cpu_pinned".to_string());
     }
 
-    let grade = if server_cpu_pct.is_none() {
+    let grade = if rate_limited_shed {
+        // Rate-limited: the limiter, not the server, is the ceiling. Hard
+        // INADMISSIBLE even without a server-CPU sample (so it outranks
+        // INCOMPLETE) — a shed rung can therefore never be a knee (HEA-2007).
+        "INADMISSIBLE".to_string()
+    } else if server_cpu_pct.is_none() {
         // Can't confirm the server saturated: incomplete, never silently ADMISSIBLE.
         "INCOMPLETE".to_string()
     } else if failing.is_empty() {
@@ -590,6 +619,7 @@ fn classify(
         generator_headroom_2x,
         transport_clean,
         degrading_by_queueing,
+        rate_limited_shed,
         grade,
         failing_conditions: failing,
     }
@@ -601,6 +631,9 @@ struct RungResult {
     achieved_rate: f64,
     completed: u64,
     non_2xx: u64,
+    /// Subset of `non_2xx` that were HTTP 429 (request shaper shed). Any non-zero
+    /// value forces the rung INADMISSIBLE with reason `rate_limited` (HEA-2007).
+    rate_limited: u64,
     connect_errors: u64,
     transport_errors: u64,
     error_rate: f64,
@@ -727,6 +760,8 @@ impl Backlog {
 struct WorkerStats {
     completed: u64,
     non_2xx: u64,
+    /// Subset of `non_2xx` that were HTTP 429 (request shaper shed load).
+    rate_limited: u64,
     connect_errors: u64,
     transport_errors: u64,
     latencies_us: Vec<u64>,
@@ -885,6 +920,9 @@ fn run_rung(
                         st.latencies_us.push(elapsed);
                         if !(200..300).contains(&code) {
                             st.non_2xx += 1;
+                            if code == 429 {
+                                st.rate_limited += 1;
+                            }
                         }
                     }
                     Err(e) => {
@@ -952,6 +990,7 @@ fn run_rung(
     // Aggregate worker stats.
     let mut completed = 0u64;
     let mut non_2xx = 0u64;
+    let mut rate_limited = 0u64;
     let mut connect_errors = 0u64;
     let mut transport_errors = 0u64;
     let mut lat: Vec<u64> = Vec::new();
@@ -959,6 +998,7 @@ fn run_rung(
         let st = s.lock().expect("stats lock");
         completed += st.completed;
         non_2xx += st.non_2xx;
+        rate_limited += st.rate_limited;
         connect_errors += st.connect_errors;
         transport_errors += st.transport_errors;
         lat.extend_from_slice(&st.latencies_us);
@@ -974,6 +1014,7 @@ fn run_rung(
         generator_headroom,
         connect_errors + transport_errors,
         error_rate,
+        rate_limited,
     );
 
     RungResult {
@@ -981,6 +1022,7 @@ fn run_rung(
         achieved_rate,
         completed,
         non_2xx,
+        rate_limited,
         connect_errors,
         transport_errors,
         error_rate,
@@ -1040,6 +1082,11 @@ fn real_main() -> Result<(), String> {
     let server_cpu_file = arg(&args, "--server-cpu-file");
     let login_password = arg(&args, "--login-password").unwrap_or_default();
     let allow_loopback = args.iter().any(|a| a == "--allow-loopback");
+    // Operator-supplied record of the measured host's shaper setting (HEA-2007):
+    // e.g. `--limiter-note "request_shaper ip_rps=200000 realm_rps=200000"`. Echoed
+    // verbatim into the artifact so the chosen setting is captured alongside the run.
+    // Advisory only — the `rate_limited` gate is what actually voids a shed rung.
+    let limiter_note = arg(&args, "--limiter-note");
 
     if target_url.is_empty() {
         return Err("--target http://HOST:PORT (or HEARTH_SAT_TARGET) is required".into());
@@ -1093,8 +1140,8 @@ fn real_main() -> Result<(), String> {
             &server_cpu_file,
         );
         eprintln_stderr(&format!(
-            "  achieved={:.0}/s p50={:.2}ms p99={:.2}ms grade={} err_rate={:.4}",
-            r.achieved_rate, r.p50_ms, r.p99_ms, r.attribution.grade, r.error_rate
+            "  achieved={:.0}/s p50={:.2}ms p99={:.2}ms grade={} err_rate={:.4} 429={}",
+            r.achieved_rate, r.p50_ms, r.p99_ms, r.attribution.grade, r.error_rate, r.rate_limited
         ));
         results.push(r);
     }
@@ -1117,6 +1164,12 @@ fn real_main() -> Result<(), String> {
         },
         "target_authority": redact_authority(&target.authority),
         "limiter": "on (two-host rig cannot enable load_test_unthrottled; report which resource saturated)",
+        // HEA-2007: the measured host must pin `security.request_shaper` above the
+        // top rung so the shaper does not shed offered load; the operator records
+        // that setting here. Any rung that still sees a 429 is graded INADMISSIBLE
+        // (reason `rate_limited`) so a shaper-shed rung can never be reported as a knee.
+        "limiter_setting": limiter_note,
+        "rungs_rate_limited": results.iter().any(|r| r.rate_limited > 0),
         "generator_cores": num_cpus(),
         "conns": conns,
         "warmup_s": warmup.as_secs(),
@@ -1133,7 +1186,10 @@ fn real_main() -> Result<(), String> {
             "A rung is ADMISSIBLE only when server CPU is pinned, generator headroom \
              >= 2x, transport is clean, and degradation is by queueing not errors.",
             "INCOMPLETE = no --server-cpu-file, so server saturation is unconfirmed; \
-             never treat an INCOMPLETE rung as a published capacity number."
+             never treat an INCOMPLETE rung as a published capacity number.",
+            "Any rung with a 429 is INADMISSIBLE (reason `rate_limited`): the request \
+             shaper shed load, so the ceiling is Hearth's limiter, not the server — \
+             pin security.request_shaper above the top rung and re-run (HEA-2007)."
         ]
     });
 
@@ -1207,7 +1263,7 @@ mod tests {
 
     #[test]
     fn classify_admissible_when_all_conditions_met() {
-        let a = classify(Some(95.0), 3.0, 0, 0.0);
+        let a = classify(Some(95.0), 3.0, 0, 0.0, 0);
         assert_eq!(a.grade, "ADMISSIBLE");
         assert!(a.failing_conditions.is_empty());
         assert_eq!(a.server_cpu_pinned, Some(true));
@@ -1216,14 +1272,14 @@ mod tests {
     #[test]
     fn classify_incomplete_without_server_cpu() {
         // Even with a perfect generator-side picture, no server CPU ⇒ INCOMPLETE.
-        let a = classify(None, 5.0, 0, 0.0);
+        let a = classify(None, 5.0, 0, 0.0, 0);
         assert_eq!(a.grade, "INCOMPLETE");
     }
 
     #[test]
     fn classify_inadmissible_on_generator_ceiling() {
         // Generator itself is the bottleneck (headroom < 2x): inadmissible.
-        let a = classify(Some(70.0), 1.2, 0, 0.0);
+        let a = classify(Some(70.0), 1.2, 0, 0.0, 0);
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a
             .failing_conditions
@@ -1238,7 +1294,7 @@ mod tests {
     #[test]
     fn classify_inadmissible_on_error_cliff() {
         // Server pinned & generator clear, but the ceiling is an error cliff.
-        let a = classify(Some(99.0), 4.0, 0, 0.20);
+        let a = classify(Some(99.0), 4.0, 0, 0.20, 0);
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a
             .failing_conditions
@@ -1248,9 +1304,29 @@ mod tests {
 
     #[test]
     fn classify_inadmissible_on_transport_errors() {
-        let a = classify(Some(99.0), 4.0, 5, 0.0);
+        let a = classify(Some(99.0), 4.0, 5, 0.0, 0);
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a.failing_conditions.iter().any(|c| c == "transport_clean"));
+    }
+
+    #[test]
+    fn classify_inadmissible_on_any_429_even_below_error_threshold() {
+        // A perfectly-attributed rung (server pinned, generator clear, transport
+        // clean) with a single 429 whose error rate is *under* MAX_ERROR_RATE must
+        // still be INADMISSIBLE — the shaper shed load, so it measured the limiter.
+        let a = classify(Some(99.0), 4.0, 0, MAX_ERROR_RATE / 2.0, 1);
+        assert_eq!(a.grade, "INADMISSIBLE");
+        assert!(a.rate_limited_shed);
+        assert!(a.failing_conditions.iter().any(|c| c == "rate_limited"));
+    }
+
+    #[test]
+    fn classify_429_outranks_incomplete_without_server_cpu() {
+        // No server-CPU sample would normally give INCOMPLETE, but a 429 is a hard
+        // INADMISSIBLE — otherwise a shed rung could sneak past as "not yet graded".
+        let a = classify(None, 5.0, 0, 0.0, 3);
+        assert_eq!(a.grade, "INADMISSIBLE");
+        assert!(a.failing_conditions.iter().any(|c| c == "rate_limited"));
     }
 
     fn rung(offered: u64, achieved: f64, _grade: &str, err: f64) -> RungResult {
@@ -1259,6 +1335,7 @@ mod tests {
             achieved_rate: achieved,
             completed: achieved as u64,
             non_2xx: 0,
+            rate_limited: 0,
             connect_errors: 0,
             transport_errors: 0,
             error_rate: err,
@@ -1266,8 +1343,20 @@ mod tests {
             p50_ms: 1.0,
             p99_ms: 2.0,
             p999_ms: 3.0,
-            attribution: classify(Some(95.0), 4.0, 0, err),
+            attribution: classify(Some(95.0), 4.0, 0, err, 0),
         }
+    }
+
+    #[test]
+    fn rate_limited_rung_is_never_a_knee() {
+        // A rung that keeps up and would otherwise be the knee, but saw 429s, must
+        // be excluded from knee detection (HEA-2007 AC: shed rung never ADMISSIBLE).
+        let mut shed = rung(1000, 1000.0, "ADMISSIBLE", 0.0);
+        shed.rate_limited = 42;
+        shed.attribution = classify(Some(99.0), 4.0, 0, 0.0, 42);
+        let rungs = vec![rung(500, 500.0, "ADMISSIBLE", 0.0), shed];
+        // The only keeping-up rung with a valid grade is index 0, not the shed rung.
+        assert_eq!(detect_knee(&rungs), Some(0));
     }
 
     #[test]
@@ -1286,7 +1375,7 @@ mod tests {
     #[test]
     fn knee_none_when_no_rung_admissible() {
         let mut r = rung(500, 500.0, "ADMISSIBLE", 0.30);
-        r.attribution = classify(Some(50.0), 1.0, 3, 0.30);
+        r.attribution = classify(Some(50.0), 1.0, 3, 0.30, 0);
         assert_eq!(detect_knee(&[r]), None);
     }
 

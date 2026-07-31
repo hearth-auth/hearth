@@ -109,6 +109,18 @@ storage:
   data_dir: /var/lib/hearth-loadtest      # persists across the mode switch
 security:
   key_encryption_key: ${HEARTH_KEK}       # identical in both phases (env-substituted)
+  # HEA-2007: the shipped shaper defaults (ip_rps 100 / realm_rps 1000) shed every
+  # rung the ramp fires from a single generator IP, so phase 3B would measure the
+  # LIMITER, not the server. Pin both above the top offered rung. These are honoured
+  # in phase 3B (limiters ON there); in phase 3A the escape hatch below disables the
+  # shaper entirely, so seeding 5000 users from one IP does not 429.
+  request_shaper:
+    ip_rps: 200000                        # > any rung; record this value in the artifact (§6)
+    realm_rps: 200000
+  # Honoured ONLY in phase 3A (--dev + loopback); auto-refused in phase 3B (non-dev,
+  # non-loopback) by the HEA-1980 gate, so it is safe to leave in the shared file.
+  # Without it, the phase-3A seed dies at `create_user failed: HTTP 429`.
+  load_test_unthrottled: true
 ```
 
 ### 3A. Seed phase — `--dev`, loopback only
@@ -183,12 +195,15 @@ arguably better — note in the artifact which you used.
 ```bash
 T=http://<HOST_A_PRIVATE_IP>:8420
 CPU=/shared/hostA-cpu.txt
+# HEA-2007: record the pinned shaper setting from §3's hearth.yaml so the chosen
+# value is captured in every artifact. It must be > your top rung.
+LIM='request_shaper ip_rps=200000 realm_rps=200000'
 
 # Read plane — the competitor-comparable number.
 ./target/release/examples/http_saturation \
   --target $T --seed-handle /shared/seed.json --plane read \
   --rungs 1000,2000,4000,8000,16000,32000 --hold 30 --warmup 5 --conns 512 \
-  --server-cpu-file $CPU > sat-read.json
+  --server-cpu-file $CPU --limiter-note "$LIM" > sat-read.json
 ```
 
 The `issuance` and `blended` planes are also runnable here (HEA-2003) — they mint
@@ -247,21 +262,34 @@ design; the read plane is unaffected.
 Keep the login ladder short and shallow — Argon2id is ~10–30 ms of CPU behind a
 bounded admission gate, so high rungs just fill the shed queue.
 
-## 6. Rate limiter — record the decision
+## 6. Rate limiter — pin it above the knee, record the setting (HEA-2007)
 
 `security.load_test_unthrottled` requires `--dev` **AND** every effective bind
 loopback (`src/main.rs`). The measured run in phase 3B is **not** `--dev` and binds
-the private interface, so the escape hatch **cannot** be enabled and limiters stay
-**ON**. That is deliberate — we report what the product actually does — but it means
-the observed ceiling may be Hearth's own limiter (429s), not CPU. The artifact stamps
-`limiter: "on"`. When you write the report you **must** state which resource
-saturated first, read from the attribution fields:
+the private interface, so the escape hatch **cannot** be enabled and the request
+shaper stays **ON**. That is deliberate — we report what the product actually does.
 
-- `server_cpu_pinned: true` + `degrading_by_queueing: true` + no 429s ⇒ **CPU-bound**;
-  the knee is a real hardware capacity number.
-- non-2xx dominated by **429** while `server_cpu_pct` well under 90 ⇒ **limiter-bound**;
-  report it as "capacity at the configured limiter setting", not hardware capacity,
-  and note the limiter config.
+But the shipped shaper **defaults** (`ip_rps: 100`, `realm_rps: 1000`) are fatal to
+this measurement: the generator is a single source IP, so **every rung above 100
+rps is shed as 429** and the "knee" would be the limiter, not the server. Decision
+(HEA-2007, option A): **pin `security.request_shaper` above the top offered rung**
+on the measured host (done in §3's `hearth.yaml`) and **record the values** — pass
+them via `--limiter-note` (§4) so they land in every artifact's `limiter_setting`
+field. The gate is untouched; the shaper is simply configured above the knee.
+
+The harness **enforces** this: any rung that still sees a 429 is graded
+**INADMISSIBLE** with reason `rate_limited` (and `rate_limited_shed: true`), so a
+shaper-shed rung can **never** be reported as a knee. `rungs_rate_limited: true` in
+the artifact means your pin was too low — raise it and re-run.
+
+When you write the report, state which resource saturated first, from the
+attribution fields:
+
+- `server_cpu_pinned: true` + `degrading_by_queueing: true` + `rate_limited_shed:
+  false` ⇒ **CPU-bound**; the knee is a real hardware capacity number.
+- any `rate_limited > 0` ⇒ the rung is INADMISSIBLE by construction; the shaper pin
+  was below the offered rate. This is never a publishable capacity number — raise
+  `request_shaper` and re-run.
 
 ## 7. Copy back, grade, publish
 
@@ -284,6 +312,7 @@ saturated first, read from the attribution fields:
 | `generator_headroom_2x` | host B used ≤ 50% of its CPU (headroom ratio ≥ 2.0) |
 | `transport_clean` | zero connect/transport errors |
 | `degrading_by_queueing` | non-2xx rate ≤ 0.5% (ceiling is latency, not an error cliff) |
+| `rate_limited_shed` | **zero** HTTP 429s — a single 429 is a hard INADMISSIBLE (limiter, not server; HEA-2007) |
 
 A rung failing any of these is emitted `INADMISSIBLE` (or `INCOMPLETE`), **never
 silently included** in a published knee.
