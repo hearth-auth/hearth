@@ -691,7 +691,9 @@ async fn dcr_client_credentials_issuance_path_works_end_to_end() {
                 .uri("/token")
                 .header("X-Realm-ID", realm_uuid.clone())
                 .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::to_vec(&token_body).expect("serialize")))
+                .body(Body::from(
+                    serde_json::to_vec(&token_body).expect("serialize"),
+                ))
                 .expect("build"),
         )
         .await

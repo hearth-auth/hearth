@@ -391,8 +391,10 @@ fn build_corpus(
         Ok(())
     };
 
-    let push_login =
-        |templates: &mut Vec<ReqTemplate>, password: &str, csrf_token: Option<&str>| -> Result<(), String> {
+    let push_login = |templates: &mut Vec<ReqTemplate>,
+                      password: &str,
+                      csrf_token: Option<&str>|
+     -> Result<(), String> {
         if password.is_empty() {
             return Err(
                 "login/KDF plane requires --login-password AND users seeded with it \
@@ -513,15 +515,18 @@ fn urlencode(s: &str) -> String {
 /// GET per corpus build (≤100 users standard corpus) adds negligible overhead.
 /// On failure (server down, no cookie set) the harness aborts before firing any
 /// load — a missing token means every login request would 422 immediately.
-fn fetch_csrf_token(authority: &str, host_header: &str, login_path: &str) -> Result<String, String> {
+fn fetch_csrf_token(
+    authority: &str,
+    host_header: &str,
+    login_path: &str,
+) -> Result<String, String> {
     let mut stream = TcpStream::connect(authority)
         .map_err(|e| format!("csrf prefetch connect({authority}): {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
-    let req = format!(
-        "GET {login_path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n"
-    );
+    let req =
+        format!("GET {login_path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(req.as_bytes())
         .map_err(|e| format!("csrf prefetch write: {e}"))?;
@@ -715,8 +720,8 @@ fn classify(
     // TIME_WAIT exhaustion looks exactly like a server-side latency cliff. Gate at
     // 95 % of the ephemeral port range. Fail-open when the range is unreadable
     // (port_range_size == u64::MAX).
-    let generator_ephemeral_ports_ok = net.port_range_size == u64::MAX
-        || net.time_wait < net.port_range_size * 95 / 100;
+    let generator_ephemeral_ports_ok =
+        net.port_range_size == u64::MAX || net.time_wait < net.port_range_size * 95 / 100;
 
     let mut failing = Vec::new();
     if rate_limited_shed {
@@ -1427,13 +1432,9 @@ fn run_rung(
                 softnet_time_squeeze: end_snap
                     .softnet_time_squeeze
                     .saturating_sub(start_snap.softnet_time_squeeze),
-                rx_pps: end_snap
-                    .rx_packets
-                    .saturating_sub(start_snap.rx_packets) as f64
+                rx_pps: end_snap.rx_packets.saturating_sub(start_snap.rx_packets) as f64
                     / measure_wall,
-                tx_pps: end_snap
-                    .tx_packets
-                    .saturating_sub(start_snap.tx_packets) as f64
+                tx_pps: end_snap.tx_packets.saturating_sub(start_snap.tx_packets) as f64
                     / measure_wall,
                 time_wait: end_snap.time_wait,
                 port_range_size: read_ephemeral_port_range_size(),
@@ -1574,7 +1575,12 @@ fn real_main() -> Result<(), String> {
         Plane::Login | Plane::Blended => prefetch_login_csrf(&target, &handle)?,
         _ => None,
     };
-    let corpus = Arc::new(build_corpus(plane, &target, &handle, login_csrf_token.as_deref())?);
+    let corpus = Arc::new(build_corpus(
+        plane,
+        &target,
+        &handle,
+        login_csrf_token.as_deref(),
+    )?);
 
     // HEA-2014: detect the generator's primary NIC once; reused across rungs.
     let net_dev = primary_net_dev();
@@ -1820,7 +1826,14 @@ mod tests {
         // A perfectly-attributed rung (server pinned, generator clear, transport
         // clean) with a single 429 whose error rate is *under* MAX_ERROR_RATE must
         // still be INADMISSIBLE — the shaper shed load, so it measured the limiter.
-        let a = classify(Some(99.0), 4.0, 0, MAX_ERROR_RATE / 2.0, 1, &NetDelta::default());
+        let a = classify(
+            Some(99.0),
+            4.0,
+            0,
+            MAX_ERROR_RATE / 2.0,
+            1,
+            &NetDelta::default(),
+        );
         assert_eq!(a.grade, "INADMISSIBLE");
         assert!(a.rate_limited_shed);
         assert!(a.failing_conditions.iter().any(|c| c == "rate_limited"));
@@ -1839,11 +1852,13 @@ mod tests {
         };
         let a = classify(Some(99.0), 4.0, 0, 0.0, 0, &net);
         assert_eq!(a.grade, "INADMISSIBLE");
-        assert!(a
-            .failing_conditions
-            .iter()
-            .any(|c| c == "generator_softnet_drops"),
-            "expected generator_softnet_drops in {:?}", a.failing_conditions);
+        assert!(
+            a.failing_conditions
+                .iter()
+                .any(|c| c == "generator_softnet_drops"),
+            "expected generator_softnet_drops in {:?}",
+            a.failing_conditions
+        );
         assert!(!a.softnet_drops_zero);
     }
 
@@ -1861,11 +1876,13 @@ mod tests {
         };
         let a = classify(Some(99.0), 4.0, 0, 0.0, 0, &net);
         assert_eq!(a.grade, "INADMISSIBLE");
-        assert!(a
-            .failing_conditions
-            .iter()
-            .any(|c| c == "generator_ephemeral_ports"),
-            "expected generator_ephemeral_ports in {:?}", a.failing_conditions);
+        assert!(
+            a.failing_conditions
+                .iter()
+                .any(|c| c == "generator_ephemeral_ports"),
+            "expected generator_ephemeral_ports in {:?}",
+            a.failing_conditions
+        );
         assert!(!a.generator_ephemeral_ports_ok);
     }
 
@@ -1879,7 +1896,10 @@ mod tests {
         };
         let a = classify(None, 5.0, 0, 0.0, 0, &net);
         assert_eq!(a.grade, "INADMISSIBLE");
-        assert!(a.failing_conditions.iter().any(|c| c == "generator_softnet_drops"));
+        assert!(a
+            .failing_conditions
+            .iter()
+            .any(|c| c == "generator_softnet_drops"));
     }
 
     #[test]
@@ -1969,8 +1989,16 @@ mod tests {
         // A failed login is rendered as a 303 redirect back to the login page.
         // Blanket-accepting 3xx would grade a 100%-wrong-password run green;
         // only a redirect to /ui (the post-login target) counts as success.
-        assert!(!is_response_success("login", 303, Some("/ui/realms/dev/login")));
-        assert!(!is_response_success("login", 302, Some("/ui/realms/dev/login")));
+        assert!(!is_response_success(
+            "login",
+            303,
+            Some("/ui/realms/dev/login")
+        ));
+        assert!(!is_response_success(
+            "login",
+            302,
+            Some("/ui/realms/dev/login")
+        ));
     }
 
     #[test]
@@ -2248,8 +2276,13 @@ mod tests {
         let handle = login_handle(realm_id, "dev-realm");
         // HEA-2015: pass a pre-fetched CSRF token so the template is realistic;
         // the network call (fetch_csrf_token) is exercised separately.
-        let corpus = build_corpus(Plane::Login, &login_target(), &handle, Some("csrf-test-token"))
-            .expect("login corpus builds with a realm name, password, and csrf token");
+        let corpus = build_corpus(
+            Plane::Login,
+            &login_target(),
+            &handle,
+            Some("csrf-test-token"),
+        )
+        .expect("login corpus builds with a realm name, password, and csrf token");
         let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
         // The request LINE (path) is name-keyed; the realm id must not leak into
         // it. (The id still rides in the `X-Realm-ID` header — that is correct
@@ -2269,7 +2302,10 @@ mod tests {
             req.contains("Cookie: hearth_ui_csrf=csrf-test-token\r\n"),
             "Cookie header with CSRF token missing: {req}"
         );
-        assert!(req.contains("_csrf=csrf-test-token"), "_csrf body field missing: {req}");
+        assert!(
+            req.contains("_csrf=csrf-test-token"),
+            "_csrf body field missing: {req}"
+        );
     }
 
     #[test]
@@ -2292,9 +2328,8 @@ mod tests {
         // the `_csrf=TOKEN` body field. Without both the production-mode server
         // returns 422 before reaching Argon2id — the KDF plane measures nothing.
         let handle = login_handle("r1", "dev-realm");
-        let corpus =
-            build_corpus(Plane::Login, &login_target(), &handle, Some("tok-abc-123"))
-                .expect("login corpus with csrf token");
+        let corpus = build_corpus(Plane::Login, &login_target(), &handle, Some("tok-abc-123"))
+            .expect("login corpus with csrf token");
         let req = String::from_utf8(corpus.templates[0].bytes.clone()).expect("utf8");
         assert!(
             req.contains("Cookie: hearth_ui_csrf=tok-abc-123\r\n"),
