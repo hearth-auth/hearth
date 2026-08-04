@@ -94,6 +94,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   users in realm B. Self-service registration is unchanged and continues to be served by the
   web `/register` flow, which honours the realm's registration policy and lands users in
   `PendingVerification`. (HEA-2023)
+- **`POST /realms/{realm}/token` token-exchange now authenticates the client (HEA-2024)** —
+  the path-realm token endpoint dispatched the
+  `urn:ietf:params:oauth:grant-type:token-exchange` grant with no client
+  authentication, unlike the header-realm `/token` endpoint (which enforces it).
+  Any holder of a valid subject token could POST a random-UUID `client_id` with no
+  credentials and receive a freshly signed access token carrying the subject's
+  `sub`/`permissions` with attacker-controlled `aud`/`resource`/`cnf.jkt`. The grant
+  now requires client authentication (HTTP Basic or `client_id`/`client_secret`) and
+  rejects unauthenticated requests with `401 invalid_client`. Additionally, exchanging
+  a DPoP-bound (`cnf.jkt`) subject token now requires a DPoP proof whose thumbprint
+  matches that binding, closing a re-binding path where a stolen sender-constrained
+  token could be laundered onto an attacker's key. (HEA-2024)
 
 ### Fixed
 - **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —

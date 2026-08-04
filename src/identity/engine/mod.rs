@@ -13501,6 +13501,29 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
         let subject_remaining = subject_claims.exp.saturating_sub(now_secs);
 
+        // HEA-2024 (F2): preserve the DPoP sender constraint across the exchange.
+        // If the subject token is bound to a key (`cnf.jkt`), the caller MUST prove
+        // possession of that same key by presenting a DPoP proof whose thumbprint
+        // matches. `request.dpop_jkt` carries the thumbprint of the validated proof
+        // from the protocol layer (`None` when no proof was presented). Without this
+        // check a stolen DPoP-bound subject token could be laundered into a token
+        // re-bound to the attacker's key (the new `cnf` is set from `request.dpop_jkt`
+        // downstream). Requiring an exact match blocks both the no-proof and
+        // wrong-key cases.
+        if let Some(ref subject_cnf) = subject_claims.cnf {
+            match request.dpop_jkt {
+                Some(ref presented_jkt) if *presented_jkt == subject_cnf.jkt => {}
+                _ => {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "subject_token is DPoP-bound; a DPoP proof matching \
+                                 cnf.jkt is required to exchange it"
+                            .to_string(),
+                        oauth_error: "invalid_grant",
+                    });
+                }
+            }
+        }
+
         // 3. Validate actor_token if present (B.5 OBO).
         // Returns (actor_sub, actor_scope_owned, actor_permissions_owned) — the actor's scope
         // ceiling (RFC 8693 §4.4) and the actor's own RBAC permission set (AUTHORIZATION.md § 16,
