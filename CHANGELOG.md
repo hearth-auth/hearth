@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **DPoP sender-constraint now enforced at `/userinfo`, `/realms/{realm}/userinfo`, and
+  `/v1/me/permissions` — stops bound-token replay as plain Bearer (HEA-2031)** — these three
+  resource endpoints bypassed the shared `extract_user_auth` guard and parsed the
+  `Authorization: Bearer` header directly, so a DPoP-bound access token (`cnf.jkt` present) was
+  fully usable as an ordinary Bearer token — the `cnf` confirmation was never checked and no
+  `DPoP` proof was required. A token stolen via log, referrer, or proxy could return the
+  victim's userinfo claims and freshly-resolved effective roles/groups/permissions, silently
+  downgrading the RFC 9449 sender-constraint (CWE-345). All three now route through a shared
+  `validate_user_token_with_dpop` guard: a token carrying `cnf.jkt` presented without a valid
+  matching DPoP proof is rejected `401 invalid_token`. The same-class 4th instance,
+  `POST /oauth/authorize` (decide-permission), was found in the audit and hardened too —
+  fail-closed to `{"allowed": false}` when the DPoP proof is missing/invalid. **Operator
+  impact:** DPoP/FAPI clients calling these endpoints with a sender-constrained token must now
+  send a valid `DPoP` proof header (correct `htm`/`htu`/`ath`); plain-Bearer callers with
+  unbound tokens are unaffected. (HEA-2031)
 - **WebAuthn REST endpoints now pin `rp_id`/origin server-side — restores phishing resistance (HEA-2025)** —
   `POST /webauthn/auth/begin`, `/webauthn/auth/complete`, `/webauthn/register/begin`, and
   `/webauthn/register/complete` previously took the relying-party ID and expected origin
