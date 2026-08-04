@@ -263,13 +263,13 @@ async fn enforce_host_allowlist(
     }
 }
 
-/// Fail-closed bearer-token presence guard for the agent router (HEA-1412).
+/// Presence-only bearer-token guard for the agent router (HEA-1412).
 ///
-/// Checks that an `Authorization: Bearer …` header is present before the
-/// request reaches any handler. Full token validation and permission checks
-/// still happen per-handler — this layer ensures future handlers added to the
-/// agent router return `401` even when a developer forgets the per-handler
-/// auth call.
+/// Checks that the `Authorization` header begins with `"Bearer "` and rejects
+/// with 401 if it is absent or malformed. **This does NOT validate the token
+/// value** — signature verification, expiry, and permission checks MUST be
+/// performed in every handler behind this layer. This guard only prevents
+/// 200/500 leaks from handlers that accidentally omit per-handler auth.
 async fn require_bearer_token(req: Request, next: Next) -> Response {
     use axum::http::StatusCode;
     let has_bearer = req
