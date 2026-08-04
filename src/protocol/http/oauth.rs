@@ -1145,11 +1145,24 @@ async fn token_exchange_impl(
     };
 
     // Rate limit per client_id before any grant-type dispatch.
-    if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
-        let client_id = ClientId::new(client_uuid);
-        if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-            return resp;
+    // Reject non-UUID client_ids — a non-parseable value bypassed the limiter
+    // and constitutes an invalid request per RFC 6749 §2.2 (HEA-2033).
+    let client_uuid = match body.client_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_request",
+                    "error_description": "client_id must be a UUID"
+                })),
+            )
+                .into_response();
         }
+    };
+    let client_id = ClientId::new(client_uuid);
+    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
     }
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
@@ -2157,11 +2170,24 @@ async fn realm_token_exchange(
         Err(e) => return e,
     };
     // Rate limit per client_id before any grant-type dispatch.
-    if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
-        let client_id = ClientId::new(client_uuid);
-        if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-            return resp;
+    // Reject non-UUID client_ids — a non-parseable value bypassed the limiter
+    // and constitutes an invalid request per RFC 6749 §2.2 (HEA-2033).
+    let client_uuid = match body.client_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_request",
+                    "error_description": "client_id must be a UUID"
+                })),
+            )
+                .into_response();
         }
+    };
+    let client_id = ClientId::new(client_uuid);
+    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
     }
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
