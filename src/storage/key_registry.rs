@@ -277,6 +277,13 @@ impl KeyRegistry {
         if file_guard.is_none() {
             // Create key file with version header
             *file_guard = Some(self.fs.create(&self.key_file_path)?);
+            // fsync parent directory so the new file's directory entry is durable
+            // before data is written — same class as HEA-1855 for WAL/SST.
+            let parent = self
+                .key_file_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."));
+            self.fs.sync_dir(parent)?;
             let version_bytes = KEY_FILE_VERSION.to_le_bytes();
             file_guard
                 .as_mut()
@@ -532,6 +539,9 @@ fn rewrite_keys_file(
     }
 
     fs.rename(&tmp_path, path)?;
+    // fsync parent directory so the rename (directory entry update) is durable
+    // before the caller considers the rewrite complete (HEA-1855 class).
+    fs.sync_dir(parent)?;
     Ok(fs.open_append(path)?)
 }
 
@@ -1222,6 +1232,138 @@ mod tests {
         assert!(
             !dir.path().join("hearth.host_key").exists(),
             "host_key file must NOT be written on refused production start-up"
+        );
+    }
+
+    // ── dir-fsync regression tests (HEA-2033) ────────────────────────────────
+
+    /// Spy filesystem that delegates all operations to RealFs but records the
+    /// paths passed to `sync_dir` so tests can assert durability invariants.
+    struct DirSyncSpyFs {
+        inner: crate::storage::fs::RealFs,
+        synced_dirs: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    }
+
+    impl DirSyncSpyFs {
+        fn new() -> (Arc<Self>, Arc<Mutex<Vec<std::path::PathBuf>>>) {
+            let synced_dirs = Arc::new(Mutex::new(Vec::new()));
+            let fs = Arc::new(Self {
+                inner: crate::storage::fs::RealFs,
+                synced_dirs: Arc::clone(&synced_dirs),
+            });
+            (fs, synced_dirs)
+        }
+    }
+
+    impl crate::storage::fs::Fs for DirSyncSpyFs {
+        fn create(
+            &self,
+            path: &Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.create(path)
+        }
+
+        fn open_read(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+
+        fn open_append(
+            &self,
+            path: &Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_append(path)
+        }
+
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+
+        fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            self.synced_dirs
+                .lock()
+                .expect("spy mutex")
+                .push(dir.to_path_buf());
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    #[test]
+    fn kek_store_first_create_syncs_parent_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (spy_fs, synced_dirs) = DirSyncSpyFs::new();
+        let registry =
+            KeyRegistry::load_with_fs(dir.path(), spy_fs, true).expect("load");
+
+        let realm = RealmId::generate();
+        registry.ensure_kek_for_realm(&realm).expect("ensure kek");
+
+        let dirs = synced_dirs.lock().expect("lock");
+        assert!(
+            dirs.iter().any(|p| p == dir.path()),
+            "sync_dir must be called on the data directory after creating hearth.keys; \
+             called on: {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn kek_store_rewrite_syncs_parent_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_key1 = crate::storage::encryption::generate_host_key()
+            .expect("host key 1");
+        let key1_bytes = *host_key1.as_bytes();
+
+        // Bootstrap a registry with two realms under key1.
+        let realm1 = RealmId::generate();
+        let realm2 = RealmId::generate();
+        {
+            let registry = KeyRegistry::load_with_keys(
+                dir.path(),
+                Arc::new(crate::storage::fs::RealFs),
+                host_key1,
+                None,
+            )
+            .expect("load key1");
+            registry.ensure_kek_for_realm(&realm1).expect("ensure r1");
+            registry.ensure_kek_for_realm(&realm2).expect("ensure r2");
+        }
+
+        // Now reload with key2 as current + key1 as previous — triggers rewrite_keys_file.
+        let (spy_fs, synced_dirs) = DirSyncSpyFs::new();
+        let host_key2 = crate::storage::encryption::generate_host_key()
+            .expect("host key 2");
+        let _ = KeyRegistry::load_with_keys(
+            dir.path(),
+            spy_fs,
+            host_key2,
+            Some(crate::storage::encryption::HostKey::from_bytes(key1_bytes)),
+        )
+        .expect("load key2 with rotation");
+
+        let dirs = synced_dirs.lock().expect("lock");
+        assert!(
+            dirs.iter().any(|p| p == dir.path()),
+            "sync_dir must be called on the data directory after rewrite_keys_file rename; \
+             called on: {dirs:?}"
         );
     }
 }
