@@ -42,28 +42,23 @@ jobs:
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.target }})
     runs-on: ubuntu-latest
-    # 30 min headroom: a cold leg is a full ASAN release rebuild of the hearth
-    # crate plus `cargo install cargo-fuzz`. On a warm Swatinem cache the build
-    # is ~13 min; on a cold cache (every leg until one succeeds and saves it) it
-    # is longer, and the swap-backed ASAN codegen peak (see the swap step) is
-    # slower still. Once a leg succeeds the cache warms and legs finish quickly.
-    timeout-minutes: 30
+    # 20 min headroom: a cold leg is a `--dev` (opt-level 0, no LTO) build of the
+    # fuzz target plus `cargo install cargo-fuzz`. The dev build is fast and its
+    # LLVM link peak is small; once a leg succeeds the Swatinem cache warms and
+    # later legs finish quickly.
+    timeout-minutes: 20
 
-    # HEA-1867: the ASAN release build OOMs the runner. Swap alone did not fix it
-    # — a 14 GB swapfile only converted the fast OOM-kill into a slow thrash that
-    # starved the runner agent's heartbeat, so GitHub reclaimed the VM (exit 143,
-    # "runner received a shutdown signal") ~5 min into a frozen codegen unit. The
-    # durable fix is to keep the peak *inside* the 16 GB RAM instead of leaning on
-    # swap: cap concurrent rustc/LLVM jobs and drop the release opt-level. A fuzz
+    # HEA-2020: the ASAN *release* + thin-LTO build of the fuzz targets drove the
+    # LLVM link memory peak over the 16 GB runner and OOM/VM-reclaimed mid-codegen
+    # (exit 143). The prior HEA-1867 mitigations (14 GB swapfile + opt-level caps)
+    # made it worse. The durable fix is to build the smoke `--dev` (opt-level 0,
+    # high codegen-units, no LTO) which collapses the link peak; ASAN is still
+    # applied via cargo-fuzz's injected RUSTFLAGS, so coverage is unchanged. A fuzz
     # smoke only needs the target to compile, parse its seeds, and not panic in
-    # 1 000 runs — it does not need -O3 codegen. opt-level=1 slashes the LLVM peak
-    # and build time; ASAN instrumentation is unaffected. Once a leg finally
-    # succeeds the Swatinem cache saves and later legs warm up (previously the
-    # cache never saved because every build died first).
+    # 1 000 runs — it does not need -O3 codegen. CARGO_BUILD_JOBS: "2" is kept as a
+    # cheap safety margin against a residual spike.
     env:
       CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
-      CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"
 
     strategy:
       fail-fast: false
@@ -87,21 +82,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # HEA-1867: secondary backstop only. The primary OOM fix is the job-level
-      # env above (capped build jobs + opt-level=1) which keeps the ASAN codegen
-      # peak inside RAM. This swapfile absorbs any residual spike from a single
-      # heavy codegen unit (e.g. opentelemetry-semantic-conventions) without
-      # thrashing hard enough to starve the runner agent. Do NOT rely on it as the
-      # fix — a large swapfile alone thrashes the runner to death (exit 143).
-      - name: Add swap headroom for the ASAN release build
-        run: |
-          sudo swapoff -a || true
-          sudo fallocate -l 14G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
-          free -h
-
       - name: Setup Rust nightly + protoc (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
         with:
@@ -118,9 +98,13 @@ jobs:
         # repo. fuzz/corpus/ (gitignored) is where libFuzzer accumulates
         # discovered inputs during extended runs. CI uses seeds only.
         run: |
+          # HEA-2020: --dev builds the target in the dev profile (opt-level 0,
+          # high codegen-units, no LTO) which collapses the LLVM link memory
+          # peak that OOM-killed the release+thin-LTO build. ASAN is still
+          # injected by cargo-fuzz's RUSTFLAGS, so smoke coverage is unchanged.
           SEEDS="fuzz/seeds/${{ matrix.target }}"
           if [ -d "$SEEDS" ]; then
-            cargo fuzz run ${{ matrix.target }} "$SEEDS" -- -runs=1000
+            cargo fuzz run --dev ${{ matrix.target }} "$SEEDS" -- -runs=1000
           else
-            cargo fuzz run ${{ matrix.target }} -- -runs=1000
+            cargo fuzz run --dev ${{ matrix.target }} -- -runs=1000
           fi
