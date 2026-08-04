@@ -158,6 +158,9 @@ async fn agent_card(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id;
 
     let agent_id_str = match query.agent_id {
