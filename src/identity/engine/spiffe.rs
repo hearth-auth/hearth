@@ -59,6 +59,7 @@ impl EmbeddedIdentityEngine {
             agent_id: request.agent_id.clone(),
             trust_domain: trust_domain.to_string(),
             created_at: now,
+            trust_bundle_pem: request.trust_bundle_pem.clone(),
         };
         let mapping_bytes =
             serde_json::to_vec(&mapping).map_err(|e| IdentityError::Serialization {
@@ -141,10 +142,11 @@ impl EmbeddedIdentityEngine {
     /// returns the mapped `AgentId`.
     ///
     /// Validation steps:
-    /// 1. Parse the DER certificate using `rcgen`/`rustls-pki-types`.
+    /// 1. Parse the DER certificate using `x509-parser`.
     /// 2. Extract the Subject Alternative Name (SAN) with `spiffe://` URI.
     /// 3. Verify the certificate is not expired.
-    /// 4. Look up the SPIFFE ID → `AgentId` mapping.
+    /// 4. Look up the full SPIFFE mapping.
+    /// 5. If a trust bundle is registered, verify the cert chain against it.
     pub(super) fn validate_spiffe_svid_inner(
         &self,
         realm_id: &RealmId,
@@ -159,10 +161,29 @@ impl EmbeddedIdentityEngine {
         // Check expiry using basic ASN.1 field extraction.
         check_cert_not_expired(der_cert, self.clock.now())?;
 
-        // Look up the mapping.
-        let agent_id = self
-            .lookup_agent_by_spiffe_id_inner(realm_id, &spiffe_id)?
+        // Load the full mapping to get trust bundle and agent_id.
+        let mapping = self
+            .lookup_spiffe_mapping_full_inner(realm_id, &spiffe_id)?
             .ok_or(IdentityError::SpiffeMappingNotFound)?;
+
+        // Verify the certificate chain against the registered trust bundle.
+        // Without chain verification a self-signed cert with any registered
+        // SPIFFE ID is accepted, enabling trust-domain confusion (HEA-2033).
+        match &mapping.trust_bundle_pem {
+            Some(bundle) => {
+                verify_cert_against_trust_bundle(der_cert, bundle)?;
+            }
+            None => {
+                // No trust bundle registered — chain verification skipped.
+                // mTLS is not yet wired so this path is unreachable in production,
+                // but warn operators so the gap is visible in logs once mTLS lands.
+                tracing::warn!(
+                    spiffe_id = %spiffe_id,
+                    "SPIFFE SVID validated without trust-bundle chain verification: \
+                     register a trust_bundle_pem to close this gap before enabling mTLS"
+                );
+            }
+        }
 
         let _ = self.record_audit(
             realm_id,
@@ -172,7 +193,30 @@ impl EmbeddedIdentityEngine {
             &spiffe_id,
         );
 
-        Ok(agent_id)
+        Ok(mapping.agent_id)
+    }
+
+    /// Loads the full `SpiffeIdentityMapping` for a given SPIFFE ID string.
+    fn lookup_spiffe_mapping_full_inner(
+        &self,
+        realm_id: &RealmId,
+        spiffe_id: &str,
+    ) -> Result<Option<SpiffeIdentityMapping>, IdentityError> {
+        let key = crate::identity::keys::encode_spiffe_mapping(spiffe_id);
+        match self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        {
+            None => Ok(None),
+            Some(bytes) => {
+                let mapping: SpiffeIdentityMapping =
+                    serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                        reason: e.to_string(),
+                    })?;
+                Ok(Some(mapping))
+            }
+        }
     }
 }
 
@@ -279,4 +323,144 @@ fn check_cert_not_expired(der: &[u8], now: crate::core::Timestamp) -> Result<(),
     }
 
     Ok(())
+}
+
+/// Verifies a DER-encoded certificate's chain against a PEM-encoded trust bundle.
+///
+/// For each CA certificate in the bundle, checks:
+/// 1. The cert's issuer DN matches the CA's subject DN.
+/// 2. The cert's signature verifies under the CA's public key.
+///
+/// Returns `Ok(())` if any CA in the bundle validates the chain.
+/// Returns `Err(SpiffeCertInvalid)` if no CA accepts it.
+fn verify_cert_against_trust_bundle(
+    der_cert: &[u8],
+    trust_bundle_pem: &str,
+) -> Result<(), IdentityError> {
+    use base64::Engine as _;
+
+    let (_, svid) = parse_x509_certificate(der_cert).map_err(|_| IdentityError::SpiffeCertInvalid {
+        reason: "failed to parse SVID DER for chain verification".to_string(),
+    })?;
+
+    // Parse PEM blocks from the trust bundle. Each "CERTIFICATE" block is a
+    // potential CA. We strip headers/footers and base64-decode the body.
+    let mut ca_der_bufs: Vec<Vec<u8>> = Vec::new();
+    let mut pem_text = trust_bundle_pem;
+    while let Some(start) = pem_text.find("-----BEGIN CERTIFICATE-----") {
+        let after_header = &pem_text[start + "-----BEGIN CERTIFICATE-----".len()..];
+        let end = after_header
+            .find("-----END CERTIFICATE-----")
+            .ok_or_else(|| IdentityError::SpiffeIdInvalid {
+                reason: "trust bundle PEM has unclosed BEGIN CERTIFICATE block".to_string(),
+            })?;
+        let b64: String = after_header[..end]
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .map_err(|_| IdentityError::SpiffeIdInvalid {
+                reason: "trust bundle PEM contains invalid base64".to_string(),
+            })?;
+        ca_der_bufs.push(der);
+        pem_text = &after_header[end + "-----END CERTIFICATE-----".len()..];
+    }
+
+    if ca_der_bufs.is_empty() {
+        return Err(IdentityError::SpiffeIdInvalid {
+            reason: "trust bundle PEM contains no CA certificates".to_string(),
+        });
+    }
+
+    for ca_der in &ca_der_bufs {
+        let Ok((_, ca_cert)) = parse_x509_certificate(ca_der) else {
+            continue;
+        };
+        // Issuer DN of the SVID must equal the subject DN of the CA.
+        if svid.issuer() != ca_cert.subject() {
+            continue;
+        }
+        // Verify the SVID's signature under the CA's public key.
+        if svid
+            .verify_signature(Some(ca_cert.public_key()))
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(IdentityError::SpiffeCertInvalid {
+        reason: "certificate was not signed by any CA in the trust bundle".to_string(),
+    })
+}
+
+// ── HEA-2033 trust-bundle regression tests ───────────────────────────────────
+
+#[cfg(test)]
+mod trust_bundle_tests {
+    use super::*;
+
+    /// Generate a (ca_pem, ee_cert_der) pair where the end-entity cert is
+    /// signed by the CA.
+    fn make_ca_and_signed_cert() -> (String, Vec<u8>) {
+        use rcgen::{CertificateParams, KeyPair};
+
+        // CA — self-signed
+        let ca_key = KeyPair::generate().expect("ca keygen");
+        let mut ca_params =
+            CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca self-sign");
+        let ca_pem = ca_cert.pem();
+
+        // End entity signed by the CA (using rcgen 0.13 signed_by API)
+        let ee_key = KeyPair::generate().expect("ee keygen");
+        let ee_params =
+            CertificateParams::new(vec!["localhost".to_string()]).expect("ee params");
+        let ee_cert = ee_params
+            .signed_by(&ee_key, &ca_cert, &ca_key)
+            .expect("sign ee by CA");
+
+        (ca_pem, ee_cert.der().to_vec())
+    }
+
+    #[test]
+    fn verify_cert_against_trust_bundle_accepts_valid_chain() {
+        let (ca_pem, ee_der) = make_ca_and_signed_cert();
+        verify_cert_against_trust_bundle(&ee_der, &ca_pem)
+            .expect("cert signed by registered CA must be accepted");
+    }
+
+    #[test]
+    fn verify_cert_against_trust_bundle_rejects_wrong_ca() {
+        let (_, ee_der) = make_ca_and_signed_cert();
+        // Generate a completely different CA — the ee cert was NOT signed by it.
+        let other_ca_key = rcgen::KeyPair::generate().expect("other ca keygen");
+        let mut other_ca_params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("other ca params");
+        other_ca_params.is_ca =
+            rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let other_ca_cert =
+            other_ca_params.self_signed(&other_ca_key).expect("other ca self-sign");
+        let other_ca_pem = other_ca_cert.pem();
+
+        let err = verify_cert_against_trust_bundle(&ee_der, &other_ca_pem)
+            .expect_err("cert from different CA must be rejected");
+        assert!(
+            matches!(err, IdentityError::SpiffeCertInvalid { .. }),
+            "expected SpiffeCertInvalid, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_cert_against_trust_bundle_rejects_empty_bundle() {
+        let (_, ee_der) = make_ca_and_signed_cert();
+        let err = verify_cert_against_trust_bundle(&ee_der, "")
+            .expect_err("empty trust bundle must be rejected");
+        assert!(
+            matches!(err, IdentityError::SpiffeIdInvalid { .. }),
+            "expected SpiffeIdInvalid for empty bundle, got: {err:?}"
+        );
+    }
 }

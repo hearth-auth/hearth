@@ -1000,6 +1000,12 @@ pub struct SpiffeIdentityMapping {
     pub trust_domain: String,
     /// When this mapping was created.
     pub created_at: Timestamp,
+    /// PEM-encoded trust bundle (one or more CA certificates) for this SPIFFE
+    /// trust domain. When present, `validate_spiffe_svid_inner` verifies the
+    /// presented certificate's chain against this bundle before accepting it.
+    /// When absent, chain verification is skipped and a warning is emitted.
+    #[serde(default)]
+    pub trust_bundle_pem: Option<String>,
 }
 
 /// Request to register a SPIFFE ID → `AgentId` mapping.
