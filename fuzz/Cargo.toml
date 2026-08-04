@@ -16,41 +16,6 @@ serde_json = "1"
 [workspace]
 members = ["."]
 
-# HEA-2019: cap the fuzz build's memory peak so the ASAN-instrumented smoke fits
-# the 16 GB GitHub runner. The OOM (exit 143, VM reclaimed) happens inside rustc
-# while compiling the large `hearth` path dependency under ASAN + sancov.
-#
-# Two independent knobs drive that peak, and both must point the same way:
-#
-#   1. debuginfo. The dev profile defaults to `debug = 2`. Full DWARF for every
-#      ASAN-instrumented CGU is a multi-GB multiplier the smoke has no use for —
-#      it only needs the target to compile, parse its seed corpus, and not panic
-#      in 1 000 runs. It does not need symbolicated backtraces.
-#
-#   2. codegen-units. This is the knob the previous attempt got backwards.
-#      `codegen-units = 1` does NOT reduce peak RSS "to a single thread's
-#      footprint"; it puts the *entire* crate into one LLVM module, so the peak
-#      is the whole ASAN-bloated IR held at once — the largest possible peak.
-#      Leaving the dev default (256) partitions `hearth` into many small modules
-#      that are emitted and freed incrementally. Serialising codegen is the build
-#      *jobs* knob (CARGO_BUILD_JOBS in fuzz.yml), not codegen-units.
-#
-# This interacts with cargo-fuzz: in release mode cargo-fuzz injects
-# `-Ccodegen-units=1` via RUSTFLAGS for the whole graph (to keep ThinLTO viable
-# under sancov — see cargo-fuzz src/project.rs). RUSTFLAGS wins over the profile,
-# which is why the release build OOMs no matter what is set here. `--dev` skips
-# that injection, so the dev profile below is what actually takes effect.
-#
-# ASAN instrumentation itself is untouched, so the smoke's memory-safety coverage
-# is unchanged. These profiles apply to every crate in the fuzz build, including
-# the `hearth` path dependency.
-[profile.dev]
-debug = 0
-# codegen-units intentionally left at the dev default (256) — see above.
-
-[profile.release]
-debug = 0
-
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
