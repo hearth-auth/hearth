@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **WebAuthn REST endpoints now pin `rp_id`/origin server-side — restores phishing resistance (HEA-2025)** —
+  `POST /webauthn/auth/begin`, `/webauthn/auth/complete`, `/webauthn/register/begin`, and
+  `/webauthn/register/complete` previously took the relying-party ID and expected origin
+  from the request body (`rp_id`, `origin`). Both are attacker-controlled, so the
+  `clientDataJSON.origin` and `authenticatorData.rpIdHash` comparisons — the two controls
+  that make WebAuthn phishing-resistant — were verified attacker-value against attacker-value
+  (self-referential no-ops, CWE-346). The REST path now derives both from the configured OIDC
+  issuer (`origin` = issuer authority, `rp_id` = its host), exactly as the browser passkey path
+  does (L5 hardening). The `rp_id`/`origin` request fields are still accepted for backward
+  compatibility but ignored. **Operator impact:** WebAuthn/passkey REST clients must use an
+  `rp_id`/origin matching the server's `oidc.issuer`; credentials registered against a
+  mismatched RP ID will no longer authenticate. (HEA-2025)
 - **Client IP now threaded from real socket peer into all auth handlers (HEA-2027)** — login,
   MFA, passkey, magic-link, token-exchange, and registration handlers previously passed a
   hard-coded `127.0.0.1` fallback instead of the real TCP peer address to `extract_client_ip`
