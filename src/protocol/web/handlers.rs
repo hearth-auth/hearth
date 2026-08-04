@@ -56,7 +56,7 @@ const FALLBACK_PEER: SocketAddr =
 use super::auth::{
     clear_mfa_pending_cookie, cookie_value_from_headers, issue_auth_cookies,
     issue_mfa_pending_cookie, parse_mfa_pending_cookie, revoke_prior_session_cookie,
-    sanitize_return_to, IssuedCookies, MFA_PENDING_COOKIE,
+    sanitize_return_to, CsrfToken, IssuedCookies, MFA_PENDING_COOKIE,
 };
 use super::realm_resolver::{self, Resolved};
 use super::templates::{render, render_status, Flash};
@@ -1589,6 +1589,7 @@ pub struct PasskeyLoginCompleteBody {
 pub async fn passkey_login_complete(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
+    _csrf: CsrfToken,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
     passkey_login_complete_impl(state, headers, body, None)
@@ -1599,6 +1600,7 @@ pub async fn passkey_login_complete_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
+    _csrf: CsrfToken,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
     passkey_login_complete_impl(state, headers, body, Some(realm_name))
@@ -1610,6 +1612,7 @@ pub async fn passkey_login_complete_scoped(
 pub async fn passkey_login_complete_admin(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
+    _csrf: CsrfToken,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
     let system_realm_name = match resolve_admin_realm(&state) {
