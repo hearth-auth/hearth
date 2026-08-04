@@ -49,6 +49,22 @@ jobs:
     # slower still. Once a leg succeeds the cache warms and legs finish quickly.
     timeout-minutes: 30
 
+    # HEA-1867: the ASAN release build OOMs the runner. Swap alone did not fix it
+    # — a 14 GB swapfile only converted the fast OOM-kill into a slow thrash that
+    # starved the runner agent's heartbeat, so GitHub reclaimed the VM (exit 143,
+    # "runner received a shutdown signal") ~5 min into a frozen codegen unit. The
+    # durable fix is to keep the peak *inside* the 16 GB RAM instead of leaning on
+    # swap: cap concurrent rustc/LLVM jobs and drop the release opt-level. A fuzz
+    # smoke only needs the target to compile, parse its seeds, and not panic in
+    # 1 000 runs — it does not need -O3 codegen. opt-level=1 slashes the LLVM peak
+    # and build time; ASAN instrumentation is unaffected. Once a leg finally
+    # succeeds the Swatinem cache saves and later legs warm up (previously the
+    # cache never saved because every build died first).
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+      CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"
+
     strategy:
       fail-fast: false
       matrix:
@@ -71,14 +87,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # HEA-1867: cargo-fuzz builds the whole hearth crate in *release* mode with
-      # debuginfo AND AddressSanitizer. That codegen unit peaks well past the
-      # ~16 GB a standard runner ships, and the OOM killer takes the leg down
-      # partway through (SIGTERM / exit 143) — the failure is silent, mid-compile,
-      # nowhere near the job timeout. The perf branch's memtable/skiplist deps
-      # pushed the peak over the edge; main was already close. Back the peak with
-      # on-disk swap on the runner's large /mnt volume so the ASAN link completes.
-      - name: Add swap for the ASAN release build
+      # HEA-1867: secondary backstop only. The primary OOM fix is the job-level
+      # env above (capped build jobs + opt-level=1) which keeps the ASAN codegen
+      # peak inside RAM. This swapfile absorbs any residual spike from a single
+      # heavy codegen unit (e.g. opentelemetry-semantic-conventions) without
+      # thrashing hard enough to starve the runner agent. Do NOT rely on it as the
+      # fix — a large swapfile alone thrashes the runner to death (exit 143).
+      - name: Add swap headroom for the ASAN release build
         run: |
           sudo swapoff -a || true
           sudo fallocate -l 14G /mnt/swapfile
