@@ -6,8 +6,8 @@
 //! actor=<admin_user_id>.  After the fix each mutation emits exactly one event
 //! carrying the real admin actor.
 //!
-//! Also confirms that the self-registration path (POST /users) is unaffected
-//! and still emits exactly one UserCreated event.
+//! Also confirms the admin `POST /users` path (HEA-2023) emits exactly one
+//! UserCreated event attributed to the admin actor.
 
 mod common;
 
@@ -302,14 +302,17 @@ async fn admin_delete_user_emits_exactly_one_user_deleted_with_actor() {
     );
 }
 
-// ===== Self-registration coverage (must still emit exactly one UserCreated) =====
+// ===== POST /users (admin path) coverage (must emit exactly one UserCreated) =====
 
-/// POST /users (self-registration) must still emit exactly one UserCreated.
-/// This is a retained-coverage check: the fix must not break non-admin paths.
+/// `POST /users` is the admin creation path (HEA-2023 closed the unauthenticated
+/// hole). Like `POST /admin/users` it must emit exactly one UserCreated event
+/// attributed to the admin actor with `metadata.via = "user_api"`.
 #[tokio::test]
-async fn self_registration_emits_exactly_one_user_created() {
+async fn post_users_admin_emits_exactly_one_user_created() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed realm");
+    let (token, admin_id) = setup_admin(&h, &realm).await;
     let realm_uuid = realm.as_uuid().to_string();
 
     let app = build_app(&h);
@@ -318,10 +321,11 @@ async fn self_registration_emits_exactly_one_user_created() {
             Request::builder()
                 .method("POST")
                 .uri("/users")
+                .header("Authorization", format!("Bearer {token}"))
                 .header("X-Realm-ID", &realm_uuid)
                 .header("Content-Type", "application/json")
                 .body(Body::from(
-                    r#"{"email":"selfreg@audit-dedup.example","display_name":"Self Reg","first_name":"Self","last_name":"Reg"}"#,
+                    r#"{"email":"newuser2@audit-dedup.example","display_name":"New User","first_name":"New","last_name":"User"}"#,
                 ))
                 .expect("build request"),
         )
@@ -348,12 +352,20 @@ async fn self_registration_emits_exactly_one_user_created() {
     assert_eq!(
         for_user.len(),
         1,
-        "self-registration must emit exactly 1 UserCreated (got {})",
+        "POST /users must emit exactly 1 UserCreated (got {})",
         for_user.len()
     );
-    // Self-registration is anonymous — actor must be "system" (no attribution).
     assert_eq!(
-        for_user[0].actor, "system",
-        "self-registration actor should be 'system'"
+        for_user[0].actor, admin_id,
+        "UserCreated actor must be the admin's user ID, not 'system'"
+    );
+    let meta = for_user[0]
+        .metadata
+        .as_ref()
+        .expect("UserCreated should carry metadata");
+    assert_eq!(
+        meta["via"].as_str(),
+        Some("user_api"),
+        "metadata.via must be 'user_api'"
     );
 }
