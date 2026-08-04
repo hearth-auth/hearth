@@ -15,7 +15,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::abuse::MAX_SCIM_OPERATIONS;
+use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{OrganizationId, RealmId, UserId};
 use crate::identity::{
@@ -325,7 +325,9 @@ pub async fn list_groups(
         None => None,
     };
 
-    // Collect all orgs via offset pagination for SCIM.
+    // Collect at most SCIM_MAX_SCAN_LIMIT orgs via offset pagination for SCIM.
+    // Without the cap a `?count=1` request triggers O(realm-size) work
+    // (HEA-2032 defect 1).
     let mut all_orgs: Vec<crate::identity::Organization> = Vec::new();
     let mut scim_off = 0u64;
     loop {
@@ -339,7 +341,7 @@ pub async fn list_groups(
         };
         let n = sp.items.len() as u64;
         all_orgs.extend(sp.items);
-        if n == 0 || scim_off + n >= sp.total {
+        if n == 0 || scim_off + n >= sp.total || all_orgs.len() >= SCIM_MAX_SCAN_LIMIT {
             break;
         }
         scim_off += n;

@@ -34,6 +34,13 @@ pub struct ScimAuth {
     /// Format is `"scim_token:<realm_uuid>"` for the bearer-token path, or
     /// the admin user UUID string for the JWT fallback path.
     pub actor: String,
+    /// `true` when authenticated via the realm-scoped SCIM bearer token;
+    /// `false` when via the admin-JWT fallback path.
+    ///
+    /// Mutating handlers use this to enforce the SCIM authority boundary:
+    /// provisioning tokens carry a narrowed permission set that may not act
+    /// on principals holding admin-level permissions.
+    pub is_scim_token: bool,
 }
 
 /// Authenticate a SCIM request using the dual-path model.
@@ -69,6 +76,7 @@ pub fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<ScimAuth, S
         Ok(ScimAuth {
             actor: format!("scim_token:{}", realm_id.as_uuid()),
             realm_id,
+            is_scim_token: true,
         })
     } else {
         // No SCIM token configured: fall back to admin JWT.
@@ -86,9 +94,13 @@ pub fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<ScimAuth, S
         if admin.realm_id != realm_id {
             return Err(ScimError::forbidden("realm mismatch"));
         }
+        // Apply the same per-realm rate limiter to the admin-JWT fallback path
+        // so it cannot be used to bypass SCIM throttling (defect 3 / HEA-2032).
+        check_scim_rate_limit(state, &realm_id)?;
         Ok(ScimAuth {
             actor: admin.user_id.as_uuid().to_string(),
             realm_id,
+            is_scim_token: false,
         })
     }
 }
