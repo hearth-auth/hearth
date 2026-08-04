@@ -63,7 +63,7 @@ jobs:
       - name: Setup Rust nightly + protoc (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-29
           # cargo-fuzz only needs the compiler — skip clippy/rustfmt to save time.
           components: ""
           cache-workspaces: "fuzz -> target"
