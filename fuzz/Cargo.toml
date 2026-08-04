@@ -16,6 +16,30 @@ serde_json = "1"
 [workspace]
 members = ["."]
 
+# HEA-2019: cap the fuzz build's memory peak so the ASAN-instrumented smoke fits
+# the 16 GB GitHub runner. The prior HEA-1867/2020 attempts tuned opt-level, LTO,
+# swap, and CARGO_BUILD_JOBS but never touched debuginfo — and the real OOM peak
+# is rustc compiling the large `hearth` crate under ASAN with the dev profile's
+# default `debug = 2`. Full DWARF under ASAN is a multi-GB memory multiplier that
+# pushed the codegen peak over the runner. `debug = 0` strips it, collapsing the
+# peak, and costs the smoke nothing: it only needs the target to compile, parse
+# its seed corpus, and not panic in 1 000 runs — it does not need symbolicated
+# backtraces. ASAN instrumentation (injected by cargo-fuzz's RUSTFLAGS) is
+# unchanged, so memory-safety coverage of the smoke is preserved. These profiles
+# apply to every crate in the fuzz build, including the `hearth` path dependency.
+[profile.dev]
+debug = 0
+# HEA-2019: default codegen-units=256 lets rustc spawn 256 parallel LLVM threads
+# per crate. Under ASAN on the large `hearth` crate that peaks well above 16 GB.
+# Setting codegen-units=1 serialises LLVM within each rustc call, reducing peak
+# RSS to a single thread's footprint. Build time increases but stays under the
+# 20-minute CI timeout.
+codegen-units = 1
+
+[profile.release]
+debug = 0
+codegen-units = 1
+
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
