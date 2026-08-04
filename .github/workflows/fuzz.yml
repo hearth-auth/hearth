@@ -44,20 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # HEA-2019 CONTROL EXPERIMENT — temporary branch, do not merge.
+    # Re-runs main's *unchanged* tree (43190f5e, last green on 2026-07-30) on
+    # today's runners to determine whether the Fuzz smoke breakage on PR #270 is
+    # a regression from that PR or environment drift. Matrix cut to one target.
     strategy:
       fail-fast: false
       matrix:
         target:
-          - config_parse
-          - jwt_parse
-          - wal_entry_deserialize
-          - credential_verify
-          - oidc_request_parse
-          - webauthn_cbor_parse
-          - federation_claims
-          - saml_xml_parse
-          - token_exchange_parse
-          - redirect_uri_parse
           - aat_parse
 
     steps:
@@ -82,6 +76,20 @@ jobs:
         # repo. fuzz/corpus/ (gitignored) is where libFuzzer accumulates
         # discovered inputs during extended runs. CI uses seeds only.
         run: |
+          # HEA-2019 telemetry: sample memory/disk alongside the build so an
+          # exit-143 runner kill can be attributed to RAM vs disk vs neither.
+          echo "=== baseline ==="; free -m; df -h /; nproc
+          ( while true; do
+              echo "[watchdog $(date -u +%H:%M:%S)]" \
+                   "mem_avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)" \
+                   "swap_free_mb=$(awk '/SwapFree/{print int($2/1024)}' /proc/meminfo)" \
+                   "root_avail=$(df -BM --output=avail / | tail -1 | tr -d ' ')" \
+                   "peak_rss_mb=$(ps -eo rss --sort=-rss --no-headers | head -1 | awk '{print int($1/1024)}')"
+              sleep 10
+            done ) &
+          WATCHDOG=$!
+          trap 'kill "$WATCHDOG" 2>/dev/null || true' EXIT
+
           SEEDS="fuzz/seeds/${{ matrix.target }}"
           if [ -d "$SEEDS" ]; then
             cargo fuzz run ${{ matrix.target }} "$SEEDS" -- -runs=1000
