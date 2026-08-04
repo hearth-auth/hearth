@@ -29,7 +29,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   request extensions (populated by `into_make_service_with_connect_info` at server startup) and
   falls back to the loopback address only in unit-test environments. A startup warning is now
   emitted when `server.trusted_proxies` is empty and the server is bound to a public address.
-  (HEA-2027)
+  Independently re-verified as HEA-2030 (the client-IP collapse defect) and covered by a
+  served-socket regression test that logs in from two distinct loopback peer IPs and asserts
+  each session records its real peer address rather than `127.0.0.1`. (HEA-2027, HEA-2030)
 - **SCIM: bounded realm scan — prevents DoS via `?count=1` on large realms (HEA-2032)** —
   `GET /scim/v2/Users` and `GET /scim/v2/Groups` previously materialised every user or
   group in the realm before applying the `count`/`startIndex` page slice. An authenticated
