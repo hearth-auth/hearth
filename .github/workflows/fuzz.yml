@@ -42,7 +42,11 @@ jobs:
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30 min headroom: the first run after any fuzz/Cargo.lock change is a cold
+    # ASAN rebuild of the whole hearth crate plus `cargo install cargo-fuzz`,
+    # which overran the old 20-min budget (SIGTERM / exit 143). Once the lock is
+    # stable the Swatinem cache warms and legs finish in a few minutes.
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
