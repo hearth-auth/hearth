@@ -8480,13 +8480,29 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(None);
         };
 
-        // 4. Generate random token (reuse magic link token generator)
+        // 4. Invalidate any existing reset tokens for this email — a new
+        // request must revoke prior links so only the most-recent token is live.
+        let pr_prefix = keys::password_reset_scan_prefix();
+        let pr_end = crate::storage::prefix_scan_end(&pr_prefix);
+        if let Ok(entries) = self.storage.scan(realm_id, &pr_prefix, &pr_end) {
+            for entry in entries {
+                if let Ok(prior) =
+                    serde_json::from_slice::<StoredPasswordReset>(&entry.value)
+                {
+                    if prior.email == normalized {
+                        let _ = self.storage.delete(realm_id, &entry.key);
+                    }
+                }
+            }
+        }
+
+        // 5. Generate random token (reuse magic link token generator)
         let token = magic_link::generate_magic_link_token()?;
 
-        // 5. SHA-256 hash the token
+        // 6. SHA-256 hash the token
         let token_hash = Self::sha256_hex(token.as_str().as_bytes());
 
-        // 6. Store the password reset record
+        // 7. Store the password reset record
         let now = self.clock.now().as_micros();
         let stored = StoredPasswordReset {
             email: normalized.clone(),
@@ -8503,10 +8519,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &stored_bytes)
             .map_err(Self::storage_err)?;
 
-        // 7. Record rate limit event
+        // 8. Record rate limit event
         self.record_password_reset_request(realm_id, &normalized);
 
-        // 8. Return plaintext token (shown once)
+        // 9. Return plaintext token (shown once)
         Ok(Some(token.as_str().to_string()))
     }
 
@@ -19243,6 +19259,61 @@ mod tests {
             matches!(err, IdentityError::PasswordResetTokenInvalid),
             "expected PasswordResetTokenInvalid after TTL expiry, got: {err}"
         );
+    }
+
+    // ===== HEA-2033: Password reset reissue invalidates prior tokens =====
+
+    #[test]
+    fn password_reset_reissue_invalidates_prior_token() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = engine
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("pr-reissue-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let user = create_test_user(&engine, realm.id());
+        engine
+            .set_password(
+                realm.id(),
+                user.id(),
+                &CleartextPassword::from_string("ValidPassword1!".to_string()),
+            )
+            .expect("set password");
+
+        // First reset request — produces token1.
+        let token1 = engine
+            .request_password_reset(realm.id(), user.email())
+            .expect("first reset request")
+            .expect("known user yields token");
+
+        // Second reset request — must invalidate token1.
+        let token2 = engine
+            .request_password_reset(realm.id(), user.email())
+            .expect("second reset request")
+            .expect("known user yields token");
+
+        // token1 must now be rejected (it was deleted when token2 was issued).
+        let err = engine
+            .reset_password_with_token(
+                realm.id(),
+                &token1,
+                &CleartextPassword::from_string("ShouldFail1!".to_string()),
+            )
+            .expect_err("stale reset token must be rejected after reissue");
+        assert!(
+            matches!(err, IdentityError::PasswordResetTokenInvalid),
+            "expected PasswordResetTokenInvalid for stale token, got: {err:?}"
+        );
+
+        // token2 must succeed.
+        engine
+            .reset_password_with_token(
+                realm.id(),
+                &token2,
+                &CleartextPassword::from_string("NewValidPassword1!".to_string()),
+            )
+            .expect("fresh reset token must still be valid");
     }
 
     // ==========================================================================
