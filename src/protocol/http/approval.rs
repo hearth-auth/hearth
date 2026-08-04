@@ -252,7 +252,7 @@ async fn approve_approval_request(
         Err(e) => return e.into_response(),
     };
     let realm_id = auth.realm_id.clone();
-    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+    if let Err(e) = require_admin_permission(&auth, "hearth.approvals.manage") {
         return e.into_response();
     }
 
@@ -291,7 +291,7 @@ async fn deny_approval_request(
         Err(e) => return e.into_response(),
     };
     let realm_id = auth.realm_id.clone();
-    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+    if let Err(e) = require_admin_permission(&auth, "hearth.approvals.manage") {
         return e.into_response();
     }
 
