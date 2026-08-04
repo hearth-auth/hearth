@@ -155,6 +155,8 @@ pub async fn sp_acs(
     // individually-signed `<Assertion>`; when `false` it falls back to
     // accepting a Response-level signature (common for SPs that sign the
     // outer Response only).
+    // SP metadata always advertises WantAssertionsSigned="true"; enforcement
+    // must match to avoid a capability-advertised-but-not-enforced gap (HEA-2033).
     let saml_idp = crate::identity::federation::saml::SamlIdpConfig {
         idp_id: idp_cfg.id.clone(),
         name: idp_cfg.name.clone(),
@@ -163,7 +165,7 @@ pub async fn sp_acs(
         slo_url: idp_cfg.userinfo_endpoint.clone(),
         idp_certificates_pem: vec![idp_cfg.client_secret.expose_secret().to_string()],
         sign_authn_requests: false,
-        want_assertions_signed: idp_cfg.want_assertions_signed,
+        want_assertions_signed: true,
         attribute_map: idp_cfg.claim_mappings.clone(),
     };
 
