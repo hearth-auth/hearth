@@ -131,6 +131,17 @@ pub struct TokenConfig {
     ///
     /// Default: 86,400 seconds (24 hours).
     pub signing_key_rotation_grace_period_secs: u64,
+    /// Maximum entries in the in-process token-claims cache used by the
+    /// `validate_token` hot path (S12-F2 / HEA-1990).
+    ///
+    /// The cache eliminates the Ed25519 verify + `serde_json` parse on repeated
+    /// validations of the same access token. It is TTL-aware and evicts the
+    /// soonest-to-expire entries once full, so a full cache **replaces** rather
+    /// than refusing inserts. Size this to the expected concurrent access-token
+    /// working set; the fast path is only reachable for tokens that fit.
+    ///
+    /// Default: 65,536.
+    pub claims_cache_max: usize,
 }
 
 impl Default for TokenConfig {
@@ -141,6 +152,7 @@ impl Default for TokenConfig {
             access_token_ttl_secs: 900,                     // 15 minutes
             refresh_token_ttl_secs: 604_800,                // 7 days
             signing_key_rotation_grace_period_secs: 86_400, // 24 hours
+            claims_cache_max: 65_536,
         }
     }
 }
@@ -1551,6 +1563,7 @@ mod tests {
             access_token_ttl_secs: 900,
             refresh_token_ttl_secs: 604_800,
             signing_key_rotation_grace_period_secs: 86_400,
+            claims_cache_max: 65_536,
         };
 
         let pair = key

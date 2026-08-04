@@ -411,8 +411,10 @@ async fn main() {
             )
             .await
             {
-                // Use eprintln! here — tracing may not be initialized yet if
-                // the error occurred during config loading.
+                // Route through report_startup_fatal — tracing may not be
+                // initialized yet if the error occurred during config loading,
+                // in which case a bare `tracing::error!` writes nowhere and the
+                // operator sees only the exit code (HEA-2011).
                 //
                 // HostKeyMismatch requires exit code 2 and an actionable message
                 // so operators know exactly how to recover.
@@ -423,19 +425,19 @@ async fn main() {
                         } = *storage_err
                         {
                             let realms = affected_realms.join(", ");
-                            tracing::error!(
+                            report_startup_fatal(&format!(
                                 "FATAL: Realm KEKs could not be decrypted with the current \
                                  HEARTH_MASTER_KEY.\nIf you recently rotated the master key, \
                                  set HEARTH_PREVIOUS_MASTER_KEY to the previous value. If the \
                                  previous key is unavailable, restore from backup.\n\
                                  Affected realms: {realms}"
-                            );
+                            ));
                             std::process::exit(2);
                         }
-                        tracing::error!("error: {storage_err}");
+                        report_startup_fatal(&format!("error: {storage_err}"));
                     }
                     Err(other) => {
-                        tracing::error!("error: {other}");
+                        report_startup_fatal(&format!("error: {other}"));
                     }
                 }
                 std::process::exit(1);
@@ -634,6 +636,45 @@ enum LoadtestUnthrottle {
     RefusedNotDev,
 }
 
+/// Returns whether an effective bind string resolves to a loopback address.
+///
+/// Effective binds arrive as either a bare host (`127.0.0.1`, `::1`,
+/// `localhost`) or a `host:port` pair (`127.0.0.1:8420`, `[::1]:8420`,
+/// `localhost:8420`) once CLI `--bind`/`--port` overrides are folded in. The
+/// full socket-address form is tried first so a legitimate loopback `host:port`
+/// (the HEA-1997 runbook §3A prescribes `--bind 127.0.0.1:8420`) is recognized;
+/// it falls back to a bare IP, then to hostname forms. Anything unparseable
+/// stays fail-closed — treated as non-loopback (HEA-2008).
+fn bind_is_loopback(bind: &str) -> bool {
+    if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    if let Ok(ip) = bind.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    // Hostname forms: `localhost` or `localhost:8420`. Strip a trailing
+    // `:port` if present (a bare `::1` was already handled as an `IpAddr`).
+    let host = bind.rsplit_once(':').map_or(bind, |(h, _)| h);
+    host.eq_ignore_ascii_case("localhost")
+}
+
+/// Normalizes a `--bind` CLI override into a `(host, embedded_port)` pair.
+///
+/// `--bind` maps to `server.bind_address`, which the listener rebuilds into
+/// `bind_address:port` at startup — so a bare host (`127.0.0.1`, `::1`,
+/// `localhost`) must pass through unchanged. When the operator supplies a full
+/// `host:port` (`127.0.0.1:8422`, `[::1]:8422`), the embedded port is peeled
+/// off so it seeds `server.port` instead of being re-appended into an invalid
+/// `host:port:port` address (HEA-2008 — the HEA-1997 runbook §3A prescribes the
+/// `host:port` form). Anything that does not parse as a socket address is
+/// treated as a bare host with no embedded port.
+fn split_bind_override(bind: &str) -> (String, Option<u16>) {
+    match bind.parse::<SocketAddr>() {
+        Ok(sock) => (sock.ip().to_string(), Some(sock.port())),
+        Err(_) => (bind.to_string(), None),
+    }
+}
+
 /// Decides whether the load-test unthrottle escape hatch applies. Gated on
 /// `--dev` mode AND every effective bind being loopback (HEA-1797). Pure (no
 /// logging / I/O) so the prod-safety gate is unit tested; the caller emits the
@@ -656,18 +697,11 @@ fn loadtest_unthrottle_decision(
     if !dev {
         return LoadtestUnthrottle::RefusedNotDev;
     }
-    let is_loopback = |bind: &str| {
-        bind.eq_ignore_ascii_case("localhost")
-            || bind
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false)
-    };
     // Every effective bind must be loopback. A disabled gRPC listener (`None`)
     // cannot be reached, so it does not gate the decision.
-    let all_loopback = is_loopback(http_bind)
+    let all_loopback = bind_is_loopback(http_bind)
         && match grpc_bind {
-            Some(g) => is_loopback(g),
+            Some(g) => bind_is_loopback(g),
             None => true,
         };
     if all_loopback {
@@ -702,16 +736,9 @@ fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> D
     if !dev {
         return DevBindCheck::NotDev;
     }
-    let is_loopback = |bind: &str| {
-        bind.eq_ignore_ascii_case("localhost")
-            || bind
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false)
-    };
-    let all_loopback = is_loopback(http_bind)
+    let all_loopback = bind_is_loopback(http_bind)
         && match grpc_bind {
-            Some(g) => is_loopback(g),
+            Some(g) => bind_is_loopback(g),
             None => true,
         };
     if all_loopback {
@@ -756,16 +783,38 @@ async fn run_serve(
     verbose: bool,
     allow_reflection_in_prod: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Load configuration
-    let mut config = load_config(dev, config_path.as_deref())?;
+    // Load configuration. This runs before `telemetry::init` below, so a
+    // failure here cannot be reported through `tracing` — write the same
+    // field-level diagnostic `hearth config validate` produces to stderr
+    // instead, or `serve` exits 1 with no output at all (HEA-2011).
+    let mut config = match load_config(dev, config_path.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            if let Some(path) = effective_config_path(config_path.as_deref()) {
+                if let Err(report) = config_validation_report(&path, dev) {
+                    report_startup_fatal(report.trim_end());
+                }
+            }
+            return Err(e);
+        }
+    };
     let serve_start = std::time::Instant::now();
 
-    // Apply CLI overrides
+    // Apply CLI overrides. `--bind` may be a bare host (`127.0.0.1`) or a
+    // `host:port` pair (`127.0.0.1:8422`); in the latter form the embedded port
+    // seeds `server.port`. An explicit `--port` is applied afterwards so it
+    // always wins over a port embedded in `--bind` (HEA-2008 — the HEA-1997
+    // runbook §3A prescribes `--bind <ip>:<port>`, which the listener builds
+    // back into `bind_address:port` at startup).
+    if let Some(bind) = bind_override {
+        let (host, embedded_port) = split_bind_override(&bind);
+        config.server.bind_address = host;
+        if let Some(p) = embedded_port {
+            config.server.port = p;
+        }
+    }
     if let Some(port) = port_override {
         config.server.port = port;
-    }
-    if let Some(bind) = bind_override {
-        config.server.bind_address = bind;
     }
 
     // --verbose: promote log level to debug so startup diagnostics are visible.
@@ -783,10 +832,10 @@ async fn run_serve(
                 .map(|w| w.var_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::error!(
+            report_startup_fatal(&format!(
                 "[hearth] {n} env-var config warnings; vars: {preview} and {} more",
                 n - 3
-            );
+            ));
         } else {
             let inline = config
                 .config_warnings
@@ -794,7 +843,7 @@ async fn run_serve(
                 .map(|w| format!("{} ({})", w.var_name, w.kind_label()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            tracing::error!("[hearth] config warnings: {inline}");
+            report_startup_fatal(&format!("[hearth] config warnings: {inline}"));
         }
     }
 
@@ -1031,6 +1080,10 @@ async fn run_serve(
             if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
                 tc.signing_key_rotation_grace_period_secs = (micros / 1_000_000) as u64;
             }
+        }
+        if let Some(max) = config.token.claims_cache_max {
+            // Clamp to at least 1 so the hot-path cache can always hold one entry.
+            tc.claims_cache_max = max.max(1);
         }
         // Warn when the audience is still the placeholder value but oidc.issuer is a
         // real URL.  This only triggers when token.audience is explicitly set to "hearth"
@@ -2160,6 +2213,44 @@ async fn run_serve(
         }
     });
 
+    // Operator-configured request-rate caps (HEA-2010).
+    //
+    // Before this, the admin (100/min) and token (200/min) caps were compiled-in
+    // constants and the only escape hatch was `security.load_test_unthrottled`,
+    // which is refused outside `--dev`. A saturation run therefore could not
+    // reach the server's knee: every rung shed ~2/3 of its requests as HTTP 429.
+    // `0` now disables a limiter outright. `security.backup.export_rate_limit`
+    // was documented but never read — it is wired here too.
+    let admin_rate_limit = config
+        .security
+        .rate_limiting
+        .as_ref()
+        .and_then(|rl| rl.admin_per_minute);
+    let token_rate_limit = config
+        .security
+        .rate_limiting
+        .as_ref()
+        .and_then(|rl| rl.token_per_minute);
+    let export_rate_limit = config.security.backup.export_rate_limit;
+    for (key, value) in [
+        ("security.rate_limiting.admin_per_minute", admin_rate_limit),
+        ("security.rate_limiting.token_per_minute", token_rate_limit),
+        ("security.backup.export_rate_limit", export_rate_limit),
+    ] {
+        match value {
+            Some(0) => {
+                tracing::warn!(
+                    config_key = key,
+                    "request-rate limiter DISABLED by config (limit 0) — this removes an \
+                     abuse cap. Load-test use only; never set 0 on a production bind."
+                );
+                hearth::metrics::metrics().mark_rate_limiters_disabled("config_zero");
+            }
+            Some(limit) => info!(config_key = key, limit, "request-rate limit overridden"),
+            None => {}
+        }
+    }
+
     let allowed_hosts = config.security.allowed_hosts.clone();
     if !allowed_hosts.is_empty() {
         info!(count = allowed_hosts.len(), "loaded allowed_hosts");
@@ -2181,6 +2272,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts.clone())
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
@@ -2205,6 +2297,7 @@ async fn run_serve(
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts)
             .with_request_shaper(Arc::clone(&request_shaper))
+            .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
@@ -3103,6 +3196,20 @@ async fn run_serve_tls(
 }
 
 /// Loads configuration from file, dev mode, or defaults.
+/// Resolves the config file [`load_config`] would actually read.
+///
+/// Mirrors that function's resolution order: an explicit `-c` path wins, then
+/// a `hearth.yaml` in the working directory. Returns `None` when neither
+/// exists, i.e. when the config came from a built-in preset and there is no
+/// file to re-validate for diagnostics.
+fn effective_config_path(config_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    if let Some(path) = config_path {
+        return Some(path.to_path_buf());
+    }
+    let default_path = std::path::Path::new("hearth.yaml");
+    default_path.exists().then(|| default_path.to_path_buf())
+}
+
 fn load_config(
     dev: bool,
     config_path: Option<&std::path::Path>,
@@ -4035,21 +4142,24 @@ fn mime_for_logo(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Runs the `hearth config validate` command.
+/// Validates `file` the way `hearth config validate` does, returning either the
+/// parsed config or the field-level diagnostic report.
 ///
-/// Uses the all-collecting validator so every problem is reported in one pass.
-/// Exits 0 on success (with a human-readable summary) and 1 on any error.
-fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse without short-circuit so we can collect every issue.
-    let config = match Config::from_file_unchecked(file) {
+/// Uses the non-short-circuiting parser so every problem is collected in one
+/// pass. Callers on a failure path can print the `Err` verbatim; a clean `Ok`
+/// tells them the config itself was not the problem.
+///
+/// `force_dev` applies the same relaxations `--dev` does (`dev_mode`, no
+/// `fsync`) so the report matches the rules the caller was validated under.
+fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<Config, String> {
+    let mut config = match Config::from_file_unchecked(file) {
         Ok(c) => c,
-        Err(e) => {
-            tracing::error!("✗ Configuration invalid");
-            tracing::error!("");
-            tracing::error!("  parse error: {e}");
-            return Err("configuration validation failed".into());
-        }
+        Err(e) => return Err(format!("✗ Configuration invalid\n\n  parse error: {e}\n")),
     };
+    if force_dev {
+        config.dev_mode = true;
+        config.storage.fsync = false;
+    }
 
     // Collect all structural issues in one pass.
     let mut issues = config.validate_all();
@@ -4074,20 +4184,52 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
     }
 
     if issues.is_empty() {
-        println!("✓ Configuration valid");
-        println!();
-        config_validate_print_summary(&config);
-        Ok(())
-    } else {
-        eprintln!("✗ Configuration invalid — {} error(s):", issues.len());
-        eprintln!();
-        for issue in &issues {
-            eprintln!("  {}: {}", issue.field, issue.reason);
-            if let Some(hint) = config_validate_hint(&issue.field, &issue.reason) {
-                eprintln!("    → {hint}");
-            }
+        return Ok(config);
+    }
+
+    let mut report = format!("✗ Configuration invalid — {} error(s):\n\n", issues.len());
+    for issue in &issues {
+        report.push_str(&format!("  {}: {}\n", issue.field, issue.reason));
+        if let Some(hint) = config_validate_hint(&issue.field, &issue.reason) {
+            report.push_str(&format!("    → {hint}\n"));
         }
-        Err("configuration validation failed".into())
+    }
+    Err(report)
+}
+
+/// Emits a fatal startup message so it is visible even before tracing is up.
+///
+/// Config loading happens before `telemetry::init` installs the subscriber, so
+/// a `tracing::error!` on that path writes the message nowhere and the process
+/// exits 1 in total silence (HEA-2011). Writes straight to stderr when no
+/// global subscriber has been set; otherwise defers to `tracing` so structured
+/// sinks keep the record.
+fn report_startup_fatal(msg: &str) {
+    if tracing::dispatcher::has_been_set() {
+        tracing::error!("{msg}");
+    } else {
+        eprintln!("{msg}");
+    }
+}
+
+/// Runs the `hearth config validate` command.
+///
+/// Uses the all-collecting validator so every problem is reported in one pass.
+/// Exits 0 on success (with a human-readable summary) and 1 on any error.
+fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    match config_validation_report(file, false) {
+        Ok(config) => {
+            println!("✓ Configuration valid");
+            println!();
+            config_validate_print_summary(&config);
+            Ok(())
+        }
+        Err(report) => {
+            // No tracing subscriber is installed for the `config` subcommand,
+            // so the diagnostic must go to stderr directly.
+            eprint!("{report}");
+            Err("configuration validation failed".into())
+        }
     }
 }
 
@@ -4622,8 +4764,19 @@ mod tests {
 
     #[test]
     fn dev_bind_check_dev_loopback_http_no_grpc() {
-        // Dev + loopback HTTP, gRPC disabled → Ok.
-        for bind in ["127.0.0.1", "::1", "localhost", "LOCALHOST", "127.0.0.53"] {
+        // Dev + loopback HTTP, gRPC disabled → Ok. Covers both bare-host and
+        // `host:port` forms — the HEA-1997 runbook §3A prescribes the latter
+        // (`--bind 127.0.0.1:8420`), which HEA-2008 must accept.
+        for bind in [
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.53",
+            "127.0.0.1:8420",
+            "[::1]:8420",
+            "localhost:8420",
+        ] {
             assert_eq!(
                 dev_mode_bind_check(true, bind, None),
                 DevBindCheck::Ok,
@@ -4635,7 +4788,17 @@ mod tests {
     #[test]
     fn dev_bind_check_refused_non_loopback_http() {
         // Dev + non-loopback HTTP bind → refused, even when gRPC is disabled.
-        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
+        // `host:port` wildcard forms and unparseable garbage stay fail-closed.
+        for bind in [
+            "0.0.0.0",
+            "::",
+            "10.0.0.5",
+            "192.168.1.10",
+            "example.com",
+            "0.0.0.0:8420",
+            "192.168.1.10:8420",
+            "garbage",
+        ] {
             assert_eq!(
                 dev_mode_bind_check(true, bind, None),
                 DevBindCheck::RefusedNonLoopback,
@@ -4684,6 +4847,60 @@ mod tests {
             DevBindCheck::RefusedNonLoopback,
             "--dev --bind :: must be refused at startup"
         );
+    }
+
+    #[test]
+    fn bind_is_loopback_covers_host_and_host_port_forms() {
+        // HEA-2008: the shared gate helper must accept loopback in both bare
+        // and `host:port` forms, and stay fail-closed on wildcards / garbage.
+        for accept in [
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.53",
+            "127.0.0.1:8420",
+            "[::1]:8420",
+            "localhost:8420",
+            "127.0.0.1:0",
+        ] {
+            assert!(bind_is_loopback(accept), "{accept} must be loopback");
+        }
+        for refuse in [
+            "0.0.0.0",
+            "::",
+            "10.0.0.5",
+            "192.168.1.10",
+            "0.0.0.0:8420",
+            "[::]:8420",
+            "example.com",
+            "example.com:80",
+            "garbage",
+            "",
+        ] {
+            assert!(!bind_is_loopback(refuse), "{refuse} must not be loopback");
+        }
+    }
+
+    #[test]
+    fn split_bind_override_peels_embedded_port() {
+        // HEA-2008: a `host:port` --bind seeds server.port; a bare host does not.
+        assert_eq!(
+            split_bind_override("127.0.0.1:8422"),
+            ("127.0.0.1".to_string(), Some(8422))
+        );
+        assert_eq!(
+            split_bind_override("[::1]:8422"),
+            ("::1".to_string(), Some(8422))
+        );
+        assert_eq!(
+            split_bind_override("0.0.0.0:8422"),
+            ("0.0.0.0".to_string(), Some(8422))
+        );
+        // Bare hosts pass through unchanged with no embedded port.
+        for host in ["127.0.0.1", "::1", "localhost", "0.0.0.0"] {
+            assert_eq!(split_bind_override(host), (host.to_string(), None));
+        }
     }
 
     // ── HEA-SEC-10: setup token truncation ───────────────────────────────────

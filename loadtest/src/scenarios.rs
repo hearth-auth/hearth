@@ -47,17 +47,14 @@ static CONTEXT: OnceLock<Arc<LoadContext>> = OnceLock::new();
 pub struct LoadContext {
     /// Realm every journey targets (`X-Realm-ID`).
     realm_id: String,
-    /// Public OAuth client that authenticates the introspect/revoke calls and
-    /// owns the ROPC issuance grant.
+    /// Public OAuth client that authenticates the introspect and revoke calls.
     client_id: String,
     /// Live (non-revoked) access tokens for the validate + session journeys.
     live_tokens: Vec<String>,
-    /// Seeded user IDs for the admin user-lookup journey.
+    /// Seeded user IDs for the admin user-lookup and dynamic token-mint journeys.
     user_ids: Vec<String>,
-    /// ROPC subject for the issuance + revoke journeys (dev admin).
-    ropc_username: String,
-    /// ROPC password for the issuance + revoke journeys (dev admin).
-    ropc_password: String,
+    /// Bootstrap admin token for journey 3 (`GET /admin/users/{id}`). SECRET.
+    admin_token: String,
     /// Round-robins token/user selection so load spreads across the corpus.
     cursor: AtomicUsize,
 }
@@ -73,6 +70,8 @@ pub enum ContextError {
     NoLiveTokens,
     /// The realm has no seeded users — the user-lookup journey has no target.
     NoUsers,
+    /// The handle has no admin token — re-seed to populate (HEA-1995).
+    NoAdminToken,
 }
 
 impl std::fmt::Display for ContextError {
@@ -84,6 +83,10 @@ impl std::fmt::Display for ContextError {
                 "seed handle has no live (non-revoked) tokens; increase --sessions-frac when seeding"
             ),
             Self::NoUsers => write!(f, "seed handle has no seeded users; increase --users-per-realm"),
+            Self::NoAdminToken => write!(
+                f,
+                "seed handle has no admin token; re-run the seed step to regenerate the handle"
+            ),
         }
     }
 }
@@ -94,19 +97,13 @@ impl LoadContext {
     /// Builds a context from the first realm of a seed-handle.
     ///
     /// The boot-local seed populates a single realm (see [`crate::seed`]); the
-    /// first realm is used. `ropc_username`/`ropc_password` are the credentials
-    /// the issuance + revoke journeys authenticate with (the dev admin, whose
-    /// password is not in the handle).
+    /// first realm is used.
     ///
     /// # Errors
     /// Returns a [`ContextError`] if the handle lacks realms, live tokens, or
     /// users — each journey needs real corpus to exercise the hot path rather
     /// than the reject path.
-    pub fn from_handle(
-        handle: &SeedHandle,
-        ropc_username: &str,
-        ropc_password: &str,
-    ) -> Result<Self, ContextError> {
+    pub fn from_handle(handle: &SeedHandle) -> Result<Self, ContextError> {
         let realm = handle.realms.first().ok_or(ContextError::NoRealms)?;
         let live_tokens: Vec<String> = realm
             .tokens
@@ -121,13 +118,15 @@ impl LoadContext {
         if user_ids.is_empty() {
             return Err(ContextError::NoUsers);
         }
+        if handle.admin_token.is_empty() {
+            return Err(ContextError::NoAdminToken);
+        }
         Ok(Self {
             realm_id: realm.realm_id.clone(),
             client_id: realm.client_id.clone(),
             live_tokens,
             user_ids,
-            ropc_username: ropc_username.to_string(),
-            ropc_password: ropc_password.to_string(),
+            admin_token: handle.admin_token.clone(),
             cursor: AtomicUsize::new(0),
         })
     }
@@ -145,16 +144,6 @@ impl LoadContext {
     /// A seeded user ID, round-robined across the corpus.
     fn user_id(&self) -> &str {
         &self.user_ids[self.next() % self.user_ids.len()]
-    }
-
-    /// The ROPC request body the `/token` password grant expects.
-    fn ropc_body(&self) -> serde_json::Value {
-        serde_json::json!({
-            "grant_type": "password",
-            "client_id": self.client_id,
-            "username": self.ropc_username,
-            "password": self.ropc_password,
-        })
     }
 
     // ── Accessors for the open-loop saturate driver (C4, HEA-1872) ──────────
@@ -264,15 +253,15 @@ async fn journey_session_lookup(user: &mut GooseUser) -> TransactionResult {
 
 // ===== Journey 3 — User lookup (admin) =====
 
-/// `GET /admin/users/{id}` with an admin-authority bearer (the seeded dev-admin
-/// token). Exercises the user-lookup hot path over the admin surface.
+/// `GET /admin/users/{id}` with the bootstrap admin bearer token. Exercises the
+/// user-lookup hot path over the admin surface.
 async fn journey_user_lookup(user: &mut GooseUser) -> TransactionResult {
     let ctx = ctx();
     let path = format!("/admin/users/{}", ctx.user_id());
     let rb = user
         .get_request_builder(&GooseMethod::Get, &path)?
         .header(REALM_HEADER, &ctx.realm_id)
-        .bearer_auth(ctx.live_token());
+        .bearer_auth(&ctx.admin_token);
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name("user_lookup")
@@ -332,7 +321,12 @@ async fn journey_revoke_revalidate(user: &mut GooseUser) -> TransactionResult {
 
 // ===== Shared helpers =====
 
-/// Runs a ROPC `POST /token` and returns the minted access token.
+/// Mints a fresh access token via `POST /dev/seed-token` and returns it.
+///
+/// ROPC (`grant_type=password`) was removed by HEA-1862; this dev-only path
+/// creates a real session + issues a signed JWT for a round-robined seeded user
+/// so that issuance + revoke journeys exercise the full token lifecycle without
+/// re-introducing ROPC. (HEA-1991)
 ///
 /// The request's own success metric is recorded by Goose; on any non-2xx,
 /// missing token, or transport error this marks the metric failed (via
@@ -343,10 +337,11 @@ async fn mint_token(
     name: &'static str,
 ) -> Result<String, Box<TransactionError>> {
     let ctx = ctx();
+    let user_id = ctx.user_id();
     let rb = user
-        .get_request_builder(&GooseMethod::Post, "/token")?
+        .get_request_builder(&GooseMethod::Post, "/dev/seed-token")?
         .header(REALM_HEADER, &ctx.realm_id)
-        .json(&ctx.ropc_body());
+        .json(&serde_json::json!({"user_id": user_id}));
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name(name)
@@ -547,7 +542,6 @@ impl TierMissContext {
         let n = self.cursor.fetch_add(1, Ordering::Relaxed);
         (splitmix64(n) % self.corpus_size) + 1
     }
-
 }
 
 /// Publishes the tier-miss corpus. Call once before the tier-miss attack starts.
@@ -587,7 +581,10 @@ async fn tier_lookup(user: &mut GooseUser, index: u64, name: &'static str) -> Tr
     let email = ctx.email(index);
     let rb = user
         .get_request_builder(&GooseMethod::Get, "/dev/probe-user")?
-        .query(&[("realm_id", ctx.realm_id.as_str()), ("email", email.as_str())]);
+        .query(&[
+            ("realm_id", ctx.realm_id.as_str()),
+            ("email", email.as_str()),
+        ]);
     let req = GooseRequest::builder()
         .set_request_builder(rb)
         .name(name)
@@ -760,11 +757,16 @@ mod tests {
             target_host: "http://127.0.0.1:8420".into(),
             seed: 1,
             dataset_shape: "test".into(),
+            admin_token: "test-admin-token".into(),
             realms: vec![SeededRealm {
                 realm_id: "realm-1".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "client-1".into(),
+                cc_client_id: String::new(),
+                cc_client_secret: String::new(),
                 users,
                 tokens,
+                sessions: Vec::new(),
             }],
         }
     }
@@ -772,7 +774,7 @@ mod tests {
     #[test]
     fn context_selects_only_live_tokens() {
         let h = handle_with(3, 2, 4);
-        let ctx = LoadContext::from_handle(&h, "admin@dev.local", "pw").expect("context");
+        let ctx = LoadContext::from_handle(&h).expect("context");
         assert_eq!(ctx.live_tokens.len(), 3, "revoked tokens must be excluded");
         assert!(ctx.live_tokens.iter().all(|t| t.starts_with("live-")));
         assert_eq!(ctx.user_ids.len(), 4);
@@ -781,7 +783,7 @@ mod tests {
     #[test]
     fn context_round_robins_across_the_corpus() {
         let h = handle_with(2, 0, 3);
-        let ctx = LoadContext::from_handle(&h, "admin@dev.local", "pw").expect("context");
+        let ctx = LoadContext::from_handle(&h).expect("context");
         // live_token and user_id share one cursor; assert each wraps its own slice.
         let t0 = ctx.live_token().to_string();
         let t1 = ctx.live_token().to_string();
@@ -795,7 +797,7 @@ mod tests {
     fn context_requires_live_tokens() {
         let h = handle_with(0, 3, 4);
         assert!(matches!(
-            LoadContext::from_handle(&h, "a", "b"),
+            LoadContext::from_handle(&h),
             Err(ContextError::NoLiveTokens)
         ));
     }
@@ -804,7 +806,7 @@ mod tests {
     fn context_requires_users() {
         let h = handle_with(2, 0, 0);
         assert!(matches!(
-            LoadContext::from_handle(&h, "a", "b"),
+            LoadContext::from_handle(&h),
             Err(ContextError::NoUsers)
         ));
     }
@@ -814,21 +816,19 @@ mod tests {
         let mut h = handle_with(2, 0, 2);
         h.realms.clear();
         assert!(matches!(
-            LoadContext::from_handle(&h, "a", "b"),
+            LoadContext::from_handle(&h),
             Err(ContextError::NoRealms)
         ));
     }
 
     #[test]
-    fn ropc_body_carries_the_grant() {
-        let h = handle_with(1, 0, 1);
-        let ctx =
-            LoadContext::from_handle(&h, "admin@dev.local", "HearthDev123!").expect("context");
-        let body = ctx.ropc_body();
-        assert_eq!(body["grant_type"], "password");
-        assert_eq!(body["client_id"], "client-1");
-        assert_eq!(body["username"], "admin@dev.local");
-        assert_eq!(body["password"], "HearthDev123!");
+    fn context_requires_admin_token() {
+        let mut h = handle_with(2, 0, 2);
+        h.admin_token = String::new();
+        assert!(matches!(
+            LoadContext::from_handle(&h),
+            Err(ContextError::NoAdminToken)
+        ));
     }
 
     #[test]

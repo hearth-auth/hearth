@@ -107,30 +107,37 @@ throughput advantage or disadvantage without that context.
 | **T1-H** | → `GET /userinfo` | **HTTP** | **16,642 /s** @T=1 | **106,641 /s** @T=32 | — | n/a | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ⚠️ **not reproduced** at T≤8; **exceeded** at T=32 (142,426 /s). See §4.1 |
 | **T3** | Permission check | **engine** | **5,987,782 /core/s** | **52,048,086 /s** @16T | +0.796 | n/a (read) | dev-ryzen-7840hs | `c7-saturation-v2-raw.json` · `981516f1` | ✅ **exceeded** — 10-run range 10.9–13.7 M /core (~25%); 2-sample: 11.39–12.45 M /core; see §4.2 |
 | **T3-H** | Permission check over HTTP | — | *not on the HTTP surface by design* | — | — | — | — | — | n/a — permissions are embedded in the JWT at issue time |
-| **T4** | Session creation (durable) | **engine** | **484 /s** @T=1 | **41,255 /s** @T=256 | +0.851 | **fsync-before-ack, `W`=1.000** | dev-ryzen-7840hs | `c7-saturation-post-hea1959-sample2-raw.json` · `873263d0` | ✅ **exceeded** — 10-run range 30,466–48,648 /s @T=256 (~60%); 2-sample mid-session: 47,215–47,978 /s; see §4.2 |
+| **T4** | Session creation (durable) | **engine** | **484 /s** @T=1 | ⛔ **UNSTABLE** — do not quote | +0.851 | **fsync-before-ack, `W`=1.000** | dev-ryzen-7840hs | `c7-saturation-post-hea1959-sample2-raw.json` · `873263d0` | ❌ **RETRACTED** — HEA-1993 (2026-07-30) ran 5 alternating runs at `43190f5e`; all MISS vs 30k; range 10,047–33,888 /s (3.4×); prior "10-run range 30,466–48,648" retracted as inconsistent. T4 needs quiescent server-class host. |
 | **T4-H** | Session creation over HTTP | — | *no end-to-end counterpart exists* | — | — | — | — | — | n/a — no single endpoint isolates it |
 | **T5** | Password login, end-to-end | **HTTP** | **49 /s** @T=1 | **185 /s** @T=8 | — | durable session create included | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ✅ **reproduced** — HEAD 51 /s @T=1, 215 /s @T=8 |
 | **L9-T** | `introspect_token` | **engine** | **21,802 /s** @T=1 | **125,613 /s** @T=32 | — | n/a | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ✅ **exceeded** — HEAD 24,664 /s @T=1 |
 | **L9-TH** | `POST /introspect` | **HTTP** | **9,508 /s** @T=1 | **55,700 /s** @T=32 | — | n/a | dev-ryzen-7840hs | `c11-http-delta-raw.json` · `1b2fda55` | ⚠️ **not reproduced** — see §4.1 |
 
-### 2.1 T4 against its target — read the footnote
+### 2.1 T4 against its target — RETRACTED (HEA-1993, 2026-07-30)
 
 T4's target was **revised down from 50,000 to 30,000 ops/s by the board on
 2026-07-29**, described at the time as "a totally arbitrary number."
 
-| | ops/s @T=256 | vs 30,000 (current) | vs 50,000 (original) |
+**⛔ All prior T4 figures are retracted.** HEA-1993 ran 5 alternating runs at HEAD (`43190f5e`);
+all MISS vs 30k; 5-run range 10,047–33,888 ops/s (3.4×). `W`=1.000 on every run.
+
+| | ops/s @T=256 | vs 30,000 (current) | status |
 |---|---|---|---|
-| Report 2.1a (`873263d0`) | 41,255 | 1.38× PASS | 0.83× |
-| **HEA-1967 sample 1** (`1b6b7745`) | **47,978.5** | **1.60× PASS** | **0.96×** |
-| **HEA-1967 sample 2** (`1b6b7745`) | **47,215.1** | **1.57× PASS** | **0.94×** |
+| Report 2.1a (`873263d0`) | 41,255 | 1.38× | ❌ retracted — within natural jitter |
+| HEA-1967 sample 1 (`1b6b7745`) | 47,978.5 | 1.60× | ❌ retracted — within natural jitter |
+| HEA-1967 sample 2 (`1b6b7745`) | 47,215.1 | 1.57× | ❌ retracted — within natural jitter |
+| HEA-1989 run 1 | 21,179 | 0.71× MISS | ❌ below range |
+| HEA-1989 run 2 | 43,043 | 1.43× | within jitter |
+| **HEA-1993 run 1** | **33,888** | **1.13× MISS** | — |
+| **HEA-1993 run 2** | **16,281** | **0.54× MISS** | — |
+| **HEA-1993 run 3** | **15,978** | **0.53× MISS** | — |
+| **HEA-1993 run 4** | **33,531** | **1.12× MISS** | — |
+| **HEA-1993 run 5** | **10,047** | **0.33× MISS** | — |
+| **HEA-1993 median** | **~16,281** | **0.54× MISS** | **UNSTABLE** |
 
-**We are within 4–6% of the target that was removed for being unreachable.** The
-board should know that lowering the bar may not have been necessary. This is not a
-request to reopen optimization work — T4 tuning remains stood down per HEA-1964 —
-it is a correction to the record that informed the decision.
-
-T4 total improvement from report 2.0: **254 → ~47,600 ops/s, ~187×**, with
-`fsync`-before-ack intact throughout.
+T4 is not quotable in any customer-facing or external document until re-measured on a
+quiescent server-class host. T4 single-thread figure (484 /s @T=1) remains valid as a
+floor measurement and is unaffected by the group-commit instability.
 
 ---
 
@@ -181,6 +188,50 @@ reduction at N=100k**. Publishable.
 K8/K9 are carried forward from report 1.0/2.0 unchanged. They were not in the
 HEA-1967 headline scope. They are low-risk but are **not** HEAD-verified; label
 them as such if published.
+
+### 3.3 HTTP-plane capacity — "requests/s before it falls over" (HEA-1997)
+
+**We publish NO end-to-end HTTP capacity figure. This section states, in writing,
+why — and what it takes to earn one.** (HEA-1997, filed from the board's HEA-1970
+question: *"Isn't the whole point of a load test to see what load an app can handle
+on given hardware?"*)
+
+Every capacity number above is **engine-level per-op cost or corpus footprint** —
+none answers *how many requests/s this box serves before it falls over.* The two
+existing HTTP-adjacent harnesses cannot answer it either:
+
+- `examples/http_delta.rs` measures a **fixed 3-rung ladder** `[1, 8, 32]` of
+  concurrency. 32 is the top of the ladder, not a knee. It reports what one
+  `/userinfo` *costs*, and is silent on the box's *ceiling*.
+- Every Goose run to date was **generator-limited and inadmissible**: at 1,000
+  users HEA-1989 §3 saw **100 % `client error (Connect)`** while server CPU *fell*
+  to 48.7 % — a measurement of Goose, not Hearth. The HEA-1867 grading rule is
+  *nothing is PASS on a run whose ceiling attribution was the generator*, and these
+  fail it.
+
+**The measurement capability now exists but has not been run.** `examples/http_saturation.rs`
+(HEA-1997) is an **open-loop, fixed-rate, two-host** saturation ramp with
+coordinated-omission-corrected latency and **mandatory per-rung bottleneck
+attribution** (a rung grades ADMISSIBLE only when server CPU is pinned, generator
+headroom ≥ 2×, transport is clean, and degradation is by queueing not an error
+cliff). It refuses to grade a loopback target by construction. Per-plane:
+read / issuance / login(KDF) / blended.
+
+**What blocks a published number:** the run needs **two rented hosts** (generator
+on host B, Hearth on host A) — the same booking as HEA-1970 (~$4, DO CPU-Optimized),
+not yet executed. Two secondary gaps: (a) the login/KDF plane needs the loadtest
+seeder to seed users with a known password (the current corpus has none —
+`loadtest/src/seed.rs:114`), tracked as a follow-up; (b) the request limiter stays
+**ON** on a two-host rig (`security.load_test_unthrottled` requires all-loopback
+binds), so a reported ceiling must state whether the server's CPU or its own request
+shaper saturated first.
+
+> **Until that run lands: quote no HTTP requests/s figure.** HEA-1968 (external
+> figures) may quote the engine per-op and footprint numbers in §1–§3.2 **only**,
+> each with its `engine`/`HTTP` plane label intact. There is currently **no**
+> cleared HTTP-plane throughput claim.
+
+The runbook for executing the ramp on the rig is `docs/perf/HEA-1997-SATURATION-RUNBOOK.md`.
 
 ---
 
@@ -369,7 +420,7 @@ CPU during this sweep, and I will not publish a number I cannot attribute.
 | Session lookup latency | 0.118 µs p50 | engine |
 | Permission check throughput | 5,987,782 /core/s · 52,048,086 /s @16T | engine |
 | `introspect_token` latency | 44.0 µs p50 | engine |
-| Durable session creation | 484 /s @T=1 · 41,255 /s @T=256, **fsync-before-ack, W=1.000** | engine |
+| Durable session creation (floor) | 484 /s @T=1, **fsync-before-ack, W=1.000** | engine |
 | Password login | 16.4 ms p50 (Argon2id m=19,456 KiB t=2 p=1) | engine |
 | Password login | 20.1 ms p50 · 49 /s @T=1 · 185 /s @T=8 | **HTTP** |
 | RAM per user | 100 B/user marginal; 97.1 MiB δRSS @1M | engine |
@@ -395,6 +446,7 @@ CPU during this sweep, and I will not publish a number I cannot attribute.
 - **Every HTTP-plane competitive multiplier** — `/userinfo` 44–63× and
   `/introspect` 2.3–2.6× both moved by 2–4× on re-measurement (§4.1). The
   multiplier is a ratio of two numbers, one of which is withdrawn.
+- **T4 peak throughput** — 41,255 /s @T=256 (and all prior T4 peak figures) — retracted; HEA-1993 5-run sweep shows UNSTABLE, all MISS, range 10,047–33,888 /s. See §2.1.
 - **L5 `lookup_user` as a point latency** — 236% spread (§4.2).
 - **"O(1) RAM regardless of corpus size"** — measured exponent 0.8778 (§3.1).
 - **Any engine figure placed beside a competitor's HTTP figure** (§0.1).

@@ -6,7 +6,64 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —
+  config loading happens before the tracing subscriber is installed, so the failure was
+  reported through `tracing::error!` and written nowhere: an operator whose `hearth.yaml`
+  was missing a production-only field (e.g. `oidc.issuer`) got exit code 1 with no stdout
+  and no stderr, while `hearth config validate` on the same file printed a perfect
+  field-level report. `serve` now writes that same field-level diagnostic to stderr before
+  exiting. The same pre-subscriber path also swallowed the env-var config-warning
+  safety-net, the `HostKeyMismatch` KEK-recovery message, and `config validate`'s YAML
+  parse errors; all four now reach stderr. (HEA-2011)
+
+### Changed
+- **Every rate-limiter `429` now names the limiter that shed the request (HEA-2010)** —
+  the JSON body carries an additive `limiter` field: `"shaper"`
+  (`security.request_shaper`), `"admin"` (`security.rate_limiting.admin_per_minute`),
+  `"token"` (`security.rate_limiting.token_per_minute`), `"export"`
+  (`security.backup.export_rate_limit`), or `"login_ip"` (the per-IP login limit on the
+  token and magic-link endpoints). Existing `error` codes are unchanged, so clients
+  matching on `too_many_requests` / `export_rate_limit_exceeded` keep working. Five
+  independent limiters could previously answer `429` with no way to tell them apart,
+  which sent operators to re-tune `security.request_shaper` when the shed actually came
+  from the admin or token cap. (HEA-2010)
+
 ### Added
+- **`security.rate_limiting.admin_per_minute` and `security.rate_limiting.token_per_minute`
+  config keys (HEA-2010)** — the admin-API cap (previously a compiled-in 100 requests per
+  minute per admin user, shared by REST, gRPC **and** SCIM — SCIM buckets on the realm
+  UUID, so `admin_per_minute: 0` also removes SCIM's only rate limit) and the OAuth
+  token/introspection cap
+  (previously a compiled-in 200 per minute per `(realm, client)`) are now operator-tunable.
+  Setting either to `0` disables that limiter entirely. Unlike
+  `security.load_test_unthrottled`, these are ordinary thresholds and are **not** gated on
+  `--dev` or a loopback bind, so they work under a production-mode `serve` — a `0` therefore
+  removes a real abuse control. Any `0` logs a startup `WARN` naming the key and raises
+  `hearth_rate_limiters_disabled{reason="config_zero"}` to `1`. Needed because a saturation
+  sweep could not reach the server's knee: every rung of a 1k→16k rps read-plane ramp shed
+  ~2/3 of its requests as HTTP 429 from the fixed admin cap, so the run measured the limiter
+  rather than the server. (HEA-2010)
+- **`dcr_policy` is now settable via `PATCH /admin/realms/{realm_id}/config` (HEA-2003)** —
+  the request body accepts an optional `dcr_policy` field (`"disabled"`, `"open"`,
+  `"authenticated"`, or `null`) alongside the existing config fields, letting an operator
+  (or automation holding `hearth.realm.admin`) change a realm's Dynamic Client Registration
+  policy for `POST /register` without editing `hearth.yaml`. An unknown value returns 400.
+  Used by the load-test seeder to provision the issuance-plane client; see below. (HEA-2003)
+- **`POST /dev/seed-password` endpoint (dev-only, HEA-1998)** — sets a known password
+  credential on a given `user_id` (via the same `set_password` primitive the admin UI
+  uses), so the load-test corpus has authenticatable users. This unblocks the login / KDF
+  saturation plane (`examples/http_saturation.rs --plane login`), which drives
+  `POST /ui/realms/{realm}/login` (the Argon2id path); the plain `POST /admin/users` path
+  cannot set a credential. The seed step exposes a matching **`--login-password`** flag
+  (env `HEARTH_LOADTEST_LOGIN_PASSWORD`) that provisions every seeded user with that
+  password — pass the same value to the harness's `--login-password`. Only available when
+  the server runs with `--dev`; refused in production. (HEA-1998)
+- **`POST /dev/seed-token` endpoint (dev-only, HEA-1991)** — mints a real signed access
+  token for a given `user_id` (creates a session + issues a JWT via the identity engine).
+  Used by the load-test harness to populate the live token corpus and to drive issuance +
+  revoke journeys without ROPC (removed in HEA-1862). Only available when the server runs
+  with `--dev`; refused in production.
 - **Block-structured SST format (v3) with mmap + bounded block cache (HEA-1914)** — SST
   files now use a block-based on-disk format (magic `HSS3`): the data section is split
   into ~4 KiB independently-encrypted blocks with a footer block index, and readers
@@ -20,6 +77,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cannot be replayed at a different position or spliced into another file. V1/V2 SSTs
   remain readable via the eager path; new writes and compaction output are v3. Greenfield
   — no migration tooling; old files are absorbed by compaction. (HEA-1914)
+
+### Fixed
+- **`security.backup.export_rate_limit` is now actually applied (HEA-2010)** — the key was
+  documented with a default of `10`/hour and a documented `0`-disables behaviour, but was
+  never read at startup; the export limiter always used the compiled-in `10`. Operators who
+  had tuned or zeroed this value were silently running the default.
+- **`--dev --bind <ip>:<port>` now starts instead of being refused (HEA-2008)** — the dev-mode
+  loopback startup gate parsed the whole `--bind` value as a bare `IpAddr`, so a legitimate
+  `host:port` form (`--bind 127.0.0.1:8420`) failed to parse and was fail-closed as
+  non-loopback — the HEA-1997 saturation runbook prescribes exactly that form, so an operator
+  following it could not start the seed phase. The gate now recognizes `host:port` (including
+  `[::1]:8420` and `localhost:8420`), and the `--bind` override peels an embedded port into
+  `server.port` so the listener no longer builds an invalid `host:port:port` address. A
+  wildcard bind (`--bind 0.0.0.0:8420`) is still refused in `--dev`. (HEA-2008)
+- **Token-claims cache now evicts instead of refusing inserts at capacity (HEA-1990)** —
+  the in-process cache that lets `validate_token` skip the Ed25519 verify + JSON parse
+  previously stopped accepting new tokens once it filled (hardcoded 2048 entries) and had
+  no eviction or TTL sweep. The first N distinct tokens after boot held their slots for the
+  process lifetime; once they expired (≤ 15 min at the default access-token TTL) the cache
+  became permanently-dead entries and the steady-state hit rate converged to zero, so the
+  fast path was unreachable in production. The cache is now TTL-aware and, when full, evicts
+  expired entries then the soonest-to-expire ones so an insert always **replaces** rather
+  than being dropped. Its capacity is configurable via the new **`token.claims_cache_max`**
+  key (default 65,536, up from the fixed 2,048) — size it to the expected concurrent
+  access-token working set. Hot-path reads remain wait-free and zero-allocation. (HEA-1990)
 
 ### Changed
 - **`security.password.kdf.max_queue_wait_ms: 0` is now rejected at startup (HEA-1984)** —

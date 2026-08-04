@@ -15,9 +15,20 @@ Step 3 adds browser login with the TypeScript SDK; step 4 checks permissions fro
 
 ## 1. Run Hearth
 
+**From source (recommended)** — no Docker required; works on Linux, Mac, and Windows:
+
 ```bash
-docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:latest serve --dev --bind 0.0.0.0
+cargo run -- serve --dev
+# or:  make dev
 ```
+
+**Docker on Linux** — `--network=host` gives the container access to the host's loopback, which `--dev` requires:
+
+```bash
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:latest serve --dev
+```
+
+> **Docker on Mac / Windows:** `--network=host` is not equivalent to the host loopback on Docker Desktop, so `--dev` cannot bind correctly in a single container. Use the Docker Compose stack instead — see [`deploy/README.md`](../../deploy/README.md). Note that the Compose stack does not expose the `--dev` bootstrap endpoint; set up your first realm via the Admin API.
 
 `--dev` uses in-memory storage, enables the bootstrap endpoint, and starts the built-in **mailcatcher** (captured email at `http://127.0.0.1:8420/dev/mail`). **Data does not persist across restarts.**
 
@@ -27,10 +38,6 @@ Confirm it is up:
 curl -fsS http://127.0.0.1:8420/health
 # → {"status":"ok"}
 ```
-
-:::tip[From source]
-`make dev` or `cargo run -- serve --dev` — same flags, no Docker required. Rust toolchain must be installed.
-:::
 
 :::tip[Production deployment]
 For Docker Compose, systemd, or Helm, see [`deploy/README.md`](../../deploy/README.md).

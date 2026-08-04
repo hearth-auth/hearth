@@ -272,6 +272,15 @@ oidc:
 #     login_per_account:
 #       max_failures: 5       # default: 5; consecutive failures before lockout
 #       lockout_seconds: 300  # default: 300 (5 min); per-account lockout duration
+#     # Request-rate caps on the authenticated API surfaces. Set either to 0 to
+#     # DISABLE that limiter — required to saturate the read plane in a load
+#     # test, since a fixed cap sheds most of the offered load and the
+#     # measurement then reports the limiter instead of the server. A 0 emits a
+#     # startup WARN and raises hearth_rate_limiters_disabled{reason="config_zero"}.
+#     # Never set 0 on a production bind.
+#     admin_per_minute: 100   # default: 100; per admin user, REST + gRPC
+#     token_per_minute: 200   # default: 200; per (realm, client) on /token,
+#                             #   /introspect, /device_authorization
 
 # --- Metrics auth (A-26) ----------------------------------------------------
 # Protect /metrics from unauthenticated scraping. Alternatively, firewall the

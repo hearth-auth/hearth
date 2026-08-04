@@ -69,7 +69,19 @@ jobs:
       - name: Setup Rust nightly + protoc (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          # HEA-2019: pinned, not floating `nightly`. This is the only workflow
+          # in the repo on the nightly channel (cargo-fuzz requires it), so it is
+          # the only one exposed to nightly drift. A nightly published between
+          # 2026-07-29 and 2026-08-02 regressed rustc's memory use under
+          # ASAN + sancov: one rustc reached 15.1 GB on a 15,989 MB runner and
+          # every leg died with exit 143 ("runner has received a shutdown
+          # signal"). Proven by control experiment (PR #271): main's *unchanged*
+          # last-green tree failed on floating nightly and passed on this pin,
+          # with no other change.
+          #
+          # Bump deliberately (verify a candidate on a control branch first);
+          # do not restore floating `nightly` without one.
+          toolchain: nightly-2026-07-29
           # cargo-fuzz only needs the compiler — skip clippy/rustfmt to save time.
           components: ""
           cache-workspaces: "fuzz -> target"

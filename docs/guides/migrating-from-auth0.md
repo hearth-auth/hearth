@@ -159,11 +159,15 @@ Users without an email address in Auth0 are skipped — the migration report cou
 
 ### Test a login
 
-```bash
-curl -X POST http://127.0.0.1:8420/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=password&username=user@example.com&password=<password>&client_id=<client-id>"
+Confirm at least one password-credential user can authenticate by navigating to the login UI:
+
 ```
+http://127.0.0.1:8420/ui/admin/login
+```
+
+Sign in with a known user's email and password. A successful login lands on the admin dashboard.
+
+> **Note:** Hearth does not support the Resource Owner Password Credential grant (`grant_type=password`). All user logins go through the browser-based authorization code flow.
 
 ### Verify the OIDC discovery document
 

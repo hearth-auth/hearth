@@ -162,10 +162,61 @@ pub(crate) fn extract_cluster_admin_auth(
     Ok(auth)
 }
 
+// ── Rate-limiter attribution (HEA-2010) ──────────────────────────────────────
+//
+// Several independent limiters can answer `429`, and until now every one of
+// them produced an untagged body. An operator seeing 429s under load had no way
+// to tell which limiter shed the request, so the natural (and wrong) conclusion
+// was `security.request_shaper` — even when the shed came from the admin cap.
+// Every limiter 429 now carries a `limiter` field naming its source.
+
+/// Admin API per-user limiter (`security.rate_limiting.admin_per_minute`).
+pub(crate) const LIMITER_ADMIN: &str = "admin";
+/// Token endpoint per-`(realm, client)` limiter (`…token_per_minute`).
+pub(crate) const LIMITER_TOKEN: &str = "token";
+/// Backup/export per-user hourly limiter (`security.backup.export_rate_limit`).
+pub(crate) const LIMITER_EXPORT: &str = "export";
+/// Per-IP login limiter on the token and magic-link endpoints.
+pub(crate) const LIMITER_LOGIN_IP: &str = "login_ip";
+/// Global per-IP + per-realm request shaper (`security.request_shaper`, A-2).
+pub(crate) const LIMITER_SHAPER: &str = "shaper";
+
+/// Builds a `429` JSON body tagged with the limiter that shed the request.
+///
+/// The `error` code stays `too_many_requests` so existing clients keep working;
+/// `limiter` is additive.
+pub(crate) fn rate_limit_body(limiter: &str, description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": "too_many_requests",
+        "error_description": description,
+        "limiter": limiter,
+    })
+}
+
+/// The `429` response returned when the admin API limiter sheds a request.
+fn admin_rate_limit_response() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(rate_limit_body(LIMITER_ADMIN, "rate limit exceeded")),
+    )
+}
+
+/// The `429` response returned when the export limiter sheds a request.
+fn export_rate_limit_response() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+            "error": "export_rate_limit_exceeded",
+            "error_description": "export rate limit exceeded; maximum exports per hour reached",
+            "limiter": LIMITER_EXPORT,
+        })),
+    )
+}
+
 /// Checks the admin API rate limit for a user.
 ///
-/// Returns 429 if the user has exceeded 100 requests in the current
-/// 1-minute window.
+/// Returns 429 if the user has exceeded the configured per-minute quota
+/// (`security.rate_limiting.admin_per_minute`, default 100).
 fn check_admin_rate_limit(
     state: &AppState,
     user_id: &UserId,
@@ -178,10 +229,7 @@ fn check_admin_rate_limit(
 
     match state.admin_rate_limiter.check(user_id, now) {
         RateLimitOutcome::Allowed => Ok(()),
-        RateLimitOutcome::Exceeded => Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({"error": "rate limit exceeded"})),
-        )),
+        RateLimitOutcome::Exceeded => Err(admin_rate_limit_response()),
     }
 }
 
@@ -289,13 +337,7 @@ pub(crate) fn check_export_rate_limit(
 
     match state.export_rate_limiter.check(user_id, now) {
         ExportRateLimitOutcome::Allowed => Ok(()),
-        ExportRateLimitOutcome::Exceeded => Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
-                "error": "export_rate_limit_exceeded",
-                "error_description": "export rate limit exceeded; maximum exports per hour reached"
-            })),
-        )),
+        ExportRateLimitOutcome::Exceeded => Err(export_rate_limit_response()),
     }
 }
 
@@ -410,10 +452,7 @@ pub(crate) fn check_token_rate_limit(
             Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 [("retry-after", retry_str.as_str())],
-                Json(serde_json::json!({
-                    "error": "too_many_requests",
-                    "error_description": "rate limit exceeded"
-                })),
+                Json(rate_limit_body(LIMITER_TOKEN, "rate limit exceeded")),
             )
                 .into_response())
         }
@@ -430,10 +469,7 @@ pub(crate) fn make_ip_rate_limit_response(retry_after_secs: u32) -> Response {
             axum::http::header::RETRY_AFTER,
             retry_after_secs.to_string(),
         )],
-        Json(serde_json::json!({
-            "error": "too_many_requests",
-            "error_description": "rate limit exceeded"
-        })),
+        Json(rate_limit_body(LIMITER_LOGIN_IP, "rate limit exceeded")),
     )
         .into_response()
 }
@@ -1062,5 +1098,67 @@ mod proto_json_tests {
         assert_eq!(v["token"].as_str(), Some("abc123def"));
         assert_eq!(v["flag"].as_bool(), Some(true));
         assert_eq!(v["empty"].as_str(), Some(""));
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_attribution_tests {
+    //! Every limiter `429` must name its own source.
+    //
+    //! Without it the only signal an operator (or the saturation harness) has
+    //! is the status code, which points them at `security.request_shaper` even
+    //! when the shed came from the admin or token limiter — exactly the
+    //! misdiagnosis that cost the HEA-1970 dry-run its read-plane knee.
+    use super::{
+        admin_rate_limit_response, export_rate_limit_response, rate_limit_body, LIMITER_ADMIN,
+        LIMITER_EXPORT, LIMITER_LOGIN_IP, LIMITER_SHAPER, LIMITER_TOKEN,
+    };
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    #[test]
+    fn admin_rate_limit_body_is_tagged_admin() {
+        let (status, Json(body)) = admin_rate_limit_response();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["limiter"].as_str(), Some(LIMITER_ADMIN));
+    }
+
+    #[test]
+    fn export_rate_limit_body_is_tagged_export() {
+        let (status, Json(body)) = export_rate_limit_response();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["limiter"].as_str(), Some(LIMITER_EXPORT));
+        // The pre-existing machine-readable code must not change: SDKs and the
+        // export runbook match on it.
+        assert_eq!(body["error"].as_str(), Some("export_rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn token_rate_limit_body_is_tagged_token() {
+        let body = rate_limit_body(LIMITER_TOKEN, "rate limit exceeded");
+        assert_eq!(body["limiter"].as_str(), Some("token"));
+        assert_eq!(body["error"].as_str(), Some("too_many_requests"));
+    }
+
+    #[test]
+    fn ip_login_rate_limit_body_is_tagged_login_ip() {
+        let body = rate_limit_body(LIMITER_LOGIN_IP, "rate limit exceeded");
+        assert_eq!(body["limiter"].as_str(), Some("login_ip"));
+    }
+
+    #[test]
+    fn limiter_ids_are_distinct() {
+        // The harness buckets 429s by this string; a collision would silently
+        // merge two limiters into one bucket and re-create the ambiguity.
+        let ids = [
+            LIMITER_ADMIN,
+            LIMITER_TOKEN,
+            LIMITER_EXPORT,
+            LIMITER_LOGIN_IP,
+            LIMITER_SHAPER,
+        ];
+        let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "limiter ids must be distinct");
+        assert!(ids.iter().all(|id| !id.is_empty()));
     }
 }

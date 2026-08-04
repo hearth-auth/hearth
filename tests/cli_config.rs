@@ -184,6 +184,80 @@ fn validate_returns_1_for_nonexistent_file() {
     assert_eq!(status.code(), Some(1));
 }
 
+#[test]
+fn validate_prints_parse_error_for_bad_yaml_syntax() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("hearth.yaml");
+    std::fs::write(&config_path, "server:\n  port: [unclosed").expect("write config");
+
+    let output = Command::new(hearth_bin())
+        .args([
+            "config",
+            "validate",
+            config_path.to_str().expect("valid UTF-8 path"),
+        ])
+        .output()
+        .expect("spawn hearth");
+
+    // HEA-2011: the parse-error branch reported via `tracing::error!`, but no
+    // subscriber is installed for the `config` subcommand — the operator saw an
+    // exit code and nothing else.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("parse error"),
+        "bad YAML should print a parse error to stderr, got: {stderr}"
+    );
+}
+
+// === hearth serve — startup diagnostics (HEA-2011) ===
+
+/// Production config that is missing `oidc.issuer`, which `serve` (without
+/// `--dev`) rejects during config validation — i.e. before tracing is up.
+const SERVE_CONFIG_MISSING_ISSUER: &str = r#"
+storage:
+  data_dir: "/tmp/hearth-test-hea2011"
+"#;
+
+/// HEA-2011: `hearth serve` must not exit 1 in total silence when config
+/// validation fails.
+///
+/// The config load happens before `telemetry::init`, so the `tracing::error!`
+/// on that path wrote the diagnostic nowhere. An operator following the
+/// HEA-1997 saturation runbook §3B saw a server that died with no output at
+/// all, while `hearth config validate` on the same file printed a perfect
+/// field-level report.
+#[test]
+fn serve_prints_field_level_diagnostic_when_config_invalid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("hearth.yaml");
+    std::fs::write(&config_path, SERVE_CONFIG_MISSING_ISSUER).expect("write config");
+
+    let output = Command::new(hearth_bin())
+        .args([
+            "serve",
+            "-c",
+            config_path.to_str().expect("valid UTF-8 path"),
+        ])
+        .output()
+        .expect("spawn hearth serve");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "serve should exit 1 on invalid config"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("oidc.issuer"),
+        "serve must name the offending config field on stderr, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Configuration invalid"),
+        "serve should print the same field-level report as `config validate`, got: {stderr:?}"
+    );
+}
+
 // === hearth config example ===
 
 #[test]

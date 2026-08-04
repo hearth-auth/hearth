@@ -61,10 +61,12 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ```bash
 docker pull ghcr.io/hearth-auth/hearth:v1.0.0
 
-# Dev mode — in-memory store, no data persistence
-docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:v1.0.0 serve --dev --bind 0.0.0.0
+# Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.0.0 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
+
+> **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run -- serve --dev`).
 
 ### Helm OCI chart (signed)
 

@@ -274,8 +274,9 @@ curl -s -X POST http://127.0.0.1:8420/register \
 ```
 
 The realm-scoped equivalent is `POST /realms/<realm-name>/register`. Whether DCR is
-open, token-gated, or disabled is controlled by `dcr_policy` in `hearth.yaml` (see
-[CONFIGURATION.md](../specs/CONFIGURATION.md#dcr_policy)).
+open, token-gated, or disabled is controlled by `realms.<name>.auth.dcr.mode` in
+`hearth.yaml` (see [CONFIGURATION.md — `realms.<name>.auth.dcr`](../specs/CONFIGURATION.md#realmsnameathdcr))
+or at runtime via `PATCH /admin/realms/{realm_id}/config` with the `dcr_policy` field.
 
 ---
 

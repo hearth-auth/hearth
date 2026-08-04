@@ -16,9 +16,27 @@
 #[path = "../examples/support/hostenv.rs"]
 mod hostenv;
 
-use hostenv::{HostProfile, LoadSnapshot, ProcSample, ProcessCensus};
+use hostenv::{ClockProbe, HostProfile, LoadSnapshot, ProcSample, ProcessCensus};
 
-/// A host that passes every gate: server chassis, pinned clocks, isolated cores.
+/// A stable fixed-work probe: all samples within 1% of the mean.
+fn stable_probe() -> ClockProbe {
+    ClockProbe {
+        samples: vec![1.000, 1.008, 0.995, 1.005, 0.992],
+        mean_ns_per_unit: 1.0,
+        max_drift_pct: 1.0,
+    }
+}
+
+/// An unstable probe: samples spread well beyond the 2% threshold.
+fn unstable_probe() -> ClockProbe {
+    ClockProbe {
+        samples: vec![1.0, 1.5, 0.8, 1.4, 0.9],
+        mean_ns_per_unit: 1.12,
+        max_drift_pct: 33.9,
+    }
+}
+
+/// A host that passes every gate: server chassis, stable clock, no steal.
 fn server_class_host() -> HostProfile {
     HostProfile {
         cpu_model: "AMD EPYC 9454P 48-Core Processor".into(),
@@ -28,6 +46,7 @@ fn server_class_host() -> HostProfile {
         isolated_cpus: "8-15".into(),
         has_battery: false,
         temp_c: Some(41.0),
+        clock_probe: Some(stable_probe()),
     }
 }
 
@@ -41,7 +60,7 @@ fn quiet_load() -> LoadSnapshot {
     }
 }
 
-/// A census with no process over the 5%-of-a-core bar.
+/// A census with no process over the 5%-of-a-core bar and zero steal.
 fn quiet_census() -> ProcessCensus {
     ProcessCensus {
         procs: vec![ProcSample {
@@ -51,6 +70,7 @@ fn quiet_census() -> ProcessCensus {
             rss_kib: 4096,
         }],
         total_busy_pct: 2.0,
+        steal_pct: 0.0,
     }
 }
 
@@ -119,6 +139,7 @@ fn a_single_busy_neighbour_is_caught_even_when_load_average_is_low() {
             rss_kib: 353_280,
         }],
         total_busy_pct: 84.0,
+        steal_pct: 0.0,
     };
     let v = hostenv::evaluate(&server_class_host(), &quiet_load(), &census);
 
@@ -142,6 +163,7 @@ fn a_process_exactly_at_the_bar_is_admitted() {
             rss_kib: 2048,
         }],
         total_busy_pct: 6.0,
+        steal_pct: 0.0,
     };
     let v = hostenv::evaluate(&server_class_host(), &quiet_load(), &census);
 
@@ -179,62 +201,173 @@ fn battery_presence_is_a_host_class_objection_that_quiescing_cannot_clear() {
     );
 }
 
+// ── Governor and isolated_cpus are now informational, not gate inputs ─────────
+
 #[test]
-fn non_performance_governor_is_a_host_class_objection() {
-    for (governor, expect) in [
-        (Some("powersave"), true),
-        (Some("schedutil"), true),
-        (Some("ondemand"), true),
-        (Some("performance"), false),
-        (None, true),
+fn governor_is_informational_and_does_not_gate_publication() {
+    // HEA-1996: governor was previously a hard objection but cloud guests do
+    // not expose cpufreq. Clock stability is now measured by the ClockProbe,
+    // which is strictly stronger evidence (governor=performance pins a policy,
+    // not a frequency — RAPL and thermal throttling move the clock regardless).
+    for governor in [
+        Some("powersave"),
+        Some("schedutil"),
+        Some("ondemand"),
+        Some("performance"),
+        None,
     ] {
         let host = HostProfile {
             governor: governor.map(Into::into),
             ..server_class_host()
         };
         let reasons = host.non_server_class_reasons();
-        let flagged = reasons.iter().any(|r| r.contains("governor"));
-        assert_eq!(
-            flagged,
-            expect,
-            "governor {governor:?} should {} raise an objection; got {reasons:?}",
-            if expect { "" } else { "NOT" }
+        assert!(
+            !reasons.iter().any(|r| r.contains("governor")),
+            "governor {governor:?} must NOT raise a host-class objection (it is now \
+             informational); got {reasons:?}",
         );
     }
 }
 
 #[test]
-fn missing_cpu_isolation_is_a_host_class_objection() {
-    for (isolated, expect_objection) in [("", true), ("   ", true), ("8-15", false)] {
+fn isolated_cpus_is_informational_and_does_not_gate_publication() {
+    // HEA-1996: isolated_cpus was previously a hard objection but cloud hosts
+    // typically do not set isolcpus=. The failure mode it guarded against —
+    // a noisy neighbour stealing the generator's core — is now caught by the
+    // per-process census and steal-time checks.
+    for isolated in ["", "   ", "8-15"] {
         let host = HostProfile {
             isolated_cpus: isolated.into(),
             ..server_class_host()
         };
-        let flagged = host
-            .non_server_class_reasons()
-            .iter()
-            .any(|r| r.contains("isolated CPUs"));
-        assert_eq!(
-            flagged, expect_objection,
-            "isolated_cpus {isolated:?} misclassified"
+        assert!(
+            !host
+                .non_server_class_reasons()
+                .iter()
+                .any(|r| r.contains("isolated")),
+            "isolated_cpus {isolated:?} must NOT raise a host-class objection (it is now \
+             informational)",
         );
     }
 }
 
+// ── New gate inputs: measured clock drift and hypervisor steal ────────────────
+
+#[test]
+fn governor_none_with_stable_probe_and_zero_steal_is_publishable() {
+    // The motivating case for HEA-1996: a DigitalOcean CPU-Optimized droplet
+    // has no cpufreq sysfs, no isolcpus, dedicated vCPU, and zero steal.
+    // Under the old gate it stamped `publishable: false` on every run.
+    // Under the new gate it should pass cleanly.
+    let host = HostProfile {
+        governor: None,               // cloud guest: no cpufreq
+        isolated_cpus: String::new(), // no isolcpus=
+        ..server_class_host()         // stable_probe() + no battery
+    };
+    let v = hostenv::evaluate(&host, &quiet_load(), &quiet_census());
+
+    assert!(
+        v.publishable,
+        "a cloud guest with no cpufreq, no isolcpus, stable clock, and zero steal \
+         must be publishable; objections: host_class={:?} contention={:?}",
+        v.host_class, v.contention,
+    );
+}
+
+#[test]
+fn non_zero_steal_is_a_host_class_objection() {
+    // Steal is non-zero when the hypervisor takes CPU time away from this VM.
+    // It is a hard objection because it is attributable to the host's placement
+    // policy, not to transient software load that quiescing would clear.
+    let census = ProcessCensus {
+        steal_pct: 2.5,
+        ..quiet_census()
+    };
+    let v = hostenv::evaluate(&server_class_host(), &quiet_load(), &census);
+
+    assert!(!v.publishable, "non-zero steal must block publication");
+    assert!(
+        !v.only_contention(),
+        "steal is not fixable by quiescing; must be a host-class objection"
+    );
+    assert_eq!(v.host_class.len(), 1, "got: {:?}", v.host_class);
+    assert!(
+        v.host_class[0].contains("steal") && v.host_class[0].contains("2.5"),
+        "the objection must mention steal and the measured value: {}",
+        v.host_class[0]
+    );
+    assert!(
+        v.contention.is_empty(),
+        "the host is otherwise quiet; no contention objections expected: {:?}",
+        v.contention
+    );
+}
+
+#[test]
+fn clock_drift_over_threshold_is_a_host_class_objection() {
+    // When the fixed-work probe records > 2% drift across its samples, the CPU
+    // clock moved during the window. The throughput figures would be a mix of
+    // clock speeds rather than a property of the code.
+    let host = HostProfile {
+        clock_probe: Some(unstable_probe()),
+        ..server_class_host()
+    };
+    let v = hostenv::evaluate(&host, &quiet_load(), &quiet_census());
+
+    assert!(!v.publishable, "probe drift > 2% must block publication");
+    assert!(
+        !v.only_contention(),
+        "clock drift is a host-class objection, not a contention one"
+    );
+    assert_eq!(v.host_class.len(), 1, "got: {:?}", v.host_class);
+    assert!(
+        v.host_class[0].contains("drift"),
+        "the objection must mention drift: {}",
+        v.host_class[0]
+    );
+    assert!(
+        v.contention.is_empty(),
+        "the host is otherwise quiet; no contention objections expected: {:?}",
+        v.contention
+    );
+}
+
+#[test]
+fn stable_probe_just_under_threshold_is_admitted() {
+    // The 2% boundary: a probe whose max_drift_pct is exactly at the threshold
+    // is admitted (the check is `>`, not `>=`).
+    let host = HostProfile {
+        clock_probe: Some(ClockProbe {
+            samples: vec![1.0, 1.02, 0.98],
+            mean_ns_per_unit: 1.0,
+            max_drift_pct: 2.0,
+        }),
+        ..server_class_host()
+    };
+    let v = hostenv::evaluate(&host, &quiet_load(), &quiet_census());
+
+    assert!(
+        v.publishable,
+        "drift exactly at the threshold must be admitted; objections: {:?}",
+        v.host_class
+    );
+}
+
 #[test]
 fn objections_accumulate_rather_than_short_circuiting() {
-    // The developer host this issue was filed from trips three host-class and
-    // several contention objections at once. The report has to list all of
-    // them, because fixing only the first would leave the run just as
-    // unpublishable — that is the escalation argument in HEA-1974 AC6.
+    // A developer laptop tripping all three independent host-class conditions —
+    // battery, unstable clock, and steal — plus load and process contention.
+    // The report has to list all of them, because fixing only the first would
+    // leave the run just as unpublishable. HEA-1974 AC6.
     let host = HostProfile {
         cpu_model: "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics".into(),
         cpus: 16,
-        governor: Some("powersave".into()),
+        governor: Some("powersave".into()), // informational only
         boost: Some(true),
-        isolated_cpus: String::new(),
-        has_battery: true,
+        isolated_cpus: String::new(), // informational only
+        has_battery: true,            // host-class: battery
         temp_c: Some(69.8),
+        clock_probe: Some(unstable_probe()), // host-class: drift > 2%
     };
     let load = LoadSnapshot {
         load1: 17.24,
@@ -258,10 +391,12 @@ fn objections_accumulate_rather_than_short_circuiting() {
             },
         ],
         total_busy_pct: 247.0,
+        steal_pct: 5.2, // host-class: non-zero steal
     };
     let v = hostenv::evaluate(&host, &load, &census);
 
     assert!(!v.publishable);
+    // battery + clock drift + steal = 3 host-class objections
     assert_eq!(v.host_class.len(), 3, "got: {:?}", v.host_class);
     // One load objection + one per over-bar process.
     assert_eq!(v.contention.len(), 3, "got: {:?}", v.contention);
@@ -317,9 +452,13 @@ fn verdict_json_carries_the_publishable_stamp_and_both_objection_classes() {
     let j = v.to_json();
 
     assert_eq!(j["publishable"], serde_json::json!(false));
+    // battery = 1 host-class objection; stable probe + zero steal = 0 additional
     assert_eq!(j["host_class_objections"].as_array().map(Vec::len), Some(1));
     assert_eq!(j["contention_objections"].as_array().map(Vec::len), Some(1));
     assert_eq!(j["thresholds"]["max_prerun_load_per_cpu"], 0.05);
+    // New thresholds are present in the artifact.
+    assert!(j["thresholds"]["max_clock_drift_pct"].is_number());
+    assert!(j["thresholds"]["min_steal_pct_objection"].is_number());
 }
 
 #[test]
@@ -335,6 +474,22 @@ fn live_capture_reports_a_coherent_host() {
         "cpu model must be populated (or explicitly 'unknown')"
     );
 
+    // The clock probe must be populated by capture().
+    let probe = host
+        .clock_probe
+        .as_ref()
+        .expect("capture() must always run the clock probe");
+    assert!(
+        probe.mean_ns_per_unit > 0.0 && probe.mean_ns_per_unit.is_finite(),
+        "probe mean must be positive and finite, got {}",
+        probe.mean_ns_per_unit
+    );
+    assert!(
+        probe.max_drift_pct.is_finite(),
+        "probe max_drift_pct must be finite, got {}",
+        probe.max_drift_pct
+    );
+
     let load = LoadSnapshot::capture();
     assert!(
         load.load1 >= 0.0 && load.load1.is_finite(),
@@ -348,6 +503,11 @@ fn live_capture_reports_a_coherent_host() {
         census.total_busy_pct >= 0.0 && census.total_busy_pct.is_finite(),
         "busy pct must be finite, got {}",
         census.total_busy_pct
+    );
+    assert!(
+        census.steal_pct >= 0.0 && census.steal_pct.is_finite(),
+        "steal_pct must be finite and non-negative, got {}",
+        census.steal_pct
     );
     // This test process itself is excluded, but a live Linux box always has
     // *some* other process; the census may legitimately be empty on a very

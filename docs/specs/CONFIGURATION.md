@@ -53,7 +53,7 @@ Network binding and TLS configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `bind_address` | string | `"127.0.0.1"` | IP address to bind the HTTP(S) listener to. Use `"0.0.0.0"` for all interfaces. |
+| `bind_address` | string | `"127.0.0.1"` | IP address to bind the HTTP(S) listener to. Use `"0.0.0.0"` for all interfaces. **In `--dev` mode, the server refuses to start if this (or the gRPC bind) is non-loopback (HEA-1980).** |
 | `port` | integer | `8420` | TCP port for the main listener. |
 | `tls_cert_path` | string | — | Path to a PEM-encoded TLS certificate. If set, `tls_key_path` MUST also be set. |
 | `tls_key_path` | string | — | Path to the PEM-encoded private key for the TLS certificate. |
@@ -467,12 +467,14 @@ JWT issuance parameters.
 | `audience` | string | `oidc.issuer` | The `aud` claim value. Defaults to `oidc.issuer` when omitted. Override only if your resource server expects a different audience (e.g. a separate API gateway URL). |
 | `access_token_ttl` | duration | `"15m"` | Access token lifetime. |
 | `refresh_token_ttl` | duration | `"7d"` | Refresh token lifetime. |
+| `claims_cache_max` | integer | `65536` | Maximum entries in the in-process token-claims cache on the `validate_token` hot path. A cache hit skips the Ed25519 verify + JSON parse. The cache is TTL-aware and evicts expired, then soonest-to-expire, entries once full (rather than refusing inserts), so the fast path stays reachable in steady state. Size this to the expected number of distinct access tokens validated concurrently; values are clamped to at least `1`. |
 
 ```yaml
 token:
   audience: "my-app"
   access_token_ttl: "30m"
   refresh_token_ttl: "14d"
+  claims_cache_max: 131072
 ```
 
 ### `auth`
@@ -673,6 +675,8 @@ Global per-IP and per-account rate-limit thresholds. These are the server-wide d
 | `login_per_ip.window_seconds` | integer | `60` | Sliding window length in seconds for per-IP failed-login counting. |
 | `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
 | `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
+| `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user, shared across the REST and gRPC surfaces. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
+| `token_per_minute` | integer | `200` | Maximum OAuth token, introspection, and device-authorization requests per minute per `(realm, client)` pair. Set to `0` to disable the limiter entirely. |
 
 ```yaml
 security:
@@ -683,7 +687,30 @@ security:
     login_per_account:
       max_failures: 5
       lockout_seconds: 300
+    admin_per_minute: 100
+    token_per_minute: 200
 ```
+
+##### Disabling request-rate limiters for load tests
+
+`admin_per_minute: 0`, `token_per_minute: 0`, and `security.backup.export_rate_limit: 0`
+each turn the corresponding limiter off outright. This exists because a
+saturation test cannot find the server's knee while a fixed abuse cap sheds
+most of the offered load — at the compiled-in 100/min admin cap, every rung of
+a 1k→16k rps sweep shed ~2/3 of its requests as `429` regardless of the rate
+offered, so the measurement reported the limiter rather than the server.
+
+Unlike [`security.load_test_unthrottled`](#securityload_test_unthrottled),
+these keys are **not** gated on `--dev` or a loopback bind, because they are
+ordinary operator-tunable thresholds that happen to accept `0`. That makes them
+usable from a production-mode `serve` — and equally makes `0` a real removal of
+an abuse control. Setting any of them to `0`:
+
+- logs a `WARN` at startup naming the config key, and
+- raises `hearth_rate_limiters_disabled{reason="config_zero"}` to `1`, so a live
+  process reveals the state after the boot log has scrolled away.
+
+Alert on that gauge. Never ship `0` to a production bind.
 
 ##### Rate-Limit Durability After Restart
 
@@ -926,7 +953,7 @@ Each realm entry supports:
 | `password_time_cost` | integer | inherits `auth.password_time_cost` | Per-realm Argon2id time cost. |
 | `email` | object | — | Per-realm email branding overrides. |
 | `web` | object | — | Per-realm UI theme overrides. |
-| `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs). |
+| `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs, self-registration, and DCR). |
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
 | `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM. Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
@@ -1031,6 +1058,58 @@ realms:
         aaguid_allowlist:
           - "08987058-cadc-4b81-b6e1-30de50dcbe96"  # YubiKey 5 series
 ```
+
+#### `realms.<name>.auth.registration`
+
+Controls who may self-register a user account via the public sign-up UI. When this block is absent, self-registration defaults to `disabled` — only admins may create users.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"disabled"` | Self-registration policy: `"disabled"` (no public signup), `"open"` (anyone may register), `"invite_only"` (requires a valid organization invitation), or `"domain_restricted"` (email must match an entry in `allowed_domains`). |
+| `allowed_domains` | list of strings | — | Required when `mode: "domain_restricted"`. Only email addresses whose domain suffix matches an entry in this list may self-register. Ignored for other modes. |
+
+```yaml
+realms:
+  customer-portal:
+    auth:
+      registration:
+        mode: open         # anyone may create an account
+
+  enterprise:
+    auth:
+      registration:
+        mode: domain_restricted
+        allowed_domains:
+          - "example.com"
+          - "corp.example.com"
+```
+
+> **Security note:** `open` registration is suitable for developer sandboxes or consumer apps. In B2B environments use `invite_only` (combined with SCIM provisioning) or `domain_restricted` to prevent account enumeration and unsanctioned sign-ups.
+
+#### `realms.<name>.auth.dcr`
+
+Controls Dynamic Client Registration (RFC 7591) for this realm — whether third-party applications may self-register OAuth clients via `POST /register`. When absent, DCR defaults to `disabled` and only admins may create clients via the admin API.
+
+The DCR policy can also be changed at runtime without restarting the server via `PATCH /admin/realms/{realm_id}/config` with `{"dcr_policy": "disabled"|"open"|"authenticated"|null}`. A `null` value resets to the `hearth.yaml` value.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"disabled"` | DCR policy: `"disabled"` (only admins may create clients), `"open"` (any caller may register a client — unauthenticated), or `"authenticated"` (requires a valid bearer token per RFC 7591 §3.1 initial access token). |
+
+```yaml
+realms:
+  developer-sandbox:
+    auth:
+      dcr:
+        mode: open          # developer sandboxes only — unauthenticated DCR
+
+  production:
+    auth:
+      dcr:
+        mode: authenticated # bearer token required for self-registration
+```
+
+> **Security note:** `open` DCR allows any caller to register an OAuth client without authentication — suitable only for developer sandboxes and internal networks. Use `authenticated` when DCR must be available in production, or `disabled` (the default) if all clients are managed by administrators.
 
 ### `realms.<name>.breach_check`
 
@@ -1652,6 +1731,8 @@ security:
     login_per_account:
       max_failures: 5
       lockout_seconds: 300
+    admin_per_minute: 100
+    token_per_minute: 200
   backup:
     verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"
     export_rate_limit: 10
@@ -1741,6 +1822,8 @@ Every field's default value at a glance.
 | `realms.<name>.auth.webauthn_attestation` | `allow_none` | `true` |
 | `realms.<name>.auth.webauthn_attestation` | `require_prf` | `false` |
 | `realms.<name>.auth.webauthn_attestation` | `require_large_blob` | `false` |
+| `realms.<name>.auth.registration` | `mode` | `"disabled"` |
+| `realms.<name>.auth.dcr` | `mode` | `"disabled"` |
 | `realms.<name>.breach_check` | `enabled` | `true` (new realms); `false` (existing realms migrated without this key) |
 | `realms.<name>.breach_check` | `timeout_ms` | `3000` |
 | `realms.<name>.auth.token` | `password_reset_token_ttl` | `"30m"` |
@@ -1781,4 +1864,6 @@ Every field's default value at a glance.
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
 | `security.rate_limiting.login_per_account` | `max_failures` | `5` |
 | `security.rate_limiting.login_per_account` | `lockout_seconds` | `300` |
+| `security.rate_limiting` | `admin_per_minute` | `100` |
+| `security.rate_limiting` | `token_per_minute` | `200` |
 | `onboarding` | `enabled` | `true` |

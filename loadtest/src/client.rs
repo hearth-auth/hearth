@@ -7,8 +7,11 @@
 //! client lets us stay on `rustls-tls` (matching `goose`).
 //!
 //! Only the endpoints the seed flow needs are implemented:
-//! `POST /admin/bootstrap`, `POST /admin/users`, `POST /clients` (register a
-//! password-grant client), `POST /token` (ROPC), and `POST /revoke`.
+//! `POST /admin/bootstrap`, `POST /admin/users`, `POST /clients` (register the
+//! public introspect/revoke client), `POST /register` (register the confidential
+//! `client_credentials` client for the issuance plane — HEA-2003),
+//! `PATCH /admin/realms/{id}/config` (toggle DCR policy), `POST /token`, and
+//! `POST /revoke`.
 //!
 //! Secrets discipline: this module never logs token or password material. The
 //! admin bootstrap token lives only inside the [`SeedClient`] default headers.
@@ -60,15 +63,28 @@ impl From<std::io::Error> for SeedError {
     }
 }
 
-/// Result of the bootstrap call, holding only what the seed flow needs.
+/// The name of the realm `POST /admin/bootstrap` creates and re-uses.
 ///
-/// The admin bearer token is intentionally *not* surfaced here — it lives only
-/// inside the returned [`SeedClient`]'s default headers, so it cannot be
-/// accidentally logged or written to the seed handle.
+/// Bootstrap is hardwired to the `dev-realm` (see `dev_seed_system_admin` /
+/// `get_realm_by_name("dev-realm")` in `src/protocol/http/admin.rs`), on both the
+/// first-call and re-bootstrap paths. The realm-scoped UI/OIDC routes are keyed
+/// by this **name**, not the realm id — the login/KDF saturation plane builds
+/// `/ui/realms/{name}/login` from it (HEA-2006). The bootstrap *response* does
+/// not echo the name, so the seeder records this invariant here.
+pub const DEV_REALM_NAME: &str = "dev-realm";
+
+/// Result of the bootstrap call, holding what the seed flow needs.
 #[derive(Debug)]
 pub struct Bootstrap {
     /// The dev realm's ID (UUID string).
     pub realm_id: String,
+    /// The dev realm's **name** — always [`DEV_REALM_NAME`]. Carried into the
+    /// seed handle so the name-keyed login route can be reconstructed (HEA-2006).
+    pub realm_name: String,
+    /// The bootstrap admin bearer token. SECRET — stored in the seed handle
+    /// (0600 file) so the load run's `user_lookup` journey can authenticate
+    /// admin endpoints. Must not be logged.
+    pub admin_token: String,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +103,17 @@ struct RegisteredClient {
     client_id: String,
 }
 
+/// RFC 7591 Dynamic Client Registration response (`POST /register`). Unlike the
+/// admin `POST /clients` handler — which strips any secret and only mints public
+/// clients — the DCR endpoint generates and **returns** a confidential client's
+/// secret, which is why the issuance plane's `client_credentials` client is
+/// registered here (HEA-2003).
+#[derive(Deserialize)]
+struct DcrRegisteredClient {
+    client_id: String,
+    client_secret: String,
+}
+
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -103,6 +130,7 @@ struct DevSessionResponse {
 pub struct SeedClient {
     base_url: String,
     realm_id: String,
+    realm_name: String,
     http: reqwest::Client,
 }
 
@@ -150,10 +178,13 @@ impl SeedClient {
 
         let bootstrap = Bootstrap {
             realm_id: boot.realm_id.clone(),
+            realm_name: DEV_REALM_NAME.to_string(),
+            admin_token: boot.access_token.clone(),
         };
         let client = Self {
             base_url,
             realm_id: boot.realm_id,
+            realm_name: DEV_REALM_NAME.to_string(),
             http,
         };
         Ok((client, bootstrap))
@@ -163,6 +194,13 @@ impl SeedClient {
     #[must_use]
     pub fn realm_id(&self) -> &str {
         &self.realm_id
+    }
+
+    /// The name of the realm this client is scoped to (always
+    /// [`DEV_REALM_NAME`]). The name-keyed login route is built from this.
+    #[must_use]
+    pub fn realm_name(&self) -> &str {
+        &self.realm_name
     }
 
     /// Creates a user via `POST /admin/users` and returns its ID.
@@ -183,19 +221,24 @@ impl SeedClient {
         Ok(user.id)
     }
 
-    /// Registers a public OAuth client authorized for the ROPC password grant
-    /// via `POST /clients`, returning its `client_id`.
+    /// Registers a public OAuth client (authorization_code grant) via
+    /// `POST /clients`, returning its `client_id`.
+    ///
+    /// The client is used as the authenticating party for introspect and revoke
+    /// calls during the load run. ROPC (`grant_type=password`) was removed by
+    /// HEA-1862; we no longer need a password-grant client, but the journeys
+    /// still require a registered public client for endpoint authentication.
     ///
     /// # Errors
     /// Returns [`SeedError`] on transport failure or a non-2xx response.
-    pub async fn register_password_client(&self, name: &str) -> Result<String, SeedError> {
+    pub async fn register_client(&self, name: &str) -> Result<String, SeedError> {
         let resp = self
             .http
             .post(format!("{}/clients", self.base_url))
             .json(&serde_json::json!({
                 "client_name": name,
                 "redirect_uris": ["https://loadtest.test/callback"],
-                "grant_types": ["password"],
+                "grant_types": ["authorization_code"],
             }))
             .send()
             .await?;
@@ -203,29 +246,83 @@ impl SeedClient {
         Ok(client.client_id)
     }
 
-    /// Resource-owner password-credentials grant (`POST /token`). Returns the
-    /// live access token.
+    /// Sets the realm's Dynamic Client Registration policy via
+    /// `PATCH /admin/realms/{realm_id}/config` (HEA-2003).
+    ///
+    /// `policy` is one of `"disabled"`, `"open"`, or `"authenticated"`. The
+    /// seeder briefly flips the dev-realm to `"authenticated"` so it can register
+    /// the confidential `client_credentials` client over `POST /register` (the
+    /// only server path that returns a generated secret), then flips it back to
+    /// `"disabled"` — so the measured (non-`--dev`) server in phase 3B carries no
+    /// residual DCR exposure. Requires the admin bearer (carried in the client's
+    /// default headers).
     ///
     /// # Errors
     /// Returns [`SeedError`] on transport failure or a non-2xx response.
-    pub async fn password_grant(
-        &self,
-        client_id: &str,
-        email: &str,
-        password: &str,
-    ) -> Result<String, SeedError> {
+    pub async fn set_dcr_policy(&self, policy: &str) -> Result<(), SeedError> {
         let resp = self
             .http
-            .post(format!("{}/token", self.base_url))
+            .patch(format!(
+                "{}/admin/realms/{}/config",
+                self.base_url, self.realm_id
+            ))
+            .json(&serde_json::json!({"dcr_policy": policy}))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_err("set_dcr_policy", resp).await)
+        }
+    }
+
+    /// Registers a **confidential** OAuth client that supports the
+    /// `client_credentials` grant via `POST /register` (RFC 7591 DCR), returning
+    /// its `client_id` and server-generated `client_secret` (HEA-2003).
+    ///
+    /// The admin `POST /clients` handler deliberately strips any secret and only
+    /// mints public clients (HEA-1750), so DCR is the sole server path that hands
+    /// back a usable secret. The realm's `dcr_policy` must be `authenticated` (or
+    /// `open`) for this to succeed — see [`Self::set_dcr_policy`]. The returned
+    /// secret is a **secret**: the caller stores it in the `0600` seed handle and
+    /// never logs it.
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn register_confidential_client(
+        &self,
+        name: &str,
+    ) -> Result<(String, String), SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/register", self.base_url))
             .json(&serde_json::json!({
-                "grant_type": "password",
-                "client_id": client_id,
-                "username": email,
-                "password": password,
+                "client_name": name,
+                "grant_types": ["client_credentials"],
             }))
             .send()
             .await?;
-        let token: TokenResponse = json_or_err("password_grant", resp).await?;
+        let client: DcrRegisteredClient = json_or_err("register_confidential_client", resp).await?;
+        Ok((client.client_id, client.client_secret))
+    }
+
+    /// Mints an access token for `user_id` via `POST /dev/seed-token` (dev-only).
+    ///
+    /// Creates a session and issues a real JWT for the given user. Used both
+    /// during seeding (to populate the token corpus) and during load journeys
+    /// that need to mint tokens dynamically (issuance + revoke). Replaces ROPC
+    /// which was removed by HEA-1862 (HEA-1991).
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn seed_token(&self, user_id: &str) -> Result<String, SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/dev/seed-token", self.base_url))
+            .json(&serde_json::json!({"user_id": user_id}))
+            .send()
+            .await?;
+        let token: TokenResponse = json_or_err("seed_token", resp).await?;
         Ok(token.access_token)
     }
 
@@ -249,6 +346,33 @@ impl SeedClient {
             .await?;
         let session: DevSessionResponse = json_or_err("create_dev_session", resp).await?;
         Ok(session.session_id)
+    }
+
+    /// Sets a password credential on `user_id` via `POST /dev/seed-password`
+    /// (dev-only, HEA-1998).
+    ///
+    /// `POST /admin/users` cannot set a credential, so this dev endpoint is the
+    /// only boot-local way to give a seeded user a login password. Provisioning
+    /// a **known** password is what enables the login / KDF saturation plane in
+    /// `examples/http_saturation.rs --plane login` (pass the same value to that
+    /// harness's `--login-password`).
+    ///
+    /// This never logs the password material.
+    ///
+    /// # Errors
+    /// Returns [`SeedError`] on transport failure or a non-2xx response.
+    pub async fn set_password(&self, user_id: &str, password: &str) -> Result<(), SeedError> {
+        let resp = self
+            .http
+            .post(format!("{}/dev/seed-password", self.base_url))
+            .json(&serde_json::json!({"user_id": user_id, "password": password}))
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(status_err("set_password", resp).await)
+        }
     }
 
     /// Revokes a token via `POST /revoke` (RFC 7009). The public `client_id`

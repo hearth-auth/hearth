@@ -67,13 +67,37 @@ pub struct SeededUser {
 }
 
 /// One seeded realm and everything created under it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to redact [`cc_client_secret`](Self::cc_client_secret).
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SeededRealm {
     /// Realm ID (UUID string).
     pub realm_id: String,
+    /// Realm **name** (not id). The realm-scoped UI/OIDC routes are keyed by
+    /// name (`/ui/realms/{realm_name}/login`, `/realms/{realm_name}/token`, …),
+    /// so the login/KDF saturation plane MUST build its path from this, not
+    /// `realm_id` — a path built from the id 404s every request and never
+    /// exercises Argon2id (HEA-2006). Empty string on handles seeded before this
+    /// field existed; the harness rejects those with a clear error.
+    #[serde(default)]
+    pub realm_name: String,
     /// OAuth client registered for the ROPC/revoke journeys (public client).
     /// Empty string when ROPC is not used (HEA-1907: ROPC removed by HEA-1862).
     pub client_id: String,
+    /// Confidential OAuth client that supports the `client_credentials` grant,
+    /// registered for the issuance saturation plane (HEA-2003). Empty string
+    /// when not seeded (older handles, or a corpus seeded before this field
+    /// existed). The harness mints tokens over `POST /token`
+    /// (`grant_type=client_credentials`) with these credentials — a production
+    /// grant, so the issuance plane needs no dev-only endpoint at run time.
+    #[serde(default)]
+    pub cc_client_id: String,
+    /// The confidential client's secret (SECRET — redacted in `Debug`). Carried
+    /// in the handle exactly like the bearer tokens: the on-disk JSON holds the
+    /// plaintext (the harness needs it to authenticate `POST /token`), the file
+    /// is `0600`, and `Debug` never reveals it. Empty when not seeded.
+    #[serde(default)]
+    pub cc_client_secret: String,
     /// User records created in this realm.
     pub users: Vec<SeededUser>,
     /// Live access tokens minted in this realm (a fraction pre-revoked).
@@ -85,8 +109,27 @@ pub struct SeededRealm {
     pub sessions: Vec<SeededSession>,
 }
 
+// Manual Debug so a `{:?}` of a realm (or the enclosing handle) never spills the
+// confidential client's secret into logs — the same discipline as `SeededToken`.
+impl std::fmt::Debug for SeededRealm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeededRealm")
+            .field("realm_id", &self.realm_id)
+            .field("realm_name", &self.realm_name)
+            .field("client_id", &self.client_id)
+            .field("cc_client_id", &self.cc_client_id)
+            .field("cc_client_secret", &"<redacted>")
+            .field("users", &self.users)
+            .field("tokens", &self.tokens)
+            .field("sessions", &self.sessions)
+            .finish()
+    }
+}
+
 /// The persisted seed-handle. Serialized as JSON to `--seed-out`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to redact `admin_token`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SeedHandle {
     /// Base URL the corpus was seeded against.
     pub target_host: String,
@@ -94,8 +137,26 @@ pub struct SeedHandle {
     pub seed: u64,
     /// Human-readable dataset shape (mirrors the report header).
     pub dataset_shape: String,
+    /// Bootstrap admin bearer token (SECRET). Stored here (0600 file) so the
+    /// load run's `user_lookup` journey can authenticate admin endpoints.
+    /// Defaults to empty string when loading pre-HEA-1995 handles; re-seed to
+    /// populate.
+    #[serde(default)]
+    pub admin_token: String,
     /// Seeded realms.
     pub realms: Vec<SeededRealm>,
+}
+
+impl std::fmt::Debug for SeedHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeedHandle")
+            .field("target_host", &self.target_host)
+            .field("seed", &self.seed)
+            .field("dataset_shape", &self.dataset_shape)
+            .field("admin_token", &"<redacted>")
+            .field("realms", &self.realms)
+            .finish()
+    }
 }
 
 impl SeedHandle {
@@ -106,6 +167,7 @@ impl SeedHandle {
             target_host: params.target_host.clone(),
             seed: params.seed,
             dataset_shape: params.dataset_shape_summary(),
+            admin_token: String::new(),
             realms: Vec::new(),
         }
     }
@@ -208,9 +270,13 @@ mod tests {
             target_host: "http://127.0.0.1:8420".into(),
             seed: 1,
             dataset_shape: "realms=1 users/realm=2".into(),
+            admin_token: "ADMIN-BOOTSTRAP-TOKEN".into(),
             realms: vec![SeededRealm {
                 realm_id: "realm-uuid".into(),
+                realm_name: "dev-realm".into(),
                 client_id: "client-uuid".into(),
+                cc_client_id: "cc-client-uuid".into(),
+                cc_client_secret: "SUPER-SECRET-CLIENT-SECRET".into(),
                 users: vec![SeededUser {
                     id: "user-uuid".into(),
                     email: "loaduser@loadtest.test".into(),
@@ -255,6 +321,34 @@ mod tests {
         let dbg = format!("{:?}", sample_handle());
         assert!(!dbg.contains("SUPER-SECRET-TOKEN"));
         assert!(!dbg.contains("ANOTHER-SECRET"));
+        assert!(
+            !dbg.contains("ADMIN-BOOTSTRAP-TOKEN"),
+            "Debug must not reveal the admin token: {dbg}"
+        );
+        assert!(
+            !dbg.contains("SUPER-SECRET-CLIENT-SECRET"),
+            "Debug must not reveal the confidential client secret: {dbg}"
+        );
+    }
+
+    #[test]
+    fn client_credentials_secret_roundtrips_in_json_but_redacts_in_debug() {
+        // The confidential client's secret must survive the on-disk JSON (the
+        // harness authenticates POST /token with it) yet never appear in Debug —
+        // the same contract as the bearer tokens (HEA-2003).
+        let h = sample_handle();
+        let json = h.to_json().expect("serialize");
+        assert!(
+            json.contains("SUPER-SECRET-CLIENT-SECRET"),
+            "JSON must carry the plaintext client secret for the harness"
+        );
+        assert!(json.contains("cc-client-uuid"));
+        let back: SeedHandle = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.realms[0].cc_client_id, "cc-client-uuid");
+        assert_eq!(
+            back.realms[0].cc_client_secret,
+            "SUPER-SECRET-CLIENT-SECRET"
+        );
     }
 
     #[test]
@@ -268,9 +362,13 @@ mod tests {
         assert_eq!(back.total_tokens(), 2);
         assert_eq!(back.total_sessions(), 1);
         assert_eq!(back.realms[0].realm_id, "realm-uuid");
+        assert_eq!(back.realms[0].realm_name, "dev-realm");
         assert_eq!(back.realms[0].sessions[0].session_id, "session-uuid");
-        // The JSON form intentionally carries the live token (Goose needs it).
+        assert_eq!(back.admin_token, "ADMIN-BOOTSTRAP-TOKEN");
+        // The JSON form intentionally carries live tokens and the admin token
+        // (Goose needs them for load journeys).
         assert!(json.contains("SUPER-SECRET-TOKEN"));
+        assert!(json.contains("ADMIN-BOOTSTRAP-TOKEN"));
     }
 
     #[test]
@@ -289,6 +387,18 @@ mod tests {
         }"#;
         let h: SeedHandle = serde_json::from_str(old_json).expect("deserialize old handle");
         assert_eq!(h.total_sessions(), 0, "sessions defaults to empty");
+        assert!(
+            h.admin_token.is_empty(),
+            "admin_token defaults to empty on old handles"
+        );
+        assert!(
+            h.realms[0].cc_client_id.is_empty() && h.realms[0].cc_client_secret.is_empty(),
+            "confidential-client fields default to empty on pre-HEA-2003 handles"
+        );
+        assert!(
+            h.realms[0].realm_name.is_empty(),
+            "realm_name defaults to empty on pre-HEA-2006 handles"
+        );
     }
 
     #[test]

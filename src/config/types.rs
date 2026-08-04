@@ -817,6 +817,14 @@ pub struct TokenYamlConfig {
     /// rotation (e.g. `"24h"`). Default: 24 hours.
     #[serde(default)]
     pub signing_key_rotation_grace_period: Option<String>,
+    /// Maximum entries in the in-process token-claims cache on the
+    /// `validate_token` hot path (HEA-1990). Default: 65,536.
+    ///
+    /// Size this to the expected number of distinct access tokens validated
+    /// concurrently; the fast path is only reachable for tokens that fit the
+    /// cache. Values are clamped to at least 1 at startup.
+    #[serde(default)]
+    pub claims_cache_max: Option<usize>,
 }
 
 // ===== Security / rate-limiting YAML config =====
@@ -1429,6 +1437,19 @@ pub struct GlobalRateLimitYaml {
     /// Per-account consecutive-failure lockout.
     #[serde(default)]
     pub login_per_account: Option<AccountRateLimitYaml>,
+    /// Maximum admin-API requests per minute per admin user. Default: 100.
+    ///
+    /// Set to `0` to disable the admin-API request limiter entirely. Zero
+    /// removes the admin abuse cap — intended for load testing on a private
+    /// bind, never for a production deployment (HEA-2010).
+    #[serde(default)]
+    pub admin_per_minute: Option<u32>,
+    /// Maximum OAuth token / introspection / device-authorization requests per
+    /// minute per `(realm, client)` pair. Default: 200.
+    ///
+    /// Set to `0` to disable. Same warning as `admin_per_minute`.
+    #[serde(default)]
+    pub token_per_minute: Option<u32>,
 }
 
 /// Per-IP rate limit config: sliding window of failed attempts.

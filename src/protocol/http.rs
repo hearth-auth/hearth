@@ -311,10 +311,15 @@ async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next:
 
     match state.request_shaper.check(ip, "") {
         ShaperOutcome::Allow => next.run(req).await,
+        // Tagged with its source so a shed request can be attributed to the
+        // shaper rather than to one of the endpoint limiters (HEA-2010).
         _ => (
             StatusCode::TOO_MANY_REQUESTS,
             [("Retry-After", "1")],
-            axum::Json(serde_json::json!({"error": "too_many_requests"})),
+            axum::Json(auth::rate_limit_body(
+                auth::LIMITER_SHAPER,
+                "rate limit exceeded",
+            )),
         )
             .into_response(),
     }
@@ -374,6 +379,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             .route(
                 "/dev/seed-session",
                 axum::routing::post(admin::dev_seed_session),
+            )
+            .route(
+                "/dev/seed-token",
+                axum::routing::post(admin::dev_seed_token),
+            )
+            .route(
+                "/dev/seed-password",
+                axum::routing::post(admin::dev_seed_password),
             );
     }
 

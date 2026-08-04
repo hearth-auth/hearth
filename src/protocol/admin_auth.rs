@@ -11,7 +11,10 @@ use std::sync::Mutex;
 
 use crate::core::{ClientId, RealmId, UserId};
 
-/// Maximum admin API requests per minute per user.
+/// Default maximum admin API requests per minute per user.
+///
+/// Operators override this with `security.rate_limiting.admin_per_minute` in
+/// `hearth.yaml`; `0` disables the limiter entirely (HEA-2010).
 pub const ADMIN_RATE_LIMIT: u32 = 100;
 
 /// Rate limit window in microseconds (1 minute).
@@ -28,16 +31,23 @@ struct RateTracker {
 ///
 /// Guarded by a single `Mutex` — contention is low because each request only
 /// performs a cheap increment under the lock.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AdminRateLimiter {
     trackers: Mutex<HashMap<String, RateTracker>>,
-    /// When `true`, [`check`](Self::check) always returns `Allowed`.
+    /// Maximum requests allowed per window per admin user.
     ///
-    /// Set **only** by the load-test unthrottled boot path
-    /// (`security.load_test_unthrottled`, loopback-gated). Never enable in
-    /// production — disabling this limiter removes the admin-API abuse cap.
-    /// Defaults to `false` (limiter active).
-    disabled: bool,
+    /// `0` means **unlimited** — [`check`](Self::check) always returns
+    /// `Allowed`. Set from `security.rate_limiting.admin_per_minute` or by the
+    /// load-test unthrottled boot path (`security.load_test_unthrottled`,
+    /// loopback-gated). Zero removes the admin-API abuse cap; never do it on a
+    /// production bind. Defaults to [`ADMIN_RATE_LIMIT`].
+    limit: u32,
+}
+
+impl Default for AdminRateLimiter {
+    fn default() -> Self {
+        Self::with_limit(ADMIN_RATE_LIMIT)
+    }
 }
 
 /// Outcome of an admin rate-limit check.
@@ -62,9 +72,18 @@ impl AdminRateLimiter {
     /// without the abuse cap acting as the bottleneck. See the field docs for
     /// the production warning.
     pub fn disabled() -> Self {
+        Self::with_limit(0)
+    }
+
+    /// Creates a limiter with a custom per-user per-minute cap.
+    ///
+    /// A `limit` of `0` disables the limiter (equivalent to [`Self::disabled`]).
+    /// Wired from `security.rate_limiting.admin_per_minute` in `hearth.yaml`.
+    #[must_use]
+    pub fn with_limit(limit: u32) -> Self {
         Self {
-            disabled: true,
-            ..Self::default()
+            trackers: Mutex::new(HashMap::new()),
+            limit,
         }
     }
 
@@ -73,7 +92,7 @@ impl AdminRateLimiter {
     /// The caller supplies `now_micros` so tests can drive time deterministically;
     /// production callers pass the current Unix-microsecond clock.
     pub fn check(&self, user_id: &UserId, now_micros: i64) -> RateLimitOutcome {
-        if self.disabled {
+        if self.limit == 0 {
             return RateLimitOutcome::Allowed;
         }
         let key = user_id.as_uuid().to_string();
@@ -93,7 +112,7 @@ impl AdminRateLimiter {
         }
 
         tracker.count += 1;
-        if tracker.count > ADMIN_RATE_LIMIT {
+        if tracker.count > self.limit {
             RateLimitOutcome::Exceeded
         } else {
             RateLimitOutcome::Allowed
@@ -141,15 +160,21 @@ pub const EXPORT_RATE_WINDOW_MICROS: i64 = 3_600 * 1_000_000;
 ///
 /// Keyed by `user_uuid`. Contention is negligible because exports are
 /// infrequent and the lock is held only for a counter increment.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExportRateLimiter {
     trackers: Mutex<HashMap<String, RateTracker>>,
-    /// When `true`, [`check`](Self::check) always returns `Allowed`.
+    /// Maximum exports allowed per window per admin user.
     ///
-    /// Set **only** by the load-test unthrottled boot path
-    /// (`security.load_test_unthrottled`, loopback-gated). Never enable in
-    /// production. Defaults to `false` (limiter active).
-    disabled: bool,
+    /// `0` means **unlimited**. Set from `security.backup.export_rate_limit`
+    /// or by the load-test unthrottled boot path. Defaults to
+    /// [`EXPORT_RATE_LIMIT`].
+    limit: u32,
+}
+
+impl Default for ExportRateLimiter {
+    fn default() -> Self {
+        Self::with_limit(EXPORT_RATE_LIMIT)
+    }
 }
 
 /// Outcome of an export rate-limit check.
@@ -172,9 +197,18 @@ impl ExportRateLimiter {
     /// **Load-test use only** — wired from `security.load_test_unthrottled` on a
     /// loopback bind. See the field docs for the production warning.
     pub fn disabled() -> Self {
+        Self::with_limit(0)
+    }
+
+    /// Creates a limiter with a custom per-user per-hour export cap.
+    ///
+    /// A `limit` of `0` disables the limiter. Wired from
+    /// `security.backup.export_rate_limit` in `hearth.yaml`.
+    #[must_use]
+    pub fn with_limit(limit: u32) -> Self {
         Self {
-            disabled: true,
-            ..Self::default()
+            trackers: Mutex::new(HashMap::new()),
+            limit,
         }
     }
 
@@ -183,7 +217,7 @@ impl ExportRateLimiter {
     /// `now_micros` is the current Unix timestamp in microseconds; tests should
     /// pass a fixed value to drive time deterministically.
     pub fn check(&self, user_id: &UserId, now_micros: i64) -> ExportRateLimitOutcome {
-        if self.disabled {
+        if self.limit == 0 {
             return ExportRateLimitOutcome::Allowed;
         }
         let key = user_id.as_uuid().to_string();
@@ -203,7 +237,7 @@ impl ExportRateLimiter {
         }
 
         tracker.count += 1;
-        if tracker.count > EXPORT_RATE_LIMIT {
+        if tracker.count > self.limit {
             ExportRateLimitOutcome::Exceeded
         } else {
             ExportRateLimitOutcome::Allowed
@@ -219,16 +253,24 @@ impl ExportRateLimiter {
 ///
 /// Keyed by `"{realm_uuid}:{client_uuid}"`.  Lock contention is low because
 /// each request holds the lock only long enough to increment a counter.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TokenRateLimiter {
     trackers: Mutex<HashMap<String, RateTracker>>,
-    /// When `true`, [`check`](Self::check) always returns `Allowed`.
+    /// Maximum requests allowed per window per `(realm, client)` pair.
     ///
-    /// Set **only** by the load-test unthrottled boot path
-    /// (`security.load_test_unthrottled`, loopback-gated). Never enable in
-    /// production — disabling this limiter removes brute-force / token-minting
-    /// abuse protection on the OAuth token endpoint. Defaults to `false`.
-    disabled: bool,
+    /// `0` means **unlimited**. Set from
+    /// `security.rate_limiting.token_per_minute` or by the load-test
+    /// unthrottled boot path (`security.load_test_unthrottled`,
+    /// loopback-gated). Zero removes brute-force / token-minting abuse
+    /// protection on the OAuth token and introspection endpoints; never do it
+    /// on a production bind. Defaults to [`TOKEN_RATE_LIMIT`].
+    limit: u32,
+}
+
+impl Default for TokenRateLimiter {
+    fn default() -> Self {
+        Self::with_limit(TOKEN_RATE_LIMIT)
+    }
 }
 
 impl TokenRateLimiter {
@@ -244,9 +286,18 @@ impl TokenRateLimiter {
     /// the per-`(realm, client)` cap. See the field docs for the production
     /// warning.
     pub fn disabled() -> Self {
+        Self::with_limit(0)
+    }
+
+    /// Creates a limiter with a custom per-`(realm, client)` per-minute cap.
+    ///
+    /// A `limit` of `0` disables the limiter. Wired from
+    /// `security.rate_limiting.token_per_minute` in `hearth.yaml`.
+    #[must_use]
+    pub fn with_limit(limit: u32) -> Self {
         Self {
-            disabled: true,
-            ..Self::default()
+            trackers: Mutex::new(HashMap::new()),
+            limit,
         }
     }
 
@@ -260,7 +311,7 @@ impl TokenRateLimiter {
         client_id: &ClientId,
         now_micros: i64,
     ) -> TokenRateLimitOutcome {
-        if self.disabled {
+        if self.limit == 0 {
             return TokenRateLimitOutcome::Allowed;
         }
         let key = format!("{}:{}", realm_id.as_uuid(), client_id.as_uuid());
@@ -280,7 +331,7 @@ impl TokenRateLimiter {
         }
 
         tracker.count += 1;
-        if tracker.count > TOKEN_RATE_LIMIT {
+        if tracker.count > self.limit {
             let elapsed = now_micros - tracker.window_start_micros;
             let remaining_micros = TOKEN_RATE_WINDOW_MICROS - elapsed;
             let retry_after_secs =
@@ -421,6 +472,81 @@ mod tests {
         }
         assert_eq!(limiter.check(&a, 0), RateLimitOutcome::Exceeded);
         assert_eq!(limiter.check(&b, 0), RateLimitOutcome::Allowed);
+    }
+
+    // --- Configurable limits (HEA-2010) ---
+    //
+    // The saturation rig could not measure the read plane because every rung
+    // was 65-67% HTTP 429 from the compiled-in 100/min admin cap, and the only
+    // escape hatch (`security.load_test_unthrottled`) is refused outside
+    // `--dev`. These cover the operator-facing override, including `0` = off.
+
+    #[test]
+    fn admin_limit_honours_configured_value() {
+        let limiter = AdminRateLimiter::with_limit(3);
+        let u = user();
+        for _ in 0..3 {
+            assert_eq!(limiter.check(&u, 0), RateLimitOutcome::Allowed);
+        }
+        assert_eq!(limiter.check(&u, 0), RateLimitOutcome::Exceeded);
+    }
+
+    #[test]
+    fn admin_limit_zero_never_sheds() {
+        let limiter = AdminRateLimiter::with_limit(0);
+        let u = user();
+        for _ in 0..(ADMIN_RATE_LIMIT * 10) {
+            assert_eq!(limiter.check(&u, 0), RateLimitOutcome::Allowed);
+        }
+    }
+
+    #[test]
+    fn admin_default_still_caps_at_compiled_default() {
+        let limiter = AdminRateLimiter::new();
+        let u = user();
+        for _ in 0..ADMIN_RATE_LIMIT {
+            let _ = limiter.check(&u, 0);
+        }
+        assert_eq!(limiter.check(&u, 0), RateLimitOutcome::Exceeded);
+    }
+
+    #[test]
+    fn token_limit_honours_configured_value() {
+        let limiter = TokenRateLimiter::with_limit(2);
+        let (r, c) = (realm(), client());
+        for _ in 0..2 {
+            assert_eq!(limiter.check(&r, &c, 0), TokenRateLimitOutcome::Allowed);
+        }
+        assert!(matches!(
+            limiter.check(&r, &c, 0),
+            TokenRateLimitOutcome::Exceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn token_limit_zero_never_sheds() {
+        let limiter = TokenRateLimiter::with_limit(0);
+        let (r, c) = (realm(), client());
+        for _ in 0..(TOKEN_RATE_LIMIT * 10) {
+            assert_eq!(limiter.check(&r, &c, 0), TokenRateLimitOutcome::Allowed);
+        }
+    }
+
+    #[test]
+    fn export_limit_honours_configured_value() {
+        let limiter = ExportRateLimiter::with_limit(1);
+        let u = user();
+        assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Allowed);
+        assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Exceeded);
+    }
+
+    #[test]
+    fn export_limit_zero_never_sheds() {
+        let limiter = ExportRateLimiter::with_limit(0);
+        let u = user();
+        for _ in 0..(EXPORT_RATE_LIMIT * 10) {
+            assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Allowed);
+        }
     }
 
     // --- TokenRateLimiter ---

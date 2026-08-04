@@ -1402,7 +1402,7 @@ All weights are per-signal contributions in `[0.0, 1.0]`.  Setting a weight to
 
 ### Off hot-path guarantee
 
-The scorer is consulted only at login time (form-submit / password-grant flows).
+The scorer is consulted only at login time (browser form-submit flows).
 It is **not** on the `validate_token()` or `lookup_session()` hot path.
 
 ---

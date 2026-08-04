@@ -514,11 +514,13 @@ Run this drill quarterly. An untested backup is not a backup.
        <(curl -fsS http://127.0.0.1:8080/realms/<realm>/.well-known/jwks.json | jq .keys[0].kid)
      ```
    - [ ] At least one known user can authenticate with their existing
-     password (run against the drill server, not prod):
-     ```bash
-     curl -fsS -X POST http://127.0.0.1:8080/oauth/token \
-       -d grant_type=password -d username=<known-user> -d password=<known-pass>
+     password (run against the drill server, not prod) — navigate to the
+     browser login UI and sign in manually:
      ```
+     http://127.0.0.1:8080/ui/admin/login
+     ```
+     Hearth does not support `grant_type=password` (ROPC was removed in HEA-1862).
+     Use the browser-based authorization code flow for user credential verification.
    - [ ] At least one OAuth client can complete `client_credentials` and
      the returned access token validates:
      ```bash

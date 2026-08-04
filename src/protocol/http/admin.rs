@@ -1340,6 +1340,12 @@ async fn admin_patch_user_required_actions(
 ///
 /// Replaces the realm's default required-actions list. Only affects users
 /// created after this call. Unknown action strings return 400.
+///
+/// Optional fields applied only when present: `mfa_methods`,
+/// `sms_otp_expiry_seconds`, `sms_otp_max_attempts`, `email_otp_expiry_seconds`,
+/// `email_otp_max_attempts`, `fapi_profile` (`"baseline"`/`"advanced"`/`null`),
+/// and `dcr_policy` (`"disabled"`/`"open"`/`"authenticated"`/`null`) — the
+/// Dynamic Client Registration policy for `POST /register`.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn admin_patch_realm_config(
     State(state): State<Arc<AppState>>,
@@ -1461,6 +1467,35 @@ async fn admin_patch_realm_config(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": "fapi_profile must be a string or null"
+                })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(v) = body.get("dcr_policy") {
+        use crate::identity::DcrPolicy;
+        if v.is_null() {
+            config.dcr_policy = None;
+        } else if let Some(s) = v.as_str() {
+            match s {
+                "disabled" => config.dcr_policy = Some(DcrPolicy::Disabled),
+                "open" => config.dcr_policy = Some(DcrPolicy::Open),
+                "authenticated" => config.dcr_policy = Some(DcrPolicy::Authenticated),
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("unknown dcr_policy value {other:?}; expected \"disabled\", \"open\", \"authenticated\", or null")
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "dcr_policy must be a string or null"
                 })),
             )
                 .into_response();
@@ -2548,6 +2583,112 @@ pub(super) async fn dev_seed_session(
 #[derive(Deserialize)]
 pub(super) struct DevSeedSessionRequest {
     user_id: String,
+}
+
+/// POST /dev/seed-token — creates a session and issues an access token for the given user.
+///
+/// Dev-only: the route is registered only when the server runs with `--dev`.
+/// Used by the load-test harness to populate a live token corpus (seed step)
+/// and to mint tokens dynamically during issuance + revoke journeys, without
+/// re-introducing ROPC (removed by HEA-1862, fixed by HEA-1991).
+///
+/// Required headers: `X-Realm-ID: <realm-uuid>`
+/// Request body:  `{"user_id": "<user-uuid>"}`
+/// Response body: `{"access_token": "<jwt>"}`
+pub(super) async fn dev_seed_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DevSeedTokenRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let user_uuid = match body.user_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user_id"})),
+            )
+                .into_response()
+        }
+    };
+    let user_id = UserId::new(user_uuid);
+    let session = match state.identity.create_session(
+        &realm_id,
+        &user_id,
+        &crate::identity::SessionContext::default(),
+    ) {
+        Ok(s) => s,
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+    match state
+        .identity
+        .issue_tokens(&realm_id, &user_id, session.id())
+    {
+        Ok(tokens) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"access_token": tokens.access_token()})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DevSeedTokenRequest {
+    user_id: String,
+}
+
+/// POST /dev/seed-password — sets a password credential on the given user.
+///
+/// Dev-only: the route is registered only when the server runs with `--dev`.
+/// Used by the load-test seed harness to provision the login / KDF saturation
+/// plane, which drives `POST /ui/realms/{realm}/login` (Argon2id `verify_password`)
+/// against the seeded corpus. The plain admin `POST /admin/users` path has no way
+/// to set a credential, so users would otherwise have no password to log in with
+/// (HEA-1998). The password is applied via the same `set_password` primitive the
+/// admin UI uses, so a subsequent login succeeds.
+///
+/// Because `set_password` revokes all of the user's existing sessions (A-42
+/// credential-change revocation), the seeder MUST call this **before** minting
+/// tokens/sessions for the user, or the read-plane corpus would be wiped.
+///
+/// Required headers: `X-Realm-ID: <realm-uuid>`
+/// Request body:  `{"user_id": "<user-uuid>", "password": "<cleartext>"}`
+/// Response: `204 No Content` on success.
+pub(super) async fn dev_seed_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DevSeedPasswordRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let user_uuid = match body.user_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user_id"})),
+            )
+                .into_response()
+        }
+    };
+    let user_id = UserId::new(user_uuid);
+    let password = crate::identity::CleartextPassword::from_string(body.password);
+    match state.identity.set_password(&realm_id, &user_id, &password) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DevSeedPasswordRequest {
+    user_id: String,
+    password: String,
 }
 
 /// Fixed dev-mode password for `admin@hearth.test`.

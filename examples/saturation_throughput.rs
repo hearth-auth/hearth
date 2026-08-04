@@ -45,12 +45,21 @@
 //!   hot tier (warmed to convergence past the production `promote_sample_rate`);
 //!   **miss** = a random, never-inserted id, so the read falls through the tier
 //!   and returns `None` — the corpus-size-dependent path.
-//! * `validate_token`: **hot** = the raw-JWT SHA-256 is resident in the 2048-slot
-//!   token-claims cache, so the Ed25519 verify + `serde` parse are skipped;
-//!   **miss** = a token whose hash is *not* cached (the cache is pre-saturated
-//!   with a disjoint warm set, and inserts silently no-op at capacity), so every
-//!   call pays the full verify. Both still run every semantic check and the
-//!   session-validity `get_session`.
+//! * `validate_token`: **hot** = the raw-JWT SHA-256 is resident in the
+//!   token-claims cache (pinned to `CLAIMS_CACHE_MAX` slots here), so the
+//!   Ed25519 verify + `serde` parse are skipped; **miss** = a first-touch token
+//!   whose hash is *not* resident, so the call pays the full verify. Post
+//!   HEA-1990 the cache **evicts** on insert rather than no-op'ing at capacity,
+//!   so a small disjoint miss pool would quickly become fully resident and the
+//!   "miss" measurement would silently collapse into hits. To keep it honest the
+//!   miss pool is sized to `MISS_TOKENS` ≫ `CLAIMS_CACHE_MAX`, so the working-set
+//!   reuse distance exceeds the cache and the residual hit rate stays a few
+//!   percent — a true cold-verify cost, not a hidden hit. This per-op verify cost
+//!   is an Ed25519 property and does **not** change with HEA-1990; what the fix
+//!   buys is that a bounded working set no longer decays to an all-miss steady
+//!   state once the first `CLAIMS_CACHE_MAX` distinct tokens have been seen.
+//!   Both paths still run every semantic check and the session-validity
+//!   `get_session`.
 //! * `permission_check` / `session_create` have no meaningful tier-miss beyond
 //!   their own internal cache / the WAL, so they are measured once.
 //!
@@ -89,6 +98,7 @@ use std::time::{Duration, Instant};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SessionId, SystemClock, UserId};
+use hearth::identity::tokens::TokenConfig;
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
     IdentityConfig, IdentityEngine, SessionContext,
@@ -119,12 +129,27 @@ const DEVICE_FSYNC_SAMPLES: u64 = 200;
 const USERS: usize = 1_000;
 
 /// Warm session pool (session_lookup hot + validate-hot token subjects). Sized
-/// to exactly saturate the 2048-slot token-claims cache with warm tokens.
+/// to exactly saturate the token-claims cache (`CLAIMS_CACHE_MAX`) with warm
+/// tokens.
 const SESSIONS: usize = 2_048;
 
+/// Token-claims cache capacity for this fixture (HEA-1990). Pinned to the warm
+/// set size so the hot sweep fills it exactly and the miss sweep (whose pool is
+/// `MISS_TOKENS` ≫ this) exercises a genuine cold-verify cost under the new
+/// evicting cache rather than a saturated no-op cache.
+const CLAIMS_CACHE_MAX: usize = SESSIONS;
+
 /// Dedicated sessions backing the validate-**miss** token pool — kept disjoint
-/// from the warm set so their tokens never land in the (already-full) cache.
+/// from the warm set. Their sessions are warmed into the hot tier so a miss
+/// pays only the extra verify/parse, not a cold session read.
 const MISS_SESSIONS: usize = 512;
+
+/// Distinct **miss** tokens minted across the `MISS_SESSIONS` sessions
+/// (round-robin; each `issue_tokens` call yields a unique `jti`). Sized well
+/// above `CLAIMS_CACHE_MAX` so that, with the evicting cache (HEA-1990), the
+/// reuse distance exceeds the cache and the residual hit rate stays a few
+/// percent — keeping the "miss" number a true cold-verify cost.
+const MISS_TOKENS: usize = 32_768;
 
 /// Warm passes over a hot pool before measuring — drives promotion past the
 /// production `promote_sample_rate` to convergence.
@@ -187,8 +212,12 @@ struct Fixture {
     sessions: Vec<SessionId>,
     /// Warm access tokens whose hashes fill the claims cache (`validate` hot).
     warm_tokens: Vec<String>,
-    /// Access tokens whose hashes are *not* cached (`validate` miss).
+    /// Access tokens whose hashes are *not* cached (`validate` miss). Sized
+    /// `MISS_TOKENS` ≫ cache capacity so they stay cold under the evicting cache.
     miss_tokens: Vec<String>,
+    /// Sessions backing `miss_tokens`, warmed into the hot tier so a miss pays
+    /// only the extra verify — not a cold session read.
+    miss_token_sessions: Vec<SessionId>,
     /// Random, never-inserted user ids (`user_lookup` miss).
     miss_user_ids: Vec<UserId>,
     /// Random, never-inserted session ids (`session_lookup` miss).
@@ -229,6 +258,12 @@ impl Fixture {
             clock,
             IdentityConfig {
                 credential: CredentialConfig::fast_for_testing(),
+                // HEA-1990: pin the claims-cache capacity so the hot set fills it
+                // exactly and the (larger) miss pool stays a true cold path.
+                token: TokenConfig {
+                    claims_cache_max: CLAIMS_CACHE_MAX,
+                    ..TokenConfig::default()
+                },
                 ..IdentityConfig::default()
             },
             rbac,
@@ -273,12 +308,24 @@ impl Fixture {
             sessions.push(sid);
         }
 
-        println!("creating {MISS_SESSIONS} sessions + minting miss tokens …");
-        let mut miss_tokens = Vec::with_capacity(MISS_SESSIONS);
+        println!("creating {MISS_SESSIONS} sessions + minting {MISS_TOKENS} miss tokens …");
+        let mut miss_token_sessions = Vec::with_capacity(MISS_SESSIONS);
         for i in 0..MISS_SESSIONS {
             let uid = &users[i % USERS];
             let session = engine.create_session(&realm, uid, &ctx)?;
-            let pair = engine.issue_tokens(&realm, uid, session.id())?;
+            miss_token_sessions.push(session.id().clone());
+        }
+        // Mint MISS_TOKENS distinct tokens round-robin across the miss sessions.
+        // Each issue_tokens call yields a fresh `jti`, so every token is distinct
+        // even when it shares a session.
+        let mut miss_tokens = Vec::with_capacity(MISS_TOKENS);
+        for i in 0..MISS_TOKENS {
+            // Bind the token's subject to the session's owner: session `j` was
+            // created for `users[j % USERS]` above.
+            let j = i % MISS_SESSIONS;
+            let sid = &miss_token_sessions[j];
+            let uid = &users[j % USERS];
+            let pair = engine.issue_tokens(&realm, uid, sid)?;
             miss_tokens.push(pair.access_token().to_string());
         }
 
@@ -300,6 +347,7 @@ impl Fixture {
             sessions,
             warm_tokens,
             miss_tokens,
+            miss_token_sessions,
             miss_user_ids,
             miss_session_ids,
             device_fsyncs_s,
@@ -310,14 +358,17 @@ impl Fixture {
         Ok(fixture)
     }
 
-    /// Warms the hot pools and saturates the token-claims cache.
+    /// Warms the hot pools and fills the token-claims cache with the warm set.
     ///
-    /// Saturating the cache with the warm-token set (≥ its 2048 capacity) is
-    /// what makes the `validate` **miss** measurement honest: once full, inserts
-    /// silently no-op, so the disjoint miss tokens can never become resident and
-    /// every miss call pays the full Ed25519 verify.
+    /// Filling the cache with the warm tokens (== its `CLAIMS_CACHE_MAX` capacity)
+    /// is what makes the `validate` **hot** measurement a pure cache hit. The
+    /// miss measurement stays honest via pool sizing, not saturation: post
+    /// HEA-1990 the cache evicts on insert, so the miss pool is `MISS_TOKENS` ≫
+    /// capacity and is deliberately *not* pre-validated here — its tokens stay
+    /// cold. Their sessions ARE warmed (via `get_session`) so a miss pays only
+    /// the extra verify/parse relative to a hit, not a cold session read on top.
     fn warm(&self) {
-        println!("warming hot tier ({WARM_PASSES} passes) + saturating claims cache …\n");
+        println!("warming hot tier ({WARM_PASSES} passes) + filling claims cache …\n");
         for _ in 0..WARM_PASSES {
             for u in &self.users {
                 let _ = self.engine.get_user(&self.realm, u);
@@ -325,14 +376,13 @@ impl Fixture {
             for s in &self.sessions {
                 let _ = self.engine.get_session(&self.realm, s);
             }
+            for s in &self.miss_token_sessions {
+                let _ = self.engine.get_session(&self.realm, s);
+            }
         }
-        // Fill the 2048-slot claims cache with the warm tokens (validate hot),
-        // and warm the miss tokens' sessions so a miss pays *only* the extra
-        // verify/parse relative to a hit — not a cold session read on top.
+        // Fill the claims cache with the warm tokens (validate hot). The miss
+        // tokens are intentionally left un-validated so they remain a cold path.
         for t in &self.warm_tokens {
-            let _ = self.engine.validate_token(&self.realm, t);
-        }
-        for t in &self.miss_tokens {
             let _ = self.engine.validate_token(&self.realm, t);
         }
     }
