@@ -254,11 +254,42 @@ async fn consume_transaction_token(
                 .into_response()
         }
     };
+    // The consuming agent must declare which agent it is acting as. The server
+    // validates the token's `aud` matches this declared identity — binding the
+    // token to the intended recipient (HEA-2033).
+    let consuming_agent_id = match body
+        .get("consuming_agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "missing 'consuming_agent_id' field"})),
+            )
+                .into_response()
+        }
+    };
+    let expected_aud = format!("agt_{consuming_agent_id}");
+
     let identity = Arc::clone(&state.identity);
     match tokio::task::spawn_blocking(move || identity.consume_transaction_token(&realm_id, &token))
         .await
     {
-        Ok(Ok(claims)) => Json(claims).into_response(),
+        Ok(Ok(claims)) => {
+            if claims.aud != expected_aud {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "aud_mismatch",
+                        "error_description": "token audience does not match consuming_agent_id"
+                    })),
+                )
+                    .into_response();
+            }
+            Json(claims).into_response()
+        }
         Ok(Err(IdentityError::TransactionTokenReplayed)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "transaction_token_replayed"})),
