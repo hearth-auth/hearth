@@ -6,6 +6,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **KEK-store parent-directory fsync (HEA-2033)** — `hearth.keys` writes now
+  call `sync_dir` on the containing directory after file creation and after the
+  atomic rename that rewrites the key file. Without this, a crash after the file
+  data was fsynced but before the directory entry was committed could silently
+  lose the key-encryption key, making all at-rest encrypted data unrecoverable.
+  Same defect class fixed for WAL/SST in HEA-1855.
+- **CSRF protection added to passkey login-complete endpoints (HEA-2033)** —
+  The three `POST /ui/.../login/passkey-complete` handlers now extract
+  `CsrfToken` before processing the assertion. Previously these state-changing
+  POST handlers had no CSRF guard.
+- **Password-reset token invalidated on reissue (HEA-2033)** — Calling
+  `POST /password-reset` a second time for the same email now deletes any
+  existing reset tokens before issuing a new one, so older links cannot be used
+  after a fresh reset request.
+- **Token-endpoint rate limiter no longer bypassable via non-UUID `client_id` (HEA-2033)**
+  — A non-parseable `client_id` now returns `400 invalid_request` immediately
+  instead of silently skipping the per-client rate-limit check.
+- **`agent_card` now requires `hearth.agents.admin` permission (HEA-2033)** —
+  The `GET /.well-known/agent.json` endpoint previously authenticated the caller
+  but did not authorise the request; any valid admin token could retrieve any
+  agent card regardless of scope.
+- **Transaction token validated against `aud` claim on consumption (HEA-2033)** —
+  `POST /v1/advanced/transaction-tokens/consume` now requires a
+  `consuming_agent_id` field and rejects with `403 aud_mismatch` if the token's
+  `aud` does not match `agt_{consuming_agent_id}`, binding tokens to the
+  intended recipient.
+- **Approval `approve`/`deny` use granular `hearth.approvals.manage` permission (HEA-2033)**
+  — Previously used the coarse `hearth.agents.admin` permission. Any token with
+  agent-admin scope could approve or deny tool invocations.
+- **SAML assertion-signature enforcement matches advertised metadata (HEA-2033)**
+  — SP metadata always advertised `WantAssertionsSigned="true"`, but the ACS
+  enforcement path honoured the per-IdP `want_assertions_signed` config field,
+  which could be set to `false`. Enforcement is now always `true`.
+- **SPIFFE SVID chain validation against registered trust bundle (HEA-2033)** —
+  `validate_spiffe_svid_inner` now loads the full `SpiffeIdentityMapping`
+  (including `trust_bundle_pem`) and verifies the cert's issuer DN and signature
+  against registered CAs. Previously any non-expired cert with a registered
+  SPIFFE ID was accepted regardless of issuer, enabling trust-domain confusion.
+  The `trust_bundle_pem` field is now stored on registration. Mappings without a
+  bundle emit a warning; chain verification fires when mTLS is wired.
+
 ### Fixed
 - **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —
   config loading happens before the tracing subscriber is installed, so the failure was
