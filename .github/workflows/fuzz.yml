@@ -42,10 +42,11 @@ jobs:
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.target }})
     runs-on: ubuntu-latest
-    # 30 min headroom: the first run after any fuzz/Cargo.lock change is a cold
-    # ASAN rebuild of the whole hearth crate plus `cargo install cargo-fuzz`,
-    # which overran the old 20-min budget (SIGTERM / exit 143). Once the lock is
-    # stable the Swatinem cache warms and legs finish in a few minutes.
+    # 30 min headroom: a cold leg is a full ASAN release rebuild of the hearth
+    # crate plus `cargo install cargo-fuzz`. On a warm Swatinem cache the build
+    # is ~13 min; on a cold cache (every leg until one succeeds and saves it) it
+    # is longer, and the swap-backed ASAN codegen peak (see the swap step) is
+    # slower still. Once a leg succeeds the cache warms and legs finish quickly.
     timeout-minutes: 30
 
     strategy:
@@ -69,6 +70,22 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      # HEA-1867: cargo-fuzz builds the whole hearth crate in *release* mode with
+      # debuginfo AND AddressSanitizer. That codegen unit peaks well past the
+      # ~16 GB a standard runner ships, and the OOM killer takes the leg down
+      # partway through (SIGTERM / exit 143) — the failure is silent, mid-compile,
+      # nowhere near the job timeout. The perf branch's memtable/skiplist deps
+      # pushed the peak over the edge; main was already close. Back the peak with
+      # on-disk swap on the runner's large /mnt volume so the ASAN link completes.
+      - name: Add swap for the ASAN release build
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 14G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Setup Rust nightly + protoc (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
