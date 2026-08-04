@@ -100,9 +100,15 @@ paths:
   # ── User self-service ────────────────────────────────────────────────────
   /users:
     post:
-      summary: Register a new user (public)
+      summary: Create a user (admin)
+      description: |
+        Creates a user in the caller's realm. Requires an admin bearer token
+        carrying the `hearth.users.admin` permission (HEA-2023). This is not a
+        public self-registration endpoint.
       operationId: createUser
       tags: [Users]
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -112,6 +118,10 @@ paths:
       responses:
         "201":
           description: User created
+        "401":
+          description: Missing or invalid admin bearer token
+        "403":
+          description: Token lacks the `hearth.users.admin` permission
 
   /userinfo:
     get:
