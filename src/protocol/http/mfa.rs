@@ -11,10 +11,11 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::core::UserId;
+use crate::protocol::client_info::PeerAddr;
 
 use super::{
     extract_realm_id, extract_user_auth, identity_error_to_response, make_ip_rate_limit_response,
-    resolve_realm_by_name, AppState, FALLBACK_PEER,
+    resolve_realm_by_name, AppState,
 };
 
 /// Registers WebAuthn and magic-link routes.
@@ -420,6 +421,7 @@ struct MagicLinkRequestBody {
 /// caller's IP has exceeded the per-IP rate limit.
 async fn magic_link_request(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
     Json(body): Json<MagicLinkRequestBody>,
@@ -429,11 +431,11 @@ async fn magic_link_request(
         Err(e) => return e,
     };
 
-    // Per-IP rate limit. Real IP arrives via X-Forwarded-For in production;
-    // FALLBACK_PEER is used when ConnectInfo is unavailable (tests).
+    // Per-IP rate limit. Real peer threaded via PeerAddr extractor; falls back
+    // to FALLBACK_PEER only in tests without `into_make_service_with_connect_info`.
     let client_ip = crate::protocol::client_info::extract_client_ip(
         &headers,
-        FALLBACK_PEER,
+        peer_addr,
         &state.trusted_proxies,
     );
     if state

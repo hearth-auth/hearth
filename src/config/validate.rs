@@ -704,7 +704,23 @@ fn is_public_listener(bind_address: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
+///
+/// Also emits a startup warning when `trusted_proxies` is empty on a public
+/// listener — in that configuration every request uses the direct socket IP
+/// for per-IP rate limiting and audit records, which is correct for
+/// direct-bind deployments but wrong if the server is behind a reverse proxy
+/// that sends the real client IP via `X-Forwarded-For`.
 fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIssue>) {
+    if server.trusted_proxies.is_empty() && is_public_listener(&server.bind_address) {
+        tracing::warn!(
+            bind_address = %server.bind_address,
+            "server.trusted_proxies is empty on a public listener — all requests will use \
+             the direct socket IP for per-IP rate limiting and audit records. \
+             If Hearth is behind a reverse proxy, set server.trusted_proxies to the \
+             proxy IP(s) so the real client IP is read from X-Forwarded-For."
+        );
+    }
+
     for (i, entry) in server.trusted_proxies.iter().enumerate() {
         let field = format!("server.trusted_proxies[{i}]");
 

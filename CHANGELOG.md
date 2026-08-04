@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Client IP now threaded from real socket peer into all auth handlers (HEA-2027)** — login,
+  MFA, passkey, magic-link, token-exchange, and registration handlers previously passed a
+  hard-coded `127.0.0.1` fallback instead of the real TCP peer address to `extract_client_ip`
+  and `build_session_context`. On direct-bind deployments (no reverse proxy), this collapsed
+  all clients into a single rate-limit bucket — 10 failed logins would lock browser login for
+  every user — and stored `ip_address="127.0.0.1"` in all session and audit records. The fix
+  introduces an infallible `PeerAddr` Axum extractor that reads `ConnectInfo<SocketAddr>` from
+  request extensions (populated by `into_make_service_with_connect_info` at server startup) and
+  falls back to the loopback address only in unit-test environments. A startup warning is now
+  emitted when `server.trusted_proxies` is empty and the server is bound to a public address.
+  (HEA-2027)
+- **SCIM: bounded realm scan — prevents DoS via `?count=1` on large realms (HEA-2032)** —
+  `GET /scim/v2/Users` and `GET /scim/v2/Groups` previously materialised every user or
+  group in the realm before applying the `count`/`startIndex` page slice. An authenticated
+  SCIM client could exhaust CPU and memory by sending `?count=1` against a realm with many
+  principals. Scan is now capped at `SCIM_MAX_SCAN_LIMIT` (1 000) items regardless of
+  the requested page size. (HEA-2032)
+- **SCIM: provisioning tokens may no longer modify or delete admin principals (HEA-2032)** —
+  SCIM bearer tokens (provisioning service accounts) could previously PATCH, PUT, or DELETE
+  any user in the realm, including realm admins, enabling realm takeover. Mutating SCIM
+  operations now deny requests that target a principal whose effective permissions include
+  `hearth.admin` or `hearth.users.admin`. Admin JWT fallback calls are not restricted (they
+  already carry admin-level authority). **Operator impact:** SCIM integrations that currently
+  manage admin users will receive `403 Forbidden` on those operations after this update.
+  Revoke admin roles before managing those users via SCIM, or use an admin JWT instead.
+  (HEA-2032)
+- **SCIM: admin-JWT fallback path now subject to per-realm rate limiting (HEA-2032)** —
+  the `check_scim_rate_limit` guard was applied only to the SCIM bearer-token path; requests
+  authenticated via the admin-JWT fallback bypassed the limiter entirely. Both paths now
+  share the same per-realm rate-limit bucket. (HEA-2032)
+
 ### Fixed
 - **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —
   config loading happens before the tracing subscriber is installed, so the failure was
