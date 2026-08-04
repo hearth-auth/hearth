@@ -7,6 +7,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **DPoP sender-constraint now enforced at the session-version feed endpoints — stops
+  bound-token replay as plain Bearer (HEA-2039)** — `GET /oauth/session-versions` and
+  `GET /oauth/session-versions/snapshot` parsed the `Authorization: Bearer` header directly
+  and gated on the `hearth.sv_feed`/`hearth.admin` JWT permission without ever checking `cnf`
+  or requiring a `DPoP` proof, so a DPoP-bound access token (`cnf.jkt` present) stolen via
+  log, referrer, or proxy was fully usable as an ordinary Bearer to read the realm-wide
+  session-version delta/snapshot feed — the same RFC 9449 sender-constraint downgrade
+  (CWE-345) HEA-2031 closed at `/userinfo` and `/v1/me/permissions`. Both now route through
+  the shared `validate_user_token_with_dpop` guard: a token carrying `cnf.jkt` presented
+  without a valid matching DPoP proof is rejected `401 invalid_token` before the permission
+  check. The same-class authenticated-mode DCR gate (`POST /register` and
+  `POST /realms/{realm}/register`) was hardened in the same pass — a cnf-bound initial-access
+  token now requires its DPoP proof to authorize client registration. **Operator impact:**
+  DPoP/FAPI clients polling the session-version feed (or registering clients under
+  authenticated DCR) with a sender-constrained token must now send a valid `DPoP` proof
+  header; plain-Bearer callers with unbound tokens are unaffected. (HEA-2039)
 - **DPoP sender-constraint now enforced at `/userinfo`, `/realms/{realm}/userinfo`, and
   `/v1/me/permissions` — stops bound-token replay as plain Bearer (HEA-2031)** — these three
   resource endpoints bypassed the shared `extract_user_auth` guard and parsed the

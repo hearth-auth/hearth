@@ -711,6 +711,8 @@ struct DcrResponse {
 /// supply these. Returns an RFC 7591-compatible JSON response.
 async fn register_client_dynamic(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Json(body): Json<pb::RegisterClientRequest>,
 ) -> impl IntoResponse {
@@ -754,7 +756,21 @@ async fn register_client_dynamic(
                 Ok(t) => t,
                 Err((status, body)) => return (status, body).into_response(),
             };
-            if state.identity.validate_token(&realm_id, &token).is_err() {
+            // Enforce the DPoP sender-constraint (RFC 9449 §7.2) for cnf-bound
+            // initial-access-tokens, so a stolen bound token cannot be replayed
+            // as a plain Bearer to register clients in this realm (HEA-2039).
+            // Global route ⇒ plain `Uri` yields the full request path.
+            let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+            if validate_user_token_with_dpop(
+                &headers,
+                &state,
+                &realm_id,
+                &token,
+                method.as_str(),
+                &htu,
+            )
+            .is_err()
+            {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
@@ -1892,14 +1908,9 @@ async fn userinfo(
     // Enforce DPoP sender-constraint for cnf-bound tokens (RFC 9449 §7.2)
     // before handing the raw token to the identity layer (HEA-2031).
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    if let Err(e) = validate_user_token_with_dpop(
-        &headers,
-        &state,
-        &realm_id,
-        token,
-        method.as_str(),
-        &htu,
-    ) {
+    if let Err(e) =
+        validate_user_token_with_dpop(&headers, &state, &realm_id, token, method.as_str(), &htu)
+    {
         return e.into_response();
     }
 
@@ -2748,14 +2759,9 @@ async fn realm_userinfo(
     // Enforce DPoP sender-constraint for cnf-bound tokens (RFC 9449 §7.2)
     // before handing the raw token to the identity layer (HEA-2031).
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    if let Err(e) = validate_user_token_with_dpop(
-        &headers,
-        &state,
-        &realm_id,
-        token,
-        method.as_str(),
-        &htu,
-    ) {
+    if let Err(e) =
+        validate_user_token_with_dpop(&headers, &state, &realm_id, token, method.as_str(), &htu)
+    {
         return e.into_response();
     }
     match state.identity.userinfo(&realm_id, token) {
@@ -2822,6 +2828,8 @@ async fn realm_device_authorization(
 async fn realm_register_client_dynamic(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    method: axum::http::Method,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -2861,7 +2869,21 @@ async fn realm_register_client_dynamic(
                 Ok(t) => t,
                 Err((status, body)) => return (status, body).into_response(),
             };
-            if state.identity.validate_token(&realm_id, &token).is_err() {
+            // Enforce the DPoP sender-constraint (RFC 9449 §7.2) for cnf-bound
+            // initial-access-tokens (HEA-2039). Nested route ⇒ `OriginalUri`
+            // preserves the `/realms/{name}` prefix so a legitimate proof's
+            // `htu` matches the full request path.
+            let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+            if validate_user_token_with_dpop(
+                &headers,
+                &state,
+                &realm_id,
+                &token,
+                method.as_str(),
+                &htu,
+            )
+            .is_err()
+            {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({

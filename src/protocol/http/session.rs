@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::{
     extract_bearer_token, extract_realm_id, identity_error_to_response, resolve_realm_by_name,
-    AppState,
+    validate_user_token_with_dpop, AppState,
 };
 
 /// Registers session management and session-version feed routes.
@@ -278,6 +278,8 @@ struct SvDeltaQuery {
 /// Requires a bearer token with `hearth.sv_feed` permission.
 async fn oauth_sv_delta_feed(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Query(params): Query<SvDeltaQuery>,
 ) -> Response {
@@ -295,15 +297,21 @@ async fn oauth_sv_delta_feed(
         Err(r) => return r.into_response(),
     };
 
-    let claims = match state.identity.validate_token(&realm_id, &token) {
+    // Enforce the DPoP sender-constraint (RFC 9449 §7.2) for cnf-bound tokens
+    // before any permission decision, so a stolen bound token cannot be replayed
+    // as a plain Bearer against the realm-wide session-version feed (HEA-2039).
+    // This is a global (non-nested) route, so plain `Uri` yields the full path.
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let claims = match validate_user_token_with_dpop(
+        &headers,
+        &state,
+        &realm_id,
+        &token,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid token"})),
-            )
-                .into_response()
-        }
+        Err(e) => return e.into_response(),
     };
 
     let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
@@ -364,7 +372,12 @@ async fn oauth_sv_delta_feed(
 /// Returns gzip-compressed JSON with `{realm, current_seq, versions}`.
 /// Returns 404 when session versioning is disabled for the realm.
 /// Requires a bearer token with `hearth.sv_feed` permission.
-async fn oauth_sv_snapshot(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+async fn oauth_sv_snapshot(
+    State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
     let Ok(realm_id) = extract_realm_id(&headers) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -378,15 +391,21 @@ async fn oauth_sv_snapshot(State(state): State<Arc<AppState>>, headers: HeaderMa
         Err(r) => return r.into_response(),
     };
 
-    let claims = match state.identity.validate_token(&realm_id, &token) {
+    // Enforce the DPoP sender-constraint (RFC 9449 §7.2) for cnf-bound tokens
+    // before any permission decision, so a stolen bound token cannot be replayed
+    // as a plain Bearer against the realm-wide session-version snapshot
+    // (HEA-2039). Global (non-nested) route ⇒ plain `Uri` yields the full path.
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let claims = match validate_user_token_with_dpop(
+        &headers,
+        &state,
+        &realm_id,
+        &token,
+        method.as_str(),
+        &htu,
+    ) {
         Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid token"})),
-            )
-                .into_response()
-        }
+        Err(e) => return e.into_response(),
     };
 
     let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
