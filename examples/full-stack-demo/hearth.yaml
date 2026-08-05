@@ -28,6 +28,13 @@ realms:
   demo:
     display_name: "Hearth Hub Demo"
 
+    # Enable self-service signup so the demo can showcase — and the HEA-2056
+    # integration suite can exercise — the registration → email-verification →
+    # login flow. New users land with no roles until an admin assigns one.
+    auth:
+      registration:
+        mode: open
+
     applications:
       hearth-hub:
         name: "Hearth Hub"

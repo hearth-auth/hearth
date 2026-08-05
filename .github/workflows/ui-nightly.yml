@@ -206,3 +206,191 @@ jobs:
           else
             echo "One or more tests failed on ${{ matrix.browser }} — see Playwright report artifact" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  # ── Reference integration — full-stack-demo (HEA-2058) ─────────────────────
+  #
+  # Boots the full demo stack (Hearth + Go backend :8421 + Vite :5173) and runs
+  # the reference-integration Playwright suite from tests/ui/integration/.
+  #
+  # continue-on-error: true — a flaky browser test MUST NOT block a PR.
+  # This job is informational only; failures surface via the Playwright HTML
+  # report uploaded as an artifact for the nightly run.
+  reference-integration:
+    name: Reference integration — full-stack-demo
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download hearth binary artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hearth-binary
+          path: .
+
+      - name: Restore binary execute permission
+        run: chmod +x target/debug/hearth
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: examples/full-stack-demo/backend/go.mod
+          cache-dependency-path: examples/full-stack-demo/backend/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            tests/ui/package-lock.json
+            examples/full-stack-demo/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: examples/full-stack-demo/frontend
+        run: npm ci
+
+      - name: Install integration test dependencies (reuse tests/ui)
+        working-directory: tests/ui
+        run: npm ci
+
+      - name: Install Playwright browser (chromium)
+        working-directory: tests/ui
+        run: npx playwright install chromium --with-deps
+
+      - name: Start Hearth dev server (demo config)
+        run: |
+          # HEARTH_MAILCATCHER_PASSWORD must be set before Hearth starts so the
+          # mailcatcher endpoint accepts it; flow 2 (self-registration) needs it.
+          HEARTH_MAILCATCHER_PASSWORD=integration-mailcatcher-pw \
+          ./target/debug/hearth serve --dev \
+            --config examples/full-stack-demo/hearth.yaml &
+          echo "HEARTH_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for Hearth to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8420/health > /dev/null 2>&1; then
+              echo "Hearth ready after ${i}×0.5s"
+              break
+            fi
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8420/health || { echo "Hearth failed to start"; exit 1; }
+
+      - name: Bootstrap and resolve demo realm
+        run: |
+          # Bootstrap: returns system realm + admin token (idempotent)
+          BOOT=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
+          ADMIN_TOKEN=$(echo "$BOOT" | jq -r '.access_token')
+          SYS_REALM_ID=$(echo "$BOOT" | jq -r '.realm_id')
+
+          # Resolve demo realm UUID (created from config on startup)
+          DEMO_REALM_ID=$(
+            curl -sf \
+              -H "Authorization: Bearer $ADMIN_TOKEN" \
+              -H "X-Realm-ID: $SYS_REALM_ID" \
+              http://127.0.0.1:8420/admin/realms \
+            | jq -r '.items[] | select(.name == "demo") | .id'
+          )
+          echo "DEMO_REALM_ID=$DEMO_REALM_ID" >> "$GITHUB_ENV"
+
+      - name: Write frontend .env
+        run: |
+          # VITE_HEARTH_URL points to the Vite dev server, which proxies
+          # /realms, /admin, /health to Hearth on :8420 (see vite.config.ts).
+          # VITE_CLIENT_ID is the deterministic UUID seeded from hearth.yaml.
+          cat > examples/full-stack-demo/frontend/.env << EOF
+          VITE_HEARTH_URL=http://localhost:5173
+          VITE_REALM_SLUG=demo
+          VITE_REALM_ID=$DEMO_REALM_ID
+          VITE_CLIENT_ID=f7057d27-61fd-555e-b2af-ba8edd112237
+          VITE_API_URL=http://localhost:8421
+          EOF
+
+      - name: Build Go backend
+        working-directory: examples/full-stack-demo/backend
+        run: go build -o /tmp/demo-backend ./...
+
+      - name: Start Go backend
+        run: |
+          HEARTH_URL=http://127.0.0.1:8420 \
+          REALM_ID="$DEMO_REALM_ID" \
+          REALM_SLUG=demo \
+          PORT=8421 \
+          /tmp/demo-backend &
+          echo "BACKEND_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Start Vite dev server
+        working-directory: examples/full-stack-demo/frontend
+        run: |
+          npm run dev -- --port 5173 --strictPort --host 127.0.0.1 &
+          echo "FRONTEND_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for backend and frontend to be ready
+        run: |
+          for svc in "backend:8421/health" "frontend:5173"; do
+            name="${svc%%:*}"
+            addr="${svc#*:}"
+            for i in $(seq 1 60); do
+              if curl -sf "http://127.0.0.1:${addr}" > /dev/null 2>&1; then
+                echo "$name ready after ${i}×0.5s"
+                break
+              fi
+              sleep 0.5
+            done
+            curl -sf "http://127.0.0.1:${addr}" || { echo "$name failed to start"; exit 1; }
+          done
+
+      - name: Run reference-integration suite
+        working-directory: tests/ui
+        env:
+          # Coords — names match integration/config.ts (uses localhost, not 127.0.0.1,
+          # so the browser origin matches the registered redirect_uri).
+          HEARTH_URL: http://localhost:8420
+          DEMO_BACKEND_URL: http://localhost:8421
+          DEMO_FRONTEND_URL: http://localhost:5173
+          DEMO_REALM_SLUG: demo
+          DEMO_CLIENT_ID: f7057d27-61fd-555e-b2af-ba8edd112237
+          # Required for flow 2 (self-registration): authenticates the mailcatcher
+          # session so the test can read the verification email. Must match the
+          # password Hearth was started with above.
+          HEARTH_MAILCATCHER_PASSWORD: integration-mailcatcher-pw
+        run: >
+          npx playwright test
+          --config=playwright.integration.config.ts
+          --project=integration
+
+      - name: Stop demo services
+        if: always()
+        run: |
+          kill "$FRONTEND_PID" 2>/dev/null || true
+          kill "$BACKEND_PID"  2>/dev/null || true
+          kill "$HEARTH_PID"   2>/dev/null || true
+
+      - name: Upload Playwright report + traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reference-integration-report
+          path: |
+            tests/ui/reports/integration-html/
+            tests/ui/reports/integration-output/
+          retention-days: 7
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Reference Integration — full-stack-demo" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "All integration tests passed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "One or more tests failed — see **reference-integration-report** artifact for the Playwright HTML report." >> "$GITHUB_STEP_SUMMARY"
+          fi

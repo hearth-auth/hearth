@@ -10,6 +10,7 @@
     "test:accessibility": "bash ./pw-run.sh test --project=accessibility",
     "test:exploratory": "bash ./pw-run.sh test --project=exploratory",
     "test:visual": "bash ./pw-run.sh test --project=visual",
+    "test:integration": "bash ./integration/run-integration.sh",
     "test:visual:update": "bash ./pw-run.sh test --project=visual --update-snapshots",
     "test:cross-browser": "bash ./pw-run.sh test --project=smoke --project=flows --project=regression",
     "test:all": "bash ./pw-run.sh test --project=smoke --project=flows --project=regression --project=components --project=destructive --project=accessibility",
