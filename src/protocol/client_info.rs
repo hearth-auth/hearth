@@ -163,9 +163,7 @@ mod tests {
     #[tokio::test]
     async fn peer_addr_reads_connect_info_when_present() {
         let mut parts = axum::http::Request::new(()).into_parts().0;
-        parts
-            .extensions
-            .insert(ConnectInfo::<SocketAddr>(peer_a()));
+        parts.extensions.insert(ConnectInfo::<SocketAddr>(peer_a()));
         let PeerAddr(got) = PeerAddr::from_request_parts(&mut parts, &())
             .await
             .expect("infallible");
