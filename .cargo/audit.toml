@@ -17,4 +17,15 @@ ignore = [
     # it is NOT present in the production dependency graph. No production code
     # is affected. Track upstream madsim for an eventual bincode 2.x migration.
     "RUSTSEC-2025-0141",
+    # RUSTSEC-2026-0235: out-of-bounds reads validating untrusted rkyv archives
+    # that contain Rc/Arc. rkyv 0.7.46 is an *optional, unselected* dependency of
+    # rust_decimal (rust_decimal <- byte-unit <- openraft); only rust_decimal's
+    # "std" feature is enabled, never its "rkyv" feature. `cargo tree -i rkyv
+    # --workspace --target all` reports nothing, i.e. rkyv is never compiled into
+    # hearth or hearth-simulation — it exists solely as a Cargo.lock resolution
+    # entry. Hearth performs no rkyv (de)serialization, so the affected archive
+    # validation path is unreachable. No in-semver fix: rust_decimal 1.42.1 (the
+    # latest 1.x) still declares rkyv 0.7, and byte-unit 5.x requires
+    # rust_decimal 1.x. Revisit when openraft/byte-unit move to rust_decimal 2.x.
+    "RUSTSEC-2026-0235",
 ]
