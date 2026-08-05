@@ -88,5 +88,27 @@ export default defineConfig({
       testMatch: 'regression/visual_baseline.spec.ts',
       use: { ...devices['Desktop Chrome'] },
     },
+    // Integration: drives the examples/full-stack-demo SPA end-to-end against a
+    // real Hearth + Go backend + Vite (HEA-2056). Booted by run-integration.sh
+    // (which reuses the demo's demo.sh). Multi-navigation flows get a longer
+    // per-test budget; runs sequentially so control-plane mutations (revoke,
+    // key-rotation) in one flow never race another.
+    {
+      name: 'integration',
+      testMatch: 'integration/**/*.spec.ts',
+      timeout: 60_000,
+      workers: 1,
+      use: {
+        ...devices['Desktop Chrome'],
+        // Project-level launchOptions REPLACES the top-level one (shallow), so
+        // repeat executablePath here. --no-sandbox is required for Chromium to
+        // launch in containerised / restricted-namespace environments (CI and
+        // the sandboxed dev box); harmless elsewhere.
+        launchOptions: {
+          executablePath: process.env.CHROMIUM_EXECUTABLE_PATH,
+          args: ['--no-sandbox', '--disable-dev-shm-usage'],
+        },
+      },
+    },
   ],
 });

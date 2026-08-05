@@ -104,7 +104,7 @@ where
                  img-src 'self' data:; \
                  connect-src 'self'; \
                  object-src 'none'; \
-                 form-action 'self'; \
+                 form-action 'self' http://localhost:5173 http://localhost:5399; \
                  frame-ancestors 'none'; \
                  base-uri 'self'",
             );
