@@ -82,6 +82,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the `check_scim_rate_limit` guard was applied only to the SCIM bearer-token path; requests
   authenticated via the admin-JWT fallback bypassed the limiter entirely. Both paths now
   share the same per-realm rate-limit bucket. (HEA-2032)
+- **`POST /users` now requires admin authentication and authorization (HEA-2023)** — the
+  REST user-creation endpoint previously read only the `X-Realm-ID` header (a tenant
+  identifier, not a secret) and performed no token validation and no permission check, so
+  an unauthenticated caller who knew a realm UUID could create `Active` users in that realm
+  — bypassing the realm's registration policy and enabling federation pre-seeding, email-index
+  squatting, and attacker-chosen `attributes` flowing into token claims. The handler now
+  requires a valid admin bearer token carrying `hearth.users.admin` (or `hearth.admin`), the
+  same guard as `POST /admin/users`, and binds the created user's realm to the validated token
+  (`auth.realm_id`) rather than the raw header — a token scoped to realm A can no longer create
+  users in realm B. Self-service registration is unchanged and continues to be served by the
+  web `/register` flow, which honours the realm's registration policy and lands users in
+  `PendingVerification`. (HEA-2023)
 
 ### Fixed
 - **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —

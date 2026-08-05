@@ -229,10 +229,11 @@ async fn oidc_authorization_code_flow_via_http() {
         .expect("access_token in bootstrap response")
         .to_string();
 
-    // 1. Create a user via HTTP
+    // 1. Create a user via HTTP (admin-only path — HEA-2023).
     let user_resp = http_client
         .post(format!("{base}/users"))
         .header("X-Realm-ID", &realm_id)
+        .header("Authorization", format!("Bearer {admin_token}"))
         .json(&serde_json::json!({
             "email": "http-oidc@example.com",
             "display_name": "HTTP OIDC Test User"
