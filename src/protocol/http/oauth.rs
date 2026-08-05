@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::audit::CreateAuditEvent;
 use crate::core::{ClientId, RealmId, UserId};
 use crate::identity::{JwtBearerRequest, StepUpMfaGrantRequest};
-use crate::protocol::client_info::extract_client_ip;
+use crate::protocol::client_info::{extract_client_ip, PeerAddr};
 use crate::protocol::convert::oauth::{
     proto_authorize_to_domain, proto_client_creds_to_domain, proto_token_exchange_to_domain,
 };
@@ -23,7 +23,7 @@ use super::now_micros;
 use super::{
     check_token_rate_limit, extract_bearer_token, extract_realm_id, extract_user_auth,
     identity_error_to_response, make_ip_rate_limit_response, proto_to_rest_json,
-    rbac_error_to_response, resolve_realm_by_name, AppState, FALLBACK_PEER,
+    rbac_error_to_response, resolve_realm_by_name, AppState,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -143,10 +143,11 @@ struct MePermissionsResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 async fn oidc_discovery(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // A-10: per-IP rate cap on all key-discovery endpoints.
-    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
     let now_micros = now_micros();
     if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
         return (
@@ -203,9 +204,13 @@ async fn protected_resource_metadata(State(state): State<Arc<AppState>>) -> impl
 /// `y` coordinates.
 ///
 /// A-10: subject to the per-IP JWKS rate cap (default 60 rps).
-async fn jwks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn jwks(
+    State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     // A-10: per-IP rate cap.
-    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
     let now_micros = now_micros();
     if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
         return (
@@ -1098,6 +1103,7 @@ async fn par_handler(
 /// - `urn:ietf:params:oauth:grant-type:device_code`: poll for device authorization
 async fn token_exchange(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Json(body): Json<HttpTokenRequest>,
 ) -> Response {
@@ -1106,7 +1112,7 @@ async fn token_exchange(
     let maybe_client_id = body.client_id.parse::<uuid::Uuid>().ok().map(ClientId::new);
     let maybe_realm_id = extract_realm_id(&headers).ok();
 
-    let mut resp = token_exchange_impl(Arc::clone(&state), headers.clone(), body).await;
+    let mut resp = token_exchange_impl(Arc::clone(&state), headers.clone(), body, peer_addr).await;
 
     if let (Some(ref realm_id), Some(ref client_id)) = (&maybe_realm_id, &maybe_client_id) {
         apply_cors_to_response(&mut resp, &state, realm_id, client_id, &headers);
@@ -1138,6 +1144,7 @@ async fn token_exchange_impl(
     state: Arc<AppState>,
     headers: HeaderMap,
     body: HttpTokenRequest,
+    peer_addr: std::net::SocketAddr,
 ) -> Response {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
@@ -1154,11 +1161,10 @@ async fn token_exchange_impl(
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the step-up-mfa grant.
-    // In production traffic goes through a reverse proxy so the real IP
-    // arrives via X-Forwarded-For; FALLBACK_PEER is used when ConnectInfo is
-    // unavailable (e.g. tower::ServiceExt::oneshot in tests).
-    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    // Per-IP rate limiting for the step-up-mfa grant. The real peer is
+    // threaded from the outer handler via `peer_addr`; falls back to
+    // FALLBACK_PEER only in tests that bypass `into_make_service_with_connect_info`.
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
     if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
         && state
             .identity
@@ -2033,10 +2039,11 @@ async fn self_revoke_consent(
 /// the admin's current realm.
 async fn realm_oidc_discovery(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
     let now_micros = now_micros();
     if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
         return (
@@ -2061,10 +2068,11 @@ async fn realm_oidc_discovery(
 /// A-10: per-IP rate cap on all key-discovery endpoints.
 async fn realm_jwks(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
     let now_micros = now_micros();
     if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
         return (
@@ -2148,6 +2156,7 @@ async fn realm_authorize(
 #[allow(clippy::too_many_lines)]
 async fn realm_token_exchange(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
     Json(body): Json<HttpTokenRequest>,
@@ -2165,9 +2174,9 @@ async fn realm_token_exchange(
     }
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the step-up-mfa grant.
-    // Real IP arrives via X-Forwarded-For in production; FALLBACK_PEER used in tests.
-    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    // Per-IP rate limiting for the step-up-mfa grant. Real peer threaded from
+    // the outer handler; FALLBACK_PEER only in tests without ConnectInfo.
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
     if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
         && state
             .identity

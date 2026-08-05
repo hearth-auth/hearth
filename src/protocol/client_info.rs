@@ -4,11 +4,43 @@
 //! the `User-Agent` header into a human-readable device label for session
 //! metadata display.
 
+use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 
+use axum::extract::ConnectInfo;
 use axum::http::HeaderMap;
 
 use crate::identity::SessionContext;
+
+/// Fallback peer address when [`ConnectInfo`] is not available — e.g. tests
+/// that exercise handlers via `tower::oneshot` without
+/// `into_make_service_with_connect_info`.
+pub const FALLBACK_PEER: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
+/// Axum extractor that resolves the real peer [`SocketAddr`].
+///
+/// Reads the connection address from `ConnectInfo<SocketAddr>` when available
+/// (production and full-server integration tests), and silently falls back to
+/// [`FALLBACK_PEER`] when the extension is absent (unit tests using
+/// `tower::oneshot`). Always infallible — never returns an extraction error.
+pub struct PeerAddr(pub SocketAddr);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerAddr {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Infallible> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0)
+            .unwrap_or(FALLBACK_PEER);
+        Ok(PeerAddr(peer))
+    }
+}
 
 /// Extracts the client's IP address from the request.
 ///
@@ -110,11 +142,62 @@ pub fn build_session_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::FromRequestParts;
     use axum::http::HeaderValue;
     use std::net::{Ipv4Addr, SocketAddrV4};
 
     fn peer_addr() -> SocketAddr {
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 12345))
+    }
+
+    fn peer_a() -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 1), 1024))
+    }
+
+    fn peer_b() -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 2), 2048))
+    }
+
+    // ===== PeerAddr extractor tests =====
+
+    #[tokio::test]
+    async fn peer_addr_reads_connect_info_when_present() {
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        parts
+            .extensions
+            .insert(ConnectInfo::<SocketAddr>(peer_a()));
+        let PeerAddr(got) = PeerAddr::from_request_parts(&mut parts, &())
+            .await
+            .expect("infallible");
+        assert_eq!(got, peer_a(), "extractor must return the real socket peer");
+    }
+
+    #[tokio::test]
+    async fn peer_addr_falls_back_when_connect_info_absent() {
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        let PeerAddr(got) = PeerAddr::from_request_parts(&mut parts, &())
+            .await
+            .expect("infallible");
+        assert_eq!(
+            got, FALLBACK_PEER,
+            "extractor must fall back to FALLBACK_PEER in test environments"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_distinct_peers_produce_distinct_rate_limit_keys() {
+        // Regression test for HEA-2027: with trusted_proxies empty, two
+        // connections from different peer IPs must map to different IP strings
+        // rather than both collapsing to 127.0.0.1.
+        let headers = HeaderMap::new();
+        let ip_a = extract_client_ip(&headers, peer_a(), &[]);
+        let ip_b = extract_client_ip(&headers, peer_b(), &[]);
+        assert_ne!(
+            ip_a, ip_b,
+            "distinct peers must produce distinct rate-limit keys"
+        );
+        assert_eq!(ip_a, "203.0.113.1");
+        assert_eq!(ip_b, "203.0.113.2");
     }
 
     // ===== IP extraction tests =====

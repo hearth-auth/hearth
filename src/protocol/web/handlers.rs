@@ -46,12 +46,7 @@ use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
     IdentityError, KdfGateError, SessionContext,
 };
-use crate::protocol::client_info::build_session_context;
-
-/// Default peer address used when `ConnectInfo` is not available
-/// (e.g., in tests using `tower::oneshot` without `into_make_service_with_connect_info`).
-const FALLBACK_PEER: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+use crate::protocol::client_info::{build_session_context, PeerAddr};
 
 use super::auth::{
     clear_mfa_pending_cookie, cookie_value_from_headers, issue_auth_cookies,
@@ -988,30 +983,33 @@ pub(crate) fn kdf_shed_html_response(
 /// Handles login submission at the bare `/ui/login` URL.
 pub async fn login_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_gated(state, headers, form, RealmSource::Path(None)).await
+    login_submit_gated(state, headers, form, RealmSource::Path(None), peer_addr).await
 }
 
 /// Handles login submission at `/ui/realms/<name>/login`.
 pub async fn login_submit_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_gated(state, headers, form, RealmSource::Path(Some(realm_name))).await
+    login_submit_gated(state, headers, form, RealmSource::Path(Some(realm_name)), peer_addr).await
 }
 
 /// Handles admin login submission at `/ui/admin/login`. On success,
 /// issues a session cookie bound to the system realm.
 pub async fn admin_login_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_gated(state, headers, form, RealmSource::Admin).await
+    login_submit_gated(state, headers, form, RealmSource::Admin, peer_addr).await
 }
 
 /// Rendering inputs shared by every login error surface. Resolved once in the
@@ -1136,8 +1134,9 @@ async fn login_submit_gated(
     headers: HeaderMap,
     form: LoginForm,
     source: RealmSource,
+    peer_addr: SocketAddr,
 ) -> Response {
-    let prepared = match login_prepare(&state, &headers, &form, source) {
+    let prepared = match login_prepare(&state, &headers, &form, source, peer_addr) {
         Ok(prepared) => prepared,
         // Rejected pre-gate: no KDF permit was ever acquired.
         Err(response) => return response,
@@ -1189,6 +1188,7 @@ fn login_prepare(
     headers: &HeaderMap,
     form: &LoginForm,
     source: RealmSource,
+    peer_addr: SocketAddr,
 ) -> Result<PreparedLogin, Response> {
     let is_admin = matches!(source, RealmSource::Admin);
     let email = form.email.trim().to_string();
@@ -1199,7 +1199,7 @@ fn login_prepare(
             .get(header::ACCEPT_LANGUAGE)
             .and_then(|v| v.to_str().ok()),
     );
-    let session_ctx = build_session_context(headers, FALLBACK_PEER, &state.trusted_proxies);
+    let session_ctx = build_session_context(headers, peer_addr, &state.trusted_proxies);
 
     let (realm, action_prefix) = match resolve_for_source(state, source, true) {
         PreAuthRealm::Ok {
@@ -1588,20 +1588,22 @@ pub struct PasskeyLoginCompleteBody {
 /// `POST /ui/login/passkey-complete` — bare variant.
 pub async fn passkey_login_complete(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
-    passkey_login_complete_impl(state, headers, body, None)
+    passkey_login_complete_impl(state, headers, body, None, peer_addr)
 }
 
 /// `POST /ui/realms/<name>/login/passkey-complete` — realm-scoped variant.
 pub async fn passkey_login_complete_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
-    passkey_login_complete_impl(state, headers, body, Some(realm_name))
+    passkey_login_complete_impl(state, headers, body, Some(realm_name), peer_addr)
 }
 
 /// `POST /ui/admin/login/passkey-complete` — admin variant. Routes the
@@ -1609,6 +1611,7 @@ pub async fn passkey_login_complete_scoped(
 /// tenant realm.
 pub async fn passkey_login_complete_admin(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
@@ -1618,7 +1621,7 @@ pub async fn passkey_login_complete_admin(
             return (StatusCode::BAD_REQUEST, "System realm unavailable").into_response();
         }
     };
-    passkey_login_complete_impl(state, headers, body, Some(system_realm_name))
+    passkey_login_complete_impl(state, headers, body, Some(system_realm_name), peer_addr)
 }
 
 /// Completes the discoverable credential authentication ceremony.
@@ -1631,9 +1634,10 @@ fn passkey_login_complete_impl(
     headers: HeaderMap,
     body: PasskeyLoginCompleteBody,
     path_realm: Option<String>,
+    peer_addr: SocketAddr,
 ) -> Response {
     use base64::Engine as _;
-    let mut session_ctx = build_session_context(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let mut session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
     // Passkeys are inherently multi-factor (possession + biometric/PIN), so they
     // satisfy any realm-level mfa_required policy without a separate TOTP gate.
     session_ctx.satisfies_mfa_via_passkey = true;
@@ -1892,10 +1896,11 @@ pub async fn mfa_challenge_form(
 #[allow(clippy::too_many_lines)]
 pub async fn mfa_challenge_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<MfaChallengeForm>,
 ) -> Response {
-    let session_ctx = build_session_context(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
     let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
@@ -2165,10 +2170,11 @@ pub struct MfaEnrollRequiredForm {
 #[allow(clippy::too_many_lines)]
 pub async fn mfa_enroll_required_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<MfaEnrollRequiredForm>,
 ) -> Response {
-    let session_ctx = build_session_context(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
     let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
         return Redirect::to("/ui/login").into_response();
     };
@@ -2884,21 +2890,23 @@ pub struct ForgotPasswordForm {
 /// Handles forgot-password form submission at the bare URL.
 pub async fn forgot_password_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    let captcha_ok = captcha_check(&state, &headers, peer_addr, &form.captcha_token).await;
     forgot_password_submit_impl(state, headers, form, RealmSource::Path(None), captcha_ok)
 }
 
 /// Handles forgot-password form submission at `/ui/realms/<name>/forgot-password`.
 pub async fn forgot_password_submit_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    let captcha_ok = captcha_check(&state, &headers, peer_addr, &form.captcha_token).await;
     forgot_password_submit_impl(
         state,
         headers,
@@ -2911,10 +2919,11 @@ pub async fn forgot_password_submit_scoped(
 /// Handles admin forgot-password form submission at `/ui/admin/forgot-password`.
 pub async fn admin_forgot_password_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    let captcha_ok = captcha_check(&state, &headers, peer_addr, &form.captcha_token).await;
     forgot_password_submit_impl(state, headers, form, RealmSource::Admin, captcha_ok)
 }
 
@@ -3521,10 +3530,14 @@ fn register_error_message(err: &IdentityError) -> String {
 ///
 /// Delegates to `extract_client_ip` so a spoofed `X-Forwarded-For` from an
 /// untrusted hop is ignored when `trusted_proxies` is empty (the default).
-fn register_client_ip(headers: &HeaderMap, trusted_proxies: &[std::net::IpAddr]) -> Option<String> {
+fn register_client_ip(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    trusted_proxies: &[std::net::IpAddr],
+) -> Option<String> {
     Some(crate::protocol::client_info::extract_client_ip(
         headers,
-        FALLBACK_PEER,
+        peer,
         trusted_proxies,
     ))
 }
@@ -3538,9 +3551,10 @@ fn register_client_ip(headers: &HeaderMap, trusted_proxies: &[std::net::IpAddr])
 /// fails to parse (should not occur in practice).
 fn captcha_client_ip(
     headers: &HeaderMap,
+    peer: SocketAddr,
     trusted_proxies: &[std::net::IpAddr],
 ) -> std::net::IpAddr {
-    crate::protocol::client_info::extract_client_ip(headers, FALLBACK_PEER, trusted_proxies)
+    crate::protocol::client_info::extract_client_ip(headers, peer, trusted_proxies)
         .parse()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
@@ -3555,11 +3569,16 @@ fn captcha_client_ip(
 ///
 /// Fails-open (returns `true`) if `spawn_blocking` itself fails, consistent
 /// with §6.1 of the abuse-prevention plan.
-async fn captcha_check(state: &Arc<super::WebState>, headers: &HeaderMap, token: &str) -> bool {
+async fn captcha_check(
+    state: &Arc<super::WebState>,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    token: &str,
+) -> bool {
     if state.captcha_provider.widget_html().is_empty() {
         return true;
     }
-    let ip = captcha_client_ip(headers, &state.trusted_proxies);
+    let ip = captcha_client_ip(headers, peer, &state.trusted_proxies);
     let provider = Arc::clone(&state.captcha_provider);
     let token = token.to_string();
     tokio::task::spawn_blocking(move || provider.verify(&token, ip))
@@ -3658,10 +3677,11 @@ fn register_pre_gate(
 /// Handles registration form submission (bare `/ui/register`).
 pub async fn register_submit(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Form(form): Form<RegisterForm>,
 ) -> Response {
-    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    let captcha_ok = captcha_check(&state, &headers, peer_addr, &form.captcha_token).await;
     // CSRF and captcha validated pre-gate so a flood of rejected requests never
     // exhausts the Argon2id admission pool (HEA-1981 / F3).
     let prepared = match register_pre_gate(&state, &headers, &form, None, captcha_ok) {
@@ -3673,7 +3693,7 @@ pub async fn register_submit(
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
     match gate()
-        .run(move || register_submit_impl(state, headers, form, prepared))
+        .run(move || register_submit_impl(state, headers, form, prepared, peer_addr))
         .await
     {
         Ok(resp) => resp,
@@ -3692,11 +3712,12 @@ pub async fn register_submit(
 /// Handles registration form submission for `/ui/realms/<name>/register`.
 pub async fn register_submit_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
     Form(form): Form<RegisterForm>,
 ) -> Response {
-    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    let captcha_ok = captcha_check(&state, &headers, peer_addr, &form.captcha_token).await;
     let prepared = match register_pre_gate(&state, &headers, &form, Some(realm_name), captcha_ok) {
         Ok(p) => p,
         Err(resp) => return resp,
@@ -3706,7 +3727,7 @@ pub async fn register_submit_scoped(
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
     match gate()
-        .run(move || register_submit_impl(state, headers, form, prepared))
+        .run(move || register_submit_impl(state, headers, form, prepared, peer_addr))
         .await
     {
         Ok(resp) => resp,
@@ -3739,6 +3760,7 @@ fn register_submit_impl(
     headers: HeaderMap,
     form: RegisterForm,
     prepared: PreparedRegister,
+    peer_addr: SocketAddr,
 ) -> Response {
     let PreparedRegister {
         realm,
@@ -3795,7 +3817,7 @@ fn register_submit_impl(
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
         password: CleartextPassword::from_string(form.password.clone()),
-        client_ip: register_client_ip(&headers, &state.trusted_proxies),
+        client_ip: register_client_ip(&headers, peer_addr, &state.trusted_proxies),
         invitation_token: form.invitation_token.clone(),
     };
 
