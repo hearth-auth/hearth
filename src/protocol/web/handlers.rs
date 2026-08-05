@@ -998,7 +998,14 @@ pub async fn login_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_gated(state, headers, form, RealmSource::Path(Some(realm_name)), peer_addr).await
+    login_submit_gated(
+        state,
+        headers,
+        form,
+        RealmSource::Path(Some(realm_name)),
+        peer_addr,
+    )
+    .await
 }
 
 /// Handles admin login submission at `/ui/admin/login`. On success,

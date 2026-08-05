@@ -189,13 +189,7 @@ async fn setup() -> Fixture {
     let dpop_key = DPopKey::generate();
     let jkt = dpop_key.thumbprint();
 
-    let access_token = mint_bound_user_token(
-        &harness,
-        &realm,
-        user.id(),
-        client.client_id(),
-        &jkt,
-    );
+    let access_token = mint_bound_user_token(&harness, &realm, user.id(), client.client_id(), &jkt);
 
     // Precondition: the access token must actually carry the cnf.jkt binding,
     // otherwise the negative test would pass vacuously.
