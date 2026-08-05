@@ -62,6 +62,16 @@ pub const MAX_ACT_CHAIN_DEPTH: usize = 10;
 /// Maximum number of SCIM `Operations` in a single PATCH body (A-35a).
 pub const MAX_SCIM_OPERATIONS: usize = 1_000;
 
+/// Maximum number of users or groups scanned (materialised in memory) during a
+/// single SCIM list request (A-23).
+///
+/// Requests that supply a small `count` would otherwise trigger O(realm-size)
+/// storage scans: the handler fetched the entire realm before slicing. This cap
+/// bounds both the scan and the allocation so an authenticated SCIM client
+/// cannot exhaust tenant CPU/memory by requesting `?count=1` against a large
+/// realm.
+pub const SCIM_MAX_SCAN_LIMIT: usize = 1_000;
+
 /// Maximum SAML XML parse-event count per `AuthnResponse` (A-44).
 pub const MAX_SAML_XML_EVENTS: usize = 10_000;
 

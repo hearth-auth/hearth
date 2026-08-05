@@ -7,6 +7,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **DPoP sender-constraint now enforced at the session-version feed endpoints — stops
+  bound-token replay as plain Bearer (HEA-2039)** — `GET /oauth/session-versions` and
+  `GET /oauth/session-versions/snapshot` parsed the `Authorization: Bearer` header directly
+  and gated on the `hearth.sv_feed`/`hearth.admin` JWT permission without ever checking `cnf`
+  or requiring a `DPoP` proof, so a DPoP-bound access token (`cnf.jkt` present) stolen via
+  log, referrer, or proxy was fully usable as an ordinary Bearer to read the realm-wide
+  session-version delta/snapshot feed — the same RFC 9449 sender-constraint downgrade
+  (CWE-345) HEA-2031 closed at `/userinfo` and `/v1/me/permissions`. Both now route through
+  the shared `validate_user_token_with_dpop` guard: a token carrying `cnf.jkt` presented
+  without a valid matching DPoP proof is rejected `401 invalid_token` before the permission
+  check. The same-class authenticated-mode DCR gate (`POST /register` and
+  `POST /realms/{realm}/register`) was hardened in the same pass — a cnf-bound initial-access
+  token now requires its DPoP proof to authorize client registration. **Operator impact:**
+  DPoP/FAPI clients polling the session-version feed (or registering clients under
+  authenticated DCR) with a sender-constrained token must now send a valid `DPoP` proof
+  header; plain-Bearer callers with unbound tokens are unaffected. (HEA-2039)
+- **DPoP sender-constraint now enforced at `/userinfo`, `/realms/{realm}/userinfo`, and
+  `/v1/me/permissions` — stops bound-token replay as plain Bearer (HEA-2031)** — these three
+  resource endpoints bypassed the shared `extract_user_auth` guard and parsed the
+  `Authorization: Bearer` header directly, so a DPoP-bound access token (`cnf.jkt` present) was
+  fully usable as an ordinary Bearer token — the `cnf` confirmation was never checked and no
+  `DPoP` proof was required. A token stolen via log, referrer, or proxy could return the
+  victim's userinfo claims and freshly-resolved effective roles/groups/permissions, silently
+  downgrading the RFC 9449 sender-constraint (CWE-345). All three now route through a shared
+  `validate_user_token_with_dpop` guard: a token carrying `cnf.jkt` presented without a valid
+  matching DPoP proof is rejected `401 invalid_token`. The same-class 4th instance,
+  `POST /oauth/authorize` (decide-permission), was found in the audit and hardened too —
+  fail-closed to `{"allowed": false}` when the DPoP proof is missing/invalid. **Operator
+  impact:** DPoP/FAPI clients calling these endpoints with a sender-constrained token must now
+  send a valid `DPoP` proof header (correct `htm`/`htu`/`ath`); plain-Bearer callers with
+  unbound tokens are unaffected. (HEA-2031)
+- **WebAuthn REST endpoints now pin `rp_id`/origin server-side — restores phishing resistance (HEA-2025)** —
+  `POST /webauthn/auth/begin`, `/webauthn/auth/complete`, `/webauthn/register/begin`, and
+  `/webauthn/register/complete` previously took the relying-party ID and expected origin
+  from the request body (`rp_id`, `origin`). Both are attacker-controlled, so the
+  `clientDataJSON.origin` and `authenticatorData.rpIdHash` comparisons — the two controls
+  that make WebAuthn phishing-resistant — were verified attacker-value against attacker-value
+  (self-referential no-ops, CWE-346). The REST path now derives both from the configured OIDC
+  issuer (`origin` = issuer authority, `rp_id` = its host), exactly as the browser passkey path
+  does (L5 hardening). The `rp_id`/`origin` request fields are still accepted for backward
+  compatibility but ignored. **Operator impact:** WebAuthn/passkey REST clients must use an
+  `rp_id`/origin matching the server's `oidc.issuer`; credentials registered against a
+  mismatched RP ID will no longer authenticate. (HEA-2025)
 - **Client IP now threaded from real socket peer into all auth handlers (HEA-2027)** — login,
   MFA, passkey, magic-link, token-exchange, and registration handlers previously passed a
   hard-coded `127.0.0.1` fallback instead of the real TCP peer address to `extract_client_ip`
@@ -17,7 +60,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   request extensions (populated by `into_make_service_with_connect_info` at server startup) and
   falls back to the loopback address only in unit-test environments. A startup warning is now
   emitted when `server.trusted_proxies` is empty and the server is bound to a public address.
-  (HEA-2027)
+  Independently re-verified as HEA-2030 (the client-IP collapse defect) and covered by a
+  served-socket regression test that logs in from two distinct loopback peer IPs and asserts
+  each session records its real peer address rather than `127.0.0.1`. (HEA-2027, HEA-2030)
 - **SCIM: bounded realm scan — prevents DoS via `?count=1` on large realms (HEA-2032)** —
   `GET /scim/v2/Users` and `GET /scim/v2/Groups` previously materialised every user or
   group in the realm before applying the `count`/`startIndex` page slice. An authenticated

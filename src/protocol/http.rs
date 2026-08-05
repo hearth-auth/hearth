@@ -60,7 +60,8 @@ pub(crate) use auth::{
     check_export_capability, check_export_rate_limit, check_token_rate_limit,
     emit_export_watermark, extract_bearer_token, extract_realm_id, extract_user_auth,
     identity_error_to_response, make_ip_rate_limit_response, now_micros, proto_to_rest_json,
-    rbac_error_to_response, resolve_realm_by_name, verify_manifest_signature,
+    rbac_error_to_response, resolve_realm_by_name, validate_user_token_with_dpop,
+    verify_manifest_signature,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────

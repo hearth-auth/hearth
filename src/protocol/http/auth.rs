@@ -956,6 +956,41 @@ pub(crate) fn extract_user_auth(
         ));
     };
 
+    let claims = validate_user_token_with_dpop(headers, state, realm_id, token, htm, htu)?;
+
+    // sub is "user_{uuid}" — strip the prefix before UUID parse.
+    let sub_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
+    uuid::Uuid::parse_str(sub_str)
+        .map(UserId::new)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid_token"})),
+            )
+        })
+}
+
+/// Validates a bearer `token` and enforces the DPoP sender-constraint
+/// (RFC 9449 §7.2) when the token carries a `cnf.jkt` confirmation claim,
+/// returning the decoded claims on success.
+///
+/// Resource endpoints that consume the raw access token directly — rather than
+/// through [`extract_user_auth`] — MUST route through this guard so a stolen
+/// DPoP-bound token cannot be replayed as a plain `Bearer` (HEA-2031). Callers
+/// that only need the [`UserId`] should prefer [`extract_user_auth`]; this
+/// helper exists for handlers that must hand the raw token to the identity
+/// layer (e.g. `/userinfo`, `/v1/me/permissions`).
+///
+/// Fails closed: a token presenting `cnf.jkt` without a valid matching DPoP
+/// proof is rejected with `401 invalid_token` before any user lookup.
+pub(crate) fn validate_user_token_with_dpop(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    token: &str,
+    htm: &str,
+    htu: &str,
+) -> Result<std::sync::Arc<crate::identity::TokenClaims>, (StatusCode, Json<serde_json::Value>)> {
     let claims = state
         .identity
         .validate_token(realm_id, token)
@@ -968,21 +1003,12 @@ pub(crate) fn extract_user_auth(
 
     // Resource servers MUST verify the DPoP proof for cnf-bound tokens
     // (RFC 9449 §7.2). Plain Bearer use of a DPoP-bound token is rejected
-    // before any user lookup.
+    // before any user lookup or permission resolution.
     if let Some(ref cnf) = claims.cnf {
         enforce_dpop_binding(headers, state, realm_id, token, &cnf.jkt, htm, htu)?;
     }
 
-    // sub is "user_{uuid}" — strip the prefix before UUID parse.
-    let sub_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
-    uuid::Uuid::parse_str(sub_str)
-        .map(UserId::new)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_token"})),
-            )
-        })
+    Ok(claims)
 }
 pub(crate) fn extract_bearer_token(
     headers: &HeaderMap,

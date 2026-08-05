@@ -9,7 +9,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::abuse::MAX_SCIM_OPERATIONS;
+use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
@@ -21,6 +21,7 @@ use crate::protocol::scim::patch_apply::apply_user_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimEmail, ScimName, ScimUser, USER_SCHEMA,
 };
+use crate::rbac::Permission;
 
 /// Converts a stored `User` to a SCIM wire resource. `base_path` is the
 /// absolute request path prefix up to `/scim/v2/Users`.
@@ -133,6 +134,29 @@ fn audit(
         resource_id: user_id.as_uuid().to_string(),
         metadata: Some(metadata),
     });
+}
+
+/// Returns `true` when the target user holds admin-level permissions
+/// (`hearth.admin` or `hearth.users.admin`).
+///
+/// SCIM provisioning tokens are narrowed-scope service accounts and must not
+/// be able to modify or delete principals that hold admin authority, as that
+/// would enable realm takeover via a compromised integration token.
+///
+/// Fails open (returns `false`) on RBAC errors so an unseeded realm or
+/// temporary RBAC failure does not lock out legitimate provisioning.
+fn is_admin_principal(state: &AppState, realm_id: &RealmId, user_id: &UserId) -> bool {
+    const PROTECTED: &[&str] = &["hearth.admin", "hearth.users.admin"];
+    match state
+        .rbac
+        .resolve_permissions(user_id, realm_id, None, None)
+    {
+        Ok(resolved) => resolved
+            .permissions
+            .iter()
+            .any(|p: &Permission| PROTECTED.contains(&p.as_str())),
+        Err(_) => false,
+    }
 }
 
 // ================== Handlers ==================
@@ -312,10 +336,12 @@ pub async fn list_users(
         None => None,
     };
 
-    // Phase 1 pagination: fetch up to 1000 users in one scan and slice in
+    // Phase 1 pagination: scan at most SCIM_MAX_SCAN_LIMIT users and slice in
     // memory. Okta / Azure paginate at ~100; Phase 2 can push the filter
     // + pagination into the engine layer.
-    // Collect all users via offset pagination for SCIM.
+    //
+    // The cap is critical: without it a `?count=1` request triggers O(realm-
+    // size) work — a DoS with O(1) attacker cost (HEA-2032 defect 1).
     let mut all_items: Vec<crate::identity::User> = Vec::new();
     let mut scim_offset = 0u64;
     loop {
@@ -329,7 +355,7 @@ pub async fn list_users(
         };
         let n = scan_page.items.len() as u64;
         all_items.extend(scan_page.items);
-        if n == 0 || scim_offset + n >= scan_page.total {
+        if n == 0 || scim_offset + n >= scan_page.total || all_items.len() >= SCIM_MAX_SCAN_LIMIT {
             break;
         }
         scim_offset += n;
@@ -383,6 +409,12 @@ pub async fn replace_user(
         Ok(Some(_)) => {}
         Ok(None) => return ScimError::not_found("user not found").into_response(),
         Err(e) => return from_identity_error(&e).into_response(),
+    }
+
+    // SCIM provisioning tokens may not replace admin principals (HEA-2032).
+    if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
+        return ScimError::forbidden("SCIM provisioning token may not replace an admin principal")
+            .into_response();
     }
 
     let (first_name, last_name) = match require_name(&body) {
@@ -483,6 +515,13 @@ pub async fn patch_user(
         Ok(None) => return ScimError::not_found("user not found").into_response(),
         Err(e) => return from_identity_error(&e).into_response(),
     };
+
+    // SCIM provisioning tokens may not patch admin principals (HEA-2032).
+    if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
+        return ScimError::forbidden("SCIM provisioning token may not patch an admin principal")
+            .into_response();
+    }
+
     let current_ext = state
         .identity
         .get_scim_external_id(&auth.realm_id, &user_id)
@@ -606,6 +645,12 @@ pub async fn delete_user(
         return ScimError::not_found("user not found").into_response();
     };
     let user_id = UserId::new(uuid);
+
+    // SCIM provisioning tokens may not delete admin principals (HEA-2032).
+    if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
+        return ScimError::forbidden("SCIM provisioning token may not delete an admin principal")
+            .into_response();
+    }
 
     match state.identity.delete_user(&auth.realm_id, &user_id) {
         Ok(()) => {

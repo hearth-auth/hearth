@@ -55,8 +55,48 @@ fn b64_encode(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
 
+/// Derives the server-pinned `WebAuthn` origin and RP ID from the configured
+/// OIDC issuer, mirroring the browser path's L5 hardening in
+/// [`crate::protocol::web`].
+///
+/// The `origin` (compared against `clientDataJSON.origin`) and the `rp_id`
+/// (whose SHA-256 is compared against `authenticatorData.rpIdHash`) are the two
+/// controls that make `WebAuthn` phishing-resistant. They MUST come from server
+/// configuration — never from the attacker-controlled request body — otherwise
+/// both comparisons become self-referential no-ops (HEA-2025, CWE-346).
+///
+/// Returns `(origin, rp_id)`, e.g. `("https://auth.example.com", "auth.example.com")`.
+fn pinned_origin_and_rp_id(state: &AppState) -> (String, String) {
+    let issuer = state.identity.oidc_discovery().issuer;
+    // Strip any path component to obtain the bare origin (scheme://authority),
+    // matching `resolve_public_origin` on the web path.
+    let origin = match issuer.find("://") {
+        Some(sep) => {
+            let after_scheme = sep + 3;
+            let authority_end = issuer[after_scheme..]
+                .find('/')
+                .map_or(issuer.len(), |i| i + after_scheme);
+            issuer[..authority_end].to_string()
+        }
+        None => issuer.clone(),
+    };
+    // RP ID is the origin host with scheme and port removed.
+    let rp_id = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(':')
+        .next()
+        .unwrap_or("localhost")
+        .to_string();
+    (origin, rp_id)
+}
+
 #[derive(Debug, Deserialize)]
 struct WbrBeginReq {
+    /// Accepted for backward compatibility but **ignored**: the RP ID is pinned
+    /// server-side from the configured issuer (HEA-2025). A client cannot choose
+    /// the relying-party identifier the ceremony binds to.
+    #[allow(dead_code)]
     rp_id: Option<String>,
     discoverable: Option<bool>,
 }
@@ -77,6 +117,10 @@ struct WbrBeginRes {
 struct WbrCompleteReq {
     client_data_json: String,
     attestation_object: String,
+    /// Accepted for backward compatibility but **ignored**: the expected origin
+    /// is pinned server-side from the configured issuer (HEA-2025) and compared
+    /// against `clientDataJSON.origin`. A client cannot assert its own origin.
+    #[allow(dead_code)]
     origin: String,
     discoverable: Option<bool>,
 }
@@ -90,6 +134,9 @@ struct WbrCompleteRes {
 
 #[derive(Debug, Deserialize)]
 struct WbaBeginReq {
+    /// Accepted for backward compatibility but **ignored**: the RP ID is pinned
+    /// server-side from the configured issuer (HEA-2025).
+    #[allow(dead_code)]
     rp_id: Option<String>,
     user_id: Option<String>,
 }
@@ -117,6 +164,10 @@ struct WbaCompleteReq {
     authenticator_data: String,
     signature: String,
     user_handle: Option<String>,
+    /// Accepted for backward compatibility but **ignored**: the expected origin
+    /// is pinned server-side from the configured issuer (HEA-2025) and compared
+    /// against `clientDataJSON.origin`.
+    #[allow(dead_code)]
     origin: String,
 }
 
@@ -155,8 +206,10 @@ async fn webauthn_register_begin(
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
+    // Pin the RP ID server-side; ignore any client-supplied `rp_id` (HEA-2025).
+    let (_origin, rp_id) = pinned_origin_and_rp_id(&state);
     let options = crate::identity::webauthn::RegistrationOptions {
-        rp_id: body.rp_id.unwrap_or_default(),
+        rp_id,
         discoverable: body.discoverable.unwrap_or(true),
     };
     match state
@@ -205,12 +258,16 @@ async fn webauthn_register_complete(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
+    // Pin the expected origin server-side; ignore any client-supplied
+    // `origin` so a forged value cannot satisfy the phishing-resistance
+    // check against `clientDataJSON.origin` (HEA-2025).
+    let (origin, _rp_id) = pinned_origin_and_rp_id(&state);
     match state.identity.complete_webauthn_registration(
         &realm_id,
         &user_id,
         &client_data_json,
         &attestation_object,
-        &body.origin,
+        &origin,
         body.discoverable.unwrap_or(false),
     ) {
         Ok(info) => (
@@ -246,9 +303,9 @@ async fn webauthn_auth_begin(
         }
         None => None,
     };
-    let options = crate::identity::webauthn::AuthenticationOptions {
-        rp_id: body.rp_id.unwrap_or_default(),
-    };
+    // Pin the RP ID server-side; ignore any client-supplied `rp_id` (HEA-2025).
+    let (_origin, rp_id) = pinned_origin_and_rp_id(&state);
+    let options = crate::identity::webauthn::AuthenticationOptions { rp_id };
     match state
         .identity
         .start_webauthn_authentication(&realm_id, user_id.as_ref(), &options)
@@ -317,13 +374,17 @@ async fn webauthn_auth_complete(
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
+    // Pin the expected origin server-side; ignore any client-supplied
+    // `origin` so a forged value cannot satisfy the phishing-resistance
+    // check against `clientDataJSON.origin` (HEA-2025).
+    let (origin, _rp_id) = pinned_origin_and_rp_id(&state);
     let params = crate::identity::webauthn::CompleteAuthenticationParams {
         credential_id: &credential_id,
         client_data_json: &client_data_json,
         authenticator_data: &authenticator_data,
         signature: &signature,
         user_handle: uh_vec.as_deref(),
-        origin: &body.origin,
+        origin: &origin,
     };
     match state
         .identity
