@@ -3254,10 +3254,16 @@
     },
     "/users": {
       "post": {
-        "summary": "Register a new user (public)",
+        "summary": "Create a user (admin)",
+        "description": "Creates a user in the caller's realm. Requires an admin bearer token\ncarrying the `hearth.users.admin` permission (HEA-2023). This is not a\npublic self-registration endpoint.\n",
         "operationId": "createUser",
         "tags": [
           "Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
         ],
         "requestBody": {
           "required": true,
@@ -3272,6 +3278,12 @@
         "responses": {
           "201": {
             "description": "User created"
+          },
+          "401": {
+            "description": "Missing or invalid admin bearer token"
+          },
+          "403": {
+            "description": "Token lacks the `hearth.users.admin` permission"
           }
         }
       }
