@@ -477,6 +477,84 @@ DPoP proof). See RFC 7523 for the assertion structure.
 { "error": "invalid_dpop_proof", "error_description": "DPoP proof required for FAPI 2.0 clients" }
 ```
 
+### Calling resource endpoints with a DPoP-bound token
+
+A `cnf`-bound access token is not usable as a plain `Bearer`. Hearth verifies the sender-constraint
+on every resource request, so each call needs its own fresh DPoP proof — including `/userinfo`,
+`/realms/{realm}/userinfo`, and `/v1/me/permissions`. See
+[OIDC.md §3.3](../specs/OIDC.md#33-resource-endpoint-enforcement-rfc-9449-72) for the full endpoint
+list and normative rules.
+
+The resource proof differs from the token-endpoint proof in three ways:
+
+1. `htm` / `htu` describe the **resource request**, not the token request.
+2. `ath` — the base64url SHA-256 hash of the access token — is **required**.
+3. `htu` must be built from the **issuer** plus the request path, not from the host you dialled.
+   Behind a reverse proxy or a private hostname, sign `https://auth.example.com/userinfo`, not the
+   internal address.
+
+```python
+import jwt, time, uuid, hashlib, base64
+
+def b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+now = int(time.time())
+issuer = "https://auth.example.com"          # must match the configured issuer
+path = "/userinfo"                            # "/realms/banking/userinfo" for realm-scoped
+
+resource_proof = jwt.encode(
+    {
+        "jti": str(uuid.uuid4()),             # unique per request — replayed jti is rejected
+        "htm": "GET",
+        "htu": issuer + path,
+        "ath": b64url(hashlib.sha256(access_token.encode()).digest()),
+        "iat": now,
+        "exp": now + 30,                      # proofs older than 120 s are rejected
+    },
+    private_key,                              # the SAME key the token was bound to
+    algorithm="EdDSA",
+    headers={
+        "typ": "dpop+jwt",
+        "jwk": {"kty": "OKP", "crv": "Ed25519", "x": "<base64url-public-key>"},
+    },
+)
+```
+
+Send the token under the **`Bearer`** scheme — Hearth uses `Bearer` even for DPoP-bound tokens
+(this deviates from RFC 9449 §7.1; `Authorization: DPoP ...` is not recognised):
+
+```bash
+curl -s "$ISSUER/userinfo" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "DPoP: $RESOURCE_PROOF" \
+  -H "X-Realm-ID: $REALM_ID"
+
+# Realm-scoped variant — note htu must include the /realms/<realm> prefix:
+curl -s "$ISSUER/realms/$REALM/userinfo" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "DPoP: $RESOURCE_PROOF"
+```
+
+**Rejected — bound token replayed without a proof:**
+```json
+{
+  "error": "invalid_token",
+  "error_description": "DPoP proof required for cnf-bound access token"
+}
+```
+
+**Rejected — proof signed with a different key than the token was bound to:**
+```json
+{
+  "error": "invalid_token",
+  "error_description": "DPoP proof key does not match token cnf.jkt binding"
+}
+```
+
+Tokens issued without a DPoP proof carry no `cnf.jkt` and are unaffected — they keep working as
+plain Bearer tokens with no `DPoP` header.
+
 ---
 
 ## 8. Testing FAPI 2.0 Compliance
@@ -562,6 +640,10 @@ Hearth's internal test suite covers the conformance scenarios in `tests/fapi_con
 | `invalid_dpop_proof: DPoP proof required for FAPI 2.0 clients` | 400 | Token request missing `DPoP` header | Build and attach a DPoP proof JWT |
 | `invalid_dpop_proof: DPoP htm mismatch` | 400 | DPoP `htm` claim doesn't match HTTP method | Set `htm: "POST"` |
 | `invalid_dpop_proof: DPoP htu mismatch` | 400 | DPoP `htu` claim is the wrong URL | Use the exact token endpoint URL (no query string) |
+| `invalid_token: DPoP proof required for cnf-bound access token` | 401 | Bound token sent to a resource endpoint with no `DPoP` header | Attach a per-request resource proof (§7) |
+| `invalid_token: DPoP proof key does not match token cnf.jkt binding` | 401 | Resource proof signed with a different key than the token was bound to | Reuse the key pair the token was issued against |
+| `invalid_dpop_proof` at `/userinfo` (no description) | 401 | Resource proof missing `ath`, or `htu` built from the request `Host` instead of the issuer | Add `ath` = base64url SHA-256 of the access token; build `htu` from the configured issuer |
+| `use_dpop_nonce` at a resource endpoint | 401 | Same `jti` presented twice (proof replay) | Generate a fresh `jti` per request |
 | `invalid_request_object: JAR signature verification failed` | 400 | JAR JWT signed with wrong key | Sign with the private key matching the registered JWKS |
 | `invalid_request: JAR client_id mismatch` | 400 | `client_id` in JAR ≠ `client_id` query param | Set both to the same prefixed client ID |
 | `invalid_request: request_uri expired or already consumed` | 400 | PAR `request_uri` older than 90 s or replayed | Push a fresh PAR request |
