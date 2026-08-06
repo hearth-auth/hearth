@@ -4,8 +4,9 @@ import { resolve } from "path";
 
 // Proxy Hearth API paths through the Vite dev server so the browser
 // never crosses origins — OIDC discovery and token requests stay on
-// localhost:5173 and Vite forwards them to the Hearth server on :8420.
-const HEARTH_TARGET = "http://127.0.0.1:8420";
+// the frontend origin and Vite forwards them to the Hearth server.
+// HEARTH_PORT and FRONTEND_PORT are set by demo.sh; default to the dev values.
+const HEARTH_TARGET = `http://127.0.0.1:${process.env.HEARTH_PORT ?? "8420"}`;
 
 export default defineConfig({
   plugins: [react()],
@@ -20,7 +21,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: Number(process.env.FRONTEND_PORT) || 5173,
     proxy: {
       "/realms": HEARTH_TARGET,
       "/admin":  HEARTH_TARGET,

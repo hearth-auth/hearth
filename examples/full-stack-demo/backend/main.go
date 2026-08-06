@@ -49,8 +49,9 @@ func main() {
 	r := gin.Default()
 
 	// CORS: explicit origin allowlist for the SPA (not wildcard).
-	// Equivalent to gin-contrib/cors with AllowOrigins: ["http://localhost:5173"].
-	r.Use(corsMiddleware([]string{"http://localhost:5173"}))
+	// FRONTEND_ORIGIN is written by demo.sh; defaults to the dev value.
+	frontendOrigin := getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+	r.Use(corsMiddleware([]string{frontendOrigin}))
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

@@ -37,11 +37,13 @@ CONFIG="$HERE/hearth.yaml"
 HEARTH_PORT="${HEARTH_PORT:-8420}"
 BACKEND_PORT="${BACKEND_PORT:-8421}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+export HEARTH_PORT BACKEND_PORT FRONTEND_PORT
 BASE="http://127.0.0.1:${HEARTH_PORT}"
 
 HEARTH_PID=""
 BACKEND_PID=""
 FRONTEND_PID=""
+_cfg_tmp=""
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,7 @@ cleanup() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+  [[ -n "$_cfg_tmp" ]] && rm -f "$_cfg_tmp"
   echo "  ✓ stopped"
 }
 trap cleanup EXIT
@@ -80,6 +83,15 @@ for _port in "${BACKEND_PORT}" "${FRONTEND_PORT}"; do
     kill $_pids 2>/dev/null || true
   fi
 done
+
+# ── Port-specific config ──────────────────────────────────────────────────────
+# hearth.yaml hard-codes localhost:5173 as the registered redirect_uri/origin.
+# Generate a temp copy with the actual FRONTEND_PORT so the OIDC redirect
+# validation accepts the real callback URL when a different port is chosen.
+_cfg_tmp="$(mktemp /tmp/hearth-demo-XXXXXX.yaml)"
+sed -e "s|http://localhost:5173|http://localhost:${FRONTEND_PORT}|g" \
+    "$CONFIG" > "$_cfg_tmp"
+CONFIG="$_cfg_tmp"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -216,6 +228,7 @@ HEARTH_URL=http://localhost:${HEARTH_PORT}
 REALM_ID=${REALM_ID}
 REALM_SLUG=demo
 PORT=${BACKEND_PORT}
+FRONTEND_ORIGIN=http://localhost:${FRONTEND_PORT}
 EOF
 echo "  ✓ backend/.env"
 
