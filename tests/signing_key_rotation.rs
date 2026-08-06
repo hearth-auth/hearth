@@ -566,6 +566,7 @@ async fn realm_delete_purges_retiring_keys_background_path() {
         if retiring_key_blobs(&storage, &realm).is_empty() {
             return;
         }
+        // AUDIT: justified-sleep: backoff in a bounded poll for a spawned cascade task with no completion handle — no timer for tokio::time::advance to drive.
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("background cascade left retiring signing keys in storage");
