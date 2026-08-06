@@ -16,10 +16,22 @@ export interface AdminSession {
   systemRealmId: string;
 }
 
-/** Bootstraps (or re-bootstraps) the dev system realm and returns an admin token.
- *  Idempotent: dev bootstrap is a no-op that refreshes the token if the realm
- *  already exists. */
+/** Returns an admin session for use by control-plane helpers.
+ *
+ *  When the stack was booted by run-integration.sh the admin token is available
+ *  as HEARTH_ADMIN_TOKEN / HEARTH_SYSTEM_REALM_ID (written by demo.sh after its
+ *  first-call bootstrap).  Those env vars are consumed here directly so this
+ *  function never re-calls POST /admin/bootstrap — which would 401 because the
+ *  realm already exists after demo.sh ran.
+ *
+ *  Without those env vars (standalone test run against a fresh instance) the
+ *  unauthenticated bootstrap call is valid only on the very first call. */
 export async function bootstrapAdmin(): Promise<AdminSession> {
+  const envToken = process.env['HEARTH_ADMIN_TOKEN'];
+  const envRealmId = process.env['HEARTH_SYSTEM_REALM_ID'];
+  if (envToken && envRealmId) {
+    return { token: envToken, systemRealmId: envRealmId };
+  }
   const resp = await fetch(`${HEARTH_URL}/admin/bootstrap`, { method: 'POST' });
   if (!resp.ok) throw new Error(`bootstrap failed: HTTP ${resp.status}`);
   const body = (await resp.json()) as { access_token: string; realm_id: string };

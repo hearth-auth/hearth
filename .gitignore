@@ -51,6 +51,10 @@ ui/tailwindcss
 /hearth.yaml
 /hearth.yml
 
+# Integration-suite run credentials (written by demo.sh after first bootstrap;
+# contains a live admin token — must never be committed).
+examples/full-stack-demo/.hearth-run-env
+
 .codex
 
 # Backup files
