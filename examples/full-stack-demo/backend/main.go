@@ -14,17 +14,18 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/handlers"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/store"
 	"github.com/hearth-auth/hearth/sdks/go/hearth"
-	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	hearthURL := mustEnv("HEARTH_URL")
-	realmID := mustEnv("REALM_ID")   // UUID — used for admin API X-Realm-ID header
+	realmID := mustEnv("REALM_ID")     // UUID — used for admin API X-Realm-ID header
 	realmSlug := mustEnv("REALM_SLUG") // slug — used for OIDC/JWKS URL path
 	port := getenv("PORT", "8421")
 
@@ -41,6 +42,18 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("JWKS loaded", "url", jwksURL)
+
+	// Layer revocation-aware validation on top of the signature check. Signature
+	// verification alone accepts a revoked-but-unexpired token (HEA-2094): a JWT
+	// cannot express that its session was killed at Hearth after issuance. We ask
+	// Hearth's realm-scoped introspection endpoint (RFC 7662) — which needs no
+	// client credentials — and cache each verdict for a short TTL so introspection
+	// is not a per-request network round-trip. See RevocationChecker for the
+	// latency/consistency tradeoff.
+	introspectURL := fmt.Sprintf("%s/realms/%s/introspect", hearthURL, realmSlug)
+	ttl := introspectCacheTTL()
+	validator = validator.WithRevocationCheck(middleware.NewRevocationChecker(introspectURL, ttl))
+	slog.Info("revocation introspection enabled", "url", introspectURL, "cache_ttl", ttl)
 
 	noteStore := store.NewNotes()
 	notesH := handlers.NewNotes(noteStore, client)
@@ -64,10 +77,10 @@ func main() {
 	// /api/notes — content CRUD
 	notes := r.Group("/api/notes", auth)
 	{
-		notes.GET("", notesH.List)                          // any authenticated user
-		notes.POST("", requireEditor, notesH.Create)        // content.write
-		notes.PATCH("/:id", requireEditor, notesH.Update)   // content.write
-		notes.DELETE("/:id", requireAdmin, notesH.Delete)   // admin role only
+		notes.GET("", notesH.List)                        // any authenticated user
+		notes.POST("", requireEditor, notesH.Create)      // content.write
+		notes.PATCH("/:id", requireEditor, notesH.Update) // content.write
+		notes.DELETE("/:id", requireAdmin, notesH.Delete) // admin role only
 	}
 
 	// /admin — administrative operations
@@ -106,6 +119,25 @@ func corsMiddleware(allowOrigins []string) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// introspectCacheTTL reads INTROSPECT_CACHE_TTL (a Go duration string, e.g.
+// "3s", "30s") and returns the revocation-cache TTL. It defaults to a short
+// window so a revocation is observable interactively within seconds; production
+// deployments tune this against their revocation-latency budget. "0" disables
+// caching (introspect on every request).
+func introspectCacheTTL() time.Duration {
+	const def = 3 * time.Second
+	v := os.Getenv("INTROSPECT_CACHE_TTL")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		slog.Warn("invalid INTROSPECT_CACHE_TTL; using default", "value", v, "default", def)
+		return def
+	}
+	return d
 }
 
 func mustEnv(key string) string {

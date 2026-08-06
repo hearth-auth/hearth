@@ -10,13 +10,12 @@
  *                     against the revoked refresh token, clears tokens, and the
  *                     user is bounced to the login screen.
  *
- * KNOWN GAP (HEA-2056 finding, encoded as `test.fail`): the Go resource server
- * (`middleware/auth.go`) validates the JWT signature only — it does NOT
- * introspect or check revocation — so a revoked-but-unexpired access token is
- * still accepted on `/api/notes`. That is a demo-app limitation, not a test bug;
- * fixing it requires editing demo backend source (introspection), which this
- * issue explicitly scopes out. The expected-fail test flips to a hard failure
- * the moment the backend starts enforcing revocation, prompting its removal.
+ * Resource-server revocation (HEA-2094, was a KNOWN GAP under HEA-2056): the Go
+ * backend now layers RFC 7662 introspection on top of its JWKS signature check
+ * (`middleware/revocation.go`), with a short-TTL cache so introspection is not a
+ * per-request round-trip. A revoked-but-unexpired access token is therefore
+ * refused at `/api/notes` (within the cache TTL). The third test below asserts
+ * that behavior directly — the former `test.fail` annotation is gone.
  */
 
 import { test, expect } from '@playwright/test';
@@ -50,17 +49,30 @@ test.describe('Flow 4 — token revocation propagates', () => {
     await expect(page.getByRole('button', { name: 'Sign in with Hearth' })).toBeVisible();
   });
 
-  test('KNOWN GAP: resource server should reject a revoked access token', async ({ page }) => {
-    // Expected-fail: demo backend does signature-only validation (no introspection).
-    test.fail(true, 'demo Go backend validates signature only — no revocation check (HEA-2056 finding)');
-
+  test('resource server rejects a revoked access token (introspection)', async ({ page }) => {
+    // HEA-2094: the demo backend now layers RFC 7662 introspection on top of its
+    // JWKS signature check (middleware/revocation.go), so a revoked-but-unexpired
+    // access token is refused at /api/notes — no longer a KNOWN GAP.
     const { accessToken } = await loginViaSpa(page, EDITOR.email);
-    expect(await backendStatus(accessToken, '/api/notes')).toBe(200); // warm: accepted while live
+
+    // Live: the resource server accepts the token (and caches the "active"
+    // introspection verdict for its short TTL).
+    expect(await backendStatus(accessToken, '/api/notes')).toBe(200);
+
+    // Revoke the access token at Hearth (kills the backing session).
     expect(await revokeToken(accessToken)).toBe(200);
 
-    // Desired behavior: the resource server rejects the revoked token.
-    // Currently returns 200 (signature still valid) → this assertion fails →
-    // the expected-fail annotation keeps the suite green while tracking the gap.
-    expect(await backendStatus(accessToken, '/api/notes')).toBe(401);
+    // The resource server introspects and rejects the revoked token. The backend
+    // caches introspection verdicts for a short TTL (INTROSPECT_CACHE_TTL,
+    // default 3s), so the previously-cached "active" verdict lingers until it
+    // expires — this IS the latency/consistency tradeoff the cache buys. Poll
+    // until the revocation propagates rather than asserting on the first request.
+    await expect
+      .poll(() => backendStatus(accessToken, '/api/notes'), {
+        timeout: 15_000,
+        intervals: [250, 500, 1000, 1000],
+        message: 'resource server should reject the revoked token within the introspection cache TTL',
+      })
+      .toBe(401);
   });
 });
