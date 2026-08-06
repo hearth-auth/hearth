@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use hearth::audit::EmbeddedAuditEngine;
 use hearth::config::{compute_diff, ConfigSnapshot, RealmYamlConfig};
-use hearth::core::{Clock, FakeClock, Timestamp};
+use hearth::core::{Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::reconcile::{apply_diff, save_snapshot};
 use hearth::identity::{
-    CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
-    RealmConfig,
+    CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
+    IdentityConfig, IdentityEngine, RealmConfig, SessionContext,
 };
 use hearth::rbac::EmbeddedRbacEngine;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -249,5 +249,121 @@ async fn snapshot_rotate_flag_cleared_after_apply_diff() {
     assert!(
         !rotation_again,
         "rotation diff must NOT fire on second startup when flag was cleared from snapshot"
+    );
+}
+
+// ── HEA-2090: grace period is two-sided (Hearth accepts old-kid tokens) ───────
+
+/// Creates a realm + user + session and issues a token pair, returning the
+/// realm id, user id, and the issued pair. Signed with the realm's active key.
+fn realm_user_and_tokens(
+    engine: &EmbeddedIdentityEngine,
+    realm_name: &str,
+) -> (RealmId, UserId, hearth::identity::TokenPair) {
+    let realm = engine
+        .create_realm(&CreateRealmRequest {
+            name: realm_name.to_string(),
+            config: Some(RealmConfig::default()),
+        })
+        .unwrap();
+    let user = engine
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("user-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Grace Tester".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .unwrap();
+    let session = engine
+        .create_session(realm.id(), user.id(), &SessionContext::default())
+        .unwrap();
+    let pair = engine
+        .issue_tokens(realm.id(), user.id(), session.id())
+        .unwrap();
+    (realm.id().clone(), user.id().clone(), pair)
+}
+
+/// A token minted before rotation must still validate during the grace period —
+/// otherwise every active session is logged out the instant an operator rotates
+/// the realm's signing key (HEA-2090).
+#[test]
+fn validate_token_accepts_old_kid_during_grace_period() {
+    let (_dir, engine, _clock) = setup_engine_with_clock(1_000_000_000_000);
+    let (realm, _user, pair) = realm_user_and_tokens(&engine, "grace-accept");
+    let access = pair.access_token().to_string();
+
+    // Rotate with the default 24-hour grace period. The token is NOT validated
+    // before rotation, so the token-claims cache cannot mask the retiring-key path.
+    engine.rotate_realm_signing_key(&realm, 86_400).unwrap();
+
+    let claims = engine.validate_token(&realm, &access).expect(
+        "access token signed with the retiring key must still validate during the grace period",
+    );
+    assert_eq!(claims.tid, realm.to_string());
+    assert_eq!(claims.token_type, "access");
+}
+
+/// Once the grace period elapses, a token signed with the retired key MUST be
+/// rejected — the fallback is strictly time-bounded and fails closed.
+#[test]
+fn validate_token_rejects_old_kid_after_grace_period() {
+    let (_dir, engine, clock) = setup_engine_with_clock(1_000_000_000_000);
+    let (realm, _user, pair) = realm_user_and_tokens(&engine, "grace-expire");
+    let access = pair.access_token().to_string();
+
+    // Rotate with a 1-second grace period, then advance past the deadline.
+    // The token is never validated inside the window, so no cache entry exists.
+    engine.rotate_realm_signing_key(&realm, 1).unwrap();
+    clock.advance(2_000_000); // +2 seconds in micros
+
+    let err = engine
+        .validate_token(&realm, &access)
+        .expect_err("token signed with an expired retiring key must be rejected");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::InvalidToken),
+        "expected InvalidToken after grace period, got {err:?}"
+    );
+}
+
+/// The refresh-token grant is the call site that logged everyone out in the
+/// original report: a refresh token minted before rotation must still be
+/// redeemable during the grace period.
+#[test]
+fn refresh_grant_accepts_old_kid_during_grace_period() {
+    let (_dir, engine, _clock) = setup_engine_with_clock(1_000_000_000_000);
+    let (realm, _user, pair) = realm_user_and_tokens(&engine, "grace-refresh-ok");
+    let refresh = pair.refresh_token().to_string();
+
+    engine.rotate_realm_signing_key(&realm, 86_400).unwrap();
+
+    let refreshed = engine
+        .refresh_tokens(&realm, &refresh, None, None)
+        .expect("old-kid refresh token must be redeemable during the grace period");
+    // The freshly issued pair is signed with the new active key and validates.
+    engine
+        .validate_token(&realm, refreshed.access_token())
+        .expect("re-issued access token validates against the new active key");
+}
+
+/// After the grace period, an old-kid refresh token must be rejected.
+#[test]
+fn refresh_grant_rejects_old_kid_after_grace_period() {
+    let (_dir, engine, clock) = setup_engine_with_clock(1_000_000_000_000);
+    let (realm, _user, pair) = realm_user_and_tokens(&engine, "grace-refresh-expire");
+    let refresh = pair.refresh_token().to_string();
+
+    engine.rotate_realm_signing_key(&realm, 1).unwrap();
+    clock.advance(2_000_000); // +2 seconds — past the 1-second deadline
+
+    let err = engine
+        .refresh_tokens(&realm, &refresh, None, None)
+        .expect_err("old-kid refresh token must be rejected after the grace period");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::InvalidToken),
+        "expected InvalidToken after grace period, got {err:?}"
     );
 }

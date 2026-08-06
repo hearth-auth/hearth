@@ -478,6 +478,21 @@ fn prune_rate_tracker(map: &mut HashMap<String, AttemptTracker>, cutoff_micros: 
     before.saturating_sub(map.len() as u64)
 }
 
+/// A retiring per-realm signing key still inside its rotation grace period.
+///
+/// `deadline_secs` is the Unix-seconds instant (from the storage key encoded by
+/// [`keys::encode_realm_retiring_key`]) after which the key MUST NOT be used to
+/// verify a signature. Cached with the key material so `validate_token` can
+/// filter expired entries against the current clock without re-scanning storage
+/// (HEA-2090).
+#[derive(Clone)]
+struct RetiringSigningKey {
+    /// Unix-seconds instant after which this key is no longer accepted.
+    deadline_secs: u64,
+    /// The retiring key material.
+    key: Arc<SigningKey>,
+}
+
 /// Embedded identity engine backed by a `StorageEngine`.
 ///
 /// Manages user CRUD operations with email uniqueness enforcement,
@@ -516,6 +531,22 @@ pub struct EmbeddedIdentityEngine {
     /// Wrapped in `Arc` so background delete tasks can hold a reference.
     /// Sharded (HEA-1772) so an insert clones ~`1/N` of the map, not all of it.
     realm_signing_keys: Arc<ShardedArcSwapMap<RealmId, Arc<SigningKey>>>,
+    /// Per-realm retiring signing keys within their rotation grace period.
+    ///
+    /// After [`rotate_realm_signing_key`](Self::rotate_realm_signing_key) the
+    /// previous key is retained (with a `now + grace_period` deadline) so
+    /// tokens minted before the rotation keep validating until the grace period
+    /// ends — matching what `realm_jwks` advertises to third-party verifiers
+    /// (HEA-2090).
+    ///
+    /// Each cache entry is the full retiring-key set for a realm, cached
+    /// alongside `realm_signing_keys` so `validate_token` need not re-scan
+    /// storage per call. The active key is tried first; retiring keys are only
+    /// consulted when the active key fails to verify. Entries are cached with
+    /// their deadline and filtered by the current clock at read time, so an
+    /// expired retiring key is never accepted even before the cache entry is
+    /// invalidated. Invalidated on rotation and realm delete.
+    realm_retiring_keys: Arc<ShardedArcSwapMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
     /// Wait-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -1066,6 +1097,7 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1619,6 +1651,7 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -3438,19 +3471,99 @@ impl EmbeddedIdentityEngine {
             .unwrap_or_else(|_| Arc::clone(&self.signing_key))
     }
 
-    /// Verifies a JWT signature against the realm-specific signing key.
+    /// Verifies a JWT signature against the realm-specific signing key, falling
+    /// back to any non-expired retiring key from a recent rotation.
     ///
     /// Fails closed (HEA-SEC-18): if the realm has no per-realm key, or if
-    /// verification against the realm key fails, returns an error. The legacy
-    /// global-key fallback has been removed — every realm is provisioned with
-    /// its own key at creation time.
+    /// verification against the active key and every in-grace retiring key
+    /// fails, returns an error. The legacy global-key fallback has been removed
+    /// — every realm is provisioned with its own key at creation time.
+    ///
+    /// The active key is tried first (the overwhelmingly common case, one
+    /// verify). Only when it fails are retiring keys consulted, so a token
+    /// minted before an operator rotated the realm's key keeps validating until
+    /// its grace period ends — mirroring what `realm_jwks` advertises to
+    /// third-party verifiers (HEA-2090). Retiring keys whose grace period has
+    /// elapsed are never tried.
     fn verify_token_signature_for_realm(
         &self,
         realm_id: &RealmId,
         token: &str,
     ) -> Result<TokenClaims, IdentityError> {
         let realm_key = self.get_or_load_realm_signing_key(realm_id)?;
-        tokens::verify_token_signature(token, realm_key.public_key_bytes())
+        match tokens::verify_token_signature(token, realm_key.public_key_bytes()) {
+            Ok(claims) => Ok(claims),
+            Err(active_err) => {
+                // Active key rejected the token. Before failing, try each
+                // retiring key still inside its grace period (fail-closed:
+                // expired retiring keys are skipped).
+                let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+                let retiring = self.get_or_load_realm_retiring_keys(realm_id);
+                for entry in retiring.iter() {
+                    if entry.deadline_secs <= now_secs {
+                        continue; // Grace period expired — must not be accepted.
+                    }
+                    if let Ok(claims) =
+                        tokens::verify_token_signature(token, entry.key.public_key_bytes())
+                    {
+                        return Ok(claims);
+                    }
+                }
+                Err(active_err)
+            }
+        }
+    }
+
+    /// Retrieves (or lazily loads from storage) the retiring signing keys for a
+    /// realm, cached alongside `realm_signing_keys` (HEA-2090).
+    ///
+    /// The returned set may include keys whose grace period has since elapsed;
+    /// callers MUST filter on `deadline_secs` against the current clock. The
+    /// cache is invalidated on rotation and realm delete, so it never misses a
+    /// newly-retired key.
+    fn get_or_load_realm_retiring_keys(&self, realm_id: &RealmId) -> Arc<Vec<RetiringSigningKey>> {
+        if let Some(keys) = self.realm_retiring_keys.get(realm_id) {
+            return keys;
+        }
+        let loaded = Arc::new(self.load_realm_retiring_keys(realm_id));
+        self.realm_retiring_keys
+            .insert(realm_id.clone(), Arc::clone(&loaded));
+        loaded
+    }
+
+    /// Scans storage for a realm's retiring signing keys and decrypts them.
+    ///
+    /// Uses the same `realm:retiring:` scan + deadline parsing that `realm_jwks`
+    /// relies on. Undecodable or unwrappable entries are silently skipped —
+    /// a corrupt retiring key must never take down validation of live tokens.
+    fn load_realm_retiring_keys(&self, realm_id: &RealmId) -> Vec<RetiringSigningKey> {
+        let sys_realm = keys::system_realm_id();
+        let scan_prefix = keys::realm_retiring_key_scan_prefix(realm_id);
+        let scan_end = keys::prefix_end(&scan_prefix);
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let mut out = Vec::new();
+        if let Ok(entries) = self.storage.scan(&sys_realm, &scan_prefix, &scan_end) {
+            for entry in entries {
+                let Some(deadline_secs) = keys::parse_retiring_key_deadline(&entry.key) else {
+                    continue;
+                };
+                let Ok(plaintext) = crate::identity::key_encryption::unwrap_key(&entry.value, kek)
+                else {
+                    continue;
+                };
+                if let Ok(retiring_key) = SigningKey::from_pkcs8(&plaintext) {
+                    out.push(RetiringSigningKey {
+                        deadline_secs,
+                        key: Arc::new(retiring_key),
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Parses a `session_`-prefixed session ID claim.
@@ -5406,6 +5519,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         {
             let id = realm_id.clone();
             self.realm_signing_keys.remove(&id);
+            self.realm_retiring_keys.remove(&id);
             self.realm_status_cache.rcu(|current| {
                 let mut new_map = (**current).clone();
                 new_map.remove(&id);
@@ -5452,33 +5566,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let active_key = self.get_or_load_realm_signing_key(realm_id)?;
         let mut jwks = active_key.to_jwks();
 
-        // Include retiring keys that have not yet passed their grace-period deadline.
-        let sys_realm = keys::system_realm_id();
-        let scan_prefix = keys::realm_retiring_key_scan_prefix(realm_id);
-        let scan_end = keys::prefix_end(&scan_prefix);
-        let now_secs = self.clock.now().as_micros() / 1_000_000;
-        if let Ok(entries) = self.storage.scan(&sys_realm, &scan_prefix, &scan_end) {
-            for entry in entries {
-                let Some(deadline) = keys::parse_retiring_key_deadline(&entry.key) else {
-                    continue;
-                };
-                if deadline <= now_secs as u64 {
-                    continue; // Grace period expired — omit from JWKS.
-                }
-                let kek = self
-                    .config
-                    .key_encryption_key
-                    .as_ref()
-                    .map(|k| k.as_bytes());
-                if let Ok(plaintext) =
-                    crate::identity::key_encryption::unwrap_key(&entry.value, kek)
-                {
-                    if let Ok(retiring_key) = SigningKey::from_pkcs8(&plaintext) {
-                        let retiring_jwk = retiring_key.to_jwks();
-                        jwks.keys.extend(retiring_jwk.keys);
-                    }
-                }
+        // Include retiring keys that have not yet passed their grace-period
+        // deadline. Shares the cached retiring-key set that `validate_token`
+        // uses, so JWKS advertisement and Hearth's own acceptance stay in
+        // lock-step (HEA-2090).
+        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        for entry in self.get_or_load_realm_retiring_keys(realm_id).iter() {
+            if entry.deadline_secs <= now_secs {
+                continue; // Grace period expired — omit from JWKS.
             }
+            jwks.keys.extend(entry.key.to_jwks().keys);
         }
 
         Ok(jwks)
@@ -5702,6 +5799,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
         self.realm_signing_keys.remove(realm_id);
+        // Invalidate the retiring-key cache so the just-retired key is picked up
+        // on the next validation (HEA-2090).
+        self.realm_retiring_keys.remove(realm_id);
 
         tracing::info!(
             realm = %realm_id.as_uuid(),

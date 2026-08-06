@@ -25,6 +25,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `form-action 'self'` regardless of this setting. (HEA-2084)
 
 ### Fixed
+- **Signing-key rotation no longer logs out every active session (HEA-2090)** — rotating a
+  realm's Ed25519 signing key (`POST /admin/realms/{id}/rotate-signing-key`, or config
+  `rotate_signing_key: true`) now honours the grace period on *both* sides: Hearth continues to
+  accept access, refresh, token-exchange, and required-action tokens signed with the retiring
+  key until its `signing_key_rotation_grace_period_secs` deadline (default 24h) — exactly the
+  window `JWKS` already advertised the retiring key for. Previously Hearth advertised the old
+  key in JWKS for 24h but rejected everything signed with it the instant rotation completed,
+  bouncing every logged-in user. Verification still fails closed: expired retiring keys are
+  never tried, and issuance always uses the new active key. (HEA-2090)
 - **Self-registration no longer rejects a blank "Display name (optional)" field (HEA-2078)** —
   the engine now derives the display name from `first_name + last_name` when the field is left
   empty, matching the form label and the behaviour of `create_user` / `import_user`. Registrations
