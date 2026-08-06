@@ -37,6 +37,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (HEA-2094)
 
 ### Security
+- **Signing-key cache no longer resurrects a just-rotated key under a race (HEA-2096)** — the
+  per-realm active-signing-key cache filled its miss path with an unsynchronised
+  get-miss-load-insert. A `rotate_realm_signing_key` that landed between the storage read and the
+  insert had its cache eviction overwritten by the loser's stale value, so the engine kept signing
+  new tokens with the key that was just retired until the next invalidation — an unbounded window
+  if the rotation was an emergency response to a compromised key. The miss path now snapshots a
+  per-realm rotation epoch before the load and discards its insert if a rotation intervened, at no
+  cost to the cache-hit hot path. (HEA-2096)
 - **Retiring signing keys are now cut off, cleaned up, and reaped (HEA-2093)** — three
   key-material-hygiene gaps in the rotation grace lifecycle introduced with HEA-2090:
   - An emergency rotation (`signing_key_rotation_grace_period_secs: 0`, for a compromised key)
