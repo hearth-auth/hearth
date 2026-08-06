@@ -93,11 +93,22 @@ export async function fetchEmailBody(mcauthCookie: string, emailId: string): Pro
  */
 export function extractFirstLink(body: string): string | undefined {
   // Prefer href values first (they appear in the HTML-format email body)
+  // Literal href attribute (plain-text body or unescaped rendering).
   const hrefMatch = /href="(https?:\/\/[^"]+)"/.exec(body);
   if (hrefMatch) return hrefMatch[1];
-  // Fallback: bare URL in text
-  const urlMatch = /(https?:\/\/\S+)/.exec(body);
-  return urlMatch ? urlMatch[1] : undefined;
+  // Entity-encoded href inside an srcdoc attribute (HTML body embedded via Askama).
+  // The email HTML body is HTML-escaped into srcdoc="..." so href="..." becomes href=&quot;...&quot;.
+  const encodedHrefMatch = /href=&quot;(https?:\/\/[^&]+)&quot;/.exec(body);
+  if (encodedHrefMatch) return encodedHrefMatch[1];
+  // Fallback: bare URL in plain-text body — skip w3.org namespace URIs from SVG elements.
+  const urlRe = /(https?:\/\/\S+)/g;
+  let urlMatch: RegExpExecArray | null;
+  while ((urlMatch = urlRe.exec(body)) !== null) {
+    if (!urlMatch[1].startsWith('http://www.w3.org/') && !urlMatch[1].startsWith('https://www.w3.org/')) {
+      return urlMatch[1];
+    }
+  }
+  return undefined;
 }
 
 /**

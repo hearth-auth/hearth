@@ -79,9 +79,13 @@ cleanup() {
     kill -TERM "$DEMO_PID" 2>/dev/null || true
     wait "$DEMO_PID" 2>/dev/null || true
   fi
-  # Belt-and-suspenders: demo.sh's own trap frees :8421/:5173; make sure Hearth
-  # started by this run is gone too.
+  # Belt-and-suspenders. demo.sh's trap is supposed to free :8421/:5173, but when
+  # it exits early (e.g. Vite fails to bind) the Go backend is left running and
+  # reparented to init — every later run then aborts on "port 8421 in use". Kill
+  # the demo's own children explicitly rather than trusting that trap.
   pkill -f "hearth serve .*full-stack-demo" 2>/dev/null || true
+  pkill -f "full-stack-demo/frontend/node_modules/.bin/vite" 2>/dev/null || true
+  pkill -f "go-build.*/backend$" 2>/dev/null || true
   # Restore any go.mod/go.sum churn from the -mod=mod build so the tree is clean.
   git -C "$REPO_ROOT" checkout -- \
     examples/full-stack-demo/backend/go.mod \
@@ -95,12 +99,26 @@ trap cleanup EXIT INT TERM
 # REFUSE if any of the three demo ports is still held.  We must not
 # unconditionally kill arbitrary PIDs: on a shared host the occupant could be
 # an unrelated service (e.g. a long-running container on :5173).
+#
+# `lsof -ti` alone is NOT sufficient: a Docker-published port (e.g. a container
+# mapping 0.0.0.0:5173->5173) is held by a root-owned docker-proxy listener that
+# an unprivileged `lsof` cannot see. The check would pass and Vite would then die
+# with "Port 5173 is already in use". So consult `ss`, which lists the listening
+# socket regardless of owner, and treat lsof's PID list as extra detail only.
 check_port() {
   local port="$1"
-  local pids
+  local pids listening=""
   pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
-  if [[ -z "$pids" ]]; then return 0; fi
-  echo "✗ port $port is already in use (pid: $pids)" >&2
+  if command -v ss >/dev/null 2>&1; then
+    listening="$(ss -ltn "sport = :$port" 2>/dev/null | tail -n +2)"
+  fi
+  if [[ -z "$pids" && -z "$listening" ]]; then return 0; fi
+  if [[ -n "$pids" ]]; then
+    echo "✗ port $port is already in use (pid: $pids)" >&2
+  else
+    echo "✗ port $port is already in use by another user or a container" >&2
+    echo "  (no visible PID — check 'docker ps' for a published :$port mapping)" >&2
+  fi
   echo "  Stop that process first, or override the port with an env var:" >&2
   echo "    HEARTH_PORT=NNNN BACKEND_PORT=NNNN FRONTEND_PORT=NNNN bash $0" >&2
   exit 1

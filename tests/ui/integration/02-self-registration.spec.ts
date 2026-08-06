@@ -58,7 +58,8 @@ test.describe('Flow 2 — self-registration', () => {
     // ── Complete email verification via mailcatcher ─────────────────────────
     const mail = await waitForEmail(mcCookie, () => true, 15_000);
     const verifyLink = await extractLinkFromEmail(mcCookie, mail.id);
-    expect(verifyLink).toContain(HEARTH_URL.replace(/^https?:\/\//, '').split(':')[0]);
+    // Hearth may build the link with 127.0.0.1 instead of localhost; accept both.
+    expect(verifyLink).toMatch(/^https?:\/\/(localhost|127\.0\.0\.1)/);
     await page.goto(verifyLink);
     // Verification lands on a success/sign-in page, not an error.
     await expect(page.locator('body')).not.toContainText(/invalid|expired|error/i);

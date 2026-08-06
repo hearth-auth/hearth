@@ -90,7 +90,7 @@ export async function rotateSigningKey(admin: AdminSession, demoRealmId: string)
     method: 'POST',
     headers: {
       Authorization: `Bearer ${admin.token}`,
-      'X-Realm-ID': demoRealmId,
+      'X-Realm-ID': admin.systemRealmId,
     },
   });
   if (!resp.ok) {
