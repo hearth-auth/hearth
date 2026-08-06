@@ -337,7 +337,30 @@ The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 
 ---
 
-## 8. Test Coverage
+## 8. Request Encoding — Accepted Content Types
+
+The OAuth 2.0 / OIDC POST endpoints accept **both** `application/x-www-form-urlencoded`
+(the encoding mandated by the OAuth RFCs) **and** `application/json` (retained for SDK and
+programmatic convenience). The `Content-Type` header selects the decoder; a form body and the
+equivalent JSON body produce identical behaviour, and all authentication, DPoP, and rate-limit
+checks run identically on both paths. Any other content type is rejected with
+`415 Unsupported Media Type` (HEA-2077).
+
+| Endpoint | Header-routed path | Realm-scoped twin | RFC mandating form |
+|----------|--------------------|-------------------|--------------------|
+| Token | `POST /token` | `POST /realms/{realm}/token` | RFC 6749 §4.1.3 |
+| Revocation | `POST /revoke` | `POST /realms/{realm}/revoke` | RFC 7009 §2.1 |
+| Introspection | `POST /introspect` | `POST /realms/{realm}/introspect` | RFC 7662 §2.1 |
+| Device Authorization | `POST /device_authorization` | `POST /realms/{realm}/device_authorization` | RFC 8628 §3.1 |
+| Pushed Authorization Request (PAR) | `POST /as/par` | `POST /realms/{realm}/as/par` | RFC 9126 §2.1 |
+
+Client credentials carried in the request body (`client_id` / `client_secret`, RFC 6749 §2.3.1)
+are honoured on the form path as well as the header path. Dynamic client registration
+(`POST /register`, RFC 7591) and the JSON permission-decision endpoint remain JSON-only by design.
+
+---
+
+## 9. Test Coverage
 
 | Test file | What it covers |
 |-----------|----------------|
@@ -347,11 +370,12 @@ The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 | `tests/jar.rs` | JAR (RFC 9101) request JWT parsing, signature verification |
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
+| `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 
 ---
 
-## 9. References
+## 10. References
 
 - [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
 - [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html)
