@@ -79,10 +79,17 @@ var (
 // The demo's public OAuth client + redirect, kept in sync with demo.sh /
 // hearth.yaml. Used only in documentation assertions; the PKCE path uses a
 // freshly-registered system-realm public client so the admin token is co-realm.
-const (
-	demoClientID    = "f7057d27-61fd-555e-b2af-ba8edd112237"
-	demoRedirectURI = "http://localhost:5173/callback"
-)
+const demoClientID = "f7057d27-61fd-555e-b2af-ba8edd112237"
+
+// demoRedirectURI is the registered callback URI for the hearth-hub app.
+// Matches hearth.yaml's redirect_uris default; set DEMO_FRONTEND_URL to
+// override when running on a non-default frontend port.
+var demoRedirectURI = func() string {
+	if v := os.Getenv("DEMO_FRONTEND_URL"); v != "" {
+		return strings.TrimRight(v, "/") + "/callback"
+	}
+	return "http://localhost:5173/callback"
+}()
 
 func TestMain(m *testing.M) {
 	if err := bootMain(); err != nil {

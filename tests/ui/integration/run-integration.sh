@@ -22,6 +22,15 @@ REPO_ROOT="$(cd "$UI_DIR/../.." && pwd)"
 DEMO_DIR="$REPO_ROOT/examples/full-stack-demo"
 DEMO_LOG="${DEMO_LOG:-$HERE/.demo-stack.log}"
 
+# ── Port configuration ──────────────────────────────────────────────────────
+# All three ports are overridable. The defaults match the demo's own defaults.
+# When a port is already in use (e.g. 5173 held by another container), set the
+# matching env var to a free port before running this script.
+HEARTH_PORT="${HEARTH_PORT:-8420}"
+BACKEND_PORT="${BACKEND_PORT:-8421}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+export HEARTH_PORT BACKEND_PORT FRONTEND_PORT
+
 # ── Env the suite depends on ────────────────────────────────────────────────
 # Fixed mailcatcher password so flow 2 (email verification) is deterministic.
 export HEARTH_MAILCATCHER_PASSWORD="${HEARTH_MAILCATCHER_PASSWORD:-integration-mailcatcher-pw}"
@@ -29,8 +38,11 @@ export HEARTH_MAILCATCHER_PASSWORD="${HEARTH_MAILCATCHER_PASSWORD:-integration-m
 # global setup meant for the other Playwright projects.
 export HEARTH_SKIP_GLOBAL_SETUP=1
 # Use localhost (not 127.0.0.1) so the browser origin matches the issuer and the
-# registered localhost:5173/callback redirect_uri.
-export HEARTH_URL="${HEARTH_URL:-http://localhost:8420}"
+# registered redirect_uri.
+export HEARTH_URL="${HEARTH_URL:-http://localhost:${HEARTH_PORT}}"
+# Tell the Playwright config where each tier lives (config.ts already reads these).
+export DEMO_FRONTEND_URL="${DEMO_FRONTEND_URL:-http://localhost:${FRONTEND_PORT}}"
+export DEMO_BACKEND_URL="${DEMO_BACKEND_URL:-http://localhost:${BACKEND_PORT}}"
 # Disable the sccache RUSTC wrapper — it fails in this sandbox (exit 254);
 # demo.sh's `cargo build --release` must not go through it.
 export RUSTC_WRAPPER=""
@@ -78,21 +90,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# ── Free stale processes so our env actually applies and --strictPort works.
-# demo.sh reuses an already-running Hearth if it has the demo realm (which would
-# skip our HEARTH_MAILCATCHER_PASSWORD), and Vite's --strictPort fails hard if
-# :5173 is held by a leftover from an aborted run. Free all three ports by PID.
-freeport() {
+# ── Guard against occupied ports ─────────────────────────────────────────────
+# Kill any leftover `hearth` binary (safe — scoped to the binary name), then
+# REFUSE if any of the three demo ports is still held.  We must not
+# unconditionally kill arbitrary PIDs: on a shared host the occupant could be
+# an unrelated service (e.g. a long-running container on :5173).
+check_port() {
+  local port="$1"
   local pids
-  pids="$(lsof -ti tcp:"$1" 2>/dev/null || true)"
-  if [[ -n "$pids" ]]; then
-    echo "  → freeing port $1 (pid $pids)"
-    kill $pids 2>/dev/null || true
-  fi
-  return 0
+  pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  if [[ -z "$pids" ]]; then return 0; fi
+  echo "✗ port $port is already in use (pid: $pids)" >&2
+  echo "  Stop that process first, or override the port with an env var:" >&2
+  echo "    HEARTH_PORT=NNNN BACKEND_PORT=NNNN FRONTEND_PORT=NNNN bash $0" >&2
+  exit 1
 }
 pkill -x hearth 2>/dev/null || true
-freeport 8420; freeport 8421; freeport 5173
+check_port "${HEARTH_PORT}"
+check_port "${BACKEND_PORT}"
+check_port "${FRONTEND_PORT}"
 # Clear Vite's dep-optimize cache. demo.sh rewrites frontend/.env on every run,
 # which makes Vite log "config has changed" and RESTART its dev server mid-boot;
 # with --strictPort that restart can't rebind :5173 and dies. A clean cache
@@ -122,7 +138,7 @@ if [[ -z "$ready" ]]; then
   tail -20 "$DEMO_LOG" >&2 || true
   exit 1
 fi
-echo "  ✓ stack is up (Hearth :8420, backend :8421, frontend :5173)"
+echo "  ✓ stack is up (Hearth :${HEARTH_PORT}, backend :${BACKEND_PORT}, frontend :${FRONTEND_PORT})"
 
 # ── Run the suite (reuse pw-run.sh for the cross-platform browser launch) ────
 echo "▸ running integration suite…"
