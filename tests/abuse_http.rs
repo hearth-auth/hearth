@@ -146,6 +146,7 @@ async fn a40_coop_coep_headers_present() {
     let layer = SecurityHeadersLayer::new(SecurityConfig {
         hsts_enabled: false,
         coop_coep_enabled: true,
+        extra_form_action_origins: Vec::new(),
     });
     let svc = layer.layer(tower::service_fn(|_req: Request<Body>| async {
         Ok::<_, Infallible>(StatusCode::OK.into_response())
@@ -195,6 +196,7 @@ async fn a40_coop_coep_absent_when_disabled() {
     let layer = SecurityHeadersLayer::new(SecurityConfig {
         hsts_enabled: false,
         coop_coep_enabled: false,
+        extra_form_action_origins: Vec::new(),
     });
     let svc = layer.layer(tower::service_fn(|_req: Request<Body>| async {
         Ok::<_, Infallible>(StatusCode::OK.into_response())

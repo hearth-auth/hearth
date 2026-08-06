@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **CSP `form-action` no longer advertises plaintext-http localhost origins in production
+  builds (HEA-2072)** — the security-headers middleware emitted
+  `form-action 'self' http://localhost:5173 http://localhost:5399` unconditionally on every UI
+  response. Those two demo-SPA origins were added for the reference-integration Playwright
+  suite but were never gated behind `--dev`, so every production Hearth deployment weakened a
+  defense-in-depth control on exactly the hosted login/consent pages where `form-action`
+  matters most. The extra origins are now gated behind dev mode (`SecurityConfig.extra_form_action_origins`,
+  populated only when `dev_mode` is set); production output is byte-identical to
+  `form-action 'self'`. **Operator impact:** none for production; the demo integration suite
+  continues to work under `--dev`. (HEA-2072)
 - **DPoP sender-constraint now enforced at the session-version feed endpoints — stops
   bound-token replay as plain Bearer (HEA-2039)** — `GET /oauth/session-versions` and
   `GET /oauth/session-versions/snapshot` parsed the `Authorization: Bearer` header directly
