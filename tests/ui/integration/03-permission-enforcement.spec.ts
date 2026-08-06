@@ -32,6 +32,10 @@ test.describe('Flow 3 — permission enforcement (UI + API planes)', () => {
     await expect(page.locator('.badge-admin')).toHaveCount(0);
 
     // Direct navigation to /admin is bounced back to /dashboard (client guard).
+    // This is a real user action — typing the URL, or following a bookmark —
+    // so it must go through page.goto and actually load the SPA. It regressed
+    // once when the Vite dev proxy shadowed /admin (HEA-2086); keep it as a
+    // full navigation so that collision cannot come back unnoticed.
     await page.goto(`${FRONTEND_URL}/admin`);
     await expect(page).toHaveURL(`${FRONTEND_URL}/dashboard`);
 

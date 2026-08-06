@@ -35,8 +35,11 @@ test.describe('Flow 6 — silent refresh at expiry', () => {
     // The user remains authenticated — Dashboard renders, no bounce to Login.
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
 
-    // And protected navigation continues to work post-refresh.
-    await page.goto(`${FRONTEND_URL}/notes`);
+    // And protected navigation continues to work post-refresh. Click the real
+    // nav link rather than calling page.goto: a second full load would race the
+    // SDK's localStorage write of the freshly rotated refresh token. Clicking
+    // is also what a user actually does, and it exercises React Router.
+    await page.getByRole('link', { name: 'Notes' }).click();
     await expect(page.getByRole('heading', { name: 'Notes' })).toBeVisible();
   });
 });

@@ -23,8 +23,12 @@ export default defineConfig({
   server: {
     port: Number(process.env.FRONTEND_PORT) || 5173,
     proxy: {
+      // NOTE: do NOT proxy "/admin" here. The SPA owns a client-side /admin
+      // route (App.tsx), and a proxy entry shadows it — a direct visit,
+      // bookmark, or hard refresh on /admin gets forwarded to Hearth's admin
+      // API and returns JSON instead of loading the app. The SPA reaches its
+      // admin data through the Go backend (VITE_API_URL), not this proxy.
       "/realms": HEARTH_TARGET,
-      "/admin":  HEARTH_TARGET,
       "/health": HEARTH_TARGET,
       "/clients": HEARTH_TARGET,
     },
