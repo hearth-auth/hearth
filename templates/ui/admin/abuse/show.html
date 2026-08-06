@@ -69,8 +69,8 @@
         <table class="w-full">
           <thead>
             <tr class="border-b border-divider bg-ht-surface-elevated">
-              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP address</th>
-              <th class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Events</th>
+              <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP address</th>
+              <th scope="col" class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Events</th>
             </tr>
           </thead>
           <tbody>
@@ -121,17 +121,17 @@
         <table class="w-full">
           <thead>
             <tr class="border-b border-divider bg-ht-surface-elevated">
-              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Time (UTC)</th>
-              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Event</th>
-              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Actor</th>
-              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
+              <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Time (UTC)</th>
+              <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Event</th>
+              <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Actor</th>
+              <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
             </tr>
           </thead>
           <tbody>
             {% for row in recent_events %}
             <tr class="border-b border-divider-subtle hover-bg-divider">
               <td class="px-4 py-2.5">
-                <span class="font-mono text-xs text-ht-content-muted">{{ row.timestamp_display }}</span>
+                <time datetime="{{ row.timestamp_iso }}" class="font-mono text-xs text-ht-content-muted">{{ row.timestamp_display }}</time>
               </td>
               <td class="px-4 py-2.5">
                 <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium

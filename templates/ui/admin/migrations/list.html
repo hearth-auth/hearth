@@ -22,7 +22,7 @@
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
               <code class="font-mono text-sm font-semibold text-error-fg">{{ o.realm_slug }}</code>
-              <span class="ml-3 text-xs text-error-fg opacity-70">detected {{ o.detected_at }}</span>
+              <span class="ml-3 text-xs text-error-fg opacity-70">detected <time datetime="{{ o.detected_at_iso }}">{{ o.detected_at }}</time></span>
             </div>
             <div class="flex items-center gap-4 text-xs text-error-fg opacity-80">
               <span>{{ o.user_count }} user{% if o.user_count != 1 %}s{% endif %}</span>
@@ -89,13 +89,13 @@
     <table class="w-full text-sm">
       <thead>
         <tr class="border-b border-ht-divider/[0.06]">
-          <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Source</th>
-          <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Destination</th>
-          <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Kind</th>
-          <th class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Moved</th>
-          <th class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Skipped</th>
-          <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Status</th>
-          <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Completed</th>
+          <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Source</th>
+          <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Destination</th>
+          <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Kind</th>
+          <th scope="col" class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Moved</th>
+          <th scope="col" class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Skipped</th>
+          <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Status</th>
+          <th scope="col" class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Completed</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-white/[0.04]">
@@ -124,7 +124,7 @@
             </span>
           </td>
           <td class="px-4 py-3 text-xs text-ht-content-muted">
-            {{ m.completed_at }}
+            <time datetime="{{ m.completed_at_iso }}">{{ m.completed_at }}</time>
           </td>
         </tr>
         {% endfor %}

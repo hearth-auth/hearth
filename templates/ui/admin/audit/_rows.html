@@ -14,7 +14,7 @@
     </button>
   </td>
   <td class="whitespace-nowrap px-4 py-3 text-sm text-ht-content-muted">
-    <span title="{{ row.timestamp_display }}">{{ row.timestamp_relative }}</span>
+    <time datetime="{{ row.timestamp_iso }}" title="{{ row.timestamp_display }}">{{ row.timestamp_relative }}</time>
   </td>
   <td class="px-4 py-3">
     <span class="inline-flex items-center gap-1.5 rounded-full bg-ht-surface-base px-2 py-0.5 text-xs text-ht-content-secondary ring-1 ring-divider-subtle"

@@ -44,6 +44,8 @@ pub struct FailingIpRow {
 /// A row in the recent security events table.
 pub struct SecurityEventRow {
     pub timestamp_display: String,
+    /// ISO-8601 timestamp for `<time datetime>`.
+    pub timestamp_iso: String,
     pub action_label: String,
     pub actor: String,
     pub ip: Option<String>,
@@ -174,6 +176,7 @@ pub async fn admin_abuse_dashboard(
             let ip = extract_ip(&e.metadata);
             SecurityEventRow {
                 timestamp_display: format_timestamp_display(e.timestamp),
+                timestamp_iso: super::super::format_ts_iso(e.timestamp),
                 action_label: security_action_label(&e.action),
                 actor: e.actor.clone(),
                 ip,

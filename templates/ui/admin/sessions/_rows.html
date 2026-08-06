@@ -6,10 +6,10 @@
   {% endif %}
   <td class="px-4 py-3 text-sm text-ht-content-secondary">{{ s.device_label }}</td>
   <td class="px-4 py-3 font-mono text-xs text-ht-content-muted">{{ s.ip_address }}</td>
-  <td class="px-4 py-3 text-sm text-ht-content-muted">{{ s.created_at_display }}</td>
+  <td class="px-4 py-3 text-sm text-ht-content-muted"><time datetime="{{ s.created_at_iso }}">{{ s.created_at_display }}</time></td>
   <td class="px-4 py-3 text-sm text-ht-content-muted">
     <span class="inline-flex items-center gap-1.5">
-      {{ s.expires_at_display }}
+      <time datetime="{{ s.expires_at_iso }}">{{ s.expires_at_display }}</time>
       {% if !s.is_active %}
         <span class="inline-flex items-center rounded-full bg-steel-bg px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-steel-fg" title="Session is past its expiry or has been revoked.">Expired</span>
       {% endif %}

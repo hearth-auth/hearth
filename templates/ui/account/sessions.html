@@ -30,12 +30,12 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Signed in</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Last active</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
-        <th class="px-3 py-2" aria-label="Actions"></th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Signed in</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Last active</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
+        <th scope="col" class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -48,9 +48,9 @@
           {% endif %}
         </td>
         <td class="px-3 py-2 font-mono text-xs text-ht-content-muted">{{ s.ip_address }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.created_at }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.last_active }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.expires_at }}</td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.created_at_iso }}">{{ s.created_at }}</time></td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.last_active_iso }}">{{ s.last_active }}</time></td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.expires_at_iso }}">{{ s.expires_at }}</time></td>
         <td class="px-3 py-2 text-right">
           <form method="post" action="/ui/account/sessions/{{ s.id }}/revoke">
             {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
