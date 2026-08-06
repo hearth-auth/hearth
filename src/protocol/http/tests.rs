@@ -152,6 +152,196 @@ async fn bootstrap_returns_admin_credentials_in_dev_mode() {
     assert!(!token.is_empty(), "access_token should not be empty");
 }
 
+/// HEA-2087: Bootstrap must also return a **system-realm** admin token capable
+/// of cross-realm management. The dev-realm-scoped `access_token` 403s on another
+/// realm's `rotate-signing-key` (the `scoped_realm` BOLA guard only lets a
+/// nil-UUID system token operate cross-realm); the new `system_access_token`
+/// (issued for the seeded `admin@hearth.test` system admin) must succeed.
+#[tokio::test]
+async fn bootstrap_system_token_can_rotate_other_realm_signing_key() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    // The dev-realm credential (existing behavior).
+    let dev_token = json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+    let dev_realm_id = json["realm_id"].as_str().expect("realm_id").to_string();
+
+    // The new cross-realm system credential.
+    let system_token = json["system_access_token"]
+        .as_str()
+        .expect("system_access_token present")
+        .to_string();
+    assert!(
+        !system_token.is_empty(),
+        "system_access_token must be non-empty on first bootstrap"
+    );
+    let system_realm_id = json["system_realm_id"]
+        .as_str()
+        .expect("system_realm_id present")
+        .to_string();
+    assert_eq!(
+        system_realm_id,
+        uuid::Uuid::nil().to_string(),
+        "system_realm_id must be the nil UUID (the reserved system realm)"
+    );
+
+    // A separate realm to exercise cross-realm management against.
+    let other = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: "other-realm".to_string(),
+            config: None,
+        })
+        .expect("create other realm");
+    let other_id = other.id().as_uuid().to_string();
+    let rotate_uri = format!("/admin/realms/{other_id}/rotate-signing-key");
+
+    // The dev-realm token cannot cross-realm manage — documents the root cause.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(&rotate_uri)
+                .header("Authorization", format!("Bearer {dev_token}"))
+                .header("X-Realm-ID", &dev_realm_id)
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "dev-realm-scoped token must NOT be able to rotate another realm's key"
+    );
+
+    // The system-realm token must cross-realm manage successfully.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(&rotate_uri)
+                .header("Authorization", format!("Bearer {system_token}"))
+                .header("X-Realm-ID", &system_realm_id)
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "system-realm token must be able to rotate another realm's signing key cross-realm"
+    );
+}
+
+/// HEA-2087: Re-bootstrap (dev-realm already exists) must still return a working
+/// cross-realm `system_access_token`, so an integration harness that re-bootstraps
+/// after a restart can keep managing realms.
+#[tokio::test]
+async fn rebootstrap_returns_working_system_token() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+
+    // First bootstrap to obtain a Bearer token for the authenticated re-bootstrap.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let first: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let dev_token = first["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Re-bootstrap with the Bearer token.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .header("Authorization", format!("Bearer {dev_token}"))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "re-bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let second: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    let system_token = second["system_access_token"]
+        .as_str()
+        .expect("system_access_token present on re-bootstrap")
+        .to_string();
+    assert!(
+        !system_token.is_empty(),
+        "system_access_token must be non-empty on re-bootstrap"
+    );
+    let system_realm_id = second["system_realm_id"]
+        .as_str()
+        .expect("system_realm_id present");
+    assert_eq!(system_realm_id, uuid::Uuid::nil().to_string());
+
+    // Prove the re-bootstrap system token works cross-realm.
+    let other = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: "other-realm".to_string(),
+            config: None,
+        })
+        .expect("create other realm");
+    let other_id = other.id().as_uuid().to_string();
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/admin/realms/{other_id}/rotate-signing-key"))
+                .header("Authorization", format!("Bearer {system_token}"))
+                .header("X-Realm-ID", uuid::Uuid::nil().to_string())
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "re-bootstrap system token must manage realms cross-realm"
+    );
+}
+
 /// HEA-1670: First bootstrap must return `admin_password`; the password must
 /// authenticate the `admin@hearth.test` user.
 #[tokio::test]

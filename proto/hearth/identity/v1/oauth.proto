@@ -221,6 +221,15 @@ message BootstrapResponse {
   // call. Empty on all subsequent re-bootstrap calls — store this value
   // securely, it is never returned again.
   string admin_password = 6;
+  // Access token for the reserved **system realm** admin (`admin@hearth.test`).
+  // Unlike `access_token` (scoped to the dev-realm), this token can manage ANY
+  // realm cross-realm (e.g. rotate another realm's signing key) — the BOLA guard
+  // only permits cross-realm operations for a nil-UUID system-realm token.
+  // Populated on every bootstrap and re-bootstrap. Dev-only (HEA-2087).
+  string system_access_token = 7;
+  // The reserved system realm id (the nil UUID). Use as the `X-Realm-ID` header
+  // alongside `system_access_token` for cross-realm admin API calls.
+  string system_realm_id = 8;
 }
 
 // ---------------------------------------------------------------------------

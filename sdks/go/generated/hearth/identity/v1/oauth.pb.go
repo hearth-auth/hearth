@@ -1695,6 +1695,15 @@ type BootstrapResponse struct {
 	// call. Empty on all subsequent re-bootstrap calls — store this value
 	// securely, it is never returned again.
 	AdminPassword string `protobuf:"bytes,6,opt,name=admin_password,json=adminPassword,proto3" json:"admin_password,omitempty"`
+	// Access token for the reserved **system realm** admin (`admin@hearth.test`).
+	// Unlike `access_token` (scoped to the dev-realm), this token can manage ANY
+	// realm cross-realm (e.g. rotate another realm's signing key) — the BOLA guard
+	// only permits cross-realm operations for a nil-UUID system-realm token.
+	// Populated on every bootstrap and re-bootstrap. Dev-only (HEA-2087).
+	SystemAccessToken string `protobuf:"bytes,7,opt,name=system_access_token,json=systemAccessToken,proto3" json:"system_access_token,omitempty"`
+	// The reserved system realm id (the nil UUID). Use as the `X-Realm-ID` header
+	// alongside `system_access_token` for cross-realm admin API calls.
+	SystemRealmId string `protobuf:"bytes,8,opt,name=system_realm_id,json=systemRealmId,proto3" json:"system_realm_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1767,6 +1776,20 @@ func (x *BootstrapResponse) GetQuickstart() string {
 func (x *BootstrapResponse) GetAdminPassword() string {
 	if x != nil {
 		return x.AdminPassword
+	}
+	return ""
+}
+
+func (x *BootstrapResponse) GetSystemAccessToken() string {
+	if x != nil {
+		return x.SystemAccessToken
+	}
+	return ""
+}
+
+func (x *BootstrapResponse) GetSystemRealmId() string {
+	if x != nil {
+		return x.SystemRealmId
 	}
 	return ""
 }
@@ -2184,7 +2207,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x03use\x18\x05 \x01(\tR\x03use\x12\x10\n" +
 	"\x03alg\x18\x06 \x01(\tR\x03alg\"B\n" +
 	"\fJwksDocument\x122\n" +
-	"\x04keys\x18\x01 \x03(\v2\x1e.hearth.identity.v1.JsonWebKeyR\x04keys\"\xd6\x01\n" +
+	"\x04keys\x18\x01 \x03(\v2\x1e.hearth.identity.v1.JsonWebKeyR\x04keys\"\xae\x02\n" +
 	"\x11BootstrapResponse\x12\x19\n" +
 	"\brealm_id\x18\x01 \x01(\tR\arealmId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12!\n" +
@@ -2193,7 +2216,9 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\n" +
 	"quickstart\x18\x05 \x01(\tR\n" +
 	"quickstart\x12%\n" +
-	"\x0eadmin_password\x18\x06 \x01(\tR\radminPassword\"f\n" +
+	"\x0eadmin_password\x18\x06 \x01(\tR\radminPassword\x12.\n" +
+	"\x13system_access_token\x18\a \x01(\tR\x11systemAccessToken\x12&\n" +
+	"\x0fsystem_realm_id\x18\b \x01(\tR\rsystemRealmId\"f\n" +
 	"\x17ListApplicationsRequest\x12\x1b\n" +
 	"\x06cursor\x18\x01 \x01(\tH\x00R\x06cursor\x88\x01\x01\x12\x19\n" +
 	"\x05limit\x18\x02 \x01(\rH\x01R\x05limit\x88\x01\x01B\t\n" +

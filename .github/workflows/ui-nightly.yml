@@ -286,10 +286,20 @@ jobs:
 
       - name: Bootstrap and resolve demo realm
         run: |
-          # Bootstrap: returns system realm + admin token (idempotent)
+          # Bootstrap (first call on a fresh server): returns the dev-realm token
+          # plus a cross-realm SYSTEM-realm admin token (HEA-2087).
           BOOT=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
           ADMIN_TOKEN=$(echo "$BOOT" | jq -r '.access_token')
           SYS_REALM_ID=$(echo "$BOOT" | jq -r '.realm_id')
+
+          # The nil-UUID system-realm token — the ONLY credential that passes the
+          # scoped_realm BOLA guard for cross-realm ops (e.g. flow 5 signing-key
+          # rotation). Export it so the suite's bootstrapAdmin() consumes it and
+          # never re-bootstraps (which would 401 on an already-bootstrapped box).
+          SYSTEM_ADMIN_TOKEN=$(echo "$BOOT" | jq -r '.system_access_token // empty')
+          SYSTEM_REALM_ID=$(echo "$BOOT" | jq -r '.system_realm_id // empty')
+          echo "HEARTH_ADMIN_TOKEN=${SYSTEM_ADMIN_TOKEN:-$ADMIN_TOKEN}" >> "$GITHUB_ENV"
+          echo "HEARTH_SYSTEM_REALM_ID=${SYSTEM_REALM_ID:-$SYS_REALM_ID}" >> "$GITHUB_ENV"
 
           # Resolve demo realm UUID (created from config on startup)
           DEMO_REALM_ID=$(
@@ -362,6 +372,11 @@ jobs:
           # session so the test can read the verification email. Must match the
           # password Hearth was started with above.
           HEARTH_MAILCATCHER_PASSWORD: integration-mailcatcher-pw
+          # Cross-realm system-realm admin credential resolved above (HEA-2087).
+          # Consumed by bootstrapAdmin(); required for flow 5 signing-key rotation
+          # and avoids a 401 re-bootstrap against the already-bootstrapped server.
+          HEARTH_ADMIN_TOKEN: ${{ env.HEARTH_ADMIN_TOKEN }}
+          HEARTH_SYSTEM_REALM_ID: ${{ env.HEARTH_SYSTEM_REALM_ID }}
         run: >
           npx playwright test
           --config=playwright.integration.config.ts

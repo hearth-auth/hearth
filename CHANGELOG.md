@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`POST /admin/bootstrap` now returns a cross-realm system-realm admin token (HEA-2087)** —
+  the dev-only bootstrap response gained two fields: `system_access_token` (an access token for
+  the reserved system-realm admin `admin@hearth.test`, whose nil-UUID realm passes the
+  `scoped_realm` cross-realm guard) and `system_realm_id` (the nil UUID). The pre-existing
+  `access_token` is scoped to the dev-realm and — by design — cannot manage other realms, so
+  operations like rotating a *different* realm's signing key returned `403 forbidden`. SDK and
+  integration consumers that need cross-realm admin should use `system_access_token` together
+  with `X-Realm-ID: <system_realm_id>`. Both fields are populated on first bootstrap and every
+  re-bootstrap; the endpoint remains a 404 in production. (HEA-2087)
 - **`security.dev_csp_form_action_origins` config key (HEA-2084)** — the dev-mode CSP
   `form-action` extra origins (previously hard-coded to `:5173` and `:5399`) are now
   configurable via this `hearth.yaml` key. Supply a list of `http://localhost:<port>` strings
