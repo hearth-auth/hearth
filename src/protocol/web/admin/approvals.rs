@@ -33,10 +33,14 @@ pub struct ApprovalRow {
     pub status_badge_class: &'static str,
     /// Absolute UTC timestamp for when the request was created.
     pub requested_display: String,
+    /// ISO-8601 requested-at for `<time datetime>`.
+    pub requested_iso: String,
     /// Relative timestamp (e.g. `"5m ago"`).
     pub requested_ago: String,
     /// Absolute UTC timestamp for when the request expires.
     pub expires_display: String,
+    /// ISO-8601 expires-at for `<time datetime>`.
+    pub expires_iso: String,
     /// `true` when the request is still actionable (status = Pending).
     pub is_pending: bool,
 }
@@ -54,11 +58,14 @@ pub struct ApprovalDetail {
     pub status: &'static str,
     pub status_badge_class: &'static str,
     pub requested_display: String,
+    pub requested_iso: String,
     pub requested_ago: String,
     pub expires_display: String,
+    pub expires_iso: String,
     pub is_pending: bool,
     /// Populated when the request has been approved or denied.
     pub resolved_display: Option<String>,
+    pub resolved_iso: Option<String>,
     pub resolved_ago: Option<String>,
     pub denial_reason: Option<String>,
 }
@@ -180,8 +187,10 @@ fn to_row(req: &ApprovalRequest) -> ApprovalRow {
         status: status_label(&req.status),
         status_badge_class: status_badge_class(&req.status),
         requested_display: format_ts(req.requested_at),
+        requested_iso: super::super::format_ts_iso(req.requested_at),
         requested_ago: format_ts_relative(req.requested_at),
         expires_display: format_ts(req.expires_at),
+        expires_iso: super::super::format_ts_iso(req.expires_at),
         is_pending: matches!(req.status, ApprovalRequestStatus::Pending),
     }
 }
@@ -197,10 +206,13 @@ fn to_detail(req: &ApprovalRequest) -> ApprovalDetail {
         status: status_label(&req.status),
         status_badge_class: status_badge_class(&req.status),
         requested_display: format_ts(req.requested_at),
+        requested_iso: super::super::format_ts_iso(req.requested_at),
         requested_ago: format_ts_relative(req.requested_at),
         expires_display: format_ts(req.expires_at),
+        expires_iso: super::super::format_ts_iso(req.expires_at),
         is_pending: matches!(req.status, ApprovalRequestStatus::Pending),
         resolved_display: req.resolved_at.map(format_ts),
+        resolved_iso: req.resolved_at.map(super::super::format_ts_iso),
         resolved_ago: req.resolved_at.map(format_ts_relative),
         denial_reason: req.denial_reason.clone(),
     }

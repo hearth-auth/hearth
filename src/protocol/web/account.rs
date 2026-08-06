@@ -1193,10 +1193,16 @@ struct AccountSessionRow {
     ip_address: String,
     /// Human-readable creation timestamp.
     created_at: String,
+    /// ISO-8601 creation timestamp for `<time datetime>`.
+    created_at_iso: String,
     /// Human-readable last-refreshed timestamp (same as created on fresh sessions).
     last_active: String,
+    /// ISO-8601 last-refreshed timestamp for `<time datetime>`.
+    last_active_iso: String,
     /// Human-readable expiration timestamp.
     expires_at: String,
+    /// ISO-8601 expiration timestamp for `<time datetime>`.
+    expires_at_iso: String,
     /// `true` iff this row matches the session that made the current request.
     is_current: bool,
 }
@@ -1440,8 +1446,11 @@ fn load_session_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<AccountS
                     .ip_address()
                     .map_or_else(|| "—".to_string(), str::to_string),
                 created_at: format_ts(s.created_at()),
+                created_at_iso: super::format_ts_iso(s.created_at()),
                 last_active: format_ts(s.last_refreshed_at()),
+                last_active_iso: super::format_ts_iso(s.last_refreshed_at()),
                 expires_at: format_ts(s.expires_at()),
+                expires_at_iso: super::format_ts_iso(s.expires_at()),
                 is_current: s.id() == &session.session_id,
             });
         }

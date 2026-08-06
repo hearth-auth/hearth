@@ -54,25 +54,36 @@
         <div class="flex items-start gap-4 px-4 py-3">
           <dt class="w-28 shrink-0 font-mono text-xs text-ht-content-muted pt-0.5">Requested</dt>
           <dd class="text-sm text-ht-content-secondary">
-            <span title="{{ req.requested_display }} UTC">{{ req.requested_ago }}</span>
+            <time datetime="{{ req.requested_iso }}" title="{{ req.requested_display }} UTC">{{ req.requested_ago }}</time>
             <span class="ml-1 text-xs text-ht-content-muted">({{ req.requested_display }} UTC)</span>
           </dd>
         </div>
         <div class="flex items-start gap-4 px-4 py-3">
           <dt class="w-28 shrink-0 font-mono text-xs text-ht-content-muted pt-0.5">Expires</dt>
-          <dd class="text-sm text-ht-content-secondary">{{ req.expires_display }} UTC</dd>
+          <dd class="text-sm text-ht-content-secondary"><time datetime="{{ req.expires_iso }}">{{ req.expires_display }}</time> UTC</dd>
         </div>
         {% match req.resolved_display %}
           {% when Some with (resolved) %}
             <div class="flex items-start gap-4 px-4 py-3">
               <dt class="w-28 shrink-0 font-mono text-xs text-ht-content-muted pt-0.5">Resolved</dt>
               <dd class="text-sm text-ht-content-secondary">
-                {% match req.resolved_ago %}
-                  {% when Some with (ago) %}
-                    <span title="{{ resolved }} UTC">{{ ago }}</span>
-                    <span class="ml-1 text-xs text-ht-content-muted">({{ resolved }} UTC)</span>
+                {% match req.resolved_iso %}
+                  {% when Some with (resolved_iso) %}
+                    {% match req.resolved_ago %}
+                      {% when Some with (ago) %}
+                        <time datetime="{{ resolved_iso }}" title="{{ resolved }} UTC">{{ ago }}</time>
+                        <span class="ml-1 text-xs text-ht-content-muted">({{ resolved }} UTC)</span>
+                      {% when None %}
+                        <time datetime="{{ resolved_iso }}">{{ resolved }}</time> UTC
+                    {% endmatch %}
                   {% when None %}
-                    {{ resolved }} UTC
+                    {% match req.resolved_ago %}
+                      {% when Some with (ago) %}
+                        <span title="{{ resolved }} UTC">{{ ago }}</span>
+                        <span class="ml-1 text-xs text-ht-content-muted">({{ resolved }} UTC)</span>
+                      {% when None %}
+                        {{ resolved }} UTC
+                    {% endmatch %}
                 {% endmatch %}
               </dd>
             </div>

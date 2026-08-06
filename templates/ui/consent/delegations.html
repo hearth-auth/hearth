@@ -54,7 +54,7 @@
         </ul>
         {% endif %}
         <p class="mt-2 font-mono text-[11px] text-ht-content-muted">
-          Granted {{ d.created_at }} &middot; Expires {{ d.expires_at }}
+          Granted <time datetime="{{ d.created_at_iso }}">{{ d.created_at }}</time> &middot; Expires <time datetime="{{ d.expires_at_iso }}">{{ d.expires_at }}</time>
         </p>
       </div>
     </li>

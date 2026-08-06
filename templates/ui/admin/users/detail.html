@@ -72,11 +72,11 @@
     </div>
     <div>
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Created</dt>
-      <dd class="mt-1 text-sm text-ht-content-muted">{{ created_at_display }}</dd>
+      <dd class="mt-1 text-sm text-ht-content-muted"><time datetime="{{ created_at_iso }}">{{ created_at_display }}</time></dd>
     </div>
     <div>
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Updated</dt>
-      <dd class="mt-1 text-sm text-ht-content-muted">{{ updated_at_display }}</dd>
+      <dd class="mt-1 text-sm text-ht-content-muted"><time datetime="{{ updated_at_iso }}">{{ updated_at_display }}</time></dd>
     </div>
     {% match masked_phone %}
       {% when Some with (phone) %}
@@ -211,8 +211,8 @@
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b border-divider-subtle">
-            <th class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Key</th>
-            <th class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Value</th>
+            <th scope="col" class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Key</th>
+            <th scope="col" class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Value</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-divider-faint">
@@ -234,12 +234,12 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-        <th class="px-3 py-2" aria-label="Actions"></th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
+        <th scope="col" class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -247,8 +247,8 @@
       <tr class="border-b border-divider-faint">
         <td class="px-3 py-2 text-sm text-ht-content-secondary">{{ s.device_label }}</td>
         <td class="px-3 py-2 font-mono text-xs text-ht-content-muted">{{ s.ip_address }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.created_at }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.expires_at }}</td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.created_at_iso }}">{{ s.created_at }}</time></td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.expires_at_iso }}">{{ s.expires_at }}</time></td>
         <td class="px-3 py-2">
           {% if s.revoked %}
             <span class="inline-flex items-center rounded-full bg-danger/[0.12] px-2 py-0.5 text-xs font-medium text-danger-fg">Revoked</span>
@@ -293,10 +293,10 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Credential ID</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
-        <th class="px-3 py-2" aria-label="Actions"></th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Credential ID</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
+        <th scope="col" class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -334,8 +334,8 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Organization</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Role</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Organization</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Role</th>
       </tr>
     </thead>
     <tbody>

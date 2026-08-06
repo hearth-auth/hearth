@@ -206,6 +206,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   token could be laundered onto an attacker's key. (HEA-2024)
 
 ### Fixed
+- **Admin UI accessibility + theme cleanup (HEA-2074)** — seven confirmed a11y/theme
+  defects in the admin and account UI are fixed: (1) primary/destructive/step-indicator
+  buttons no longer use the THEME-banned `text-white` (now the `graphite-50` token);
+  (2) chromeless pages (login, register, consent, MFA challenge) now render a real
+  `<main id="main">` landmark so the skip-to-content link works; (3) every list/detail
+  search box has a programmatic accessible name (previously placeholder-only, announced as
+  "search, edit text"); (4) create forms mark only optional fields with a
+  "All fields are required unless marked optional" legend, replacing the inconsistent `*` /
+  `aria-required` mix; (5) the **Redirect URIs** label is bound to its textarea on both the
+  application create and edit forms; (6) rendered timestamps are wrapped in
+  `<time datetime="…">` with a machine-readable RFC 3339 value (visible text unchanged);
+  (7) every data-table column header carries `scope="col"`. Regression fences ship in the
+  same change: a bespoke label-binding assertion (placeholder/title excluded), a
+  `scope="col"` assertion, a skip-link `#main`-focusable assertion on both layout branches,
+  a promoted `skip-link`/`region`/`landmark-one-main` blocking rule set in the axe gate, and
+  a repo-level lint that fails if `text-white` reappears under `templates/`. (HEA-2074)
 - **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —
   config loading happens before the tracing subscriber is installed, so the failure was
   reported through `tracing::error!` and written nowhere: an operator whose `hearth.yaml`
