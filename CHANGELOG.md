@@ -24,6 +24,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reference-integration suite. Production (`dev_mode == false`) always emits
   `form-action 'self'` regardless of this setting. (HEA-2084)
 
+### Security
+- **Retiring signing keys are now cut off, cleaned up, and reaped (HEA-2093)** — three
+  key-material-hygiene gaps in the rotation grace lifecycle introduced with HEA-2090:
+  - An emergency rotation (`signing_key_rotation_grace_period_secs: 0`, for a compromised key)
+    now actually revokes tokens Hearth had already validated. Previously the in-process
+    token-claims cache short-circuits the signature check, so an already-seen token kept passing
+    until its own `exp`; rotation and realm delete now flush that cache, and a token accepted via
+    a *retiring* key is never memoized, so its grace deadline is re-checked on every validation.
+  - Deleting a realm now removes its retiring signing keys from storage on both the synchronous
+    and the large-realm background cascade path. Wrapped PKCS#8 private keys (plaintext when no
+    `key_encryption_key` is configured) previously persisted indefinitely after the realm was gone.
+  - Rotation now purges retiring keys whose grace window has already closed. Each rotation
+    previously appended one permanent storage entry, all of which were decrypted on every
+    retiring-key cache reload. (HEA-2093)
+
 ### Fixed
 - **Signing-key rotation no longer logs out every active session (HEA-2090)** — rotating a
   realm's Ed25519 signing key (`POST /admin/realms/{id}/rotate-signing-key`, or config

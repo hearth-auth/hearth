@@ -3490,9 +3490,24 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         token: &str,
     ) -> Result<TokenClaims, IdentityError> {
+        self.verify_token_signature_for_realm_detailed(realm_id, token)
+            .map(|(claims, _)| claims)
+    }
+
+    /// [`Self::verify_token_signature_for_realm`], additionally reporting which
+    /// key accepted the token: `true` when a retiring key was used.
+    ///
+    /// Callers that memoize the verify result MUST NOT cache a
+    /// retiring-key-verified token: the grace deadline is re-evaluated on every
+    /// verify, and a cached entry would let the token outlive it (HEA-2093).
+    fn verify_token_signature_for_realm_detailed(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<(TokenClaims, bool), IdentityError> {
         let realm_key = self.get_or_load_realm_signing_key(realm_id)?;
         match tokens::verify_token_signature(token, realm_key.public_key_bytes()) {
-            Ok(claims) => Ok(claims),
+            Ok(claims) => Ok((claims, false)),
             Err(active_err) => {
                 // Active key rejected the token. Before failing, try each
                 // retiring key still inside its grace period (fail-closed:
@@ -3506,7 +3521,7 @@ impl EmbeddedIdentityEngine {
                     if let Ok(claims) =
                         tokens::verify_token_signature(token, entry.key.public_key_bytes())
                     {
-                        return Ok(claims);
+                        return Ok((claims, true));
                     }
                 }
                 Err(active_err)
@@ -3564,6 +3579,74 @@ impl EmbeddedIdentityEngine {
             }
         }
         out
+    }
+
+    /// Deletes retiring signing-key blobs for a realm from system-realm storage.
+    ///
+    /// `cutoff_secs` selects what goes:
+    /// - `Some(now)` — only keys whose grace deadline has already elapsed
+    ///   (`deadline <= now`), the routine purge performed on each rotation.
+    /// - `None` — every retiring key, used when the realm itself is deleted.
+    ///
+    /// Takes `storage` by argument rather than `&self` so the `delete_realm`
+    /// background cascade — which owns only a cloned storage handle — can reuse
+    /// it. Best-effort: a failure here must never abort a rotation or delete, so
+    /// errors are logged and the count of removed blobs is returned.
+    fn purge_realm_retiring_keys(
+        storage: &Arc<dyn StorageEngine>,
+        realm_id: &RealmId,
+        cutoff_secs: Option<u64>,
+    ) -> usize {
+        let sys_realm = keys::system_realm_id();
+        let scan_prefix = keys::realm_retiring_key_scan_prefix(realm_id);
+        let scan_end = keys::prefix_end(&scan_prefix);
+        let entries = match storage.scan(&sys_realm, &scan_prefix, &scan_end) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::info!(
+                    realm = %realm_id.as_uuid(),
+                    error = %e,
+                    "retiring-key purge: scan failed"
+                );
+                return 0;
+            }
+        };
+        let mut purged = 0usize;
+        for entry in entries {
+            if let Some(now_secs) = cutoff_secs {
+                // Keep keys still inside their grace window. An unparseable
+                // deadline is treated as expired: it can never be used to
+                // verify (`load_realm_retiring_keys` skips it too), so it is
+                // dead material that should not linger.
+                let live = keys::parse_retiring_key_deadline(&entry.key)
+                    .is_some_and(|deadline| deadline > now_secs);
+                if live {
+                    continue;
+                }
+            }
+            if let Err(e) = storage.delete(&sys_realm, &entry.key) {
+                tracing::info!(
+                    realm = %realm_id.as_uuid(),
+                    error = %e,
+                    "retiring-key purge: delete failed"
+                );
+            } else {
+                purged += 1;
+            }
+        }
+        purged
+    }
+
+    /// Drops every memoized token-claims entry.
+    ///
+    /// A claims-cache hit skips the Ed25519 verify, so any event that changes
+    /// which keys are trusted (rotation, realm delete) must invalidate the
+    /// cache or an already-seen token keeps passing on the strength of a
+    /// verification performed under the old key set (HEA-2093). Rotation and
+    /// realm delete are rare, admin-gated operations; the cost is a cold cache
+    /// on the next few validations, not a hot-path change.
+    fn flush_token_claims_cache(&self) {
+        self.token_claims_cache.store(Arc::new(HashMap::new()));
     }
 
     /// Parses a `session_`-prefixed session ID claim.
@@ -4539,6 +4622,13 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 9b. Delete every retiring signing key. Like the active key above these
+        //     are wrapped private keys (plaintext when no KEK is configured) and
+        //     must not outlive the realm (HEA-2093).
+        if Self::purge_realm_retiring_keys(&self.storage, realm_id, None) > 0 {
+            cascade_work_done = true;
+        }
+
         Ok(cascade_work_done)
     }
 }
@@ -5331,6 +5421,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // realm, so it is safe to proceed without holding the lock.
         drop(ops_guard);
 
+        // Tokens of a realm being deleted must stop validating on the strength
+        // of a memoized verify. Done here so both the background and the
+        // synchronous cascade below inherit it (HEA-2093).
+        self.flush_token_claims_cache();
+
         // Estimate the size of the cascade to decide whether to background it.
         let cascade_count = self.estimate_cascade_count(realm_id);
         let chunk_size = self.config.cascade_chunk_size;
@@ -5345,6 +5440,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 let audit = Arc::clone(&self.audit);
                 let realm_id_bg = realm_id.clone();
                 let signing_keys = self.realm_signing_keys.clone();
+                let retiring_keys = self.realm_retiring_keys.clone();
                 let status_cache = self.realm_status_cache.clone();
                 let existing_realm_bg = existing_realm.clone();
 
@@ -5462,11 +5558,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         }
                     }
 
-                    // System-realm keys: SAML key + signing key.
+                    // System-realm keys: SAML key + active signing key + every
+                    // retiring signing key. All are (wrapped) private key
+                    // material and must not outlive the realm (HEA-2093).
                     let saml_key = keys::encode_realm_saml_key(&realm_id_bg);
                     let _ = storage.delete(&sys, &saml_key);
                     let signing_key_key = keys::encode_realm_signing_key(&realm_id_bg);
                     let _ = storage.delete(&sys, &signing_key_key);
+                    Self::purge_realm_retiring_keys(&storage, &realm_id_bg, None);
 
                     // Emit audit event (best-effort; no ? propagation in async task).
                     let audit_event = crate::audit::CreateAuditEvent {
@@ -5481,6 +5580,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
                     // Remove from in-memory caches.
                     signing_keys.remove(&realm_id_bg);
+                    retiring_keys.remove(&realm_id_bg);
                     status_cache.rcu(|current| {
                         let mut new_map = (**current).clone();
                         new_map.remove(&realm_id_bg);
@@ -5787,8 +5887,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(&sys_realm, &key_storage_key, &new_stored)
             .map_err(Self::storage_err)?;
 
-        // Store the old key as a retiring key with its expiry deadline.
+        // Reap retiring keys whose grace window has already closed. They can
+        // never verify anything again, but they are wrapped (plaintext without
+        // a configured KEK) private keys that would otherwise accumulate one
+        // per rotation forever and be decrypted on every cache reload
+        // (HEA-2093).
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        let purged = Self::purge_realm_retiring_keys(&self.storage, realm_id, Some(now_secs));
+
+        // Store the old key as a retiring key with its expiry deadline.
         let deadline_secs = now_secs.saturating_add(grace_period_secs);
         let retiring_key_storage =
             keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id);
@@ -5802,6 +5909,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Invalidate the retiring-key cache so the just-retired key is picked up
         // on the next validation (HEA-2090).
         self.realm_retiring_keys.remove(realm_id);
+        // Drop memoized claims: a token already validated under the outgoing key
+        // must be re-verified against the new key set, so an emergency rotation
+        // (grace 0) actually cuts it off instead of letting a warm cache entry
+        // carry it to its own `exp` (HEA-2093).
+        self.flush_token_claims_cache();
 
         tracing::info!(
             realm = %realm_id.as_uuid(),
@@ -5809,6 +5921,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             new_kid = %new_key.key_id(),
             grace_period_secs,
             deadline_secs,
+            purged_expired_retiring_keys = purged,
             "signing key rotated; old key enters grace period"
         );
 
@@ -7077,9 +7190,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Some(arc) => arc,
                 None => {
                     // Cache miss: full Ed25519 verify + serde_json parse.
-                    let c = self.verify_token_signature_for_realm(realm_id, token)?;
+                    let (c, via_retiring_key) =
+                        self.verify_token_signature_for_realm_detailed(realm_id, token)?;
                     let arc = Arc::new(c);
-                    if let Some(k) = maybe_key {
+                    // A token accepted by a *retiring* key is deliberately not
+                    // memoized: the grace deadline is checked inside the verify,
+                    // so caching would let the token stay valid past the end of
+                    // the grace window (HEA-2093). Tokens signed with the active
+                    // key — every token in steady state — still cache.
+                    if let (Some(k), false) = (maybe_key, via_retiring_key) {
                         self.token_claims_cache_insert(k, Arc::clone(&arc));
                     }
                     arc
