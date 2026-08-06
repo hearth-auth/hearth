@@ -1615,6 +1615,18 @@ pub fn router(state: WebState) -> Router {
     // and `/ui/*`. Add a permanent redirect so bookmarks and old links
     // still work.
     let tls_enabled = shared.tls_enabled;
+    // HEA-2072: the reference-integration Playwright suite POSTs the hosted
+    // login/consent forms back to the demo SPA's Vite dev server. Advertise
+    // those plaintext-http localhost origins in the CSP `form-action` directive
+    // ONLY under `--dev`; production emits the strict `form-action 'self'`.
+    let extra_form_action_origins = if shared.dev_mode {
+        vec![
+            "http://localhost:5173".to_string(),
+            "http://localhost:5399".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
     Router::new()
         .route(
             "/ui/",
@@ -1684,6 +1696,7 @@ pub fn router(state: WebState) -> Router {
             security::SecurityConfig {
                 hsts_enabled: tls_enabled,
                 coop_coep_enabled: true,
+                extra_form_action_origins,
             },
         ))
 }
