@@ -15,6 +15,7 @@
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Register application</h1>
   <p class="mt-1 text-sm text-ht-content-muted">Create a new OAuth 2.0 / OIDC client for this realm.</p>
+  <p class="mt-1 text-sm text-ht-content-muted">All fields are required unless marked optional.</p>
 </div>
 
 <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
@@ -32,7 +33,7 @@
     {% endmatch %}
 
     <div>
-      <label for="client_name" class="block text-sm font-medium text-ht-content-secondary">Application name <span class="text-danger-fg">*</span></label>
+      <label for="client_name" class="block text-sm font-medium text-ht-content-secondary">Application name</label>
       <input type="text" id="client_name" name="client_name" required autofocus maxlength="128"
              value="{{ form_client_name }}"
              class="mt-1 input">
@@ -68,7 +69,7 @@
     </fieldset>
 
     <div>
-      <label class="block text-sm font-medium text-ht-content-secondary">Redirect URIs <span class="text-danger-fg">*</span></label>
+      <label for="redirect_uris" class="block text-sm font-medium text-ht-content-secondary">Redirect URIs</label>
       <p class="mb-1.5 text-xs text-ht-content-muted">One URI per line. Must match exactly what your app sends in the authorization request.</p>
       <textarea id="redirect_uris" name="redirect_uris" rows="4" required
                 placeholder="https://app.example.com/callback&#10;https://app.example.com/auth/callback"

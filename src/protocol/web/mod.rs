@@ -652,6 +652,25 @@ pub(super) fn format_ts(ts: crate::core::Timestamp) -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
 }
 
+/// Formats a [`crate::core::Timestamp`] as an RFC 3339 / ISO-8601 UTC string
+/// (`YYYY-MM-DDTHH:MM:SSZ`) for the `datetime` attribute of `<time>` elements.
+///
+/// This is the machine-readable counterpart to [`format_ts`]: templates render
+/// the human string as the element's text and this value as its `datetime`
+/// attribute, so assistive tech and any future relative-time JS get a precise
+/// timestamp without changing what the user sees (HEA-2074 finding #6).
+#[allow(clippy::many_single_char_names)]
+pub(super) fn format_ts_iso(ts: crate::core::Timestamp) -> String {
+    let secs = ts.as_micros().div_euclid(1_000_000);
+    let rem = secs.rem_euclid(86_400);
+    let days = secs.div_euclid(86_400);
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let (y, mo, d) = web_civil_from_days(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
 /// Formats a [`crate::core::Timestamp`] as a human-friendly relative
 /// time string, using `now` as the reference point. Used on the audit
 /// log where scanning recent activity is easier with "5m ago" than with
@@ -2129,6 +2148,22 @@ mod tests {
         // 5 minutes earlier
         let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 5 * 60_000_000);
         assert_eq!(format_ts_relative_at(ts, now), "5m ago");
+    }
+
+    #[test]
+    fn format_ts_iso_renders_rfc3339_utc_with_seconds() {
+        // 1_700_000_000 s = 2023-11-14T22:13:20Z (Unix epoch reference).
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        assert_eq!(format_ts_iso(ts), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn format_ts_iso_matches_human_format_ts_date_and_time() {
+        // The ISO datetime attribute must describe the same instant the human
+        // text shows — same date and HH:MM, just with seconds + `T`/`Z`.
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        assert_eq!(format_ts(ts), "2023-11-14 22:13 UTC");
+        assert_eq!(format_ts_iso(ts), "2023-11-14T22:13:20Z");
     }
 
     #[test]

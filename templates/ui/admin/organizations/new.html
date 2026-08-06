@@ -15,6 +15,7 @@
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Create organization</h1>
   <p class="mt-1 text-sm text-ht-content-muted">Organizations group members, RBAC roles, and audit history together inside this realm.</p>
+  <p class="mt-1 text-sm text-ht-content-muted">All fields are required unless marked optional.</p>
 </div>
 
 <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
@@ -87,7 +88,7 @@
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">
             {{ def.display_label() }}
-            {% if def.required %}<span class="ml-0.5 text-danger-fg">*</span>{% endif %}
+            {% if !def.required %}<span class="ml-0.5 text-ht-content-muted">(optional)</span>{% endif %}
           </label>
           {% if let Some(desc) = def.description_str() %}
             <p class="mt-0.5 text-xs text-ht-content-muted">{{ desc }}</p>
