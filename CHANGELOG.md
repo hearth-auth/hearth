@@ -24,6 +24,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reference-integration suite. Production (`dev_mode == false`) always emits
   `form-action 'self'` regardless of this setting. (HEA-2084)
 
+### Fixed
+- **Full-stack demo resource server now rejects revoked access tokens (HEA-2094)** — the demo
+  Go backend (`examples/full-stack-demo/backend`) previously validated access tokens by Ed25519
+  signature and expiry only, so a token revoked at Hearth was still accepted on `/api/notes`
+  until it expired naturally. It now layers RFC 7662 introspection on top of the JWKS signature
+  check (`middleware/revocation.go`), calling Hearth's realm-scoped `POST /realms/{realm}/introspect`
+  and caching each verdict for a short, configurable TTL (`INTROSPECT_CACHE_TTL`, default `3s`)
+  so introspection is not a per-request round-trip. Introspection outages fail closed (`503`).
+  This is a reference-implementation quality fix — Hearth's own control plane already rejected the
+  revoked token — so integrators who copied the demo stop learning the signature-only anti-pattern.
+  (HEA-2094)
+
 ### Security
 - **Retiring signing keys are now cut off, cleaned up, and reaped (HEA-2093)** — three
   key-material-hygiene gaps in the rotation grace lifecycle introduced with HEA-2090:

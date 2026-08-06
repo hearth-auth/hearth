@@ -38,6 +38,12 @@ type JWKSValidator struct {
 	mu      sync.RWMutex
 	keySet  jwk.Set
 	jwksURL string
+
+	// revoker, when set, adds revocation-aware validation after the local
+	// signature+expiry check. nil leaves the validator signature-only (the
+	// insufficient behavior HEA-2094 fixes — kept as an explicit opt-out so the
+	// contrast is visible in the demo).
+	revoker *RevocationChecker
 }
 
 // NewJWKSValidator fetches the JWKS from jwksURL and returns a ready validator.
@@ -51,6 +57,19 @@ func NewJWKSValidator(ctx context.Context, jwksURL string) (*JWKSValidator, erro
 		return nil, fmt.Errorf("fetch JWKS from %s: %w", jwksURL, err)
 	}
 	return &JWKSValidator{keySet: set, jwksURL: jwksURL}, nil
+}
+
+// WithRevocationCheck enables revocation-aware validation: after the local
+// signature+expiry check passes, Auth() additionally confirms the token is
+// still active at Hearth via introspection (see RevocationChecker). Returns the
+// receiver for chaining. Passing nil leaves the validator signature-only.
+//
+// Signature validation alone cannot detect revocation — a logged-out or killed
+// session still carries a cryptographically valid token until it expires — so a
+// resource server that cares about revocation MUST layer this check on top.
+func (v *JWKSValidator) WithRevocationCheck(r *RevocationChecker) *JWKSValidator {
+	v.revoker = r
+	return v
 }
 
 // Auth returns a Gin middleware that validates the Authorization: Bearer token
@@ -85,6 +104,27 @@ func (v *JWKSValidator) Auth() gin.HandlerFunc {
 			// as error details can leak information about expected token structure.
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
+		}
+
+		// Signature + expiry are valid, but a JWT cannot express revocation: a
+		// session logged out or killed at Hearth after this token was minted
+		// still carries a valid signature until it expires. When a revocation
+		// checker is configured, confirm the token is still active at Hearth
+		// (RFC 7662 introspection, short-TTL cached). Fail closed: an
+		// introspection outage rejects the request (503) rather than silently
+		// falling back to signature-only acceptance.
+		if v.revoker != nil {
+			active, rerr := v.revoker.IsActive(c.Request.Context(), raw)
+			if rerr != nil {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+					"error": "token validation temporarily unavailable",
+				})
+				return
+			}
+			if !active {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token revoked"})
+				return
+			}
 		}
 
 		c.Set(KeyRawToken, raw)
