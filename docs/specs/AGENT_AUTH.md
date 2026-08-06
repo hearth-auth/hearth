@@ -251,6 +251,19 @@ Hearth **MUST** implement the OAuth 2.0 On-Behalf-Of extension per draft-oauth-a
 
 Hearth **MUST** implement the token exchange grant type (`urn:ietf:params:oauth:grant-type:token-exchange`) per RFC 8693.
 
+**Client authentication is required (HEA-2024).** Both the header-realm endpoint (`POST /token`)
+and the path-realm endpoint (`POST /realms/{realm}/token`) require the caller to authenticate
+as a registered client before the exchange is processed. Unauthenticated requests (no `Authorization`
+header and no `client_id`/`client_secret` in the request body) are rejected with
+`401 invalid_client`. Supported client authentication methods are HTTP Basic and
+`client_id`/`client_secret` in the request body.
+
+**DPoP-bound subject tokens (HEA-2024).** If the `subject_token` carries a `cnf.jkt` claim,
+the request **MUST** include a `DPoP` proof whose thumbprint matches that binding. Presenting a
+sender-constrained subject token without a matching proof is rejected with `invalid_dpop_proof`.
+This prevents a stolen DPoP-bound access token from being re-bound to an attacker's key via
+token exchange.
+
 **Rules:**
 
 - The `subject_token` **MUST** be the user's access token (proving the user's identity and granted scopes).

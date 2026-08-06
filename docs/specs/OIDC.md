@@ -191,6 +191,29 @@ Clients SHOULD confirm `cnf.jkt` is present in the issued access token before re
 
 > For agent-specific guidance on persisting DPoP key pairs across grant lifetimes, see [AGENT_AUTH.md §6.5](AGENT_AUTH.md#65-dpop-refresh-token-binding-rfc-9449-5).
 
+### 3.3 Server-Side Sender-Constraint Enforcement at Hearth Resource Endpoints (HEA-2031, HEA-2039)
+
+Hearth itself acts as a resource server for several protected endpoints. When a caller presents
+a DPoP-bound access token (one carrying `cnf.jkt`) at any of these endpoints, Hearth **rejects
+the request with `401 invalid_token`** unless a valid matching `DPoP` proof header is also
+provided. Plain Bearer tokens without `cnf.jkt` are accepted without a proof.
+
+Endpoints that enforce this:
+
+| Endpoint | Notes |
+|---|---|
+| `GET /userinfo`, `GET /realms/{realm}/userinfo` | OIDC UserInfo |
+| `GET /v1/me/permissions` | Effective-permissions resolution |
+| `POST /oauth/authorize` (decide-permission) | Agent tool-permission decision |
+| `GET /oauth/session-versions` | Session-version delta feed |
+| `GET /oauth/session-versions/snapshot` | Session-version snapshot |
+| `POST /register`, `POST /realms/{realm}/register` | Authenticated DCR with initial-access token |
+
+For callers with DPoP-bound tokens, the `DPoP` proof must include correct `htm` (HTTP method),
+`htu` (HTTP URL), and — when the token is access-token-bound — an `ath` (access token hash)
+claim per RFC 9449 §4.3. Missing or invalid proofs are rejected before any permission check
+runs.
+
 ---
 
 ## 4. JAR (JWT Authorization Requests, RFC 9101)

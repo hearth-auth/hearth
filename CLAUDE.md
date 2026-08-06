@@ -110,15 +110,20 @@ BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
 REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
 ADMIN_PASSWORD=$(echo "$BOOTSTRAP" | jq -r '.admin_password')
+SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
+SYSTEM_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.system_realm_id')
 
-echo "Realm:    $REALM_ID"
-echo "Token:    $ADMIN_TOKEN"
-echo "Password: $ADMIN_PASSWORD"   # store this — it will not be shown again
+echo "Realm:         $REALM_ID"
+echo "Token:         $ADMIN_TOKEN"
+echo "Password:      $ADMIN_PASSWORD"   # store this — it will not be shown again
+echo "System Token:  $SYSTEM_TOKEN"
+echo "System Realm:  $SYSTEM_REALM_ID"
 
 # 3. Re-bootstrap (after server restart / token expiry) — requires the Bearer token.
 BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap \
   -H "Authorization: Bearer $ADMIN_TOKEN")
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
+SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
 ```
 
 **Browser login:** navigate to `http://127.0.0.1:8420/ui/admin/login` and sign in with:
@@ -130,15 +135,25 @@ ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
 
 A successful login drops you at the admin dashboard (`/admin`).
 
-**API usage with the token:**
+**API usage with the tokens:**
 
 ```bash
-# Example: list realms
+# Dev-realm operations (most admin API calls)
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
   http://127.0.0.1:8420/admin/realms | jq .
+
+# Cross-realm operations (e.g. rotate a non-dev realm's signing key)
+# Use the system token + X-Realm-ID header
+curl -s -X POST \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms/<other-realm-id>/rotate-signing-key | jq .
 ```
 
-> The `access_token` from bootstrap is a long-lived admin Bearer token. Use it for REST API calls in tests and scripts. It is **not** a session cookie — browser pages require the cookie set by the login form above.
+> `access_token` is scoped to the dev realm only — it 403s on cross-realm operations.
+> `system_access_token` carries the nil-UUID system-realm identity and can manage any realm.
+> Both are long-lived Bearer tokens. They are **not** session cookies — browser pages require
+> the cookie set by the login form above.
 
 ## Reference Documents
 

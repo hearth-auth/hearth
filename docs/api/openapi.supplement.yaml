@@ -349,11 +349,66 @@ paths:
   /admin/bootstrap:
     post:
       summary: Dev bootstrap (--dev mode only)
+      description: |
+        Seeds a realm and admin user on first call. Returns tokens on every call.
+        Available **only** in `--dev` mode; returns `404` in production.
+        Re-bootstrap (realm already exists) refreshes tokens but does **not** reset
+        the admin password — include the `Authorization: Bearer <access_token>` header
+        from the first bootstrap call.
       operationId: adminBootstrap
       tags: [Admin]
       responses:
         "200":
-          description: Bootstrap result with admin token
+          description: Bootstrap result with dev-realm and system-realm admin tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  realm_id:
+                    type: string
+                    description: UUID of the created dev realm.
+                  user_id:
+                    type: string
+                    description: UUID of the admin user in the dev realm.
+                  access_token:
+                    type: string
+                    description: |
+                      Long-lived Bearer token for the dev-realm admin. Scoped to the dev
+                      realm only — cannot manage other realms. Use for REST API calls in
+                      dev/test scripts and as the `Authorization` header on re-bootstrap.
+                  refresh_token:
+                    type: string
+                    description: Refresh token for the dev-realm admin session.
+                  admin_password:
+                    type: string
+                    description: |
+                      Randomly generated admin password. Non-empty **only** on the **first**
+                      bootstrap call. Empty on all subsequent re-bootstrap calls — store this
+                      value securely; it is never returned again. Use for browser login at
+                      `/ui/admin/login`.
+                  quickstart:
+                    type: string
+                    description: |
+                      Ready-to-copy shell commands with the actual realm ID and token
+                      interpolated for convenience. Only populated in --dev mode.
+                  system_access_token:
+                    type: string
+                    description: |
+                      Bearer token for the **system-realm** admin (`admin@hearth.test` in the
+                      nil-UUID system realm). Unlike `access_token`, this token can manage
+                      **any** realm cross-realm (e.g. rotate another realm's signing key) — the
+                      BOLA guard only permits cross-realm operations for a nil-UUID system-realm
+                      token. Use with `X-Realm-ID: <system_realm_id>` for cross-realm admin API
+                      calls. Populated on every bootstrap and re-bootstrap (HEA-2087).
+                  system_realm_id:
+                    type: string
+                    description: |
+                      The reserved system realm ID (the nil UUID,
+                      `00000000-0000-0000-0000-000000000000`). Send as the `X-Realm-ID` header
+                      alongside `system_access_token` for cross-realm admin API calls.
+        "404":
+          description: Endpoint not available in production mode.
 
   # ── Admin — sessions ─────────────────────────────────────────────────────
   /admin/sessions/{session_id}/sv-bump:
