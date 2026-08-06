@@ -140,6 +140,21 @@ if [[ -z "$ready" ]]; then
 fi
 echo "  ✓ stack is up (Hearth :${HEARTH_PORT}, backend :${BACKEND_PORT}, frontend :${FRONTEND_PORT})"
 
+# ── Plumb the admin token written by demo.sh ────────────────────────────────
+# demo.sh writes .hearth-run-env after its own (first, unauthenticated) bootstrap.
+# Sourcing it here exports HEARTH_ADMIN_TOKEN / HEARTH_SYSTEM_REALM_ID so the
+# suite's bootstrapAdmin() helper can return them directly instead of calling
+# POST /admin/bootstrap again — which would 401 because the realm already exists.
+DEMO_RUN_ENV="$DEMO_DIR/.hearth-run-env"
+if [[ -f "$DEMO_RUN_ENV" ]]; then
+  # shellcheck source=/dev/null
+  source "$DEMO_RUN_ENV"
+  export HEARTH_ADMIN_TOKEN HEARTH_SYSTEM_REALM_ID
+  echo "  ✓ admin credentials loaded from stack boot"
+else
+  echo "  ⚠ .hearth-run-env not found — bootstrapAdmin() will attempt a live bootstrap call" >&2
+fi
+
 # ── Run the suite (reuse pw-run.sh for the cross-platform browser launch) ────
 echo "▸ running integration suite…"
 cd "$UI_DIR"

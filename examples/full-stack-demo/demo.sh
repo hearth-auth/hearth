@@ -181,6 +181,14 @@ if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
 fi
 echo "  ✓ admin token acquired"
 
+# Write the bootstrap credentials to a gitignored env file so the integration
+# test suite can consume them without re-bootstrapping (which would 401 because
+# the realm already exists after this call).
+cat > "$HERE/.hearth-run-env" <<RUNENV
+HEARTH_ADMIN_TOKEN=${ADMIN_TOKEN}
+HEARTH_SYSTEM_REALM_ID=${SYS_REALM_ID}
+RUNENV
+
 # ── Resolve demo realm ────────────────────────────────────────────────────────
 
 echo "▸ resolving demo realm…"
