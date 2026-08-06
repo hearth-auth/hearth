@@ -45,6 +45,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   if the rotation was an emergency response to a compromised key. The miss path now snapshots a
   per-realm rotation epoch before the load and discards its insert if a rotation intervened, at no
   cost to the cache-hit hot path. (HEA-2096)
+- **Token-claims cache no longer resurrects a token past a racing rotation flush (HEA-2097)** — the
+  same race class as HEA-2096, on the `validate_token` claims cache. A validation that verified a
+  token under the active key could memoize it *after* an emergency `grace: 0`
+  `rotate_realm_signing_key` (or a realm delete) had already flushed the cache, leaving that token
+  accepted until its own `exp` and defeating the point of the emergency rotation. The cache now
+  carries a generation counter that each flush bumps; the miss path snapshots it before the
+  signature verify and discards the insert if it moved, so an in-flight validation can never re-warm
+  a token the flush was meant to cut off. The cache-hit hot path is untouched. A related off-hot-path
+  cleanup: `purge_realm_retiring_keys` now logs a persistent delete failure at `warn` rather than
+  `info`, since it silently retains wrapped (or, with no KEK, plaintext) private-key material.
+  (HEA-2097)
 - **Retiring signing keys are now cut off, cleaned up, and reaped (HEA-2093)** — three
   key-material-hygiene gaps in the rotation grace lifecycle introduced with HEA-2090:
   - An emergency rotation (`signing_key_rotation_grace_period_secs: 0`, for a compromised key)
