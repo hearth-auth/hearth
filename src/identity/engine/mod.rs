@@ -8343,7 +8343,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // 2. Normalize and validate basic inputs before any storage.
         let email = validation::validate_email(&request.email)?;
-        let display_name = validation::validate_display_name(&request.display_name)?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
+        let display_name = if request.display_name.trim().is_empty() {
+            // UI labels display_name as optional — synthesize from first+last
+            // when blank, matching the same fallback used by create_user and import_user.
+            let synthesized = format!("{first_name} {last_name}").trim().to_string();
+            if synthesized.is_empty() {
+                return Err(IdentityError::InvalidInput {
+                    reason: "Display name or first/last name is required".to_string(),
+                });
+            }
+            validation::validate_display_name(&synthesized)?
+        } else {
+            validation::validate_display_name(&request.display_name)?
+        };
         // DoS bound check then HSEC-003 floor (unconditional, policy-independent).
         validation::validate_password_length(request.password.as_bytes())?;
         validation::validate_password_floor(request.password.as_bytes())?;
@@ -8430,6 +8444,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &CreateUserRequest {
                 email: email.clone(),
                 display_name,
+                first_name,
+                last_name,
                 ..Default::default()
             },
             UserStatus::PendingVerification,
