@@ -11,8 +11,13 @@
 import { HEARTH_URL, BACKEND_URL, REALM_SLUG, CLIENT_ID } from './config';
 
 export interface AdminSession {
+  /** A **system-realm** (nil-UUID) admin token. Unlike the dev-realm bootstrap
+   *  token it can manage any realm cross-realm (e.g. rotate another realm's
+   *  signing key) — the server's BOLA guard only permits cross-realm ops for a
+   *  nil-realm token (HEA-2087). */
   token: string;
-  /** System realm id — required as `X-Realm-ID` on admin API calls. */
+  /** System realm id (the nil UUID) — required as `X-Realm-ID` on cross-realm
+   *  admin API calls. */
   systemRealmId: string;
 }
 
@@ -25,7 +30,11 @@ export interface AdminSession {
  *  realm already exists after demo.sh ran.
  *
  *  Without those env vars (standalone test run against a fresh instance) the
- *  unauthenticated bootstrap call is valid only on the very first call. */
+ *  unauthenticated bootstrap call is valid only on the very first call.
+ *
+ *  The token returned is the **system-realm** admin token (`system_access_token`)
+ *  so cross-realm operations like `rotateSigningKey` work; older servers that
+ *  predate HEA-2087 fall back to the dev-realm `access_token`/`realm_id`. */
 export async function bootstrapAdmin(): Promise<AdminSession> {
   const envToken = process.env['HEARTH_ADMIN_TOKEN'];
   const envRealmId = process.env['HEARTH_SYSTEM_REALM_ID'];
@@ -34,8 +43,18 @@ export async function bootstrapAdmin(): Promise<AdminSession> {
   }
   const resp = await fetch(`${HEARTH_URL}/admin/bootstrap`, { method: 'POST' });
   if (!resp.ok) throw new Error(`bootstrap failed: HTTP ${resp.status}`);
-  const body = (await resp.json()) as { access_token: string; realm_id: string };
-  return { token: body.access_token, systemRealmId: body.realm_id };
+  const body = (await resp.json()) as {
+    access_token: string;
+    realm_id: string;
+    system_access_token?: string;
+    system_realm_id?: string;
+  };
+  // Prefer the cross-realm system credential; fall back to the dev-realm token
+  // for servers predating HEA-2087.
+  return {
+    token: body.system_access_token || body.access_token,
+    systemRealmId: body.system_realm_id || body.realm_id,
+  };
 }
 
 /** Resolves the demo realm's UUID via the admin realms list. */

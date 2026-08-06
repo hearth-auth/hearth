@@ -171,8 +171,17 @@ fi
 echo "▸ bootstrapping…"
 BOOTSTRAP=$(curl -sf -X POST "$BASE/admin/bootstrap")
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
-# The system realm ID is required as X-Realm-ID on admin API calls.
+# NOTE: .realm_id is the DEV realm's UUID, not the reserved system realm. It is
+# fine for the global GET /admin/realms below (which lists all realms), but a
+# dev-realm token CANNOT manage other realms cross-realm (HEA-2087).
 SYS_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
+
+# HEA-2087: cross-realm admin credential. bootstrap also seeds a system-realm
+# admin (admin@hearth.test, nil-UUID realm) and now returns a token for it. Only
+# a nil-realm (system) token passes the scoped_realm BOLA guard for cross-realm
+# operations such as rotating the demo realm's signing key (integration flow 5).
+SYSTEM_ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token // empty')
+SYSTEM_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.system_realm_id // empty')
 
 if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
   echo "✗ could not obtain admin token" >&2
@@ -183,10 +192,12 @@ echo "  ✓ admin token acquired"
 
 # Write the bootstrap credentials to a gitignored env file so the integration
 # test suite can consume them without re-bootstrapping (which would 401 because
-# the realm already exists after this call).
+# the realm already exists after this call). The suite's control-plane helpers
+# need the SYSTEM token so cross-realm ops (signing-key rotation) succeed; fall
+# back to the dev-realm token for older binaries that lack system_access_token.
 cat > "$HERE/.hearth-run-env" <<RUNENV
-HEARTH_ADMIN_TOKEN=${ADMIN_TOKEN}
-HEARTH_SYSTEM_REALM_ID=${SYS_REALM_ID}
+HEARTH_ADMIN_TOKEN=${SYSTEM_ADMIN_TOKEN:-$ADMIN_TOKEN}
+HEARTH_SYSTEM_REALM_ID=${SYSTEM_REALM_ID:-$SYS_REALM_ID}
 RUNENV
 
 # ── Resolve demo realm ────────────────────────────────────────────────────────
