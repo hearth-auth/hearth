@@ -842,6 +842,26 @@ security:
 
 ---
 
+#### `security.dev_csp_form_action_origins`
+
+Extra origins appended to the CSP `form-action` directive when the server runs in `--dev` mode (HEA-2084).
+
+**Production safety:** These origins are **only emitted when `hearth serve --dev` is active.** In production the server always emits `form-action 'self'` regardless of this setting.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dev_csp_form_action_origins` | `string[]` | `["http://localhost:5173", "http://localhost:5399"]` | List of `http://localhost:<port>` origins allowed as `form-action` destinations in dev mode. Configure to match the port(s) your demo SPA listens on. Has no effect in production. |
+
+```yaml
+security:
+  dev_csp_form_action_origins:
+    - "http://localhost:3000"   # custom Vite port
+```
+
+> **QA note (HEA-2082):** Set this key to `["http://localhost:<your-port>"]` in `hearth.yaml` when running the reference-integration Playwright suite against a non-default SPA port. The config key name is `security.dev_csp_form_action_origins`.
+
+---
+
 #### `security.load_test_unthrottled`
 
 Load-test escape hatch that disables all request-rate limiters so a single-node

@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`security.dev_csp_form_action_origins` config key (HEA-2084)** — the dev-mode CSP
+  `form-action` extra origins (previously hard-coded to `:5173` and `:5399`) are now
+  configurable via this `hearth.yaml` key. Supply a list of `http://localhost:<port>` strings
+  to match the port(s) your demo SPA runs on. The key defaults to the previous values
+  (`["http://localhost:5173", "http://localhost:5399"]`), so no change is needed for the
+  reference-integration suite. Production (`dev_mode == false`) always emits
+  `form-action 'self'` regardless of this setting. (HEA-2084)
+
+### Fixed
+- **Self-registration no longer rejects a blank "Display name (optional)" field (HEA-2078)** —
+  the engine now derives the display name from `first_name + last_name` when the field is left
+  empty, matching the form label and the behaviour of `create_user` / `import_user`. Registrations
+  where all three name fields are blank continue to be rejected with a clear error.
+- **OAuth endpoints now accept the RFC-mandated `application/x-www-form-urlencoded` request
+  encoding (HEA-2077)** — the token, revocation, introspection, pushed-authorization-request
+  (PAR), and device-authorization endpoints — plus their `/realms/{realm}/…` twins — previously
+  returned `415 Unsupported Media Type` for form-encoded bodies, breaking spec-compliant clients
+  and off-the-shelf OAuth libraries (RFC 6749 §4.1.3, RFC 7009 §2.1, RFC 7662 §2.1, RFC 8628 §3.1,
+  RFC 9126 §2.1). Both form and JSON bodies are now accepted on every one of these endpoints;
+  client credentials carried in the form body (`client_id`/`client_secret`) work as before, and
+  all auth, DPoP, and rate-limit checks run identically on the form path. Genuinely unsupported
+  content types still return 415.
+
 ### Security
 - **CSP `form-action` no longer advertises plaintext-http localhost origins in production
   builds (HEA-2072)** — the security-headers middleware emitted
