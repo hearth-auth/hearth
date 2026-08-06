@@ -547,6 +547,20 @@ pub struct EmbeddedIdentityEngine {
     /// expired retiring key is never accepted even before the cache entry is
     /// invalidated. Invalidated on rotation and realm delete.
     realm_retiring_keys: Arc<ShardedArcSwapMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
+    /// Per-realm rotation epoch guarding the `realm_signing_keys` cache-miss
+    /// fill against a racing rotation (HEA-2096).
+    ///
+    /// `get_or_load_realm_signing_key` is an unsynchronised get-miss-load-insert:
+    /// a `rotate_realm_signing_key` that lands between the storage read and the
+    /// cache insert would otherwise have its `remove()` overwritten by the
+    /// loser's now-stale value, leaving the engine signing new tokens with the
+    /// key that was just retired until the *next* invalidation. Rotation bumps
+    /// this counter (under `realm_ops_lock`) before it clears the cache; the
+    /// miss path snapshots it before the storage read and, if it moved by the
+    /// time the load completes, discards its own insert so the next reader
+    /// reloads the freshly-rotated key. No lock and no cost on the cache-hit
+    /// hot path — only cache misses read the epoch.
+    realm_key_epoch: Arc<ShardedArcSwapMap<RealmId, u64>>,
     /// Wait-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -1098,6 +1112,7 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1652,6 +1667,7 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -3690,6 +3706,12 @@ impl EmbeddedIdentityEngine {
             return Ok(key);
         }
 
+        // Cache miss. Snapshot the rotation epoch *before* the storage read so a
+        // rotation that lands in the load window is detectable (HEA-2096). A
+        // missing entry is epoch 0 — the same value a never-rotated realm reads
+        // and bumps from, so the comparison below stays consistent.
+        let epoch_before = self.realm_key_epoch.get(realm_id).unwrap_or(0);
+
         // Cache miss: load key bytes from storage.
         let sys_realm = keys::system_realm_id();
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
@@ -3707,10 +3729,19 @@ impl EmbeddedIdentityEngine {
 
         let signing_key = Arc::new(SigningKey::from_pkcs8(&key_bytes)?);
 
-        // Insert into cache — safe under concurrent loaders: the last writer
-        // wins but all produce equivalent keys.
+        // Publish, then verify no rotation intervened. Under concurrent loaders
+        // of the *same* key the last writer wins and all produce equivalent
+        // values, so the insert is safe. The danger is a rotation that landed
+        // between the epoch snapshot and now: our `signing_key` may be the
+        // just-retired key, and a plain insert would resurrect it past
+        // `rotate_realm_signing_key`'s own `remove()`. If the epoch moved,
+        // discard our entry so the next reader reloads the rotated key — worst
+        // case an extra cold fill, never a stale active key (HEA-2096).
         self.realm_signing_keys
             .insert(realm_id.clone(), Arc::clone(&signing_key));
+        if self.realm_key_epoch.get(realm_id).unwrap_or(0) != epoch_before {
+            self.realm_signing_keys.remove(realm_id);
+        }
 
         Ok(signing_key)
     }
@@ -5903,6 +5934,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .put(&sys_realm, &retiring_key_storage, &old_stored)
             .map_err(Self::storage_err)?;
+
+        // Bump the rotation epoch *before* clearing the cache so a concurrent
+        // cache-miss fill that snapshotted the old epoch and read the outgoing
+        // key sees the change and discards its stale insert instead of
+        // resurrecting it past the `remove()` below (HEA-2096). Serialised by
+        // `realm_ops_lock`, so the read-then-write bump cannot lose an update.
+        let next_epoch = self
+            .realm_key_epoch
+            .get(realm_id)
+            .unwrap_or(0)
+            .wrapping_add(1);
+        self.realm_key_epoch.insert(realm_id.clone(), next_epoch);
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
         self.realm_signing_keys.remove(realm_id);
@@ -14454,6 +14497,225 @@ mod tests {
         .expect("engine creation")
         .with_hibp_transport(Arc::new(NeverPwnedStub));
         (dir, engine, clock)
+    }
+
+    // ===== HEA-2096: signing-key cache-miss vs. rotation race =====
+
+    /// A one-shot rendezvous the [`GatedStorage`] decorator uses to park a
+    /// cache-miss `get` for one specific storage key, letting the test drive a
+    /// rotation into the exact window between the storage read and the cache
+    /// insert.
+    struct RotationGate {
+        /// The storage key whose `get` should trip the gate; `None` once fired.
+        armed_key: std::sync::Mutex<Option<Vec<u8>>>,
+        reached: std::sync::Mutex<bool>,
+        reached_cv: std::sync::Condvar,
+        release: std::sync::Mutex<bool>,
+        release_cv: std::sync::Condvar,
+    }
+
+    impl RotationGate {
+        fn new() -> Self {
+            Self {
+                armed_key: std::sync::Mutex::new(None),
+                reached: std::sync::Mutex::new(false),
+                reached_cv: std::sync::Condvar::new(),
+                release: std::sync::Mutex::new(false),
+                release_cv: std::sync::Condvar::new(),
+            }
+        }
+
+        /// Arms the gate to fire on the next `get` of `key`.
+        fn arm(&self, key: Vec<u8>) {
+            *self.armed_key.lock().expect("armed_key lock") = Some(key);
+        }
+
+        /// Called from the decorator's `get`. If `key` is the armed key, fires
+        /// once: signals the driver and blocks until [`release`](Self::release).
+        fn maybe_trip(&self, key: &[u8]) {
+            let hit = {
+                let mut armed = self.armed_key.lock().expect("armed_key lock");
+                if armed.as_deref() == Some(key) {
+                    *armed = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !hit {
+                return;
+            }
+            *self.reached.lock().expect("reached lock") = true;
+            self.reached_cv.notify_all();
+            let mut rel = self.release.lock().expect("release lock");
+            while !*rel {
+                rel = self.release_cv.wait(rel).expect("release wait");
+            }
+        }
+
+        /// Blocks until a reader has parked at the gate.
+        fn wait_reached(&self) {
+            let mut r = self.reached.lock().expect("reached lock");
+            while !*r {
+                r = self.reached_cv.wait(r).expect("reached wait");
+            }
+        }
+
+        /// Releases the parked reader.
+        fn release(&self) {
+            *self.release.lock().expect("release lock") = true;
+            self.release_cv.notify_all();
+        }
+    }
+
+    /// Storage decorator that parks a single, specific `get` on a [`RotationGate`]
+    /// so a test can interleave a rotation with a signing-key cache-miss fill.
+    /// Every other operation delegates straight through.
+    struct GatedStorage {
+        inner: Arc<dyn StorageEngine>,
+        gate: Arc<RotationGate>,
+    }
+
+    impl StorageEngine for GatedStorage {
+        fn get(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+            // Read the value first so the parked reader observes the
+            // pre-rotation (outgoing) key, then park before returning.
+            let val = self.inner.get(realm_id, key)?;
+            self.gate.maybe_trip(key);
+            Ok(val)
+        }
+
+        fn put(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+            value: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.put(realm_id, key, value)
+        }
+
+        fn delete(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
+            self.inner.scan(realm_id, start, end)
+        }
+    }
+
+    fn setup_engine_gated() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<RotationGate>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let inner =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+        let gate = Arc::new(RotationGate::new());
+        let storage = Arc::new(GatedStorage {
+            inner,
+            gate: Arc::clone(&gate),
+        }) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
+        (dir, engine, gate)
+    }
+
+    /// Regression for HEA-2096: a rotation that lands between a signing-key
+    /// cache miss's storage read and its insert must NOT leave the just-retired
+    /// key cached as the realm's active signing key. The epoch guard forces the
+    /// racing reader to discard its stale insert.
+    #[test]
+    fn signing_key_cache_miss_racing_rotation_discards_stale_key() {
+        let (_dir, engine, gate) = setup_engine_gated();
+        let engine = Arc::new(engine);
+        let realm = create_test_realm(&engine);
+
+        // The key in use before the rotation.
+        let old_kid = engine
+            .get_or_load_realm_signing_key(&realm)
+            .expect("load active key")
+            .key_id()
+            .to_string();
+
+        // Force the reader down the cache-miss path and arm the gate on the
+        // signing-key storage read.
+        engine.realm_signing_keys.remove(&realm);
+        gate.arm(keys::encode_realm_signing_key(&realm));
+
+        // Reader: reads the outgoing key from storage, then parks at the gate
+        // before it can publish — exactly the get-miss-load-insert window.
+        let reader_engine = Arc::clone(&engine);
+        let reader_realm = realm.clone();
+        let reader = std::thread::spawn(move || {
+            reader_engine
+                .get_or_load_realm_signing_key(&reader_realm)
+                .expect("reader load")
+                .key_id()
+                .to_string()
+        });
+
+        // Rotate only once the reader is parked mid-load.
+        gate.wait_reached();
+        engine
+            .rotate_realm_signing_key(&realm, 3600)
+            .expect("rotate");
+
+        // Let the parked reader finish its (now-stale) publish attempt.
+        gate.release();
+        let reader_kid = reader.join().expect("reader join");
+        assert_eq!(
+            reader_kid, old_kid,
+            "reader returns the key it read, which was live at read time"
+        );
+
+        // The stale insert must not have survived: the cache holds either
+        // nothing (reader discarded it) or the rotated key — never the old kid.
+        let cached_after = engine
+            .realm_signing_keys
+            .get(&realm)
+            .map(|k| k.key_id().to_string());
+        assert_ne!(
+            cached_after.as_deref(),
+            Some(old_kid.as_str()),
+            "raced rotation must not leave the retired key cached as active"
+        );
+
+        // And a fresh resolve returns the rotated active key.
+        let resolved = engine
+            .get_or_load_realm_signing_key(&realm)
+            .expect("post-rotation load")
+            .key_id()
+            .to_string();
+        assert_ne!(
+            resolved, old_kid,
+            "post-rotation load must resolve the rotated key, not the retired one"
+        );
     }
 
     // ===== Scenario 1: Create user with required fields succeeds =====
