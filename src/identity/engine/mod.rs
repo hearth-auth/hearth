@@ -4,6 +4,7 @@
 //! and `Clock` trait for deterministic timestamps.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -769,6 +770,21 @@ pub struct EmbeddedIdentityEngine {
     /// `config.token.claims_cache_max`; a full cache evicts expired then
     /// soonest-to-expire entries rather than refusing inserts (HEA-1990).
     token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
+    /// Monotonic generation counter guarding [`Self::token_claims_cache`]
+    /// against a flush-vs-in-flight-verify TOCTOU (HEA-2097).
+    ///
+    /// `validate_token`'s cache-miss branch performs an unsynchronised
+    /// verify-then-insert: a `flush_token_claims_cache` (from an emergency
+    /// `grace: 0` rotation or a realm delete) that lands *after* the verify but
+    /// *before* the insert would otherwise fail to cut off that just-verified
+    /// token, leaving it accepted until its own `exp`. Each flush bumps this
+    /// counter; the miss path snapshots it before the signature verify and the
+    /// insert discards itself if the counter moved by the time it runs, so a
+    /// raced insert can never re-memoize a token past the flush that was meant
+    /// to revoke it. No hot-path cost: only cache misses read the counter, and
+    /// the cache-hit read path is untouched. This is the claims-cache twin of
+    /// the `realm_key_epoch` guard on the signing-key cache.
+    token_claims_cache_gen: AtomicU64,
     /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
     ///
     /// Lazily populated: first call for a realm loads or generates the secret
@@ -1162,6 +1178,7 @@ impl EmbeddedIdentityEngine {
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            token_claims_cache_gen: AtomicU64::new(0),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
             blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
             revoked_jti_cache: ShardedArcSwapMap::new(),
@@ -1717,6 +1734,7 @@ impl EmbeddedIdentityEngine {
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            token_claims_cache_gen: AtomicU64::new(0),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
             blocked_dpop_jkt_cache: ShardedArcSwapMap::new(),
             revoked_jti_cache: ShardedArcSwapMap::new(),
@@ -3421,10 +3439,27 @@ impl EmbeddedIdentityEngine {
     /// The result is that a full cache always *replaces* rather than refusing
     /// inserts, so the steady-state hit rate no longer collapses to zero once
     /// the first `claims_cache_max` distinct tokens have been seen.
-    fn token_claims_cache_insert(&self, key: [u8; 32], claims: Arc<TokenClaims>) {
+    fn token_claims_cache_insert(
+        &self,
+        key: [u8; 32],
+        claims: Arc<TokenClaims>,
+        gen_at_verify: u64,
+    ) {
         let max = self.config.token.claims_cache_max.max(1);
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         self.token_claims_cache.rcu(|map| {
+            // Generation guard (HEA-2097): if a flush ran after the caller
+            // captured `gen_at_verify` (before its signature verify), the token
+            // this insert carries may have been signed by a key the flush was
+            // meant to stop trusting. Drop the insert — returning a copy of the
+            // *current* map, never the pre-verify state — so the flush wins.
+            // Re-read on every rcu retry: a flush that lands mid-CAS bumps the
+            // counter before it swaps the map, so the retry observing the new
+            // map also observes the new generation.
+            if self.token_claims_cache_gen.load(Ordering::Acquire) != gen_at_verify {
+                return HashMap::clone(map);
+            }
+
             // Fast path: room to spare, or we are updating an existing key.
             if map.len() < max || map.contains_key(&key) {
                 let mut m = HashMap::clone(map);
@@ -3641,7 +3676,10 @@ impl EmbeddedIdentityEngine {
                 }
             }
             if let Err(e) = storage.delete(&sys_realm, &entry.key) {
-                tracing::info!(
+                // A persistent delete failure silently retains wrapped (or,
+                // with no KEK configured, plaintext) private key material, so
+                // this is warn-worthy — it is off the hot path (HEA-2097).
+                tracing::warn!(
                     realm = %realm_id.as_uuid(),
                     error = %e,
                     "retiring-key purge: delete failed"
@@ -3662,7 +3700,24 @@ impl EmbeddedIdentityEngine {
     /// realm delete are rare, admin-gated operations; the cost is a cold cache
     /// on the next few validations, not a hot-path change.
     fn flush_token_claims_cache(&self) {
+        // Bump the generation *before* clearing the map (HEA-2097). A racing
+        // cache-miss insert that snapshotted the old generation before its
+        // verify must observe the bump whenever it observes the emptied map;
+        // publishing the counter first (its write is carried by the map
+        // store's release) guarantees exactly that, so the insert discards
+        // itself instead of resurrecting a token this flush was meant to cut
+        // off. See `token_claims_cache_gen`.
+        self.token_claims_cache_gen.fetch_add(1, Ordering::AcqRel);
         self.token_claims_cache.store(Arc::new(HashMap::new()));
+    }
+
+    /// Snapshots the token-claims-cache generation counter (HEA-2097).
+    ///
+    /// Read by `validate_token` before a signature verify and handed to
+    /// [`Self::token_claims_cache_insert`], which drops the insert if the
+    /// counter has since moved (i.e. a flush intervened).
+    fn token_claims_cache_generation(&self) -> u64 {
+        self.token_claims_cache_gen.load(Ordering::Acquire)
     }
 
     /// Parses a `session_`-prefixed session ID claim.
@@ -7232,6 +7287,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             match cached {
                 Some(arc) => arc,
                 None => {
+                    // Snapshot the claims-cache generation *before* the verify
+                    // (HEA-2097): a flush racing this verify-then-insert bumps
+                    // the counter, and the insert below discards itself if the
+                    // snapshot is stale, so a rotation/delete flush can never be
+                    // outrun by an in-flight validation re-memoizing the token.
+                    let gen_at_verify = self.token_claims_cache_generation();
                     // Cache miss: full Ed25519 verify + serde_json parse.
                     let (c, via_retiring_key) =
                         self.verify_token_signature_for_realm_detailed(realm_id, token)?;
@@ -7242,7 +7303,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     // the grace window (HEA-2093). Tokens signed with the active
                     // key — every token in steady state — still cache.
                     if let (Some(k), false) = (maybe_key, via_retiring_key) {
-                        self.token_claims_cache_insert(k, Arc::clone(&arc));
+                        self.token_claims_cache_insert(k, Arc::clone(&arc), gen_at_verify);
                     }
                     arc
                 }
@@ -14715,6 +14776,114 @@ mod tests {
         assert_ne!(
             resolved, old_kid,
             "post-rotation load must resolve the rotated key, not the retired one"
+        );
+    }
+
+    // ===== HEA-2097: claims-cache flush-vs-in-flight-verify TOCTOU =====
+
+    /// Regression for HEA-2097 (guard, deterministic): an insert that carries a
+    /// generation captured *before* a `flush_token_claims_cache` must discard
+    /// itself, while an insert carrying the *current* generation must land.
+    /// This pins the exact ordering — a raced insert lands after the flush yet
+    /// leaves the cache empty — without depending on thread scheduling.
+    #[test]
+    fn claims_cache_insert_with_stale_generation_is_discarded() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let session = engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session");
+        let pair = engine
+            .issue_tokens(&realm, user.id(), session.id())
+            .expect("issue tokens");
+        clock.advance(1_000_000);
+        let token = pair.access_token();
+        let key = EmbeddedIdentityEngine::token_cache_hash(token).expect("token hash");
+
+        // The verified-but-not-yet-memoized claims an in-flight validate_token
+        // holds, and the generation it snapshotted before its verify.
+        let claims = Arc::new(
+            engine
+                .verify_token_signature_for_realm(&realm, token)
+                .expect("verify under active key"),
+        );
+        let gen_before = engine.token_claims_cache_generation();
+
+        // A racing rotation/delete flushes the claims cache first.
+        engine.flush_token_claims_cache();
+
+        // The now-stale insert must be dropped: the token is not re-memoized.
+        engine.token_claims_cache_insert(key, Arc::clone(&claims), gen_before);
+        assert!(
+            engine.token_claims_cache.load().get(&key).is_none(),
+            "an insert carrying a pre-flush generation must be discarded"
+        );
+
+        // Non-vacuous control: an insert with the current generation lands, so
+        // the guard rejects only stale inserts rather than everything.
+        let gen_now = engine.token_claims_cache_generation();
+        engine.token_claims_cache_insert(key, Arc::clone(&claims), gen_now);
+        assert!(
+            engine.token_claims_cache.load().get(&key).is_some(),
+            "an insert carrying the current generation must be applied"
+        );
+    }
+
+    /// Regression for HEA-2097 (end-to-end): verify a token under the active
+    /// key, run an emergency `grace: 0` rotation (which flushes the claims
+    /// cache and immediately retires the old key), then let the in-flight
+    /// validation's stale insert land. The token MUST be rejected on the next
+    /// validation — without the generation guard the stale insert would
+    /// re-memoize it and it would keep passing until its own `exp`.
+    #[test]
+    fn stale_insert_after_grace0_rotation_does_not_resurrect_token() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let session = engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session");
+        let pair = engine
+            .issue_tokens(&realm, user.id(), session.id())
+            .expect("issue tokens");
+        clock.advance(1_000_000);
+        let token = pair.access_token().to_string();
+        let key = EmbeddedIdentityEngine::token_cache_hash(&token).expect("token hash");
+
+        // In-flight validate_token: snapshot the generation, then verify under
+        // the still-active key (via_retiring_key = false, so it would cache).
+        let gen_before = engine.token_claims_cache_generation();
+        let claims = Arc::new(
+            engine
+                .verify_token_signature_for_realm(&realm, &token)
+                .expect("verify under active key"),
+        );
+
+        // Emergency rotation: retires the old key with a zero grace window and
+        // flushes the claims cache.
+        engine
+            .rotate_realm_signing_key(&realm, 0)
+            .expect("grace-0 rotation");
+
+        // The validation's now-stale insert lands *after* the flush.
+        engine.token_claims_cache_insert(key, Arc::clone(&claims), gen_before);
+
+        // Advance so the retiring key's deadline is strictly in the past.
+        clock.advance(1_000_000);
+
+        // Next validation must reject: the old key is retired-and-expired, the
+        // new key never signed this token, and the stale insert was discarded.
+        let err = engine
+            .validate_token(&realm, &token)
+            .expect_err("token must be rejected after a grace-0 rotation");
+        assert!(
+            matches!(err, IdentityError::InvalidToken),
+            "expected InvalidToken after grace-0 rotation, got {err:?}"
+        );
+        assert!(
+            engine.token_claims_cache.load().get(&key).is_none(),
+            "the stale insert must not have resurrected the token in the cache"
         );
     }
 
