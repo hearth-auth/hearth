@@ -43,14 +43,14 @@ The demo realm id is resolved dynamically at runtime (via `POST /admin/bootstrap
 
 ## Findings (per the issue's "finding, not a fixup" rule)
 
-1. **Resource server does not enforce revocation.** `backend/middleware/auth.go`
-   validates the JWT **signature only** — no introspection / revocation check —
-   so a revoked-but-unexpired access token is still accepted on `/api/notes`.
-   Revocation IS enforced at Hearth's control plane (`/userinfo` → 401) and at
-   the SPA's refresh boundary. Flow 4 asserts the enforceable planes and encodes
-   the backend gap as an expected-fail (`test.fail`) tripwire; it flips to a hard
-   failure the moment the backend starts introspecting. Fixing it requires
-   editing demo backend source, which this issue scopes out.
+1. **Resource server did not enforce revocation — FIXED (HEA-2094).**
+   `backend/middleware/auth.go` originally validated the JWT **signature only**,
+   so a revoked-but-unexpired access token was still accepted on `/api/notes`.
+   As the reference integration, that taught integrators the signature-only
+   anti-pattern. `backend/middleware/revocation.go` now introspects the token
+   (RFC 7662) after the signature check, caching each verdict for
+   `INTROSPECT_CACHE_TTL` (default 3s); introspection outages fail closed.
+   Flow 4's third test is now a **hard assertion**, not a `test.fail` tripwire.
 
 2. **Demo backend does not build headless from a clean tree.** `backend/go.mod`
    pins transitive deps below what a current Go toolchain resolves, so bare
