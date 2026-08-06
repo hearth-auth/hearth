@@ -116,10 +116,7 @@ where
             // The value is precomputed in `build_csp`; `form-action` carries any
             // dev-only extra origins (HEA-2072) and is byte-identical to
             // `form-action 'self'` in production.
-            headers.insert(
-                HeaderName::from_static("content-security-policy"),
-                csp,
-            );
+            headers.insert(HeaderName::from_static("content-security-policy"), csp);
             if hsts_enabled {
                 insert(
                     headers,
@@ -322,6 +319,61 @@ mod tests {
         assert!(
             csp.contains("form-action 'self' http://localhost:5173 http://localhost:5399;"),
             "dev CSP must append the demo origins after 'self', got: {csp}"
+        );
+    }
+
+    /// HEA-2084: a custom port configured via `security.dev_csp_form_action_origins`
+    /// must appear in the dev-mode CSP but never in production.
+    #[tokio::test]
+    async fn form_action_custom_port_reaches_dev_csp() {
+        let custom = vec!["http://localhost:3000".to_string()];
+
+        // In dev mode the custom origin is emitted.
+        let dev_layer = SecurityHeadersLayer::new(SecurityConfig {
+            hsts_enabled: false,
+            coop_coep_enabled: false,
+            extra_form_action_origins: custom.clone(),
+        });
+        let dev_resp = dev_layer
+            .layer(tower::service_fn(ok_handler))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("service call");
+        let dev_csp = dev_resp.headers()["content-security-policy"]
+            .to_str()
+            .expect("CSP header must be valid ASCII");
+        assert!(
+            dev_csp.contains("form-action 'self' http://localhost:3000;"),
+            "dev CSP must include the custom port, got: {dev_csp}"
+        );
+
+        // In production (empty extra_form_action_origins) the custom origin is not emitted.
+        let prod_layer = SecurityHeadersLayer::new(SecurityConfig {
+            hsts_enabled: false,
+            coop_coep_enabled: false,
+            extra_form_action_origins: Vec::new(),
+        });
+        let prod_resp = prod_layer
+            .layer(tower::service_fn(ok_handler))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("service call");
+        let prod_csp = prod_resp.headers()["content-security-policy"]
+            .to_str()
+            .expect("CSP header must be valid ASCII");
+        assert!(
+            !prod_csp.contains("localhost"),
+            "production CSP must not contain any localhost origin, got: {prod_csp}"
         );
     }
 
