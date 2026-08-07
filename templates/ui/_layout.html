@@ -187,9 +187,11 @@
   {% else %}
   {# ── Public (unauthenticated) layout: centered card ── #}
   {# Chromeless pages still need a `main` landmark so the skip link (`#main`)
-     has a valid target and screen readers expose the primary region. #}
+     has a valid target and screen readers expose the primary region.
+     tabindex="-1" so the skip link moves keyboard focus here rather than only
+     scrolling — same contract as the chromed branch above. #}
   <div class="flex min-h-screen items-center justify-center bg-ht-surface-base p-4">
-    <main id="main" class="w-full max-w-md">
+    <main id="main" tabindex="-1" class="w-full max-w-md focus:outline-none">
       {% match flash %}
         {% when Some with (f) %}
           <div class="mb-4 rounded px-4 py-3 text-sm font-medium {% if f.kind == "error" %}bg-danger/[0.12] text-danger-fg{% else %}bg-success/[0.12] text-success-fg{% endif %}" role="{% if f.kind == "error" %}alert{% else %}status{% endif %}">
