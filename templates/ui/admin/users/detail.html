@@ -149,24 +149,26 @@
         {% endif %}
       </p>
     </div>
-    {# Tab buttons #}
-    <div class="flex gap-1 self-end sm:self-auto">
-      <button type="button"
+    {# Tab buttons. `role="tab"` is required: the Tabs component sets
+       `aria-selected` on every button, and that attribute is only allowed on a
+       role that supports it (axe `aria-allowed-attr`, critical). #}
+    <div class="flex gap-1 self-end sm:self-auto" role="tablist" aria-label="User access sections">
+      <button type="button" role="tab" id="tab-roles" aria-controls="roles-panel"
               data-tab="roles" aria-selected="true"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Roles
       </button>
-      <button type="button"
+      <button type="button" role="tab" id="tab-extra" aria-controls="extra-panel"
               data-tab="extra"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Extra Permissions
       </button>
-      <button type="button"
+      <button type="button" role="tab" id="tab-effective" aria-controls="effective-panel"
               data-tab="effective"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Effective
       </button>
-      <button type="button"
+      <button type="button" role="tab" id="tab-attrs" aria-controls="attrs-panel"
               data-tab="attrs"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Attributes
@@ -175,21 +177,24 @@
   </div>
 
   {# Roles tab #}
-  <div id="roles-panel" data-tab-panel="roles" class="p-6">
+  <div id="roles-panel" role="tabpanel" aria-labelledby="tab-roles" tabindex="0"
+       data-tab-panel="roles" class="p-6 focus:outline-none">
     <div id="roles-tab-content">
       {% include "ui/admin/users/_roles_tab.html" %}
     </div>
   </div>
 
   {# Extra Permissions tab #}
-  <div id="extra-panel" data-tab-panel="extra" class="p-6 hidden">
+  <div id="extra-panel" role="tabpanel" aria-labelledby="tab-extra" tabindex="0"
+       data-tab-panel="extra" class="p-6 hidden focus:outline-none">
     <div id="permissions-tab-content">
       {% include "ui/admin/users/_permissions_tab.html" %}
     </div>
   </div>
 
   {# Effective Permissions tab #}
-  <div id="effective-panel" data-tab-panel="effective" class="p-6 hidden">
+  <div id="effective-panel" role="tabpanel" aria-labelledby="tab-effective" tabindex="0"
+       data-tab-panel="effective" class="p-6 hidden focus:outline-none">
     {% if effective_permissions.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No effective permissions resolved for this user.</p>
     {% else %}
@@ -204,7 +209,8 @@
   </div>
 
   {# Attributes tab #}
-  <div id="attrs-panel" data-tab-panel="attrs" class="p-6 hidden">
+  <div id="attrs-panel" role="tabpanel" aria-labelledby="tab-attrs" tabindex="0"
+       data-tab-panel="attrs" class="p-6 hidden focus:outline-none">
     {% if attributes.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No attributes set on this user.</p>
     {% else %}
