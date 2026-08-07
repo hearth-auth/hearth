@@ -41,7 +41,7 @@
           {% endfor %}
         </ul>
         {% endif %}
-        <p class="mt-2 font-mono text-[11px] text-ht-content-muted">Granted {{ c.granted_at }}</p>
+        <p class="mt-2 font-mono text-[11px] text-ht-content-muted">Granted <time datetime="{{ c.granted_at_iso }}">{{ c.granted_at }}</time></p>
       </div>
     </li>
     {% endfor %}

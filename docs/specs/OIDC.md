@@ -191,6 +191,84 @@ Clients SHOULD confirm `cnf.jkt` is present in the issued access token before re
 
 > For agent-specific guidance on persisting DPoP key pairs across grant lifetimes, see [AGENT_AUTH.md §6.5](AGENT_AUTH.md#65-dpop-refresh-token-binding-rfc-9449-5).
 
+### 3.3 Resource-Endpoint Enforcement (RFC 9449 §7.2)
+
+Binding a token at issuance is only half the sender-constraint. Resource endpoints MUST also verify
+the proof on every request — otherwise a stolen `cnf`-bound token replays as a plain `Bearer` and
+the binding buys nothing (HEA-2031).
+
+**Normative rule.** When a validated access token carries a `cnf.jkt` claim, the endpoint MUST
+reject the request unless it also carries a `DPoP` header whose proof validates against that
+thumbprint. Enforcement happens **before** any user lookup, permission resolution, or
+side-effecting work — the check fails closed.
+
+Endpoints that enforce the sender-constraint:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/userinfo` | OIDC UserInfo (realm from `X-Realm-ID`) |
+| `GET` | `/realms/{realm}/userinfo` | OIDC UserInfo (realm-scoped) |
+| `GET` | `/v1/me/permissions` | Live effective-permission resolution |
+| `GET` | `/oauth/consents` | Self-service consent listing |
+| `DELETE` | `/oauth/consents/{client_id}` | Self-service consent revocation |
+| `GET` | `/oauth/session-versions` | Session-version delta feed |
+| `GET` | `/oauth/session-versions/snapshot` | Session-version snapshot |
+| `POST` | `/webauthn/register/begin` | WebAuthn credential registration |
+| `POST` | `/webauthn/register/complete` | WebAuthn credential registration |
+| `GET` | `/webauthn/credentials` | WebAuthn credential listing |
+| `DELETE` | `/webauthn/credentials/{credential_id}` | WebAuthn credential deletion |
+
+Tokens **without** `cnf.jkt` are unaffected — plain Bearer tokens continue to work at every endpoint
+above with no `DPoP` header.
+
+#### Proof requirements at resource endpoints
+
+The resource-endpoint proof differs from the token-endpoint proof:
+
+| Claim | Value | Notes |
+|-------|-------|-------|
+| `htm` | The request's HTTP method | Compared case-insensitively (RFC 9110) |
+| `htu` | `<issuer><request path>` | Query string and fragment stripped before comparison |
+| `ath` | `BASE64URL(SHA-256(access_token))` | REQUIRED at resource endpoints; compared in constant time |
+
+`htu` is derived server-side from the **configured issuer** plus the request path — never from the
+`Host` header — so a client MUST sign the issuer-relative URL, not whatever origin it happened to
+dial. For `/realms/{realm}/userinfo` that path includes the `/realms/{realm}` prefix.
+
+A DPoP `nonce` is NOT required at resource endpoints; it is only used at the token endpoint. Proof
+`iat` MUST be within `DPOP_MAX_AGE_SECS` (120 s) plus `DPOP_MAX_CLOCK_SKEW_SECS` (60 s), and each
+`jti` is recorded to reject proof replay.
+
+#### Authorization scheme
+
+Hearth accepts the access token under the `Bearer` scheme at these endpoints, including when the
+token is DPoP-bound:
+
+```http
+GET /userinfo HTTP/1.1
+Authorization: Bearer <access_token>
+DPoP: <proof-jwt>
+X-Realm-ID: <realm-uuid>
+```
+
+This deviates from RFC 9449 §7.1, which specifies a `DPoP` authorization scheme for bound tokens.
+An `Authorization: DPoP ...` header is not recognised and yields `401 invalid_token`.
+
+#### Error responses
+
+| Condition | Status | Body |
+|-----------|--------|------|
+| `cnf`-bound token, no `DPoP` header | 401 | `{"error":"invalid_token","error_description":"DPoP proof required for cnf-bound access token"}` |
+| Proof key thumbprint ≠ token `cnf.jkt` | 401 | `{"error":"invalid_token","error_description":"DPoP proof key does not match token cnf.jkt binding"}` |
+| Malformed proof, or `htm` / `htu` / `ath` / `iat` mismatch | 401 | `{"error":"invalid_dpop_proof","error_code":"..."}` |
+| `jti` already seen (proof replay) | 401 | `{"error":"use_dpop_nonce","error_code":"..."}` |
+
+The `invalid_dpop_proof` body deliberately omits the specific validation failure — the reason is
+recorded server-side only, so the response cannot be used as an oracle.
+
+> Operator-facing walkthrough with runnable proof-building code:
+> [fapi2.md §7](../guides/fapi2.md#7-token-exchange-with-dpop).
+
 ---
 
 ## 4. JAR (JWT Authorization Requests, RFC 9101)

@@ -180,8 +180,19 @@ the cache to appear stale on the first missed poll, triggering spurious errors.
 
 DPoP (RFC 9449) binds a token to an ephemeral client key pair. The `sv` claim is part of
 the signed JWT payload and is therefore covered by the Ed25519 signature that DPoP
-verification already validates. DPoP and `sv` compose transparently — no additional
-configuration is needed on either the server or the resource server.
+verification already validates.
+
+**Sender-constraint enforcement at the feed endpoints (HEA-2039):** if the service account
+token used to poll the session-version feed carries a `cnf.jkt` claim (i.e., it was issued
+with a DPoP proof at grant time), callers **must** include a valid `DPoP` proof header on
+every request to `GET /oauth/session-versions` and `GET /oauth/session-versions/snapshot`.
+Presenting a bound token without a matching DPoP proof is rejected with `401 invalid_token`.
+Plain Bearer tokens without `cnf.jkt` are unaffected and require no DPoP proof.
+
+If you provision a service account for sv-feed polling, prefer an **unbound** token
+(do not include a `DPoP` header at grant time) unless your threat model requires key binding.
+DPoP-bound service accounts must maintain their key pair across the poller's lifetime and
+include a fresh proof on every feed request.
 
 ---
 
@@ -207,6 +218,8 @@ Resource servers use two endpoints to maintain their version cache:
 ```
 GET /oauth/session-versions?realm=<realm_id>&since=<seq>
 Authorization: Bearer <service-account-token with hearth.sv_feed>
+# If the token carries cnf.jkt (DPoP-bound), also include:
+DPoP: <proof-JWT for this request>
 ```
 
 - `since` — last sequence number seen (exclusive). Use `0` on first call.
@@ -220,6 +233,8 @@ Authorization: Bearer <service-account-token with hearth.sv_feed>
 ```
 GET /oauth/session-versions/snapshot?realm=<realm_id>
 Authorization: Bearer <service-account-token with hearth.sv_feed>
+# If the token carries cnf.jkt (DPoP-bound), also include:
+DPoP: <proof-JWT for this request>
 ```
 
 Returns the complete `{session_id → min_sv}` map for the realm at the current instant,

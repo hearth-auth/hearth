@@ -51,7 +51,8 @@
         hx-swap="outerHTML"
         hx-push-url="true">
     <div class="relative">
-      <input type="search" name="q" value="{{ search_query }}" placeholder="Search by URL or event type…"
+      <label for="page-search" class="sr-only">Search webhooks</label>
+      <input id="page-search" type="search" name="q" value="{{ search_query }}" placeholder="Search by URL or event type…"
              autocomplete="off" class="input pl-9">
       <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted"
            viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"

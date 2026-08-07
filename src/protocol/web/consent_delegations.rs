@@ -32,7 +32,9 @@ struct DelegationRow {
     actor_sub: String,
     granted_scopes: Vec<String>,
     created_at: String,
+    created_at_iso: String,
     expires_at: String,
+    expires_at_iso: String,
 }
 
 #[derive(Template)]
@@ -124,7 +126,9 @@ fn load_delegations(state: &Arc<WebState>, session: &UiSession) -> Vec<Delegatio
             actor_sub: e.actor_sub,
             granted_scopes: e.granted_scopes,
             created_at: super::format_ts(e.created_at),
+            created_at_iso: super::format_ts_iso(e.created_at),
             expires_at: super::format_ts(e.expires_at),
+            expires_at_iso: super::format_ts_iso(e.expires_at),
         })
         .collect()
 }

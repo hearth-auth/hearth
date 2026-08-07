@@ -61,7 +61,7 @@
         </ul>
         {% endif %}
         <p class="mt-2 font-mono text-[11px] text-ht-content-muted">
-          Granted {{ c.granted_at }}{% if c.updated_at != c.granted_at %} · Updated {{ c.updated_at }}{% endif %}
+          Granted <time datetime="{{ c.granted_at_iso }}">{{ c.granted_at }}</time>{% if c.updated_at != c.granted_at %} · Updated <time datetime="{{ c.updated_at_iso }}">{{ c.updated_at }}</time>{% endif %}
         </p>
       </div>
     </li>

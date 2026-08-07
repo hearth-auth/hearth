@@ -1,7 +1,7 @@
 # Content Security Policy — Design Rationale
 
 > **Status:** Migration complete (HEA-850, HEA-1049, HEA-1757).  
-> **Last reviewed:** 2026-07-17 (HEA-1757 — `object-src` and `form-action` pinned)  
+> **Last reviewed:** 2026-08-06 (HEA-2084/HEA-2072 — `form-action` dev-mode extension)  
 > **Implemented in:** `src/protocol/web/security.rs`
 
 ## Current policy
@@ -28,6 +28,27 @@ been strict throughout all three generations.
 `form-action 'self'` prevents a cross-site request forgery variant where a crafted
 page submits an HTML form to Hearth's authenticated endpoints — combined with CSRF
 tokens on state-changing forms, this provides defense-in-depth.
+
+### Dev-mode `form-action` extension (HEA-2084 / HEA-2072)
+
+When the server starts with `--dev`, extra `http://localhost:<port>` origins are
+appended to `form-action` so that the reference-integration Playwright suite can
+POST Hearth's hosted login and consent forms back to a local demo SPA. In
+production (`dev_mode == false`) the directive is always `form-action 'self'`
+regardless of configuration.
+
+The additional origins default to `http://localhost:5173` (Vite) and
+`http://localhost:5399` (companion demo-SPA service). You can override them in
+`hearth.yaml` under `security.dev_csp_form_action_origins`:
+
+```yaml
+security:
+  dev_csp_form_action_origins:
+    - "http://localhost:3000"
+```
+
+This key is **ignored in production** — the gate is in `src/protocol/web/mod.rs`
+and passes an empty slice to the policy builder when `dev_mode` is false.
 
 ## Prior gaps (now resolved)
 
@@ -63,6 +84,7 @@ All Alpine.js usage across ~40 templates was replaced across HEA-824 child issue
 | Layout, remaining tabs, password strength | HEA-850 | Done |
 | Hyperscript removed → vanilla JS `components.js` | HEA-1049 | Done |
 | `object-src 'none'` and `form-action 'self'` pinned | HEA-1757 | Done |
+| `form-action` dev-mode extension (`dev_csp_form_action_origins`) | HEA-2084, HEA-2072 | Done |
 
 ## Alternatives considered
 

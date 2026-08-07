@@ -328,6 +328,8 @@ pub struct AuditRow {
     /// Still rendered as a `title="…"` tooltip so the precise UTC time
     /// is always one hover away (HEA-644).
     pub timestamp_display: String,
+    /// ISO-8601 timestamp for the `<time datetime>` machine-readable value.
+    pub timestamp_iso: String,
     /// Human-readable relative timestamp (`just now`, `Nm ago`, `Nh ago`,
     /// or `Mon DD`). Easier to scan than absolute UTC when reviewing
     /// recent activity (HEA-644).
@@ -1154,6 +1156,7 @@ pub async fn admin_audit_list(
                         == crate::audit::AuditFailurePolicy::FailOperation;
                     AuditRow {
                         timestamp_display: format_ts(e.timestamp),
+                        timestamp_iso: super::super::format_ts_iso(e.timestamp),
                         timestamp_relative: format_ts_relative(e.timestamp),
                         action_label,
                         action_category,
