@@ -2784,6 +2784,51 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
     Some(password)
 }
 
+/// Issues a fresh access token for the reserved system-realm admin
+/// (`admin@hearth.test`, nil-UUID realm) seeded by [`dev_seed_system_admin`].
+///
+/// The returned token carries the `realm.admin` permission set and is scoped to
+/// the nil-UUID system realm, so it can manage **any** realm cross-realm — the
+/// `scoped_realm` BOLA guard only permits cross-realm operations for a nil-realm
+/// token. Bootstrap hands this back so SDK / integration consumers have a
+/// credential that can actually perform cross-realm admin (e.g. rotate another
+/// realm's signing key), which the dev-realm `access_token` cannot (HEA-2087).
+///
+/// Best-effort: logs on error and returns `None` rather than failing bootstrap.
+/// Call [`dev_seed_system_admin`] first to guarantee the admin user exists.
+fn dev_system_admin_token(state: &AppState) -> Option<String> {
+    let sys = crate::identity::keys::system_realm_id();
+    let admin = match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            tracing::warn!("dev bootstrap: system admin missing; cannot mint system token");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system admin lookup failed");
+            return None;
+        }
+    };
+    let session = match state.identity.create_session(
+        &sys,
+        admin.id(),
+        &crate::identity::SessionContext::default(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system admin session creation failed");
+            return None;
+        }
+    };
+    match state.identity.issue_tokens(&sys, admin.id(), session.id()) {
+        Ok(tokens) => Some(tokens.access_token().to_string()),
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system admin token issuance failed");
+            None
+        }
+    }
+}
+
 /// POST /admin/bootstrap — creates a realm, admin user, session, assigns
 /// the admin role, and issues tokens. Returns everything needed for SDK tests.
 ///
@@ -2933,8 +2978,10 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 
 # 2. Full PKCE flow — see docs/guides/getting-started.md"#
             );
-            // Re-bootstrap: do not modify existing password (HEA-1670).
+            // Re-bootstrap: do not modify existing password (HEA-1670). Still
+            // mint a fresh cross-realm system token (HEA-2087).
             dev_seed_system_admin(&state);
+            let system_access_token = dev_system_admin_token(&state).unwrap_or_default();
             return (
                 StatusCode::OK,
                 Json(pb::BootstrapResponse {
@@ -2944,6 +2991,10 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
                     refresh_token: tokens.refresh_token().to_string(),
                     quickstart: qs,
                     admin_password: String::new(),
+                    system_access_token,
+                    system_realm_id: crate::identity::keys::system_realm_id()
+                        .as_uuid()
+                        .to_string(),
                 }),
             )
                 .into_response();
@@ -3052,6 +3103,9 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
     );
 
     let admin_password = dev_seed_system_admin(&state).unwrap_or_default();
+    // Cross-realm system-realm admin token (HEA-2087) — the dev-realm
+    // `access_token` above cannot manage other realms.
+    let system_access_token = dev_system_admin_token(&state).unwrap_or_default();
     (
         StatusCode::OK,
         Json(pb::BootstrapResponse {
@@ -3061,6 +3115,10 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
             refresh_token: tokens.refresh_token().to_string(),
             quickstart,
             admin_password,
+            system_access_token,
+            system_realm_id: crate::identity::keys::system_realm_id()
+                .as_uuid()
+                .to_string(),
         }),
     )
         .into_response()

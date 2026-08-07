@@ -563,8 +563,12 @@ pub struct UserSessionRow {
     pub id: String,
     /// Human-readable created-at.
     pub created_at: String,
+    /// ISO-8601 created-at for `<time datetime>`.
+    pub created_at_iso: String,
     /// Human-readable expires-at.
     pub expires_at: String,
+    /// ISO-8601 expires-at for `<time datetime>`.
+    pub expires_at_iso: String,
     /// Whether the session has been revoked.
     pub revoked: bool,
     /// Whether the session has passed its expires_at relative to wall-clock
@@ -631,8 +635,12 @@ struct UserDetailTemplate {
     available_orgs: Vec<AvailableOrg>,
     /// Formatted creation timestamp.
     created_at_display: String,
+    /// ISO-8601 creation timestamp for `<time datetime>`.
+    created_at_iso: String,
     /// Formatted last-updated timestamp.
     updated_at_display: String,
+    /// ISO-8601 last-updated timestamp for `<time datetime>`.
+    updated_at_iso: String,
     /// Directly-granted permissions with scope display info.
     extra_permissions: Vec<UserPermissionGrantRow>,
     /// Per-role groups of inherited permissions, used to attribute each
@@ -737,7 +745,9 @@ pub async fn admin_user_detail(
         .map(|s| UserSessionRow {
             id: s.id().as_uuid().to_string(),
             created_at: format_ts(s.created_at()),
+            created_at_iso: super::super::format_ts_iso(s.created_at()),
             expires_at: format_ts(s.expires_at()),
+            expires_at_iso: super::super::format_ts_iso(s.expires_at()),
             revoked: s.is_revoked(),
             expired: s.expires_at().as_micros() <= now_micros,
             device_label: s.device_label().unwrap_or("Unknown device").to_string(),
@@ -812,7 +822,9 @@ pub async fn admin_user_detail(
 
     let is_user_admin = check_user_admin(&state, target.id(), &uid);
     let created_at_display = format_ts(user.created_at());
+    let created_at_iso = super::super::format_ts_iso(user.created_at());
     let updated_at_display = format_ts(user.updated_at());
+    let updated_at_iso = super::super::format_ts_iso(user.updated_at());
 
     // Role assignments with display metadata.
     let role_assignments = build_role_assignment_rows(&state, target.id(), &uid);
@@ -909,7 +921,9 @@ pub async fn admin_user_detail(
         available_roles,
         available_orgs,
         created_at_display,
+        created_at_iso,
         updated_at_display,
+        updated_at_iso,
         extra_permissions,
         role_inherited_groups,
         available_permissions,
@@ -1659,8 +1673,12 @@ pub struct SessionRow {
     pub user_email: String,
     /// Human-readable created-at.
     pub created_at_display: String,
+    /// ISO-8601 created-at for `<time datetime>`.
+    pub created_at_iso: String,
     /// Human-readable expires-at.
     pub expires_at_display: String,
+    /// ISO-8601 expires-at for `<time datetime>`.
+    pub expires_at_iso: String,
     /// Device label (e.g. "Chrome, Mac OSX") or "Unknown device".
     pub device_label: String,
     /// Client IP address or "\u{2014}" (em dash) if unavailable.
@@ -1968,7 +1986,9 @@ fn build_session_row(
     let is_active = !s.is_revoked() && s.expires_at().as_micros() > now_micros;
     SessionRow {
         created_at_display: format_ts(s.created_at()),
+        created_at_iso: super::super::format_ts_iso(s.created_at()),
         expires_at_display: format_ts(s.expires_at()),
+        expires_at_iso: super::super::format_ts_iso(s.expires_at()),
         session: s,
         user_email,
         device_label,
@@ -2055,7 +2075,9 @@ struct AdminConsentRow {
     client_logo_url: Option<String>,
     scopes: Vec<String>,
     granted_at: String,
+    granted_at_iso: String,
     updated_at: String,
+    updated_at_iso: String,
 }
 
 #[derive(Template)]
@@ -2112,7 +2134,9 @@ pub async fn admin_user_consents_list(
             client_logo_url: e.client_logo_url,
             scopes: e.record.granted_scopes,
             granted_at: format_ts_admin(e.record.granted_at),
+            granted_at_iso: super::super::format_ts_iso(e.record.granted_at),
             updated_at: format_ts_admin(e.record.updated_at),
+            updated_at_iso: super::super::format_ts_iso(e.record.updated_at),
         })
         .collect();
 

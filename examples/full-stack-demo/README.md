@@ -117,6 +117,7 @@ go run .               # http://localhost:8421
 | Feature | Where |
 |---------|-------|
 | JWKS auto-discovery on startup + key-rotation re-fetch | `middleware/auth.go` |
+| Revocation-aware validation via RFC 7662 introspection + short-TTL cache | `middleware/revocation.go` |
 | `RequirePermission` middleware (`content.write`) | `middleware/rbac.go` |
 | `RequireRole` middleware (`admin`) | `middleware/rbac.go` |
 | Notes CRUD with per-route RBAC enforcement | `handlers/notes.go` |
@@ -136,6 +137,30 @@ go run .               # http://localhost:8421
 | `DELETE` | `/notes/:id` | `admin` role | Delete a note |
 | `GET` | `/admin/users` | `admin` role | List users via Hearth Admin API |
 
+### Signature validation is not enough — check revocation
+
+Verifying a JWT's Ed25519 signature and `exp` proves Hearth minted the token and
+it has not expired. It says **nothing** about whether the session behind the
+token was revoked *after* issuance — a logout, an admin killing a session, or a
+leaked-token revocation are all invisible to signature-only validation until the
+token expires on its own. A resource server that stops at the signature will
+keep honoring a revoked-but-unexpired access token.
+
+To close that gap, `middleware/revocation.go` asks Hearth's realm-scoped
+introspection endpoint (`POST /realms/{realm}/introspect`, RFC 7662 — no client
+credentials required) whether the token is still `active`, *after* the signature
+check passes. Because a network round-trip on every request would put Hearth on
+the request hot path, each verdict is cached for a short TTL
+(`INTROSPECT_CACHE_TTL`, default `3s`).
+
+**The tradeoff is latency vs. consistency:** the TTL bounds how long a revoked
+token can still be accepted here (up to one TTL after the last cached
+introspection). Shorten it to propagate revocation faster at the cost of more
+calls to Hearth; lengthen it to cut calls at the cost of a wider staleness
+window; set it to `0` to introspect on every request. Introspection failures
+fail **closed** — the request is rejected (`503`) rather than falling back to
+signature-only acceptance.
+
 ## Feature walkthrough
 
 Once all three phases are complete:
@@ -146,8 +171,8 @@ Once all three phases are complete:
 4. Log out, sign in as `editor@hearth.test` — the **New Note** button appears.
 5. Sign in as `admin@hearth.test` — the **Users** tab and note **Delete** buttons are visible.
 6. All three flows use the same PKCE authorization code grant; the backend
-   verifies the JWT signature against Hearth's JWKS and checks RBAC claims
-   via the `hearth-go` SDK.
+   verifies the JWT signature against Hearth's JWKS, introspects the token for
+   revocation (see below), and checks RBAC claims via the `hearth-go` SDK.
 
 ### Verifying role enforcement via curl
 

@@ -940,6 +940,26 @@ pub struct SecurityYaml {
     /// no pepper (unchanged default behaviour).
     #[serde(default)]
     pub password: PasswordSecurityYaml,
+    /// Extra origins appended to the CSP `form-action` directive when the
+    /// server is running in `--dev` mode (HEA-2084).
+    ///
+    /// These origins are **only emitted under `--dev`**; production always
+    /// emits `form-action 'self'` regardless of this value.
+    ///
+    /// Default: `["http://localhost:5173", "http://localhost:5399"]` — the
+    /// Vite dev server and the companion demo-SPA service used by the
+    /// reference-integration Playwright suite.
+    ///
+    /// Set this to the actual port(s) your demo SPA runs on if you use a
+    /// different port:
+    ///
+    /// ```yaml
+    /// security:
+    ///   dev_csp_form_action_origins:
+    ///     - "http://localhost:3000"
+    /// ```
+    #[serde(default = "SecurityYaml::default_dev_csp_form_action_origins")]
+    pub dev_csp_form_action_origins: Vec<String>,
 }
 
 /// Redacts `dpop_nonce_secret` and `key_encryption_key` — both are secret key
@@ -973,6 +993,10 @@ impl std::fmt::Debug for SecurityYaml {
                 &self.key_encryption_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("password", &self.password)
+            .field(
+                "dev_csp_form_action_origins",
+                &self.dev_csp_form_action_origins,
+            )
             .finish()
     }
 }
@@ -1149,6 +1173,14 @@ impl SecurityYaml {
     /// Default slug cooldown in days (A-5).
     const fn default_slug_cooldown_days() -> u32 {
         30
+    }
+
+    /// Default dev-mode CSP `form-action` extra origins (HEA-2084).
+    fn default_dev_csp_form_action_origins() -> Vec<String> {
+        vec![
+            "http://localhost:5173".to_string(),
+            "http://localhost:5399".to_string(),
+        ]
     }
 }
 

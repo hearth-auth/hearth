@@ -6,7 +6,105 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`POST /admin/bootstrap` now returns a cross-realm system-realm admin token (HEA-2087)** —
+  the dev-only bootstrap response gained two fields: `system_access_token` (an access token for
+  the reserved system-realm admin `admin@hearth.test`, whose nil-UUID realm passes the
+  `scoped_realm` cross-realm guard) and `system_realm_id` (the nil UUID). The pre-existing
+  `access_token` is scoped to the dev-realm and — by design — cannot manage other realms, so
+  operations like rotating a *different* realm's signing key returned `403 forbidden`. SDK and
+  integration consumers that need cross-realm admin should use `system_access_token` together
+  with `X-Realm-ID: <system_realm_id>`. Both fields are populated on first bootstrap and every
+  re-bootstrap; the endpoint remains a 404 in production. (HEA-2087)
+- **`security.dev_csp_form_action_origins` config key (HEA-2084)** — the dev-mode CSP
+  `form-action` extra origins (previously hard-coded to `:5173` and `:5399`) are now
+  configurable via this `hearth.yaml` key. Supply a list of `http://localhost:<port>` strings
+  to match the port(s) your demo SPA runs on. The key defaults to the previous values
+  (`["http://localhost:5173", "http://localhost:5399"]`), so no change is needed for the
+  reference-integration suite. Production (`dev_mode == false`) always emits
+  `form-action 'self'` regardless of this setting. (HEA-2084)
+
+### Fixed
+- **Full-stack demo resource server now rejects revoked access tokens (HEA-2094)** — the demo
+  Go backend (`examples/full-stack-demo/backend`) previously validated access tokens by Ed25519
+  signature and expiry only, so a token revoked at Hearth was still accepted on `/api/notes`
+  until it expired naturally. It now layers RFC 7662 introspection on top of the JWKS signature
+  check (`middleware/revocation.go`), calling Hearth's realm-scoped `POST /realms/{realm}/introspect`
+  and caching each verdict for a short, configurable TTL (`INTROSPECT_CACHE_TTL`, default `3s`)
+  so introspection is not a per-request round-trip. Introspection outages fail closed (`503`).
+  This is a reference-implementation quality fix — Hearth's own control plane already rejected the
+  revoked token — so integrators who copied the demo stop learning the signature-only anti-pattern.
+  (HEA-2094)
+
 ### Security
+- **Signing-key cache no longer resurrects a just-rotated key under a race (HEA-2096)** — the
+  per-realm active-signing-key cache filled its miss path with an unsynchronised
+  get-miss-load-insert. A `rotate_realm_signing_key` that landed between the storage read and the
+  insert had its cache eviction overwritten by the loser's stale value, so the engine kept signing
+  new tokens with the key that was just retired until the next invalidation — an unbounded window
+  if the rotation was an emergency response to a compromised key. The miss path now snapshots a
+  per-realm rotation epoch before the load and discards its insert if a rotation intervened, at no
+  cost to the cache-hit hot path. (HEA-2096)
+- **Token-claims cache no longer resurrects a token past a racing rotation flush (HEA-2097)** — the
+  same race class as HEA-2096, on the `validate_token` claims cache. A validation that verified a
+  token under the active key could memoize it *after* an emergency `grace: 0`
+  `rotate_realm_signing_key` (or a realm delete) had already flushed the cache, leaving that token
+  accepted until its own `exp` and defeating the point of the emergency rotation. The cache now
+  carries a generation counter that each flush bumps; the miss path snapshots it before the
+  signature verify and discards the insert if it moved, so an in-flight validation can never re-warm
+  a token the flush was meant to cut off. The cache-hit hot path is untouched. A related off-hot-path
+  cleanup: `purge_realm_retiring_keys` now logs a persistent delete failure at `warn` rather than
+  `info`, since it silently retains wrapped (or, with no KEK, plaintext) private-key material.
+  (HEA-2097)
+- **Retiring signing keys are now cut off, cleaned up, and reaped (HEA-2093)** — three
+  key-material-hygiene gaps in the rotation grace lifecycle introduced with HEA-2090:
+  - An emergency rotation (`signing_key_rotation_grace_period_secs: 0`, for a compromised key)
+    now actually revokes tokens Hearth had already validated. Previously the in-process
+    token-claims cache short-circuits the signature check, so an already-seen token kept passing
+    until its own `exp`; rotation and realm delete now flush that cache, and a token accepted via
+    a *retiring* key is never memoized, so its grace deadline is re-checked on every validation.
+  - Deleting a realm now removes its retiring signing keys from storage on both the synchronous
+    and the large-realm background cascade path. Wrapped PKCS#8 private keys (plaintext when no
+    `key_encryption_key` is configured) previously persisted indefinitely after the realm was gone.
+  - Rotation now purges retiring keys whose grace window has already closed. Each rotation
+    previously appended one permanent storage entry, all of which were decrypted on every
+    retiring-key cache reload. (HEA-2093)
+
+### Fixed
+- **Signing-key rotation no longer logs out every active session (HEA-2090)** — rotating a
+  realm's Ed25519 signing key (`POST /admin/realms/{id}/rotate-signing-key`, or config
+  `rotate_signing_key: true`) now honours the grace period on *both* sides: Hearth continues to
+  accept access, refresh, token-exchange, and required-action tokens signed with the retiring
+  key until its `signing_key_rotation_grace_period_secs` deadline (default 24h) — exactly the
+  window `JWKS` already advertised the retiring key for. Previously Hearth advertised the old
+  key in JWKS for 24h but rejected everything signed with it the instant rotation completed,
+  bouncing every logged-in user. Verification still fails closed: expired retiring keys are
+  never tried, and issuance always uses the new active key. (HEA-2090)
+- **Self-registration no longer rejects a blank "Display name (optional)" field (HEA-2078)** —
+  the engine now derives the display name from `first_name + last_name` when the field is left
+  empty, matching the form label and the behaviour of `create_user` / `import_user`. Registrations
+  where all three name fields are blank continue to be rejected with a clear error.
+- **OAuth endpoints now accept the RFC-mandated `application/x-www-form-urlencoded` request
+  encoding (HEA-2077)** — the token, revocation, introspection, pushed-authorization-request
+  (PAR), and device-authorization endpoints — plus their `/realms/{realm}/…` twins — previously
+  returned `415 Unsupported Media Type` for form-encoded bodies, breaking spec-compliant clients
+  and off-the-shelf OAuth libraries (RFC 6749 §4.1.3, RFC 7009 §2.1, RFC 7662 §2.1, RFC 8628 §3.1,
+  RFC 9126 §2.1). Both form and JSON bodies are now accepted on every one of these endpoints;
+  client credentials carried in the form body (`client_id`/`client_secret`) work as before, and
+  all auth, DPoP, and rate-limit checks run identically on the form path. Genuinely unsupported
+  content types still return 415.
+
+### Security
+- **CSP `form-action` no longer advertises plaintext-http localhost origins in production
+  builds (HEA-2072)** — the security-headers middleware emitted
+  `form-action 'self' http://localhost:5173 http://localhost:5399` unconditionally on every UI
+  response. Those two demo-SPA origins were added for the reference-integration Playwright
+  suite but were never gated behind `--dev`, so every production Hearth deployment weakened a
+  defense-in-depth control on exactly the hosted login/consent pages where `form-action`
+  matters most. The extra origins are now gated behind dev mode (`SecurityConfig.extra_form_action_origins`,
+  populated only when `dev_mode` is set); production output is byte-identical to
+  `form-action 'self'`. **Operator impact:** none for production; the demo integration suite
+  continues to work under `--dev`. (HEA-2072)
 - **DPoP sender-constraint now enforced at the session-version feed endpoints — stops
   bound-token replay as plain Bearer (HEA-2039)** — `GET /oauth/session-versions` and
   `GET /oauth/session-versions/snapshot` parsed the `Authorization: Bearer` header directly
@@ -108,6 +206,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   token could be laundered onto an attacker's key. (HEA-2024)
 
 ### Fixed
+- **Admin UI accessibility + theme cleanup (HEA-2074)** — seven confirmed a11y/theme
+  defects in the admin and account UI are fixed: (1) primary/destructive/step-indicator
+  buttons no longer use the THEME-banned `text-white` (now the `graphite-50` token);
+  (2) chromeless pages (login, register, consent, MFA challenge) now render a real
+  `<main id="main">` landmark so the skip-to-content link works; (3) every list/detail
+  search box has a programmatic accessible name (previously placeholder-only, announced as
+  "search, edit text"); (4) create forms mark only optional fields with a
+  "All fields are required unless marked optional" legend, replacing the inconsistent `*` /
+  `aria-required` mix; (5) the **Redirect URIs** label is bound to its textarea on both the
+  application create and edit forms; (6) rendered timestamps are wrapped in
+  `<time datetime="…">` with a machine-readable RFC 3339 value (visible text unchanged);
+  (7) every data-table column header carries `scope="col"`. Regression fences ship in the
+  same change: a bespoke label-binding assertion (placeholder/title excluded), a
+  `scope="col"` assertion, a skip-link `#main`-focusable assertion on both layout branches,
+  a promoted `skip-link`/`region`/`landmark-one-main` blocking rule set in the axe gate, and
+  a repo-level lint that fails if `text-white` reappears under `templates/`. (HEA-2074)
 - **`hearth serve` no longer exits 1 in silence when the config is invalid (HEA-2011)** —
   config loading happens before the tracing subscriber is installed, so the failure was
   reported through `tracing::error!` and written nowhere: an operator whose `hearth.yaml`

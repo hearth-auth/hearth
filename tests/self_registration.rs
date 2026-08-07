@@ -317,3 +317,64 @@ async fn signup_enforces_realm_password_policy() {
         "weak password must be rejected, got: {result:?}"
     );
 }
+
+// ===== Scenario: blank display_name synthesized from first+last =====
+
+#[tokio::test]
+async fn blank_display_name_synthesized_from_first_last() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
+
+    let email = format!("jane-{}@example.com", uuid::Uuid::new_v4());
+    let req = RegisterUserRequest {
+        email: email.clone(),
+        display_name: String::new(),
+        first_name: "Jane".to_string(),
+        last_name: "Doe".to_string(),
+        password: CleartextPassword::from_string("correct-horse-battery-staple".to_string()),
+        client_ip: Some("203.0.113.2".to_string()),
+        invitation_token: None,
+    };
+    let resp = harness
+        .identity()
+        .register_user(&realm, &req)
+        .expect("blank display_name with first+last must succeed");
+    assert!(
+        !resp.verification_token.is_empty(),
+        "verification token must be issued"
+    );
+
+    // Verify the user was created with the synthesized display name.
+    let user = harness
+        .identity()
+        .get_user(&realm, &resp.user_id)
+        .expect("get_user")
+        .expect("user must exist");
+    assert_eq!(
+        user.display_name(),
+        "Jane Doe",
+        "display name must be synthesized from first+last"
+    );
+}
+
+#[tokio::test]
+async fn blank_display_name_and_blank_first_last_rejected() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
+
+    let email = format!("nobody-{}@example.com", uuid::Uuid::new_v4());
+    let req = RegisterUserRequest {
+        email: email.clone(),
+        display_name: String::new(),
+        first_name: String::new(),
+        last_name: String::new(),
+        password: CleartextPassword::from_string("correct-horse-battery-staple".to_string()),
+        client_ip: Some("203.0.113.3".to_string()),
+        invitation_token: None,
+    };
+    let result = harness.identity().register_user(&realm, &req);
+    assert!(
+        matches!(result, Err(IdentityError::InvalidInput { .. })),
+        "all-blank names must be rejected, got: {result:?}"
+    );
+}

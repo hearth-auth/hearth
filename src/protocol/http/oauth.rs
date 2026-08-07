@@ -232,6 +232,64 @@ async fn jwks(
         .into_response()
 }
 
+/// Request-body extractor that accepts **either** JSON or
+/// `application/x-www-form-urlencoded`.
+///
+/// RFC 6749 §4.1.3, RFC 7009 §2.1, and RFC 7662 §2.1 mandate that the token,
+/// revocation, and introspection endpoints accept form-encoded bodies — a
+/// spec-compliant OAuth client or off-the-shelf library sends
+/// `application/x-www-form-urlencoded`, and a bare [`Json`] extractor rejects
+/// that with `415 Unsupported Media Type` (HEA-2077). Hearth additionally keeps
+/// accepting JSON for SDK/programmatic convenience.
+///
+/// The `Content-Type` header selects the decoder: form-encoded bodies are
+/// parsed with `serde_urlencoded`; everything else falls through to the JSON
+/// decoder, preserving the historical JSON behaviour (and its rejection
+/// responses) for existing clients.
+pub(super) struct JsonOrForm<T>(pub(super) T);
+
+impl<T, S> axum::extract::FromRequest<S> for JsonOrForm<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let is_form = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| {
+                ct.trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("application/x-www-form-urlencoded")
+            });
+
+        if is_form {
+            let bytes = axum::body::Bytes::from_request(req, state)
+                .await
+                .map_err(axum::response::IntoResponse::into_response)?;
+            let value = serde_urlencoded::from_bytes::<T>(&bytes).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": e.to_string(),
+                    })),
+                )
+                    .into_response()
+            })?;
+            Ok(JsonOrForm(value))
+        } else {
+            let Json(value) = Json::<T>::from_request(req, state)
+                .await
+                .map_err(axum::response::IntoResponse::into_response)?;
+            Ok(JsonOrForm(value))
+        }
+    }
+}
+
 /// HTTP request body for token exchange.
 ///
 /// Uses a flat struct because the proto `TokenExchangeRequest` doesn't cover
@@ -1026,7 +1084,7 @@ fn default_response_type() -> String {
 async fn pushed_authorization_request(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<HttpParRequest>,
+    JsonOrForm(body): JsonOrForm<HttpParRequest>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
@@ -1039,7 +1097,7 @@ async fn pushed_authorization_request(
 async fn realm_pushed_authorization_request(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    Json(body): Json<HttpParRequest>,
+    JsonOrForm(body): JsonOrForm<HttpParRequest>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
@@ -1121,7 +1179,7 @@ async fn token_exchange(
     State(state): State<Arc<AppState>>,
     PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
-    Json(body): Json<HttpTokenRequest>,
+    JsonOrForm(body): JsonOrForm<HttpTokenRequest>,
 ) -> Response {
     // Parse client_id and realm_id before dispatch so CORS can be applied to
     // every response path, including grant-type-specific error branches.
@@ -1667,7 +1725,7 @@ async fn token_exchange_impl(
 async fn token_revocation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<HttpRevocationBody>,
+    JsonOrForm(body): JsonOrForm<HttpRevocationBody>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
@@ -1718,7 +1776,7 @@ async fn token_revocation(
 async fn token_introspection(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<HttpIntrospectionBody>,
+    JsonOrForm(body): JsonOrForm<HttpIntrospectionBody>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
@@ -1840,7 +1898,7 @@ async fn oauth_decide_permission(
 async fn device_authorization(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<pb::DeviceAuthorizationRequest>,
+    JsonOrForm(body): JsonOrForm<pb::DeviceAuthorizationRequest>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
@@ -2209,7 +2267,7 @@ async fn realm_token_exchange(
     PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<HttpTokenRequest>,
+    JsonOrForm(body): JsonOrForm<HttpTokenRequest>,
 ) -> Response {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
@@ -2676,7 +2734,7 @@ async fn realm_token_exchange(
 async fn realm_token_revocation(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    JsonOrForm(body): JsonOrForm<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
@@ -2705,7 +2763,7 @@ async fn realm_token_revocation(
 async fn realm_token_introspection(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    JsonOrForm(body): JsonOrForm<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
@@ -2782,7 +2840,7 @@ async fn realm_userinfo(
 async fn realm_device_authorization(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    JsonOrForm(body): JsonOrForm<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,

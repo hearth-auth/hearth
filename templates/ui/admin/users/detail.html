@@ -72,11 +72,11 @@
     </div>
     <div>
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Created</dt>
-      <dd class="mt-1 text-sm text-ht-content-muted">{{ created_at_display }}</dd>
+      <dd class="mt-1 text-sm text-ht-content-muted"><time datetime="{{ created_at_iso }}">{{ created_at_display }}</time></dd>
     </div>
     <div>
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Updated</dt>
-      <dd class="mt-1 text-sm text-ht-content-muted">{{ updated_at_display }}</dd>
+      <dd class="mt-1 text-sm text-ht-content-muted"><time datetime="{{ updated_at_iso }}">{{ updated_at_display }}</time></dd>
     </div>
     {% match masked_phone %}
       {% when Some with (phone) %}
@@ -149,24 +149,26 @@
         {% endif %}
       </p>
     </div>
-    {# Tab buttons #}
-    <div class="flex gap-1 self-end sm:self-auto">
-      <button type="button"
+    {# Tab buttons. `role="tab"` is required: the Tabs component sets
+       `aria-selected` on every button, and that attribute is only allowed on a
+       role that supports it (axe `aria-allowed-attr`, critical). #}
+    <div class="flex gap-1 self-end sm:self-auto" role="tablist" aria-label="User access sections">
+      <button type="button" role="tab" id="tab-roles" aria-controls="roles-panel"
               data-tab="roles" aria-selected="true"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Roles
       </button>
-      <button type="button"
+      <button type="button" role="tab" id="tab-extra" aria-controls="extra-panel"
               data-tab="extra"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Extra Permissions
       </button>
-      <button type="button"
+      <button type="button" role="tab" id="tab-effective" aria-controls="effective-panel"
               data-tab="effective"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Effective
       </button>
-      <button type="button"
+      <button type="button" role="tab" id="tab-attrs" aria-controls="attrs-panel"
               data-tab="attrs"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Attributes
@@ -175,21 +177,24 @@
   </div>
 
   {# Roles tab #}
-  <div id="roles-panel" data-tab-panel="roles" class="p-6">
+  <div id="roles-panel" role="tabpanel" aria-labelledby="tab-roles" tabindex="0"
+       data-tab-panel="roles" class="p-6 focus:outline-none">
     <div id="roles-tab-content">
       {% include "ui/admin/users/_roles_tab.html" %}
     </div>
   </div>
 
   {# Extra Permissions tab #}
-  <div id="extra-panel" data-tab-panel="extra" class="p-6 hidden">
+  <div id="extra-panel" role="tabpanel" aria-labelledby="tab-extra" tabindex="0"
+       data-tab-panel="extra" class="p-6 hidden focus:outline-none">
     <div id="permissions-tab-content">
       {% include "ui/admin/users/_permissions_tab.html" %}
     </div>
   </div>
 
   {# Effective Permissions tab #}
-  <div id="effective-panel" data-tab-panel="effective" class="p-6 hidden">
+  <div id="effective-panel" role="tabpanel" aria-labelledby="tab-effective" tabindex="0"
+       data-tab-panel="effective" class="p-6 hidden focus:outline-none">
     {% if effective_permissions.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No effective permissions resolved for this user.</p>
     {% else %}
@@ -204,15 +209,16 @@
   </div>
 
   {# Attributes tab #}
-  <div id="attrs-panel" data-tab-panel="attrs" class="p-6 hidden">
+  <div id="attrs-panel" role="tabpanel" aria-labelledby="tab-attrs" tabindex="0"
+       data-tab-panel="attrs" class="p-6 hidden focus:outline-none">
     {% if attributes.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No attributes set on this user.</p>
     {% else %}
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b border-divider-subtle">
-            <th class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Key</th>
-            <th class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Value</th>
+            <th scope="col" class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Key</th>
+            <th scope="col" class="pb-2 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Value</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-divider-faint">
@@ -234,12 +240,12 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-        <th class="px-3 py-2" aria-label="Actions"></th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
+        <th scope="col" class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -247,8 +253,8 @@
       <tr class="border-b border-divider-faint">
         <td class="px-3 py-2 text-sm text-ht-content-secondary">{{ s.device_label }}</td>
         <td class="px-3 py-2 font-mono text-xs text-ht-content-muted">{{ s.ip_address }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.created_at }}</td>
-        <td class="px-3 py-2 text-sm text-ht-content-muted">{{ s.expires_at }}</td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.created_at_iso }}">{{ s.created_at }}</time></td>
+        <td class="px-3 py-2 text-sm text-ht-content-muted"><time datetime="{{ s.expires_at_iso }}">{{ s.expires_at }}</time></td>
         <td class="px-3 py-2">
           {% if s.revoked %}
             <span class="inline-flex items-center rounded-full bg-danger/[0.12] px-2 py-0.5 text-xs font-medium text-danger-fg">Revoked</span>
@@ -293,10 +299,10 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Credential ID</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
-        <th class="px-3 py-2" aria-label="Actions"></th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Credential ID</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
+        <th scope="col" class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -334,8 +340,8 @@
   <table class="w-full">
     <thead>
       <tr class="border-b border-divider-subtle">
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Organization</th>
-        <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Role</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Organization</th>
+        <th scope="col" class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Role</th>
       </tr>
     </thead>
     <tbody>

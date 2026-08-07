@@ -24,9 +24,22 @@ observability:
 email:
   transport: mailcatcher   # captures all mail; view at http://localhost:8420/dev/mail
 
+security:
+  # demo.sh replaces 5173 → FRONTEND_PORT in this file, so the CSP form-action
+  # origin tracks whatever port the Vite dev server is actually bound to.
+  dev_csp_form_action_origins:
+    - "http://localhost:5173"
+
 realms:
   demo:
     display_name: "Hearth Hub Demo"
+
+    # Enable self-service signup so the demo can showcase — and the HEA-2056
+    # integration suite can exercise — the registration → email-verification →
+    # login flow. New users land with no roles until an admin assigns one.
+    auth:
+      registration:
+        mode: open
 
     applications:
       hearth-hub:

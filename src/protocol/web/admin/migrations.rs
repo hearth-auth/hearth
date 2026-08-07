@@ -54,6 +54,8 @@ pub struct MigrationRow {
     pub users_skipped: u64,
     /// Human-readable completion timestamp.
     pub completed_at: String,
+    /// Raw RFC3339 completion timestamp for `<time datetime>`.
+    pub completed_at_iso: String,
     /// CSS token classes for the status badge.
     pub badge_class: String,
     /// Human-readable status label.
@@ -71,6 +73,7 @@ impl MigrationRow {
             users_migrated: r.users_migrated,
             users_skipped: r.users_skipped,
             completed_at: format_rfc3339_human(&r.completed_at),
+            completed_at_iso: r.completed_at.clone(),
             badge_class: r.status.badge_class().to_string(),
             status_label: r.status.label().to_string(),
             audit_filter: format!("action=MigrationCompleted&q={}", r.source_slug),
@@ -84,6 +87,8 @@ pub struct OrphanRow {
     pub realm_slug: String,
     /// When the orphan was first detected.
     pub detected_at: String,
+    /// Raw RFC3339 detection timestamp for `<time datetime>`.
+    pub detected_at_iso: String,
     /// Number of users at detection time.
     pub user_count: u64,
     /// Number of orgs at detection time.
@@ -101,6 +106,7 @@ impl OrphanRow {
         Self {
             realm_slug: r.realm_slug.clone(),
             detected_at: format_rfc3339_human(&r.detected_at),
+            detected_at_iso: r.detected_at.clone(),
             user_count: r.user_count,
             org_count: r.org_count,
             yaml_snippet,

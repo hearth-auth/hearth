@@ -191,6 +191,29 @@ Clients SHOULD confirm `cnf.jkt` is present in the issued access token before re
 
 > For agent-specific guidance on persisting DPoP key pairs across grant lifetimes, see [AGENT_AUTH.md §6.5](AGENT_AUTH.md#65-dpop-refresh-token-binding-rfc-9449-5).
 
+### 3.3 Server-Side Sender-Constraint Enforcement at Hearth Resource Endpoints (HEA-2031, HEA-2039)
+
+Hearth itself acts as a resource server for several protected endpoints. When a caller presents
+a DPoP-bound access token (one carrying `cnf.jkt`) at any of these endpoints, Hearth **rejects
+the request with `401 invalid_token`** unless a valid matching `DPoP` proof header is also
+provided. Plain Bearer tokens without `cnf.jkt` are accepted without a proof.
+
+Endpoints that enforce this:
+
+| Endpoint | Notes |
+|---|---|
+| `GET /userinfo`, `GET /realms/{realm}/userinfo` | OIDC UserInfo |
+| `GET /v1/me/permissions` | Effective-permissions resolution |
+| `POST /oauth/authorize` (decide-permission) | Agent tool-permission decision |
+| `GET /oauth/session-versions` | Session-version delta feed |
+| `GET /oauth/session-versions/snapshot` | Session-version snapshot |
+| `POST /register`, `POST /realms/{realm}/register` | Authenticated DCR with initial-access token |
+
+For callers with DPoP-bound tokens, the `DPoP` proof must include correct `htm` (HTTP method),
+`htu` (HTTP URL), and — when the token is access-token-bound — an `ath` (access token hash)
+claim per RFC 9449 §4.3. Missing or invalid proofs are rejected before any permission check
+runs.
+
 ---
 
 ## 4. JAR (JWT Authorization Requests, RFC 9101)
@@ -337,7 +360,30 @@ The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 
 ---
 
-## 8. Test Coverage
+## 8. Request Encoding — Accepted Content Types
+
+The OAuth 2.0 / OIDC POST endpoints accept **both** `application/x-www-form-urlencoded`
+(the encoding mandated by the OAuth RFCs) **and** `application/json` (retained for SDK and
+programmatic convenience). The `Content-Type` header selects the decoder; a form body and the
+equivalent JSON body produce identical behaviour, and all authentication, DPoP, and rate-limit
+checks run identically on both paths. Any other content type is rejected with
+`415 Unsupported Media Type` (HEA-2077).
+
+| Endpoint | Header-routed path | Realm-scoped twin | RFC mandating form |
+|----------|--------------------|-------------------|--------------------|
+| Token | `POST /token` | `POST /realms/{realm}/token` | RFC 6749 §4.1.3 |
+| Revocation | `POST /revoke` | `POST /realms/{realm}/revoke` | RFC 7009 §2.1 |
+| Introspection | `POST /introspect` | `POST /realms/{realm}/introspect` | RFC 7662 §2.1 |
+| Device Authorization | `POST /device_authorization` | `POST /realms/{realm}/device_authorization` | RFC 8628 §3.1 |
+| Pushed Authorization Request (PAR) | `POST /as/par` | `POST /realms/{realm}/as/par` | RFC 9126 §2.1 |
+
+Client credentials carried in the request body (`client_id` / `client_secret`, RFC 6749 §2.3.1)
+are honoured on the form path as well as the header path. Dynamic client registration
+(`POST /register`, RFC 7591) and the JSON permission-decision endpoint remain JSON-only by design.
+
+---
+
+## 9. Test Coverage
 
 | Test file | What it covers |
 |-----------|----------------|
@@ -347,11 +393,12 @@ The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 | `tests/jar.rs` | JAR (RFC 9101) request JWT parsing, signature verification |
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
+| `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 
 ---
 
-## 9. References
+## 10. References
 
 - [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
 - [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html)

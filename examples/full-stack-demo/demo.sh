@@ -37,11 +37,13 @@ CONFIG="$HERE/hearth.yaml"
 HEARTH_PORT="${HEARTH_PORT:-8420}"
 BACKEND_PORT="${BACKEND_PORT:-8421}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+export HEARTH_PORT BACKEND_PORT FRONTEND_PORT
 BASE="http://127.0.0.1:${HEARTH_PORT}"
 
 HEARTH_PID=""
 BACKEND_PID=""
 FRONTEND_PID=""
+_cfg_tmp=""
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
@@ -55,6 +57,7 @@ cleanup() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+  [[ -n "$_cfg_tmp" ]] && rm -f "$_cfg_tmp"
   echo "  ✓ stopped"
 }
 trap cleanup EXIT
@@ -80,6 +83,15 @@ for _port in "${BACKEND_PORT}" "${FRONTEND_PORT}"; do
     kill $_pids 2>/dev/null || true
   fi
 done
+
+# ── Port-specific config ──────────────────────────────────────────────────────
+# hearth.yaml hard-codes localhost:5173 as the registered redirect_uri/origin.
+# Generate a temp copy with the actual FRONTEND_PORT so the OIDC redirect
+# validation accepts the real callback URL when a different port is chosen.
+_cfg_tmp="$(mktemp /tmp/hearth-demo-XXXXXX.yaml)"
+sed -e "s|http://localhost:5173|http://localhost:${FRONTEND_PORT}|g" \
+    "$CONFIG" > "$_cfg_tmp"
+CONFIG="$_cfg_tmp"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -159,8 +171,17 @@ fi
 echo "▸ bootstrapping…"
 BOOTSTRAP=$(curl -sf -X POST "$BASE/admin/bootstrap")
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
-# The system realm ID is required as X-Realm-ID on admin API calls.
+# NOTE: .realm_id is the DEV realm's UUID, not the reserved system realm. It is
+# fine for the global GET /admin/realms below (which lists all realms), but a
+# dev-realm token CANNOT manage other realms cross-realm (HEA-2087).
 SYS_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
+
+# HEA-2087: cross-realm admin credential. bootstrap also seeds a system-realm
+# admin (admin@hearth.test, nil-UUID realm) and now returns a token for it. Only
+# a nil-realm (system) token passes the scoped_realm BOLA guard for cross-realm
+# operations such as rotating the demo realm's signing key (integration flow 5).
+SYSTEM_ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token // empty')
+SYSTEM_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.system_realm_id // empty')
 
 if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
   echo "✗ could not obtain admin token" >&2
@@ -168,6 +189,16 @@ if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
   exit 1
 fi
 echo "  ✓ admin token acquired"
+
+# Write the bootstrap credentials to a gitignored env file so the integration
+# test suite can consume them without re-bootstrapping (which would 401 because
+# the realm already exists after this call). The suite's control-plane helpers
+# need the SYSTEM token so cross-realm ops (signing-key rotation) succeed; fall
+# back to the dev-realm token for older binaries that lack system_access_token.
+cat > "$HERE/.hearth-run-env" <<RUNENV
+HEARTH_ADMIN_TOKEN=${SYSTEM_ADMIN_TOKEN:-$ADMIN_TOKEN}
+HEARTH_SYSTEM_REALM_ID=${SYSTEM_REALM_ID:-$SYS_REALM_ID}
+RUNENV
 
 # ── Resolve demo realm ────────────────────────────────────────────────────────
 
@@ -216,6 +247,7 @@ HEARTH_URL=http://localhost:${HEARTH_PORT}
 REALM_ID=${REALM_ID}
 REALM_SLUG=demo
 PORT=${BACKEND_PORT}
+FRONTEND_ORIGIN=http://localhost:${FRONTEND_PORT}
 EOF
 echo "  ✓ backend/.env"
 

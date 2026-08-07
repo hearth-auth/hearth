@@ -38,7 +38,9 @@ struct ConsentRow {
     client_logo_url: Option<String>,
     scopes: Vec<String>,
     granted_at: String,
+    granted_at_iso: String,
     updated_at: String,
+    updated_at_iso: String,
 }
 
 #[derive(Template)]
@@ -244,7 +246,9 @@ fn load_consents(state: &Arc<WebState>, session: &UiSession) -> Vec<ConsentRow> 
             client_logo_url: e.client_logo_url,
             scopes: e.record.granted_scopes,
             granted_at: format_ts(e.record.granted_at),
+            granted_at_iso: super::format_ts_iso(e.record.granted_at),
             updated_at: format_ts(e.record.updated_at),
+            updated_at_iso: super::format_ts_iso(e.record.updated_at),
         })
         .collect()
 }

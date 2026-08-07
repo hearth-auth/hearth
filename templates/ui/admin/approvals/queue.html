@@ -101,7 +101,7 @@
             <span class="font-mono text-xs text-ht-content-muted" title="{{ row.context_preview }}">{{ row.context_preview }}</span>
           </td>
           <td class="px-4 py-3">
-            <span class="text-sm text-ht-content-secondary" title="{{ row.requested_display }} UTC">{{ row.requested_ago }}</span>
+            <time datetime="{{ row.requested_iso }}" class="text-sm text-ht-content-secondary" title="{{ row.requested_display }} UTC">{{ row.requested_ago }}</time>
           </td>
           <td class="px-4 py-3">
             <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ row.status_badge_class }}">{{ row.status }}</span>
