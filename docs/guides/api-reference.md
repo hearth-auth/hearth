@@ -373,3 +373,196 @@ standard `x-realm-id` header.
 
 Public clients (PKCE flows with no `client_secret`) continue to authenticate via
 `code_verifier` alone. Do not add a `client_secret` to a public client registration.
+
+---
+
+## WebAuthn / Passkey REST API
+
+Hearth exposes four REST endpoints for the WebAuthn passkey ceremony (FIDO2 / WebAuthn Level 2).
+These endpoints are used by SDK clients and direct REST callers to register and authenticate
+passkey credentials without a browser session.
+
+All four endpoints require the `X-Realm-ID` header with the realm UUID. Binary fields
+(`challenge`, `client_data_json`, `attestation_object`, `credential_id`,
+`authenticator_data`, `signature`, `user_handle`) are base64url-encoded strings (no padding).
+
+> **Security note:** The `rp_id` and `origin` fields in request bodies are accepted for
+> backward compatibility but **silently ignored**. The server derives both from the configured
+> `oidc.issuer`. Credentials registered against a mismatched RP ID will fail authentication.
+
+### POST /webauthn/register/begin
+
+Start a passkey registration ceremony for the authenticated user.
+
+**Authentication:** `Authorization: Bearer <access-token>` (required)
+
+**Headers:**
+```
+Authorization: Bearer <access-token>
+X-Realm-ID: <realm-uuid>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{
+  "discoverable": true
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `discoverable` | bool | No | Whether to request a discoverable (resident-key) credential. Default: `true`. |
+| `rp_id` | string | No | Accepted but ignored. Server pins RP ID from `oidc.issuer`. |
+
+**Response `200 OK`:**
+```json
+{
+  "challenge": "<base64url>",
+  "rp_id": "auth.example.com",
+  "rp_name": "Hearth",
+  "user_id": "<user-uuid>",
+  "user_name": "<user-uuid>",
+  "user_display_name": "<user-uuid>",
+  "attestation": "none",
+  "timeout": 60
+}
+```
+
+Pass `challenge`, `rp_id`, `user_id`, and `attestation` to the browser's
+`navigator.credentials.create()` call as `PublicKeyCredentialCreationOptions`.
+
+---
+
+### POST /webauthn/register/complete
+
+Complete the registration ceremony with the browser's attestation response.
+
+**Authentication:** `Authorization: Bearer <access-token>` (required)
+
+**Headers:**
+```
+Authorization: Bearer <access-token>
+X-Realm-ID: <realm-uuid>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{
+  "client_data_json": "<base64url>",
+  "attestation_object": "<base64url>",
+  "origin": "<ignored>",
+  "discoverable": false
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `client_data_json` | string | Yes | Base64url of `response.clientDataJSON` from the browser. |
+| `attestation_object` | string | Yes | Base64url of `response.attestationObject` from the browser. |
+| `origin` | string | Yes | Accepted but ignored. Server pins origin from `oidc.issuer`. Pass any non-empty string for backward compatibility. |
+| `discoverable` | bool | No | Whether the credential is resident. Default: `false`. |
+
+**Response `200 OK`:**
+```json
+{
+  "credential_id": "<base64url>",
+  "algorithm": -8,
+  "discoverable": true
+}
+```
+
+`algorithm` is the COSE algorithm identifier (e.g. `-8` for EdDSA, `-7` for ES256).
+
+---
+
+### POST /webauthn/auth/begin
+
+Start a passkey authentication ceremony. No authentication required (supports discoverable flow).
+
+**Headers:**
+```
+X-Realm-ID: <realm-uuid>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{
+  "user_id": "<user-uuid>"
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `user_id` | string (UUID) | No | Omit for discoverable (username-less) assertion. When provided, `allow_credentials` is populated with the user's registered credential IDs. |
+| `rp_id` | string | No | Accepted but ignored. |
+
+**Response `200 OK`:**
+```json
+{
+  "challenge": "<base64url>",
+  "rp_id": "auth.example.com",
+  "allow_credentials": [
+    { "id": "<base64url>", "type": "public-key" }
+  ],
+  "user_verification": "preferred",
+  "timeout": 60
+}
+```
+
+`allow_credentials` is empty when `user_id` is omitted (discoverable flow).
+
+---
+
+### POST /webauthn/auth/complete
+
+Complete the authentication ceremony with the browser's assertion response.
+
+**Headers:**
+```
+X-Realm-ID: <realm-uuid>
+Content-Type: application/json
+```
+
+**Request body:**
+```json
+{
+  "credential_id": "<base64url>",
+  "client_data_json": "<base64url>",
+  "authenticator_data": "<base64url>",
+  "signature": "<base64url>",
+  "user_handle": "<base64url>",
+  "origin": "<ignored>"
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `credential_id` | string | Yes | Base64url of the credential ID returned by the browser. |
+| `client_data_json` | string | Yes | Base64url of `response.clientDataJSON`. |
+| `authenticator_data` | string | Yes | Base64url of `response.authenticatorData`. |
+| `signature` | string | Yes | Base64url of `response.signature`. |
+| `user_handle` | string | No | Base64url of `response.userHandle`. Required for discoverable assertions. |
+| `origin` | string | Yes | Accepted but ignored. Pass any non-empty string for backward compatibility. |
+
+**Response `200 OK`:**
+```json
+{
+  "credential_id": "<base64url>",
+  "user_id": "<user-uuid>",
+  "sign_count": 42
+}
+```
+
+On success, issue a Hearth session or token using the returned `user_id`.
+
+**Common error responses:**
+
+| Status | Error | Cause |
+|--------|-------|-------|
+| `400` | `invalid_credential` | `clientDataJSON.origin` does not match the server-pinned origin (derived from `oidc.issuer`). |
+| `400` | `invalid_credential` | `authenticatorData.rpIdHash` does not match the server-pinned RP ID. |
+| `400` | `invalid_credential` | Signature verification failed. |
+| `404` | `not_found` | Credential ID is not registered in this realm. |

@@ -216,6 +216,92 @@ runs.
 
 ---
 
+### 3.4 Token Exchange (RFC 8693)
+
+Hearth implements the token exchange grant type (`urn:ietf:params:oauth:grant-type:token-exchange`)
+per [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) on both token endpoints:
+
+| Endpoint | Realm resolved from |
+|---|---|
+| `POST /token` | `X-Realm-ID` header |
+| `POST /realms/{realm}/token` | `{realm}` path segment |
+
+#### 3.4.1 Client Authentication Required
+
+Both endpoints require the caller to authenticate as a registered client before the exchange is
+processed (HEA-2024). Unauthenticated requests are rejected with `401 invalid_client`.
+
+Supported authentication methods:
+
+- **HTTP Basic** — `Authorization: Basic base64(client_id:client_secret)`
+- **Form body** — `client_id` + `client_secret` in the `application/x-www-form-urlencoded` body
+
+```bash
+# Authenticated token exchange — HTTP Basic
+curl -s -X POST "$ISSUER/realms/$REALM/token" \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  --data-urlencode "subject_token=$USER_ACCESS_TOKEN" \
+  --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+
+# Rejected — no client credentials
+curl -s -X POST "$ISSUER/realms/$REALM/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  --data-urlencode "client_id=random-uuid" \
+  --data-urlencode "subject_token=$USER_ACCESS_TOKEN" \
+  --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+# → 401 invalid_client
+```
+
+#### 3.4.2 DPoP-Bound Subject Tokens
+
+If the `subject_token` carries a `cnf.jkt` claim (i.e., it was issued with a DPoP proof at
+grant time), the exchange request **MUST** include a `DPoP` proof header whose thumbprint matches
+the `cnf.jkt` binding of the subject token (HEA-2024).
+
+Presenting a sender-constrained subject token without a matching proof is rejected with
+`invalid_dpop_proof`. This prevents a stolen DPoP-bound access token from being re-bound to an
+attacker's key via token exchange.
+
+Plain Bearer subject tokens (no `cnf.jkt`) require no `DPoP` header.
+
+```bash
+# DPoP-bound subject token — DPoP proof required
+curl -s -X POST "$ISSUER/realms/$REALM/token" \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "DPoP: $DPOP_PROOF" \
+  --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  --data-urlencode "subject_token=$CNF_BOUND_ACCESS_TOKEN" \
+  --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+
+# Rejected — DPoP-bound subject token with no proof
+curl -s -X POST "$ISSUER/realms/$REALM/token" \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  --data-urlencode "subject_token=$CNF_BOUND_ACCESS_TOKEN" \
+  --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+# → 400 invalid_dpop_proof
+```
+
+#### 3.4.3 Error Reference
+
+| Error | HTTP status | Cause |
+|---|---|---|
+| `invalid_client` | 401 | No client credentials, or credentials do not match a registered client |
+| `invalid_dpop_proof` | 400 | Subject token carries `cnf.jkt` but no matching `DPoP` proof was provided |
+| `invalid_dpop_proof` | 400 | `DPoP` proof thumbprint does not match subject token `cnf.jkt` |
+| `invalid_grant` | 400 | `subject_token` is expired, revoked, or not an access token |
+| `unsupported_grant_type` | 400 | Grant type is not `urn:ietf:params:oauth:grant-type:token-exchange` |
+
+For agent-specific token exchange rules (scope intersection, `act` claim, delegation depth),
+see [AGENT_AUTH.md §3.3](AGENT_AUTH.md#33-token-exchange-rfc-8693).
+
+---
+
 ## 4. JAR (JWT Authorization Requests, RFC 9101)
 
 Authorization requests may include a `request` parameter containing a signed JWT. Hearth enforces:
@@ -394,6 +480,7 @@ are honoured on the form path as well as the header path. Dynamic client registr
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
+| `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 
 ---
@@ -405,6 +492,7 @@ are honoured on the form path as well as the header path. Dynamic client registr
 - [RFC 9126 — Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
 - [RFC 9101 — JWT Authorization Requests](https://www.rfc-editor.org/rfc/rfc9101)
 - [RFC 9207 — Authorization Server Issuer Identification](https://www.rfc-editor.org/rfc/rfc9207)
+- [RFC 8693 — OAuth 2.0 Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
 - [RFC 9449 — OAuth 2.0 DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 - [RFC 7636 — PKCE](https://www.rfc-editor.org/rfc/rfc7636)
 - [OAuth 2.0 JARM](https://openid.net/specs/oauth-v2-jarm.html)

@@ -818,10 +818,10 @@ Depth semantics:
 
 **RFC reference**: RFC 8693 §4.4 (`act` claim structure and delegation chains).
 
-**Residual risk**: Hearth does not currently *issue* `act` chains (RFC 8693
-token exchange is not yet implemented). If token exchange is implemented,
-the `MAX_ACT_CHAIN_DEPTH` constant MUST be used when building outbound chains
-and a regression test MUST be added to `tests/abuse_dpop_act.rs`.
+**Residual risk**: None open. RFC 8693 token exchange is implemented and enforces
+`MAX_ACT_CHAIN_DEPTH` at `src/identity/engine/mod.rs` (call site: `act.depth() >
+crate::abuse::MAX_ACT_CHAIN_DEPTH`). Regression coverage lives in `tests/abuse_dpop_act.rs`
+and `tests/token_exchange.rs` (delegation depth + nested `act` chain tests).
 
 ---
 

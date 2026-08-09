@@ -47,7 +47,7 @@ curl -X GET "http://127.0.0.1:8420/scim/v2/Users" \
   -H "X-Realm-ID: $REALM_ID"
 ```
 
-Rate limit: shared with the admin surface — 100 requests/minute per realm.
+Rate limit: 100 requests per minute per realm, applied to both the SCIM bearer-token path and the admin-JWT fallback path.
 
 ## Base URL
 
@@ -130,6 +130,16 @@ curl -X DELETE "http://127.0.0.1:8420/scim/v2/Users/<id>" \
 ```
 
 This permanently removes the user and all associated sessions, credentials, and indexes within the realm.
+
+### Admin principal protection
+
+SCIM provisioning tokens (bearer-token auth) cannot modify or delete admin principals. Any PATCH, PUT, or DELETE request targeting a user whose effective permissions include `hearth.admin` or `hearth.users.admin` is rejected with `403 Forbidden`, regardless of which operations the request contains.
+
+This applies only to the SCIM bearer-token credential. Requests authenticated with an admin JWT are not subject to this restriction.
+
+If you need to deprovision or demote an admin user via SCIM:
+1. Remove the admin role from the user through the Admin API or Admin UI first.
+2. Retry the SCIM operation after the role change has taken effect.
 
 ## Group provisioning
 
@@ -233,7 +243,8 @@ The following SCIM features are deferred to a future hardening release:
 
 | Symptom | Likely cause |
 |---------|-------------|
-| `403 Forbidden` | SCIM not enabled for realm (no `bearer_token` in config), or wrong realm UUID in `X-Realm-ID`. |
+| `403 Forbidden` on auth | SCIM not enabled for realm (no `bearer_token` in config), or wrong realm UUID in `X-Realm-ID`. |
+| `403 Forbidden` on PATCH / PUT / DELETE | Target user holds `hearth.admin` or `hearth.users.admin`. SCIM bearer tokens cannot mutate admin principals. Remove the admin role first, or use an admin JWT. |
 | `401 Unauthorized` | Bearer token mismatch. |
 | `400 Bad Request` / `invalidValue` | Missing `X-Realm-ID` header, or non-UUID value. |
 | `429 Too Many Requests` | Rate limit exceeded (100 req/min per realm). Back off and retry. |
