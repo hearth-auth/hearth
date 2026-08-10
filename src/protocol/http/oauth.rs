@@ -296,6 +296,11 @@ where
 /// the multi-grant-type dispatch (`authorization_code` vs `refresh_token`).
 #[derive(Debug, Deserialize)]
 struct HttpTokenRequest {
+    /// RFC 6749 §3.2.1: REQUIRED only "if the client is not authenticating
+    /// with the authorization server" — a strict `client_secret_basic` client
+    /// omits it, so the handlers backfill it from the Basic username via
+    /// [`backfill_client_id_from_basic`] before any dispatch (HEA-2112).
+    #[serde(default)]
     client_id: String,
     #[serde(default)]
     grant_type: Option<String>,
@@ -522,6 +527,31 @@ fn verify_endpoint_client(
             )
                 .into_response()
         })
+}
+
+/// Backfills an absent or empty body `client_id` from the Basic Auth username.
+///
+/// RFC 6749 §3.2.1 requires body `client_id` only when the client is not
+/// authenticating with the authorization server; a strictly compliant
+/// `client_secret_basic` client carries its identity solely in the
+/// Authorization header. Running this before dispatch gives per-client rate
+/// limiting, CORS, client-auth enforcement, and every grant arm one effective
+/// client identity. The §2.3.1 disagreement checks downstream are unaffected:
+/// a backfilled id always equals the Basic username.
+fn backfill_client_id_from_basic(headers: &HeaderMap, body: &mut HttpTokenRequest) {
+    if body.client_id.trim().is_empty() {
+        if let Some((basic_id, _)) = parse_basic_auth(headers) {
+            body.client_id = basic_id;
+        }
+    }
+}
+
+/// Treats an explicitly empty body `client_id=` as absent so it cannot read
+/// as a disagreeing credential next to Basic auth — RFC 6749 §2.3.1 rejects
+/// conflicting credentials, not empty fields (HEA-2112).
+fn non_empty_client_id(id: &str) -> Option<&str> {
+    let trimmed = id.trim();
+    (!trimmed.is_empty()).then_some(id)
 }
 
 /// Enforces confidential-client authentication on the `authorization_code`
@@ -1304,8 +1334,14 @@ async fn token_exchange(
     State(state): State<Arc<AppState>>,
     PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
-    JsonOrForm(body): JsonOrForm<HttpTokenRequest>,
+    JsonOrForm(mut body): JsonOrForm<HttpTokenRequest>,
 ) -> Response {
+    // A strict `client_secret_basic` client omits body `client_id`
+    // (RFC 6749 §3.2.1) — adopt the Basic username before anything keys off
+    // the client identity, including the CORS lookup and, inside the impl,
+    // the per-client token rate limit.
+    backfill_client_id_from_basic(&headers, &mut body);
+
     // Parse client_id and realm_id before dispatch so CORS can be applied to
     // every response path, including grant-type-specific error branches.
     let maybe_client_id = body.client_id.parse::<uuid::Uuid>().ok().map(ClientId::new);
@@ -1514,7 +1550,7 @@ async fn token_exchange_impl(
                         &state,
                         &realm_id,
                         &headers,
-                        Some(body.client_id.as_str()),
+                        non_empty_client_id(&body.client_id),
                         body.client_secret.as_deref(),
                     ) {
                         Ok(cid) => Some(cid),
@@ -1773,7 +1809,7 @@ async fn token_exchange_impl(
                 &state,
                 &realm_id,
                 &headers,
-                Some(&body.client_id),
+                non_empty_client_id(&body.client_id),
                 body.client_secret.as_deref(),
             ) {
                 Ok(id) => id,
@@ -2392,12 +2428,16 @@ async fn realm_token_exchange(
     PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
-    JsonOrForm(body): JsonOrForm<HttpTokenRequest>,
+    JsonOrForm(mut body): JsonOrForm<HttpTokenRequest>,
 ) -> Response {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
+    // A strict `client_secret_basic` client omits body `client_id`
+    // (RFC 6749 §3.2.1) — adopt the Basic username before the rate limiter
+    // and grant dispatch key off the client identity.
+    backfill_client_id_from_basic(&headers, &mut body);
     // Rate limit per client_id before any grant-type dispatch.
     if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
         let client_id = ClientId::new(client_uuid);
@@ -2557,7 +2597,7 @@ async fn realm_token_exchange(
                         &state,
                         &realm_id,
                         &headers,
-                        Some(body.client_id.as_str()),
+                        non_empty_client_id(&body.client_id),
                         body.client_secret.as_deref(),
                     ) {
                         Ok(cid) => Some(cid),
@@ -2778,7 +2818,7 @@ async fn realm_token_exchange(
                 &state,
                 &realm_id,
                 &headers,
-                Some(&body.client_id),
+                non_empty_client_id(&body.client_id),
                 body.client_secret.as_deref(),
             ) {
                 Ok(id) => id,

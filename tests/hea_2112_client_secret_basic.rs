@@ -20,6 +20,14 @@
 //!    (`basic_auth_vs_body_secret_disagreement_rejected`,
 //!    `basic_auth_vs_body_client_id_disagreement_rejected`,
 //!    `basic_auth_vs_body_disagreement_rejected_at_introspect`).
+//! 4. Body `client_id` was a required deserialization field, so a strictly
+//!    compliant `client_secret_basic` client — which per RFC 6749 §3.2.1
+//!    carries its identity only in the Authorization header — was rejected
+//!    before reaching any handler, contradicting the newly advertised
+//!    discovery metadata
+//!    (`basic_only_code_exchange_without_body_client_id_succeeds`,
+//!    `basic_only_code_exchange_succeeds_on_realm_path`,
+//!    `basic_auth_with_explicitly_empty_body_client_id_succeeds`).
 //!
 //! The related timing oracle (unknown client ids failed without an Argon2
 //! verification) is covered by unit tests in `src/identity/engine/mod.rs`
@@ -170,6 +178,7 @@ async fn post_json(
 struct Fixture {
     state: Arc<AppState>,
     realm_id_str: String,
+    realm_name: String,
     client_id: String,
     code: String,
     verifier: String,
@@ -177,10 +186,11 @@ struct Fixture {
 
 async fn fixture_with_secret(secret: &str) -> Fixture {
     let h = common::TestHarness::embedded().await.unwrap();
+    let realm_name = format!("hea2112-{}", uuid::Uuid::new_v4());
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
-            name: format!("hea2112-{}", uuid::Uuid::new_v4()),
+            name: realm_name.clone(),
             config: None,
         })
         .unwrap();
@@ -191,6 +201,7 @@ async fn fixture_with_secret(secret: &str) -> Fixture {
     Fixture {
         state: Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())),
         realm_id_str: realm.id().as_uuid().to_string(),
+        realm_name,
         client_id: client.client_id().as_uuid().to_string(),
         code,
         verifier,
@@ -205,6 +216,15 @@ fn exchange_body(f: &Fixture) -> serde_json::Value {
         "redirect_uri": REDIRECT_URI,
         "code_verifier": f.verifier,
     })
+}
+
+/// The same exchange body a strict `client_secret_basic` client sends:
+/// per RFC 6749 §3.2.1, `client_id` stays out of the body because the
+/// client authenticates via the Authorization header.
+fn exchange_body_without_client_id(f: &Fixture) -> serde_json::Value {
+    let mut body = exchange_body(f);
+    body.as_object_mut().unwrap().remove("client_id");
+    body
 }
 
 /// Regression fence for the misdiagnosed audit finding: a confidential
@@ -232,6 +252,88 @@ async fn basic_auth_code_exchange_succeeds() {
     assert!(
         json["access_token"].as_str().is_some_and(|t| !t.is_empty()),
         "exchange must mint an access token"
+    );
+}
+
+/// RFC 6749 §3.2.1: body `client_id` is REQUIRED only "if the client is not
+/// authenticating with the authorization server". A strictly compliant
+/// `client_secret_basic` client therefore omits it — the exchange must still
+/// succeed with the identity taken from the Authorization header.
+#[tokio::test]
+async fn basic_only_code_exchange_without_body_client_id_succeeds() {
+    let secret = "hea2112-basic-secret!";
+    let f = fixture_with_secret(secret).await;
+
+    let (status, json) = post_json(
+        &f.state,
+        "/token",
+        &f.realm_id_str,
+        Some(&basic_header(&f.client_id, secret)),
+        exchange_body_without_client_id(&f),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Basic-only exchange (no body client_id) must succeed: {json}"
+    );
+    assert!(
+        json["access_token"].as_str().is_some_and(|t| !t.is_empty()),
+        "exchange must mint an access token"
+    );
+}
+
+/// Same strict Basic-only exchange through the realm-scoped
+/// `/realms/{{name}}/token` handler, which has its own dispatch path.
+#[tokio::test]
+async fn basic_only_code_exchange_succeeds_on_realm_path() {
+    let secret = "hea2112-basic-secret!";
+    let f = fixture_with_secret(secret).await;
+
+    let (status, json) = post_json(
+        &f.state,
+        &format!("/realms/{}/token", f.realm_name),
+        &f.realm_id_str,
+        Some(&basic_header(&f.client_id, secret)),
+        exchange_body_without_client_id(&f),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "realm-path Basic-only exchange must succeed: {json}"
+    );
+    assert!(
+        json["access_token"].as_str().is_some_and(|t| !t.is_empty()),
+        "exchange must mint an access token"
+    );
+}
+
+/// An explicitly empty `client_id=` next to Basic auth is an absent
+/// identifier, not a disagreeing credential — it must not trip the RFC 6749
+/// §2.3.1 mismatch rejection.
+#[tokio::test]
+async fn basic_auth_with_explicitly_empty_body_client_id_succeeds() {
+    let secret = "hea2112-basic-secret!";
+    let f = fixture_with_secret(secret).await;
+
+    let mut body = exchange_body(&f);
+    body["client_id"] = serde_json::json!("");
+    let (status, json) = post_json(
+        &f.state,
+        "/token",
+        &f.realm_id_str,
+        Some(&basic_header(&f.client_id, secret)),
+        body,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "empty body client_id must read as absent, not as a mismatch: {json}"
     );
 }
 
