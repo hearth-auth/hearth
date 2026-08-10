@@ -370,6 +370,147 @@ async fn refresh_token_rotation_e2e() {
     );
 }
 
+// ===== HEA-2110: flow-issued tokens carry the per-realm discovery issuer =====
+
+/// Decodes a JWT's payload segment into a `serde_json::Value`.
+fn decode_jwt_claims(token: &str) -> serde_json::Value {
+    use data_encoding::BASE64URL_NOPAD;
+    let payload_b64 = token.split('.').nth(1).expect("jwt payload segment");
+    let bytes = BASE64URL_NOPAD
+        .decode(payload_b64.as_bytes())
+        .expect("decode jwt payload");
+    serde_json::from_slice(&bytes).expect("parse jwt claims")
+}
+
+/// HEA-2110 regression: the access and refresh tokens minted by the
+/// authorization-code flow MUST carry `iss` equal to the realm's OIDC
+/// discovery-document issuer (`{oidc.issuer}/realms/{name}`), NOT the flat
+/// `token.issuer` sentinel (`"hearth"`).
+///
+/// Before the fix, `exchange_authorization_code` set `iss =
+/// self.config.token.issuer` (`"hearth"`) on the access + refresh tokens while
+/// the discovery document served on the same host advertised the per-realm URL,
+/// so a conformant RP that pins `iss` to the discovery issuer rejected every
+/// flow-issued access token. This test asserts the exact discovery issuer, so it
+/// fails on the literal `"hearth"` before the fix and passes after.
+///
+/// aud reading (OIDC Core §2 / RFC 9068): the *ID token* audience is the
+/// `client_id` (asserted below). The *access token* audience is the resource
+/// audience (`token.audience`), which is unchanged by this fix and validated
+/// separately by `validate_token`; only `iss` is corrected here, matching the
+/// bootstrap `issue_tokens` path which likewise overrides `iss` but not `aud`.
+#[tokio::test]
+async fn auth_code_flow_iss_matches_discovery_issuer() {
+    use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+
+    // The discovery issuer is the source of truth an RP pins `iss` against.
+    let discovery = harness
+        .identity()
+        .realm_oidc_discovery(&realm)
+        .expect("realm discovery");
+    let expected_iss = discovery.issuer.clone();
+    assert!(
+        expected_iss.contains("/realms/"),
+        "precondition: realm discovery issuer must be a per-realm URL, got {expected_iss}"
+    );
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "HEA-2110 Issuer App".to_string(),
+                redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: true,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let auth_resp = harness
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "https://app.example.com/callback".to_string(),
+                scope: "openid".to_string(),
+                state: "hea-2110".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize");
+
+    let token_resp = harness
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth_resp.code().to_string(),
+                redirect_uri: "https://app.example.com/callback".to_string(),
+                code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange code");
+
+    // Access-token `iss` MUST equal the realm discovery issuer (was `"hearth"`).
+    let access_claims = decode_jwt_claims(token_resp.access_token());
+    assert_eq!(
+        access_claims["iss"].as_str(),
+        Some(expected_iss.as_str()),
+        "access-token iss must equal the realm discovery issuer, got {:?}",
+        access_claims["iss"]
+    );
+
+    // Refresh token issued in the same response MUST match — no split-brain iss.
+    let refresh_claims = decode_jwt_claims(token_resp.refresh_token());
+    assert_eq!(
+        refresh_claims["iss"].as_str(),
+        Some(expected_iss.as_str()),
+        "refresh-token iss must equal the realm discovery issuer, got {:?}",
+        refresh_claims["iss"]
+    );
+
+    // OIDC Core §2: the ID token audience is the client_id.
+    let id_claims = decode_jwt_claims(token_resp.id_token());
+    assert_eq!(
+        id_claims["aud"].as_str(),
+        Some(client.client_id().to_string().as_str()),
+        "id-token aud must be the client_id per OIDC Core, got {:?}",
+        id_claims["aud"]
+    );
+
+    // And `validate_token` must accept the flow-issued access token: the fix
+    // must not break the existing hot-path issuer leniency.
+    let validated = harness
+        .identity()
+        .validate_token(&realm, token_resp.access_token())
+        .expect("flow-issued access token must validate");
+    assert_eq!(validated.iss, expected_iss);
+}
+
 // ===== Conformance F1: RFC 7662 Token Introspection Response =====
 
 /// Validates that introspection responses conform to RFC 7662 §2.2.
