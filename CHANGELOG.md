@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Snapshot install no longer leaves stale realm data on restarted followers (HEA-2131)** —
+  `install_snapshot` now enumerates on-disk realms via the storage engine's `list_realms` call
+  (scanning the memtable and all SST files) rather than the state machine's in-memory
+  `known_realms` set, which is always empty after a process restart.  Previously, a follower that
+  restarted and then received a Raft snapshot would skip the pre-install wipe entirely, leaving
+  keys that the leader had since deleted permanently on the follower — a silent data divergence.
+  (HEA-2105)
 - **Raft followers can now complete snapshot catch-up (HEA-2126)** — `install_snapshot` previously
   tried to open a new `EmbeddedStorageEngine` at the production data directory while the live engine
   already held the exclusive lock on that directory, causing every follower snapshot install to fail

@@ -1713,6 +1713,35 @@ impl StorageEngine for EmbeddedStorageEngine {
             .map(|(k, _)| k)
             .collect())
     }
+
+    /// Enumerates all distinct realm IDs present in the engine.
+    ///
+    /// Collects realm IDs from both the memtable (active + any map being flushed
+    /// to SST) and every live SST file, then returns the union.  Tombstone-only
+    /// realms are included — [`StorageEngine::scan`] on an all-tombstone realm
+    /// returns empty, making the Phase 1 delete a no-op for that realm.
+    ///
+    /// This scans every entry in every SST file; it is O(total data size) and
+    /// intended only for the cluster snapshot install path, which is a rare
+    /// cluster-recovery event (HEA-2131).
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        let mut realms = std::collections::BTreeSet::new();
+
+        // Enumerate from the memtable (active map + map currently being flushed).
+        for realm_id in self.active_memtable.list_realm_ids() {
+            realms.insert(realm_id);
+        }
+
+        // Enumerate from every live SST file.
+        let sst_readers = self.sst_readers.load();
+        for reader in sst_readers.iter() {
+            for (key, _) in reader.iter_all()? {
+                realms.insert(key.realm_id().clone());
+            }
+        }
+
+        Ok(realms.into_iter().collect())
+    }
 }
 
 impl std::fmt::Debug for EmbeddedStorageEngine {
@@ -4081,5 +4110,73 @@ mod tests {
             "cap=0 must report the true total, not the 10k cap"
         );
         assert_eq!(window.len(), 25);
+    }
+
+    // ── list_realms (HEA-2131) ────────────────────────────────────────────────
+
+    #[test]
+    fn list_realms_empty_engine_returns_empty() {
+        let (_dir, engine) = setup_engine();
+        let realms = engine.list_realms().expect("list_realms");
+        assert!(realms.is_empty(), "fresh engine must report no realms");
+    }
+
+    #[test]
+    fn list_realms_returns_written_realms() {
+        let (_dir, engine) = setup_engine();
+        let r1 = RealmId::generate();
+        let r2 = RealmId::generate();
+
+        engine.put(&r1, b"k1", b"v1").expect("put r1");
+        engine.put(&r2, b"k2", b"v2").expect("put r2");
+
+        let mut realms = engine.list_realms().expect("list_realms");
+        realms.sort();
+        let mut expected = vec![r1.clone(), r2.clone()];
+        expected.sort();
+        assert_eq!(
+            realms, expected,
+            "list_realms must include all written realms"
+        );
+    }
+
+    #[test]
+    fn list_realms_includes_tombstone_only_realms() {
+        // A realm where all keys are deleted still appears: scan on it returns empty
+        // (correct), so Phase 1 of snapshot install calls write_batch with an empty
+        // delete list (a no-op). The important invariant is it does NOT panic.
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"k", b"v").expect("put");
+        engine.delete(&realm, b"k").expect("delete");
+
+        let realms = engine.list_realms().expect("list_realms");
+        assert!(
+            realms.contains(&realm),
+            "a tombstone-only realm must still appear in list_realms"
+        );
+    }
+
+    #[test]
+    fn list_realms_sees_data_in_sst_after_flush() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Small flush threshold so writing a few entries triggers an SST flush.
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 1; // flush immediately
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+        let r1 = RealmId::generate();
+        let r2 = RealmId::generate();
+        engine.put(&r1, b"k1", b"v1").expect("put r1");
+        engine.put(&r2, b"k2", b"v2").expect("put r2");
+
+        let mut realms = engine.list_realms().expect("list_realms after sst flush");
+        realms.sort();
+        let mut expected = vec![r1.clone(), r2.clone()];
+        expected.sort();
+        assert_eq!(
+            realms, expected,
+            "list_realms must include realms whose data flushed to SST files"
+        );
     }
 }

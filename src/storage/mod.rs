@@ -307,4 +307,21 @@ pub trait StorageEngine: Send + Sync {
         }
         Ok(())
     }
+
+    /// Enumerates the distinct realm IDs present in this storage engine.
+    ///
+    /// Returns all realm IDs that have at least one entry (live or tombstoned)
+    /// in any storage layer (memtable, SST files, etc.).  Used by the cluster
+    /// snapshot install path to discover which realms must be cleared before
+    /// replaying a new snapshot — without this, a restarted follower whose
+    /// in-memory `known_realms` set is empty would skip Phase 1 entirely and
+    /// leave stale on-disk data in place (HEA-2131).
+    ///
+    /// The default implementation returns an empty list.  This is correct for
+    /// engines that do not support multi-realm storage or are not used on the
+    /// cluster snapshot install path.  [`EmbeddedStorageEngine`] overrides
+    /// this with a full enumeration across the memtable and all SST files.
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        Ok(Vec::new())
+    }
 }

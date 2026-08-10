@@ -274,11 +274,10 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             payload.realms.iter().map(|r| r.realm_id.clone()).collect();
 
         let engine = Arc::clone(&self.engine);
-        let existing_realms = self.known_realms.clone();
 
         // Apply the snapshot in-place through the live engine — no directory swap,
         // no new EmbeddedStorageEngine open (HEA-2126).
-        spawn_blocking(move || restore_snapshot_in_place(&engine, &existing_realms, &payload))
+        spawn_blocking(move || restore_snapshot_in_place(&engine, &payload))
             .await
             .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
 
@@ -414,12 +413,18 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 
 /// Blocking: apply a Raft snapshot in-place through the live engine.
 ///
-/// Clears every key for each realm currently tracked by the state machine,
-/// then replays all entries from the snapshot via `put_batch`.  Because this
-/// operates on the same `Arc<dyn StorageEngine>` that the server reads through
-/// (the `inner` handle from `build_clustered`), all reads via the server's
-/// original `Arc` immediately observe the post-snapshot state — no pointer
-/// swap required.
+/// Clears every live key for every realm currently present on disk (memtable
+/// and SST files), then replays all entries from the snapshot via `put_batch`.
+/// Because this operates on the same `Arc<dyn StorageEngine>` that the server
+/// reads through (the `inner` handle from `build_clustered`), all reads via
+/// the server's original `Arc` immediately observe the post-snapshot state —
+/// no pointer swap required.
+///
+/// Phase 1 uses [`StorageEngine::list_realms`] to discover on-disk realms
+/// rather than the state machine's in-memory `known_realms` set.  This fixes
+/// the HEA-2131 regression: a restarted follower's `known_realms` is always
+/// empty (the set is never persisted), so the previous approach left stale
+/// keys from realms the leader deleted during the follower's downtime.
 ///
 /// The process-local `OPEN_DIRS` guard and the OS-level advisory `LOCK` file
 /// remain continuous across the install, so the exclusive lock is never
@@ -439,11 +444,16 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 /// leaving the directory unprotected after any install (HEA-2126 bug 3).
 fn restore_snapshot_in_place(
     engine: &Arc<dyn StorageEngine>,
-    existing_realms: &BTreeSet<RealmId>,
     payload: &SnapshotPayload,
 ) -> Result<(), StorageError<u64>> {
-    // Phase 1: delete all data for realms tracked before this install.
-    for realm_id in existing_realms {
+    // Phase 1: delete all live keys for every realm currently on disk.
+    //
+    // `list_realms` enumerates from the live engine (memtable + SST files),
+    // not from the state machine's in-memory `known_realms` set, so it
+    // correctly clears stale data on a restarted follower whose `known_realms`
+    // is empty (HEA-2131).
+    let on_disk_realms = engine.list_realms().map_err(to_write_err)?;
+    for realm_id in &on_disk_realms {
         let keys = engine
             .scan(realm_id, &[], &[0xFF; 256])
             .map_err(to_write_err)?
@@ -736,6 +746,130 @@ mod tests {
 
         sm.install_snapshot(&meta, data).await.unwrap();
         assert!(sm.get_current_snapshot().await.unwrap().is_some());
+    }
+
+    // ── HEA-2131 regression pins ──────────────────────────────────────────────
+
+    /// Regression pin for HEA-2131 (restart path): a follower that restarts and
+    /// then receives a snapshot must clear on-disk data for realms absent from the
+    /// snapshot, even though `known_realms` is empty on fresh construction.
+    ///
+    /// Before the fix, Phase 1 of `restore_snapshot_in_place` iterated
+    /// `known_realms` (empty after restart), skipped the delete loop entirely,
+    /// and left stale keys permanently on disk.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_install_clears_ondisk_realms_absent_from_known_realms() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let realm = make_realm();
+
+        // Leader's snapshot: realm contains ONLY `keep`.
+        let snap = {
+            let dir_a = tempdir().unwrap();
+            let mut sm_a = open_sm(dir_a.path().join("data").as_path());
+            sm_a.apply([make_put_entry(
+                1,
+                realm.clone(),
+                b"keep".to_vec(),
+                b"keep_val".to_vec(),
+            )])
+            .await
+            .unwrap();
+            let mut builder = sm_a.get_snapshot_builder().await;
+            builder.build_snapshot().await.unwrap()
+        };
+
+        // Restarted follower: data already on disk, freshly constructed state
+        // machine, so known_realms is empty.
+        let config = StorageConfig::dev(data_dir.clone());
+        let inner: Arc<EmbeddedStorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
+        inner.put(&realm, b"stale", b"stale_val").unwrap();
+
+        let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>);
+        assert!(
+            sm.known_realms.is_empty(),
+            "precondition: fresh state machine has no known realms"
+        );
+
+        sm.install_snapshot(&snap.meta, snap.snapshot)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            inner.get(&realm, b"keep").unwrap(),
+            Some(b"keep_val".to_vec()),
+            "snapshot data must be present after install"
+        );
+        assert_eq!(
+            inner.get(&realm, b"stale").unwrap(),
+            None,
+            "a key absent from the installed snapshot must not survive the install; \
+             the follower has diverged from the leader"
+        );
+    }
+
+    /// Regression pin for HEA-2131 (no-restart path): a realm written directly to
+    /// the engine (bypassing `apply`, so never in `known_realms`) must be cleared
+    /// when a snapshot that omits that realm is installed.
+    ///
+    /// This covers the same root cause as the restart pin above but without a
+    /// process restart: `known_realms` is empty because `apply` was never called
+    /// for the stale realm, not because the state machine was freshly constructed.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_install_clears_realm_never_applied_by_this_node() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let realm_stale = make_realm();
+        let realm_snap = make_realm();
+
+        // Snapshot includes only realm_snap.
+        let snap = {
+            let dir_a = tempdir().unwrap();
+            let mut sm_a = open_sm(dir_a.path().join("data").as_path());
+            sm_a.apply([make_put_entry(
+                1,
+                realm_snap.clone(),
+                b"snap_key".to_vec(),
+                b"snap_val".to_vec(),
+            )])
+            .await
+            .unwrap();
+            let mut builder = sm_a.get_snapshot_builder().await;
+            builder.build_snapshot().await.unwrap()
+        };
+
+        // Fresh state machine whose engine already has data for realm_stale written
+        // directly (not via apply), so known_realms is empty and the stale realm is
+        // not tracked.
+        let config = StorageConfig::dev(data_dir.clone());
+        let inner: Arc<EmbeddedStorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
+        inner.put(&realm_stale, b"stale_key", b"stale_val").unwrap();
+
+        let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>);
+        assert!(
+            sm.known_realms.is_empty(),
+            "precondition: no prior applies, known_realms is empty"
+        );
+
+        sm.install_snapshot(&snap.meta, snap.snapshot)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            inner.get(&realm_stale, b"stale_key").unwrap(),
+            None,
+            "a realm never applied by this node must not survive snapshot install when \
+             it is absent from the incoming snapshot"
+        );
+        assert_eq!(
+            inner.get(&realm_snap, b"snap_key").unwrap(),
+            Some(b"snap_val".to_vec()),
+            "snapshot data must be present after install"
+        );
     }
 
     // ── HEA-2126 regression pins ──────────────────────────────────────────────
