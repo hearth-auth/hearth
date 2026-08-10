@@ -64,12 +64,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (HEA-2094)
 
 ### Security
-- **Client-authentication timing oracle closed (HEA-2112)** — authenticating with an unknown
-  `client_id` (or a known client while omitting the secret) previously returned without an
-  Argon2 verification, while a wrong secret cost one — letting an attacker enumerate which
-  client ids exist by timing token-endpoint failures. Every client-auth failure path now burns
-  one Argon2 verification against a pre-computed dummy hash, making unknown-client and
-  wrong-secret failures timing-indistinguishable. (HEA-2112)
 - **Conflicting Basic/body client credentials are now rejected (HEA-2112)** — a request that
   carried both an `Authorization: Basic` header and body `client_id`/`client_secret` parameters
   that disagreed was silently resolved in the Basic header's favor (and on the code-exchange

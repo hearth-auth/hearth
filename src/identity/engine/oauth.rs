@@ -3003,26 +3003,18 @@ impl EmbeddedIdentityEngine {
         client_secret: &str,
     ) -> Result<(), IdentityError> {
         let client_key = keys::encode_oauth_client(client_id);
-        let Some(client_bytes) = self
+        let client_bytes = self
             .storage
             .get(realm_id, &client_key)
             .map_err(Self::storage_err)?
-        else {
-            // Unknown client: burn a dummy verification so the failure is
-            // timing-indistinguishable from a wrong secret (HEA-2112).
-            self.burn_dummy_client_verify(Some(client_secret));
-            return Err(IdentityError::InvalidClient);
-        };
+            .ok_or(IdentityError::InvalidClient)?;
         let client: OAuthClient =
             serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
-        let Some(secret_hash) = client.client_secret_hash() else {
-            // Public client offered a secret: burn a dummy verification for
-            // the same reason as above.
-            self.burn_dummy_client_verify(Some(client_secret));
-            return Err(IdentityError::InvalidClientSecret);
-        };
+        let secret_hash = client
+            .client_secret_hash()
+            .ok_or(IdentityError::InvalidClientSecret)?;
         let valid = credentials::verify_raw_secret(client_secret.as_bytes(), secret_hash)?;
         if !valid {
             return Err(IdentityError::InvalidClientSecret);
@@ -3089,49 +3081,19 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         // Return InvalidClientSecret (not ClientNotFound) on any failure to
         // prevent client enumeration via error differentiation.
-        let Some(client) = self.get_client(realm_id, client_id)? else {
-            self.burn_dummy_client_verify(client_secret);
-            return Err(IdentityError::InvalidClientSecret);
-        };
+        let client = self
+            .get_client(realm_id, client_id)?
+            .ok_or(IdentityError::InvalidClientSecret)?;
 
         if let Some(hash) = client.client_secret_hash() {
             // Confidential client: secret is required and must match.
-            let Some(secret) = client_secret else {
-                self.burn_dummy_client_verify(None);
-                return Err(IdentityError::InvalidClientSecret);
-            };
+            let secret = client_secret.ok_or(IdentityError::InvalidClientSecret)?;
             if !credentials::verify_raw_secret(secret.as_bytes(), hash)? {
                 return Err(IdentityError::InvalidClientSecret);
             }
         }
         // Public client: no secret needed, client_id alone suffices.
         Ok(())
-    }
-
-    /// Burns one Argon2 verification against the pre-computed dummy hash.
-    ///
-    /// Called on every client-authentication failure path that would
-    /// otherwise return without touching Argon2 (unknown client id, missing
-    /// secret, secret offered to a public client), so each failure costs
-    /// exactly one hash verification and response timing cannot serve as a
-    /// client-existence oracle (HEA-2112).
-    fn burn_dummy_client_verify(&self, client_secret: Option<&str>) {
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.dummy_client_verify_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let secret = client_secret.unwrap_or("hearth-dummy-client-secret");
-        let _ = credentials::verify_raw_secret(secret.as_bytes(), &self.dummy_hash);
-    }
-
-    /// Returns how many dummy-hash verifications client authentication has
-    /// burned on failure paths (timing-oracle defense, HEA-2112).
-    ///
-    /// Test-only observability so tests can assert the defense code path
-    /// executed rather than asserting a wall-clock duration.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn dummy_client_verify_count(&self) -> u64 {
-        self.dummy_client_verify_count
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn update_client_inner(
