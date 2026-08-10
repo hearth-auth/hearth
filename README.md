@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.7](https://img.shields.io/badge/status-v1.6.7-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.8](https://img.shields.io/badge/status-v1.6.8-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -12,13 +12,13 @@ Every other identity provider is an application sitting on top of a generic data
 
 Token validation, session lookup, and permission checks run in-process against memory-mapped structures — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single static binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Stable 1.6.7:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+> **Stable 1.6.8:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 
 ---
 
 ## Install
 
-Download pre-built v1.6.7 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.7), or use Docker or Helm.
+Download pre-built v1.6.8 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.8), or use Docker or Helm.
 
 ### Released binary — Linux / macOS
 
@@ -28,8 +28,8 @@ Download pre-built v1.6.7 artifacts from the [Releases page](https://github.com/
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.7/${ARTIFACT}"
-curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.7/SHA256SUMS
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.8/${ARTIFACT}"
+curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.8/SHA256SUMS
 
 # Verify the checksum
 sha256sum -c SHA256SUMS --ignore-missing
@@ -42,10 +42,10 @@ chmod +x "${ARTIFACT}"
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.7/hearth-windows-amd64.exe" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.8/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.7/SHA256SUMS" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.8/SHA256SUMS" `
   -OutFile SHA256SUMS
 
 # Verify the checksum
@@ -59,10 +59,10 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
 ```bash
-docker pull ghcr.io/hearth-auth/hearth:v1.6.7
+docker pull ghcr.io/hearth-auth/hearth:v1.6.8
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
-docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.7 serve --dev
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.8 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
@@ -72,7 +72,7 @@ curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 
 ```bash
 helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
-  --version 1.6.7 \
+  --version 1.6.8 \
   --namespace auth \
   --create-namespace
 ```
@@ -84,7 +84,7 @@ cosign verify \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/hearth-auth/charts/hearth:1.6.7
+  ghcr.io/hearth-auth/charts/hearth:1.6.8
 ```
 
 For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
