@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **OIDC discovery endpoints now match the routes the server serves (HEA-2109)** — the
+  advertised `authorization_endpoint` (`{issuer}/authorize`) was registered POST-only, so a
+  conformant relying party that redirected a browser to it via GET received a `405`; the endpoint
+  now also answers GET by redirecting the browser into the interactive login/consent UI. The
+  advertised `device_authorization_endpoint` pointed at `{issuer}/device/authorize`, which the
+  router never served (`404`); discovery now advertises the real path `{issuer}/device_authorization`.
+  (HEA-2105)
+
 ### Added
 - **`POST /admin/bootstrap` now returns a cross-realm system-realm admin token (HEA-2087)** —
   the dev-only bootstrap response gained two fields: `system_access_token` (an access token for

@@ -4007,7 +4007,7 @@ impl EmbeddedIdentityEngine {
                 "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
-            device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
+            device_authorization_endpoint: Some(format!("{issuer}/device_authorization")),
             revocation_endpoint: Some(format!("{issuer}/revoke")),
             introspection_endpoint: Some(format!("{issuer}/introspect")),
             resource_indicators_supported: true,

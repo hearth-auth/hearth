@@ -45,7 +45,10 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             post(register_client_dynamic)
                 .route_layer(DefaultBodyLimit::max(super::BODY_LIMIT_SMALL)),
         )
-        .route("/authorize", post(authorize))
+        .route(
+            "/authorize",
+            get(authorize_browser_redirect).post(authorize),
+        )
         .route(
             "/as/par",
             post(pushed_authorization_request)
@@ -930,6 +933,22 @@ async fn generate_unique_slug(state: Arc<AppState>, realm_id: &RealmId, base: &s
     // ~2^32 collision space — retries are a belt-and-suspenders guard.
     let suffix = uuid::Uuid::new_v4().to_string();
     format!("{base}-{}", &suffix[..8])
+}
+
+/// `GET /authorize` — browser redirect shim.
+///
+/// OIDC discovery advertises `authorization_endpoint` as `{issuer}/authorize`.
+/// The top-level `POST /authorize` is Hearth's JSON authorization API (Bearer +
+/// `X-Realm-ID`, returns `200 + JSON`) — not an interactive browser endpoint. A
+/// conformant RP that follows the discovery document redirects the user's
+/// browser here via GET, which without this shim hits the POST-only route and
+/// receives a 405. This handler 302-redirects the browser to the interactive
+/// login+consent UI at `/ui/oauth/authorize`, preserving all query parameters
+/// (HEA-2105).
+async fn authorize_browser_redirect(uri: axum::http::Uri) -> impl IntoResponse {
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("/ui/oauth/authorize{query}");
+    axum::response::Redirect::to(&target)
 }
 
 /// Initiate an OAuth 2.0 authorization code flow.
