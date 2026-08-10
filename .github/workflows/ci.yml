@@ -189,6 +189,19 @@ jobs:
       - name: RBAC storage-write lint (check-rbac-storage-writes.sh)
         run: bash scripts/check-rbac-storage-writes.sh
 
+      # HEA-2116: prevent a release from shipping with stale install-instruction
+      # version references in README.md. Compares every pinned release URL / tag
+      # against the latest git semver tag. The filter checkout uses fetch-depth: 0
+      # so git tags are available for the comparison.
+      - name: README version drift (check-readme-version.sh)
+        run: bash scripts/check-readme-version.sh
+
+      # The guard above is itself the test artifact for HEA-2116, so it needs a
+      # test proving it FAILS on a deliberately stale reference — otherwise an
+      # `exit 0` stub would pass CI forever. Pure bash, no Rust build.
+      - name: README version drift — guard self-test
+        run: bash scripts/tests/check-readme-version.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:
