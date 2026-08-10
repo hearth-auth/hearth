@@ -80,6 +80,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `form-action 'self'` regardless of this setting. (HEA-2084)
 
 ### Changed
+- **BREAKING: flow-issued access and refresh tokens now carry the per-realm OIDC issuer (HEA-2110)** —
+  tokens minted by the authorization-code, refresh-rotation, client-credentials, JWT-bearer, and
+  token-exchange (RFC 8693) flows previously set `iss` to the flat `token.issuer` sentinel
+  (`"hearth"` by default), while the OIDC discovery document, ID token, and the direct
+  `issue_tokens` path all advertised the per-realm issuer URL (`{oidc.issuer}/realms/{name}`). A
+  single token response could therefore carry two different issuers. All six flow paths now derive
+  `iss` from `realm_issuer_url`, matching the discovery document. **Any relying party that pinned
+  `iss` to the literal `"hearth"` will reject flow-issued tokens after upgrade** and must instead
+  pin the issuer advertised by the realm's discovery document. `validate_token` continues to accept
+  both forms, so already-issued tokens keep validating across the upgrade. The access-token
+  audience (`token.audience`) is unchanged. (HEA-2110)
 - **Unknown config keys are now a hard startup error (HEA-2113)** — all `hearth.yaml` config
   structs now carry `#[serde(deny_unknown_fields)]`. Previously, a misspelled or removed key was
   silently discarded; the server started as if the key were absent, leaving the operator with no
