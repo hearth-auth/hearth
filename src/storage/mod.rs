@@ -333,12 +333,12 @@ pub trait StorageEngine: Send + Sync {
     /// returns [`StorageError::TornSnapshotRestore`] rather than silently
     /// serving mixed data from two different snapshot epochs.
     ///
-    /// The default implementation is a no-op (no crash detection).
-    /// [`EmbeddedStorageEngine`] overrides this to write and `fsync` the
-    /// marker file and its parent directory.
-    fn begin_snapshot_restore(&self, _snapshot_id: &str) -> Result<(), StorageError> {
-        Ok(())
-    }
+    /// [`EmbeddedStorageEngine`] writes and `fsync`s the marker file and its
+    /// parent directory.  Wrappers must delegate to their inner engine.
+    /// Test doubles that have no persistent marker should return `Ok(())`
+    /// explicitly — there is no silent default: a missing override would
+    /// silently skip crash detection on the snapshot-install path (HEA-2135).
+    fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError>;
 
     /// Remove the "snapshot restore in progress" marker after Phase 2 completes
     /// successfully (HEA-2132).
@@ -347,10 +347,9 @@ pub trait StorageEngine: Send + Sync {
     /// signals that the restore finished cleanly — the engine will start
     /// normally on the next open.
     ///
-    /// The default implementation is a no-op.
-    /// [`EmbeddedStorageEngine`] overrides this to unlink the marker and
-    /// `fsync` the parent directory.
-    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
+    /// [`EmbeddedStorageEngine`] unlinks the marker and `fsync`s the parent
+    /// directory.  Wrappers must delegate to their inner engine.  Test doubles
+    /// that have no persistent marker should return `Ok(())` explicitly —
+    /// there is no silent default (HEA-2135).
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError>;
 }

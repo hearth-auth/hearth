@@ -14680,6 +14680,17 @@ mod tests {
         fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
             self.inner.list_realms()
         }
+
+        fn begin_snapshot_restore(
+            &self,
+            snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
     }
 
     fn setup_engine_gated() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<RotationGate>) {
@@ -18232,6 +18243,17 @@ mod tests {
         fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
             self.inner.list_realms()
         }
+
+        fn begin_snapshot_restore(
+            &self,
+            snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
     }
 
     /// C-5: `validate_token`'s read path MUST NOT write to storage when it
@@ -18433,6 +18455,17 @@ mod tests {
 
         fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
             self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(
+            &self,
+            snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            self.inner.complete_snapshot_restore()
         }
     }
 

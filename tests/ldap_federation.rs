@@ -142,6 +142,19 @@ impl hearth::storage::StorageEngine for MemStorage {
     fn list_realms(&self) -> Result<Vec<hearth::core::RealmId>, hearth::storage::StorageError> {
         Ok(vec![])
     }
+
+    // MemStorage is an in-memory test double with no persistent storage, so
+    // snapshot marker operations are intentional no-ops.
+    fn begin_snapshot_restore(
+        &self,
+        _snapshot_id: &str,
+    ) -> Result<(), hearth::storage::StorageError> {
+        Ok(())
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), hearth::storage::StorageError> {
+        Ok(())
+    }
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
