@@ -5,10 +5,10 @@ kind: PodDisruptionBudget
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   minAvailable: 1
@@ -23,10 +23,10 @@ kind: ServiceAccount
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: hearth/templates/secret.yaml
@@ -35,10 +35,10 @@ kind: Secret
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 type: Opaque
 data:
@@ -50,10 +50,10 @@ kind: ConfigMap
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 data:
   hearth.yaml: |
@@ -92,10 +92,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   accessModes:
@@ -110,10 +110,10 @@ kind: Service
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -132,13 +132,18 @@ kind: Deployment
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
+  # Hearth uses an embedded storage engine with exclusive data_dir locking.
+  # Rolling updates would start a new pod before the old one terminates,
+  # causing the new pod to fail with a locked data directory.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: hearth
@@ -147,8 +152,8 @@ spec:
     metadata:
       annotations:
         # Force pod restart when config changes
-        checksum/config: 1b8871c843643eb21a55c5b709c8c5dae05a5c861708cc5116a4b86c155e29c4
-        checksum/secret: e425a4c4080a940ae82f052504a85b4ce6f37a299c5a825ede8ff1418893f19c
+        checksum/config: 8520bac2b420724293d65e2cdc3518717234ac677d216ba2e963d71dc3a81970
+        checksum/secret: c32f69ead78945c40100e8f45ee7f201fd46e6f1d86251ca0aeccc67232d9b7f
       labels:
         app.kubernetes.io/name: hearth
         app.kubernetes.io/instance: hearth
@@ -168,7 +173,7 @@ spec:
             runAsGroup: 10001
             runAsNonRoot: true
             runAsUser: 10001
-          image: "ghcr.io/hearth-auth/hearth:0.1.0"
+          image: "ghcr.io/hearth-auth/hearth:1.0.0"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
           ports:
@@ -231,10 +236,10 @@ kind: Ingress
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod

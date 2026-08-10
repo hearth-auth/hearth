@@ -1,6 +1,7 @@
 //! Storage engine error types.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// Errors originating from the storage engine.
 #[derive(Debug)]
@@ -52,6 +53,15 @@ pub enum StorageError {
         /// Display names of the realms whose KEKs could not be decrypted.
         affected_realms: Vec<String>,
     },
+    /// Another process (or engine instance) already holds the exclusive lock on
+    /// this data directory.
+    ///
+    /// Only one `hearth serve` process may open a given `storage.data_dir` at a
+    /// time. Stop the existing instance before starting a new one.
+    AlreadyLocked {
+        /// The data directory that is already locked.
+        data_dir: PathBuf,
+    },
     /// One or more realm KEK entries in `hearth.keys` have CRC corruption.
     ///
     /// Startup is blocked to prevent silent realm unavailability. The operator
@@ -99,6 +109,14 @@ impl fmt::Display for StorageError {
                      affected realms: {realms}"
                 )
             }
+            Self::AlreadyLocked { data_dir } => {
+                write!(
+                    f,
+                    "data directory '{}' is already locked by another process; \
+                     stop the running Hearth instance before starting a new one",
+                    data_dir.display()
+                )
+            }
             Self::CorruptedKeks { affected_realms } => {
                 let realms = affected_realms.join(", ");
                 write!(
@@ -123,7 +141,8 @@ impl std::error::Error for StorageError {
             | Self::Crypto { .. }
             | Self::UnsupportedWalVersion { .. }
             | Self::HostKeyMismatch { .. }
-            | Self::CorruptedKeks { .. } => None,
+            | Self::CorruptedKeks { .. }
+            | Self::AlreadyLocked { .. } => None,
         }
     }
 }

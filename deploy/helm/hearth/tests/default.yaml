@@ -5,10 +5,10 @@ kind: ServiceAccount
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: hearth/templates/configmap.yaml
@@ -17,10 +17,10 @@ kind: ConfigMap
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 data:
   hearth.yaml: |
@@ -50,10 +50,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   accessModes:
@@ -68,10 +68,10 @@ kind: Service
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -90,13 +90,18 @@ kind: Deployment
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-0.1.0
+    helm.sh/chart: hearth-1.0.0
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
+  # Hearth uses an embedded storage engine with exclusive data_dir locking.
+  # Rolling updates would start a new pod before the old one terminates,
+  # causing the new pod to fail with a locked data directory.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: hearth
@@ -105,7 +110,7 @@ spec:
     metadata:
       annotations:
         # Force pod restart when config changes
-        checksum/config: 58f5f29d0b0971be6ea3da90719a2b7391f716b37603c957d8aa9b98bfc50bd0
+        checksum/config: 762f4722067db703bb8e6c87c169a8a234a4b37f19482cb4aa379db455d9f267
       labels:
         app.kubernetes.io/name: hearth
         app.kubernetes.io/instance: hearth
@@ -125,7 +130,7 @@ spec:
             runAsGroup: 10001
             runAsNonRoot: true
             runAsUser: 10001
-          image: "ghcr.io/hearth-auth/hearth:0.1.0"
+          image: "ghcr.io/hearth-auth/hearth:1.0.0"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
           ports:

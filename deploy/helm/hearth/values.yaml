@@ -185,11 +185,9 @@ podDisruptionBudget:
   enabled: false
   minAvailable: 1
 
-# -- Autoscaling ----------------------------------------------------------------
-# HPA is disabled by default; Hearth is stateful (embedded storage) so
-# horizontal scaling requires careful coordination.
-autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 3
-  targetCPUUtilizationPercentage: 80
+# Autoscaling (HPA) is intentionally removed.
+# Hearth uses an embedded storage engine with an exclusive data_dir lock:
+# only one replica may be running at a time. Use strategy.type=Recreate
+# (set in deployment.yaml) and a PodDisruptionBudget for controlled rollouts.
+# Horizontal scaling requires a StatefulSet + external storage migration
+# (tracked as a follow-up; see HEA-2107 PR for the evaluation).

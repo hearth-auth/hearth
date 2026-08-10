@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Storage engine now holds an exclusive lock on `{data_dir}/LOCK` (HEA-2107)** — starting a
+  second `hearth serve` process against the same `storage.data_dir` previously caused silent
+  WAL corruption. The engine now acquires an OS-level advisory `flock` on startup and fails
+  with a clear error if another process holds it. Released automatically on shutdown and
+  `kill -9`. (HEA-2105)
 - **OIDC discovery endpoints now match the routes the server serves (HEA-2109)** — the
   advertised `authorization_endpoint` (`{issuer}/authorize`) was registered POST-only, so a
   conformant relying party that redirected a browser to it via GET received a `405`; the endpoint
@@ -14,6 +19,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   advertised `device_authorization_endpoint` pointed at `{issuer}/device/authorize`, which the
   router never served (`404`); discovery now advertises the real path `{issuer}/device_authorization`.
   (HEA-2105)
+
+### Changed
+- **Helm chart `strategy.type` is now `Recreate` (HEA-2107)** — `RollingUpdate` would start a
+  new pod before the old one terminated, causing the storage engine to fail with "data directory
+  already locked". (HEA-2105)
+- **Helm HPA template removed (HEA-2107)** — an autoscaler on a single-writer embedded-storage
+  process has no valid configuration; enabling it caused silent WAL corruption. StatefulSet
+  evaluation is tracked as a follow-up. (HEA-2105)
+- **Helm `Chart.yaml` version and appVersion aligned to `1.0.0` (HEA-2107)**. (HEA-2105)
 
 ### Added
 - **`POST /admin/bootstrap` now returns a cross-realm system-realm admin token (HEA-2087)** —
@@ -34,6 +48,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `form-action 'self'` regardless of this setting. (HEA-2084)
 
 ### Changed
+- **Unknown config keys are now a hard startup error (HEA-2113)** — all `hearth.yaml` config
+  structs now carry `#[serde(deny_unknown_fields)]`. Previously, a misspelled or removed key was
+  silently discarded; the server started as if the key were absent, leaving the operator with no
+  protection they thought they had configured. On upgrade, operators must correct or remove any
+  key that no longer exists. The following keys, formerly documented but never implemented, are
+  now immediate parse errors:
+  - `auth.audit_log_retention` — remove from config (audit retention is not yet configurable).
+  - `security.bearer_token` — **rename to `metrics.bearer_token`** (under the top-level
+    `metrics:` section). This key was intended to protect `/metrics` but was silently ignored;
+    operators following older documentation left `/metrics` unauthenticated while believing it
+    was protected.
+  - `security.password.pepper.active_version` — **rename to `security.password.pepper.version`**.
+  - `security.password.pepper.active_hex` — **rename to `security.password.pepper.key_hex`**.
+  - `security.password.pepper.previous_hex` — **rename to `security.password.pepper.previous_key_hex`**.
+- **`/metrics` endpoint defaults to disabled (HEA-2113)** — the `metrics.enabled` config field
+  has always defaulted to `false`; this release corrects the doc-comment in `AppState` that
+  incorrectly claimed the default was `true`, adds a `metrics` section to the README
+  configuration reference, and updates `hearth.example.yaml` to show the correct `metrics:`
+  block for enabling and protecting the endpoint.
 - **Minimum supported Rust version raised to 1.88.0 (HEA-2115)** — `Cargo.toml`
   `rust-version` corrected from the stale declared floor of 1.75 to the true floor of
   1.88.0, which is required by `time@0.3.51`, `cookie_store@0.22.1`, and the `tonic@0.14.6`

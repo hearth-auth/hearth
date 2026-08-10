@@ -2,8 +2,8 @@ apiVersion: v2
 name: hearth
 description: Hearth — single-binary identity database (OIDC/OAuth 2.0)
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 1.0.0
+appVersion: "1.0.0"
 keywords:
   - identity
   - auth

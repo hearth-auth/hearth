@@ -41,6 +41,7 @@ crossbeam-epoch = "0.9"
 crossbeam-skiplist = "0.1"
 data-encoding = "2"
 flate2 = "1"
+fs2 = "0.4"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto"] }
 hmac = "0.12"

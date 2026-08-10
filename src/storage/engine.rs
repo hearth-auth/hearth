@@ -5,8 +5,11 @@
 //! - **Write path**: WAL append → memtable insert → hot tier invalidate
 //! - **Recovery**: WAL replay into fresh memtable on open
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use fs2::FileExt as _;
 
 use arc_swap::ArcSwap;
 
@@ -50,6 +53,25 @@ pub(crate) struct PendingBatchHandle {
     pub(crate) ticket: u64,
     pub(crate) realm_id: crate::core::RealmId,
     pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Process-wide set of canonical data-directory paths currently held open.
+///
+/// Prevents two `EmbeddedStorageEngine` instances in the same process from
+/// opening the same directory. Cross-process conflicts are caught by the OS
+/// advisory lock (`LOCK` file via `flock`).
+static OPEN_DIRS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// RAII guard that removes `path` from [`OPEN_DIRS`] on drop.
+struct DirLockGuard(PathBuf);
+
+impl Drop for DirLockGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = OPEN_DIRS.lock() {
+            set.remove(&self.0);
+        }
+    }
 }
 
 /// Configuration for the embedded storage engine.
@@ -323,6 +345,16 @@ pub struct EmbeddedStorageEngine {
     /// every reader so decrypted cold-tier residency is `O(cache_cap)`, not
     /// `O(corpus)` (HEA-1914).
     block_cache: Arc<crate::storage::block_cache::BlockCache>,
+    /// Process-local guard: removes `data_dir` from `OPEN_DIRS` on drop.
+    ///
+    /// Must be declared after all fields that use `data_dir` so it is dropped
+    /// last (Rust drops fields in declaration order).
+    _process_lock: DirLockGuard,
+    /// OS-level exclusive advisory lock on `{data_dir}/LOCK`.
+    ///
+    /// Released by the kernel when this `File` is closed (i.e., on drop), so
+    /// a `kill -9`'d process never leaves a stale lock.
+    _dir_lock: std::fs::File,
 }
 
 impl EmbeddedStorageEngine {
@@ -340,6 +372,39 @@ impl EmbeddedStorageEngine {
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn open_with_fs(config: StorageConfig, fs: Arc<dyn Fs>) -> Result<Self, StorageError> {
         fs.create_dir_all(&config.data_dir)?;
+
+        // Acquire process-local + OS-level exclusive lock before touching any files.
+        // The process-local guard prevents two engines in this process from using
+        // the same directory (flock is per-process on Linux, so it cannot catch
+        // in-process conflicts). The OS flock catches cross-process conflicts and
+        // is released automatically by the kernel on process exit or kill -9.
+        let canonical_dir = config
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| config.data_dir.clone());
+        {
+            let mut dirs = OPEN_DIRS.lock().expect("OPEN_DIRS mutex poisoned");
+            if !dirs.insert(canonical_dir.clone()) {
+                return Err(StorageError::AlreadyLocked {
+                    data_dir: config.data_dir.clone(),
+                });
+            }
+        }
+        // SAFETY: inserted into OPEN_DIRS above; guard removes it on drop.
+        let _process_lock = DirLockGuard(canonical_dir);
+
+        let lock_path = config.data_dir.join("LOCK");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(StorageError::Io)?;
+        lock_file
+            .try_lock_exclusive()
+            .map_err(|_| StorageError::AlreadyLocked {
+                data_dir: config.data_dir.clone(),
+            })?;
 
         // Load key registry (host key from env/auto-gen)
         let key_registry = Arc::new(KeyRegistry::load_with_fs(
@@ -575,6 +640,8 @@ impl EmbeddedStorageEngine {
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_cache,
+            _process_lock,
+            _dir_lock: lock_file,
         })
     }
 
@@ -3967,6 +4034,30 @@ mod tests {
         // `cap == 0` must report the exact count, not `min(12, 0) == 0`.
         let count = engine.count_prefix(&realm, b"usr:", 0).expect("count");
         assert_eq!(count, 12);
+    }
+
+    // ===== Directory-lock tests =====
+
+    #[test]
+    fn dir_lock_second_open_fails_with_already_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config1 = StorageConfig::test_config(dir.path().to_path_buf());
+        let engine1 = EmbeddedStorageEngine::open(config1).expect("first open should succeed");
+
+        // Second open on the same dir must fail.
+        let config2 = StorageConfig::test_config(dir.path().to_path_buf());
+        let err = EmbeddedStorageEngine::open(config2)
+            .expect_err("second open on same dir must fail");
+        assert!(
+            matches!(err, StorageError::AlreadyLocked { .. }),
+            "expected AlreadyLocked, got: {err}"
+        );
+
+        // After the first engine is dropped the directory is unlocked.
+        drop(engine1);
+        let config3 = StorageConfig::test_config(dir.path().to_path_buf());
+        EmbeddedStorageEngine::open(config3)
+            .expect("open after drop of first engine should succeed");
     }
 
     #[test]
