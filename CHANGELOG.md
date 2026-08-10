@@ -24,6 +24,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reference-integration suite. Production (`dev_mode == false`) always emits
   `form-action 'self'` regardless of this setting. (HEA-2084)
 
+### Changed
+- **Minimum supported Rust version raised to 1.88.0 (HEA-2115)** — `Cargo.toml`
+  `rust-version` corrected from the stale declared floor of 1.75 to the true floor of
+  1.88.0, which is required by `time@0.3.51`, `cookie_store@0.22.1`, and the `tonic@0.14.6`
+  family. A new `msrv` CI job now builds the workspace at exactly `1.88.0` on every
+  Rust-touching PR so the floor cannot silently drift again.
+
 ### Fixed
 - **Full-stack demo resource server now rejects revoked access tokens (HEA-2094)** — the demo
   Go backend (`examples/full-stack-demo/backend`) previously validated access tokens by Ed25519

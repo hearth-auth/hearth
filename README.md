@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) ![v1.0.0](https://img.shields.io/badge/status-v1.0.0-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.0.0](https://img.shields.io/badge/status-v1.0.0-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -267,7 +267,7 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 
 ### Prerequisites
 
-- **Rust 1.75+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
+- **Rust 1.88.0+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
 - `buf` (optional — only needed if you edit `proto/**/*.proto`; see [`CONTRIBUTING.md`](CONTRIBUTING.md))
 
 ### 1. Build
