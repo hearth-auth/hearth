@@ -999,7 +999,7 @@ impl EmbeddedIdentityEngine {
         };
         let access_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud: aud.clone(),
             exp: iat + access_ttl_secs,
             iat,
@@ -1031,7 +1031,7 @@ impl EmbeddedIdentityEngine {
         };
         let refresh_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud,
             exp: iat + refresh_ttl_secs,
             iat,
@@ -1446,7 +1446,7 @@ impl EmbeddedIdentityEngine {
         let scope = request.scope.clone();
         let access_claims = TokenClaims {
             sub: request.client_id.to_string(),
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud: Audience::single(self.config.token.audience.clone()),
             exp: iat + self.config.token.access_token_ttl_secs,
             iat,
@@ -1606,7 +1606,7 @@ impl EmbeddedIdentityEngine {
         let scope = request.scope.clone();
         let access_claims = TokenClaims {
             sub: assertion_claims.sub,
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud: Audience::single(self.config.token.audience.clone()),
             exp: iat + self.config.token.access_token_ttl_secs,
             iat,

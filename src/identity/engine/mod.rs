@@ -3077,7 +3077,7 @@ impl EmbeddedIdentityEngine {
 
         let new_access_claims = TokenClaims {
             sub: user_id.to_string(),
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud: aud.clone(),
             exp: iat + access_ttl_secs,
             iat,
@@ -3106,7 +3106,7 @@ impl EmbeddedIdentityEngine {
         };
         let new_refresh_claims = TokenClaims {
             sub: user_id.to_string(),
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud,
             exp: iat + refresh_ttl_secs,
             iat,
@@ -14012,7 +14012,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let jti = uuid::Uuid::new_v4().to_string();
         let issued_claims = crate::identity::tokens::TokenClaims {
             sub: subject_claims.sub.clone(),
-            iss: self.config.token.issuer.clone(),
+            iss: self.realm_issuer_url(realm_id),
             aud,
             exp,
             iat: now_secs,
