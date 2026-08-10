@@ -1619,10 +1619,10 @@ fn is_e164(s: &str) -> bool {
 
 /// Returns the HMAC key bytes to use for OTP operations.
 ///
-/// When no key is configured (Log transport + dev mode only), returns a
-/// zero-filled 32-byte key. This path is unreachable in production because
-/// startup rejects a missing `HEARTH_SMS_OTP_HMAC_KEY` when the SMS transport
-/// is not `log` or `dev_mode` is false.
+/// When no key is configured (the `log` transport, in dev or production),
+/// returns a zero-filled 32-byte key. This path is unreachable whenever a real
+/// SMS transport is configured because startup rejects a missing
+/// `HEARTH_SMS_OTP_HMAC_KEY` when `sms.transport` is not `log`.
 fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
     state
         .sms_otp_hmac_key

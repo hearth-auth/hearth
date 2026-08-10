@@ -387,6 +387,23 @@ Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Eve
 | `metrics` | `enabled` | bool | `false` | Set `true` to expose the `/metrics` Prometheus scrape endpoint. Disabled by default — enable only with a `bearer_token` or network-layer access control. |
 | `metrics` | `bearer_token` | string? | — | Bearer token required to access `/metrics` (constant-time compare). When absent, the endpoint is unauthenticated — operators SHOULD firewall it or bind to loopback. |
 
+### Environment variables
+
+Secrets are supplied through the environment rather than the YAML file so they never land on disk. `hearth serve` reads the following directly (independently of the `${VAR}` substitution used inside `hearth.yaml`):
+
+| Variable | Required? | Format | Generate | Purpose |
+|---|---|---|---|---|
+| `HEARTH_MASTER_KEY` | Recommended | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup fails** (auto-generation happens only under `--dev`). Set it so the key is not stored beside the data. |
+| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so existing realm KEKs can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
+| `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
+| `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). Under the `log` transport (dev or production) it is optional and a deterministic dev key is substituted. |
+| `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
+| `HEARTH_REALM_<REALM>_FINGERPRINT_HMAC_SECRET` | Per configured realm | ≥ 32 bytes | `openssl rand -base64 32` | Per-realm device-fingerprint HMAC secret. `<REALM>` is the SCREAMING_SNAKE_CASE realm name (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`). See [security hardening](docs/guides/security-hardening.md). |
+| `HEARTH_DEV_DATA_DIR` | Dev only | filesystem path | — | Overrides the data directory used under `--dev` (env > config `storage.data_dir` > temp dir). Ignored outside dev mode. |
+| `HEARTH_MAILCATCHER_PASSWORD` | Dev only | string | `openssl rand -base64 24` | Password for the in-process mailcatcher UI (`/dev/mail`) when `email.transport: mailcatcher`. Auto-generated (and logged) if unset. |
+
+See [`docs/guides/security-hardening.md`](docs/guides/security-hardening.md) for master-key rotation and per-realm secret provisioning.
+
 ---
 
 ## Theming the Admin UI

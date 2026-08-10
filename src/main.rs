@@ -730,9 +730,11 @@ fn resolve_sms_otp_hmac_key(
     match env_value {
         Some(key) if !key.is_empty() => {
             if key.len() < 32 {
-                return Err("HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
+                return Err(
+                    "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
                      HMAC-SHA256 security; use a 32+ byte random value"
-                    .into());
+                        .into(),
+                );
             }
             Ok(Some(key.as_bytes().to_vec()))
         }
