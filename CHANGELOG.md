@@ -49,9 +49,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   complete an exchange, contradicting the newly advertised discovery metadata. The client
   identity is now taken from the Basic username when the body field is absent or empty, and is
   used consistently for per-client rate limiting, CORS, client authentication, and grant
-  dispatch. An explicitly empty `client_id=` form field next to Basic auth is treated as
-  absent, not as a conflicting credential. Requests that supply *neither* body `client_id` nor
-  an `Authorization` header keep their previous behavior. (HEA-2112)
+  dispatch. An explicitly empty `client_id=` or `client_secret=` form field next to Basic auth
+  is treated as absent, not as a conflicting credential — at the token, introspection, and
+  revocation endpoints alike. Requests that supply *neither* body `client_id` nor an
+  `Authorization` header keep their previous behavior. (HEA-2112)
 - **Full-stack demo resource server now rejects revoked access tokens (HEA-2094)** — the demo
   Go backend (`examples/full-stack-demo/backend`) previously validated access tokens by Ed25519
   signature and expiry only, so a token revoked at Hearth was still accepted on `/api/notes`

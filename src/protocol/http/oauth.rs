@@ -481,6 +481,13 @@ fn verify_endpoint_client(
     body_client_id: Option<&str>,
     body_client_secret: Option<&str>,
 ) -> Result<ClientId, Response> {
+    // Normalize at the helper boundary so every endpoint that authenticates
+    // through here gets the empty-field-is-absent rule by construction —
+    // applying it callsite-by-callsite is how /introspect and /revoke were
+    // missed (HEA-2112).
+    let body_client_id = body_client_id.and_then(non_empty_credential);
+    let body_client_secret = body_client_secret.and_then(non_empty_credential);
+
     // Prefer Basic Auth (RFC 6749 §2.3.1); fall back to body parameters.
     // When both are present they must agree — §2.3.1 forbids using more
     // than one client authentication mechanism per request, so a
@@ -546,12 +553,15 @@ fn backfill_client_id_from_basic(headers: &HeaderMap, body: &mut HttpTokenReques
     }
 }
 
-/// Treats an explicitly empty body `client_id=` as absent so it cannot read
-/// as a disagreeing credential next to Basic auth — RFC 6749 §2.3.1 rejects
-/// conflicting credentials, not empty fields (HEA-2112).
-fn non_empty_client_id(id: &str) -> Option<&str> {
-    let trimmed = id.trim();
-    (!trimmed.is_empty()).then_some(id)
+/// Treats an explicitly empty form credential (`client_id=` /
+/// `client_secret=`) as absent so it cannot read as a disagreeing credential
+/// next to Basic auth — RFC 6749 §2.3.1 rejects conflicting credentials, not
+/// empty fields. Applied inside `verify_endpoint_client` and
+/// `enforce_confidential_client_auth`, so every endpoint authenticating
+/// through them gets the rule without per-callsite plumbing (HEA-2112).
+fn non_empty_credential(field: &str) -> Option<&str> {
+    let trimmed = field.trim();
+    (!trimmed.is_empty()).then_some(field)
 }
 
 /// Enforces confidential-client authentication on the `authorization_code`
@@ -575,6 +585,9 @@ fn enforce_confidential_client_auth(
     body_client_id: &str,
     body_client_secret: Option<&str>,
 ) -> Result<(), Response> {
+    // Same boundary normalization as `verify_endpoint_client` (HEA-2112).
+    let body_client_secret = body_client_secret.and_then(non_empty_credential);
+
     // RFC 6749 §2.3.1: a request must not use more than one client
     // authentication mechanism. If a Basic header is present, its username
     // must name the same client as the body `client_id` (previously the
@@ -584,7 +597,7 @@ fn enforce_confidential_client_auth(
     if let Some((basic_id, basic_secret)) = &basic {
         // An absent/empty body client_id is fine — RFC 6749 §4.1.3 only
         // requires it when the client is not otherwise authenticating.
-        if (!body_client_id.is_empty() && basic_id != body_client_id)
+        if non_empty_credential(body_client_id).is_some_and(|b| basic_id != b)
             || body_client_secret.is_some_and(|b| b != basic_secret)
         {
             return Err(basic_body_mismatch_response());
@@ -1550,7 +1563,7 @@ async fn token_exchange_impl(
                         &state,
                         &realm_id,
                         &headers,
-                        non_empty_client_id(&body.client_id),
+                        Some(body.client_id.as_str()),
                         body.client_secret.as_deref(),
                     ) {
                         Ok(cid) => Some(cid),
@@ -1809,7 +1822,7 @@ async fn token_exchange_impl(
                 &state,
                 &realm_id,
                 &headers,
-                non_empty_client_id(&body.client_id),
+                Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
             ) {
                 Ok(id) => id,
@@ -2597,7 +2610,7 @@ async fn realm_token_exchange(
                         &state,
                         &realm_id,
                         &headers,
-                        non_empty_client_id(&body.client_id),
+                        Some(body.client_id.as_str()),
                         body.client_secret.as_deref(),
                     ) {
                         Ok(cid) => Some(cid),
@@ -2818,7 +2831,7 @@ async fn realm_token_exchange(
                 &state,
                 &realm_id,
                 &headers,
-                non_empty_client_id(&body.client_id),
+                Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
             ) {
                 Ok(id) => id,

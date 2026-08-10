@@ -28,6 +28,14 @@
 //!    (`basic_only_code_exchange_without_body_client_id_succeeds`,
 //!    `basic_only_code_exchange_succeeds_on_realm_path`,
 //!    `basic_auth_with_explicitly_empty_body_client_id_succeeds`).
+//! 5. The empty-field-is-absent rule from (4) was first applied per callsite
+//!    (`client_id` at the token grant arms only), leaving empty
+//!    `client_secret=` at /token and empty `client_id=` at /introspect and
+//!    /revoke reading as *conflicting* credentials. Normalization now lives
+//!    inside `verify_endpoint_client` / `enforce_confidential_client_auth`,
+//!    covering every caller by construction
+//!    (`basic_auth_with_explicitly_empty_body_client_secret_succeeds`,
+//!    `basic_auth_with_explicitly_empty_body_client_id_succeeds_at_introspect`).
 //!
 //! The related timing oracle (unknown client ids failed without an Argon2
 //! verification) is covered by unit tests in `src/identity/engine/mod.rs`
@@ -334,6 +342,69 @@ async fn basic_auth_with_explicitly_empty_body_client_id_succeeds() {
         status,
         StatusCode::OK,
         "empty body client_id must read as absent, not as a mismatch: {json}"
+    );
+}
+
+/// An explicitly empty `client_secret=` next to Basic auth is likewise an
+/// absent credential, not a disagreeing one — clients that emit empty form
+/// defaults must keep authenticating via the Basic header.
+#[tokio::test]
+async fn basic_auth_with_explicitly_empty_body_client_secret_succeeds() {
+    let secret = "hea2112-basic-secret!";
+    let f = fixture_with_secret(secret).await;
+
+    let mut body = exchange_body(&f);
+    body["client_secret"] = serde_json::json!("");
+    let (status, json) = post_json(
+        &f.state,
+        "/token",
+        &f.realm_id_str,
+        Some(&basic_header(&f.client_id, secret)),
+        body,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "empty body client_secret must read as absent, not as a mismatch: {json}"
+    );
+    assert!(
+        json["access_token"].as_str().is_some_and(|t| !t.is_empty()),
+        "exchange must mint an access token"
+    );
+}
+
+/// The empty-field-is-absent rule must hold on the `verify_endpoint_client`
+/// path too (introspection) — it was previously applied only at the token
+/// grant arms, so `client_id=` next to Basic auth 400'd at /introspect.
+#[tokio::test]
+async fn basic_auth_with_explicitly_empty_body_client_id_succeeds_at_introspect() {
+    let secret = "hea2112-basic-secret!";
+    let f = fixture_with_secret(secret).await;
+
+    let (status, json) = post_json(
+        &f.state,
+        "/introspect",
+        &f.realm_id_str,
+        Some(&basic_header(&f.client_id, secret)),
+        serde_json::json!({
+            "token": "some.fake.token",
+            "client_id": "",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "empty body client_id at /introspect must read as absent: {json}"
+    );
+    assert_eq!(
+        json["active"].as_bool(),
+        Some(false),
+        "a garbage token must introspect as inactive, proving the request \
+         authenticated and reached the introspection logic"
     );
 }
 
