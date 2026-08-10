@@ -14,7 +14,6 @@
 
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read as _, Write as _};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,7 +31,7 @@ use tracing::{debug, info, instrument};
 
 use crate::cluster::types::{HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
 use crate::core::RealmId;
-use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+use crate::storage::StorageEngine;
 
 // ── Error helpers ─────────────────────────────────────────────────────────────
 
@@ -161,10 +160,12 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
 /// Tracks which realms have received writes so snapshot creation can scan
 /// every live realm without a separate realm-registry call.
 pub struct HearthStateMachine {
-    /// The underlying storage engine.  Replaced atomically on snapshot install.
+    /// The underlying storage engine.  Shared with the server — never swapped.
+    ///
+    /// `build_clustered` passes `Arc::clone(&inner)` here; snapshot install
+    /// applies data in-place so the server's `inner` handle always reads
+    /// current state without any `Arc` swap (HEA-2126).
     engine: Arc<dyn StorageEngine>,
-    /// Config used to open a fresh engine after snapshot install.
-    storage_config: StorageConfig,
     /// Set of realms that have had at least one write applied.
     known_realms: BTreeSet<RealmId>,
     /// Last applied log id (updated after every `apply` call).
@@ -177,10 +178,9 @@ pub struct HearthStateMachine {
 
 impl HearthStateMachine {
     /// Create a state machine wrapping an existing storage engine.
-    pub fn new(engine: Arc<dyn StorageEngine>, storage_config: StorageConfig) -> Self {
+    pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
         Self {
             engine,
-            storage_config,
             known_realms: BTreeSet::new(),
             last_applied: None,
             last_membership: StoredMembership::default(),
@@ -273,18 +273,14 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         let realm_ids: BTreeSet<RealmId> =
             payload.realms.iter().map(|r| r.realm_id.clone()).collect();
 
-        let data_dir = self.storage_config.data_dir.clone();
-        let storage_config = self.storage_config.clone();
+        let engine = Arc::clone(&self.engine);
+        let existing_realms = self.known_realms.clone();
 
-        // Replay into a fresh engine in a temp directory, then atomically
-        // rename to the production data directory.
-        let new_engine: Arc<dyn StorageEngine> =
-            spawn_blocking(move || install_snapshot_blocking(&data_dir, storage_config, &payload))
-                .await
-                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
-
-        // Swap in the new engine.
-        self.engine = new_engine;
+        // Apply the snapshot in-place through the live engine — no directory swap,
+        // no new EmbeddedStorageEngine open (HEA-2126).
+        spawn_blocking(move || restore_snapshot_in_place(&engine, &existing_realms, &payload))
+            .await
+            .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
 
         // Rebuild known_realms from the snapshot.
         self.known_realms = realm_ids;
@@ -416,53 +412,59 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
         .map_err(|e| io_read_err(std::io::Error::other(e.to_string())))
 }
 
-/// Blocking: replay snapshot into a temp dir, atomic-rename to prod data dir.
+/// Blocking: apply a Raft snapshot in-place through the live engine.
 ///
-/// Returns a new [`Arc<dyn StorageEngine>`] opened from the production path.
-fn install_snapshot_blocking(
-    data_dir: &PathBuf,
-    storage_config: StorageConfig,
+/// Clears every key for each realm currently tracked by the state machine,
+/// then replays all entries from the snapshot via `put_batch`.  Because this
+/// operates on the same `Arc<dyn StorageEngine>` that the server reads through
+/// (the `inner` handle from `build_clustered`), all reads via the server's
+/// original `Arc` immediately observe the post-snapshot state — no pointer
+/// swap required.
+///
+/// The process-local `OPEN_DIRS` guard and the OS-level advisory `LOCK` file
+/// remain continuous across the install, so the exclusive lock is never
+/// released (HEA-2126 bugs 1–3).
+///
+/// # Crash safety
+///
+/// An in-place restore is not atomic across a crash mid-restore: a process
+/// killed between the delete phase and the replay phase leaves the engine in a
+/// partially-cleared state.  On restart the WAL replays whatever was durably
+/// written, which may be a mix of cleared and un-cleared realm data.  Operators
+/// using Raft snapshot catch-up should either recover from a quorum peer or
+/// wipe the data directory before restarting a node that died mid-restore.
+///
+/// Note: the directory-swap this replaces was also not crash-atomic — the OS
+/// advisory lock file was moved with `data_dir` and immediately unlinked,
+/// leaving the directory unprotected after any install (HEA-2126 bug 3).
+fn restore_snapshot_in_place(
+    engine: &Arc<dyn StorageEngine>,
+    existing_realms: &BTreeSet<RealmId>,
     payload: &SnapshotPayload,
-) -> Result<Arc<dyn StorageEngine>, StorageError<u64>> {
-    let parent = data_dir
-        .parent()
-        .ok_or_else(|| io_write_err(std::io::Error::other("data_dir has no parent")))?;
+) -> Result<(), StorageError<u64>> {
+    // Phase 1: delete all data for realms tracked before this install.
+    for realm_id in existing_realms {
+        let keys = engine
+            .scan(realm_id, &[], &[0xFF; 256])
+            .map_err(to_write_err)?
+            .into_iter()
+            .map(|e| e.key)
+            .collect::<Vec<_>>();
+        if !keys.is_empty() {
+            engine
+                .write_batch(realm_id, &[], &keys)
+                .map_err(to_write_err)?;
+        }
+    }
 
-    let temp_dir = parent.join(format!("hearth-snap-{}.tmp", uuid::Uuid::new_v4()));
-
-    // Create a fresh engine in the temp directory.
-    let temp_config = StorageConfig::dev(temp_dir.clone());
-    let temp_engine = EmbeddedStorageEngine::open(temp_config).map_err(to_write_err)?;
-
-    // Replay all entries from the snapshot.
+    // Phase 2: replay the snapshot data.
     for realm_data in &payload.realms {
-        temp_engine
+        engine
             .put_batch(&realm_data.realm_id, &realm_data.entries)
             .map_err(to_write_err)?;
     }
 
-    // Drop the temp engine to flush WAL before rename.
-    drop(temp_engine);
-
-    // Atomic rename: move old prod dir aside, then temp dir → prod dir.
-    let backup_dir = parent.join("hearth-data.pre-snapshot");
-
-    if data_dir.exists() {
-        if backup_dir.exists() {
-            std::fs::remove_dir_all(&backup_dir).map_err(to_write_err)?;
-        }
-        std::fs::rename(data_dir, &backup_dir).map_err(to_write_err)?;
-    }
-    std::fs::rename(&temp_dir, data_dir).map_err(to_write_err)?;
-
-    // Non-blocking cleanup of the backup.
-    if backup_dir.exists() {
-        let _ = std::fs::remove_dir_all(&backup_dir);
-    }
-
-    // Open the production engine from its new data.
-    let new_engine = EmbeddedStorageEngine::open(storage_config).map_err(to_write_err)?;
-    Ok(Arc::new(new_engine))
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -476,7 +478,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::cluster::types::RaftCommand;
-    use crate::storage::{EmbeddedStorageEngine, StorageConfig};
+    use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageError};
 
     fn make_realm() -> RealmId {
         RealmId::new(Uuid::new_v4())
@@ -531,8 +533,8 @@ mod tests {
 
     fn open_sm(dir: &std::path::Path) -> HearthStateMachine {
         let config = StorageConfig::dev(dir.to_path_buf());
-        let engine = EmbeddedStorageEngine::open(config.clone()).expect("open engine");
-        HearthStateMachine::new(Arc::new(engine), config)
+        let engine = EmbeddedStorageEngine::open(config).expect("open engine");
+        HearthStateMachine::new(Arc::new(engine))
     }
 
     // ── Put / Delete / Batch ──────────────────────────────────────────────────
@@ -734,6 +736,101 @@ mod tests {
 
         sm.install_snapshot(&meta, data).await.unwrap();
         assert!(sm.get_current_snapshot().await.unwrap().is_some());
+    }
+
+    // ── HEA-2126 regression pins ──────────────────────────────────────────────
+
+    /// Bug 2 pin: reads through the **original** `Arc<EmbeddedStorageEngine>`
+    /// (the `inner` handle held by the server, mirroring `build_clustered`)
+    /// must observe the snapshot data after install.
+    ///
+    /// Before the fix, `install_snapshot` replaced `self.engine` with a new
+    /// Arc pointing at a freshly-opened (now separate) engine, while the
+    /// server's original Arc still pointed at the pre-snapshot directory.
+    /// Any read routed through `ClusterEngine::inner` would silently return
+    /// stale data (or worse, data from a deleted directory).
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_install_visible_through_original_arc() {
+        // Simulate the production topology: the server holds Arc<EmbeddedStorageEngine>
+        // (inner) and the state machine holds Arc::clone(&inner) cast to dyn StorageEngine.
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let config = StorageConfig::dev(data_dir.clone());
+        let inner: Arc<EmbeddedStorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
+
+        // State machine wraps the same object — mirrors build_clustered.
+        let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
+        let mut sm = HearthStateMachine::new(sm_engine);
+        let realm = make_realm();
+
+        // Build a snapshot from a separate node (different data).
+        let snap = {
+            let dir_a = tempdir().unwrap();
+            let mut sm_a = open_sm(dir_a.path().join("data").as_path());
+            sm_a.apply([make_put_entry(
+                1,
+                realm.clone(),
+                b"snap_key".to_vec(),
+                b"snap_val".to_vec(),
+            )])
+            .await
+            .unwrap();
+            let mut builder = sm_a.get_snapshot_builder().await;
+            builder.build_snapshot().await.unwrap()
+        };
+
+        sm.install_snapshot(&snap.meta, snap.snapshot)
+            .await
+            .unwrap();
+
+        // Reads through the ORIGINAL Arc must see the snapshot data.
+        let via_inner = inner.get(&realm, b"snap_key").unwrap();
+        assert_eq!(
+            via_inner,
+            Some(b"snap_val".to_vec()),
+            "reads through the original engine Arc must observe post-install snapshot data"
+        );
+    }
+
+    /// Bug 3 pin: the `data_dir` exclusive lock must remain held after a
+    /// snapshot install.
+    ///
+    /// Before the fix, the rename sequence moved the locked `LOCK` inode to a
+    /// backup directory and unlinked it, silently releasing the exclusive lock.
+    /// A second process (or a second in-process open) could then acquire the
+    /// lock and open the same directory concurrently.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn data_dir_lock_held_after_snapshot_install() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let mut sm = open_sm(&data_dir);
+        let realm = make_realm();
+
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"k".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+
+        let mut builder = sm.get_snapshot_builder().await;
+        let snap = builder.build_snapshot().await.unwrap();
+        let meta = snap.meta.clone();
+
+        sm.install_snapshot(&meta, snap.snapshot).await.unwrap();
+
+        // The exclusive lock on data_dir must still be held — a second open
+        // on the same directory must return AlreadyLocked.
+        let result = EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone()));
+        assert!(
+            matches!(result, Err(StorageError::AlreadyLocked { .. })),
+            "data_dir must remain exclusively locked after snapshot install; got: {result:?}"
+        );
     }
 
     // ── Concurrent reads during snapshot ─────────────────────────────────────

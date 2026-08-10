@@ -121,7 +121,7 @@ impl ClusterEngine {
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
         let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
-        let state_machine = HearthStateMachine::new(sm_engine, storage_config.clone());
+        let state_machine = HearthStateMachine::new(sm_engine);
 
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;

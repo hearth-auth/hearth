@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Raft followers can now complete snapshot catch-up (HEA-2126)** — `install_snapshot` previously
+  tried to open a new `EmbeddedStorageEngine` at the production data directory while the live engine
+  already held the exclusive lock on that directory, causing every follower snapshot install to fail
+  with `AlreadyLocked`.  Snapshots are now applied in-place through the live engine (delete existing
+  realm data, replay snapshot via `put_batch`), keeping the directory lock continuous and ensuring the
+  server's storage handle always reads current data without any pointer swap. (HEA-2105)
 - **`HEARTH_SMS_OTP_HMAC_KEY` is no longer forced on SMS-less production deployments (HEA-2114)** —
   `hearth serve` previously refused to start in production whenever `HEARTH_SMS_OTP_HMAC_KEY` was
   unset, even when `sms.transport: log` (no real SMS at all). The key is now required **only when a
