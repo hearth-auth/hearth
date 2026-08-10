@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`HEARTH_SMS_OTP_HMAC_KEY` is no longer forced on SMS-less production deployments (HEA-2114)** —
+  `hearth serve` previously refused to start in production whenever `HEARTH_SMS_OTP_HMAC_KEY` was
+  unset, even when `sms.transport: log` (no real SMS at all). The key is now required **only when a
+  real SMS transport (`twilio`, `awssns`) is configured**, matching the config-validation layer.
+  Deployments that do not send SMS start without it. (HEA-2105)
+
+### Added
+- **Environment-variable reference in the README (HEA-2114)** — the Configuration section now
+  documents the `HEARTH_*` secrets read directly by `hearth serve` (`HEARTH_MASTER_KEY`,
+  `HEARTH_PREVIOUS_MASTER_KEY`, `HEARTH_KEK`, `HEARTH_SMS_OTP_HMAC_KEY`,
+  `HEARTH_TURNSTILE_SECRET_KEY`, per-realm `HEARTH_REALM_<REALM>_FINGERPRINT_HMAC_SECRET`,
+  `HEARTH_DEV_DATA_DIR`, `HEARTH_MAILCATCHER_PASSWORD`) with formats and generation commands.
+  (HEA-2105)
+
+### Fixed
 - **`POST /authorize` no longer rejects requests that omit `user_id` from the body (HEA-2117)** —
   the conversion layer required `user_id` to be a valid UUID string even though the handler
   always overrides it with the authenticated principal's ID from the Bearer token (HEA-1721).

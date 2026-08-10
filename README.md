@@ -384,6 +384,8 @@ Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Eve
 | `email.mailgun` | `domain` | string | — | Mailgun sending domain |
 | `email.mailgun` | `region` | string | `us` | `us` \| `eu` |
 | `email.mailtrap` | `api_token` | string | — | Mailtrap Sending API token; required when `transport: mailtrap` |
+| `metrics` | `enabled` | bool | `false` | Set `true` to expose the `/metrics` Prometheus scrape endpoint. Disabled by default — enable only with a `bearer_token` or network-layer access control. |
+| `metrics` | `bearer_token` | string? | — | Bearer token required to access `/metrics` (constant-time compare). When absent, the endpoint is unauthenticated — operators SHOULD firewall it or bind to loopback. |
 
 ---
 

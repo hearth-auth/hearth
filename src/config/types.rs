@@ -17,6 +17,7 @@ use crate::rbac::{
 
 /// Server network configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Address to bind the server to.
     #[serde(default = "ServerConfig::default_bind_address")]
@@ -121,6 +122,7 @@ impl Default for ServerConfig {
 
 /// Background SST compaction configuration (all fields optional).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactionSection {
     /// Whether automatic background compaction is enabled.
     #[serde(default = "CompactionSection::default_enabled")]
@@ -180,6 +182,7 @@ impl CompactionSection {
 /// These values control WAL, memtable, and hot tier behavior.
 /// Distinct from `storage::StorageConfig` — conversion happens in main.rs wiring.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StorageSection {
     /// Directory for data files (WAL, SSTs).
     #[serde(default = "StorageSection::default_data_dir")]
@@ -258,6 +261,7 @@ impl Default for StorageSection {
 
 /// Metrics endpoint configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Whether to expose the Prometheus `/metrics` HTTP endpoint.
     ///
@@ -310,6 +314,7 @@ pub enum OtlpProtocol {
 /// When present under `observability.otlp`, Hearth ships spans to the
 /// configured collector endpoint via gRPC or HTTP.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OtlpConfig {
     /// Collector endpoint URL.
     ///
@@ -349,6 +354,7 @@ impl OtlpConfig {
 
 /// Observability (logging and tracing) configuration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Tracing log level filter (trace, debug, info, warn, error).
     #[serde(default = "ObservabilityConfig::default_log_level")]
@@ -395,6 +401,7 @@ impl Default for ObservabilityConfig {
 
 /// Operational limits and timeouts.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationalConfig {
     /// Request timeout in seconds.
     #[serde(default = "OperationalConfig::default_request_timeout_secs")]
@@ -492,6 +499,7 @@ pub enum SmtpEncryption {
 /// optional; if `username` is set then `password` MUST also be set (and
 /// vice versa) — the config validator enforces the pair.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SmtpConfig {
     /// SMTP server hostname (e.g. `smtp.example.com`, `mailpit`).
     pub host: String,
@@ -512,6 +520,7 @@ pub struct SmtpConfig {
 ///
 /// Required when [`EmailTransport::Sendgrid`] is selected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendgridConfig {
     /// `SendGrid` API key.
     pub api_key: String,
@@ -521,6 +530,7 @@ pub struct SendgridConfig {
 ///
 /// Required when [`EmailTransport::Postmark`] is selected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PostmarkConfig {
     /// `Postmark` server token.
     pub server_token: String,
@@ -541,6 +551,7 @@ pub enum MailgunRegion {
 ///
 /// Required when [`EmailTransport::Mailgun`] is selected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MailgunConfig {
     /// `Mailgun` API key.
     pub api_key: String,
@@ -555,6 +566,7 @@ pub struct MailgunConfig {
 ///
 /// Required when [`EmailTransport::Mailtrap`] is selected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MailtrapConfig {
     /// `Mailtrap` API key.
     pub api_key: String,
@@ -574,6 +586,7 @@ pub struct MailtrapConfig {
 /// development. Production deployments should set `transport: smtp` (or
 /// one of the HTTP providers) and provide the corresponding config block.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmailConfig {
     /// Which transport to use for outbound email.
     #[serde(default)]
@@ -625,6 +638,7 @@ pub enum SmsTransport {
 ///
 /// Required when [`SmsTransport::Twilio`] is selected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TwilioConfig {
     /// Twilio Account SID (e.g. `AC…`).
     pub account_sid: String,
@@ -639,6 +653,7 @@ pub struct TwilioConfig {
 ///
 /// Required when [`SmsTransport::AwsSns`] is selected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnsSmsConfig {
     /// AWS region (e.g. `us-east-1`).
     pub region: String,
@@ -658,6 +673,7 @@ pub struct SnsSmsConfig {
 /// Production deployments should set `transport: twilio` (or `awssns`)
 /// and provide the corresponding config block.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SmsConfig {
     /// Which transport to use for outbound SMS.
     #[serde(default)]
@@ -676,6 +692,7 @@ pub struct SmsConfig {
 /// `None`, the built-in Hearth SVG logo is used everywhere. When
 /// `product_name` is `None`, "Hearth" is used.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BrandingConfig {
     /// Product name shown in the UI (logo alt text) and email subjects.
     /// Defaults to `"Hearth"` when `None`.
@@ -710,6 +727,7 @@ impl BrandingConfig {
 
 /// Per-realm web branding block in YAML.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmWebYaml {
     /// Named theme override for this realm's UI sessions.
     #[serde(default)]
@@ -731,6 +749,7 @@ pub struct RealmWebYaml {
 /// When `enabled`, Hearth generates a setup token at startup if no realm
 /// exists and logs a one-time setup URL (Jenkins-style).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OnboardingConfig {
     /// When `true`, the onboarding flow is available at `/ui/setup` until
     /// the first admin is created. Set to `false` to permanently disable.
@@ -773,6 +792,7 @@ impl Default for OnboardingConfig {
 ///
 /// Controls OIDC Discovery metadata, authorization code TTL, and nonce enforcement.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OidcYamlConfig {
     /// The issuer URL used in discovery documents and ID tokens.
     /// Must be a valid URL. Example: `"https://auth.example.com"`
@@ -798,6 +818,7 @@ pub struct OidcYamlConfig {
 ///
 /// Controls JWT issuance parameters: issuer, audience, and TTLs.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TokenYamlConfig {
     /// The `iss` claim value. Defaults to `oidc.issuer` when omitted.
     #[serde(default)]
@@ -835,6 +856,7 @@ pub struct TokenYamlConfig {
 /// `dpop_nonce_secret` and `key_encryption_key` are redacted — see the
 /// `impl Debug` below. Any new secret field MUST be redacted there too.
 #[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityYaml {
     /// Global rate-limiting thresholds (overrides compiled-in defaults).
     #[serde(default)]
@@ -1003,6 +1025,7 @@ impl std::fmt::Debug for SecurityYaml {
 
 /// `security.password` — password-hashing hardening.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PasswordSecurityYaml {
     /// Server-side Argon2id pepper. When present, all new password hashes are
     /// peppered via `HMAC-SHA256(key, password)` before Argon2id. Absent = no
@@ -1025,6 +1048,7 @@ pub struct PasswordSecurityYaml {
 /// This gate caps in-flight KDF work to `max_in_flight`, waits at most
 /// `max_queue_wait_ms` for a slot, then sheds with `503`/`Retry-After`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KdfAdmissionYaml {
     /// Maximum concurrent Argon2id operations.
     ///
@@ -1092,6 +1116,7 @@ impl KdfAdmissionYaml {
 /// The optional `previous_*` pair keeps a superseded pepper valid on login
 /// during an operator-controlled rotation grace window.
 #[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PepperYaml {
     /// Active pepper version. Embedded in each new credential's
     /// `pepper_version` so rotations can be tracked and audited.
@@ -1197,6 +1222,7 @@ impl SecurityYaml {
 ///       secret_key: "0x4AAAAAAA..."
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptchaYaml {
     /// Which CAPTCHA provider to activate.
     pub provider: CaptchaProviderKind,
@@ -1215,6 +1241,7 @@ pub enum CaptchaProviderKind {
 
 /// `security.captcha.turnstile` — Cloudflare Turnstile settings.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnstileYaml {
     /// Turnstile **site key** (public — safe to embed in HTML).
     pub site_key: String,
@@ -1239,6 +1266,7 @@ pub struct TurnstileYaml {
 ///     export_rate_limit: 10
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackupSecurityYaml {
     /// Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-pad).
     ///
@@ -1272,6 +1300,7 @@ pub struct BackupSecurityYaml {
 ///     maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpReputationYaml {
     /// Whether IP reputation checks are enabled.  Default: `false`.
     #[serde(default)]
@@ -1300,6 +1329,7 @@ pub struct IpReputationYaml {
 ///     reflection_enabled: false   # default; omit for production-safe behaviour
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrpcSecurityYaml {
     /// Whether the gRPC server reflection service is enabled.
     ///
@@ -1341,6 +1371,7 @@ pub enum TlsMinVersionYaml {
 ///       - /etc/hearth/crl/client-ca.crl.pem
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsSecurityYaml {
     /// Minimum TLS protocol version to accept.
     ///
@@ -1376,6 +1407,7 @@ pub enum IpReputationActionYaml {
 
 /// `security.ip_reputation.spamhaus` — Spamhaus DROP/EDROP refresh settings.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpamhausDropYaml {
     /// URL for the Spamhaus DROP (IPv4) list.
     #[serde(default = "SpamhausDropYaml::default_drop_url")]
@@ -1412,6 +1444,7 @@ impl Default for SpamhausDropYaml {
 
 /// `security.http2` — HTTP/2 rapid-reset defense (A-39, CVE-2023-44487).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Http2SecurityYaml {
     /// Maximum concurrent HTTP/2 streams per connection.  Default: 100.
     #[serde(default = "Http2SecurityYaml::default_max_concurrent_streams")]
@@ -1442,6 +1475,7 @@ impl Default for Http2SecurityYaml {
 
 /// `security.request_shaper` — global per-IP + per-realm rate limiter (A-2).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestShaperYaml {
     /// Maximum requests per second per source IP.  Default: 100.
     #[serde(default = "RequestShaperYaml::default_ip_rps")]
@@ -1462,6 +1496,7 @@ impl RequestShaperYaml {
 
 /// `security.rate_limiting` — operator-tunable per-IP and per-account thresholds.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalRateLimitYaml {
     /// Per-IP failed-login rate limit (credential-stuffing protection).
     #[serde(default)]
@@ -1486,6 +1521,7 @@ pub struct GlobalRateLimitYaml {
 
 /// Per-IP rate limit config: sliding window of failed attempts.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpRateLimitYaml {
     /// Maximum failed attempts in the window before the IP is blocked. Default: 10.
     #[serde(default)]
@@ -1497,6 +1533,7 @@ pub struct IpRateLimitYaml {
 
 /// Per-account lockout config: consecutive failures trigger a timed lockout.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountRateLimitYaml {
     /// Maximum consecutive failures before lockout. Default: 5.
     #[serde(default)]
@@ -1512,6 +1549,7 @@ pub struct AccountRateLimitYaml {
 ///
 /// These apply to all realms unless overridden per-realm in the `realms:` map.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// Default session TTL as a human-readable duration (e.g. "24h", "30m").
     #[serde(default)]
@@ -1547,6 +1585,7 @@ pub struct AuthConfig {
 /// but enforcement (checking MFA on login, validating password complexity, applying
 /// rate limits) is a separate concern in the identity engine.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmAuthYaml {
     /// Whether MFA is required for all users in this realm.
     #[serde(default)]
@@ -1586,6 +1625,7 @@ pub struct RealmAuthYaml {
 
 /// WebAuthn attestation policy in YAML (`realms.<name>.auth.webauthn_attestation`).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebAuthnAttestationYaml {
     /// Whether attestation format `"none"` is allowed (default: `true`).
     #[serde(default = "WebAuthnAttestationYaml::default_allow_none")]
@@ -1623,6 +1663,7 @@ impl WebAuthnAttestationYaml {
 /// When `mode = domain_restricted`, `allowed_domains` lists the permitted
 /// email domains (case-insensitive).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegistrationPolicyYaml {
     /// One of `disabled` (default), `open`, `invite_only`, `domain_restricted`.
     #[serde(default)]
@@ -1673,6 +1714,7 @@ impl RegistrationPolicyYaml {
 /// Controls whether OAuth clients may self-register via `POST /register`
 /// (RFC 7591). Defaults to `disabled` when absent.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DcrPolicyYaml {
     /// One of `disabled` (default) or `open`.
     #[serde(default)]
@@ -1706,6 +1748,7 @@ impl DcrPolicyYaml {
 
 /// Password complexity policy in YAML.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PasswordPolicyYaml {
     /// Minimum password length. Must be >= 1.
     #[serde(default)]
@@ -1735,6 +1778,7 @@ pub struct PasswordPolicyYaml {
 
 /// Per-realm token TTL overrides in YAML.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmTokenYaml {
     /// Access token TTL as a duration string (e.g. `"15m"`).
     #[serde(default)]
@@ -1766,6 +1810,7 @@ pub struct RealmTokenYaml {
 
 /// Per-realm rate limit overrides in YAML.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitYaml {
     /// Maximum failed login attempts before lockout.
     #[serde(default)]
@@ -1800,6 +1845,7 @@ pub enum AttributeTypeYaml {
 /// `realms.<name>.attribute_definitions.users` or
 /// `realms.<name>.attribute_definitions.organizations`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributeDefinitionYaml {
     /// Machine-readable key used as the storage key in the attribute map.
     pub key: String,
@@ -1824,6 +1870,7 @@ pub struct AttributeDefinitionYaml {
 ///
 /// Declared under `realms.<name>.attribute_definitions:`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributeDefinitionsYaml {
     /// Attribute definitions for user records.
     #[serde(default)]
@@ -1839,6 +1886,7 @@ pub struct AttributeDefinitionsYaml {
 /// with storage at startup: created if missing, updated if changed.
 /// Members and invitations are runtime-only — not managed via YAML.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrganizationYamlConfig {
     /// Human-readable organization name.
     pub name: String,
@@ -1852,6 +1900,7 @@ pub struct OrganizationYamlConfig {
 
 /// Organization configuration overrides in YAML.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrgConfigYaml {
     /// Maximum number of members allowed. `None` means unlimited.
     #[serde(default)]
@@ -1864,6 +1913,7 @@ pub struct OrgConfigYaml {
 /// with storage at startup: created if missing, updated if changed, archived
 /// if removed from the YAML.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationYamlConfig {
     /// Human-readable application name.
     pub name: String,
@@ -1917,6 +1967,7 @@ pub struct ApplicationYamlConfig {
 
 /// YAML permission definition.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionYamlConfig {
     pub name: String,
     pub display_name: String,
@@ -1928,6 +1979,7 @@ pub struct PermissionYamlConfig {
 
 /// YAML role definition.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoleYamlConfig {
     pub name: String,
     #[serde(default)]
@@ -1942,6 +1994,7 @@ pub struct RoleYamlConfig {
 
 /// YAML scope-bundle definition.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeBundleYamlConfig {
     pub name: String,
     pub display_name: String,
@@ -1953,6 +2006,7 @@ pub struct ScopeBundleYamlConfig {
 
 /// YAML protected-resource registration.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProtectedResourceYamlConfig {
     pub resource_uri: String,
     pub display_name: String,
@@ -1962,6 +2016,7 @@ pub struct ProtectedResourceYamlConfig {
 
 /// YAML claim-profile wrapper.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimsYamlConfig {
     #[serde(default)]
     pub mappings: Vec<ClaimMapping>,
@@ -1969,6 +2024,7 @@ pub struct ClaimsYamlConfig {
 
 /// Per-realm email branding overrides in YAML.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmEmailYaml {
     /// Email branding overrides.
     #[serde(default)]
@@ -1977,6 +2033,7 @@ pub struct RealmEmailYaml {
 
 /// YAML group declaration in a realm config block.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroupYamlConfig {
     pub name: String,
     #[serde(default)]
@@ -2005,6 +2062,7 @@ pub enum MigrateConflictPolicy {
 /// Controls which data categories are included in the migration and how
 /// conflicts are handled. All fields have production-safe defaults.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmMigrateYaml {
     /// Whether to migrate user records and credentials. Default: `true`.
     #[serde(default = "default_true")]
@@ -2042,6 +2100,7 @@ fn default_true() -> bool {
 /// Reconciliation is additive-only — existing accounts are never deleted or
 /// modified by the reconciler.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeedUserYamlConfig {
     /// Email address for the user (unique within the realm).
     pub email: String,
@@ -2073,6 +2132,7 @@ impl SeedUserYamlConfig {
 /// invoked. A production config simply omits this block, so the mass seeder
 /// physically cannot run against real data.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DemoConfig {
     /// Master switch. Must be `true` for any per-realm `seeding:` block to run.
     #[serde(default)]
@@ -2106,6 +2166,7 @@ impl DemoConfig {
 /// modifies or deletes existing accounts. Cross-realm distribution is simply
 /// whichever `users` counts the operator sets per realm.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SeedingYamlConfig {
     /// Target number of synthetic users for this realm.
     pub users: u64,
@@ -2127,6 +2188,7 @@ pub struct SeedingYamlConfig {
 ///
 /// Fields are optional — `None` inherits from global `auth:` defaults.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmYamlConfig {
     /// Session TTL override (e.g. "12h").
     #[serde(default)]
@@ -2259,6 +2321,7 @@ pub struct RealmYamlConfig {
 
 /// YAML for `realms.{name}.tool_registry.*`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolRegistryYamlConfig {
     /// Maps group name → list of tool names.
     ///
@@ -2271,6 +2334,7 @@ pub struct ToolRegistryYamlConfig {
 
 /// YAML for `realms.{name}.scim.*`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RealmScimYaml {
     /// Static bearer token accepted by `/scim/v2/*` for this realm.
     ///
@@ -2282,6 +2346,7 @@ pub struct RealmScimYaml {
 
 /// YAML for a single SAML SP registration (Hearth as IdP issues to this SP).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SamlServiceProviderYaml {
     pub entity_id: String,
     pub acs_url: String,
@@ -2304,6 +2369,7 @@ pub struct SamlServiceProviderYaml {
 
 /// YAML for `realms.{name}.federation.*`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FederationYamlConfig {
     /// How to link external identities that match existing local users
     /// by email: `disabled` / `confirm` / `auto`. Defaults to `confirm`
@@ -2349,6 +2415,7 @@ impl LinkModeYaml {
 ///   issuer/endpoints/scopes prefilled.
 /// - `github` — OAuth2 (no OIDC).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FederationProviderYaml {
     /// Preset or protocol selector (`"oidc"`, `"google"`, `"microsoft"`,
     /// `"apple"`, `"github"`).
@@ -2456,6 +2523,7 @@ impl FederationProviderYaml {
 ///
 /// See `docs/specs/AGENT_AUTH.md` for phase definitions.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentAuthCapabilities {
     /// Phase A — Agent identity: CRUD, API-key credentials, Agent Card,
     /// and REST endpoints (`/v1/agents`).
@@ -2491,6 +2559,7 @@ pub struct AgentAuthCapabilities {
 ///
 /// See `docs/specs/AGENT_AUTH.md` for the normative specification.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentAuthConfig {
     /// Staged capability flags. All default to `false`.
     #[serde(default)]
@@ -3110,6 +3179,7 @@ fn make_group_slug(name: &str) -> String {
 
 /// Address and ID for a single cluster peer.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeerConfig {
     /// Unique node ID within the cluster.
     pub id: u64,
@@ -3126,6 +3196,7 @@ pub struct PeerConfig {
 /// All three TLS fields are required — plaintext peer connections are
 /// unconditionally rejected.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     /// This node's numeric ID — must be unique across the cluster.
     pub node_id: u64,
@@ -3410,6 +3481,7 @@ pub struct ValidationIssue {
 /// All sections use `#[serde(default)]` so a partial or empty YAML file
 /// produces valid configuration with production-safe defaults.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(dead_code, clippy::struct_field_names)]
 pub struct Config {
     /// Server network settings.
@@ -3477,8 +3549,13 @@ pub struct Config {
     /// [`DemoConfig`].
     #[serde(default)]
     pub demo: DemoConfig,
-    /// Whether development mode is active. Not serialized — set by [`Config::dev`].
-    #[serde(skip)]
+    /// Whether development mode is active.
+    ///
+    /// Set to `true` in YAML only for local development or integration tests.
+    /// Setting `dev_mode: true` on a non-loopback bind is a hard startup error.
+    /// The CLI flag `--dev` is the canonical way to enable dev mode; YAML is
+    /// supported for test harnesses that embed inline config strings.
+    #[serde(default)]
     pub dev_mode: bool,
     /// Env-var substitution warnings from config loading (missing/empty variables).
     /// Skipped during serde deserialization — populated by [`Config::from_file`]

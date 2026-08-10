@@ -1016,7 +1016,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Decodes a lowercase/uppercase hex string, returning `None` on any invalid
 /// input (odd length or non-hex digit).
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let bytes = s.as_bytes();

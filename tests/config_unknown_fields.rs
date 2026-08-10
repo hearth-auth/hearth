@@ -1,27 +1,22 @@
-//! Characterization tests for config drift — unknown / no-op YAML keys
-//! (HEA-1836, Phase 2 gap #7).
+//! Unknown config-key rejection tests (HEA-2113, decision D5).
 //!
-//! The top-level [`Config`] struct and its sections do **not** carry
-//! `#[serde(deny_unknown_fields)]`, so any key an operator misspells, or any
-//! documented-but-unimplemented key (`security.bearer_token`,
-//! `security.password.pepper.*`, `auth.audit_log_retention`), is **silently
-//! discarded** during deserialization. An operator who sets such a key
-//! believes they have protected pepper material / the metrics scrape endpoint /
-//! audit retention, when in fact the value is a no-op.
+//! Every struct in `src/config/types.rs` carries `#[serde(deny_unknown_fields)]`.
+//! Unknown or misspelled keys produce a hard parse error at startup rather than
+//! being silently discarded. Operators get a clear message instead of believing
+//! a mistyped or removed key did something.
 //!
-//! These tests PIN the current (silent-ignore) behavior so the gap is explicit
-//! and greppable. Whether these keys should instead be *rejected* (add
-//! `deny_unknown_fields`) or *implemented* is a CTO / SecurityAuditor decision
-//! (HEA-1766 report §Escalations). When that decision lands, whoever implements
-//! it MUST update these assertions to match the chosen behavior — the test
-//! failing is the signal that config-drift protection changed.
+//! Phantom keys fixed in this PR:
+//! - `auth.audit_log_retention` (documented in old guides, no backing field)
+//! - `security.bearer_token` (wrong path; real gate is `metrics.bearer_token`)
+//! - `security.password.pepper.active_version` (real field: `version`)
+//! - `security.password.pepper.active_hex` (real field: `key_hex`)
 
 use hearth::config::Config;
 
-/// A syntactically valid config with a completely bogus top-level key still
-/// parses successfully; the unknown key is dropped rather than rejected.
+/// A completely bogus top-level key must be rejected with a parse error that
+/// names the unknown field.
 #[test]
-fn unknown_top_level_key_is_silently_ignored() {
+fn unknown_top_level_key_is_rejected() {
     let yaml = r#"
 dev_mode: true
 server:
@@ -29,62 +24,124 @@ server:
   port: 8420
 this_key_does_not_exist: "operator typo"
 "#;
-    let cfg = Config::from_yaml_str(yaml)
-        .expect("CHARACTERIZATION: unknown top-level keys are currently accepted, not rejected");
-    // The real key next to the bogus one still applied.
-    assert_eq!(cfg.server.port, 8420);
+    let err = Config::from_yaml_str(yaml).expect_err("unknown top-level key must be rejected");
+    let display = format!("{err}");
+    assert!(
+        display.contains("this_key_does_not_exist"),
+        "error must name the unknown field; got: {display}"
+    );
 }
 
-/// A misspelled key *inside* a real section is likewise dropped: the section
-/// deserializes from its known fields and ignores the rest.
+/// A misspelled key inside a section must be rejected, not silently discarded.
 #[test]
-fn unknown_nested_key_is_silently_ignored() {
+fn unknown_nested_key_is_rejected() {
     let yaml = r#"
 dev_mode: true
 server:
   bind_address: "127.0.0.1"
   port: 8420
-  porrt: 9999          # typo for `port` — silently ignored
-metrics:
-  enabled: true
-  bearer_tokn: "secret"  # typo for `bearer_token` — silently ignored
+  porrt: 9999
 "#;
-    let cfg = Config::from_yaml_str(yaml).expect(
-        "CHARACTERIZATION: unknown nested keys are currently accepted; the typo'd `porrt` \
-         and `bearer_tokn` are dropped, so `port` keeps its explicit value and \
-         `metrics.bearer_token` stays unset",
-    );
-    assert_eq!(
-        cfg.server.port, 8420,
-        "the typo did not override the real port"
-    );
+    let err =
+        Config::from_yaml_str(yaml).expect_err("typo'd nested key must produce a parse error");
+    let display = format!("{err}");
     assert!(
-        cfg.metrics.bearer_token.is_none(),
-        "the typo'd bearer_tokn was dropped — metrics scrape endpoint is UNPROTECTED despite \
-         the operator believing they set a token",
+        display.contains("porrt"),
+        "error must name the typo'd field; got: {display}"
     );
 }
 
-/// Documented-but-unimplemented keys called out in the audit are accepted with
-/// no effect. This is the operator-dangerous case: the config *looks* like it
-/// protects something but does nothing.
+/// `auth.audit_log_retention` appears in older runbooks but has no backing
+/// field in `AuthConfig`. It must be rejected on upgrade, not silently ignored.
 #[test]
-fn documented_but_unimplemented_keys_are_no_ops() {
+fn auth_audit_log_retention_is_rejected() {
+    let yaml = r#"
+dev_mode: true
+auth:
+  audit_log_retention: "90d"
+"#;
+    let err = Config::from_yaml_str(yaml)
+        .expect_err("auth.audit_log_retention must be rejected — it is not implemented");
+    let display = format!("{err}");
+    assert!(
+        display.contains("audit_log_retention"),
+        "error must name the phantom field; got: {display}"
+    );
+}
+
+/// `security.bearer_token` was documented as the metrics scrape token but is
+/// NOT a field of `SecurityYaml`. The real path is `metrics.bearer_token`.
+/// An operator following the old docs left `/metrics` unauthenticated while
+/// believing it was protected.
+#[test]
+fn security_bearer_token_is_rejected() {
     let yaml = r#"
 dev_mode: true
 security:
   bearer_token: "believed-to-protect-metrics"
-auth:
-  audit_log_retention: "90d"
 "#;
-    // Currently accepted — no validation error, no observable effect.
-    let cfg = Config::from_yaml_str(yaml).expect(
-        "CHARACTERIZATION: documented-but-unimplemented keys are silently accepted as no-ops",
+    let err = Config::from_yaml_str(yaml).expect_err(
+        "security.bearer_token must be rejected — the real path is metrics.bearer_token",
     );
-    // `metrics.bearer_token` (the key that actually gates /metrics) remains
-    // unset — proving `security.bearer_token` did NOT wire anything up.
+    let display = format!("{err}");
     assert!(
-        cfg.metrics.bearer_token.is_none(),
-        "security.bearer_token is a no-op: the real metrics gate (metrics.bearer_token) is unset",
+        display.contains("bearer_token"),
+        "error must name the phantom field; got: {display}"
     );
+}
+
+/// `security.password.pepper.active_version` appears in old example YAML but
+/// does NOT match any field of `PepperYaml`. The real field is `version`.
+#[test]
+fn pepper_active_version_is_rejected() {
+    let yaml = r#"
+dev_mode: true
+security:
+  password:
+    pepper:
+      active_version: 1
+      key_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+    let err = Config::from_yaml_str(yaml)
+        .expect_err("pepper.active_version must be rejected — the real field is `version`");
+    let display = format!("{err}");
+    assert!(
+        display.contains("active_version"),
+        "error must name the phantom field; got: {display}"
+    );
+}
+
+/// `security.password.pepper.active_hex` appears in old example YAML but
+/// does NOT match any field of `PepperYaml`. The real field is `key_hex`.
+#[test]
+fn pepper_active_hex_is_rejected() {
+    let yaml = r#"
+dev_mode: true
+security:
+  password:
+    pepper:
+      version: 1
+      active_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+    let err = Config::from_yaml_str(yaml)
+        .expect_err("pepper.active_hex must be rejected — the real field is `key_hex`");
+    let display = format!("{err}");
+    assert!(
+        display.contains("active_hex"),
+        "error must name the phantom field; got: {display}"
+    );
+}
+
+/// Verify that the correct pepper key names still parse cleanly (regression guard).
+#[test]
+fn correct_pepper_keys_are_accepted() {
+    let yaml = r#"
+dev_mode: true
+security:
+  password:
+    pepper:
+      version: 1
+      key_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+    Config::from_yaml_str(yaml).expect("correct pepper key names must parse successfully");
 }

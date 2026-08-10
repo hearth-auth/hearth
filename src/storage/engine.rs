@@ -391,7 +391,7 @@ impl EmbeddedStorageEngine {
             }
         }
         // Inserted into OPEN_DIRS above; guard removes it on drop (including early returns below).
-        let _process_lock = DirLockGuard(canonical_dir);
+        let dir_lock_guard = DirLockGuard(canonical_dir);
 
         let lock_path = config.data_dir.join("LOCK");
         let lock_file = std::fs::OpenOptions::new()
@@ -640,7 +640,7 @@ impl EmbeddedStorageEngine {
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_cache,
-            _process_lock,
+            _process_lock: dir_lock_guard,
             _dir_lock: lock_file,
         })
     }
