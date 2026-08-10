@@ -520,6 +520,12 @@ pub struct EmbeddedIdentityEngine {
     /// credential, we verify against this dummy hash so the response time
     /// is indistinguishable from a real failed verification.
     dummy_hash: String,
+    /// Number of dummy-hash verifications burned by client-authentication
+    /// failure paths (see `burn_dummy_client_verify`). Lets tests assert
+    /// the timing-defense code path executed instead of making flaky
+    /// wall-clock timing assertions (HEA-2112).
+    #[cfg(any(test, feature = "test-hooks"))]
+    dummy_client_verify_count: std::sync::atomic::AtomicU64,
     /// Default Ed25519 signing key for JWT token issuance (Phase 0 compat).
     signing_key: Arc<SigningKey>,
     /// Per-realm Ed25519 signing keys, lazily loaded from storage.
@@ -1125,6 +1131,8 @@ impl EmbeddedIdentityEngine {
             rbac,
             audit,
             dummy_hash,
+            #[cfg(any(test, feature = "test-hooks"))]
+            dummy_client_verify_count: std::sync::atomic::AtomicU64::new(0),
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
@@ -1681,6 +1689,8 @@ impl EmbeddedIdentityEngine {
             rbac,
             audit,
             dummy_hash,
+            #[cfg(any(test, feature = "test-hooks"))]
+            dummy_client_verify_count: std::sync::atomic::AtomicU64::new(0),
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
@@ -3994,6 +4004,7 @@ impl EmbeddedIdentityEngine {
             ],
             token_endpoint_auth_methods_supported: vec![
                 "none".to_string(),
+                "client_secret_basic".to_string(),
                 "client_secret_post".to_string(),
                 "private_key_jwt".to_string(),
             ],
@@ -17438,6 +17449,136 @@ mod tests {
             .expect("create realm");
 
         assert_eq!(realm.config(), &config);
+    }
+
+    // ===== HEA-2112: client-authentication timing-oracle defense =====
+    //
+    // A wall-clock timing assertion would be flaky, so these tests assert
+    // the code path instead: every failure arm that has no real Argon2 hash
+    // to verify must burn one verification against the dummy hash. The
+    // counter only exists under cfg(test)/test-hooks.
+
+    fn hea2112_realm(engine: &EmbeddedIdentityEngine, name: &str) -> Realm {
+        engine
+            .create_realm(&CreateRealmRequest {
+                name: name.to_string(),
+                config: None,
+            })
+            .expect("create realm")
+    }
+
+    fn hea2112_client(
+        engine: &EmbeddedIdentityEngine,
+        realm: &Realm,
+        secret: Option<&str>,
+    ) -> OAuthClient {
+        engine
+            .register_client(
+                realm.id(),
+                &crate::identity::RegisterClientRequest {
+                    client_name: "hea2112-client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                    client_secret: secret.map(str::to_string),
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    ..Default::default()
+                },
+            )
+            .expect("register client")
+    }
+
+    #[test]
+    fn unknown_client_auth_burns_dummy_verify() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = hea2112_realm(&engine, "hea2112-unknown");
+        let unknown = crate::core::ClientId::new(uuid::Uuid::new_v4());
+
+        let before = engine.dummy_client_verify_count();
+        let err = engine
+            .authenticate_client_inner(realm.id(), &unknown, Some("any-secret"))
+            .expect_err("unknown client must fail");
+        assert!(
+            matches!(err, IdentityError::InvalidClientSecret),
+            "unknown client must map to InvalidClientSecret (anti-enumeration), got {err:?}"
+        );
+        assert_eq!(
+            engine.dummy_client_verify_count(),
+            before + 1,
+            "unknown-client failure must burn exactly one dummy verification"
+        );
+    }
+
+    #[test]
+    fn known_client_wrong_secret_verifies_real_hash_not_dummy() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = hea2112_realm(&engine, "hea2112-wrong");
+        let client = hea2112_client(&engine, &realm, Some("correct-secret-123"));
+
+        let before = engine.dummy_client_verify_count();
+        let err = engine
+            .authenticate_client_inner(realm.id(), client.client_id(), Some("wrong-secret"))
+            .expect_err("wrong secret must fail");
+        assert!(
+            matches!(err, IdentityError::InvalidClientSecret),
+            "got {err:?}"
+        );
+        assert_eq!(
+            engine.dummy_client_verify_count(),
+            before,
+            "a wrong secret is verified against the real hash — no dummy burn"
+        );
+    }
+
+    #[test]
+    fn known_confidential_client_missing_secret_burns_dummy_verify() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = hea2112_realm(&engine, "hea2112-missing");
+        let client = hea2112_client(&engine, &realm, Some("correct-secret-123"));
+
+        let before = engine.dummy_client_verify_count();
+        let err = engine
+            .authenticate_client_inner(realm.id(), client.client_id(), None)
+            .expect_err("missing secret must fail");
+        assert!(
+            matches!(err, IdentityError::InvalidClientSecret),
+            "got {err:?}"
+        );
+        assert_eq!(
+            engine.dummy_client_verify_count(),
+            before + 1,
+            "missing-secret failure must burn exactly one dummy verification"
+        );
+    }
+
+    #[test]
+    fn public_client_auth_succeeds_without_dummy_verify() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = hea2112_realm(&engine, "hea2112-public");
+        let client = hea2112_client(&engine, &realm, None);
+
+        let before = engine.dummy_client_verify_count();
+        engine
+            .authenticate_client_inner(realm.id(), client.client_id(), None)
+            .expect("public client authenticates by id alone");
+        assert_eq!(engine.dummy_client_verify_count(), before);
+    }
+
+    #[test]
+    fn oauth_client_auth_unknown_client_burns_dummy_verify() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = hea2112_realm(&engine, "hea2112-oauth-unknown");
+        let unknown = crate::core::ClientId::new(uuid::Uuid::new_v4());
+
+        let before = engine.dummy_client_verify_count();
+        let err = engine
+            .authenticate_oauth_client_inner(realm.id(), &unknown, "any-secret")
+            .expect_err("unknown client must fail");
+        assert!(matches!(err, IdentityError::InvalidClient), "got {err:?}");
+        assert_eq!(
+            engine.dummy_client_verify_count(),
+            before + 1,
+            "unknown-client failure must burn exactly one dummy verification"
+        );
     }
 
     #[test]
