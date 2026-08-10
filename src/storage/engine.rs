@@ -390,7 +390,7 @@ impl EmbeddedStorageEngine {
                 });
             }
         }
-        // SAFETY: inserted into OPEN_DIRS above; guard removes it on drop.
+        // Inserted into OPEN_DIRS above; guard removes it on drop (including early returns below).
         let _process_lock = DirLockGuard(canonical_dir);
 
         let lock_path = config.data_dir.join("LOCK");
