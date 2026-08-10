@@ -296,6 +296,11 @@ where
 /// the multi-grant-type dispatch (`authorization_code` vs `refresh_token`).
 #[derive(Debug, Deserialize)]
 struct HttpTokenRequest {
+    /// RFC 6749 §3.2.1: REQUIRED only "if the client is not authenticating
+    /// with the authorization server" — a strict `client_secret_basic` client
+    /// omits it, so the handlers backfill it from the Basic username via
+    /// [`backfill_client_id_from_basic`] before any dispatch (HEA-2112).
+    #[serde(default)]
     client_id: String,
     #[serde(default)]
     grant_type: Option<String>,
@@ -383,7 +388,9 @@ struct HttpIntrospectionBody {
 /// Parses HTTP Basic Auth credentials from the `Authorization` header.
 ///
 /// Returns `Some((client_id, client_secret))` on success, `None` if the header
-/// is absent or not Basic Auth.
+/// is absent or not Basic Auth. Both values are form-urldecoded per RFC 6749
+/// §2.3.1, which requires clients to apply the `application/x-www-form-urlencoded`
+/// encoding to the userid and password before base64 (HEA-2112).
 fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     let value = headers
         .get(axum::http::header::AUTHORIZATION)?
@@ -396,7 +403,68 @@ fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
         .ok()?;
     let decoded_str = String::from_utf8(decoded).ok()?;
     let (id, secret) = decoded_str.split_once(':')?;
-    Some((id.to_string(), secret.to_string()))
+    Some((form_urldecode_lenient(id), form_urldecode_lenient(secret)))
+}
+
+/// Returns the numeric value of an ASCII hex digit, or `None`.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decodes an `application/x-www-form-urlencoded` value per RFC 6749
+/// Appendix B: `+` becomes a space and `%XX` a percent-encoded octet.
+///
+/// Lenient on malformed input so legacy clients that never encoded keep
+/// authenticating: a `%` not followed by two hex digits passes through
+/// unchanged, and invalid UTF-8 after decoding falls back to the raw input.
+fn form_urldecode_lenient(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => match (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                (Some(hi), Some(lo)) => {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                }
+                _ => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+/// Builds the RFC 6749 §5.2 `invalid_request` rejection for a request that
+/// supplies both Basic and body client credentials that disagree — using
+/// more than one client authentication mechanism per request is forbidden
+/// by RFC 6749 §2.3.1 (HEA-2112).
+fn basic_body_mismatch_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid_request",
+            "error_description":
+                "client credentials in Authorization header and request body disagree"
+        })),
+    )
+        .into_response()
 }
 
 /// Extracts client credentials from HTTP Basic Auth or body parameters and
@@ -413,8 +481,21 @@ fn verify_endpoint_client(
     body_client_id: Option<&str>,
     body_client_secret: Option<&str>,
 ) -> Result<ClientId, Response> {
+    // Normalize at the helper boundary so every endpoint that authenticates
+    // through here gets the empty-field-is-absent rule by construction —
+    // applying it callsite-by-callsite is how /introspect and /revoke were
+    // missed (HEA-2112).
+    let body_client_id = body_client_id.and_then(non_empty_credential);
+    let body_client_secret = body_client_secret.and_then(non_empty_credential);
+
     // Prefer Basic Auth (RFC 6749 §2.3.1); fall back to body parameters.
+    // When both are present they must agree — §2.3.1 forbids using more
+    // than one client authentication mechanism per request, so a
+    // disagreement is rejected rather than silently resolved (HEA-2112).
     let (raw_id, secret) = if let Some((id, sec)) = parse_basic_auth(headers) {
+        if body_client_id.is_some_and(|b| b != id) || body_client_secret.is_some_and(|b| b != sec) {
+            return Err(basic_body_mismatch_response());
+        }
         (id, Some(sec))
     } else if let Some(id) = body_client_id {
         (id.to_string(), body_client_secret.map(str::to_string))
@@ -455,6 +536,34 @@ fn verify_endpoint_client(
         })
 }
 
+/// Backfills an absent or empty body `client_id` from the Basic Auth username.
+///
+/// RFC 6749 §3.2.1 requires body `client_id` only when the client is not
+/// authenticating with the authorization server; a strictly compliant
+/// `client_secret_basic` client carries its identity solely in the
+/// Authorization header. Running this before dispatch gives per-client rate
+/// limiting, CORS, client-auth enforcement, and every grant arm one effective
+/// client identity. The §2.3.1 disagreement checks downstream are unaffected:
+/// a backfilled id always equals the Basic username.
+fn backfill_client_id_from_basic(headers: &HeaderMap, body: &mut HttpTokenRequest) {
+    if body.client_id.trim().is_empty() {
+        if let Some((basic_id, _)) = parse_basic_auth(headers) {
+            body.client_id = basic_id;
+        }
+    }
+}
+
+/// Treats an explicitly empty form credential (`client_id=` /
+/// `client_secret=`) as absent so it cannot read as a disagreeing credential
+/// next to Basic auth — RFC 6749 §2.3.1 rejects conflicting credentials, not
+/// empty fields. Applied inside `verify_endpoint_client` and
+/// `enforce_confidential_client_auth`, so every endpoint authenticating
+/// through them gets the rule without per-callsite plumbing (HEA-2112).
+fn non_empty_credential(field: &str) -> Option<&str> {
+    let trimmed = field.trim();
+    (!trimmed.is_empty()).then_some(field)
+}
+
 /// Enforces confidential-client authentication on the `authorization_code`
 /// exchange arm (O2, HEA-1755).
 ///
@@ -476,6 +585,24 @@ fn enforce_confidential_client_auth(
     body_client_id: &str,
     body_client_secret: Option<&str>,
 ) -> Result<(), Response> {
+    // Same boundary normalization as `verify_endpoint_client` (HEA-2112).
+    let body_client_secret = body_client_secret.and_then(non_empty_credential);
+
+    // RFC 6749 §2.3.1: a request must not use more than one client
+    // authentication mechanism. If a Basic header is present, its username
+    // must name the same client as the body `client_id` (previously the
+    // Basic secret was verified against the *body's* client id) and any
+    // body `client_secret` must match the Basic one (HEA-2112).
+    let basic = parse_basic_auth(headers);
+    if let Some((basic_id, basic_secret)) = &basic {
+        // An absent/empty body client_id is fine — RFC 6749 §4.1.3 only
+        // requires it when the client is not otherwise authenticating.
+        if non_empty_credential(body_client_id).is_some_and(|b| basic_id != b)
+            || body_client_secret.is_some_and(|b| b != basic_secret)
+        {
+            return Err(basic_body_mismatch_response());
+        }
+    }
     let Ok(uuid) = body_client_id.parse::<uuid::Uuid>() else {
         return Ok(());
     };
@@ -490,7 +617,7 @@ fn enforce_confidential_client_auth(
     }
     // Confidential client: a valid secret is mandatory. Prefer HTTP Basic Auth
     // credentials (RFC 6749 §2.3.1), fall back to the body `client_secret`.
-    let secret = parse_basic_auth(headers)
+    let secret = basic
         .map(|(_, s)| s)
         .or_else(|| body_client_secret.map(str::to_string));
     state
@@ -680,6 +807,47 @@ mod tests {
                 .is_none(),
             "no-origin request must not get Access-Control-Allow-Origin"
         );
+    }
+
+    // ===== HEA-2112: RFC 6749 §2.3.1 form-urldecoding of Basic credentials =====
+
+    #[test]
+    fn form_urldecode_decodes_escapes_and_plus() {
+        assert_eq!(
+            form_urldecode_lenient("sec+ret%25%2B%3A%26%3D"),
+            "sec ret%+:&="
+        );
+        assert_eq!(form_urldecode_lenient("plain-secret"), "plain-secret");
+        assert_eq!(form_urldecode_lenient(""), "");
+    }
+
+    #[test]
+    fn form_urldecode_passes_invalid_escapes_through() {
+        // `%` not followed by two hex digits is not an escape.
+        assert_eq!(form_urldecode_lenient("100%legit"), "100%legit");
+        assert_eq!(form_urldecode_lenient("trailing%"), "trailing%");
+        assert_eq!(form_urldecode_lenient("short%2"), "short%2");
+    }
+
+    #[test]
+    fn form_urldecode_falls_back_to_raw_on_invalid_utf8() {
+        // %FF decodes to a lone 0xFF byte — invalid UTF-8, so the raw
+        // input is returned unchanged.
+        assert_eq!(form_urldecode_lenient("bad%FFseq"), "bad%FFseq");
+    }
+
+    #[test]
+    fn parse_basic_auth_form_urldecodes_both_credentials() {
+        use base64::Engine as _;
+        let mut headers = HeaderMap::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode("client%2Did:sec+ret%25end");
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Basic {encoded}")).expect("valid header"),
+        );
+        let (id, secret) = parse_basic_auth(&headers).expect("must parse");
+        assert_eq!(id, "client-id");
+        assert_eq!(secret, "sec ret%end");
     }
 }
 
@@ -1179,8 +1347,14 @@ async fn token_exchange(
     State(state): State<Arc<AppState>>,
     PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
-    JsonOrForm(body): JsonOrForm<HttpTokenRequest>,
+    JsonOrForm(mut body): JsonOrForm<HttpTokenRequest>,
 ) -> Response {
+    // A strict `client_secret_basic` client omits body `client_id`
+    // (RFC 6749 §3.2.1) — adopt the Basic username before anything keys off
+    // the client identity, including the CORS lookup and, inside the impl,
+    // the per-client token rate limit.
+    backfill_client_id_from_basic(&headers, &mut body);
+
     // Parse client_id and realm_id before dispatch so CORS can be applied to
     // every response path, including grant-type-specific error branches.
     let maybe_client_id = body.client_id.parse::<uuid::Uuid>().ok().map(ClientId::new);
@@ -1648,7 +1822,7 @@ async fn token_exchange_impl(
                 &state,
                 &realm_id,
                 &headers,
-                Some(&body.client_id),
+                Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
             ) {
                 Ok(id) => id,
@@ -2267,12 +2441,16 @@ async fn realm_token_exchange(
     PeerAddr(peer_addr): PeerAddr,
     Path(realm_name): Path<String>,
     headers: HeaderMap,
-    JsonOrForm(body): JsonOrForm<HttpTokenRequest>,
+    JsonOrForm(mut body): JsonOrForm<HttpTokenRequest>,
 ) -> Response {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
+    // A strict `client_secret_basic` client omits body `client_id`
+    // (RFC 6749 §3.2.1) — adopt the Basic username before the rate limiter
+    // and grant dispatch key off the client identity.
+    backfill_client_id_from_basic(&headers, &mut body);
     // Rate limit per client_id before any grant-type dispatch.
     if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
         let client_id = ClientId::new(client_uuid);
@@ -2653,7 +2831,7 @@ async fn realm_token_exchange(
                 &state,
                 &realm_id,
                 &headers,
-                Some(&body.client_id),
+                Some(body.client_id.as_str()),
                 body.client_secret.as_deref(),
             ) {
                 Ok(id) => id,

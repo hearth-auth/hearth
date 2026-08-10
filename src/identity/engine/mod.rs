@@ -3994,6 +3994,7 @@ impl EmbeddedIdentityEngine {
             ],
             token_endpoint_auth_methods_supported: vec![
                 "none".to_string(),
+                "client_secret_basic".to_string(),
                 "client_secret_post".to_string(),
                 "private_key_jwt".to_string(),
             ],
