@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`POST /authorize` no longer rejects requests that omit `user_id` from the body (HEA-2117)** —
+  the conversion layer required `user_id` to be a valid UUID string even though the handler
+  always overrides it with the authenticated principal's ID from the Bearer token (HEA-1721).
+  Callers may now omit `user_id` (or pass an empty string) and the server accepts the request;
+  a well-formed UUID is still validated when supplied. (HEA-2117)
+- **Cluster init failure is now fatal (HEA-2108)** — when `cluster:` is present in the
+  configuration and Raft initialisation fails (bad TLS paths, unreachable peers, log-store
+  error), `hearth serve` now exits non-zero with a clear error message instead of silently
+  degrading to an independent single-node writer. Single-node mode must be an explicit
+  configuration choice (omit the `cluster:` section), never a fallback. (HEA-2105)
 - **Storage engine now holds an exclusive lock on `{data_dir}/LOCK` (HEA-2107)** — starting a
   second `hearth serve` process against the same `storage.data_dir` previously caused silent
   WAL corruption. The engine now acquires an OS-level advisory `flock` on startup and fails

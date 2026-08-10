@@ -203,6 +203,60 @@ fn cli_serve_missing_config_file_exits_with_error() {
     );
 }
 
+// === TEST_SCENARIOS: cluster init failure is fatal ===
+
+/// A config with a `cluster:` section pointing at unreachable peers must cause
+/// `hearth serve` to exit non-zero rather than silently degrading to single-node
+/// mode (HEA-2108).
+#[test]
+fn serve_cluster_init_failure_is_fatal() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg_path = dir.path().join("hearth.yaml");
+
+    // Minimal cluster config: node_id + peer_address + unreachable peer + dummy
+    // TLS paths (files do not exist — ClusterEngine::init will fail reading them).
+    let cfg_yaml = r#"
+cluster:
+  node_id: 1
+  peer_address: "127.0.0.1:19001"
+  peers:
+    - node_id: 2
+      address: "127.0.0.1:19002"
+  tls_cert_path: "/nonexistent/cert.pem"
+  tls_key_path: "/nonexistent/key.pem"
+  tls_ca_cert_path: "/nonexistent/ca.pem"
+"#;
+    std::fs::File::create(&cfg_path)
+        .expect("create config")
+        .write_all(cfg_yaml.as_bytes())
+        .expect("write config");
+
+    // Use --dev so no real storage/email/key setup is needed.
+    let output = Command::new(hearth_bin())
+        .args([
+            "serve",
+            "--dev",
+            "--config",
+            cfg_path.to_str().expect("path"),
+        ])
+        .output()
+        .expect("spawn hearth serve");
+
+    assert!(
+        !output.status.success(),
+        "hearth serve with failing cluster config must exit non-zero (got 0); \
+         stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cluster") || stderr.contains("Raft") || stderr.contains("fatal"),
+        "stderr should mention cluster failure; got: {stderr}"
+    );
+}
+
 // === TEST_SCENARIOS: CLI management commands ===
 
 #[test]
