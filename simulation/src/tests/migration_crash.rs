@@ -194,8 +194,12 @@ fn simulation_crash_mid_migration_resumes_correctly() {
         .expect("check completed")
         .is_none());
 
-    // Drop engines → simulate crash and WAL flush.
+    // Drop engines → simulate crash and WAL flush. Every handle that holds an
+    // `Arc` to the storage engine must go, including the RBAC engine — the last
+    // `Arc` drop is what releases the exclusive `data_dir` lock and lets
+    // `open_engines` reopen the same directory below.
     drop(identity);
+    drop(_rbac);
     drop(storage);
 
     // --- Phase 2: Restart and resume migration ---
@@ -419,8 +423,10 @@ fn simulation_crash_mid_migration_record_intact() {
     .expect("first migration");
     assert_eq!(r1.migrated, 10);
 
-    // Simulate restart.
+    // Simulate restart. All storage-engine handles must drop (including `rbac`)
+    // so the exclusive `data_dir` lock is released before reopening.
     drop(identity);
+    drop(rbac);
     drop(storage);
     let (storage, identity, rbac) = open_engines(dir.path());
 

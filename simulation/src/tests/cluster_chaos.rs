@@ -180,11 +180,31 @@ impl RaftNetwork<HearthRaftConfig> for InMemoryPeer {
 
 struct NodeHandle {
     id: u64,
-    raft: openraft::Raft<HearthRaftConfig>,
-    storage: Arc<EmbeddedStorageEngine>,
+    /// `None` once [`ChaosCluster::crash_node`] has released it to simulate process death.
+    raft: Option<openraft::Raft<HearthRaftConfig>>,
+    /// `None` once [`ChaosCluster::crash_node`] has released it. Dropping the last `Arc`
+    /// releases the engine's exclusive `data_dir` lock, which is what lets the same
+    /// directory be reopened afterwards.
+    storage: Option<Arc<EmbeddedStorageEngine>>,
     data_dir: std::path::PathBuf,
     log_db_path: std::path::PathBuf,
     _dir: tempfile::TempDir,
+}
+
+impl NodeHandle {
+    /// The node's Raft handle. Panics if the node has been crashed.
+    fn raft(&self) -> &openraft::Raft<HearthRaftConfig> {
+        self.raft
+            .as_ref()
+            .expect("node has been crashed; its Raft handle was released")
+    }
+
+    /// The node's storage engine. Panics if the node has been crashed.
+    fn storage(&self) -> &Arc<EmbeddedStorageEngine> {
+        self.storage
+            .as_ref()
+            .expect("node has been crashed; its storage engine was released")
+    }
 }
 
 struct ChaosCluster {
@@ -258,22 +278,26 @@ impl ChaosCluster {
             registry.lock().unwrap().insert(id, raft.clone());
             nodes.push(NodeHandle {
                 id,
-                raft,
-                storage,
+                raft: Some(raft),
+                storage: Some(storage),
                 data_dir,
                 log_db_path,
                 _dir: dir,
             });
         }
 
-        nodes[0].raft.initialize(members).await.expect("initialize");
+        nodes[0]
+            .raft()
+            .initialize(members)
+            .await
+            .expect("initialize");
 
         // Wait up to 5 s for a leader to emerge.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if nodes
                 .iter()
-                .any(|n| n.raft.metrics().borrow().current_leader.is_some())
+                .any(|n| n.raft().metrics().borrow().current_leader.is_some())
             {
                 break;
             }
@@ -296,7 +320,7 @@ impl ChaosCluster {
 
     fn leader_idx(&self) -> Option<usize> {
         self.nodes.iter().position(|n| {
-            let m = n.raft.metrics().borrow().clone();
+            let m = n.raft().metrics().borrow().clone();
             m.current_leader == Some(n.id)
         })
     }
@@ -306,7 +330,7 @@ impl ChaosCluster {
             if exclude.contains(&n.id) {
                 return false;
             }
-            let m = n.raft.metrics().borrow().clone();
+            let m = n.raft().metrics().borrow().clone();
             m.current_leader == Some(n.id)
         })
     }
@@ -322,7 +346,7 @@ impl ChaosCluster {
         };
         let idx = self.leader_idx_excluding(exclude)?;
         self.nodes[idx]
-            .raft
+            .raft()
             .client_write(cmd)
             .await
             .ok()
@@ -351,13 +375,36 @@ impl ChaosCluster {
 
     fn read_from(&self, node_idx: usize, key: &[u8]) -> Option<Vec<u8>> {
         self.nodes[node_idx]
-            .storage
+            .storage()
             .get(&self.realm, key)
             .expect("storage read")
     }
 
     fn unregister(&self, id: u64) {
         self.registry.lock().unwrap().remove(&id);
+    }
+
+    /// Simulates process death for node `pos`: shuts the Raft node down, removes it from
+    /// the in-memory network registry, and drops every handle to its storage engine.
+    ///
+    /// Dropping the engine is what releases the exclusive `data_dir` advisory lock — the
+    /// same thing the kernel does when a real process exits. Without it, reopening the
+    /// node's `data_dir` fails with `StorageError::AlreadyLocked`, because a crashed
+    /// process cannot still be holding its own database open.
+    ///
+    /// The node's `TempDir` is deliberately kept alive so the on-disk state survives for
+    /// the reopen/replay path.
+    async fn crash_node(&mut self, pos: usize) -> u64 {
+        let id = self.nodes[pos].id;
+        let raft = self.nodes[pos]
+            .raft
+            .take()
+            .expect("node has already been crashed");
+        raft.shutdown().await.expect("shutdown (crash)");
+        self.unregister(id);
+        drop(raft);
+        drop(self.nodes[pos].storage.take());
+        id
     }
 
     fn register(&self, id: u64, raft: openraft::Raft<HearthRaftConfig>) {
@@ -368,7 +415,7 @@ impl ChaosCluster {
         let deadline = Instant::now() + timeout;
         loop {
             let all_ok = indices.iter().all(|&i| {
-                let m = self.nodes[i].raft.metrics().borrow().clone();
+                let m = self.nodes[i].raft().metrics().borrow().clone();
                 m.last_applied.as_ref().map(|id| id.index).unwrap_or(0) >= min_index
             });
             if all_ok {
@@ -431,7 +478,7 @@ async fn simulation_leader_kill_mid_write_sequence() {
         .expect("leader must exist before kill");
 
     cluster.nodes[cluster.leader_idx().unwrap()]
-        .raft
+        .raft()
         .shutdown()
         .await
         .expect("shutdown killed leader");
@@ -519,7 +566,7 @@ async fn simulation_leader_kill_mid_write_sequence() {
 /// cluster within 15 s — confirming WAL integrity survives a crash.
 #[tokio::test]
 async fn simulation_wal_replay_after_crash() {
-    let cluster = ChaosCluster::new(3).await;
+    let mut cluster = ChaosCluster::new(3).await;
 
     // Write 30 tokens and wait for all nodes to apply them.
     let mut last_idx = 0u64;
@@ -542,14 +589,10 @@ async fn simulation_wal_replay_after_crash() {
         .iter()
         .position(|n| n.id != leader_id)
         .unwrap();
-    let crash_id = cluster.nodes[crash_pos].id;
 
-    cluster.nodes[crash_pos]
-        .raft
-        .shutdown()
-        .await
-        .expect("shutdown (crash)");
-    cluster.unregister(crash_id);
+    // Releases the node's Raft handle *and* its storage engine, so the exclusive
+    // `data_dir` lock is freed exactly as it would be if the process had been killed.
+    let crash_id = cluster.crash_node(crash_pos).await;
 
     // Simulate more writes while the node is down (log will need replay on rejoin).
     for i in 30u8..40 {
@@ -609,17 +652,13 @@ async fn simulation_wal_replay_after_crash() {
         tokio::time::sleep(Duration::from_millis(100)).await; // AUDIT: justified-sleep: polling Raft state convergence, no event-driven alternative
     }
 
-    // Re-open storage to get the post-replay state (state machine may have a stale Arc).
-    let replayed_storage = EmbeddedStorageEngine::open(StorageConfig::dev(
-        cluster.nodes[crash_pos].data_dir.clone(),
-    ))
-    .expect("reopen storage for read verification");
-
+    // Read back through the same engine the restarted state machine writes to — `sm` was
+    // constructed from `Arc::clone(&storage)`, so this *is* the post-replay state. (Opening
+    // a second engine on this `data_dir` would now fail with `AlreadyLocked`, and would be
+    // redundant regardless.)
     // Verify all 40 tokens are present on the replayed node.
     for i in 0u8..40 {
-        let got = replayed_storage
-            .get(&cluster.realm, &[i])
-            .expect("storage read");
+        let got = storage.get(&cluster.realm, &[i]).expect("storage read");
         assert_eq!(
             got,
             Some(vec![i.wrapping_mul(7)]),
@@ -672,7 +711,7 @@ async fn simulation_committed_writes_survive_sequential_leadership_changes() {
 
         // Kill the current leader, triggering re-election.
         cluster.nodes[leader_idx]
-            .raft
+            .raft()
             .shutdown()
             .await
             .expect("shutdown");
