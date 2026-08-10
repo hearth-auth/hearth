@@ -2091,6 +2091,9 @@ struct AdminUpdateClientBody {
     /// Replaces the CORS allowed origins list. `null`/omitted leaves unchanged;
     /// `[]` clears all CORS origins.
     cors_origins: Option<Vec<String>>,
+    /// Trust level for this client: `"first_party"` or `"third_party"`.
+    /// Omit to leave unchanged.
+    trust_level: Option<String>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -2133,11 +2136,15 @@ async fn admin_update_client(
         }
     };
 
-    use crate::identity::oidc::AccessTokenAuthorization;
+    use crate::identity::oidc::{AccessTokenAuthorization, ClientTrustLevel};
     let access_token_authorization = body.access_token_authorization.as_deref().map(|s| match s {
         "introspection" => AccessTokenAuthorization::Introspection,
         "decision" => AccessTokenAuthorization::Decision,
         _ => AccessTokenAuthorization::Embedded,
+    });
+    let trust_level = body.trust_level.as_deref().map(|s| match s {
+        "first_party" => ClientTrustLevel::FirstParty,
+        _ => ClientTrustLevel::ThirdParty,
     });
     let request = crate::identity::UpdateClientRequest {
         client_name: body.client_name,
@@ -2156,6 +2163,7 @@ async fn admin_update_client(
         post_logout_redirect_uris: body.post_logout_redirect_uris,
         require_consent: body.require_consent,
         access_token_authorization,
+        trust_level,
         mfa_required: body.mfa_required.map(Some),
         cors_origins: body.cors_origins,
         ..Default::default()

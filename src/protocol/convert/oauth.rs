@@ -73,11 +73,15 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             require_consent: true,
             client_logo_url: None,
             slug: None,
-            // HEA-1750 (A2): default proto-registered clients to ThirdParty so
-            // they present the consent screen. FirstParty (consent-skipping)
-            // trust is only granted via an explicit admin update, never inferred
-            // from an incoming proto request.
-            trust_level: domain::ClientTrustLevel::ThirdParty,
+            // HEA-2111: map the proto field to the domain type.  Unspecified
+            // (proto default 0) or ThirdParty both resolve to ThirdParty so
+            // the DCR path stays safe.  Callers that want FirstParty trust must
+            // pass CLIENT_TRUST_LEVEL_FIRST_PARTY explicitly; the DCR handler
+            // overrides this field to ThirdParty unconditionally.
+            trust_level: match pb::ClientTrustLevel::try_from(r.trust_level.unwrap_or(0)) {
+                Ok(pb::ClientTrustLevel::FirstParty) => domain::ClientTrustLevel::FirstParty,
+                _ => domain::ClientTrustLevel::ThirdParty,
+            },
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
             access_token_authorization,
@@ -109,7 +113,13 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             require_consent: None,
             client_logo_url: None,
             slug: None,
-            trust_level: None,
+            trust_level: r.trust_level.and_then(|v| {
+                match pb::ClientTrustLevel::try_from(v) {
+                    Ok(pb::ClientTrustLevel::FirstParty) => Some(domain::ClientTrustLevel::FirstParty),
+                    Ok(pb::ClientTrustLevel::ThirdParty) => Some(domain::ClientTrustLevel::ThirdParty),
+                    _ => None,
+                }
+            }),
             declared_scopes: None,
             cors_origins: None,
             consent_spans_orgs: None,
@@ -430,6 +440,7 @@ mod tests {
             client_secret: Some("secret123".to_string()),
             grant_types: vec![],
             access_token_authorization: 0, // Embedded
+            trust_level: None,
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(domain.client_name, "My App");
@@ -448,6 +459,7 @@ mod tests {
             client_secret: None,
             grant_types: vec![],
             access_token_authorization: 0,
+            trust_level: None,
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(

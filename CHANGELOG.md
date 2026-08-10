@@ -14,6 +14,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Deployments that do not send SMS start without it. (HEA-2105)
 
 ### Added
+- **`trust_level` field on `POST /admin/applications` and `PATCH /admin/applications/{id}` (HEA-2111)** —
+  clients created via the admin API can now be designated `first_party` at creation time or
+  promoted/demoted via PATCH.  First-party clients skip the consent screen and receive the
+  full `permissions`, `roles`, and `groups` claims in issued JWTs.  The anonymous RFC 7591
+  DCR endpoint (`POST /register`) continues to hard-code `third_party` trust regardless of
+  any field sent by the caller.  `hearth.example.yaml` now documents the `trust_level` key
+  under `applications:`. (HEA-2105)
 - **Environment-variable reference in the README (HEA-2114)** — the Configuration section now
   documents the `HEARTH_*` secrets read directly by `hearth serve` (`HEARTH_MASTER_KEY`,
   `HEARTH_PREVIOUS_MASTER_KEY`, `HEARTH_KEK`, `HEARTH_SMS_OTP_HMAC_KEY`,

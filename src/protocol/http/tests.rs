@@ -1116,3 +1116,247 @@ async fn authorize_succeeds_without_user_id_in_body_when_bearer_present() {
         "response must contain a non-empty authorization code; got: {json}"
     );
 }
+
+// ==================== HEA-2111: trust_level via API ====================
+
+/// Helper: bootstrap a dev realm and return (realm_id, access_token).
+async fn bootstrap_dev(state: &Arc<AppState>) -> (String, String) {
+    let resp = router(Arc::clone(state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "bootstrap");
+    let b = axum::body::to_bytes(resp.into_body(), 32_000).await.expect("body");
+    let boot: serde_json::Value = serde_json::from_slice(&b).expect("json");
+    (
+        boot["realm_id"].as_str().expect("realm_id").to_string(),
+        boot["access_token"].as_str().expect("access_token").to_string(),
+    )
+}
+
+/// HEA-2111: Admin POST /admin/applications with trust_level=first_party must
+/// persist FirstParty trust on the stored client.  A subsequent PATCH that does
+/// not include trust_level must leave it unchanged (the ..Default::default()
+/// landmine must not silently swallow the field).
+#[tokio::test]
+async fn admin_create_first_party_client_via_api() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let (realm_id, token) = bootstrap_dev(&state).await;
+
+    // Create a first-party client via the admin API.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/applications")
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    // trust_level: 2 = CLIENT_TRUST_LEVEL_FIRST_PARTY (pbjson integer form)
+                    r#"{"client_name":"fp-app","redirect_uris":["https://example.com/cb"],"trust_level":2}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CREATED, "admin create first-party client");
+    let b = axum::body::to_bytes(resp.into_body(), 8_000).await.expect("body");
+    let client: serde_json::Value = serde_json::from_slice(&b).expect("json");
+    let client_id = client["client_id"].as_str().expect("client_id").to_string();
+
+    // Verify the trust level is persisted by patching with an unrelated field
+    // and confirming that trust_level is not reset to ThirdParty by
+    // ..Default::default() in the handler.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/applications/{client_id}"))
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"client_name":"fp-app-renamed"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "patch unrelated field");
+
+    // Fetch the client and confirm trust_level is still first_party.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/admin/applications/{client_id}"))
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "get client");
+    // The stored client must still be first_party after the patch.
+    // We verify by reading the stored client directly from the identity engine
+    // to avoid depending on the API serialisation of trust_level.
+    use crate::core::ClientId;
+    use crate::identity::oidc::ClientTrustLevel;
+    let realm_uuid: uuid::Uuid = realm_id.parse().expect("realm uuid");
+    let realm_id_t = crate::core::RealmId::new(realm_uuid);
+    let client_uuid: uuid::Uuid = client_id.parse().expect("client uuid");
+    let stored = state
+        .identity
+        .get_client(&realm_id_t, &ClientId::new(client_uuid))
+        .expect("get_client ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.trust_level(),
+        ClientTrustLevel::FirstParty,
+        "trust_level must survive a PATCH that omits the field (..Default::default() landmine)"
+    );
+}
+
+/// HEA-2111: DCR path (POST /register) must always produce ThirdParty trust
+/// even when the caller sends trust_level=FIRST_PARTY in the body.
+#[tokio::test]
+async fn dcr_cannot_self_grant_first_party_trust() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let (realm_id, _token) = bootstrap_dev(&state).await;
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    // trust_level: 2 = CLIENT_TRUST_LEVEL_FIRST_PARTY (pbjson integer form)
+                    r#"{"client_name":"dcr-attacker","redirect_uris":["https://evil.example.com/cb"],"trust_level":2}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    // DCR may be disabled (default in dev) — either 403 or 201 is acceptable,
+    // but if the client is created its trust must be ThirdParty.
+    if resp.status() == StatusCode::CREATED {
+        let b = axum::body::to_bytes(resp.into_body(), 8_000).await.expect("body");
+        let client: serde_json::Value = serde_json::from_slice(&b).expect("json");
+        let client_id = client["client_id"].as_str().expect("client_id").to_string();
+        use crate::core::ClientId;
+        use crate::identity::oidc::ClientTrustLevel;
+        let realm_uuid: uuid::Uuid = realm_id.parse().expect("realm uuid");
+        let realm_id_t = crate::core::RealmId::new(realm_uuid);
+        let client_uuid: uuid::Uuid = client_id.parse().expect("client uuid");
+        let stored = state
+            .identity
+            .get_client(&realm_id_t, &ClientId::new(client_uuid))
+            .expect("get_client ok")
+            .expect("client exists");
+        assert_eq!(
+            stored.trust_level(),
+            ClientTrustLevel::ThirdParty,
+            "DCR must not allow self-granted first-party trust"
+        );
+    }
+}
+
+/// HEA-2111: PATCH /admin/applications/{id} with trust_level=first_party must
+/// upgrade the client's trust level; trust_level=third_party must downgrade it.
+#[tokio::test]
+async fn patch_client_trust_level_roundtrip() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let (realm_id, token) = bootstrap_dev(&state).await;
+
+    // Create a third-party client (default).
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/applications")
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"client_name":"tp-app","redirect_uris":["https://example.com/cb"]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CREATED, "create client");
+    let b = axum::body::to_bytes(resp.into_body(), 8_000).await.expect("body");
+    let client: serde_json::Value = serde_json::from_slice(&b).expect("json");
+    let client_id = client["client_id"].as_str().expect("client_id").to_string();
+
+    use crate::core::ClientId;
+    use crate::identity::oidc::ClientTrustLevel;
+    let realm_uuid: uuid::Uuid = realm_id.parse().expect("realm uuid");
+    let realm_id_t = crate::core::RealmId::new(realm_uuid);
+    let client_uuid: uuid::Uuid = client_id.parse().expect("client uuid");
+
+    // Upgrade to first_party via PATCH.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/applications/{client_id}"))
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(r#"{"trust_level":"first_party"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "patch upgrade to first_party");
+    let stored = state
+        .identity
+        .get_client(&realm_id_t, &ClientId::new(client_uuid))
+        .expect("get_client ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.trust_level(),
+        ClientTrustLevel::FirstParty,
+        "trust_level must be FirstParty after PATCH with trust_level=first_party"
+    );
+
+    // Downgrade back to third_party via PATCH.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/applications/{client_id}"))
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(r#"{"trust_level":"third_party"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "patch downgrade to third_party");
+    let stored = state
+        .identity
+        .get_client(&realm_id_t, &ClientId::new(client_uuid))
+        .expect("get_client ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.trust_level(),
+        ClientTrustLevel::ThirdParty,
+        "trust_level must be ThirdParty after PATCH with trust_level=third_party"
+    );
+}

@@ -56,6 +56,20 @@ enum AccessTokenAuthorization {
   DECISION = 2;
 }
 
+// Controls whether a client is trusted as a first-party application.
+//
+// FirstParty clients skip the consent screen and receive the full
+// `permissions`, `roles`, and `groups` claims in issued JWTs.  ThirdParty
+// clients are shown the consent screen and do not receive those claims.
+// Unspecified defaults to ThirdParty on the DCR path; on the authenticated
+// admin path the caller must pass FIRST_PARTY explicitly to grant first-party
+// trust.
+enum ClientTrustLevel {
+  CLIENT_TRUST_LEVEL_UNSPECIFIED = 0;
+  CLIENT_TRUST_LEVEL_THIRD_PARTY = 1;
+  CLIENT_TRUST_LEVEL_FIRST_PARTY = 2;
+}
+
 // Request to register a new OAuth 2.0 client.
 message RegisterClientRequest {
   string client_name = 1;
@@ -63,6 +77,9 @@ message RegisterClientRequest {
   optional string client_secret = 3;
   repeated string grant_types = 4;
   AccessTokenAuthorization access_token_authorization = 5;
+  // Trust level for this client.  Unspecified defaults to ThirdParty on the
+  // DCR path.  The authenticated admin create path respects this field.
+  optional ClientTrustLevel trust_level = 6;
 }
 
 // Request to update an existing OAuth 2.0 client.
@@ -71,6 +88,8 @@ message UpdateClientRequest {
   repeated string redirect_uris = 2;
   repeated string grant_types = 3;
   optional AccessTokenAuthorization access_token_authorization = 4;
+  // Trust level override.  Omit to leave unchanged.
+  optional ClientTrustLevel trust_level = 5;
 }
 
 // A registered OAuth 2.0 client.

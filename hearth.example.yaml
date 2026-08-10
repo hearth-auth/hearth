@@ -609,12 +609,20 @@ oidc:
 #         grant_types:
 #           - authorization_code
 #           - refresh_token
+#         # trust_level controls whether this client is first-party or third-party.
+#         # first_party: skips the consent screen; the issued JWT includes the
+#         #   `permissions`, `roles`, and `groups` claims.  Use only for clients
+#         #   you fully control (internal dashboards, mobile apps you ship, etc.).
+#         # third_party: shows the consent screen; JWT carries only identity
+#         #   claims.  This is the default for any API-registered client.
+#         trust_level: first_party   # first_party | third_party (default: third_party)
 #       api-service:
 #         name: "API Service"
 #         confidential: true
 #         client_secret: "${INTERNAL_API_SECRET}"
 #         grant_types:
 #           - client_credentials
+#         trust_level: third_party   # machine-to-machine clients are typically third-party
 #
 #     # --- RBAC: permissions, roles, and scope bundles ---------------------
 #     # Hearth seeds a baseline set on every realm: permissions

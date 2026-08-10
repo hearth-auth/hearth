@@ -845,8 +845,10 @@ async fn register_client_dynamic(
     }
 
     // Strip any client-supplied secret — the server generates its own.
+    // RFC 7591 DCR is anonymous; callers cannot self-grant first-party trust.
     let mut request = crate::identity::RegisterClientRequest::from(body);
     request.client_secret = None;
+    request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
 
     // Generate server-side random secret.
     use base64::Engine as _;

@@ -75,6 +75,63 @@ func (AccessTokenAuthorization) EnumDescriptor() ([]byte, []int) {
 	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{0}
 }
 
+// Controls whether a client is trusted as a first-party application.
+//
+// FirstParty clients skip the consent screen and receive the full
+// `permissions`, `roles`, and `groups` claims in issued JWTs.  ThirdParty
+// clients are shown the consent screen and do not receive those claims.
+// Unspecified defaults to ThirdParty on the DCR path; on the authenticated
+// admin path the caller must pass FIRST_PARTY explicitly to grant first-party
+// trust.
+type ClientTrustLevel int32
+
+const (
+	ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED ClientTrustLevel = 0
+	ClientTrustLevel_CLIENT_TRUST_LEVEL_THIRD_PARTY ClientTrustLevel = 1
+	ClientTrustLevel_CLIENT_TRUST_LEVEL_FIRST_PARTY ClientTrustLevel = 2
+)
+
+// Enum value maps for ClientTrustLevel.
+var (
+	ClientTrustLevel_name = map[int32]string{
+		0: "CLIENT_TRUST_LEVEL_UNSPECIFIED",
+		1: "CLIENT_TRUST_LEVEL_THIRD_PARTY",
+		2: "CLIENT_TRUST_LEVEL_FIRST_PARTY",
+	}
+	ClientTrustLevel_value = map[string]int32{
+		"CLIENT_TRUST_LEVEL_UNSPECIFIED": 0,
+		"CLIENT_TRUST_LEVEL_THIRD_PARTY": 1,
+		"CLIENT_TRUST_LEVEL_FIRST_PARTY": 2,
+	}
+)
+
+func (x ClientTrustLevel) Enum() *ClientTrustLevel {
+	p := new(ClientTrustLevel)
+	*p = x
+	return p
+}
+
+func (x ClientTrustLevel) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ClientTrustLevel) Descriptor() protoreflect.EnumDescriptor {
+	return file_hearth_identity_v1_oauth_proto_enumTypes[1].Descriptor()
+}
+
+func (ClientTrustLevel) Type() protoreflect.EnumType {
+	return &file_hearth_identity_v1_oauth_proto_enumTypes[1]
+}
+
+func (x ClientTrustLevel) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ClientTrustLevel.Descriptor instead.
+func (ClientTrustLevel) EnumDescriptor() ([]byte, []int) {
+	return file_hearth_identity_v1_oauth_proto_rawDescGZIP(), []int{1}
+}
+
 // Request to initiate an OAuth 2.0 authorization.
 type AuthorizationRequest struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
@@ -402,8 +459,11 @@ type RegisterClientRequest struct {
 	ClientSecret             *string                  `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
 	GrantTypes               []string                 `protobuf:"bytes,4,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization AccessTokenAuthorization `protobuf:"varint,5,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization" json:"access_token_authorization,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Trust level for this client.  Unspecified defaults to ThirdParty on the
+	// DCR path.  The authenticated admin create path respects this field.
+	TrustLevel    *ClientTrustLevel `protobuf:"varint,6,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterClientRequest) Reset() {
@@ -471,6 +531,13 @@ func (x *RegisterClientRequest) GetAccessTokenAuthorization() AccessTokenAuthori
 	return AccessTokenAuthorization_EMBEDDED
 }
 
+func (x *RegisterClientRequest) GetTrustLevel() ClientTrustLevel {
+	if x != nil && x.TrustLevel != nil {
+		return *x.TrustLevel
+	}
+	return ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED
+}
+
 // Request to update an existing OAuth 2.0 client.
 type UpdateClientRequest struct {
 	state                    protoimpl.MessageState    `protogen:"open.v1"`
@@ -478,8 +545,10 @@ type UpdateClientRequest struct {
 	RedirectUris             []string                  `protobuf:"bytes,2,rep,name=redirect_uris,json=redirectUris,proto3" json:"redirect_uris,omitempty"`
 	GrantTypes               []string                  `protobuf:"bytes,3,rep,name=grant_types,json=grantTypes,proto3" json:"grant_types,omitempty"`
 	AccessTokenAuthorization *AccessTokenAuthorization `protobuf:"varint,4,opt,name=access_token_authorization,json=accessTokenAuthorization,proto3,enum=hearth.identity.v1.AccessTokenAuthorization,oneof" json:"access_token_authorization,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// Trust level override.  Omit to leave unchanged.
+	TrustLevel    *ClientTrustLevel `protobuf:"varint,5,opt,name=trust_level,json=trustLevel,proto3,enum=hearth.identity.v1.ClientTrustLevel,oneof" json:"trust_level,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdateClientRequest) Reset() {
@@ -538,6 +607,13 @@ func (x *UpdateClientRequest) GetAccessTokenAuthorization() AccessTokenAuthoriza
 		return *x.AccessTokenAuthorization
 	}
 	return AccessTokenAuthorization_EMBEDDED
+}
+
+func (x *UpdateClientRequest) GetTrustLevel() ClientTrustLevel {
+	if x != nil && x.TrustLevel != nil {
+		return *x.TrustLevel
+	}
+	return ClientTrustLevel_CLIENT_TRUST_LEVEL_UNSPECIFIED
 }
 
 // A registered OAuth 2.0 client.
@@ -2062,7 +2138,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"token_type\x18\x03 \x01(\tR\ttokenType\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\x04 \x01(\x03R\texpiresIn\x12#\n" +
-	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\xa6\x02\n" +
+	"\rrefresh_token\x18\x05 \x01(\tR\frefreshToken\"\x82\x03\n" +
 	"\x15RegisterClientRequest\x12\x1f\n" +
 	"\vclient_name\x18\x01 \x01(\tR\n" +
 	"clientName\x12#\n" +
@@ -2070,17 +2146,23 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\rclient_secret\x18\x03 \x01(\tH\x00R\fclientSecret\x88\x01\x01\x12\x1f\n" +
 	"\vgrant_types\x18\x04 \x03(\tR\n" +
 	"grantTypes\x12j\n" +
-	"\x1aaccess_token_authorization\x18\x05 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorizationB\x10\n" +
-	"\x0e_client_secret\"\xa1\x02\n" +
+	"\x1aaccess_token_authorization\x18\x05 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12J\n" +
+	"\vtrust_level\x18\x06 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x01R\n" +
+	"trustLevel\x88\x01\x01B\x10\n" +
+	"\x0e_client_secretB\x0e\n" +
+	"\f_trust_level\"\xfd\x02\n" +
 	"\x13UpdateClientRequest\x12$\n" +
 	"\vclient_name\x18\x01 \x01(\tH\x00R\n" +
 	"clientName\x88\x01\x01\x12#\n" +
 	"\rredirect_uris\x18\x02 \x03(\tR\fredirectUris\x12\x1f\n" +
 	"\vgrant_types\x18\x03 \x03(\tR\n" +
 	"grantTypes\x12o\n" +
-	"\x1aaccess_token_authorization\x18\x04 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationH\x01R\x18accessTokenAuthorization\x88\x01\x01B\x0e\n" +
+	"\x1aaccess_token_authorization\x18\x04 \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationH\x01R\x18accessTokenAuthorization\x88\x01\x01\x12J\n" +
+	"\vtrust_level\x18\x05 \x01(\x0e2$.hearth.identity.v1.ClientTrustLevelH\x02R\n" +
+	"trustLevel\x88\x01\x01B\x0e\n" +
 	"\f_client_nameB\x1d\n" +
-	"\x1b_access_token_authorization\"\xc5\x02\n" +
+	"\x1b_access_token_authorizationB\x0e\n" +
+	"\f_trust_level\"\xc5\x02\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2236,7 +2318,11 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x18AccessTokenAuthorization\x12\f\n" +
 	"\bEMBEDDED\x10\x00\x12\x11\n" +
 	"\rINTROSPECTION\x10\x01\x12\f\n" +
-	"\bDECISION\x10\x022\xc4\x05\n" +
+	"\bDECISION\x10\x02*~\n" +
+	"\x10ClientTrustLevel\x12\"\n" +
+	"\x1eCLIENT_TRUST_LEVEL_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eCLIENT_TRUST_LEVEL_THIRD_PARTY\x10\x01\x12\"\n" +
+	"\x1eCLIENT_TRUST_LEVEL_FIRST_PARTY\x10\x022\xc4\x05\n" +
 	"\x17ApplicationAdminService\x12\x81\x01\n" +
 	"\x10ListApplications\x12+.hearth.identity.v1.ListApplicationsRequest\x1a#.hearth.identity.v1.OAuthClientPage\"\x1b\x82\xd3\xe4\x93\x02\x15\x12\x13/admin/applications\x12\x85\x01\n" +
 	"\x0eGetApplication\x12).hearth.identity.v1.GetApplicationRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"'\x82\xd3\xe4\x93\x02!\x12\x1f/admin/applications/{client_id}\x12\x7f\n" +
@@ -2267,77 +2353,80 @@ func file_hearth_identity_v1_oauth_proto_rawDescGZIP() []byte {
 	return file_hearth_identity_v1_oauth_proto_rawDescData
 }
 
-var file_hearth_identity_v1_oauth_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_hearth_identity_v1_oauth_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_hearth_identity_v1_oauth_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_hearth_identity_v1_oauth_proto_goTypes = []any{
 	(AccessTokenAuthorization)(0),       // 0: hearth.identity.v1.AccessTokenAuthorization
-	(*AuthorizationRequest)(nil),        // 1: hearth.identity.v1.AuthorizationRequest
-	(*AuthorizationResponse)(nil),       // 2: hearth.identity.v1.AuthorizationResponse
-	(*TokenExchangeRequest)(nil),        // 3: hearth.identity.v1.TokenExchangeRequest
-	(*OidcTokenResponse)(nil),           // 4: hearth.identity.v1.OidcTokenResponse
-	(*RegisterClientRequest)(nil),       // 5: hearth.identity.v1.RegisterClientRequest
-	(*UpdateClientRequest)(nil),         // 6: hearth.identity.v1.UpdateClientRequest
-	(*OAuthClient)(nil),                 // 7: hearth.identity.v1.OAuthClient
-	(*OAuthClientPage)(nil),             // 8: hearth.identity.v1.OAuthClientPage
-	(*ClientCredentialsRequest)(nil),    // 9: hearth.identity.v1.ClientCredentialsRequest
-	(*ClientCredentialsResponse)(nil),   // 10: hearth.identity.v1.ClientCredentialsResponse
-	(*DeviceAuthorizationRequest)(nil),  // 11: hearth.identity.v1.DeviceAuthorizationRequest
-	(*DeviceAuthorizationResponse)(nil), // 12: hearth.identity.v1.DeviceAuthorizationResponse
-	(*TokenRevocationRequest)(nil),      // 13: hearth.identity.v1.TokenRevocationRequest
-	(*TokenIntrospectionRequest)(nil),   // 14: hearth.identity.v1.TokenIntrospectionRequest
-	(*IntrospectionResponse)(nil),       // 15: hearth.identity.v1.IntrospectionResponse
-	(*TokenDecisionRequest)(nil),        // 16: hearth.identity.v1.TokenDecisionRequest
-	(*TokenDecisionResponse)(nil),       // 17: hearth.identity.v1.TokenDecisionResponse
-	(*UserInfoResponse)(nil),            // 18: hearth.identity.v1.UserInfoResponse
-	(*OidcDiscoveryDocument)(nil),       // 19: hearth.identity.v1.OidcDiscoveryDocument
-	(*JsonWebKey)(nil),                  // 20: hearth.identity.v1.JsonWebKey
-	(*JwksDocument)(nil),                // 21: hearth.identity.v1.JwksDocument
-	(*BootstrapResponse)(nil),           // 22: hearth.identity.v1.BootstrapResponse
-	(*ListApplicationsRequest)(nil),     // 23: hearth.identity.v1.ListApplicationsRequest
-	(*GetApplicationRequest)(nil),       // 24: hearth.identity.v1.GetApplicationRequest
-	(*DeleteApplicationRequest)(nil),    // 25: hearth.identity.v1.DeleteApplicationRequest
-	(*UpdateApplicationCall)(nil),       // 26: hearth.identity.v1.UpdateApplicationCall
-	(*OAuthEmpty)(nil),                  // 27: hearth.identity.v1.OAuthEmpty
+	(ClientTrustLevel)(0),               // 1: hearth.identity.v1.ClientTrustLevel
+	(*AuthorizationRequest)(nil),        // 2: hearth.identity.v1.AuthorizationRequest
+	(*AuthorizationResponse)(nil),       // 3: hearth.identity.v1.AuthorizationResponse
+	(*TokenExchangeRequest)(nil),        // 4: hearth.identity.v1.TokenExchangeRequest
+	(*OidcTokenResponse)(nil),           // 5: hearth.identity.v1.OidcTokenResponse
+	(*RegisterClientRequest)(nil),       // 6: hearth.identity.v1.RegisterClientRequest
+	(*UpdateClientRequest)(nil),         // 7: hearth.identity.v1.UpdateClientRequest
+	(*OAuthClient)(nil),                 // 8: hearth.identity.v1.OAuthClient
+	(*OAuthClientPage)(nil),             // 9: hearth.identity.v1.OAuthClientPage
+	(*ClientCredentialsRequest)(nil),    // 10: hearth.identity.v1.ClientCredentialsRequest
+	(*ClientCredentialsResponse)(nil),   // 11: hearth.identity.v1.ClientCredentialsResponse
+	(*DeviceAuthorizationRequest)(nil),  // 12: hearth.identity.v1.DeviceAuthorizationRequest
+	(*DeviceAuthorizationResponse)(nil), // 13: hearth.identity.v1.DeviceAuthorizationResponse
+	(*TokenRevocationRequest)(nil),      // 14: hearth.identity.v1.TokenRevocationRequest
+	(*TokenIntrospectionRequest)(nil),   // 15: hearth.identity.v1.TokenIntrospectionRequest
+	(*IntrospectionResponse)(nil),       // 16: hearth.identity.v1.IntrospectionResponse
+	(*TokenDecisionRequest)(nil),        // 17: hearth.identity.v1.TokenDecisionRequest
+	(*TokenDecisionResponse)(nil),       // 18: hearth.identity.v1.TokenDecisionResponse
+	(*UserInfoResponse)(nil),            // 19: hearth.identity.v1.UserInfoResponse
+	(*OidcDiscoveryDocument)(nil),       // 20: hearth.identity.v1.OidcDiscoveryDocument
+	(*JsonWebKey)(nil),                  // 21: hearth.identity.v1.JsonWebKey
+	(*JwksDocument)(nil),                // 22: hearth.identity.v1.JwksDocument
+	(*BootstrapResponse)(nil),           // 23: hearth.identity.v1.BootstrapResponse
+	(*ListApplicationsRequest)(nil),     // 24: hearth.identity.v1.ListApplicationsRequest
+	(*GetApplicationRequest)(nil),       // 25: hearth.identity.v1.GetApplicationRequest
+	(*DeleteApplicationRequest)(nil),    // 26: hearth.identity.v1.DeleteApplicationRequest
+	(*UpdateApplicationCall)(nil),       // 27: hearth.identity.v1.UpdateApplicationCall
+	(*OAuthEmpty)(nil),                  // 28: hearth.identity.v1.OAuthEmpty
 }
 var file_hearth_identity_v1_oauth_proto_depIdxs = []int32{
 	0,  // 0: hearth.identity.v1.RegisterClientRequest.access_token_authorization:type_name -> hearth.identity.v1.AccessTokenAuthorization
-	0,  // 1: hearth.identity.v1.UpdateClientRequest.access_token_authorization:type_name -> hearth.identity.v1.AccessTokenAuthorization
-	0,  // 2: hearth.identity.v1.OAuthClient.access_token_authorization:type_name -> hearth.identity.v1.AccessTokenAuthorization
-	7,  // 3: hearth.identity.v1.OAuthClientPage.items:type_name -> hearth.identity.v1.OAuthClient
-	0,  // 4: hearth.identity.v1.IntrospectionResponse.mode:type_name -> hearth.identity.v1.AccessTokenAuthorization
-	20, // 5: hearth.identity.v1.JwksDocument.keys:type_name -> hearth.identity.v1.JsonWebKey
-	6,  // 6: hearth.identity.v1.UpdateApplicationCall.body:type_name -> hearth.identity.v1.UpdateClientRequest
-	23, // 7: hearth.identity.v1.ApplicationAdminService.ListApplications:input_type -> hearth.identity.v1.ListApplicationsRequest
-	24, // 8: hearth.identity.v1.ApplicationAdminService.GetApplication:input_type -> hearth.identity.v1.GetApplicationRequest
-	5,  // 9: hearth.identity.v1.ApplicationAdminService.CreateApplication:input_type -> hearth.identity.v1.RegisterClientRequest
-	26, // 10: hearth.identity.v1.ApplicationAdminService.UpdateApplication:input_type -> hearth.identity.v1.UpdateApplicationCall
-	25, // 11: hearth.identity.v1.ApplicationAdminService.DeleteApplication:input_type -> hearth.identity.v1.DeleteApplicationRequest
-	1,  // 12: hearth.identity.v1.OAuthService.Authorize:input_type -> hearth.identity.v1.AuthorizationRequest
-	3,  // 13: hearth.identity.v1.OAuthService.TokenExchange:input_type -> hearth.identity.v1.TokenExchangeRequest
-	13, // 14: hearth.identity.v1.OAuthService.Revoke:input_type -> hearth.identity.v1.TokenRevocationRequest
-	14, // 15: hearth.identity.v1.OAuthService.Introspect:input_type -> hearth.identity.v1.TokenIntrospectionRequest
-	11, // 16: hearth.identity.v1.OAuthService.DeviceAuthorize:input_type -> hearth.identity.v1.DeviceAuthorizationRequest
-	9,  // 17: hearth.identity.v1.OAuthService.ClientCredentials:input_type -> hearth.identity.v1.ClientCredentialsRequest
-	5,  // 18: hearth.identity.v1.OAuthService.RegisterClient:input_type -> hearth.identity.v1.RegisterClientRequest
-	16, // 19: hearth.identity.v1.OAuthService.Decide:input_type -> hearth.identity.v1.TokenDecisionRequest
-	8,  // 20: hearth.identity.v1.ApplicationAdminService.ListApplications:output_type -> hearth.identity.v1.OAuthClientPage
-	7,  // 21: hearth.identity.v1.ApplicationAdminService.GetApplication:output_type -> hearth.identity.v1.OAuthClient
-	7,  // 22: hearth.identity.v1.ApplicationAdminService.CreateApplication:output_type -> hearth.identity.v1.OAuthClient
-	7,  // 23: hearth.identity.v1.ApplicationAdminService.UpdateApplication:output_type -> hearth.identity.v1.OAuthClient
-	27, // 24: hearth.identity.v1.ApplicationAdminService.DeleteApplication:output_type -> hearth.identity.v1.OAuthEmpty
-	2,  // 25: hearth.identity.v1.OAuthService.Authorize:output_type -> hearth.identity.v1.AuthorizationResponse
-	4,  // 26: hearth.identity.v1.OAuthService.TokenExchange:output_type -> hearth.identity.v1.OidcTokenResponse
-	27, // 27: hearth.identity.v1.OAuthService.Revoke:output_type -> hearth.identity.v1.OAuthEmpty
-	15, // 28: hearth.identity.v1.OAuthService.Introspect:output_type -> hearth.identity.v1.IntrospectionResponse
-	12, // 29: hearth.identity.v1.OAuthService.DeviceAuthorize:output_type -> hearth.identity.v1.DeviceAuthorizationResponse
-	10, // 30: hearth.identity.v1.OAuthService.ClientCredentials:output_type -> hearth.identity.v1.ClientCredentialsResponse
-	7,  // 31: hearth.identity.v1.OAuthService.RegisterClient:output_type -> hearth.identity.v1.OAuthClient
-	17, // 32: hearth.identity.v1.OAuthService.Decide:output_type -> hearth.identity.v1.TokenDecisionResponse
-	20, // [20:33] is the sub-list for method output_type
-	7,  // [7:20] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	1,  // 1: hearth.identity.v1.RegisterClientRequest.trust_level:type_name -> hearth.identity.v1.ClientTrustLevel
+	0,  // 2: hearth.identity.v1.UpdateClientRequest.access_token_authorization:type_name -> hearth.identity.v1.AccessTokenAuthorization
+	1,  // 3: hearth.identity.v1.UpdateClientRequest.trust_level:type_name -> hearth.identity.v1.ClientTrustLevel
+	0,  // 4: hearth.identity.v1.OAuthClient.access_token_authorization:type_name -> hearth.identity.v1.AccessTokenAuthorization
+	8,  // 5: hearth.identity.v1.OAuthClientPage.items:type_name -> hearth.identity.v1.OAuthClient
+	0,  // 6: hearth.identity.v1.IntrospectionResponse.mode:type_name -> hearth.identity.v1.AccessTokenAuthorization
+	21, // 7: hearth.identity.v1.JwksDocument.keys:type_name -> hearth.identity.v1.JsonWebKey
+	7,  // 8: hearth.identity.v1.UpdateApplicationCall.body:type_name -> hearth.identity.v1.UpdateClientRequest
+	24, // 9: hearth.identity.v1.ApplicationAdminService.ListApplications:input_type -> hearth.identity.v1.ListApplicationsRequest
+	25, // 10: hearth.identity.v1.ApplicationAdminService.GetApplication:input_type -> hearth.identity.v1.GetApplicationRequest
+	6,  // 11: hearth.identity.v1.ApplicationAdminService.CreateApplication:input_type -> hearth.identity.v1.RegisterClientRequest
+	27, // 12: hearth.identity.v1.ApplicationAdminService.UpdateApplication:input_type -> hearth.identity.v1.UpdateApplicationCall
+	26, // 13: hearth.identity.v1.ApplicationAdminService.DeleteApplication:input_type -> hearth.identity.v1.DeleteApplicationRequest
+	2,  // 14: hearth.identity.v1.OAuthService.Authorize:input_type -> hearth.identity.v1.AuthorizationRequest
+	4,  // 15: hearth.identity.v1.OAuthService.TokenExchange:input_type -> hearth.identity.v1.TokenExchangeRequest
+	14, // 16: hearth.identity.v1.OAuthService.Revoke:input_type -> hearth.identity.v1.TokenRevocationRequest
+	15, // 17: hearth.identity.v1.OAuthService.Introspect:input_type -> hearth.identity.v1.TokenIntrospectionRequest
+	12, // 18: hearth.identity.v1.OAuthService.DeviceAuthorize:input_type -> hearth.identity.v1.DeviceAuthorizationRequest
+	10, // 19: hearth.identity.v1.OAuthService.ClientCredentials:input_type -> hearth.identity.v1.ClientCredentialsRequest
+	6,  // 20: hearth.identity.v1.OAuthService.RegisterClient:input_type -> hearth.identity.v1.RegisterClientRequest
+	17, // 21: hearth.identity.v1.OAuthService.Decide:input_type -> hearth.identity.v1.TokenDecisionRequest
+	9,  // 22: hearth.identity.v1.ApplicationAdminService.ListApplications:output_type -> hearth.identity.v1.OAuthClientPage
+	8,  // 23: hearth.identity.v1.ApplicationAdminService.GetApplication:output_type -> hearth.identity.v1.OAuthClient
+	8,  // 24: hearth.identity.v1.ApplicationAdminService.CreateApplication:output_type -> hearth.identity.v1.OAuthClient
+	8,  // 25: hearth.identity.v1.ApplicationAdminService.UpdateApplication:output_type -> hearth.identity.v1.OAuthClient
+	28, // 26: hearth.identity.v1.ApplicationAdminService.DeleteApplication:output_type -> hearth.identity.v1.OAuthEmpty
+	3,  // 27: hearth.identity.v1.OAuthService.Authorize:output_type -> hearth.identity.v1.AuthorizationResponse
+	5,  // 28: hearth.identity.v1.OAuthService.TokenExchange:output_type -> hearth.identity.v1.OidcTokenResponse
+	28, // 29: hearth.identity.v1.OAuthService.Revoke:output_type -> hearth.identity.v1.OAuthEmpty
+	16, // 30: hearth.identity.v1.OAuthService.Introspect:output_type -> hearth.identity.v1.IntrospectionResponse
+	13, // 31: hearth.identity.v1.OAuthService.DeviceAuthorize:output_type -> hearth.identity.v1.DeviceAuthorizationResponse
+	11, // 32: hearth.identity.v1.OAuthService.ClientCredentials:output_type -> hearth.identity.v1.ClientCredentialsResponse
+	8,  // 33: hearth.identity.v1.OAuthService.RegisterClient:output_type -> hearth.identity.v1.OAuthClient
+	18, // 34: hearth.identity.v1.OAuthService.Decide:output_type -> hearth.identity.v1.TokenDecisionResponse
+	22, // [22:35] is the sub-list for method output_type
+	9,  // [9:22] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_hearth_identity_v1_oauth_proto_init() }
@@ -2365,7 +2454,7 @@ func file_hearth_identity_v1_oauth_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hearth_identity_v1_oauth_proto_rawDesc), len(file_hearth_identity_v1_oauth_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   2,
