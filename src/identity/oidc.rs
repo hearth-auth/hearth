@@ -1877,7 +1877,10 @@ mod tests {
             id_token_signing_alg_values_supported: vec!["EdDSA".to_string()],
             scopes_supported: vec!["openid".to_string()],
             claims_supported: vec!["sub".to_string()],
-            token_endpoint_auth_methods_supported: vec!["none".to_string()],
+            token_endpoint_auth_methods_supported: vec![
+                "none".to_string(),
+                "client_secret_basic".to_string(),
+            ],
             code_challenge_methods_supported: vec!["S256".to_string()],
             grant_types_supported: vec![
                 "authorization_code".to_string(),
