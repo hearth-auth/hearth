@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and
+  takes an exclusive advisory lock on `storage.data_dir`, so a second replica sharing the
+  `ReadWriteOnce` PVC cannot start; it crash-loops with `AlreadyLocked`.  `helm template` /
+  `helm install` now fail at render time with an explanatory error instead of producing a
+  Deployment that will never become ready.  Use Raft cluster mode (one PVC per node) for high
+  availability.  `make helm-template` asserts the guard so it cannot silently regress.
+- **Helm `Chart.yaml` `version` / `appVersion` corrected to 1.6.8 (HEA-2107)** — both read `1.0.0`
+  while the shipping release was 1.6.8.  The publish workflow stamps the release tag at package
+  time, so this affected in-repo renders only.
+
 ### Fixed
 - **Torn Raft snapshot restore now fails loudly at startup instead of silently serving mixed data
   (HEA-2132)** — `install_snapshot` (the two-phase in-place restore: Phase 1 deletes all realm keys,
@@ -86,12 +97,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Helm `Chart.yaml` version and appVersion aligned to `1.0.0` (HEA-2107)**. (HEA-2105)
 
 ### Added
-- **Discovery now advertises `client_secret_basic` (HEA-2112)** — the OIDC discovery document's
-  `token_endpoint_auth_methods_supported` list gained `client_secret_basic`. HTTP Basic client
-  authentication has worked since HEA-1755 (an external audit claiming otherwise was a
-  misdiagnosis), but discovery omitted it — contradicting the `token_endpoint_auth_method`
-  value dynamic client registration returns for every client. Strict OIDC clients that pick
-  their auth method from discovery can now select Basic. (HEA-2112)
 - **`POST /admin/bootstrap` now returns a cross-realm system-realm admin token (HEA-2087)** —
   the dev-only bootstrap response gained two fields: `system_access_token` (an access token for
   the reserved system-realm admin `admin@hearth.test`, whose nil-UUID realm passes the
@@ -147,28 +152,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Rust-touching PR so the floor cannot silently drift again.
 
 ### Fixed
-- **Basic-auth client credentials are now percent-decoded per RFC 6749 §2.3.1 (HEA-2112)** —
-  `Authorization: Basic` client credentials at the token, introspection, and revocation
-  endpoints were previously used verbatim, so a strict OAuth client that form-urlencodes its
-  credentials before base64 (as the RFC requires) could never authenticate if its secret
-  contained reserved characters (`%`, `+`, space, `:`, `&`, `=`). Decoding is lenient: a `%`
-  that does not start a valid escape passes through unchanged, so unencoded legacy secrets keep
-  working. Operators with manually registered secrets containing a *literal* `+` or a literal
-  valid escape sequence (e.g. `%2B`) sent unencoded should re-register or switch those clients
-  to `client_secret_post`. Server-generated secrets (DCR, admin API) are base64url and are
-  unaffected. (HEA-2112)
-- **Body `client_id` is no longer required at the token endpoint when authenticating via
-  Basic (HEA-2112)** — `POST /token` and `POST /realms/{realm}/token` previously rejected any
-  request whose body omitted `client_id`, even though RFC 6749 §3.2.1 requires it only when the
-  client is not otherwise authenticating. A strictly compliant `client_secret_basic` client —
-  which carries its identity solely in the `Authorization` header — could therefore never
-  complete an exchange, contradicting the newly advertised discovery metadata. The client
-  identity is now taken from the Basic username when the body field is absent or empty, and is
-  used consistently for per-client rate limiting, CORS, client authentication, and grant
-  dispatch. An explicitly empty `client_id=` or `client_secret=` form field next to Basic auth
-  is treated as absent, not as a conflicting credential — at the token, introspection, and
-  revocation endpoints alike. Requests that supply *neither* body `client_id` nor an
-  `Authorization` header keep their previous behavior. (HEA-2112)
 - **Full-stack demo resource server now rejects revoked access tokens (HEA-2094)** — the demo
   Go backend (`examples/full-stack-demo/backend`) previously validated access tokens by Ed25519
   signature and expiry only, so a token revoked at Hearth was still accepted on `/api/notes`
@@ -181,13 +164,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (HEA-2094)
 
 ### Security
-- **Conflicting Basic/body client credentials are now rejected (HEA-2112)** — a request that
-  carried both an `Authorization: Basic` header and body `client_id`/`client_secret` parameters
-  that disagreed was silently resolved in the Basic header's favor (and on the code-exchange
-  arm, the Basic secret was verified against the *body's* client id). RFC 6749 §2.3.1 forbids
-  using more than one client authentication mechanism per request; such requests now fail with
-  `400 invalid_request`. Requests where header and body credentials agree are unaffected.
-  (HEA-2112)
 - **Signing-key cache no longer resurrects a just-rotated key under a race (HEA-2096)** — the
   per-realm active-signing-key cache filled its miss path with an unsynchronised
   get-miss-load-insert. A `rotate_realm_signing_key` that landed between the storage read and the

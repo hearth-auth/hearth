@@ -1,3 +1,15 @@
+{{- /*
+  Hearth is a single-writer embedded database: the storage engine takes an
+  exclusive advisory lock on storage.data_dir (HEA-2107).  A second replica
+  sharing the ReadWriteOnce PVC cannot start — it fails with AlreadyLocked.
+  Fail rendering rather than shipping a Deployment that crash-loops.
+
+  For high availability use Raft cluster mode with one PVC per node
+  (see docs/guides/), not additional Deployment replicas.
+*/ -}}
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- fail (printf "hearth: replicaCount=%v is not a supported configuration. Hearth is single-writer and takes an exclusive lock on storage.data_dir; a second replica sharing the ReadWriteOnce PVC will fail to start with AlreadyLocked. Use Raft cluster mode (one PVC per node) for high availability, not extra Deployment replicas." .Values.replicaCount) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

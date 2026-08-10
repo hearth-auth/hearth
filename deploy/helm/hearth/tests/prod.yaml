@@ -5,10 +5,10 @@ kind: PodDisruptionBudget
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 spec:
   minAvailable: 1
@@ -23,10 +23,10 @@ kind: ServiceAccount
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: hearth/templates/secret.yaml
@@ -35,10 +35,10 @@ kind: Secret
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 type: Opaque
 data:
@@ -50,10 +50,10 @@ kind: ConfigMap
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 data:
   hearth.yaml: |
@@ -92,10 +92,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 spec:
   accessModes:
@@ -110,10 +110,10 @@ kind: Service
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -132,10 +132,10 @@ kind: Deployment
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -152,8 +152,8 @@ spec:
     metadata:
       annotations:
         # Force pod restart when config changes
-        checksum/config: 8520bac2b420724293d65e2cdc3518717234ac677d216ba2e963d71dc3a81970
-        checksum/secret: c32f69ead78945c40100e8f45ee7f201fd46e6f1d86251ca0aeccc67232d9b7f
+        checksum/config: 5e71ed84fc99394f3cd9e6e76bfc17bdfcf77325f651fde2164578bd151f6492
+        checksum/secret: c152e5ebd8a93b1b229762ddc9c3f6243db5a4bdca7664159fea4019a0f2fab7
       labels:
         app.kubernetes.io/name: hearth
         app.kubernetes.io/instance: hearth
@@ -173,7 +173,7 @@ spec:
             runAsGroup: 10001
             runAsNonRoot: true
             runAsUser: 10001
-          image: "ghcr.io/hearth-auth/hearth:1.0.0"
+          image: "ghcr.io/hearth-auth/hearth:1.6.8"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
           ports:
@@ -236,10 +236,10 @@ kind: Ingress
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-1.0.0
+    helm.sh/chart: hearth-1.6.8
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.6.8"
     app.kubernetes.io/managed-by: Helm
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
