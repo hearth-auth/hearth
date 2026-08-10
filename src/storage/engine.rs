@@ -60,8 +60,7 @@ pub(crate) struct PendingBatchHandle {
 /// Prevents two `EmbeddedStorageEngine` instances in the same process from
 /// opening the same directory. Cross-process conflicts are caught by the OS
 /// advisory lock (`LOCK` file via `flock`).
-static OPEN_DIRS: LazyLock<Mutex<HashSet<PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static OPEN_DIRS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// RAII guard that removes `path` from [`OPEN_DIRS`] on drop.
 struct DirLockGuard(PathBuf);
@@ -4046,8 +4045,8 @@ mod tests {
 
         // Second open on the same dir must fail.
         let config2 = StorageConfig::test_config(dir.path().to_path_buf());
-        let err = EmbeddedStorageEngine::open(config2)
-            .expect_err("second open on same dir must fail");
+        let err =
+            EmbeddedStorageEngine::open(config2).expect_err("second open on same dir must fail");
         assert!(
             matches!(err, StorageError::AlreadyLocked { .. }),
             "expected AlreadyLocked, got: {err}"

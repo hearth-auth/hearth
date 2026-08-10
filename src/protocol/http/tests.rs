@@ -1007,3 +1007,112 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
         "error must be invalid_request for FAPI violation"
     );
 }
+
+/// HEA-2117: POST /authorize must accept a request that omits `user_id` from the
+/// JSON body when the caller supplies a valid Bearer token.  Before the fix,
+/// `proto_authorize_to_domain` tried to parse an empty string as a UUID and
+/// returned 400 "invalid user_id UUID" even though the handler always overwrites
+/// the body-supplied user_id with the authenticated principal anyway (HEA-1721).
+#[tokio::test]
+async fn authorize_succeeds_without_user_id_in_body_when_bearer_present() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+
+    // Bootstrap to get a realm, admin user, and access token.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 32_000)
+        .await
+        .expect("body");
+    let boot: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
+    let access_token = boot["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Register a confidential client.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/clients")
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"client_name":"test-app","redirect_uris":["https://example.com/cb"]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::CREATED, "register client");
+    let body = axum::body::to_bytes(resp.into_body(), 8_000)
+        .await
+        .expect("body");
+    let client: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let client_id = client["client_id"].as_str().expect("client_id").to_string();
+
+    // Generate a minimal PKCE challenge.
+    let verifier = "dGhpcyBpcyBhIHRlc3QgdmVyaWZpZXIgdGhpcyBpcyBhIHRlc3Q";
+    let challenge = {
+        use data_encoding::BASE64URL_NOPAD;
+        use ring::digest;
+        let hash = digest::digest(&digest::SHA256, verifier.as_bytes());
+        BASE64URL_NOPAD.encode(hash.as_ref())
+    };
+
+    // POST /authorize WITHOUT a user_id field in the body but WITH Bearer token.
+    let body = serde_json::json!({
+        "client_id":             client_id,
+        "redirect_uri":          "https://example.com/cb",
+        "response_type":         "code",
+        "scope":                 "openid",
+        "state":                 "test-state",
+        "code_challenge":        challenge,
+        "code_challenge_method": "S256"
+        // intentionally no "user_id" key
+    });
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/authorize")
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&body).expect("json"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "authorize without user_id must succeed when Bearer token is present (HEA-2117)"
+    );
+    let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+    assert!(
+        json.get("code")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "response must contain a non-empty authorization code; got: {json}"
+    );
+}

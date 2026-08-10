@@ -104,12 +104,18 @@ The bootstrap call returns a realm, an admin user, and a signed JWT — everythi
 
 ```json
 {
-  "realm_id":    "01234567-89ab-cdef-0123-456789abcdef",
-  "user_id":     "fedcba98-7654-3210-fedc-ba9876543210",
-  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
-  "refresh_token": "rt_..."
+  "realm_id":            "01234567-89ab-cdef-0123-456789abcdef",
+  "user_id":             "fedcba98-7654-3210-fedc-ba9876543210",
+  "access_token":        "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
+  "refresh_token":       "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
+  "quickstart":          "# ready-to-paste shell commands (dev only)",
+  "admin_password":      "HearthTest123!",
+  "system_access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
 }
 ```
+
+`admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns an empty `admin_password`.
 
 > **No Docker, no Postgres, no config required** — `--dev` mode is fully self-contained. The bootstrap endpoint is disabled in production (`404 Not Found`).
 
@@ -323,12 +329,18 @@ Response (JSON):
 
 ```json
 {
-  "realm_id":    "<uuid>",
-  "user_id":      "<uuid>",
-  "access_token": "<jwt>",
-  "refresh_token":"<opaque>"
+  "realm_id":            "<uuid>",
+  "user_id":             "<uuid>",
+  "access_token":        "<jwt>",
+  "refresh_token":       "<jwt>",
+  "quickstart":          "<shell snippet with realm_id and token interpolated>",
+  "admin_password":      "<randomly generated — non-empty on first call only>",
+  "system_access_token": "<jwt scoped to the system realm for cross-realm admin ops>",
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
 }
 ```
+
+`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return an empty string. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap.
 
 In production mode the endpoint returns `404 Not Found`.
 
@@ -548,7 +560,7 @@ echo "Realm: $REALM_ID"
 echo "User:  $USER_ID"
 ```
 
-The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. In production it returns `404 Not Found`.
+The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password` field is **non-empty on the first call only** — store it securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
 
 ### 2. Register a client
 
@@ -587,9 +599,12 @@ echo "Challenge: $CODE_CHALLENGE"
 
 ### 4. Start an authorization request
 
+The `/authorize` endpoint requires a valid Bearer token — the user's identity is taken from the token's `sub` claim, not from a caller-supplied field.
+
 ```bash
 AUTH=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
   -H "X-Realm-ID: $REALM_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_id\":             \"$CLIENT_ID\",
@@ -598,8 +613,7 @@ AUTH=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
     \"scope\":                 \"openid profile email\",
     \"state\":                 \"$(openssl rand -hex 16)\",
     \"code_challenge\":        \"$CODE_CHALLENGE\",
-    \"code_challenge_method\": \"S256\",
-    \"user_id\":               \"$USER_ID\"
+    \"code_challenge_method\": \"S256\"
   }")
 
 CODE=$(echo "$AUTH" | jq -r .code)

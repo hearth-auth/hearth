@@ -162,9 +162,16 @@ pub(crate) fn proto_authorize_to_domain(
         state: r.state,
         resource: None,
         response_type: r.response_type,
-        user_id: UserId::new(
-            uuid::Uuid::parse_str(&r.user_id).map_err(|_| "invalid user_id UUID".to_string())?,
-        ),
+        // `user_id` is optional on the HTTP path: callers that go through
+        // `proto_authorize_to_domain` subsequently override this field with the
+        // authenticated principal from the Bearer token (HEA-1721).  Accept an
+        // absent or empty field (proto default "") by falling back to nil UUID;
+        // callers that supply a well-formed UUID still have it validated here.
+        user_id: UserId::new(if r.user_id.is_empty() {
+            uuid::Uuid::nil()
+        } else {
+            uuid::Uuid::parse_str(&r.user_id).map_err(|_| "invalid user_id UUID".to_string())?
+        }),
         code_challenge: r.code_challenge,
         code_challenge_method,
         nonce: r.nonce,
