@@ -265,7 +265,7 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **4,623 Rust tests (2,231 unit · 2,331 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
 
 ---
 
