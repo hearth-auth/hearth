@@ -113,13 +113,17 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             require_consent: None,
             client_logo_url: None,
             slug: None,
-            trust_level: r.trust_level.and_then(|v| {
-                match pb::ClientTrustLevel::try_from(v) {
-                    Ok(pb::ClientTrustLevel::FirstParty) => Some(domain::ClientTrustLevel::FirstParty),
-                    Ok(pb::ClientTrustLevel::ThirdParty) => Some(domain::ClientTrustLevel::ThirdParty),
+            trust_level: r
+                .trust_level
+                .and_then(|v| match pb::ClientTrustLevel::try_from(v) {
+                    Ok(pb::ClientTrustLevel::FirstParty) => {
+                        Some(domain::ClientTrustLevel::FirstParty)
+                    }
+                    Ok(pb::ClientTrustLevel::ThirdParty) => {
+                        Some(domain::ClientTrustLevel::ThirdParty)
+                    }
                     _ => None,
-                }
-            }),
+                }),
             declared_scopes: None,
             cors_origins: None,
             consent_spans_orgs: None,

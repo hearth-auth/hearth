@@ -1132,11 +1132,16 @@ async fn bootstrap_dev(state: &Arc<AppState>) -> (String, String) {
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK, "bootstrap");
-    let b = axum::body::to_bytes(resp.into_body(), 32_000).await.expect("body");
+    let b = axum::body::to_bytes(resp.into_body(), 32_000)
+        .await
+        .expect("body");
     let boot: serde_json::Value = serde_json::from_slice(&b).expect("json");
     (
         boot["realm_id"].as_str().expect("realm_id").to_string(),
-        boot["access_token"].as_str().expect("access_token").to_string(),
+        boot["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string(),
     )
 }
 
@@ -1167,8 +1172,14 @@ async fn admin_create_first_party_client_via_api() {
         )
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::CREATED, "admin create first-party client");
-    let b = axum::body::to_bytes(resp.into_body(), 8_000).await.expect("body");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "admin create first-party client"
+    );
+    let b = axum::body::to_bytes(resp.into_body(), 8_000)
+        .await
+        .expect("body");
     let client: serde_json::Value = serde_json::from_slice(&b).expect("json");
     let client_id = client["client_id"].as_str().expect("client_id").to_string();
 
@@ -1252,7 +1263,9 @@ async fn dcr_cannot_self_grant_first_party_trust() {
     // DCR may be disabled (default in dev) — either 403 or 201 is acceptable,
     // but if the client is created its trust must be ThirdParty.
     if resp.status() == StatusCode::CREATED {
-        let b = axum::body::to_bytes(resp.into_body(), 8_000).await.expect("body");
+        let b = axum::body::to_bytes(resp.into_body(), 8_000)
+            .await
+            .expect("body");
         let client: serde_json::Value = serde_json::from_slice(&b).expect("json");
         let client_id = client["client_id"].as_str().expect("client_id").to_string();
         use crate::core::ClientId;
@@ -1298,7 +1311,9 @@ async fn patch_client_trust_level_roundtrip() {
         .await
         .expect("response");
     assert_eq!(resp.status(), StatusCode::CREATED, "create client");
-    let b = axum::body::to_bytes(resp.into_body(), 8_000).await.expect("body");
+    let b = axum::body::to_bytes(resp.into_body(), 8_000)
+        .await
+        .expect("body");
     let client: serde_json::Value = serde_json::from_slice(&b).expect("json");
     let client_id = client["client_id"].as_str().expect("client_id").to_string();
 
@@ -1322,7 +1337,11 @@ async fn patch_client_trust_level_roundtrip() {
         )
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::OK, "patch upgrade to first_party");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "patch upgrade to first_party"
+    );
     let stored = state
         .identity
         .get_client(&realm_id_t, &ClientId::new(client_uuid))
@@ -1348,7 +1367,11 @@ async fn patch_client_trust_level_roundtrip() {
         )
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::OK, "patch downgrade to third_party");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "patch downgrade to third_party"
+    );
     let stored = state
         .identity
         .get_client(&realm_id_t, &ClientId::new(client_uuid))
