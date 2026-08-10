@@ -138,6 +138,10 @@ impl hearth::storage::StorageEngine for MemStorage {
         entries.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(entries)
     }
+
+    fn list_realms(&self) -> Result<Vec<hearth::core::RealmId>, hearth::storage::StorageError> {
+        Ok(vec![])
+    }
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────

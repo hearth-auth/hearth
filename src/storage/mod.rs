@@ -317,11 +317,40 @@ pub trait StorageEngine: Send + Sync {
     /// in-memory `known_realms` set is empty would skip Phase 1 entirely and
     /// leave stale on-disk data in place (HEA-2131).
     ///
-    /// The default implementation returns an empty list.  This is correct for
-    /// engines that do not support multi-realm storage or are not used on the
-    /// cluster snapshot install path.  [`EmbeddedStorageEngine`] overrides
-    /// this with a full enumeration across the memtable and all SST files.
-    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
-        Ok(Vec::new())
+    /// Implementors that do not support multi-realm enumeration (e.g. test
+    /// doubles) should return `Ok(vec![])` explicitly.  There is no silent
+    /// default: a missing override that returns empty would silently skip the
+    /// Phase 1 clear on the snapshot-install path (HEA-2133).
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError>;
+
+    /// Write a durable "snapshot restore in progress" marker before the
+    /// two-phase snapshot restore begins (HEA-2132).
+    ///
+    /// Called by the cluster snapshot install path immediately before Phase 1
+    /// (delete all keys).  A process killed after this point but before
+    /// [`complete_snapshot_restore`](Self::complete_snapshot_restore) leaves
+    /// the marker on disk.  The engine detects the marker at next startup and
+    /// returns [`StorageError::TornSnapshotRestore`] rather than silently
+    /// serving mixed data from two different snapshot epochs.
+    ///
+    /// The default implementation is a no-op (no crash detection).
+    /// [`EmbeddedStorageEngine`] overrides this to write and `fsync` the
+    /// marker file and its parent directory.
+    fn begin_snapshot_restore(&self, _snapshot_id: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Remove the "snapshot restore in progress" marker after Phase 2 completes
+    /// successfully (HEA-2132).
+    ///
+    /// Called after all snapshot data has been replayed.  Removing the marker
+    /// signals that the restore finished cleanly — the engine will start
+    /// normally on the next open.
+    ///
+    /// The default implementation is a no-op.
+    /// [`EmbeddedStorageEngine`] overrides this to unlink the marker and
+    /// `fsync` the parent directory.
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        Ok(())
     }
 }

@@ -58,6 +58,10 @@ impl StorageEngine for PartialFaultEngine {
     ) -> Result<Vec<ScanEntry>, StorageError> {
         self.inner.scan(realm_id, start, end)
     }
+
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        self.inner.list_realms()
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

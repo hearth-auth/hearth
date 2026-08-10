@@ -1855,6 +1855,10 @@ mod tests {
         ) -> Result<(), StorageError> {
             self.inner.put_batch(realm_id, entries)
         }
+
+        fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+            self.inner.list_realms()
+        }
     }
 
     fn mk_counting_engine() -> (EmbeddedRbacEngine, Arc<CountingStorage>, RealmId) {

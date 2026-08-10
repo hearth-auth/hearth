@@ -14675,6 +14675,10 @@ mod tests {
         ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
             self.inner.scan(realm_id, start, end)
         }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            self.inner.list_realms()
+        }
     }
 
     fn setup_engine_gated() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<RotationGate>) {
@@ -18223,6 +18227,10 @@ mod tests {
             self.bump();
             self.inner.write_batch(realm_id, puts, deletes)
         }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            self.inner.list_realms()
+        }
     }
 
     /// C-5: `validate_token`'s read path MUST NOT write to storage when it
@@ -18420,6 +18428,10 @@ mod tests {
             deletes: &[Vec<u8>],
         ) -> Result<(), crate::storage::StorageError> {
             self.inner.write_batch(realm_id, puts, deletes)
+        }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            self.inner.list_realms()
         }
     }
 

@@ -516,6 +516,17 @@ impl ClusterEngine {
             .map_err(|e| ClusterError::Raft(e.to_string()))?
             .map_err(ClusterError::Storage)
     }
+
+    /// Enumerates all realm IDs present in the underlying storage engine.
+    ///
+    /// Delegates directly to [`EmbeddedStorageEngine::list_realms`] without
+    /// routing through Raft — enumeration is a local read, not a replicated
+    /// write.
+    pub(crate) fn list_realms(
+        &self,
+    ) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+        self.inner.list_realms()
+    }
 }
 
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
@@ -788,6 +799,10 @@ impl StorageEngine for ClusterStorageAdapter {
         })
         .map_err(cluster_to_storage_err)
     }
+
+    fn list_realms(&self) -> Result<Vec<RealmId>, crate::storage::StorageError> {
+        self.engine.list_realms()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -996,5 +1011,38 @@ mod tests {
                                                                 // Boundary: 1_000 ms is not "exceeds 1 s"; 1_001 ms is.
         assert_eq!(clock_skew_ms(0, 1_000_000), 1_000);
         assert!(clock_skew_ms(0, 1_001_000) > 1_000);
+    }
+
+    // ── ClusterStorageAdapter::list_realms delegation ─────────────────────────
+
+    /// `ClusterStorageAdapter::list_realms` must report every realm stored in
+    /// the underlying `EmbeddedStorageEngine`.  Without this delegation the
+    /// `restore_snapshot_in_place` Phase 1 clear would silently no-op when
+    /// invoked through the adapter (HEA-2133).
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_list_realms_delegates_to_inner() {
+        use crate::storage::StorageEngine as _;
+
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let realm_a = make_realm();
+        let realm_b = make_realm();
+
+        // Write one key into each realm so they appear on disk.
+        inner.put(&realm_a, b"key", b"val").expect("put realm_a");
+        inner.put(&realm_b, b"key", b"val").expect("put realm_b");
+
+        let cluster_engine = Arc::new(ClusterEngine::single_node(Arc::clone(&inner)));
+        let adapter = ClusterStorageAdapter::new(cluster_engine);
+
+        let mut realms = adapter.list_realms().expect("list_realms");
+        realms.sort();
+        let mut expected = vec![realm_a, realm_b];
+        expected.sort();
+        assert_eq!(
+            realms, expected,
+            "adapter must report all realms held by inner engine"
+        );
     }
 }

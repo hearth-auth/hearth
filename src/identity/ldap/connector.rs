@@ -438,6 +438,10 @@ mod tests {
         ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
             Ok(vec![])
         }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            Ok(vec![])
+        }
     }
 
     #[test]
