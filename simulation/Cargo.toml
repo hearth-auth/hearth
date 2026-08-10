@@ -2,7 +2,7 @@
 name = "hearth-simulation"
 version = "0.1.0"
 edition = "2021"
-description = "Deterministic simulation tests for Hearth storage and identity engines"
+description = "Crash-recovery simulation tests for Hearth storage and identity engines"
 license = "Apache-2.0"
 publish = false
 

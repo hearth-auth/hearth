@@ -34,7 +34,7 @@ Dependencies flow bottom-up (leaf → root), matching the layer architecture.
 ### Notes
 
 - Within each step, tackle P0 `fast` scenarios first, then P0 `extended`, then P1.
-- Property tests (`proptest`) and simulation tests (`madsim`) come after unit tests pass for each module.
+- Property tests (`proptest`) and crash-recovery simulation tests (`hearth-simulation`) come after unit tests pass for each module.
 - Benchmarks (`criterion`) added alongside steps 6, 11, 13, 14, 15 — not deferred to the end.
 - Proto files created when step 15 (OIDC) demands wire format definitions, not before.
 

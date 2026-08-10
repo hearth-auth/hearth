@@ -250,16 +250,16 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 2. **Integration / black box** — a `TestHarness` runs the same suite in embedded *and* HTTP server modes.
 3. **Property** — `proptest`, 256 cases locally, 10,000+ in CI.
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
-5. **Deterministic simulation** — `madsim` replays disk faults, WAL-tail corruption, and clock skew from fixed seeds: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
+5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
 7. **Conformance** — OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, WebAuthn Level 2 ceremony.
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
-**Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a madsim scenario that exercises it.
+**Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **900+ Rust tests · 27 deterministic simulation tests · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **4,623 Rust tests (2,231 unit · 2,331 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
 
 ---
 

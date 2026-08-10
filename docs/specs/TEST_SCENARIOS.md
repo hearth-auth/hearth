@@ -70,7 +70,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Simulation
 
-- [x] Crash mid-write: WAL recovers to last fully committed entry (`madsim` fault injection) `P0` `full`
+- [x] Crash mid-write: WAL recovers to last fully committed entry (`FaultFs` fault injection) `P0` `full`
 - [x] Crash mid-fsync: recovery produces valid state without corruption `P0` `full`
 - [x] Simulated disk I/O failure during append returns error with no partial writes `P0` `full`
 
@@ -113,7 +113,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Simulation
 
-- [x] Crash during memtable flush: recovery loses no committed data (`madsim`) `P0` `full`
+- [x] Crash during memtable flush: recovery loses no committed data (crash-recovery simulation) `P0` `full`
 - [x] Crash during compaction: recovery produces valid SST state `P0` `full`
 - [x] Power-loss simulation: all fsync'd data survives across crash-recovery cycles `P0` `full`
 
@@ -140,7 +140,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Simulation
 
-- [x] Tier transitions preserve all data under concurrent read/write load (`madsim`) `P0` `full`
+- [x] Tier transitions preserve all data under concurrent read/write load (crash-recovery simulation) `P0` `full`
 - [x] Crash during promotion or eviction: recovery produces consistent tier state `P0` `full`
 
 #### Benchmark
@@ -238,7 +238,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Simulation
 
-- [x] Crash recovery: no committed session is lost (`madsim` oracle assertion) `P0` `full`
+- [x] Crash recovery: no committed session is lost (crash-recovery oracle assertion) `P0` `full`
 - [x] TTL expiration correct under simulated clock skew / time drift `P1` `full`
 
 #### Adversarial
@@ -584,8 +584,8 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Simulation
 
-- [x] Crash during cascading realm deletion: recovery completes deletion or fully rolls back (`madsim`) `P0` `full`
-- [x] Concurrent realm operations under simulated I/O delays produce no data corruption (`madsim`) `P1` `full`
+- [x] Crash during cascading realm deletion: recovery completes deletion or fully rolls back (crash-recovery simulation) `P0` `full`
+- [x] Concurrent realm operations under simulated I/O delays produce no data corruption (crash-recovery simulation) `P1` `full`
 
 #### Adversarial
 
@@ -697,8 +697,8 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 
 #### Simulation
 
-- [x] Crash during audit write: recovery produces no partial or duplicate entries (`madsim`) `P0` `full`
-- [x] Audit log integrity under sustained write load: no events lost or reordered (`madsim`) `P0` `full`
+- [x] Crash during audit write: recovery produces no partial or duplicate entries (crash-recovery simulation) `P0` `full`
+- [x] Audit log integrity under sustained write load: no events lost or reordered (crash-recovery simulation) `P0` `full`
 
 #### Adversarial
 

@@ -228,7 +228,7 @@ dominated by the resource server's outbound call, not by Hearth's internal proce
 - Memtable insertions happen after WAL append. If the process crashes between WAL write and memtable update, WAL replay MUST reconstruct the correct state.
 - Writes SHOULD be batched where possible to amortize `fsync` cost.
 - `fsync()` is non-optional in production builds. A `--dev` flag MAY relax this for development mode only.
-- The storage engine MUST survive `kill -9` at any point and recover to a consistent state. This is verified by deterministic simulation tests (see [TESTING.md Section 5](./TESTING.md)).
+- The storage engine MUST survive `kill -9` at any point and recover to a consistent state. This is verified by crash-recovery simulation tests (see [TESTING.md Section 5](./TESTING.md)).
 - The storage engine MUST support **atomic batch writes**. Multiple operations (puts and deletes) MUST be writable as a single WAL entry with a single `fsync`. Either all operations in the batch are durable, or none are.
 - Identity operations that span multiple records (e.g., create user + index entry + credential) MUST use batch writes to maintain consistency.
 
@@ -539,7 +539,7 @@ These crates are pre-approved and need no additional justification:
 | Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; not yet production-validated at scale |
 | HTTP framework | `axum` | `tower`-compatible |
 | Time handling | `std::time`, `tokio::time` | |
-| Testing | `proptest`, `criterion`, `insta`, `madsim` | Test-only |
+| Testing | `proptest`, `criterion`, `insta` | Test-only |
 | HTTP client (test) | `reqwest` | Test-only |
 
 ### 15.3 Banned Patterns
@@ -609,7 +609,7 @@ hearth/
 ├── tests/                      # Black box integration tests
 ├── fuzz/                       # cargo-fuzz targets
 ├── benches/                    # Criterion benchmarks
-└── simulation/                 # madsim deterministic simulation tests
+└── simulation/                 # real-thread crash-recovery simulation tests
 ```
 
 ---
