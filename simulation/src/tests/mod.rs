@@ -7,6 +7,7 @@ mod rbac_concurrent_assignments;
 mod realm_concurrent_io;
 mod realm_crash;
 mod session_crash;
+mod snapshot_restore_crash;
 mod sst_compact_crash;
 mod sst_crash;
 mod tiered_crash;

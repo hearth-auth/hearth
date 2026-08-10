@@ -250,11 +250,9 @@ impl TestCluster {
 
             let log_store = HearthLogStore::open(&log_db_path).expect("log store");
             let storage_config = StorageConfig::dev(data_dir.clone());
-            let storage = Arc::new(
-                EmbeddedStorageEngine::open(storage_config).expect("storage engine"),
-            );
-            let sm =
-                HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>);
+            let storage =
+                Arc::new(EmbeddedStorageEngine::open(storage_config).expect("storage engine"));
+            let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>);
             let factory =
                 InMemoryNetworkFactory::new(id, Arc::clone(&registry), Arc::clone(&partitioned));
             let raft = openraft::Raft::<HearthRaftConfig>::new(

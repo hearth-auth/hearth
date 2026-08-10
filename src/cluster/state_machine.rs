@@ -274,10 +274,16 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             payload.realms.iter().map(|r| r.realm_id.clone()).collect();
 
         let engine = Arc::clone(&self.engine);
+        let snapshot_id = meta.snapshot_id.clone();
 
         // Apply the snapshot in-place through the live engine — no directory swap,
         // no new EmbeddedStorageEngine open (HEA-2126).
-        spawn_blocking(move || restore_snapshot_in_place(&engine, &payload))
+        //
+        // `restore_snapshot_in_place` writes a durable marker before Phase 1 and
+        // removes it after Phase 2.  A crash between the two phases leaves the
+        // marker on disk; the engine refuses to start on next open rather than
+        // silently serving mixed data (HEA-2132).
+        spawn_blocking(move || restore_snapshot_in_place(&engine, &payload, &snapshot_id))
             .await
             .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
 
@@ -432,12 +438,18 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 ///
 /// # Crash safety
 ///
-/// An in-place restore is not atomic across a crash mid-restore: a process
-/// killed between the delete phase and the replay phase leaves the engine in a
-/// partially-cleared state.  On restart the WAL replays whatever was durably
-/// written, which may be a mix of cleared and un-cleared realm data.  Operators
-/// using Raft snapshot catch-up should either recover from a quorum peer or
-/// wipe the data directory before restarting a node that died mid-restore.
+/// An in-place restore is not atomic across a crash mid-restore.  To make a
+/// torn restore detectable rather than silently corrupt, this function writes
+/// a `SNAPSHOT_RESTORE_IN_PROGRESS` marker file (via
+/// [`StorageEngine::begin_snapshot_restore`]) before Phase 1 and removes it
+/// after Phase 2 (via [`StorageEngine::complete_snapshot_restore`]).
+///
+/// If the process is killed between the two phases the marker remains on disk.
+/// When [`EmbeddedStorageEngine::open`] finds the marker it returns
+/// [`StorageError::TornSnapshotRestore`] and refuses to serve rather than
+/// starting up in a mixed-data state.  The operator can recover by deleting
+/// the marker file and restarting (the node will re-request the snapshot from
+/// the leader via normal Raft catch-up), or by wiping the data directory.
 ///
 /// Note: the directory-swap this replaces was also not crash-atomic — the OS
 /// advisory lock file was moved with `data_dir` and immediately unlinked,
@@ -445,7 +457,15 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 fn restore_snapshot_in_place(
     engine: &Arc<dyn StorageEngine>,
     payload: &SnapshotPayload,
+    snapshot_id: &str,
 ) -> Result<(), StorageError<u64>> {
+    // Write a durable marker before Phase 1 so a crash between the two phases
+    // is detectable at next startup rather than silently serving mixed data
+    // (HEA-2132).  The marker is removed after Phase 2 completes.
+    engine
+        .begin_snapshot_restore(snapshot_id)
+        .map_err(to_write_err)?;
+
     // Phase 1: delete all live keys for every realm currently on disk.
     //
     // `list_realms` enumerates from the live engine (memtable + SST files),
@@ -473,6 +493,9 @@ fn restore_snapshot_in_place(
             .put_batch(&realm_data.realm_id, &realm_data.entries)
             .map_err(to_write_err)?;
     }
+
+    // Remove the marker: the restore completed cleanly.
+    engine.complete_snapshot_restore().map_err(to_write_err)?;
 
     Ok(())
 }

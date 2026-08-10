@@ -55,6 +55,16 @@ pub(crate) struct PendingBatchHandle {
     pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Name of the marker file written before a two-phase snapshot restore and
+/// removed after it completes successfully (HEA-2132).
+///
+/// If this file is present when the engine opens, the previous process was
+/// killed between Phase 1 (delete all keys) and Phase 2 (replay snapshot data).
+/// The engine refuses to start and returns [`StorageError::TornSnapshotRestore`]
+/// so the operator can take action (delete the file and let the node re-request
+/// the snapshot from the leader) rather than silently serving mixed data.
+const SNAPSHOT_RESTORE_MARKER: &str = "SNAPSHOT_RESTORE_IN_PROGRESS";
+
 /// Process-wide set of canonical data-directory paths currently held open.
 ///
 /// Prevents two `EmbeddedStorageEngine` instances in the same process from
@@ -404,6 +414,22 @@ impl EmbeddedStorageEngine {
             .map_err(|_| StorageError::AlreadyLocked {
                 data_dir: config.data_dir.clone(),
             })?;
+
+        // Refuse to open a directory that contains a torn snapshot restore marker
+        // (HEA-2132). We hold the exclusive lock at this point, so no other process
+        // can be writing to the directory concurrently.
+        let marker_path = config.data_dir.join(SNAPSHOT_RESTORE_MARKER);
+        match fs.read(&marker_path) {
+            Ok(content) => {
+                let snapshot_id = String::from_utf8(content).unwrap_or_default();
+                return Err(StorageError::TornSnapshotRestore {
+                    marker_path,
+                    snapshot_id,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(StorageError::Io(e)),
+        }
 
         // Load key registry (host key from env/auto-gen)
         let key_registry = Arc::new(KeyRegistry::load_with_fs(
@@ -1741,6 +1767,22 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         Ok(realms.into_iter().collect())
+    }
+
+    fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+        let marker_path = self.data_dir.join(SNAPSHOT_RESTORE_MARKER);
+        let mut file = self.fs.create(&marker_path)?;
+        file.write_all(snapshot_id.as_bytes())?;
+        file.sync_all()?;
+        self.fs.sync_dir(&self.data_dir)?;
+        Ok(())
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        let marker_path = self.data_dir.join(SNAPSHOT_RESTORE_MARKER);
+        self.fs.remove_file(&marker_path)?;
+        self.fs.sync_dir(&self.data_dir)?;
+        Ok(())
     }
 }
 

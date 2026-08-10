@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Torn Raft snapshot restore now fails loudly at startup instead of silently serving mixed data
+  (HEA-2132)** — `install_snapshot` (the two-phase in-place restore: Phase 1 deletes all realm keys,
+  Phase 2 replays the snapshot) now writes a durable `SNAPSHOT_RESTORE_IN_PROGRESS` marker before
+  Phase 1 and removes it after Phase 2.  If a follower is killed between the two phases the marker
+  persists; on next startup the engine detects it, refuses to open, and emits an actionable error
+  message naming the marker file.  The operator can recover by deleting the marker and restarting
+  (the node re-requests the snapshot from the leader via normal Raft catch-up).  Six simulation tests
+  cover: torn-restore detection, clean-restore marker removal, error-message quality, idempotent
+  `begin_snapshot_restore`, overwrite of a stale marker, and the end-to-end multi-realm round-trip.
+  (HEA-2132)
 - **Snapshot install no longer leaves stale realm data on restarted followers (HEA-2131)** —
   `install_snapshot` now enumerates on-disk realms via the storage engine's `list_realms` call
   (scanning the memtable and all SST files) rather than the state machine's in-memory
