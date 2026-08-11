@@ -326,7 +326,11 @@ jobs:
 
       - name: Build Go backend
         working-directory: examples/full-stack-demo/backend
-        run: go build -o /tmp/demo-backend ./...
+        # Build ONLY the main package. `./...` matches handlers/, middleware/,
+        # store/ and integration/ too, and `go build -o <file>` refuses to write
+        # multiple packages to a single non-directory path — which failed this
+        # job on every run since it was added.
+        run: go build -o /tmp/demo-backend .
 
       - name: Start Go backend
         run: |
