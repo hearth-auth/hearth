@@ -18,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   time, so this affected in-repo renders only.
 
 ### Added
+- **`realms.<name>.applications.<slug>.post_logout_redirect_uris` config key** — `OAuthClient` has
+  carried post-logout redirect targets since RP-initiated logout shipped, and the admin API could
+  set them, but the YAML application block never exposed the field.  A config declaring it was
+  rejected outright by `deny_unknown_fields`, so the allowlist could only be populated through the
+  admin API.  Declared URIs are now applied on both client creation and drift reconciliation.
 - **`GET /dev/probe-user` returns the resolved `user_id` (HEA-2143)** — the dev-only, loopback-only
   probe already performed the email lookup and discarded the result.  Returning the id lets tooling
   resolve a user in a *migrated* realm, which has no admin credentials of its own (admin bearer
@@ -25,6 +30,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `user_id: null` so the endpoint's latency-probe semantics are unchanged.
 
 ### Fixed
+- **Shipped example configs boot again** — `examples/large-scale-demo/hearth.yaml`,
+  `examples/full-stack-demo/hearth.yaml`, and `loadtest/loadtest-corpus.yaml` all declared a
+  `display_name` on role entries, which `RoleYamlConfig` has never accepted (roles carry `name` and
+  `description`; there is no display-name field on the role entity).  Once role parsing became
+  strict these configs failed at startup with `unknown field 'display_name'`, taking down
+  `make demo-seed`, `make loadtest`, and the nightly UI suite.  The full-stack demo additionally
+  declared a realm-level `display_name` that was never a supported key.  A parse guard now covers
+  all three shipped configs, so a schema change cannot land against a config no PR-blocking job
+  loads.
+- **`cargo publish` for the Rust SDK** — `sdks/rust/Cargo.lock` still listed `rand` as a dependency
+  of `hearth-sdk` after it was dropped in favour of `ring::SystemRandom`.  Cargo rewrote the lock
+  during packaging and then aborted on the resulting dirty working tree, so every publish dry-run
+  failed.
 - **Migrated realms are now reachable by name (HEA-2143)** — `import_realm` wrote the realm record
   and its signing key but never the `realm:name → id` index that `create_realm` writes, so every
   realm produced by `hearth migrate keycloak` / `hearth migrate auth0` (and by a backup restore) was

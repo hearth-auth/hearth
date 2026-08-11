@@ -1923,6 +1923,13 @@ pub struct ApplicationYamlConfig {
     /// Allowed OAuth 2.0 grant types (e.g. `["authorization_code", "client_credentials"]`).
     #[serde(default)]
     pub grant_types: Option<Vec<String>>,
+    /// Allowed OIDC RP-initiated logout redirect targets.
+    ///
+    /// A `post_logout_redirect_uri` supplied at the logout endpoint is only
+    /// honored when it appears in this list. Omitted means no post-logout
+    /// redirect is permitted for this client.
+    #[serde(default)]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Whether this is a confidential client (has a client secret).
     /// Defaults to `false` (public client).
     #[serde(default)]

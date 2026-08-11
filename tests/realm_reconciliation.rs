@@ -410,3 +410,60 @@ async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
         "omitted want_assertions_signed must default to false"
     );
 }
+
+// ===== Scenario: application post-logout redirect URIs round-trip from YAML =====
+
+/// `OAuthClient` has carried `post_logout_redirect_uris` since RP-initiated
+/// logout shipped, and `UpdateClientRequest` can set them — but
+/// `ApplicationYamlConfig` never exposed the field, so a config declaring it
+/// was rejected outright by `deny_unknown_fields`. Reconcile must accept the
+/// key and land it on the client, otherwise RP-initiated logout can only be
+/// configured through the admin API.
+#[tokio::test]
+async fn reconcile_applies_post_logout_redirect_uris_from_yaml() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hearth.yaml");
+    std::fs::write(
+        &path,
+        r#"
+realms:
+  demo:
+    applications:
+      demo-spa:
+        name: "Demo SPA"
+        confidential: false
+        redirect_uris:
+          - "http://localhost:5173/callback"
+        grant_types:
+          - authorization_code
+        post_logout_redirect_uris:
+          - "http://localhost:5173"
+"#,
+    )
+    .expect("write config");
+
+    let config = Config::from_file_as_dev(&path).expect("config must parse");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+
+    let realm = identity
+        .get_realm_by_name("demo")
+        .expect("lookup realm")
+        .expect("demo realm exists");
+    let clients = identity
+        .list_clients(realm.id(), &hearth::core::PageRequest::new(0, 10))
+        .expect("list clients");
+    let client = clients
+        .items
+        .iter()
+        .find(|c| c.client_name() == "Demo SPA")
+        .expect("demo-spa client exists");
+
+    assert_eq!(
+        client.post_logout_redirect_uris(),
+        ["http://localhost:5173"],
+        "YAML post_logout_redirect_uris must land on the reconciled client"
+    );
+}

@@ -807,7 +807,6 @@ dependencies = [
  "base64",
  "http 1.4.0",
  "jsonwebtoken",
- "rand 0.8.6",
  "reqwest",
  "ring",
  "serde",

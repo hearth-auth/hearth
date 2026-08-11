@@ -1184,6 +1184,7 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 |-------|------|---------|-------------|
 | `name` | string | *required* | Human-readable application name. |
 | `redirect_uris` | list | `[]` | Allowed OAuth 2.0 redirect URIs. |
+| `post_logout_redirect_uris` | list | `[]` | Allowed OIDC RP-initiated logout targets. A `post_logout_redirect_uri` passed to the logout endpoint is only honored when it appears here; an empty list permits no post-logout redirect. |
 | `grant_types` | list | `["authorization_code"]` | Allowed grant types: `authorization_code`, `client_credentials`, `refresh_token`, `device_code`. |
 | `confidential` | bool | `false` | Whether this is a confidential client (has a client secret). |
 | `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage. |
@@ -1193,7 +1194,7 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
-- Existing slug → `name`, `redirect_uris`, `grant_types` **updated** if changed
+- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types` **updated** if changed
 - Removed slug → client **archived**
 
 ```yaml

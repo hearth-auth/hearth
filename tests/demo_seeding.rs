@@ -306,3 +306,28 @@ fn loadtest_corpus_config_is_large_by_default() {
         "default loadtest corpus must seed a large dataset (got {total})"
     );
 }
+
+// ===== Scenario 7: every shipped example config parses =====
+
+/// The three configs shipped in-tree are booted by real entry points — the
+/// large-scale demo by `make demo-seed`, the loadtest corpus by
+/// `run-loadtest.sh`, and the full-stack demo by the UI integration suite and
+/// `ui-nightly.yml`. Only the first two had parse guards, so `full-stack-demo`
+/// silently rotted past `deny_unknown_fields` until a nightly boot failed.
+/// Assert the whole set parses so a schema change cannot land against a
+/// shipped config that nothing on the PR path loads.
+#[test]
+fn shipped_example_configs_parse() {
+    for relative in [
+        "examples/large-scale-demo/hearth.yaml",
+        "examples/full-stack-demo/hearth.yaml",
+        "loadtest/loadtest-corpus.yaml",
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        // All three are loaded via `serve --dev --config`, so validate them
+        // under the same relaxed dev-mode rules the real boot path uses.
+        if let Err(error) = Config::from_file_as_dev(&path) {
+            panic!("{relative} must parse and validate: {error:?}");
+        }
+    }
+}
