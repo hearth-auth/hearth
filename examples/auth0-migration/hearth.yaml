@@ -41,12 +41,12 @@ oidc:
 
 token:
   # Auth0 equivalent: Applications → <app> → Token Expiration (seconds).
-  # Auth0 default is 86400 (24 h). Hearth default is 3600 (1 h); tighten as needed.
-  access_token_lifetime_secs: 3600
+  # Auth0 default is 86400 (24 h). Hearth default is 1h; tighten as needed.
+  access_token_ttl: "1h"
 
   # Auth0 equivalent: Applications → <app> → Refresh Token → Expiration settings.
   # Rotate-on-use is always enabled in Hearth; detected theft revokes the whole family.
-  refresh_token_lifetime_secs: 2592000   # 30 days
+  refresh_token_ttl: "30d"
 
 # ── Storage ───────────────────────────────────────────────────────────────────
 

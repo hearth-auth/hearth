@@ -40,7 +40,14 @@ fi
 DATA_DIR="$(mktemp -d -t hearth-auth0-migration-XXXXXX)"
 PORT="${HEARTH_PORT:-8431}"   # avoid clashing with the default 8420 dev port
 BASE="http://127.0.0.1:${PORT}"
-HEARTH_BIN="$REPO_ROOT/target/release/hearth"
+# Resolve the target directory rather than assuming ./target — a repo-wide
+# CARGO_TARGET_DIR (or a workspace target override) puts the binary elsewhere,
+# and a hardcoded path fails with a bare "command not found" (HEA-2143).
+TARGET_DIR="$(cd "$REPO_ROOT" && \
+  cargo metadata --no-deps --format-version 1 --offline 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' \
+  2>/dev/null || echo "$REPO_ROOT/target")"
+HEARTH_BIN="$TARGET_DIR/release/hearth"
 
 cleanup() {
   if [[ -n "${HEARTH_PID:-}" ]] && kill -0 "$HEARTH_PID" 2>/dev/null; then
@@ -66,10 +73,16 @@ MIGRATE_OUTPUT="$(
 )"
 echo "$MIGRATE_OUTPUT"
 
-# Parse the realm UUID printed by `print_migration_report`:
-#   Migration summary:
-#     realm:                7b5d9f26-3c8a-4b1e-a6f2-2d08e7c81045
-MIGRATED_REALM_ID="$(echo "$MIGRATE_OUTPUT" | awk '/realm:/{print $2}')"
+# Parse the realm UUID printed by `print_migration_report`. The line carries a
+# tracing timestamp/level prefix and the id renders with a `realm_` prefix:
+#   00:51:23  INFO hearth:   realm:   realm_7b5d9f26-3c8a-4b1e-a6f2-2d08e7c81045
+# Positional awk picked up "INFO" instead, so match the UUID shape directly.
+MIGRATED_REALM_ID="$(
+  echo "$MIGRATE_OUTPUT" \
+    | grep -E 'realm:' \
+    | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' \
+    | head -n 1
+)"
 if [[ -z "$MIGRATED_REALM_ID" ]]; then
   echo "ERROR: could not parse realm UUID from migration output" >&2
   echo "Full output:" >&2
@@ -83,12 +96,20 @@ echo "  migrated realm UUID: $MIGRATED_REALM_ID"
 echo "▸ starting hearth --dev on port $PORT"
 # HEARTH_DEV_DATA_DIR tells hearth serve --dev to use our migrated data dir
 # instead of the default ephemeral temp directory.
-HEARTH_DEV_DATA_DIR="$DATA_DIR" \
-  "$HEARTH_BIN" serve \
-    --dev \
-    --bind 127.0.0.1 \
-    --port "$PORT" \
-    >"$DATA_DIR/hearth.log" 2>&1 &
+# Run from the data dir, NOT from this example directory. `hearth.yaml` here is
+# an annotated *production* reference for the migration guide (0.0.0.0 bind, TLS
+# paths under /etc) — config auto-discovery picks it up from the working
+# directory and then refuses to boot under --dev. --dev plus the flags below
+# fully specify this server, so keep discovery away from it (HEA-2143).
+(
+  cd "$DATA_DIR" || exit 1
+  HEARTH_DEV_DATA_DIR="$DATA_DIR" \
+    exec "$HEARTH_BIN" serve \
+      --dev \
+      --bind 127.0.0.1 \
+      --port "$PORT" \
+      >"$DATA_DIR/hearth.log" 2>&1
+) &
 HEARTH_PID=$!
 
 # Wait for the server to become healthy (up to 30 s).

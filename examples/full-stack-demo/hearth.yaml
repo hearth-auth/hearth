@@ -32,8 +32,6 @@ security:
 
 realms:
   demo:
-    display_name: "Hearth Hub Demo"
-
     # Enable self-service signup so the demo can showcase — and the HEA-2056
     # integration suite can exercise — the registration → email-verification →
     # login flow. New users land with no roles until an admin assigns one.
@@ -71,14 +69,12 @@ realms:
 
     roles:
       - name: viewer
-        display_name: "Viewer"
         description: "Read-only access to published content."
         scope_kind: realm
         permissions:
           - content.read
 
       - name: editor
-        display_name: "Editor"
         description: "Create and edit content."
         scope_kind: realm
         permissions:
@@ -86,7 +82,6 @@ realms:
           - content.write
 
       - name: admin
-        display_name: "Admin"
         description: "Full content administration access."
         scope_kind: realm
         permissions:

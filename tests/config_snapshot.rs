@@ -382,6 +382,7 @@ async fn diff_detects_application_added() {
         hearth::config::ApplicationYamlConfig {
             name: "Dashboard".to_string(),
             redirect_uris: None,
+            post_logout_redirect_uris: None,
             grant_types: None,
             confidential: None,
             client_secret: None,
@@ -423,6 +424,7 @@ async fn diff_detects_application_removed() {
         hearth::config::ApplicationYamlConfig {
             name: "Old Portal".to_string(),
             redirect_uris: None,
+            post_logout_redirect_uris: None,
             grant_types: None,
             confidential: None,
             client_secret: None,

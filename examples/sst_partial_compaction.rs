@@ -192,7 +192,7 @@ fn new_sst_bytes(dir: &Path, seen: &mut HashMap<u64, u64>) -> Result<u64, std::i
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.extension().is_some_and(|ext| ext == "sst") {
+        if path.extension().is_none_or(|ext| ext != "sst") {
             continue;
         }
         let Some(num) = path

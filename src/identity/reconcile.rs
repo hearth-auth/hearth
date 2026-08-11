@@ -976,6 +976,10 @@ pub(crate) fn reconcile_applications(
 
         let cfg_require_consent = app_cfg.require_consent.unwrap_or(true);
         let cfg_logo = app_cfg.client_logo_url.clone();
+        let cfg_post_logout = app_cfg
+            .post_logout_redirect_uris
+            .clone()
+            .unwrap_or_default();
         let cfg_profile = match app_cfg.profile.as_deref() {
             None | Some("standard") => ClientProfile::Standard,
             Some("fapi2") => ClientProfile::Fapi2,
@@ -1000,6 +1004,7 @@ pub(crate) fn reconcile_applications(
                 let consent_changed = existing.require_consent() != cfg_require_consent;
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
                 let profile_changed = existing.profile() != cfg_profile;
+                let post_logout_changed = existing.post_logout_redirect_uris() != cfg_post_logout;
 
                 if was_archived
                     || name_changed
@@ -1008,6 +1013,7 @@ pub(crate) fn reconcile_applications(
                     || consent_changed
                     || logo_changed
                     || profile_changed
+                    || post_logout_changed
                 {
                     engine.update_client(
                         realm_id,
@@ -1040,6 +1046,11 @@ pub(crate) fn reconcile_applications(
                             },
                             profile: if profile_changed {
                                 Some(cfg_profile)
+                            } else {
+                                None
+                            },
+                            post_logout_redirect_uris: if post_logout_changed {
+                                Some(cfg_post_logout.clone())
                             } else {
                                 None
                             },
@@ -1110,7 +1121,8 @@ pub(crate) fn reconcile_applications(
                 // client in the intended state.
                 let needs_followup = !cfg_require_consent
                     || cfg_logo.is_some()
-                    || cfg_profile != ClientProfile::Standard;
+                    || cfg_profile != ClientProfile::Standard
+                    || !cfg_post_logout.is_empty();
                 if needs_followup {
                     engine.update_client(
                         realm_id,
@@ -1122,6 +1134,7 @@ pub(crate) fn reconcile_applications(
                             require_consent: Some(cfg_require_consent),
                             client_logo_url: Some(cfg_logo.clone()),
                             profile: Some(cfg_profile),
+                            post_logout_redirect_uris: Some(cfg_post_logout.clone()),
                             slug: app_cfg.slug.clone(),
                             trust_level: app_cfg.trust_level,
                             declared_scopes: app_cfg.declared_scopes.clone(),

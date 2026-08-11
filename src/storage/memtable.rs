@@ -42,7 +42,7 @@
 //! failure the parked map is folded back into the active map so no acknowledged
 //! write is dropped (the HEA-1897 no-loss property).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -483,6 +483,30 @@ impl Memtable {
                 )
             })
             .collect()
+    }
+
+    /// Returns the set of distinct realm IDs present in the memtable.
+    ///
+    /// Scans both the active map and the map currently being flushed to an SST
+    /// (if any). Includes realms with only tombstone entries — the snapshot
+    /// install path calls `scan` on each returned realm to collect live keys,
+    /// so enumerating tombstone-only realms is harmless (their scan returns empty).
+    ///
+    /// Used by cluster snapshot install (`restore_snapshot_in_place`) to clear
+    /// all stale on-disk data before replaying a new snapshot (HEA-2131).
+    pub(crate) fn list_realm_ids(&self) -> BTreeSet<RealmId> {
+        let mut realms = BTreeSet::new();
+        let active = self.data.load();
+        for entry in active.iter() {
+            realms.insert(entry.key().realm_id().clone());
+        }
+        let flushing = self.flushing.load();
+        if let Some(parked) = flushing.as_ref() {
+            for entry in parked.iter() {
+                realms.insert(entry.key().realm_id().clone());
+            }
+        }
+        realms
     }
 
     /// Returns all entries across all realms, sorted by composite key.

@@ -189,6 +189,19 @@ jobs:
       - name: RBAC storage-write lint (check-rbac-storage-writes.sh)
         run: bash scripts/check-rbac-storage-writes.sh
 
+      # HEA-2116: prevent a release from shipping with stale install-instruction
+      # version references in README.md. Compares every pinned release URL / tag
+      # against the latest git semver tag. The filter checkout uses fetch-depth: 0
+      # so git tags are available for the comparison.
+      - name: README version drift (check-readme-version.sh)
+        run: bash scripts/check-readme-version.sh
+
+      # The guard above is itself the test artifact for HEA-2116, so it needs a
+      # test proving it FAILS on a deliberately stale reference — otherwise an
+      # `exit 0` stub would pass CI forever. Pure bash, no Rust build.
+      - name: README version drift — guard self-test
+        run: bash scripts/tests/check-readme-version.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:
@@ -724,6 +737,38 @@ jobs:
       - name: cargo deny check (advisories + licenses + bans)
         run: cargo deny check
 
+  # ── MSRV gate (HEA-2115) ─────────────────────────────────────────────────────
+  #
+  # Builds the workspace at exactly the rust-version declared in Cargo.toml so
+  # that a dependency bump that raises the true floor cannot silently drift past
+  # the declared minimum unnoticed. Runs on every Rust-touching change and on
+  # every push/schedule so cargo-update PRs are always covered.
+  #
+  # Uses `toolchain: "1.88.0"` (the value of rust-version in Cargo.toml).
+  # Keep these two in sync; the CI job is the enforcement mechanism.
+
+  msrv:
+    name: msrv (1.88.0)
+    needs: filter
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain (MSRV pin)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: "1.88.0"
+          components: ""
+
+      - name: cargo check (MSRV)
+        run: cargo check --workspace --locked
+
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
   # Branch protection requires ONLY this job for the CI workflow. It always runs
@@ -741,7 +786,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny]
+    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -757,9 +802,10 @@ jobs:
           LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
           CARGO_DENY: ${{ needs.cargo-deny.result }}
+          MSRV: ${{ needs.msrv.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY"
-          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY"; do
+          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV"
+          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "A required job failed or was cancelled."
               exit 1

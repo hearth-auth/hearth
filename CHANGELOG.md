@@ -6,13 +6,151 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and
+  takes an exclusive advisory lock on `storage.data_dir`, so a second replica sharing the
+  `ReadWriteOnce` PVC cannot start; it crash-loops with `AlreadyLocked`.  `helm template` /
+  `helm install` now fail at render time with an explanatory error instead of producing a
+  Deployment that will never become ready.  Use Raft cluster mode (one PVC per node) for high
+  availability.  `make helm-template` asserts the guard so it cannot silently regress.
+- **Helm `Chart.yaml` `version` / `appVersion` corrected to 1.6.8 (HEA-2107)** — both read `1.0.0`
+  while the shipping release was 1.6.8.  The publish workflow stamps the release tag at package
+  time, so this affected in-repo renders only.
+
 ### Added
-- **Discovery now advertises `client_secret_basic` (HEA-2112)** — the OIDC discovery document's
-  `token_endpoint_auth_methods_supported` list gained `client_secret_basic`. HTTP Basic client
-  authentication has worked since HEA-1755 (an external audit claiming otherwise was a
-  misdiagnosis), but discovery omitted it — contradicting the `token_endpoint_auth_method`
-  value dynamic client registration returns for every client. Strict OIDC clients that pick
-  their auth method from discovery can now select Basic. (HEA-2112)
+- **`realms.<name>.applications.<slug>.post_logout_redirect_uris` config key** — `OAuthClient` has
+  carried post-logout redirect targets since RP-initiated logout shipped, and the admin API could
+  set them, but the YAML application block never exposed the field.  A config declaring it was
+  rejected outright by `deny_unknown_fields`, so the allowlist could only be populated through the
+  admin API.  Declared URIs are now applied on both client creation and drift reconciliation.
+- **`GET /dev/probe-user` returns the resolved `user_id` (HEA-2143)** — the dev-only, loopback-only
+  probe already performed the email lookup and discarded the result.  Returning the id lets tooling
+  resolve a user in a *migrated* realm, which has no admin credentials of its own (admin bearer
+  tokens only validate under the realm named in `X-Realm-ID`).  Unknown emails still return 200 with
+  `user_id: null` so the endpoint's latency-probe semantics are unchanged.
+
+### Fixed
+- **Shipped example configs boot again** — `examples/large-scale-demo/hearth.yaml`,
+  `examples/full-stack-demo/hearth.yaml`, and `loadtest/loadtest-corpus.yaml` all declared a
+  `display_name` on role entries, which `RoleYamlConfig` has never accepted (roles carry `name` and
+  `description`; there is no display-name field on the role entity).  Once role parsing became
+  strict these configs failed at startup with `unknown field 'display_name'`, taking down
+  `make demo-seed`, `make loadtest`, and the nightly UI suite.  The full-stack demo additionally
+  declared a realm-level `display_name` that was never a supported key.  A parse guard now covers
+  all three shipped configs, so a schema change cannot land against a config no PR-blocking job
+  loads.
+- **`cargo publish` for the Rust SDK** — `sdks/rust/Cargo.lock` still listed `rand` as a dependency
+  of `hearth-sdk` after it was dropped in favour of `ring::SystemRandom`.  Cargo rewrote the lock
+  during packaging and then aborted on the resulting dirty working tree, so every publish dry-run
+  failed.
+- **Migrated realms are now reachable by name (HEA-2143)** — `import_realm` wrote the realm record
+  and its signing key but never the `realm:name → id` index that `create_realm` writes, so every
+  realm produced by `hearth migrate keycloak` / `hearth migrate auth0` (and by a backup restore) was
+  invisible to name-based routing.  The realm appeared in `GET /admin/realms` and looked healthy,
+  yet `/realms/{name}/token`, `/realms/{name}/.well-known/openid-configuration`,
+  `/realms/{name}/.well-known/jwks.json`, and `/ui/realms/{name}/login` all returned **404** — a
+  migrated tenant's users could not log in at all.  Importing a realm whose name is already taken
+  is now rejected with `DuplicateRealmName` instead of silently creating a second realm that fights
+  over the same login URL.
+- **Imported realm signing keys are now encrypted at rest (HEA-2143)** — `import_realm` stored raw
+  PKCS#8 bytes while `create_realm` wrapped them under `security.key_encryption_key`.  Because the
+  read path accepts unenveloped key material on its legacy path, every migrated or restored realm
+  silently opted out of at-rest key encryption with no error.  Imports now wrap under the KEK
+  exactly as realm creation does.
+- **`hearth migrate` no longer runs completely silently (HEA-2143)** — only `hearth serve`
+  installed a `tracing` subscriber, so the migration summary, the imported realm's UUID, and every
+  per-user warning (skipped credentials, unsupported hash algorithms) were written to a dispatcher
+  that did not exist.  Operators saw an empty terminal and an exit code.  All non-`serve`
+  subcommands now install a subscriber before running.
+- **Migration example scripts run again (HEA-2143)** — `examples/auth0-migration/verify.mjs` and
+  `examples/keycloak-migration/verify.mjs` still authenticated with `grant_type=password`, removed
+  in HEA-1862, and failed against any current build.  Both now drive the realm-scoped browser login
+  form — the same `verify_password` path a real user takes — and additionally assert that a wrong
+  password is **rejected**, which the old ROPC step never checked.  `examples/auth0-migration/run.sh`
+  also no longer hardcodes `target/release` (breaking any `CARGO_TARGET_DIR` setup), parses the
+  realm UUID robustly, and keeps config auto-discovery away from the example's production-shaped
+  `hearth.yaml`; that file's stale `access_token_lifetime_secs` / `refresh_token_lifetime_secs`
+  keys are corrected to `access_token_ttl` / `refresh_token_ttl`.
+
+- **Torn Raft snapshot restore now fails loudly at startup instead of silently serving mixed data
+  (HEA-2132)** — `install_snapshot` (the two-phase in-place restore: Phase 1 deletes all realm keys,
+  Phase 2 replays the snapshot) now writes a durable `SNAPSHOT_RESTORE_IN_PROGRESS` marker before
+  Phase 1 and removes it after Phase 2.  If a follower is killed between the two phases the marker
+  persists; on next startup the engine detects it, refuses to open, and emits an actionable error
+  message naming the marker file.  The operator can recover by deleting the marker and restarting
+  (the node re-requests the snapshot from the leader via normal Raft catch-up).  Eight simulation
+  tests cover: torn-restore detection, clean-restore marker removal, error-message quality,
+  idempotent `begin_snapshot_restore`, overwrite of a stale marker, a fresh engine opening without
+  a marker, trait-object dispatch reaching the engine impl, and the end-to-end multi-realm
+  round-trip. (HEA-2132)
+- **Snapshot install no longer leaves stale realm data on restarted followers (HEA-2131)** —
+  `install_snapshot` now enumerates on-disk realms via the storage engine's `list_realms` call
+  (scanning the memtable and all SST files) rather than the state machine's in-memory
+  `known_realms` set, which is always empty after a process restart.  Previously, a follower that
+  restarted and then received a Raft snapshot would skip the pre-install wipe entirely, leaving
+  keys that the leader had since deleted permanently on the follower — a silent data divergence.
+  (HEA-2105)
+- **Raft followers can now complete snapshot catch-up (HEA-2126)** — `install_snapshot` previously
+  tried to open a new `EmbeddedStorageEngine` at the production data directory while the live engine
+  already held the exclusive lock on that directory, causing every follower snapshot install to fail
+  with `AlreadyLocked`.  Snapshots are now applied in-place through the live engine (delete existing
+  realm data, replay snapshot via `put_batch`), keeping the directory lock continuous and ensuring the
+  server's storage handle always reads current data without any pointer swap. (HEA-2105)
+- **`HEARTH_SMS_OTP_HMAC_KEY` is no longer forced on SMS-less production deployments (HEA-2114)** —
+  `hearth serve` previously refused to start in production whenever `HEARTH_SMS_OTP_HMAC_KEY` was
+  unset, even when `sms.transport: log` (no real SMS at all). The key is now required **only when a
+  real SMS transport (`twilio`, `awssns`) is configured**, matching the config-validation layer.
+  Deployments that do not send SMS start without it. (HEA-2105)
+
+### Added
+- **`trust_level` field on `POST /admin/applications` and `PATCH /admin/applications/{id}` (HEA-2111)** —
+  clients created via the admin API can now be designated `first_party` at creation time or
+  promoted/demoted via PATCH.  First-party clients skip the consent screen and receive the
+  full `permissions`, `roles`, and `groups` claims in issued JWTs.  The anonymous RFC 7591
+  DCR endpoint (`POST /register`) continues to hard-code `third_party` trust regardless of
+  any field sent by the caller.  `hearth.example.yaml` now documents the `trust_level` key
+  under `applications:`. (HEA-2105)
+- **Environment-variable reference in the README (HEA-2114)** — the Configuration section now
+  documents the `HEARTH_*` secrets read directly by `hearth serve` (`HEARTH_MASTER_KEY`,
+  `HEARTH_PREVIOUS_MASTER_KEY`, `HEARTH_KEK`, `HEARTH_SMS_OTP_HMAC_KEY`,
+  `HEARTH_TURNSTILE_SECRET_KEY`, per-realm `HEARTH_REALM_<REALM>_FINGERPRINT_HMAC_SECRET`,
+  `HEARTH_DEV_DATA_DIR`, `HEARTH_MAILCATCHER_PASSWORD`) with formats and generation commands.
+  (HEA-2105)
+
+### Fixed
+- **`POST /authorize` no longer rejects requests that omit `user_id` from the body (HEA-2117)** —
+  the conversion layer required `user_id` to be a valid UUID string even though the handler
+  always overrides it with the authenticated principal's ID from the Bearer token (HEA-1721).
+  Callers may now omit `user_id` (or pass an empty string) and the server accepts the request;
+  a well-formed UUID is still validated when supplied. (HEA-2117)
+- **Cluster init failure is now fatal (HEA-2108)** — when `cluster:` is present in the
+  configuration and Raft initialisation fails (bad TLS paths, unreachable peers, log-store
+  error), `hearth serve` now exits non-zero with a clear error message instead of silently
+  degrading to an independent single-node writer. Single-node mode must be an explicit
+  configuration choice (omit the `cluster:` section), never a fallback. (HEA-2105)
+- **Storage engine now holds an exclusive lock on `{data_dir}/LOCK` (HEA-2107)** — starting a
+  second `hearth serve` process against the same `storage.data_dir` previously caused silent
+  WAL corruption. The engine now acquires an OS-level advisory `flock` on startup and fails
+  with a clear error if another process holds it. Released automatically on shutdown and
+  `kill -9`. (HEA-2105)
+- **OIDC discovery endpoints now match the routes the server serves (HEA-2109)** — the
+  advertised `authorization_endpoint` (`{issuer}/authorize`) was registered POST-only, so a
+  conformant relying party that redirected a browser to it via GET received a `405`; the endpoint
+  now also answers GET by redirecting the browser into the interactive login/consent UI. The
+  advertised `device_authorization_endpoint` pointed at `{issuer}/device/authorize`, which the
+  router never served (`404`); discovery now advertises the real path `{issuer}/device_authorization`.
+  (HEA-2105)
+
+### Changed
+- **Helm chart `strategy.type` is now `Recreate` (HEA-2107)** — `RollingUpdate` would start a
+  new pod before the old one terminated, causing the storage engine to fail with "data directory
+  already locked". (HEA-2105)
+- **Helm HPA template removed (HEA-2107)** — an autoscaler on a single-writer embedded-storage
+  process has no valid configuration; enabling it caused silent WAL corruption. StatefulSet
+  evaluation is tracked as a follow-up. (HEA-2105)
+- **Helm `Chart.yaml` version and appVersion aligned to `1.0.0` (HEA-2107)**. (HEA-2105)
+
+### Added
 - **`POST /admin/bootstrap` now returns a cross-realm system-realm admin token (HEA-2087)** —
   the dev-only bootstrap response gained two fields: `system_access_token` (an access token for
   the reserved system-realm admin `admin@hearth.test`, whose nil-UUID realm passes the
@@ -42,30 +180,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pin the issuer advertised by the realm's discovery document. `validate_token` continues to accept
   both forms, so already-issued tokens keep validating across the upgrade. The access-token
   audience (`token.audience`) is unchanged. (HEA-2110)
+- **Unknown config keys are now a hard startup error (HEA-2113)** — all `hearth.yaml` config
+  structs now carry `#[serde(deny_unknown_fields)]`. Previously, a misspelled or removed key was
+  silently discarded; the server started as if the key were absent, leaving the operator with no
+  protection they thought they had configured. On upgrade, operators must correct or remove any
+  key that no longer exists. The following keys, formerly documented but never implemented, are
+  now immediate parse errors:
+  - `auth.audit_log_retention` — remove from config (audit retention is not yet configurable).
+  - `security.bearer_token` — **rename to `metrics.bearer_token`** (under the top-level
+    `metrics:` section). This key was intended to protect `/metrics` but was silently ignored;
+    operators following older documentation left `/metrics` unauthenticated while believing it
+    was protected.
+  - `security.password.pepper.active_version` — **rename to `security.password.pepper.version`**.
+  - `security.password.pepper.active_hex` — **rename to `security.password.pepper.key_hex`**.
+  - `security.password.pepper.previous_hex` — **rename to `security.password.pepper.previous_key_hex`**.
+- **`/metrics` endpoint defaults to disabled (HEA-2113)** — the `metrics.enabled` config field
+  has always defaulted to `false`; this release corrects the doc-comment in `AppState` that
+  incorrectly claimed the default was `true`, adds a `metrics` section to the README
+  configuration reference, and updates `hearth.example.yaml` to show the correct `metrics:`
+  block for enabling and protecting the endpoint.
+- **Minimum supported Rust version raised to 1.88.0 (HEA-2115)** — `Cargo.toml`
+  `rust-version` corrected from the stale declared floor of 1.75 to the true floor of
+  1.88.0, which is required by `time@0.3.51`, `cookie_store@0.22.1`, and the `tonic@0.14.6`
+  family. A new `msrv` CI job now builds the workspace at exactly `1.88.0` on every
+  Rust-touching PR so the floor cannot silently drift again.
 
 ### Fixed
-- **Basic-auth client credentials are now percent-decoded per RFC 6749 §2.3.1 (HEA-2112)** —
-  `Authorization: Basic` client credentials at the token, introspection, and revocation
-  endpoints were previously used verbatim, so a strict OAuth client that form-urlencodes its
-  credentials before base64 (as the RFC requires) could never authenticate if its secret
-  contained reserved characters (`%`, `+`, space, `:`, `&`, `=`). Decoding is lenient: a `%`
-  that does not start a valid escape passes through unchanged, so unencoded legacy secrets keep
-  working. Operators with manually registered secrets containing a *literal* `+` or a literal
-  valid escape sequence (e.g. `%2B`) sent unencoded should re-register or switch those clients
-  to `client_secret_post`. Server-generated secrets (DCR, admin API) are base64url and are
-  unaffected. (HEA-2112)
-- **Body `client_id` is no longer required at the token endpoint when authenticating via
-  Basic (HEA-2112)** — `POST /token` and `POST /realms/{realm}/token` previously rejected any
-  request whose body omitted `client_id`, even though RFC 6749 §3.2.1 requires it only when the
-  client is not otherwise authenticating. A strictly compliant `client_secret_basic` client —
-  which carries its identity solely in the `Authorization` header — could therefore never
-  complete an exchange, contradicting the newly advertised discovery metadata. The client
-  identity is now taken from the Basic username when the body field is absent or empty, and is
-  used consistently for per-client rate limiting, CORS, client authentication, and grant
-  dispatch. An explicitly empty `client_id=` or `client_secret=` form field next to Basic auth
-  is treated as absent, not as a conflicting credential — at the token, introspection, and
-  revocation endpoints alike. Requests that supply *neither* body `client_id` nor an
-  `Authorization` header keep their previous behavior. (HEA-2112)
 - **Full-stack demo resource server now rejects revoked access tokens (HEA-2094)** — the demo
   Go backend (`examples/full-stack-demo/backend`) previously validated access tokens by Ed25519
   signature and expiry only, so a token revoked at Hearth was still accepted on `/api/notes`
@@ -78,13 +218,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (HEA-2094)
 
 ### Security
-- **Conflicting Basic/body client credentials are now rejected (HEA-2112)** — a request that
-  carried both an `Authorization: Basic` header and body `client_id`/`client_secret` parameters
-  that disagreed was silently resolved in the Basic header's favor (and on the code-exchange
-  arm, the Basic secret was verified against the *body's* client id). RFC 6749 §2.3.1 forbids
-  using more than one client authentication mechanism per request; such requests now fail with
-  `400 invalid_request`. Requests where header and body credentials agree are unaffected.
-  (HEA-2112)
 - **Signing-key cache no longer resurrects a just-rotated key under a race (HEA-2096)** — the
   per-realm active-signing-key cache filled its miss path with an unsynchronised
   get-miss-load-insert. A `rotate_realm_signing_key` that landed between the storage read and the

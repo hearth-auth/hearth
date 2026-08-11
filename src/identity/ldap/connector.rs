@@ -438,6 +438,23 @@ mod tests {
         ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
             Ok(vec![])
         }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            Ok(vec![])
+        }
+
+        // NullStorage has no persistent storage, so snapshot marker operations
+        // are intentional no-ops.
+        fn begin_snapshot_restore(
+            &self,
+            _snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            Ok(())
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            Ok(())
+        }
     }
 
     #[test]

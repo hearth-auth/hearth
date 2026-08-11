@@ -1,6 +1,7 @@
 //! Storage engine error types.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// Errors originating from the storage engine.
 #[derive(Debug)]
@@ -52,6 +53,15 @@ pub enum StorageError {
         /// Display names of the realms whose KEKs could not be decrypted.
         affected_realms: Vec<String>,
     },
+    /// Another process (or engine instance) already holds the exclusive lock on
+    /// this data directory.
+    ///
+    /// Only one `hearth serve` process may open a given `storage.data_dir` at a
+    /// time. Stop the existing instance before starting a new one.
+    AlreadyLocked {
+        /// The data directory that is already locked.
+        data_dir: PathBuf,
+    },
     /// One or more realm KEK entries in `hearth.keys` have CRC corruption.
     ///
     /// Startup is blocked to prevent silent realm unavailability. The operator
@@ -61,6 +71,22 @@ pub enum StorageError {
     CorruptedKeks {
         /// Display names of the realms whose KEK entries failed CRC verification.
         affected_realms: Vec<String>,
+    },
+    /// A Raft snapshot restore was interrupted mid-way (torn restore).
+    ///
+    /// The data directory contains a marker file left by the two-phase snapshot
+    /// install; the node was killed between Phase 1 (delete all keys) and Phase 2
+    /// (replay snapshot data). Serving reads from this state risks silently returning
+    /// mixed data from two different snapshots.
+    ///
+    /// **Recovery**: delete the marker file named in `marker_path` and restart —
+    /// the node will re-request the snapshot from the leader. Alternatively, wipe
+    /// the data directory entirely.
+    TornSnapshotRestore {
+        /// Path to the `SNAPSHOT_RESTORE_IN_PROGRESS` marker file.
+        marker_path: PathBuf,
+        /// The snapshot ID from the interrupted install (from the marker file).
+        snapshot_id: String,
     },
 }
 
@@ -99,12 +125,33 @@ impl fmt::Display for StorageError {
                      affected realms: {realms}"
                 )
             }
+            Self::AlreadyLocked { data_dir } => {
+                write!(
+                    f,
+                    "data directory '{}' is already locked by another process; \
+                     stop the running Hearth instance before starting a new one",
+                    data_dir.display()
+                )
+            }
             Self::CorruptedKeks { affected_realms } => {
                 let realms = affected_realms.join(", ");
                 write!(
                     f,
                     "CRC corruption detected in hearth.keys; startup blocked to prevent \
                      silent realm unavailability; restore from backup; affected realms: {realms}"
+                )
+            }
+            Self::TornSnapshotRestore {
+                marker_path,
+                snapshot_id,
+            } => {
+                write!(
+                    f,
+                    "torn Raft snapshot restore detected: marker file '{}' (snapshot {snapshot_id}) \
+                     was left by a process killed between Phase 1 (delete) and Phase 2 (replay); \
+                     delete the marker file and restart so the node can re-request the snapshot \
+                     from the leader, or wipe the data directory entirely",
+                    marker_path.display()
                 )
             }
         }
@@ -123,7 +170,9 @@ impl std::error::Error for StorageError {
             | Self::Crypto { .. }
             | Self::UnsupportedWalVersion { .. }
             | Self::HostKeyMismatch { .. }
-            | Self::CorruptedKeks { .. } => None,
+            | Self::CorruptedKeks { .. }
+            | Self::AlreadyLocked { .. }
+            | Self::TornSnapshotRestore { .. } => None,
         }
     }
 }

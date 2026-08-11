@@ -5,8 +5,11 @@
 //! - **Write path**: WAL append → memtable insert → hot tier invalidate
 //! - **Recovery**: WAL replay into fresh memtable on open
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use fs2::FileExt as _;
 
 use arc_swap::ArcSwap;
 
@@ -50,6 +53,34 @@ pub(crate) struct PendingBatchHandle {
     pub(crate) ticket: u64,
     pub(crate) realm_id: crate::core::RealmId,
     pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Name of the marker file written before a two-phase snapshot restore and
+/// removed after it completes successfully (HEA-2132).
+///
+/// If this file is present when the engine opens, the previous process was
+/// killed between Phase 1 (delete all keys) and Phase 2 (replay snapshot data).
+/// The engine refuses to start and returns [`StorageError::TornSnapshotRestore`]
+/// so the operator can take action (delete the file and let the node re-request
+/// the snapshot from the leader) rather than silently serving mixed data.
+const SNAPSHOT_RESTORE_MARKER: &str = "SNAPSHOT_RESTORE_IN_PROGRESS";
+
+/// Process-wide set of canonical data-directory paths currently held open.
+///
+/// Prevents two `EmbeddedStorageEngine` instances in the same process from
+/// opening the same directory. Cross-process conflicts are caught by the OS
+/// advisory lock (`LOCK` file via `flock`).
+static OPEN_DIRS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// RAII guard that removes `path` from [`OPEN_DIRS`] on drop.
+struct DirLockGuard(PathBuf);
+
+impl Drop for DirLockGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = OPEN_DIRS.lock() {
+            set.remove(&self.0);
+        }
+    }
 }
 
 /// Configuration for the embedded storage engine.
@@ -323,6 +354,16 @@ pub struct EmbeddedStorageEngine {
     /// every reader so decrypted cold-tier residency is `O(cache_cap)`, not
     /// `O(corpus)` (HEA-1914).
     block_cache: Arc<crate::storage::block_cache::BlockCache>,
+    /// Process-local guard: removes `data_dir` from `OPEN_DIRS` on drop.
+    ///
+    /// Must be declared after all fields that use `data_dir` so it is dropped
+    /// last (Rust drops fields in declaration order).
+    _process_lock: DirLockGuard,
+    /// OS-level exclusive advisory lock on `{data_dir}/LOCK`.
+    ///
+    /// Released by the kernel when this `File` is closed (i.e., on drop), so
+    /// a `kill -9`'d process never leaves a stale lock.
+    _dir_lock: std::fs::File,
 }
 
 impl EmbeddedStorageEngine {
@@ -340,6 +381,55 @@ impl EmbeddedStorageEngine {
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn open_with_fs(config: StorageConfig, fs: Arc<dyn Fs>) -> Result<Self, StorageError> {
         fs.create_dir_all(&config.data_dir)?;
+
+        // Acquire process-local + OS-level exclusive lock before touching any files.
+        // The process-local guard prevents two engines in this process from using
+        // the same directory (flock is per-process on Linux, so it cannot catch
+        // in-process conflicts). The OS flock catches cross-process conflicts and
+        // is released automatically by the kernel on process exit or kill -9.
+        let canonical_dir = config
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| config.data_dir.clone());
+        {
+            let mut dirs = OPEN_DIRS.lock().expect("OPEN_DIRS mutex poisoned");
+            if !dirs.insert(canonical_dir.clone()) {
+                return Err(StorageError::AlreadyLocked {
+                    data_dir: config.data_dir.clone(),
+                });
+            }
+        }
+        // Inserted into OPEN_DIRS above; guard removes it on drop (including early returns below).
+        let dir_lock_guard = DirLockGuard(canonical_dir);
+
+        let lock_path = config.data_dir.join("LOCK");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(StorageError::Io)?;
+        lock_file
+            .try_lock_exclusive()
+            .map_err(|_| StorageError::AlreadyLocked {
+                data_dir: config.data_dir.clone(),
+            })?;
+
+        // Refuse to open a directory that contains a torn snapshot restore marker
+        // (HEA-2132). We hold the exclusive lock at this point, so no other process
+        // can be writing to the directory concurrently.
+        let marker_path = config.data_dir.join(SNAPSHOT_RESTORE_MARKER);
+        match fs.read(&marker_path) {
+            Ok(content) => {
+                let snapshot_id = String::from_utf8(content).unwrap_or_default();
+                return Err(StorageError::TornSnapshotRestore {
+                    marker_path,
+                    snapshot_id,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(StorageError::Io(e)),
+        }
 
         // Load key registry (host key from env/auto-gen)
         let key_registry = Arc::new(KeyRegistry::load_with_fs(
@@ -575,6 +665,8 @@ impl EmbeddedStorageEngine {
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_cache,
+            _process_lock: dir_lock_guard,
+            _dir_lock: lock_file,
         })
     }
 
@@ -1646,6 +1738,51 @@ impl StorageEngine for EmbeddedStorageEngine {
             .filter(|(_, alive)| *alive)
             .map(|(k, _)| k)
             .collect())
+    }
+
+    /// Enumerates all distinct realm IDs present in the engine.
+    ///
+    /// Collects realm IDs from both the memtable (active + any map being flushed
+    /// to SST) and every live SST file, then returns the union.  Tombstone-only
+    /// realms are included — [`StorageEngine::scan`] on an all-tombstone realm
+    /// returns empty, making the Phase 1 delete a no-op for that realm.
+    ///
+    /// This scans every entry in every SST file; it is O(total data size) and
+    /// intended only for the cluster snapshot install path, which is a rare
+    /// cluster-recovery event (HEA-2131).
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        let mut realms = std::collections::BTreeSet::new();
+
+        // Enumerate from the memtable (active map + map currently being flushed).
+        for realm_id in self.active_memtable.list_realm_ids() {
+            realms.insert(realm_id);
+        }
+
+        // Enumerate from every live SST file.
+        let sst_readers = self.sst_readers.load();
+        for reader in sst_readers.iter() {
+            for (key, _) in reader.iter_all()? {
+                realms.insert(key.realm_id().clone());
+            }
+        }
+
+        Ok(realms.into_iter().collect())
+    }
+
+    fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+        let marker_path = self.data_dir.join(SNAPSHOT_RESTORE_MARKER);
+        let mut file = self.fs.create(&marker_path)?;
+        file.write_all(snapshot_id.as_bytes())?;
+        file.sync_all()?;
+        self.fs.sync_dir(&self.data_dir)?;
+        Ok(())
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        let marker_path = self.data_dir.join(SNAPSHOT_RESTORE_MARKER);
+        self.fs.remove_file(&marker_path)?;
+        self.fs.sync_dir(&self.data_dir)?;
+        Ok(())
     }
 }
 
@@ -3969,6 +4106,30 @@ mod tests {
         assert_eq!(count, 12);
     }
 
+    // ===== Directory-lock tests =====
+
+    #[test]
+    fn dir_lock_second_open_fails_with_already_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config1 = StorageConfig::test_config(dir.path().to_path_buf());
+        let engine1 = EmbeddedStorageEngine::open(config1).expect("first open should succeed");
+
+        // Second open on the same dir must fail.
+        let config2 = StorageConfig::test_config(dir.path().to_path_buf());
+        let err =
+            EmbeddedStorageEngine::open(config2).expect_err("second open on same dir must fail");
+        assert!(
+            matches!(err, StorageError::AlreadyLocked { .. }),
+            "expected AlreadyLocked, got: {err}"
+        );
+
+        // After the first engine is dropped the directory is unlocked.
+        drop(engine1);
+        let config3 = StorageConfig::test_config(dir.path().to_path_buf());
+        EmbeddedStorageEngine::open(config3)
+            .expect("open after drop of first engine should succeed");
+    }
+
     #[test]
     fn scan_prefix_paged_cap_zero_reports_exact_total_above_default() {
         let (_dir, engine) = setup_engine();
@@ -3991,5 +4152,73 @@ mod tests {
             "cap=0 must report the true total, not the 10k cap"
         );
         assert_eq!(window.len(), 25);
+    }
+
+    // ── list_realms (HEA-2131) ────────────────────────────────────────────────
+
+    #[test]
+    fn list_realms_empty_engine_returns_empty() {
+        let (_dir, engine) = setup_engine();
+        let realms = engine.list_realms().expect("list_realms");
+        assert!(realms.is_empty(), "fresh engine must report no realms");
+    }
+
+    #[test]
+    fn list_realms_returns_written_realms() {
+        let (_dir, engine) = setup_engine();
+        let r1 = RealmId::generate();
+        let r2 = RealmId::generate();
+
+        engine.put(&r1, b"k1", b"v1").expect("put r1");
+        engine.put(&r2, b"k2", b"v2").expect("put r2");
+
+        let mut realms = engine.list_realms().expect("list_realms");
+        realms.sort();
+        let mut expected = vec![r1.clone(), r2.clone()];
+        expected.sort();
+        assert_eq!(
+            realms, expected,
+            "list_realms must include all written realms"
+        );
+    }
+
+    #[test]
+    fn list_realms_includes_tombstone_only_realms() {
+        // A realm where all keys are deleted still appears: scan on it returns empty
+        // (correct), so Phase 1 of snapshot install calls write_batch with an empty
+        // delete list (a no-op). The important invariant is it does NOT panic.
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"k", b"v").expect("put");
+        engine.delete(&realm, b"k").expect("delete");
+
+        let realms = engine.list_realms().expect("list_realms");
+        assert!(
+            realms.contains(&realm),
+            "a tombstone-only realm must still appear in list_realms"
+        );
+    }
+
+    #[test]
+    fn list_realms_sees_data_in_sst_after_flush() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Small flush threshold so writing a few entries triggers an SST flush.
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 1; // flush immediately
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+        let r1 = RealmId::generate();
+        let r2 = RealmId::generate();
+        engine.put(&r1, b"k1", b"v1").expect("put r1");
+        engine.put(&r2, b"k2", b"v2").expect("put r2");
+
+        let mut realms = engine.list_realms().expect("list_realms after sst flush");
+        realms.sort();
+        let mut expected = vec![r1.clone(), r2.clone()];
+        expected.sort();
+        assert_eq!(
+            realms, expected,
+            "list_realms must include realms whose data flushed to SST files"
+        );
     }
 }

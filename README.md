@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) ![v1.0.0](https://img.shields.io/badge/status-v1.0.0-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.8](https://img.shields.io/badge/status-v1.6.8-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -12,13 +12,13 @@ Every other identity provider is an application sitting on top of a generic data
 
 Token validation, session lookup, and permission checks run in-process against memory-mapped structures — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single static binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Stable 1.0.0:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+> **Stable 1.6.8:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 
 ---
 
 ## Install
 
-Download pre-built 1.0.0 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.0.0), or use Docker or Helm.
+Download pre-built v1.6.8 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.8), or use Docker or Helm.
 
 ### Released binary — Linux / macOS
 
@@ -28,8 +28,8 @@ Download pre-built 1.0.0 artifacts from the [Releases page](https://github.com/h
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.0.0/${ARTIFACT}"
-curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.0.0/SHA256SUMS
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.8/${ARTIFACT}"
+curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.8/SHA256SUMS
 
 # Verify the checksum
 sha256sum -c SHA256SUMS --ignore-missing
@@ -42,10 +42,10 @@ chmod +x "${ARTIFACT}"
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.0.0/hearth-windows-amd64.exe" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.8/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.0.0/SHA256SUMS" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.8/SHA256SUMS" `
   -OutFile SHA256SUMS
 
 # Verify the checksum
@@ -59,10 +59,10 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
 ```bash
-docker pull ghcr.io/hearth-auth/hearth:v1.0.0
+docker pull ghcr.io/hearth-auth/hearth:v1.6.8
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
-docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.0.0 serve --dev
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.8 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
@@ -72,7 +72,7 @@ curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 
 ```bash
 helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
-  --version 1.0.0 \
+  --version 1.6.8 \
   --namespace auth \
   --create-namespace
 ```
@@ -84,7 +84,7 @@ cosign verify \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/hearth-auth/charts/hearth:1.0.0
+  ghcr.io/hearth-auth/charts/hearth:1.6.8
 ```
 
 For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
@@ -104,12 +104,18 @@ The bootstrap call returns a realm, an admin user, and a signed JWT — everythi
 
 ```json
 {
-  "realm_id":    "01234567-89ab-cdef-0123-456789abcdef",
-  "user_id":     "fedcba98-7654-3210-fedc-ba9876543210",
-  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
-  "refresh_token": "rt_..."
+  "realm_id":            "01234567-89ab-cdef-0123-456789abcdef",
+  "user_id":             "fedcba98-7654-3210-fedc-ba9876543210",
+  "access_token":        "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
+  "refresh_token":       "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
+  "quickstart":          "# ready-to-paste shell commands (dev only)",
+  "admin_password":      "HearthTest123!",
+  "system_access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
 }
 ```
+
+`admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns an empty `admin_password`.
 
 > **No Docker, no Postgres, no config required** — `--dev` mode is fully self-contained. The bootstrap endpoint is disabled in production (`404 Not Found`).
 
@@ -250,16 +256,16 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 2. **Integration / black box** — a `TestHarness` runs the same suite in embedded *and* HTTP server modes.
 3. **Property** — `proptest`, 256 cases locally, 10,000+ in CI.
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
-5. **Deterministic simulation** — `madsim` replays disk faults, WAL-tail corruption, and clock skew from fixed seeds: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
+5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
 7. **Conformance** — OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, WebAuthn Level 2 ceremony.
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
-**Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a madsim scenario that exercises it.
+**Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **900+ Rust tests · 27 deterministic simulation tests · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
 
 ---
 
@@ -267,7 +273,7 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 
 ### Prerequisites
 
-- **Rust 1.75+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
+- **Rust 1.88.0+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
 - `buf` (optional — only needed if you edit `proto/**/*.proto`; see [`CONTRIBUTING.md`](CONTRIBUTING.md))
 
 ### 1. Build
@@ -323,12 +329,18 @@ Response (JSON):
 
 ```json
 {
-  "realm_id":    "<uuid>",
-  "user_id":      "<uuid>",
-  "access_token": "<jwt>",
-  "refresh_token":"<opaque>"
+  "realm_id":            "<uuid>",
+  "user_id":             "<uuid>",
+  "access_token":        "<jwt>",
+  "refresh_token":       "<jwt>",
+  "quickstart":          "<shell snippet with realm_id and token interpolated>",
+  "admin_password":      "<randomly generated — non-empty on first call only>",
+  "system_access_token": "<jwt scoped to the system realm for cross-realm admin ops>",
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
 }
 ```
+
+`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return an empty string. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap.
 
 In production mode the endpoint returns `404 Not Found`.
 
@@ -384,6 +396,25 @@ Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Eve
 | `email.mailgun` | `domain` | string | — | Mailgun sending domain |
 | `email.mailgun` | `region` | string | `us` | `us` \| `eu` |
 | `email.mailtrap` | `api_token` | string | — | Mailtrap Sending API token; required when `transport: mailtrap` |
+| `metrics` | `enabled` | bool | `false` | Set `true` to expose the `/metrics` Prometheus scrape endpoint. Disabled by default — enable only with a `bearer_token` or network-layer access control. |
+| `metrics` | `bearer_token` | string? | — | Bearer token required to access `/metrics` (constant-time compare). When absent, the endpoint is unauthenticated — operators SHOULD firewall it or bind to loopback. |
+
+### Environment variables
+
+Secrets are supplied through the environment rather than the YAML file so they never land on disk. `hearth serve` reads the following directly (independently of the `${VAR}` substitution used inside `hearth.yaml`):
+
+| Variable | Required? | Format | Generate | Purpose |
+|---|---|---|---|---|
+| `HEARTH_MASTER_KEY` | Recommended | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup fails** (auto-generation happens only under `--dev`). Set it so the key is not stored beside the data. |
+| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so existing realm KEKs can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
+| `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
+| `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). Under the `log` transport (dev or production) it is optional and a deterministic dev key is substituted. |
+| `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
+| `HEARTH_REALM_<REALM>_FINGERPRINT_HMAC_SECRET` | Per configured realm | ≥ 32 bytes | `openssl rand -base64 32` | Per-realm device-fingerprint HMAC secret. `<REALM>` is the SCREAMING_SNAKE_CASE realm name (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`). See [security hardening](docs/guides/security-hardening.md). |
+| `HEARTH_DEV_DATA_DIR` | Dev only | filesystem path | — | Overrides the data directory used under `--dev` (env > config `storage.data_dir` > temp dir). Ignored outside dev mode. |
+| `HEARTH_MAILCATCHER_PASSWORD` | Dev only | string | `openssl rand -base64 24` | Password for the in-process mailcatcher UI (`/dev/mail`) when `email.transport: mailcatcher`. Auto-generated (and logged) if unset. |
+
+See [`docs/guides/security-hardening.md`](docs/guides/security-hardening.md) for master-key rotation and per-realm secret provisioning.
 
 ---
 
@@ -529,7 +560,7 @@ echo "Realm: $REALM_ID"
 echo "User:  $USER_ID"
 ```
 
-The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. In production it returns `404 Not Found`.
+The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password` field is **non-empty on the first call only** — store it securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
 
 ### 2. Register a client
 
@@ -568,9 +599,12 @@ echo "Challenge: $CODE_CHALLENGE"
 
 ### 4. Start an authorization request
 
+The `/authorize` endpoint requires a valid Bearer token — the user's identity is taken from the token's `sub` claim, not from a caller-supplied field.
+
 ```bash
 AUTH=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
   -H "X-Realm-ID: $REALM_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
     \"client_id\":             \"$CLIENT_ID\",
@@ -579,8 +613,7 @@ AUTH=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
     \"scope\":                 \"openid profile email\",
     \"state\":                 \"$(openssl rand -hex 16)\",
     \"code_challenge\":        \"$CODE_CHALLENGE\",
-    \"code_challenge_method\": \"S256\",
-    \"user_id\":               \"$USER_ID\"
+    \"code_challenge_method\": \"S256\"
   }")
 
 CODE=$(echo "$AUTH" | jq -r .code)

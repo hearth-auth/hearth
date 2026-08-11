@@ -181,7 +181,7 @@ Two crates in the workspace:
 | Crate | Path | Purpose |
 |-------|------|---------|
 | `hearth` | `.` | Main binary + library (`src/main.rs`, `src/lib.rs`) |
-| `hearth-simulation` | `simulation/` | Deterministic simulation tests (`madsim`), depends on `hearth` with `features = ["test-hooks"]` |
+| `hearth-simulation` | `simulation/` | Real-thread crash-recovery simulation tests (`FaultFs`), depends on `hearth` with `features = ["test-hooks"]` |
 
 Generated proto code lives at `src/protocol/generated/` (gitignored, produced by `build.rs` on every `cargo build`). Proto sources at `proto/` are the single source of truth.
 
@@ -251,7 +251,7 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 - **Watch mode**: `bacon test` for TDD loop.
 - **No doctests — ever.** No `/// ```rust` fenced blocks in doc comments. Use `#[cfg(test)] mod tests` blocks or `tests/`. Runnable examples live under `examples/`.
 - **Property tests**: `proptest` (256 cases dev, 10k+ CI).
-- **Simulation**: `madsim` (simulation crate).
+- **Simulation**: real-thread crash-recovery tests (`hearth-simulation` crate) using `FaultFs` fault injection; no deterministic scheduler.
 - **Black box tests**: `TestHarness` (`tests/common/mod.rs`) — embedded + server modes.
 
 ## Code Style

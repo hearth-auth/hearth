@@ -345,3 +345,63 @@ async fn custom_realm_id_is_honoured() {
         .expect("verify");
     assert!(ok);
 }
+
+/// HEA-2143: an imported realm MUST be resolvable by name.
+///
+/// `create_realm` writes three entries atomically — the realm record, the
+/// signing key, and the `realm:name:{name} → uuid` index. `import_realm`
+/// wrote only the first two, so every migrated realm was invisible to
+/// `get_realm_by_name`. That index is what backs *all* public realm-name
+/// routing (`/realms/{name}/token`, `/realms/{name}/.well-known/*`,
+/// `/ui/realms/{name}/login`), so a migrated realm 404'd on every
+/// user-facing endpoint even though its record was in storage and
+/// `GET /admin/realms` happily listed it.
+#[tokio::test]
+async fn imported_realm_is_resolvable_by_name() {
+    let (identity, authz, _temp) = build_engines();
+    let importer = KeycloakImporter::new(Arc::clone(&identity), Arc::clone(&authz));
+    let export = KeycloakImporter::parse(REALM_FIXTURE.as_bytes()).expect("parse fixture");
+
+    let report = importer
+        .import_realm(&export, None, &ImportOptions::default())
+        .expect("import");
+    let realm_id = report.realm_id.clone().expect("import reports a realm id");
+
+    let found = identity
+        .get_realm_by_name("acme")
+        .expect("get_realm_by_name")
+        .expect("migrated realm must be resolvable by its name");
+    assert_eq!(
+        found.id(),
+        &realm_id,
+        "name index must point at the imported realm"
+    );
+    assert_eq!(found.name(), "acme");
+}
+
+/// HEA-2143: the name index an import writes must also make the name
+/// *taken*, so a later `create_realm` cannot silently produce a second
+/// realm sharing the migrated realm's name (which would make name-based
+/// routing ambiguous and let a tenant hijack a migrated realm's login URL).
+#[tokio::test]
+async fn imported_realm_name_is_reserved_against_create_realm() {
+    let (identity, authz, _temp) = build_engines();
+    let importer = KeycloakImporter::new(Arc::clone(&identity), Arc::clone(&authz));
+    let export = KeycloakImporter::parse(REALM_FIXTURE.as_bytes()).expect("parse fixture");
+
+    importer
+        .import_realm(&export, None, &ImportOptions::default())
+        .expect("import");
+
+    let err = identity.create_realm(&hearth::identity::CreateRealmRequest {
+        name: "acme".to_string(),
+        config: None,
+    });
+    assert!(
+        matches!(
+            err,
+            Err(hearth::identity::IdentityError::DuplicateRealmName)
+        ),
+        "creating a realm named \"acme\" after importing one must be rejected, got {err:?}"
+    );
+}

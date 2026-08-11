@@ -2,8 +2,10 @@ apiVersion: v2
 name: hearth
 description: Hearth — single-binary identity database (OIDC/OAuth 2.0)
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+# The publish workflow stamps the release tag at package time; these values
+# only affect in-repo renders, but they must not lie about the shipping version.
+version: 1.6.8
+appVersion: "1.6.8"
 keywords:
   - identity
   - auth

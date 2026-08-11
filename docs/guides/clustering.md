@@ -6,6 +6,8 @@ Hearth supports multi-node Raft consensus for high availability and horizontal r
 
 **Single-node mode is the default.** Omit the `cluster:` YAML section entirely if you do not need HA. There is zero overhead — no extra port, no Raft log, no election timers.
 
+> **Cluster init failure is fatal.** If a `cluster:` section is present in `hearth.yaml` and Raft initialization fails (for example, because peer nodes are unreachable), Hearth exits non-zero. It does **not** fall back to running as a standalone single-node writer. To run single-node, omit the `cluster:` section entirely.
+
 ---
 
 ## Prerequisites
@@ -264,3 +266,18 @@ Key health signals to watch:
 | `ClusterError::ReplicationLagExceeded` rate | Follower is consistently behind; investigate node resources |
 
 These appear as structured log fields (`node_id`, `peer_address`, `read_lag_threshold_ms`) emitted at startup and in error events. Route them to your log aggregator and alert on `ClusterError::NotLeader` surges during non-maintenance windows.
+
+---
+
+## Troubleshooting
+
+### Server exits immediately at startup with a cluster error
+
+If Hearth exits non-zero at startup and the log shows a cluster initialization error, the `cluster:` section is present but Raft cannot initialize — usually because peer nodes are unreachable.
+
+Remediation steps:
+1. Confirm all peer nodes are running and reachable on the configured `peer_address` port (default `8421`).
+2. Confirm mTLS certificates are valid and that every node trusts the cluster CA.
+3. If you intended to run a single-node instance, remove or comment out the entire `cluster:` section from `hearth.yaml`. Hearth will start cleanly in single-node mode.
+
+Hearth will not start with a partially-reachable cluster. This is intentional — silently degrading to a standalone writer when cluster membership was configured could produce a split-brain.

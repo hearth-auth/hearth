@@ -86,11 +86,9 @@ realms:
         category: content
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
         permissions: [content.read]
       - name: editor
-        display_name: "Editor"
         scope_kind: realm
         permissions: [content.read, content.write]
     seed_users:
@@ -115,7 +113,6 @@ realms:
           - refresh_token
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
     seed_users:
       - email: admin@globex.demo
@@ -138,7 +135,6 @@ realms:
           - authorization_code
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
     seeding:
       users: ${LOADTEST_CORPUS_INITECH:-200000}
@@ -156,7 +152,6 @@ realms:
           - authorization_code
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
     seeding:
       users: ${LOADTEST_CORPUS_UMBRELLA:-100000}

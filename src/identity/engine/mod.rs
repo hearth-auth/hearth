@@ -4008,7 +4008,7 @@ impl EmbeddedIdentityEngine {
                 "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
-            device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
+            device_authorization_endpoint: Some(format!("{issuer}/device_authorization")),
             revocation_endpoint: Some(format!("{issuer}/revoke")),
             introspection_endpoint: Some(format!("{issuer}/introspect")),
             resource_indicators_supported: true,
@@ -9773,6 +9773,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         {
             return Err(IdentityError::DuplicateRealmName);
         }
+        // Also refuse when the *name* is already taken by a different realm.
+        // The name index below is what backs all public realm-name routing, so
+        // importing a second realm under an existing name would either clobber
+        // the incumbent's route or leave two realms fighting over one login URL
+        // (HEA-2143).
+        if self.get_realm_by_name(&request.name)?.is_some() {
+            return Err(IdentityError::DuplicateRealmName);
+        }
 
         let now = self.clock.now();
         let config = request.config.clone().unwrap_or_default();
@@ -9799,14 +9807,35 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let key_storage_key = keys::encode_realm_signing_key(&realm_id);
         // Zeroizing ensures the local PKCS#8 copy is actively overwritten
         // when dropped rather than relying on the allocator (HEA-750 M1).
-        let key_bytes = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
+        let key_plaintext = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
+        // Wrap under the KEK exactly as `create_realm` does. Writing the raw
+        // PKCS#8 here would silently exempt every migrated/restored realm from
+        // at-rest key encryption — `unwrap_key` accepts unenveloped bytes on the
+        // legacy path, so the gap would never surface as an error (HEA-2143).
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let key_stored = crate::identity::key_encryption::wrap_key(&key_plaintext, kek)?;
 
+        // Name index: realm:name:{name} → realm UUID bytes. Without this entry
+        // the realm record exists and `GET /admin/realms` lists it, but every
+        // public name-routed endpoint (`/realms/{name}/token`,
+        // `/realms/{name}/.well-known/*`, `/ui/realms/{name}/login`) 404s —
+        // i.e. a migrated realm was unreachable by its users (HEA-2143).
+        let name_key = keys::encode_realm_name(&request.name);
+        let name_value = realm_id.as_uuid().as_bytes().to_vec();
+
+        // Atomic three-entry write: the realm record, signing key, and name
+        // index land together or not at all — mirrors `create_realm`.
         self.storage
             .put_batch(
                 &sys_realm,
                 &[
                     (realm_key, realm_bytes),
-                    (key_storage_key, key_bytes.to_vec()),
+                    (key_storage_key, key_stored),
+                    (name_key, name_value),
                 ],
             )
             .map_err(Self::storage_err)?;
@@ -14676,6 +14705,21 @@ mod tests {
         ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
             self.inner.scan(realm_id, start, end)
         }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(
+            &self,
+            snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
     }
 
     fn setup_engine_gated() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<RotationGate>) {
@@ -18224,6 +18268,21 @@ mod tests {
             self.bump();
             self.inner.write_batch(realm_id, puts, deletes)
         }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(
+            &self,
+            snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
     }
 
     /// C-5: `validate_token`'s read path MUST NOT write to storage when it
@@ -18421,6 +18480,21 @@ mod tests {
             deletes: &[Vec<u8>],
         ) -> Result<(), crate::storage::StorageError> {
             self.inner.write_batch(realm_id, puts, deletes)
+        }
+
+        fn list_realms(&self) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+            self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(
+            &self,
+            snapshot_id: &str,
+        ) -> Result<(), crate::storage::StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+            self.inner.complete_snapshot_restore()
         }
     }
 

@@ -79,11 +79,9 @@ realms:
         category: content
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
         permissions: [content.read]
       - name: editor
-        display_name: "Editor"
         scope_kind: realm
         permissions: [content.read, content.write]
     groups:
@@ -117,7 +115,6 @@ realms:
         category: billing
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
         permissions: [billing.read]
     groups:
@@ -144,7 +141,6 @@ realms:
           - authorization_code
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
     seeding:
       users: 200000
@@ -162,7 +158,6 @@ realms:
           - authorization_code
     roles:
       - name: member
-        display_name: "Member"
         scope_kind: realm
     seeding:
       users: 100000

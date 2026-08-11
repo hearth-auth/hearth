@@ -460,52 +460,57 @@ async fn main() {
                 }
             }
         },
-        Commands::Migrate { source } => match source {
-            MigrateSource::Keycloak {
-                file,
-                data_dir,
-                realm,
-                dry_run,
-            } => {
-                if let Err(e) =
-                    run_migrate_keycloak(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
-                {
-                    error!("{e}");
-                    std::process::exit(1);
-                }
-            }
-            MigrateSource::Auth0 {
-                file,
-                data_dir,
-                realm,
-                dry_run,
-            } => {
-                if let Err(e) =
-                    run_migrate_auth0(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
-                {
-                    error!("{e}");
-                    std::process::exit(1);
-                }
-            }
-            MigrateSource::RotatePepper {
-                data_dir,
-                summary_only,
-            } => {
-                match run_migrate_rotate_pepper(&data_dir, summary_only) {
-                    Ok(true) => {
-                        // All credentials already use the active pepper version.
-                    }
-                    Ok(false) => {
-                        // Some credentials still need rotation.
+        Commands::Migrate { source } => {
+            // Without this the whole migration report — realm UUID, counts, and
+            // every warning — is written to a dispatcher that does not exist.
+            let _tracing_guard = init_cli_tracing();
+            match source {
+                MigrateSource::Keycloak {
+                    file,
+                    data_dir,
+                    realm,
+                    dry_run,
+                } => {
+                    if let Err(e) =
+                        run_migrate_keycloak(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
+                    {
+                        error!("{e}");
                         std::process::exit(1);
                     }
-                    Err(e) => {
+                }
+                MigrateSource::Auth0 {
+                    file,
+                    data_dir,
+                    realm,
+                    dry_run,
+                } => {
+                    if let Err(e) =
+                        run_migrate_auth0(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
+                    {
                         error!("{e}");
-                        std::process::exit(2);
+                        std::process::exit(1);
+                    }
+                }
+                MigrateSource::RotatePepper {
+                    data_dir,
+                    summary_only,
+                } => {
+                    match run_migrate_rotate_pepper(&data_dir, summary_only) {
+                        Ok(true) => {
+                            // All credentials already use the active pepper version.
+                        }
+                        Ok(false) => {
+                            // Some credentials still need rotation.
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            error!("{e}");
+                            std::process::exit(2);
+                        }
                     }
                 }
             }
-        },
+        }
         Commands::Config { action } => match action {
             ConfigAction::Reload { url, pid_file } => {
                 if let Err(e) = run_config_reload(url.as_deref(), pid_file.as_deref()) {
@@ -708,6 +713,45 @@ fn loadtest_unthrottle_decision(
         LoadtestUnthrottle::Enabled
     } else {
         LoadtestUnthrottle::RefusedNonLoopback
+    }
+}
+
+/// Resolves the SMS OTP HMAC key from `HEARTH_SMS_OTP_HMAC_KEY` at startup.
+///
+/// The key cryptographically binds OTP codes to the server. It is required
+/// **only when SMS is actually enabled** — i.e. `sms.transport` is a real
+/// transport (Twilio, AWS SNS). The `log` transport dispatches no real SMS, so
+/// the key is optional there in *both* dev and production (HEA-2105/H): forcing
+/// it on every non-dev deployment, even ones with no SMS configured at all, was
+/// a needless operator burden. When the key is absent under the `log` transport
+/// the handlers substitute a deterministic dev key.
+///
+/// Pure (no env access, no I/O) so the startup gate is unit tested; the caller
+/// reads the env var and maps the `Err` message onto the fatal-startup path.
+fn resolve_sms_otp_hmac_key(
+    env_value: Option<&str>,
+    sms_transport: SmsTransport,
+) -> Result<Option<Vec<u8>>, String> {
+    match env_value {
+        Some(key) if !key.is_empty() => {
+            if key.len() < 32 {
+                return Err(
+                    "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
+                     HMAC-SHA256 security; use a 32+ byte random value"
+                        .into(),
+                );
+            }
+            Ok(Some(key.as_bytes().to_vec()))
+        }
+        // Missing or empty: only a hard error when a real SMS transport needs it.
+        _ => {
+            if sms_transport != SmsTransport::Log {
+                return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
+                     when sms.transport is not 'log' (a real SMS transport is configured)"
+                    .into());
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -1005,13 +1049,11 @@ async fn run_serve(
                     engine
                 }
                 Err(e) => {
-                    error!(
-                        error = %e,
-                        "Raft ClusterEngine init failed — falling back to single-node mode"
-                    );
-                    Arc::new(hearth::cluster::ClusterEngine::single_node(Arc::clone(
-                        &inner_storage,
-                    )))
+                    report_startup_fatal(&format!(
+                        "Raft ClusterEngine init failed (cluster section is present — \
+                         single-node fallback is not permitted): {e}"
+                    ));
+                    return Err(e.into());
                 }
             }
         } else {
@@ -1391,30 +1433,13 @@ async fn run_serve(
     let email_service = Arc::new(build_email_service(email_sender, &config)?);
 
     // SMS sender (default: log transport).
-    // HEARTH_SMS_OTP_HMAC_KEY is required in production so OTP codes are
-    // cryptographically bound to the server; the Log transport in dev mode
-    // skips the check to avoid friction during local development.
-    let sms_otp_hmac_key: Option<String> = match std::env::var("HEARTH_SMS_OTP_HMAC_KEY") {
-        Ok(key) if !key.is_empty() => {
-            if key.len() < 32 {
-                return Err(
-                    "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
-                     HMAC-SHA256 security; use a 32+ byte random value"
-                        .into(),
-                );
-            }
-            Some(key)
-        }
-        Ok(_) | Err(_) => {
-            if config.sms.transport != SmsTransport::Log || !config.dev_mode {
-                return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
-                     when sms.transport is not 'log' or when running in production mode"
-                    .into());
-            }
-            None
-        }
-    };
-    let sms_hmac_key_bytes: Option<Vec<u8>> = sms_otp_hmac_key.map(|s| s.into_bytes());
+    // HEARTH_SMS_OTP_HMAC_KEY cryptographically binds OTP codes to the server.
+    // It is required only when a real SMS transport is configured; the Log
+    // transport (dev or production) needs no key because no real SMS is sent
+    // (HEA-2105/H).
+    let sms_env = std::env::var("HEARTH_SMS_OTP_HMAC_KEY").ok();
+    let sms_hmac_key_bytes: Option<Vec<u8>> =
+        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport)?;
     let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
     if config.sms.transport == SmsTransport::Log && !config.dev_mode {
         warn!("sms.transport = log is active outside dev mode — no real SMS messages will be sent");
@@ -4204,6 +4229,30 @@ fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<C
 /// exits 1 in total silence (HEA-2011). Writes straight to stderr when no
 /// global subscriber has been set; otherwise defers to `tracing` so structured
 /// sinks keep the record.
+/// Installs a tracing subscriber for non-`serve` CLI subcommands.
+///
+/// `run_serve` calls `telemetry::init` itself, but every other subcommand ran
+/// with **no subscriber installed at all** — so their `tracing::info!` output
+/// (the migration summary, its realm UUID, and every import warning) was
+/// discarded and `hearth migrate …` completed in total silence. `run.sh` in
+/// `examples/auth0-migration` parses the realm UUID out of that summary, so the
+/// silence broke the example outright (HEA-2143).
+///
+/// Idempotent: a subscriber that is already installed is left alone, so this is
+/// safe to call from more than one command path.
+fn init_cli_tracing() -> Option<hearth::telemetry::TracingGuard> {
+    if tracing::dispatcher::has_been_set() {
+        return None;
+    }
+    let observability = hearth::config::ObservabilityConfig {
+        // CLI subcommands are interactive one-shots — the pretty formatter and
+        // `info` level match what an operator running a migration expects.
+        dev_mode: true,
+        ..hearth::config::ObservabilityConfig::default()
+    };
+    Some(hearth::telemetry::init(&observability))
+}
+
 fn report_startup_fatal(msg: &str) {
     if tracing::dispatcher::has_been_set() {
         tracing::error!("{msg}");
@@ -4523,6 +4572,101 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── init_cli_tracing (HEA-2143 silent-CLI gate) ───────────────────────
+
+    /// HEA-2143: `hearth migrate …` reports through `tracing::info!`, but only
+    /// `run_serve` ever installed a subscriber — so the migration summary (and
+    /// the realm UUID `examples/auth0-migration/run.sh` parses out of it) went
+    /// nowhere and the command completed in total silence.
+    ///
+    /// After `init_cli_tracing`, a dispatcher must be installed; calling it a
+    /// second time must be a no-op rather than a double-init panic.
+    #[test]
+    fn init_cli_tracing_installs_a_dispatcher_and_is_idempotent() {
+        let first = init_cli_tracing();
+        assert!(
+            tracing::dispatcher::has_been_set(),
+            "migrate/CLI output is discarded unless a subscriber is installed"
+        );
+
+        // Second call must not panic and must not install a second subscriber.
+        let second = init_cli_tracing();
+        assert!(
+            second.is_none(),
+            "init_cli_tracing must no-op when a dispatcher is already set"
+        );
+        drop(first);
+    }
+
+    // ── resolve_sms_otp_hmac_key (HEA-2105/H startup gate) ────────────────
+
+    #[test]
+    fn sms_key_optional_for_log_transport_in_production() {
+        // Production deploy (dev_mode is not a factor), Log transport, no key:
+        // the server must start with no HMAC key rather than refusing to boot.
+        // This is the fail-then-pass case for HEA-2105/H — before the fix the
+        // `|| !dev_mode` clause forced the key on every non-dev deployment.
+        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log);
+        assert_eq!(decision, Ok(None));
+    }
+
+    #[test]
+    fn sms_key_optional_for_log_transport_when_empty() {
+        // An empty env var is treated the same as absent under Log transport.
+        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log);
+        assert_eq!(decision, Ok(None));
+    }
+
+    #[test]
+    fn sms_key_required_for_real_transport_when_missing() {
+        // SMS actually enabled (Twilio) but no key → hard startup error.
+        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio)
+            .expect_err("real transport without a key must be rejected");
+        assert!(
+            err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn sms_key_required_for_real_transport_when_empty() {
+        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns)
+            .expect_err("real transport with an empty key must be rejected");
+        assert!(
+            err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn sms_key_too_short_is_rejected_for_real_transport() {
+        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio)
+            .expect_err("a sub-32-byte key must be rejected");
+        assert!(
+            err.contains("at least 32 bytes"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn sms_key_too_short_is_rejected_even_under_log_transport() {
+        // A supplied-but-malformed key is always an error, even for Log — the
+        // operator clearly intended to set one, so surface the mistake.
+        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log)
+            .expect_err("a sub-32-byte key must be rejected");
+        assert!(
+            err.contains("at least 32 bytes"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn sms_key_accepted_when_valid() {
+        let key = "0123456789abcdef0123456789abcdef"; // exactly 32 bytes
+        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio);
+        assert_eq!(decision, Ok(Some(key.as_bytes().to_vec())));
+    }
 
     // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────
 

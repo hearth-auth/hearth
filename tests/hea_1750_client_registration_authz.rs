@@ -175,6 +175,7 @@ fn grpc_register_request(
         client_secret: None,
         grant_types: vec!["authorization_code".to_string()],
         access_token_authorization: 0,
+        trust_level: None,
     });
     r.metadata_mut().insert(
         "x-realm-id",

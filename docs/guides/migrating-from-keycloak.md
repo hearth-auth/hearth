@@ -156,23 +156,42 @@ Compare the count against Keycloak. Users skipped during import appear in the mi
 
 ### Test a login
 
-Confirm at least one password-credential user can authenticate by navigating to the login UI:
+Confirm at least one password-credential user can authenticate by navigating to the
+**realm-scoped** login UI — substitute the realm name from your export (the `realm`
+field, e.g. `acme`):
 
 ```
-http://127.0.0.1:8420/ui/admin/login
+http://127.0.0.1:8420/ui/realms/<realm-name>/login
 ```
 
-Sign in with a known user's email and password. A successful login lands on the admin dashboard.
+Sign in with a known user's email and password. This is the path that exercises the
+imported credential hash; `/ui/admin/login` is a different page for Hearth's own
+system-realm administrators and will **not** accept a migrated tenant user.
 
-> **Note:** Hearth does not support the Resource Owner Password Credential grant (`grant_type=password`). All user logins go through the browser-based authorization code flow.
+Also confirm a **wrong** password is rejected. A login check that only tries the
+correct password cannot distinguish "the credential migrated" from "the server
+accepts anything".
+
+> **Note:** Hearth does not support the Resource Owner Password Credential grant
+> (`grant_type=password`) — it was removed and is offered at no token endpoint. All
+> user logins go through the browser flow above or the authorization code flow.
+> `examples/keycloak-migration/verify.mjs` automates exactly these two checks.
 
 ### Verify the OIDC discovery document
 
+Query the **realm-scoped** discovery document, not the server root:
+
 ```bash
-curl http://127.0.0.1:8420/.well-known/openid-configuration | jq .issuer
+curl http://127.0.0.1:8420/realms/<realm-name>/.well-known/openid-configuration | jq .issuer
+curl http://127.0.0.1:8420/realms/<realm-name>/.well-known/jwks.json | jq '.keys | length'
 ```
 
-The `issuer` field must exactly match the value configured in `oidc.issuer` and the value your applications have hard-coded or discovered previously.
+The `issuer` field must exactly match the value configured in `oidc.issuer` and the
+value your applications have hard-coded or discovered previously.
+
+> The server-root `/.well-known/openid-configuration` answers for the default issuer
+> and returns 200 even when the migrated realm itself is unreachable — so it is not a
+> valid check that the import succeeded. Use the realm-scoped path above.
 
 ### Update redirect URIs in your applications
 

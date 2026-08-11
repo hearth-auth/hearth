@@ -19,7 +19,7 @@ use hearth::identity::key_encryption::StorageKek;
 use hearth::identity::{
     CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
 };
-use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
+use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,15 @@ fn system_realm_id() -> RealmId {
     RealmId::new(uuid::Uuid::nil())
 }
 
+/// Builds an identity engine over `storage`.
+///
+/// Deliberately does **not** call `init_sv_bumper`: that stores a strong
+/// `Arc<dyn SvBumper>` (the identity engine) on the RBAC engine, while the
+/// identity engine already holds the RBAC engine — a reference cycle that never
+/// drops. The server tolerates it because the process exits, but the restart
+/// round-trip below has to actually release the `data_dir` lock when its first
+/// engine goes out of scope, and a leaked storage handle keeps that lock held.
+/// No test in this file exercises session-version bumping.
 fn make_engine(
     storage: Arc<dyn StorageEngine>,
     kek: Option<StorageKek>,
@@ -60,9 +69,7 @@ fn make_engine(
         Arc::clone(&audit) as Arc<dyn hearth::audit::AuditEngine>,
     )
     .expect("engine creation");
-    let engine = Arc::new(engine);
-    rbac.init_sv_bumper(Arc::clone(&engine) as Arc<dyn SvBumper>);
-    engine as Arc<dyn IdentityEngine>
+    Arc::new(engine) as Arc<dyn IdentityEngine>
 }
 
 // ---------------------------------------------------------------------------

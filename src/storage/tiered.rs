@@ -167,7 +167,7 @@ impl HotTier {
         let sample_rate = self.config.promote_sample_rate;
         if sample_rate > 1 {
             let n = self.promote_counter.fetch_add(1, Ordering::Relaxed);
-            if n % u64::from(sample_rate) != 0 {
+            if !n.is_multiple_of(u64::from(sample_rate)) {
                 return;
             }
         }

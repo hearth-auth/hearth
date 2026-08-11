@@ -58,6 +58,18 @@ impl StorageEngine for PartialFaultEngine {
     ) -> Result<Vec<ScanEntry>, StorageError> {
         self.inner.scan(realm_id, start, end)
     }
+
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        self.inner.list_realms()
+    }
+
+    fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+        self.inner.begin_snapshot_restore(snapshot_id)
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

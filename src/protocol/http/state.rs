@@ -30,7 +30,7 @@ pub struct AppState {
     pub dev_mode: bool,
     /// Whether the `/metrics` Prometheus scrape endpoint is enabled.
     ///
-    /// Controlled by `metrics.enabled` in `hearth.yaml` (default: `true`).
+    /// Controlled by `metrics.enabled` in `hearth.yaml` (default: `false`).
     pub metrics_enabled: bool,
     /// Optional Bearer token required to access `/metrics` (A-26).
     ///

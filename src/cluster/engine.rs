@@ -121,7 +121,7 @@ impl ClusterEngine {
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
         let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
-        let state_machine = HearthStateMachine::new(sm_engine, storage_config.clone());
+        let state_machine = HearthStateMachine::new(sm_engine);
 
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
@@ -516,6 +516,36 @@ impl ClusterEngine {
             .map_err(|e| ClusterError::Raft(e.to_string()))?
             .map_err(ClusterError::Storage)
     }
+
+    /// Enumerates all realm IDs present in the underlying storage engine.
+    ///
+    /// Delegates directly to [`EmbeddedStorageEngine::list_realms`] without
+    /// routing through Raft — enumeration is a local read, not a replicated
+    /// write.
+    pub(crate) fn list_realms(
+        &self,
+    ) -> Result<Vec<crate::core::RealmId>, crate::storage::StorageError> {
+        self.inner.list_realms()
+    }
+
+    /// Write the snapshot-restore marker on the underlying storage engine.
+    ///
+    /// Delegates directly to [`EmbeddedStorageEngine::begin_snapshot_restore`]
+    /// — this is a local, durable operation, not a replicated write.
+    pub(crate) fn begin_snapshot_restore(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.inner.begin_snapshot_restore(snapshot_id)
+    }
+
+    /// Remove the snapshot-restore marker on the underlying storage engine.
+    ///
+    /// Delegates directly to
+    /// [`EmbeddedStorageEngine::complete_snapshot_restore`].
+    pub(crate) fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
 }
 
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
@@ -788,6 +818,21 @@ impl StorageEngine for ClusterStorageAdapter {
         })
         .map_err(cluster_to_storage_err)
     }
+
+    fn list_realms(&self) -> Result<Vec<RealmId>, crate::storage::StorageError> {
+        self.engine.list_realms()
+    }
+
+    fn begin_snapshot_restore(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<(), crate::storage::StorageError> {
+        self.engine.begin_snapshot_restore(snapshot_id)
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
+        self.engine.complete_snapshot_restore()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -996,5 +1041,105 @@ mod tests {
                                                                 // Boundary: 1_000 ms is not "exceeds 1 s"; 1_001 ms is.
         assert_eq!(clock_skew_ms(0, 1_000_000), 1_000);
         assert!(clock_skew_ms(0, 1_001_000) > 1_000);
+    }
+
+    // ── ClusterStorageAdapter::list_realms delegation ─────────────────────────
+
+    /// `ClusterStorageAdapter::list_realms` must report every realm stored in
+    /// the underlying `EmbeddedStorageEngine`.  Without this delegation the
+    /// `restore_snapshot_in_place` Phase 1 clear would silently no-op when
+    /// invoked through the adapter (HEA-2133).
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_list_realms_delegates_to_inner() {
+        use crate::storage::StorageEngine as _;
+
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let realm_a = make_realm();
+        let realm_b = make_realm();
+
+        // Write one key into each realm so they appear on disk.
+        inner.put(&realm_a, b"key", b"val").expect("put realm_a");
+        inner.put(&realm_b, b"key", b"val").expect("put realm_b");
+
+        let cluster_engine = Arc::new(ClusterEngine::single_node(Arc::clone(&inner)));
+        let adapter = ClusterStorageAdapter::new(cluster_engine);
+
+        let mut realms = adapter.list_realms().expect("list_realms");
+        realms.sort();
+        let mut expected = vec![realm_a, realm_b];
+        expected.sort();
+        assert_eq!(
+            realms, expected,
+            "adapter must report all realms held by inner engine"
+        );
+    }
+
+    // ── ClusterStorageAdapter::begin/complete_snapshot_restore delegation ──────
+
+    /// `ClusterStorageAdapter::begin_snapshot_restore` must reach the
+    /// underlying `EmbeddedStorageEngine`.  Without delegation a crash between
+    /// Phase 1 (clear) and Phase 2 (replay) is undetectable because no marker
+    /// file is written (HEA-2135).
+    ///
+    /// Proof: after `begin_snapshot_restore` via the adapter, re-opening the
+    /// raw `EmbeddedStorageEngine` returns `TornSnapshotRestore`.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_begin_snapshot_restore_delegates_to_inner() {
+        use crate::storage::{StorageConfig, StorageEngine as _};
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let inner = open_engine(data_dir.as_path());
+        let cluster_engine = Arc::new(ClusterEngine::single_node(Arc::clone(&inner)));
+        let adapter = ClusterStorageAdapter::new(cluster_engine);
+
+        adapter
+            .begin_snapshot_restore("snap-delegate-begin")
+            .expect("begin_snapshot_restore");
+        drop(adapter);
+        drop(inner);
+
+        let torn = EmbeddedStorageEngine::open(StorageConfig::dev(data_dir));
+        assert!(
+            matches!(
+                torn,
+                Err(crate::storage::StorageError::TornSnapshotRestore { .. })
+            ),
+            "re-open after begin_snapshot_restore via adapter must return TornSnapshotRestore; \
+             got: {torn:?}"
+        );
+    }
+
+    /// `ClusterStorageAdapter::complete_snapshot_restore` must reach the
+    /// underlying `EmbeddedStorageEngine` and remove the marker.  Without
+    /// delegation the marker persists and subsequent opens fail (HEA-2135).
+    ///
+    /// Proof: after `begin` + `complete` via the adapter, re-opening the
+    /// engine succeeds (marker is gone).
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_complete_snapshot_restore_delegates_to_inner() {
+        use crate::storage::{StorageConfig, StorageEngine as _};
+
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let inner = open_engine(data_dir.as_path());
+        let cluster_engine = Arc::new(ClusterEngine::single_node(Arc::clone(&inner)));
+        let adapter = ClusterStorageAdapter::new(cluster_engine);
+
+        adapter
+            .begin_snapshot_restore("snap-delegate-complete")
+            .expect("begin_snapshot_restore");
+        adapter
+            .complete_snapshot_restore()
+            .expect("complete_snapshot_restore");
+        drop(adapter);
+        drop(inner);
+
+        EmbeddedStorageEngine::open(StorageConfig::dev(data_dir))
+            .expect("engine must open cleanly after complete_snapshot_restore via adapter");
     }
 }

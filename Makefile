@@ -418,6 +418,14 @@ helm-template:
 		rm -rf $$tmp_dir; \
 		echo "✓ Helm snapshots match."; \
 	fi
+	@echo "Checking single-writer guard (replicaCount > 1 must fail to render)..."
+	@if $(HELM) template hearth $(HELM_CHART) --set replicaCount=2 --namespace hearth >/dev/null 2>&1; then \
+		echo "ERROR: chart rendered with replicaCount=2. Hearth is single-writer (exclusive"; \
+		echo "       data_dir lock, HEA-2107) — a second replica on the ReadWriteOnce PVC"; \
+		echo "       crash-loops with AlreadyLocked. Restore the guard in templates/deployment.yaml."; \
+		exit 1; \
+	fi
+	@echo "✓ replicaCount > 1 is rejected at render time."
 
 # ── UI Tests ──────────────────────────────────────────
 #

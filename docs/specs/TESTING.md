@@ -77,15 +77,23 @@ fuzz/
 
 Each fuzz target is a standalone binary that accepts arbitrary bytes and exercises a single parsing entry point.
 
-### 5. Deterministic Simulation Testing (`madsim`)
+### 5. Crash-Recovery Simulation Testing (`hearth-simulation`)
 
-Hearth uses [`madsim`](https://github.com/madsim-rs/madsim) for deterministic simulation testing, inspired by FoundationDB's approach to proving correctness under failure.
+Hearth's `simulation/` crate exercises crash recovery and concurrent-I/O behavior against
+oracle-checked invariants, inspired by FoundationDB's approach to proving correctness under
+failure — but **without** a deterministic scheduler.
 
 **How it works**:
-- `madsim` replaces `tokio` with a simulated async runtime where time, network, and filesystem I/O are controlled via a seed
-- Production code stays unchanged (normal async Rust with tokio); `madsim` intercepts at the runtime level
-- **Built-in fault injection**: disk I/O failures, network partitions, packet loss/reorder, clock skew
-- **Deterministic replay**: failing tests produce a seed that reproduces the exact failure sequence
+- Tests run on **real OS threads** (`std::thread`) against **real temporary directories** (`tempfile`)
+- Production code stays unchanged; faults are injected through `FaultFs`, an implementation of Hearth's `Fs` trait
+- **Fault injection**: disk I/O failures and per-op latency jitter (`FaultFs::latency_seed`, a splitmix64 perturbation)
+- Crashes are simulated by dropping/aborting an engine mid-operation and reopening from the on-disk WAL + SSTs
+
+> **No deterministic replay.** Concurrency interleavings are nondeterministic across runs.
+> Where a test declares a fixed `seed` constant, that value is a **static diagnostic label**
+> surfaced in assertion messages — it does not drive scheduling or reproducible replay.
+> A failing run is not guaranteed to reproduce from its reported seed. See `simulation/src/lib.rs`.
+> Network-partition and clock-skew simulation are **not** implemented.
 
 **We provide the domain-specific test oracles** — assertions about what must be true regardless of the failure scenario:
 - "After crash recovery, no committed session is lost"
@@ -100,9 +108,9 @@ Hearth uses [`madsim`](https://github.com/madsim-rs/madsim) for deterministic si
 **Structure**:
 ```
 simulation/
-├── Cargo.toml            # Depends on madsim, hearth as lib
+├── Cargo.toml            # Depends on hearth as lib (features = ["test-hooks"])
 └── src/
-    ├── lib.rs            # Simulation harness + oracle traits
+    ├── lib.rs            # FaultFs + oracle traits
     └── tests/
         ├── wal_crash.rs  # WAL crash-recovery scenarios
         └── ...
@@ -178,7 +186,7 @@ or explicit threshold assertions in the bench binary. Any threshold breach fails
 | HTTP testing | `reqwest` (test dependency) | For black box server-mode tests |
 | Test fixtures | Custom `TestHarness` | Spins up embedded or server instance, handles cleanup |
 | Coverage | `cargo-llvm-cov` | LLVM-based, accurate line/branch coverage |
-| Simulation | `madsim` | Deterministic async runtime, fault injection |
+| Simulation | `hearth-simulation` crate (`FaultFs`) | Real-thread crash recovery, I/O fault + latency injection |
 | Snapshot testing | `insta` | Serialization format stability, error message stability |
 | Mocking | Minimal / avoid | Prefer real implementations; trait-based DI only where essential (clock, filesystem) |
 
@@ -312,10 +320,10 @@ hearth/
 │   ├── permission_check.rs
 │   ├── user_lookup.rs
 │   └── token_issuance.rs
-└── simulation/                 # madsim deterministic simulation tests
-    ├── Cargo.toml              # Depends on madsim, hearth as lib
+└── simulation/                 # real-thread crash-recovery simulation tests
+    ├── Cargo.toml              # Depends on hearth as lib (features = ["test-hooks"])
     └── src/
-        ├── lib.rs              # Simulation harness + oracle traits
+        ├── lib.rs              # FaultFs + oracle traits
         └── tests/
             ├── wal_crash.rs    # WAL crash-recovery scenarios
             └── ...
@@ -609,7 +617,7 @@ make test-quality          # or: bash scripts/check-test-quality.sh
 ### Phase 0 (Storage Engine + Basic Auth)
 - Unit tests for WAL, memtable, persistence, tiered storage
 - Property tests for storage engine operations (random op sequences)
-- Deterministic simulation for crash recovery (madsim + WAL fault injection)
+- Crash-recovery simulation (real-thread tests + `FaultFs` WAL fault injection)
 - Black box tests for user CRUD, session lifecycle, basic OIDC flow
 - Benchmarks for core operations (token validation, session lookup, permission check)
 - Adversarial tests for credential handling (timing attacks, input injection)

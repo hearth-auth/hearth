@@ -419,8 +419,11 @@ Creates a new OAuth client. Body fields:
 | `grant_types` | — | Array: `authorization_code`, `client_credentials`, `refresh_token`, `device_code` |
 | `client_secret` | — | Client secret (omit for public clients). Argon2id-hashed before storage. |
 | `access_token_authorization` | — | Authorization mode: `"EMBEDDED"` (default), `"INTROSPECTION"`, `"DECISION"` |
+| `trust_level` | — | `"first_party"` or `"third_party"` (default). `first_party` clients receive full roles, permissions, and groups claims in issued JWTs. `third_party` clients receive a minimal claim set and trigger the OAuth consent screen. |
 
 The `access_token_authorization` field controls how resource servers resolve permissions for tokens issued to this client. See [Token Authorization Modes](rbac.md#token-authorization-modes) for semantics.
+
+> **Security note:** Dynamic Client Registration (`POST /register`) ignores any `trust_level` supplied by the caller and always stores `"third_party"`. Only an admin token can grant `"first_party"` trust via this endpoint.
 
 ```bash
 curl -X POST https://auth.example.com/admin/applications \
@@ -463,6 +466,7 @@ Updates a client. All fields are optional; omitted fields are unchanged.
 | `post_logout_redirect_uris` | Replacement post-logout redirect list |
 | `require_consent` | Whether to show the OAuth consent screen |
 | `access_token_authorization` | `"embedded"`, `"introspection"`, or `"decision"` |
+| `trust_level` | `"first_party"` or `"third_party"`. `first_party` clients receive full roles, permissions, and groups claims in issued JWTs. `third_party` clients receive a minimal claim set and trigger the OAuth consent screen. |
 
 ```bash
 # Switch a client to decision mode

@@ -193,8 +193,8 @@ pub struct WebState {
     /// SMS sender for OTP delivery. `None` when SMS is not configured.
     pub sms: Option<crate::identity::sms::SharedSmsSender>,
     /// Raw bytes of the HMAC-SHA256 key used to sign/verify SMS OTP codes.
-    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY`. `None` in dev mode when the
-    /// Log transport is active (a deterministic dev key is substituted).
+    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY`. `None` when the Log transport is
+    /// active (in dev or production; a deterministic dev key is substituted).
     pub sms_otp_hmac_key: Option<Vec<u8>>,
     /// CAPTCHA provider for challenge-gated forms (P-1 — HEA-1202).
     ///
@@ -477,8 +477,8 @@ impl WebState {
     /// Configures the SMS transport and HMAC key for OTP delivery.
     ///
     /// `hmac_key` is the raw bytes derived from `HEARTH_SMS_OTP_HMAC_KEY`.
-    /// When `hmac_key` is `None` (dev-mode Log transport), the handlers
-    /// substitute a deterministic dev key.
+    /// When `hmac_key` is `None` (the Log transport, in dev or production), the
+    /// handlers substitute a deterministic dev key.
     #[must_use]
     pub fn with_sms(
         mut self,

@@ -282,11 +282,13 @@ oidc:
 #     token_per_minute: 200   # default: 200; per (realm, client) on /token,
 #                             #   /introspect, /device_authorization
 
-# --- Metrics auth (A-26) ----------------------------------------------------
-# Protect /metrics from unauthenticated scraping. Alternatively, firewall the
-# port at the network layer. Comparison is constant-time.
+# --- Metrics endpoint (A-26) ------------------------------------------------
+# The /metrics Prometheus scrape endpoint is DISABLED by default. Enable it and
+# set a Bearer token to protect it from unauthenticated scraping. Alternatively,
+# firewall the port at the network layer. Comparison is constant-time.
 #
-# security:
+# metrics:
+#   enabled: true
 #   bearer_token: "${HEARTH_METRICS_TOKEN}"
 
 # --- Host header allowlist (A-40) -------------------------------------------
@@ -380,8 +382,8 @@ oidc:
 # pepper secret. Credentials are lazily re-hashed on the next successful login.
 #
 # Rotation procedure:
-#   1. Copy the current `active_version` / `active_hex` to `previous_*`.
-#   2. Increment `active_version` and supply a new 32-byte hex key in `active_hex`.
+#   1. Copy the current `version` / `key_hex` to `previous_version` / `previous_key_hex`.
+#   2. Increment `version` and supply a new 32-byte hex key in `key_hex`.
 #   3. Deploy — credentials are re-hashed lazily as users log in.
 #   4. Once all active users have logged in (check `hearth migrate rotate-pepper`),
 #      remove the `previous_*` keys to close the grace window.
@@ -389,10 +391,10 @@ oidc:
 # security:
 #   password:
 #     pepper:
-#       active_version: 1               # monotonically increasing integer
-#       active_hex: "${PEPPER_KEY_HEX}" # 32-byte (64 hex chars) secret
+#       version: 1                      # monotonically increasing integer
+#       key_hex: "${PEPPER_KEY_HEX}"    # 32-byte (64 hex chars) secret
 #       # previous_version: 0           # uncomment during rotation grace window
-#       # previous_hex: "${OLD_PEPPER_HEX}"
+#       # previous_key_hex: "${OLD_PEPPER_HEX}"
 
 # --- Argon2id admission control (KDF gate) (HEA-1887 / R1) -----------------
 # Bounds concurrent Argon2id password hashing/verification. Without a limit,
@@ -607,12 +609,20 @@ oidc:
 #         grant_types:
 #           - authorization_code
 #           - refresh_token
+#         # trust_level controls whether this client is first-party or third-party.
+#         # first_party: skips the consent screen; the issued JWT includes the
+#         #   `permissions`, `roles`, and `groups` claims.  Use only for clients
+#         #   you fully control (internal dashboards, mobile apps you ship, etc.).
+#         # third_party: shows the consent screen; JWT carries only identity
+#         #   claims.  This is the default for any API-registered client.
+#         trust_level: first_party   # first_party | third_party (default: third_party)
 #       api-service:
 #         name: "API Service"
 #         confidential: true
 #         client_secret: "${INTERNAL_API_SECRET}"
 #         grant_types:
 #           - client_credentials
+#         trust_level: third_party   # machine-to-machine clients are typically third-party
 #
 #     # --- RBAC: permissions, roles, and scope bundles ---------------------
 #     # Hearth seeds a baseline set on every realm: permissions
