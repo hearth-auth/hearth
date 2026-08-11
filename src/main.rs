@@ -460,52 +460,57 @@ async fn main() {
                 }
             }
         },
-        Commands::Migrate { source } => match source {
-            MigrateSource::Keycloak {
-                file,
-                data_dir,
-                realm,
-                dry_run,
-            } => {
-                if let Err(e) =
-                    run_migrate_keycloak(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
-                {
-                    error!("{e}");
-                    std::process::exit(1);
-                }
-            }
-            MigrateSource::Auth0 {
-                file,
-                data_dir,
-                realm,
-                dry_run,
-            } => {
-                if let Err(e) =
-                    run_migrate_auth0(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
-                {
-                    error!("{e}");
-                    std::process::exit(1);
-                }
-            }
-            MigrateSource::RotatePepper {
-                data_dir,
-                summary_only,
-            } => {
-                match run_migrate_rotate_pepper(&data_dir, summary_only) {
-                    Ok(true) => {
-                        // All credentials already use the active pepper version.
-                    }
-                    Ok(false) => {
-                        // Some credentials still need rotation.
+        Commands::Migrate { source } => {
+            // Without this the whole migration report — realm UUID, counts, and
+            // every warning — is written to a dispatcher that does not exist.
+            let _tracing_guard = init_cli_tracing();
+            match source {
+                MigrateSource::Keycloak {
+                    file,
+                    data_dir,
+                    realm,
+                    dry_run,
+                } => {
+                    if let Err(e) =
+                        run_migrate_keycloak(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
+                    {
+                        error!("{e}");
                         std::process::exit(1);
                     }
-                    Err(e) => {
+                }
+                MigrateSource::Auth0 {
+                    file,
+                    data_dir,
+                    realm,
+                    dry_run,
+                } => {
+                    if let Err(e) =
+                        run_migrate_auth0(&file, data_dir.as_deref(), realm.as_deref(), dry_run)
+                    {
                         error!("{e}");
-                        std::process::exit(2);
+                        std::process::exit(1);
+                    }
+                }
+                MigrateSource::RotatePepper {
+                    data_dir,
+                    summary_only,
+                } => {
+                    match run_migrate_rotate_pepper(&data_dir, summary_only) {
+                        Ok(true) => {
+                            // All credentials already use the active pepper version.
+                        }
+                        Ok(false) => {
+                            // Some credentials still need rotation.
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            error!("{e}");
+                            std::process::exit(2);
+                        }
                     }
                 }
             }
-        },
+        }
         Commands::Config { action } => match action {
             ConfigAction::Reload { url, pid_file } => {
                 if let Err(e) = run_config_reload(url.as_deref(), pid_file.as_deref()) {
@@ -4224,6 +4229,30 @@ fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<C
 /// exits 1 in total silence (HEA-2011). Writes straight to stderr when no
 /// global subscriber has been set; otherwise defers to `tracing` so structured
 /// sinks keep the record.
+/// Installs a tracing subscriber for non-`serve` CLI subcommands.
+///
+/// `run_serve` calls `telemetry::init` itself, but every other subcommand ran
+/// with **no subscriber installed at all** — so their `tracing::info!` output
+/// (the migration summary, its realm UUID, and every import warning) was
+/// discarded and `hearth migrate …` completed in total silence. `run.sh` in
+/// `examples/auth0-migration` parses the realm UUID out of that summary, so the
+/// silence broke the example outright (HEA-2143).
+///
+/// Idempotent: a subscriber that is already installed is left alone, so this is
+/// safe to call from more than one command path.
+fn init_cli_tracing() -> Option<hearth::telemetry::TracingGuard> {
+    if tracing::dispatcher::has_been_set() {
+        return None;
+    }
+    let observability = hearth::config::ObservabilityConfig {
+        // CLI subcommands are interactive one-shots — the pretty formatter and
+        // `info` level match what an operator running a migration expects.
+        dev_mode: true,
+        ..hearth::config::ObservabilityConfig::default()
+    };
+    Some(hearth::telemetry::init(&observability))
+}
+
 fn report_startup_fatal(msg: &str) {
     if tracing::dispatcher::has_been_set() {
         tracing::error!("{msg}");
@@ -4543,6 +4572,32 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── init_cli_tracing (HEA-2143 silent-CLI gate) ───────────────────────
+
+    /// HEA-2143: `hearth migrate …` reports through `tracing::info!`, but only
+    /// `run_serve` ever installed a subscriber — so the migration summary (and
+    /// the realm UUID `examples/auth0-migration/run.sh` parses out of it) went
+    /// nowhere and the command completed in total silence.
+    ///
+    /// After `init_cli_tracing`, a dispatcher must be installed; calling it a
+    /// second time must be a no-op rather than a double-init panic.
+    #[test]
+    fn init_cli_tracing_installs_a_dispatcher_and_is_idempotent() {
+        let first = init_cli_tracing();
+        assert!(
+            tracing::dispatcher::has_been_set(),
+            "migrate/CLI output is discarded unless a subscriber is installed"
+        );
+
+        // Second call must not panic and must not install a second subscriber.
+        let second = init_cli_tracing();
+        assert!(
+            second.is_none(),
+            "init_cli_tracing must no-op when a dispatcher is already set"
+        );
+        drop(first);
+    }
 
     // ── resolve_sms_otp_hmac_key (HEA-2105/H startup gate) ────────────────
 

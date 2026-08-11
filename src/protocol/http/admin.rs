@@ -2538,11 +2538,21 @@ pub(super) async fn dev_probe_user(
     let realm_id = crate::core::RealmId::new(realm_uuid);
     // Drive the same two-step indexed storage lookup that ROPC used, so the
     // hot-vs-cold tier split is visible in the latency distribution.
-    let _result = state.identity.get_user_by_email(&realm_id, email);
+    let result = state.identity.get_user_by_email(&realm_id, email);
+    // `user_id` lets the migration example scripts resolve a migrated user
+    // without admin credentials for the migrated realm — admin bearer tokens
+    // only validate under the realm in `X-Realm-ID`, so there is otherwise no
+    // lookup path into an imported realm (HEA-2143). Purely additive: the C8
+    // sweep reads only the status code.
+    let user_id = result.ok().flatten().map(|u| u.id().as_uuid().to_string());
     // Return 200 regardless of found/not-found — the measurement is latency,
     // not correctness. A missing user (e.g. index > corpus_size) contributes
     // a fast cached-miss path, which is fine noise for the sweep.
-    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "user_id": user_id})),
+    )
+        .into_response()
 }
 
 /// POST /dev/seed-session — creates a raw session record for the given user.

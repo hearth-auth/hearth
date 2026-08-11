@@ -17,7 +17,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   while the shipping release was 1.6.8.  The publish workflow stamps the release tag at package
   time, so this affected in-repo renders only.
 
+### Added
+- **`GET /dev/probe-user` returns the resolved `user_id` (HEA-2143)** — the dev-only, loopback-only
+  probe already performed the email lookup and discarded the result.  Returning the id lets tooling
+  resolve a user in a *migrated* realm, which has no admin credentials of its own (admin bearer
+  tokens only validate under the realm named in `X-Realm-ID`).  Unknown emails still return 200 with
+  `user_id: null` so the endpoint's latency-probe semantics are unchanged.
+
 ### Fixed
+- **Migrated realms are now reachable by name (HEA-2143)** — `import_realm` wrote the realm record
+  and its signing key but never the `realm:name → id` index that `create_realm` writes, so every
+  realm produced by `hearth migrate keycloak` / `hearth migrate auth0` (and by a backup restore) was
+  invisible to name-based routing.  The realm appeared in `GET /admin/realms` and looked healthy,
+  yet `/realms/{name}/token`, `/realms/{name}/.well-known/openid-configuration`,
+  `/realms/{name}/.well-known/jwks.json`, and `/ui/realms/{name}/login` all returned **404** — a
+  migrated tenant's users could not log in at all.  Importing a realm whose name is already taken
+  is now rejected with `DuplicateRealmName` instead of silently creating a second realm that fights
+  over the same login URL.
+- **Imported realm signing keys are now encrypted at rest (HEA-2143)** — `import_realm` stored raw
+  PKCS#8 bytes while `create_realm` wrapped them under `security.key_encryption_key`.  Because the
+  read path accepts unenveloped key material on its legacy path, every migrated or restored realm
+  silently opted out of at-rest key encryption with no error.  Imports now wrap under the KEK
+  exactly as realm creation does.
+- **`hearth migrate` no longer runs completely silently (HEA-2143)** — only `hearth serve`
+  installed a `tracing` subscriber, so the migration summary, the imported realm's UUID, and every
+  per-user warning (skipped credentials, unsupported hash algorithms) were written to a dispatcher
+  that did not exist.  Operators saw an empty terminal and an exit code.  All non-`serve`
+  subcommands now install a subscriber before running.
+- **Migration example scripts run again (HEA-2143)** — `examples/auth0-migration/verify.mjs` and
+  `examples/keycloak-migration/verify.mjs` still authenticated with `grant_type=password`, removed
+  in HEA-1862, and failed against any current build.  Both now drive the realm-scoped browser login
+  form — the same `verify_password` path a real user takes — and additionally assert that a wrong
+  password is **rejected**, which the old ROPC step never checked.  `examples/auth0-migration/run.sh`
+  also no longer hardcodes `target/release` (breaking any `CARGO_TARGET_DIR` setup), parses the
+  realm UUID robustly, and keeps config auto-discovery away from the example's production-shaped
+  `hearth.yaml`; that file's stale `access_token_lifetime_secs` / `refresh_token_lifetime_secs`
+  keys are corrected to `access_token_ttl` / `refresh_token_ttl`.
+
 - **Torn Raft snapshot restore now fails loudly at startup instead of silently serving mixed data
   (HEA-2132)** — `install_snapshot` (the two-phase in-place restore: Phase 1 deletes all realm keys,
   Phase 2 replays the snapshot) now writes a durable `SNAPSHOT_RESTORE_IN_PROGRESS` marker before

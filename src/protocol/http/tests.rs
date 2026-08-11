@@ -526,6 +526,101 @@ async fn dev_seed_password_sets_verifiable_credential() {
     );
 }
 
+/// HEA-2143: `GET /dev/probe-user` resolves an email to its user id.
+///
+/// The migration example scripts need a user id to mint a token with
+/// `POST /dev/seed-token`, but a migrated realm has no admin credentials of
+/// its own and admin bearer tokens only validate under the realm named in
+/// `X-Realm-ID` — so there is no way to look a migrated user up. This probe
+/// already performed the `get_user_by_email` lookup and discarded the result;
+/// returning the id makes it usable without weakening anything (the route is
+/// dev-only, unauthenticated, and loopback-bound, and `POST /dev/seed-token`
+/// on the same server is already strictly more powerful).
+#[tokio::test]
+async fn dev_probe_user_returns_user_id_for_known_email() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+
+    let realm = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: "probe-realm".to_string(),
+            config: None,
+        })
+        .expect("create realm");
+    let user = state
+        .identity
+        .create_user(
+            realm.id(),
+            &crate::identity::CreateUserRequest {
+                email: "probe@probe.test".to_string(),
+                display_name: "Probe User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(
+                    "/dev/probe-user?realm_id=<RID>&email=probe%40probe.test"
+                        .replace("<RID>", &realm.id().as_uuid().to_string()),
+                )
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        json.get("user_id").and_then(serde_json::Value::as_str),
+        Some(user.id().as_uuid().to_string().as_str()),
+        "probe must resolve a known email to its user id"
+    );
+}
+
+/// HEA-2143: an unknown email still returns 200 (the C8 latency sweep depends
+/// on found/not-found being indistinguishable in status), with a null id.
+#[tokio::test]
+async fn dev_probe_user_unknown_email_is_200_with_null_id() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let realm = crate::core::RealmId::generate();
+
+    let resp = router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(
+                    "/dev/probe-user?realm_id=<RID>&email=nobody%40probe.test"
+                        .replace("<RID>", &realm.as_uuid().to_string()),
+                )
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an absent user must stay a 200 — the sweep measures latency, not existence"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert!(
+        json.get("user_id").is_some_and(serde_json::Value::is_null),
+        "unknown email must report user_id: null, got {json}"
+    );
+}
+
 /// HEA-1998: an invalid `user_id` is a 400, not a 500 or a panic.
 #[tokio::test]
 async fn dev_seed_password_rejects_invalid_user_id() {
