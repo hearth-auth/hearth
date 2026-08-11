@@ -124,7 +124,7 @@ jobs:
       # applied here — the merge job tags the final multi-arch index.
       - name: Extract OCI labels
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/hearth-auth/hearth
 
@@ -178,7 +178,7 @@ jobs:
 
       - name: Extract OCI labels
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/hearth-auth/hearth
 
@@ -235,7 +235,7 @@ jobs:
       #   flavor: latest=auto               → `latest` only for non-prerelease semver
       - name: Extract Docker metadata (tags + labels)
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/hearth-auth/hearth
           tags: |
