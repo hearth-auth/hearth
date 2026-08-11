@@ -1,0 +1,108 @@
+name: PR Head Ancestor Guard
+
+# Fails when the PR head commit is a strict ancestor of another pushed branch,
+# which indicates that commits were written on a separate work branch and the
+# PR head has been left behind. This is the structural failure that stranded
+# fixes three separate times during HEA-2055.
+#
+# Advisory mode (continue-on-error: true) for the observation window.
+# Do NOT add this job to required-summary until the false-positive rate
+# against stacked PRs has been measured clean. See HEA-2106.
+#
+# Trigger: pull_request (needs HEAD SHA from event, not the merge-ref HEAD).
+# Requires: fetch-depth: 0 + git fetch --all --prune for full branch coverage.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-head-ancestor-guard:
+    name: PR head ancestor guard (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Advisory mode — does not block merge until the false-positive rate
+    # against stacked PRs has been confirmed clean over one observation week.
+    # Remove continue-on-error and add to required-summary to make blocking.
+    # See HEA-2106.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full depth required so merge-base traversal sees all history.
+          # Default shallow clone makes ancestor checks unreliable.
+          fetch-depth: 0
+
+      - name: Fetch all remote branches
+        run: git fetch --all --prune
+
+      - name: Check PR head is not a strict ancestor of another branch
+        env:
+          # Use the PR head SHA directly from the event payload.
+          # actions/checkout on pull_request checks out refs/pull/N/merge
+          # (the auto-merge commit), so git rev-parse HEAD would be wrong here.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_BRANCH: ${{ github.head_ref }}
+          # Skip the base branch (main) — stacked-PR bottom branches are
+          # legitimately ancestors of the stack above and of the base once merged.
+          PR_BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          echo "PR head branch : $PR_HEAD_BRANCH"
+          echo "PR head commit : $HEAD_SHA"
+          echo "PR base branch : $PR_BASE_BRANCH"
+          echo ""
+
+          found=0
+
+          while IFS= read -r b; do
+            shortname="${b#origin/}"
+
+            # Skip the PR head branch itself.
+            [ "$shortname" = "$PR_HEAD_BRANCH" ] && continue
+
+            # Skip the origin/HEAD symbolic ref alias.
+            [ "$shortname" = "HEAD" ] && continue
+
+            # Skip the PR base branch — stacked PRs are expected ancestors of it.
+            [ "$shortname" = "$PR_BASE_BRANCH" ] && continue
+
+            b_sha="$(git rev-parse "$b" 2>/dev/null)" || continue
+
+            # Skip branches that point at the exact same commit (not a strict ancestor).
+            [ "$b_sha" = "$HEAD_SHA" ] && continue
+
+            if git merge-base --is-ancestor "$HEAD_SHA" "$b" 2>/dev/null; then
+              count="$(git rev-list --count "${HEAD_SHA}..${b}")"
+              echo "──────────────────────────────────────────────────────────────────"
+              echo "LAGGING: PR head is a strict ancestor of '$shortname'"
+              echo "         $count commit(s) are on '$shortname' but NOT in this PR."
+              echo ""
+              echo "Missing commits (oldest first):"
+              git log --oneline --reverse "${HEAD_SHA}..${b}"
+              echo ""
+              echo "Fix — fast-forward the PR head branch to include these commits:"
+              echo "  git checkout $PR_HEAD_BRANCH"
+              echo "  git merge --ff-only $shortname"
+              echo "  git push origin $PR_HEAD_BRANCH"
+              echo "──────────────────────────────────────────────────────────────────"
+              echo ""
+              found=1
+            fi
+          done < <(git for-each-ref --format='%(refname:short)' refs/remotes/origin)
+
+          if [ "$found" -eq 1 ]; then
+            echo "ERROR: One or more pushed branches are ahead of this PR's head."
+            echo "If this PR merges as-is, those commits will be stranded off main."
+            echo ""
+            echo "NOTE: This check is running in advisory mode (continue-on-error: true)"
+            echo "and will NOT block merging during the observation window. See HEA-2106."
+            exit 1
+          fi
+
+          echo "OK: PR head ($PR_HEAD_BRANCH @ ${HEAD_SHA:0:12}) is not a strict ancestor"
+          echo "    of any pushed branch. No commits are stranded off this PR."
