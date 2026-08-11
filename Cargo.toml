@@ -31,7 +31,7 @@ pbjson-types = "0.9"
 prost = "0.14"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["multipart"] }
-base64 = "0.22"
+base64 = "0.23"
 bcrypt = "0.16"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }
