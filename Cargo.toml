@@ -31,8 +31,8 @@ pbjson-types = "0.9"
 prost = "0.14"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["multipart"] }
-base64 = "0.22"
-bcrypt = "0.16"
+base64 = "0.23"
+bcrypt = "0.19"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
@@ -51,7 +51,7 @@ lettre = { version = "0.11", default-features = false, features = [
     "builder",
     "hostname",
 ] }
-maxminddb = "0.28"
+maxminddb = "0.30"
 memmap2 = "0.9"
 password-hash = "0.5"
 pbkdf2 = { version = "0.12", default-features = false }

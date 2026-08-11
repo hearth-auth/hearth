@@ -5613,13 +5613,17 @@ Used by:
   - base64ct 1.8.3
   - blake2 0.10.6
   - block-buffer 0.10.4
-  - blowfish 0.9.1
+  - blowfish 0.10.0
   - cipher 0.4.4
+  - cipher 0.5.2
   - cpufeatures 0.2.17
   - crypto-common 0.1.7
+  - crypto-common 0.2.2
   - digest 0.10.7
   - hmac 0.12.1
+  - hybrid-array 0.4.14
   - inout 0.1.4
+  - inout 0.2.2
   - password-hash 0.5.0
   - pbkdf2 0.12.2
   - salsa20 0.10.2
@@ -6910,9 +6914,9 @@ Used by:
   - syn 3.0.3
   - sync_wrapper 1.0.2
   - thiserror-impl 1.0.69
-  - thiserror-impl 2.0.19
+  - thiserror-impl 2.0.20
   - thiserror 1.0.69
-  - thiserror 2.0.19
+  - thiserror 2.0.20
   - time-core 0.1.9
   - time-macros 0.2.32
   - time 0.3.55
@@ -7533,7 +7537,7 @@ third-party/chromium/LICENSE.
 --------------------------------------------------------------------------------
 License: ISC License (ISC)
 Used by:
-  - maxminddb 0.28.1
+  - maxminddb 0.30.0
 
 ISC License
 
@@ -8937,7 +8941,7 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-  - bcrypt 0.16.0
+  - bcrypt 0.19.3
 
 The MIT License (MIT)
 
