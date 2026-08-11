@@ -30,6 +30,26 @@ realms:
 
 A referenced variable that is **not set** is a **startup error** — there is no silent fallback. This prevents accidental deployment with missing secrets.
 
+## Strict Key Validation
+
+All configuration structs reject **unknown keys** at startup. A misspelled or removed key in `hearth.yaml` is a hard parse error — Hearth will refuse to start rather than silently ignoring it.
+
+Use `hearth.example.yaml` as the canonical reference for valid key names.
+
+### Renamed and removed keys (upgrade guide)
+
+If you are upgrading from a configuration written before v1.7 you may have phantom keys that previously had no effect but now cause a startup error:
+
+| Old key (no-op, now rejected) | Action |
+|-------------------------------|--------|
+| `auth.audit_log_retention` | Remove — this key was never implemented |
+| `security.bearer_token` | Move to `metrics.bearer_token` (the `/metrics` scrape endpoint was silently unprotected) |
+| `security.password.pepper.active_version` | Rename to `security.password.pepper.version` |
+| `security.password.pepper.active_hex` | Rename to `security.password.pepper.key_hex` |
+| `security.password.pepper.previous_hex` | Rename to `security.password.pepper.previous_key_hex` |
+
+---
+
 ## Duration Format
 
 Duration fields accept human-readable strings with a single suffix:
