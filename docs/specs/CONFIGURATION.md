@@ -317,7 +317,7 @@ Global UI and email branding. Controls the product name, logo, and visual theme 
 | `midnight` | dark | Purple/violet dark theme |
 | `forest` | dark | Green-accented dark theme |
 | `cloud` | light | Clean light theme |
-| `parchment` | light | Warm light theme |
+| `slate` | light | Steel-blue light theme |
 
 ```yaml
 branding:

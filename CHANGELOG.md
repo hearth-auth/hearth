@@ -48,6 +48,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   zero buffer and could race kubelet's SIGKILL against Hearth's drain.  The grace period is now
   explicit at 60 s (drain deadline + 30 s buffer).
 
+### Security
+- **Host key and KEK-file writes are now crash-durable (HEA-2162)** — on first boot Hearth
+  auto-generates `hearth.host_key` and, on the first realm, creates `hearth.keys`. Neither write
+  fsync'd the file's parent directory, and the host-key write did not even fsync its own contents.
+  A power loss in the seconds after initial provisioning could leave `hearth.host_key` empty or its
+  directory entry uncommitted — and every realm KEK is encrypted under that host key, so losing it
+  makes the **entire encrypted dataset permanently undecryptable** with no recovery path. All three
+  key-material write paths — the host-key write, the first-KEK `hearth.keys` create, and the
+  master-key-rotation atomic rewrite (which fsync'd the temp file but omitted the post-rename
+  directory fsync) — now `sync_all()` the file **and** fsync the parent directory before returning
+  success. This is the same defect class as the WAL/SST parent-directory fsync work (HEA-1855/1857),
+  where the host key was flagged as an open HIGH; it is now confirmed and closed.
+
 ### Changed
 - **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and
   takes an exclusive advisory lock on `storage.data_dir`, so a second replica sharing the

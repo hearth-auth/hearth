@@ -1045,7 +1045,7 @@ async fn run_serve(
                     // Known defects: followers never invalidate RBAC/session
                     // caches (C-5), membership is immutable after bootstrap
                     // (C-6), and writes to a follower return HTTP 500 (H-3).
-                    // Operators must not have to read the docs to learn this —
+                    // Operators must not learn this from the docs alone —
                     // enabling `cluster:` warns on every startup.
                     warn!(
                         node_id = cluster_cfg.node_id,
@@ -2730,19 +2730,48 @@ async fn run_serve(
             });
         }
 
-        let shutdown = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install Ctrl+C handler");
-            info!("shutdown signal received, stopping server");
+        // Wire SIGINT + SIGTERM to the same graceful drain.  The channel lets
+        // the drain-deadline timer start exactly when the signal fires rather
+        // than at process startup.
+        let drain_secs = config.operational.shutdown_timeout_secs;
+        let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async move {
+            wait_for_shutdown_signal().await;
+            info!(
+                drain_deadline_secs = drain_secs,
+                "shutdown signal received, draining in-flight requests"
+            );
+            let _ = drain_start_tx.send(());
         };
-        http::serve_router(addr, app_router, shutdown).await?;
+        tokio::select! {
+            result = http::serve_router(addr, app_router, shutdown) => {
+                result?;
+            }
+            _ = async {
+                let _ = drain_start_rx.await;
+                tokio::time::sleep(Duration::from_secs(drain_secs)).await;
+            } => {
+                warn!(
+                    drain_deadline_secs = drain_secs,
+                    "graceful drain deadline exceeded, forcing shutdown"
+                );
+            }
+        }
     }
 
-    // Signal the gRPC task to shut down and wait for it.
+    // Signal the gRPC task to shut down and wait for it within the drain deadline.
     if let Some((tx, handle)) = grpc_shutdown {
         let _ = tx.send(());
-        let _ = handle.await;
+        let drain_secs = config.operational.shutdown_timeout_secs;
+        match tokio::time::timeout(Duration::from_secs(drain_secs), handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                warn!(
+                    drain_deadline_secs = drain_secs,
+                    "gRPC graceful drain deadline exceeded, forcing shutdown"
+                );
+            }
+        }
     }
 
     // Signal the webhook dispatcher to stop.
@@ -3120,6 +3149,31 @@ fn maybe_upgrade_email_transport(config: &mut Config) -> bool {
     }
 }
 
+/// Resolves when SIGINT (Ctrl+C) or SIGTERM is received, whichever arrives first.
+///
+/// Both signals initiate the same graceful drain sequence so that `docker stop`,
+/// `kubectl delete pod`, and `systemctl stop` — all of which send SIGTERM — behave
+/// identically to an interactive Ctrl+C (HEA-2161).
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm =
+        signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.expect("failed to install SIGINT handler");
+        }
+        _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install SIGINT handler");
+}
+
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
 /// Registry type alias used for hot-swap on SIGHUP.
 type RegistrySwap = Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>>;
@@ -3215,18 +3269,35 @@ async fn run_serve_tls(
         });
     }
 
-    // Set up graceful shutdown on Ctrl+C
+    // Wire SIGINT + SIGTERM to the same graceful drain (HEA-2161).
+    let drain_secs = config.operational.shutdown_timeout_secs;
+    let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-        info!("shutdown signal received, stopping server");
+        wait_for_shutdown_signal().await;
+        info!(
+            drain_deadline_secs = drain_secs,
+            "shutdown signal received, draining in-flight requests"
+        );
+        let _ = drain_start_tx.send(());
         drop(shutdown_tx);
     });
 
-    // Start HTTPS server
+    // Start HTTPS server with drain deadline.
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    http::serve_tls_router(listener, app_router, acceptor, shutdown_rx).await?;
+    tokio::select! {
+        result = http::serve_tls_router(listener, app_router, acceptor, shutdown_rx) => {
+            result?;
+        }
+        _ = async {
+            let _ = drain_start_rx.await;
+            tokio::time::sleep(Duration::from_secs(drain_secs)).await;
+        } => {
+            warn!(
+                drain_deadline_secs = drain_secs,
+                "graceful drain deadline exceeded, forcing shutdown"
+            );
+        }
+    }
 
     let _ = redirect_handle.await;
     Ok(())
