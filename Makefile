@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -523,3 +523,18 @@ ui-test-cross-browser:
 		cd tests/ui && npx playwright install chromium firefox webkit; \
 	fi
 	bash tests/ui/pw-run.sh test --project=smoke --project=flows --project=regression
+
+# ── Scratch Retention ─────────────────────────────────
+
+## Prune stale /scratch cargo target dirs and temp files (HEA-2198).
+## Retention: target-hea-* > 7d, other target-* > 14d, /scratch/tmp > 7d.
+## Sweeps the shared active target with cargo sweep --time 14 (non-destructive).
+## To install cron: crontab -e and add:
+##   0 3 * * * /home/brad/Code/personal/hearth/scripts/scratch-retention.sh \
+##             >> /scratch/cache/retention.log 2>&1
+scratch-prune:
+	bash scripts/scratch-retention.sh
+
+## Preview what scratch-prune would delete, without removing anything.
+scratch-prune-dry-run:
+	bash scripts/scratch-retention.sh --dry-run
