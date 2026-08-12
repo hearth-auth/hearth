@@ -157,6 +157,14 @@ env:
   RUST_LOG: "info,hearth=debug"
 
 # -- Liveness / readiness probes ------------------------------------------------
+# Deliberate split:
+#   liveness  → /health  (always-200 process heartbeat; a storage failure that
+#                          triggers liveness causes an immediate pod kill, which
+#                          is worse than leaving the pod alive while storage
+#                          recovers.  Kill only when the process itself is hung.)
+#   readiness → /readyz  (genuine storage probe; fails until WAL + memtable are
+#                          ready.  Kubernetes removes the pod from the endpoints
+#                          list so traffic is not routed to an unready pod.)
 livenessProbe:
   httpGet:
     path: /health
@@ -168,12 +176,19 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
+    path: /readyz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
+
+# -- Graceful termination -------------------------------------------------------
+# Must exceed config.operational.shutdown_timeout_secs to avoid a race where
+# kubelet SIGKILLs the pod before Hearth finishes draining in-flight requests.
+# Default here (60 s) covers the production shutdown_timeout_secs of 30 s with
+# a 30 s buffer for tini signal forwarding and kernel scheduling jitter.
+terminationGracePeriodSeconds: 60
 
 # -- Node scheduling ------------------------------------------------------------
 nodeSelector: {}

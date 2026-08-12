@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Helm readiness probe now uses `/readyz` (HEA-2169)** — the Helm chart, Dockerfile, and
+  docker-compose healthcheck all pointed to `/health` (always-200 process heartbeat) for both
+  liveness and readiness.  Kubernetes therefore routed traffic to pods whose storage was not yet
+  ready.  Readiness is now wired to `/readyz` (genuine WAL + memtable probe) while liveness stays
+  on `/health`; a storage failure causing liveness to flap would trigger a pod kill-loop, which is
+  worse than keeping the pod alive while storage recovers.  The Dockerfile and compose healthchecks
+  are updated to `/readyz` so `depends_on: condition: service_healthy` also waits for storage.
+- **systemd unit no longer restart-loops on startup (HEA-2169)** — `Type=notify` requires the
+  process to call `sd_notify(READY=1)`, which Hearth does not do.  systemd waited for the
+  notification timeout, killed the service, and restarted in a loop.  Changed to `Type=exec`:
+  systemd marks the service active as soon as the main PID is assigned.
+- **Helm chart sets `terminationGracePeriodSeconds: 60` explicitly (HEA-2169)** — the production
+  profile configures `shutdown_timeout_secs: 30`; relying on the Kubernetes default of 30 s left
+  zero buffer and could race kubelet's SIGKILL against Hearth's drain.  The grace period is now
+  explicit at 60 s (drain deadline + 30 s buffer).
+
 ### Changed
 - **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and
   takes an exclusive advisory lock on `storage.data_dir`, so a second replica sharing the

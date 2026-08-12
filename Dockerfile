@@ -133,11 +133,12 @@ LABEL org.opencontainers.image.title="Hearth" \
 
 EXPOSE 8420
 
-# /health is unauthenticated and returns `{"status":"ok"}` (see
-# src/protocol/http.rs). Fails the healthcheck on any non-2xx, which is the
-# signal Compose uses to stop routing to the container.
+# /readyz performs a genuine storage probe (WAL + memtable ready) rather than
+# a process-alive ping (/health is always-200). Using /readyz means Docker /
+# Compose will not mark the container healthy — and therefore will not route
+# traffic to it — until storage is fully initialised.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
-    CMD wget -qO- http://127.0.0.1:8420/health || exit 1
+    CMD wget -qO- http://127.0.0.1:8420/readyz || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hearth"]
 CMD ["serve", "-c", "/etc/hearth/hearth.yaml"]
