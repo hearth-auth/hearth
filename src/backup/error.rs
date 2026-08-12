@@ -53,4 +53,23 @@ pub enum BackupError {
         /// Archive-relative path of the member that could not be restored.
         path: String,
     },
+
+    /// The archive carries no restorable signing key for the realm (the archive
+    /// is unencrypted, predates signing-key export, or was opened without the
+    /// DEK). Restoring anyway would generate a fresh key and invalidate every
+    /// JWT and session issued before the backup, so restore fails closed rather
+    /// than silently degrading — a `warn` on the default path is not enough
+    /// (HEA-2168).
+    #[error(
+        "backup archive has no restorable signing key for realm '{slug}' — restoring \
+         would generate a NEW key and invalidate every JWT and session issued before \
+         the backup. Re-export the realm with encryption enabled (set HEARTH_MASTER_KEY \
+         or pass `--encrypt` to `hearth backup create`) so the signing key round-trips, \
+         or pass `--allow-missing-signing-key` to `hearth backup restore` to proceed \
+         anyway with a freshly generated key."
+    )]
+    SigningKeyMissing {
+        /// Archive slug of the realm whose signing key could not be restored.
+        slug: String,
+    },
 }

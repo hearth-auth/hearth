@@ -18,6 +18,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   including that it forbids two nodes sharing a directory or a `ReadWriteMany` mount.  **The
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
+### Security
+- **Backup restore no longer silently drops the realm signing key (HEA-2168)** — restoring an
+  archive that carried no usable signing key (an unencrypted archive, one produced before signing-key
+  export, or one opened without the DEK) previously generated a **fresh** key and continued with only
+  a `warn` in the log. The restored realm could no longer validate any JWT or session issued before
+  the backup — every outstanding token was silently invalidated — and the only warning was a log line
+  an operator may never have seen. Restore now **fails closed** with an actionable error
+  (`BackupError::SigningKeyMissing`) when no signing key can be restored, naming exactly how to
+  produce an archive whose key round-trips (`--encrypt` / `HEARTH_MASTER_KEY`). An operator who
+  genuinely wants a new key can pass the new `hearth backup restore --allow-missing-signing-key` flag
+  to opt in explicitly. The HTTP restore endpoint always fails closed (no override). When the signing
+  key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
+
 ### Fixed
 - **Backup restore no longer silently destroys the entire authorization model (HEA-2160)** — a
   restore previously reported **success** while discarding every role, permission, group, role

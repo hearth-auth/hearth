@@ -32,6 +32,12 @@ Every backup includes an AES-256-GCM encrypted copy of each realm's Ed25519 sign
 
 When `--encrypt` is passed, the DEK is additionally wrapped with a passphrase using **Argon2id** (m=65536, t=3, p=4) so that the archive is self-contained and the passphrase is the only external secret needed to restore signing keys. KDF parameters (algorithm, memory, iterations, parallelism, salt) are stored alongside the wrapped DEK in `manifest.json`.
 
+#### What an unencrypted archive does *not* contain
+
+The `signing_key.json` member is only restorable when the archive is encrypted (the DEK is present and, for `--encrypt` archives, unwrappable with the passphrase). An **unencrypted** archive — one with no wrapped DEK, or opened without the passphrase — carries **no usable signing key**: the realm records, users, credentials, clients, RBAC model, organizations, and (optionally) audit events are all present, but the Ed25519 signing key is not.
+
+Restoring such an archive would generate a **fresh** signing key, which invalidates every JWT and session issued before the backup. Because that is a silent, data-loss-adjacent outcome, **restore fails closed** on a missing signing key (see [`hearth backup restore`](#hearth-backup-restore) below): it aborts with an actionable error rather than degrading. Produce a restorable archive by exporting with encryption enabled (`--encrypt`, or set `HEARTH_MASTER_KEY`), which the `hearth backup create` command now requires.
+
 ---
 
 ## Commands
@@ -91,6 +97,7 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--realm` | all realms | Restore only this realm (by archive slug) |
 | `--mode` | `skip` | Conflict resolution: `skip` keeps existing records, `overwrite` replaces them |
 | `--dry-run` | off | Parse and report without writing anything |
+| `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
 | `--data-dir` | `data` | Path to the target data directory |
 
 Restore prints a per-entity-type table of inserted and skipped counts. Exit `0` means all records imported cleanly; exit `1` means partial success (some records skipped or failed); exit `2` means a fatal error (archive unreadable, target unopenable).
@@ -117,6 +124,8 @@ hearth backup restore \
 ```
 
 > **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — run `hearth realm rotate-signing-key` explicitly. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
+>
+> **Fail-closed on a missing signing key (HEA-2168).** If the archive carries no restorable signing key (an unencrypted archive, one produced before signing-key export, or an encrypted archive opened without the passphrase), restore **refuses** with a clear error rather than silently minting a fresh key that would invalidate every pre-backup JWT and session. The remedy is to restore from an encrypted archive whose key round-trips (`hearth backup create --encrypt` / `HEARTH_MASTER_KEY`). If you genuinely intend to start the realm on a new key, pass `--allow-missing-signing-key` to acknowledge that every token issued before the backup will stop validating. The HTTP restore endpoint always fails closed and has no override.
 
 **Exit codes:** `0` success · `1` partial (some records skipped/failed) · `2` fatal error.
 

@@ -4636,6 +4636,11 @@ async fn admin_backup_restore(
             dry_run,
             realm_target: None,
             dek_passphrase,
+            // HTTP restore always fails closed on a missing signing key: an
+            // operator recovering over the API must never silently mint a fresh
+            // key that invalidates every pre-restore token. The CLI exposes
+            // `--allow-missing-signing-key` for the deliberate override (HEA-2168).
+            allow_missing_signing_key: false,
         };
 
         let slugs: Vec<String> = if let Some(slug) = &realm_filter {

@@ -179,6 +179,16 @@ enum BackupAction {
         #[arg(long)]
         dry_run: bool,
 
+        /// Proceed even when the archive carries no restorable signing key.
+        ///
+        /// By default restore REFUSES an archive with no usable signing key
+        /// (unencrypted, pre-signing-key export, or opened without the DEK),
+        /// because restoring would generate a fresh key and invalidate every
+        /// JWT and session issued before the backup. Pass this flag to accept a
+        /// freshly generated key and restore anyway (HEA-2168).
+        #[arg(long)]
+        allow_missing_signing_key: bool,
+
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
@@ -560,9 +570,17 @@ async fn main() {
                     realm,
                     mode,
                     dry_run,
+                    allow_missing_signing_key,
                     data_dir,
                 } => {
-                    match run_backup_restore(&input, realm.as_deref(), &mode, dry_run, &data_dir) {
+                    match run_backup_restore(
+                        &input,
+                        realm.as_deref(),
+                        &mode,
+                        dry_run,
+                        allow_missing_signing_key,
+                        &data_dir,
+                    ) {
                         Ok(had_errors) => i32::from(had_errors),
                         Err(e) => {
                             tracing::error!("error: {e}");
@@ -3953,6 +3971,7 @@ fn run_backup_restore(
     realm_slug: Option<&str>,
     mode_str: &str,
     dry_run: bool,
+    allow_missing_signing_key: bool,
     data_dir: &std::path::Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupImporter, ImportOptions, RestoreMode};
@@ -3987,6 +4006,7 @@ fn run_backup_restore(
         dry_run,
         realm_target: None,
         dek_passphrase,
+        allow_missing_signing_key,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
