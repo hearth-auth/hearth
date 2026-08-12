@@ -44,20 +44,27 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for PeerAddr {
 
 /// Extracts the client's IP address from the request.
 ///
-/// If `trusted_proxies` is empty, returns the peer (socket) IP directly —
-/// this is the safe default that avoids trusting forged `X-Forwarded-For`
-/// headers.
+/// `X-Forwarded-For` is honored **only** when the immediate peer is listed in
+/// `trusted_proxies` — from any other peer the header is attacker-controlled
+/// and is ignored entirely (HEA-2165). An empty `trusted_proxies` list
+/// therefore fails closed: the peer (socket) IP is always used.
 ///
-/// If `trusted_proxies` is configured, walks the `X-Forwarded-For` header
-/// right-to-left and returns the first IP that is NOT in the trusted set.
-/// This follows the "rightmost non-trusted" algorithm recommended by OWASP.
+/// When the peer is a trusted proxy, walks the `X-Forwarded-For` header
+/// right-to-left and returns the first IP that is NOT in the trusted set
+/// ("rightmost non-trusted", per OWASP). An unparseable hop stops the walk
+/// and falls back to the peer, since everything to its left is unverifiable.
+///
+/// All returned addresses are canonicalized (`::ffff:a.b.c.d` → `a.b.c.d`) so
+/// the same client cannot occupy two per-IP rate-limit buckets.
 pub fn extract_client_ip(
     headers: &HeaderMap,
     peer: SocketAddr,
     trusted_proxies: &[IpAddr],
 ) -> String {
-    if trusted_proxies.is_empty() {
-        return peer.ip().to_string();
+    // Fail closed: XFF is only meaningful when the immediate peer is a
+    // reverse proxy we explicitly trust.
+    if !is_trusted(peer.ip(), trusted_proxies) {
+        return peer.ip().to_canonical().to_string();
     }
 
     // Parse X-Forwarded-For (comma-separated, rightmost = closest proxy)
@@ -66,23 +73,26 @@ pub fn extract_client_ip(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ips: Vec<&str> = xff
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    // Walk right-to-left, find first non-trusted IP
-    for ip_str in ips.iter().rev() {
-        if let Ok(ip) = ip_str.parse::<IpAddr>() {
-            if !trusted_proxies.contains(&ip) {
-                return ip.to_string();
-            }
+    // Walk right-to-left, find the first non-trusted hop
+    for ip_str in xff.rsplit(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match ip_str.parse::<IpAddr>() {
+            Ok(ip) if is_trusted(ip, trusted_proxies) => {}
+            Ok(ip) => return ip.to_canonical().to_string(),
+            // Everything left of an unparseable hop is unverifiable — stop
+            // the walk and fail closed to the peer.
+            Err(_) => return peer.ip().to_canonical().to_string(),
         }
     }
 
-    // All IPs in XFF are trusted (or XFF is empty/unparseable) — fall back to peer
-    peer.ip().to_string()
+    // All IPs in XFF are trusted (or XFF is empty) — fall back to peer
+    peer.ip().to_canonical().to_string()
+}
+
+/// Compares canonicalized so a v4-mapped v6 peer (`::ffff:10.0.0.1` on a
+/// dual-stack listener) matches a `10.0.0.1` trusted-proxy entry.
+fn is_trusted(ip: IpAddr, trusted_proxies: &[IpAddr]) -> bool {
+    let ip = ip.to_canonical();
+    trusted_proxies.iter().any(|t| t.to_canonical() == ip)
 }
 
 /// Parses a `User-Agent` string into a human-readable device label.
@@ -220,13 +230,16 @@ mod tests {
 
     #[test]
     fn xff_right_to_left_with_trusted_proxy() {
+        // HEA-2165: the request must arrive FROM a trusted proxy for the
+        // XFF walk to run at all.
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
             HeaderValue::from_static("203.0.113.50, 10.0.0.1"),
         );
         let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
-        let result = extract_client_ip(&headers, peer_addr(), &trusted);
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 4433));
+        let result = extract_client_ip(&headers, peer, &trusted);
         assert_eq!(result, "203.0.113.50");
     }
 
@@ -241,8 +254,102 @@ mod tests {
             "10.0.0.1".parse().expect("valid"),
             "10.0.0.2".parse().expect("valid"),
         ];
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 4433));
+        let result = extract_client_ip(&headers, peer, &trusted);
+        assert_eq!(result, "10.0.0.2");
+    }
+
+    // ===== HEA-2165: XFF honored only from a trusted peer =====
+
+    fn trusted_peer() -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 4433))
+    }
+
+    #[test]
+    fn xff_from_untrusted_peer_is_ignored() {
+        // peer_addr() (192.168.1.100) is NOT in trusted_proxies, so XFF is
+        // attacker-controlled and must be ignored entirely.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.50"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
         let result = extract_client_ip(&headers, peer_addr(), &trusted);
-        assert_eq!(result, "192.168.1.100");
+        assert_eq!(
+            result, "192.168.1.100",
+            "XFF from an untrusted peer must be ignored (per-request IP spoofing)"
+        );
+    }
+
+    #[test]
+    fn xff_from_trusted_peer_is_honored() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.50"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "203.0.113.50");
+    }
+
+    #[test]
+    fn walk_returns_first_untrusted_hop_not_leftmost() {
+        // Client-prepended garbage on the left must not win: the first
+        // untrusted hop from the right is the real client.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("6.6.6.6, 203.0.113.50, 10.0.0.2"),
+        );
+        let trusted: Vec<IpAddr> = vec![
+            "10.0.0.1".parse().expect("valid"),
+            "10.0.0.2".parse().expect("valid"),
+        ];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "203.0.113.50");
+    }
+
+    #[test]
+    fn unparseable_hop_stops_walk_fail_closed() {
+        // An unparseable hop makes everything to its left unverifiable —
+        // the walk must stop and fall back to the peer, not skip past it
+        // and trust a client-supplied value.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("6.6.6.6, not-an-ip, 10.0.0.2"),
+        );
+        let trusted: Vec<IpAddr> = vec![
+            "10.0.0.1".parse().expect("valid"),
+            "10.0.0.2".parse().expect("valid"),
+        ];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(
+            result, "10.0.0.1",
+            "unparseable hop must fail closed to the peer, not trust 6.6.6.6"
+        );
+    }
+
+    #[test]
+    fn v4_mapped_v6_peer_matches_v4_trusted_entry() {
+        // Dual-stack listeners report v4 peers as ::ffff:a.b.c.d — canonical
+        // comparison must still recognize the configured v4 proxy.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.50"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let peer: SocketAddr = "[::ffff:10.0.0.1]:4433".parse().expect("valid addr");
+        let result = extract_client_ip(&headers, peer, &trusted);
+        assert_eq!(result, "203.0.113.50");
+    }
+
+    #[test]
+    fn v4_mapped_xff_entry_is_canonicalized() {
+        // ::ffff:203.0.113.50 and 203.0.113.50 must map to the SAME rate-limit
+        // key, otherwise an attacker splits per-IP buckets by alternating forms.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("::ffff:203.0.113.50"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "203.0.113.50");
     }
 
     // ===== UA parsing tests =====
