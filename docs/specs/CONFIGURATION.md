@@ -38,7 +38,7 @@ Use `hearth.example.yaml` as the canonical reference for valid key names.
 
 ### Renamed and removed keys (upgrade guide)
 
-If you are upgrading from a configuration written before v1.7 you may have phantom keys that previously had no effect but now cause a startup error:
+If you are upgrading from a configuration written before v1.7 you may have phantom keys that previously had no effect but now cause a startup error. See the [Upgrading guide](../guides/upgrading.md#v16-v17) for the full list and migration steps.
 
 | Old key (no-op, now rejected) | Action |
 |-------------------------------|--------|

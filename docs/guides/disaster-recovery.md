@@ -17,8 +17,10 @@ the guide once the incident is closed.
 
 | Symptom | Section |
 |---|---|
-| `ChecksumMismatch` on startup, single SST file affected | [SST corruption recovery](#sst-corruption-recovery) |
-| `WAL replay: CRC mismatch with trailing data` on startup | [WAL torn-write recovery](#wal-torn-write-recovery) |
+| `ERROR storage: ChecksumMismatch` on startup, single SST file affected | [SST corruption recovery](#sst-corruption-recovery) |
+| `ERROR storage: WAL replay: CRC mismatch with trailing data` on startup | [WAL torn-write recovery](#wal-torn-write-recovery) |
+| `ERROR storage: data directory '…' is already locked by another process` | [Data directory already locked](#data-directory-already-locked) |
+| `ERROR storage: torn Raft snapshot restore detected: marker file '…'` | [Torn Raft snapshot restore](#torn-raft-snapshot-restore) |
 | Cluster will not elect a leader / followers refuse to join | [Raft divergence and split-brain](#raft-divergence-and-split-brain) |
 | Suspected leak of a realm's signing key | [Post-incident signing-key rotation](#post-incident-signing-key-rotation) |
 | Whole node lost — restoring from backup | [Full-restore procedure](#full-restore-procedure) |
@@ -34,9 +36,17 @@ yourself about to break one, stop and escalate before continuing.
 
 1. **Single writer.** Hearth must not be running against the data directory
    you are recovering. Stop the server (`systemctl stop hearth` or
-   equivalent) and confirm with `lsof +D /var/lib/hearth/data` before any
-   manual file manipulation. A second process holding the WAL open will
-   corrupt new writes during recovery.
+   equivalent) before any manual file manipulation. Hearth holds an
+   OS-level advisory `flock` on `{data_dir}/LOCK` — if the file is
+   present and locked, the process is still running. Confirm it is released
+   before proceeding:
+   ```bash
+   flock --nonblock /var/lib/hearth/data/LOCK echo "lock is free" \
+     || echo "LOCK is held — process still running"
+   ```
+   A second process opening the same `storage.data_dir` is rejected at
+   startup with `ERROR storage: data directory '…' is already locked`
+   rather than silently causing WAL corruption.
 
 2. **Snapshot before mutation.** Always copy the data directory to a
    parallel path (`cp -a data data.pre-recovery.$(date +%s)`) before
@@ -175,6 +185,132 @@ intervene for the normal torn-write case.
   legitimately discard tail records that conflict with the leader. The
   Raft log replay supersedes the local WAL in that case — no operator
   action needed.
+
+---
+
+## Data directory already locked
+
+### Failure shape
+
+Hearth refuses to start and prints:
+
+```
+ERROR storage: data directory '/var/lib/hearth/data' is already locked
+               by another process; stop the running Hearth instance
+               before starting a new one
+```
+
+This means an OS-level advisory `flock` on `{data_dir}/LOCK` is already held.
+Two separate processes must never share a `storage.data_dir` — the second writer
+would corrupt the WAL.
+
+Common causes:
+
+- A previous `hearth serve` process is still running (common after a failed
+  `systemctl restart` or a direct `hearth serve` invocation that was
+  backgrounded and forgotten).
+- A Helm rollout used `strategy.type: RollingUpdate` instead of `Recreate`,
+  so the new pod started before the old one terminated. The Helm chart sets
+  `strategy.type: Recreate` by default to prevent this.
+- Two manual invocations pointed at the same `--data-dir`.
+
+### Recovery steps
+
+1. **Find the process holding the lock:**
+
+   ```bash
+   flock --nonblock /var/lib/hearth/data/LOCK echo "free" \
+     || echo "locked — finding owner"
+   # If locked:
+   lsof /var/lib/hearth/data/LOCK
+   ```
+
+2. **Stop it cleanly:**
+
+   ```bash
+   systemctl stop hearth
+   # or: kill <pid>
+   ```
+
+3. **Confirm the lock is released**, then start Hearth again:
+
+   ```bash
+   flock --nonblock /var/lib/hearth/data/LOCK echo "lock is free"
+   systemctl start hearth
+   ```
+
+The `LOCK` file itself is never deleted — its presence is expected. Only the `flock`
+lease matters. Do not delete `LOCK`; it is recreated on startup but its absence
+prevents the advisory lock from working on the next run.
+
+---
+
+## Torn Raft snapshot restore
+
+### Failure shape
+
+After a follower crash or kill during Raft snapshot install, Hearth refuses to
+start and prints:
+
+```
+ERROR storage: torn Raft snapshot restore detected: marker file
+               '/var/lib/hearth/data/SNAPSHOT_RESTORE_IN_PROGRESS'
+               (snapshot <id>) was left by a process killed between
+               Phase 1 (delete) and Phase 2 (replay); delete the
+               marker file and restart so the node can re-request
+               the snapshot from the leader, or wipe the data directory entirely
+```
+
+### Why this happens
+
+Hearth's Raft snapshot install is a two-phase operation:
+
+- **Phase 1** — delete all realm keys from the local data directory.
+- **Phase 2** — replay the leader's snapshot data into the now-empty directory.
+
+Before Phase 1 begins, the engine writes `{data_dir}/SNAPSHOT_RESTORE_IN_PROGRESS`
+durably to disk. After Phase 2 completes, the marker is removed. If the node is
+killed between the two phases, the marker remains and the data directory contains
+a partial (empty or mixed) state. Hearth refuses to serve reads from this state
+rather than silently returning incorrect data.
+
+### Recovery
+
+The node needs to receive the snapshot again from the leader. The recovery steps
+depend on whether the cluster is healthy.
+
+**Cluster is healthy (preferred path):**
+
+1. Delete the marker file:
+
+   ```bash
+   rm /var/lib/hearth/data/SNAPSHOT_RESTORE_IN_PROGRESS
+   ```
+
+2. Restart the node:
+
+   ```bash
+   systemctl start hearth
+   ```
+
+The node re-joins the cluster, the leader detects that it is behind, and
+re-sends the snapshot. Phase 1 + Phase 2 run to completion; the marker
+is removed automatically.
+
+**Cluster is unavailable or you want a clean slate:**
+
+Wipe the data directory entirely and let the node stream a fresh snapshot on join:
+
+```bash
+systemctl stop hearth
+rm -rf /var/lib/hearth/data
+mkdir -p /var/lib/hearth/data
+systemctl start hearth
+```
+
+> **Do not manually restore from a backup** while the marker is present — the
+> backup captures a point-in-time snapshot that may be older than what the
+> cluster leader already applied. Let the leader's snapshot catch-up handle it.
 
 ---
 
@@ -549,6 +685,7 @@ Run this drill quarterly. An untested backup is not a backup.
 
 ## Related material
 
+- [Upgrading Guide](./upgrading.md) — pre-upgrade checklist, binary swap, rollback procedure.
 - [Backup and Restore Guide](./backup.md) — archive format, CLI
   reference, scheduled-backup recipes.
 - [Clustering Guide](./clustering.md) — multi-node operation,
