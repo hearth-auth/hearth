@@ -36,7 +36,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Guides whose CLI invocations are covered by this test.
-const GUIDES: &[&str] = &["docs/guides/upgrading.md", "docs/guides/disaster-recovery.md"];
+const GUIDES: &[&str] = &[
+    "docs/guides/upgrading.md",
+    "docs/guides/disaster-recovery.md",
+];
 
 /// Invocations that are documented but rejected by the real CLI.
 ///
@@ -291,16 +294,18 @@ fn documented_cli_invocations_are_accepted_by_the_real_cli() {
 /// corresponding [`KNOWN_BROKEN`] entry is deleted.
 #[test]
 fn known_broken_invocations_are_still_broken_and_still_documented() {
-    let documented: Vec<Invocation> =
-        GUIDES.iter().flat_map(|g| extract_invocations(g)).collect();
+    let documented: Vec<Invocation> = GUIDES.iter().flat_map(|g| extract_invocations(g)).collect();
 
     for (text, why, issue) in KNOWN_BROKEN {
-        let inv = documented.iter().find(|i| i.text == *text).unwrap_or_else(|| {
-            panic!(
-                "KNOWN_BROKEN entry `{text}` ({issue}) no longer appears in any guide — \
+        let inv = documented
+            .iter()
+            .find(|i| i.text == *text)
+            .unwrap_or_else(|| {
+                panic!(
+                    "KNOWN_BROKEN entry `{text}` ({issue}) no longer appears in any guide — \
                  the doc was fixed; delete this entry from KNOWN_BROKEN"
-            )
-        });
+                )
+            });
 
         assert!(
             check(inv).is_err(),
