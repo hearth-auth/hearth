@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use fs2::FileExt as _;
 
@@ -304,6 +304,21 @@ pub struct EmbeddedStorageEngine {
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
     flush_lock: Arc<Mutex<()>>,
+    /// Process-wide backup-consistency barrier (HEA-2167).
+    ///
+    /// Every mutating operation (`put`, `delete`, `put_batch`, `write_batch`,
+    /// `enqueue_batch`, `await_batch_durable`) acquires this as a *reader*
+    /// (shared) while it applies its change to the memtable. A backup export
+    /// acquires it as a *writer* (exclusive) and holds it across the whole of a
+    /// realm's read pass. Because concurrent writers share the read side,
+    /// normal write concurrency is unaffected — the only contention is during
+    /// an active export, when writers block until the export's consistent read
+    /// pass completes. Reads (`get`/`scan`) never touch this lock, so the hot
+    /// path and the export's own scans are never blocked.
+    ///
+    /// `RwLock<()>` guards no data — it is a pure barrier — so a poisoned lock
+    /// carries no meaning and is always recovered via `into_inner()`.
+    backup_barrier: Arc<RwLock<()>>,
     /// Serializes compaction operations against each other.
     ///
     /// Held for the *whole* of [`Self::compact_partial`] / [`Self::compact_ssts`]
@@ -655,6 +670,7 @@ impl EmbeddedStorageEngine {
             hot_tier,
             data_dir: config.data_dir,
             flush_lock,
+            backup_barrier: Arc::new(RwLock::new(())),
             compaction_lock: Mutex::new(()),
             put_if_absent_lock: Mutex::new(()),
             sst_counter,
@@ -870,6 +886,21 @@ impl EmbeddedStorageEngine {
 }
 
 impl EmbeddedStorageEngine {
+    /// Acquires the backup-consistency barrier for a mutating operation.
+    ///
+    /// Mutating operations take the *shared* (reader) side, so they never block
+    /// one another. A backup export takes the *exclusive* (writer) side, so
+    /// while an export is in progress this call blocks the caller until the
+    /// export's consistent read pass completes (HEA-2167). Reads never call
+    /// this, so the hot path is unaffected.
+    ///
+    /// The barrier guards no data; a poisoned lock is always recovered.
+    fn enter_write(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.backup_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Compacts all current SST files into a single output SST.
     ///
     /// Returns the number of SSTs compacted (0 if the count is below
@@ -1335,6 +1366,8 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        // Block while a backup export holds the consistency barrier (HEA-2167).
+        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["put"])
@@ -1366,6 +1399,8 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        // Block while a backup export holds the consistency barrier (HEA-2167).
+        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["delete"])
@@ -1407,6 +1442,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(());
         }
 
+        // Block while a backup export holds the consistency barrier (HEA-2167).
+        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["put_batch"])
@@ -1468,6 +1505,12 @@ impl StorageEngine for EmbeddedStorageEngine {
             ));
         }
 
+        // Block while a backup export holds the consistency barrier (HEA-2167).
+        // In `SyncMode::None` the memtable is applied inline below; in
+        // `EveryWrite` the apply is deferred to `await_batch_durable`, which
+        // takes the barrier again. Either way no memtable mutation lands while
+        // an export's read pass is in flight.
+        let _barrier = self.enter_write();
         let sub_entries: Vec<BatchEntry> = entries
             .iter()
             .map(|(k, v)| BatchEntry {
@@ -1523,6 +1566,10 @@ impl StorageEngine for EmbeddedStorageEngine {
             StorageDurabilityHandleKind::Immediate => return Ok(()),
             StorageDurabilityHandleKind::Pending(p) => p,
         };
+
+        // Block while a backup export holds the consistency barrier so the
+        // deferred memtable apply below cannot land mid-snapshot (HEA-2167).
+        let _barrier = self.enter_write();
 
         // Run the group-commit leader loop (or wait as a follower) until the
         // WAL entry is covered by a sync_all.
@@ -1593,6 +1640,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(());
         }
 
+        // Block while a backup export holds the consistency barrier (HEA-2167).
+        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["write_batch"])
@@ -1784,6 +1833,10 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.fs.sync_dir(&self.data_dir)?;
         Ok(())
     }
+
+    fn backup_barrier(&self) -> Option<Arc<RwLock<()>>> {
+        Some(Arc::clone(&self.backup_barrier))
+    }
 }
 
 impl std::fmt::Debug for EmbeddedStorageEngine {
@@ -1837,6 +1890,69 @@ mod tests {
         assert_eq!(
             engine.get(&realm, b"jti").expect("get"),
             Some(b"1".to_vec())
+        );
+    }
+
+    // HEA-2167: while a backup export holds the consistency barrier in write
+    // mode, all mutating operations must block; they resume the instant the
+    // barrier is released. Reads are never blocked (asserted separately below).
+    #[test]
+    fn backup_barrier_blocks_writes_until_released() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+        engine.put(&realm, b"k", b"before").expect("seed");
+
+        let barrier = engine
+            .backup_barrier()
+            .expect("embedded engine has a barrier");
+        // Take the exclusive (export) side.
+        let guard = barrier
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let write_done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let engine = Arc::clone(&engine);
+            let realm = realm.clone();
+            let write_done = Arc::clone(&write_done);
+            std::thread::spawn(move || {
+                // This blocks until the export barrier is released.
+                engine.put(&realm, b"k", b"after").expect("blocked put");
+                write_done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        // Give the writer ample time to reach and block on the barrier. It must
+        // NOT have completed while we hold the exclusive side.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !write_done.load(Ordering::SeqCst),
+            "put must block while the backup barrier is held exclusively"
+        );
+        // Reads proceed while the barrier is held — the writer is blocked, so we
+        // still observe the pre-barrier value.
+        assert_eq!(
+            engine.get(&realm, b"k").expect("read during barrier"),
+            Some(b"before".to_vec()),
+            "reads must not be blocked by the backup barrier"
+        );
+
+        // Release the export side; the blocked write must now complete.
+        drop(guard);
+        writer.join().expect("writer thread");
+        assert!(
+            write_done.load(Ordering::SeqCst),
+            "put must resume after release"
+        );
+        assert_eq!(
+            engine.get(&realm, b"k").expect("read after release"),
+            Some(b"after".to_vec()),
+            "the previously-blocked write must land after the barrier is released"
         );
     }
 

@@ -2201,6 +2201,23 @@ pub trait IdentityEngine: Send + Sync {
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
 
+    /// Returns the underlying storage engine's backup-consistency barrier, or
+    /// `None` if snapshot isolation is unavailable (HEA-2167).
+    ///
+    /// A backup export acquires the returned lock in **write** mode and holds
+    /// it across its read pass so no write can interleave and tear the archive.
+    /// The exporter reaches the storage layer through this engine, so this is
+    /// the seam the backup module uses to obtain the barrier. See
+    /// [`StorageEngine::backup_barrier`](crate::storage::StorageEngine::backup_barrier)
+    /// for the mechanism and its write-availability impact.
+    ///
+    /// The default returns `None` — correct for test doubles and any engine
+    /// whose storage does not support a barrier. The embedded engine overrides
+    /// it to delegate to its storage layer.
+    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
+        None
+    }
+
     // ===== Adaptive MFA — device fingerprint (HEA-839) =====
 
     /// Checks whether the device described by `(ip, user_agent)` is recognised

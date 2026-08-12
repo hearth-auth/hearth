@@ -215,19 +215,31 @@ lives in the data directory alongside the data, and it is truncated in place
 when it rotates rather than being retained as history. It is not a recovery
 source beyond the current segment, and it is never shipped off-host.
 
-### Consistency caveat — the recovery point is an interval, not an instant
+### Referential consistency — each realm is snapshotted (HEA-2167)
 
-An archive is a **live sequential scan**, not a snapshot. Each entity type is
-read at a different moment during the run: users first, then credentials,
-clients, roles, and so on. If the realm is being written to during the backup,
-the archive can capture an internally inconsistent view — for example a role
-assignment referring to a user who was created after `users.ndjson` was already
-written, or a user whose assignments were deleted later in the same run.
+An export reads each entity type at a different moment during the run (users
+first, then credentials, clients, roles, and so on). To stop a concurrent write
+from tearing the archive — for example a role assignment referring to a user
+created *after* `users.ndjson` was written — the exporter holds a per-node
+**consistency barrier** across the whole of a single realm's read pass. Every
+entity in a realm's archive therefore reflects one point in time, and every
+reference (an assignment's subject, a credential's user) resolves within the
+same archive.
 
-The window of exposure is one backup run. To eliminate it, back up during a
-maintenance window or from a realm that is not taking writes. Treat the
-recovery point as *the start of the run*, and prefer `--dry-run` on restore to
-inspect counts before committing.
+**Write-availability impact — know this before you schedule backups.** While an
+export holds the barrier, **writes to that node block** until the export's read
+pass for the current realm completes; they are not lost, only delayed. Reads —
+token validation, session and user lookups — are **never** blocked, so
+authentication continues normally during a backup. The blocking window scales
+with realm size (how long it takes to scan and serialise the realm's entities),
+so for very large realms prefer a low-write window. The barrier is released
+between realms, so a multi-realm backup does not hold all writes for the whole
+run.
+
+This barrier is **single-node**. Multi-node export consistency is not provided
+(clustering is EXPERIMENTAL — see the clustering guide). The offline CLI
+(`hearth backup create` against a stopped node's data directory) has no
+concurrent writer and so is trivially consistent.
 
 ### Roadmap
 

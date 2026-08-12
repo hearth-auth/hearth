@@ -32,6 +32,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **Backup export now takes a referentially consistent snapshot (HEA-2167)** — export previously
+  paginated live reads with no snapshot or lock, so any write concurrent with a backup could tear the
+  archive: a role assignment (or any cross-entity reference) read late could point at a user created
+  after the users were read, producing an archive that never atomically existed and was discovered
+  only during a restore. Since backups run on a schedule against a live server, this was the normal
+  case. Export now acquires a per-node **consistency barrier** for the duration of each realm's read
+  pass. **Operational impact operators must know before scheduling backups:** while an export holds
+  the barrier, writes to that node block until the export's read pass for that realm completes; reads
+  (token validation, lookups) are never blocked. Schedule backups during low-write windows for large
+  realms. The barrier is single-node; multi-node export consistency is not yet provided (clustering
+  is EXPERIMENTAL — see HEA-2154).
 - **Backup restore no longer silently destroys the entire authorization model (HEA-2160)** — a
   restore previously reported **success** while discarding every role, permission, group, role
   assignment, scope, organization, and audit event: the exporter wrote 12 archive members but the

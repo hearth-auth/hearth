@@ -13159,6 +13159,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(key.pkcs8_bytes().to_vec())
     }
 
+    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
+        self.storage.backup_barrier()
+    }
+
     fn initiate_logout(
         &self,
         realm_id: &RealmId,

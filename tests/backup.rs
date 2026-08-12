@@ -1286,3 +1286,184 @@ async fn large_realm_restore_under_60s() {
         "restore of 10 000 users must complete in < 60s; took {elapsed:?}"
     );
 }
+
+// ── referential consistency under concurrent writes (HEA-2167) ─────────────────
+
+/// Exports a realm keeping the raw DEK so the test can decrypt sections
+/// directly (no passphrase round-trip needed).
+fn export_realm_keep_dek(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+    opts: &ExportOptions,
+) -> (NamedTempFile, [u8; 32]) {
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
+    let exporter = make_exporter(h);
+    let dek = BackupExporter::generate_dek().expect("generate DEK");
+    let realm_manifest = exporter
+        .export_realm(realm, &mut writer, opts, &dek)
+        .expect("export realm");
+    let (wrapped_dek_b64, wrapping_params) =
+        BackupExporter::wrap_dek(&dek, &test_passphrase()).expect("wrap DEK");
+    let mut manifest = BackupManifest::new(vec![realm_manifest]);
+    manifest.sections_encrypted = true;
+    manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+    manifest.dek_wrapping_params = Some(wrapping_params);
+    writer.finish(manifest).expect("finish archive");
+    (tmp, dek)
+}
+
+/// Decrypts an NDJSON section and returns its non-empty lines, or an empty vec
+/// if the section is absent from the archive.
+fn decrypt_ndjson_lines(
+    reader: &hearth::backup::ArchiveReader,
+    archive_path: &str,
+    dek: &[u8; 32],
+) -> Vec<Vec<u8>> {
+    let Some(enc) = reader.read_file(archive_path).expect("read section") else {
+        return Vec::new();
+    };
+    let plain = hearth::backup::decrypt_bytes(&enc, dek).expect("decrypt section");
+    plain
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// H-4 (HEA-2167): an export taken while a writer concurrently creates users
+/// and role assignments must be **referentially consistent** — every role
+/// assignment whose subject is a user must resolve to a user present in the
+/// same archive.
+///
+/// The DB is referentially consistent at every instant (a user is always
+/// created *before* it is assigned a role), so any dangling reference in the
+/// archive can only come from a *torn* snapshot: the export captured the
+/// assignment (read late) but not its user (created after the users were read).
+///
+/// Demonstrated red at `af4edb59` (export paginated live reads with no
+/// snapshot): without the storage consistency barrier this fails within a few
+/// export iterations. With the barrier, every archive resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // seed + writer thread + export/verify loop
+async fn export_is_referentially_consistent_under_concurrent_writes() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed rbac");
+    let admin_role = h
+        .rbac()
+        .get_role_by_name(&realm, "realm.admin")
+        .expect("get role")
+        .expect("seeded")
+        .id;
+
+    // Seed a small initial corpus so the first exports have content.
+    let identity = h.identity_arc();
+    let rbac = h.rbac_arc();
+    for i in 0..20u64 {
+        let user = identity
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("seed-{i}-{}@hea2167.example", uuid::Uuid::new_v4()),
+                    display_name: "Seed".into(),
+                    first_name: "Seed".into(),
+                    last_name: "User".into(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("seed create_user");
+        rbac.assign_role(
+            &realm,
+            &hearth::rbac::AssignRoleRequest {
+                subject: hearth::rbac::Subject::User(user.id().clone()),
+                role_id: admin_role.clone(),
+                scope: hearth::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("seed assign_role");
+    }
+
+    // Background writer: create user U, then assign it a role. Because the user
+    // always exists before the assignment references it, the DB is never
+    // internally inconsistent — only a torn snapshot can dangle.
+    let stop = Arc::new(AtomicBool::new(false));
+    let created = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let identity = Arc::clone(&identity);
+        let rbac = Arc::clone(&rbac);
+        let realm = realm.clone();
+        let admin_role = admin_role.clone();
+        let stop = Arc::clone(&stop);
+        let created = Arc::clone(&created);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let user = match identity.create_user(
+                    &realm,
+                    &CreateUserRequest {
+                        email: format!("churn-{}@hea2167.example", uuid::Uuid::new_v4()),
+                        display_name: "Churn".into(),
+                        first_name: "Churn".into(),
+                        last_name: "User".into(),
+                        attributes: Default::default(),
+                    },
+                ) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let _ = rbac.assign_role(
+                    &realm,
+                    &hearth::rbac::AssignRoleRequest {
+                        subject: hearth::rbac::Subject::User(user.id().clone()),
+                        role_id: admin_role.clone(),
+                        scope: hearth::rbac::Scope::Realm,
+                        assigned_by: None,
+                    },
+                );
+                created.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
+
+    let slug = realm_slug(&h, &realm);
+    let users_path = format!("realms/{slug}/users.ndjson");
+    let assignments_path = format!("realms/{slug}/assignments.ndjson");
+
+    // Export repeatedly and assert each archive resolves. Bound the loop by the
+    // writer's progress so the corpus (and thus per-export cost) stays small.
+    let mut iterations = 0u32;
+    while created.load(Ordering::Relaxed) < 300 && iterations < 200 {
+        iterations += 1;
+        let (tmp, dek) = export_realm_keep_dek(&h, &realm, &ExportOptions::default());
+        let reader = BackupArchive::open(tmp.path()).expect("open archive");
+
+        // Set of user ids present in the archive.
+        let mut archive_users = std::collections::HashSet::new();
+        for line in decrypt_ndjson_lines(&reader, &users_path, &dek) {
+            let user: hearth::identity::User = serde_json::from_slice(&line).expect("parse user");
+            archive_users.insert(user.id().as_uuid().to_string());
+        }
+
+        // Every user-subject assignment must resolve to a user in the archive.
+        for line in decrypt_ndjson_lines(&reader, &assignments_path, &dek) {
+            let assignment: hearth::rbac::RoleAssignment =
+                serde_json::from_slice(&line).expect("parse assignment");
+            if let hearth::rbac::Subject::User(uid) = &assignment.subject {
+                assert!(
+                    archive_users.contains(&uid.as_uuid().to_string()),
+                    "torn archive (HEA-2167): assignment references user {} \
+                     not present in the archive (iteration {iterations})",
+                    uid.as_uuid()
+                );
+            }
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("writer thread");
+    assert!(iterations > 0, "must have run at least one export");
+}
