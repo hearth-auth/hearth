@@ -535,19 +535,45 @@ drill](#test-restore-drill-checklist).
 
 ### Recovery Point Objective (RPO) — how much data you can lose
 
+> **Hearth has no point-in-time recovery, no WAL archiving, and no
+> incremental backup.** Your recovery point is the last successful full
+> backup. See the [backup guide's RPO
+> statement](./backup.md#recovery-point-objective-rpo) for the canonical
+> operator-facing wording and the [design
+> spike](../plans/HEA-2170-pitr-wal-archiving-design.md) for the post-1.x
+> plan.
+
+Worst-case data loss is **the backup interval plus the duration of one
+backup run** — the recovery point is the *start* of a run, not its end:
+
 | Backup cadence | Worst-case data loss |
 |---|---|
-| Hourly | 1 hour of writes |
-| Every 6 hours | 6 hours of writes |
-| Daily (typical) | 24 hours of writes |
+| Hourly | ~1 hour + one run |
+| Every 6 hours | ~6 hours + one run |
+| Daily (typical) | ~24 hours + one run |
+
+Measure your own run duration — the RTO table below covers *restore* time,
+which is not a proxy for *backup* time (restore is dominated by per-record
+re-encryption on write; export is a read scan).
 
 RPO is dominated by your backup schedule, not by Hearth's recovery
 mechanics. Hearth itself is durable to the last `fsync` — for any single-
 node crash without disk loss, RPO is effectively zero because the WAL
 replays on startup.
 
+**Do not read that as disk-loss protection.** The WAL lives inside the data
+directory, is truncated in place on rotation rather than retained as
+history, and is never shipped off-host. It recovers a crashed process, not
+a lost disk.
+
 In cluster mode, RPO for a single-node failure is zero (the other nodes
-hold the writes). RPO for whole-cluster loss equals the backup cadence.
+hold the writes). RPO for whole-cluster loss equals the backup cadence
+plus one run.
+
+Archives are also **live scans rather than snapshots**, so an archive taken
+while the realm is under write load can be internally inconsistent within
+that one-run window — see [Consistency
+caveat](./backup.md#consistency-caveat--the-recovery-point-is-an-interval-not-an-instant).
 
 ### Recovery Time Objective (RTO) — how long recovery takes
 

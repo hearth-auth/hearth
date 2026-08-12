@@ -156,35 +156,141 @@ hearth backup inspect --input /backups/prod-2026-05-19.hearth-backup
 
 ---
 
+## Recovery point objective (RPO)
+
+> **Hearth has no point-in-time recovery.** There is no WAL archiving and no
+> incremental backup. **Your recovery point is the last successful full
+> backup** — everything written after it is lost in a disk-loss or
+> datacenter-loss event.
+
+State it to your stakeholders in these terms:
+
+> With hourly backups, the maximum data loss window is **one hour plus the
+> duration of one backup run.**
+
+The general form is:
+
+```
+worst-case data loss  =  backup interval  +  duration of one backup run
+```
+
+The backup's duration counts because the recovery point is the **start** of the
+run, not the end — see the consistency caveat below. Substitute your own
+cadence: daily backups mean a worst case of just over 24 hours.
+
+**Measure your own run duration** rather than assuming one; it scales with realm
+size and is the only term in the formula that is not under your direct control.
+Time a real backup on production-shaped data:
+
+```bash
+time curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
+  "http://127.0.0.1:8420/admin/backup" -o /tmp/timing-probe.hearth-backup
+```
+
+For small realms this is typically well under a minute, making the interval the
+dominant term. Confirm it during your [test-restore
+drill](./disaster-recovery.md#test-restore-drill-checklist) and re-measure as
+the realm grows.
+
+**What this figure does and does not cover:**
+
+| Failure | Data loss |
+|---|---|
+| Process crash / `kill -9`, disk intact | **Zero** — the WAL replays on startup |
+| Single node lost in a 3-node cluster | **Zero** — surviving nodes hold the writes |
+| Disk loss on a single-node deployment | **Last backup** (the formula above) |
+| Whole-cluster or datacenter loss | **Last backup** (the formula above) |
+
+WAL replay protects you from a crash, **not** from losing the disk: the WAL
+lives in the data directory alongside the data, and it is truncated in place
+when it rotates rather than being retained as history. It is not a recovery
+source beyond the current segment, and it is never shipped off-host.
+
+### Consistency caveat — the recovery point is an interval, not an instant
+
+An archive is a **live sequential scan**, not a snapshot. Each entity type is
+read at a different moment during the run: users first, then credentials,
+clients, roles, and so on. If the realm is being written to during the backup,
+the archive can capture an internally inconsistent view — for example a role
+assignment referring to a user who was created after `users.ndjson` was already
+written, or a user whose assignments were deleted later in the same run.
+
+The window of exposure is one backup run. To eliminate it, back up during a
+maintenance window or from a realm that is not taking writes. Treat the
+recovery point as *the start of the run*, and prefer `--dry-run` on restore to
+inspect counts before committing.
+
+### Roadmap
+
+PITR, WAL archiving, and incremental backup are designed but **not in 1.x** —
+see the [design spike](../plans/HEA-2170-pitr-wal-archiving-design.md) for the
+approach, the phasing, and an explicit list of what will not be built.
+
+---
+
 ## Backup strategy recommendations
 
 ### Scheduled backups
 
-Use cron or your orchestration tool to run `hearth backup create` regularly. A typical setup:
+> **A running server holds an exclusive lock on its data directory.**
+> `hearth backup create --data-dir <live dir>` will fail with
+> `data directory '...' is already locked by another process` (exit code 2)
+> while `hearth serve` is running. The CLI is for **offline** data directories
+> only — a stopped node, or a copy of one.
+
+To back up a **live** server, use the admin HTTP endpoint, which runs inside the
+server process and needs no lock:
 
 ```bash
 # /etc/cron.d/hearth-backup
-0 2 * * * hearth /usr/bin/hearth backup create \
-  --data-dir /var/lib/hearth/data \
-  --output /backups/hearth-$(date +\%F).hearth-backup \
+0 * * * * hearth curl -fsS -X POST \
+  -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
+  "http://127.0.0.1:8420/admin/backup" \
+  -o /backups/hearth-$(date +\%FT\%H).hearth-backup \
   >> /var/log/hearth/backup.log 2>&1
+```
+
+The endpoint requires the `hearth.export` capability in addition to
+`hearth.admin`, and is rate-limited to **10 calls per hour per user**, which
+caps how tight a cadence you can schedule. Note that `POST /admin/backup` has
+no equivalent of the CLI's `--encrypt` flag; encrypt the resulting archive at
+rest yourself, or take encrypted archives from a stopped node with the CLI.
+
+Use the CLI form only against a data directory no server is using:
+
+```bash
+systemctl stop hearth
+hearth backup create --data-dir /var/lib/hearth/data \
+  --output /backups/hearth-$(date +%F).hearth-backup --encrypt
+systemctl start hearth
 ```
 
 Rotate old archives with a retention tool (e.g., `find /backups -name "*.hearth-backup" -mtime +30 -delete`).
 
 ### Cluster deployments
 
-In a multi-node cluster, **take backups from a follower** to avoid adding I/O load to the leader (which is processing all writes). Point `--data-dir` at the follower's data directory; its storage engine can be read while the cluster is live.
+In a multi-node cluster, **take backups from a follower** to avoid adding I/O
+load to the leader (which is processing all writes). Point the `POST
+/admin/backup` call at the follower's own admin listener — a running follower
+holds the exclusive lock on its data directory, so the CLI form will not work
+against it either.
 
 ### Verifying backups
 
-Always verify after creation and before storing off-site:
+Always verify after creation and before storing off-site. `hearth backup verify`
+reads only the archive, so it works regardless of which path produced it and
+does not touch the data directory:
 
 ```bash
-hearth backup create --data-dir /var/lib/hearth/data --output /tmp/latest.hearth-backup \
+curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
+  "http://127.0.0.1:8420/admin/backup" -o /tmp/latest.hearth-backup \
   && hearth backup verify --input /tmp/latest.hearth-backup \
   && mv /tmp/latest.hearth-backup /backups/
 ```
+
+An unverified backup is not a backup. Fold the `verify` step into the same
+scheduled job so a corrupt archive fails the run loudly instead of sitting
+undetected until a restore.
 
 ### Restoring to a new node
 
