@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Multi-node clustering is documented and flagged as EXPERIMENTAL (HEA-2154)** — Hearth 1.x has
+  no production-supported multi-node path.  Starting a node with a `cluster:` section now emits a
+  `WARN` on every startup naming the three known defects: followers never invalidate RBAC or
+  session caches after a revocation (C-5), cluster membership is fixed at bootstrap and cannot be
+  changed without a full-cluster restart (C-6), and writes routed to a follower fail with HTTP 500
+  with no leader hint (H-3).  The clustering guide, `hearth.example.yaml`, the Helm `values.yaml` /
+  `values-prod.yaml` comments, `CONFIGURATION.md`, `ARCHITECTURE.md`, the README, and VISION.md no
+  longer imply that HA works today.  The exclusive `data_dir` advisory lock is now documented,
+  including that it forbids two nodes sharing a directory or a `ReadWriteMany` mount.  **The
+  supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
+
 ### Fixed
 - **SIGTERM now triggers graceful drain (HEA-2161)** — `docker stop`, `kubectl delete pod`, and
   `systemctl stop` all send SIGTERM; previously the OS default handler killed the process

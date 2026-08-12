@@ -191,6 +191,8 @@ storage:
 
 ### `cluster`
 
+> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is not production-supported in Hearth 1.x. Known defects: followers do not invalidate RBAC or session caches (C-5); cluster membership is immutable after bootstrap (C-6); writes to followers return HTTP 500 (H-3). The production deployment model is single-node. See the [Clustering guide](../guides/clustering.md).
+
 Multi-node Raft consensus configuration. **Omit this section entirely for single-node deployments** — when absent, Hearth runs in single-node mode with no clustering overhead, no extra port, and no Raft log.
 
 When present, Hearth starts a Raft engine and participates in peer-to-peer log replication over mTLS-secured gRPC. All three TLS certificate fields are required — plaintext peer connections are unconditionally rejected.
@@ -199,11 +201,11 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 |-------|------|---------|-------------|
 | `node_id` | integer | — | **Required.** This node's numeric ID. Must be unique across the cluster. Typically `1`, `2`, `3`, … |
 | `peer_address` | string | `"127.0.0.1:8421"` | `host:port` this node listens on for inbound Raft RPCs from peers. Use a routable address in production (not loopback). |
-| `peers` | list | `[]` | Known cluster peers. Each entry has `id` (integer) and `address` (string `host:port`). List all nodes except this one. |
+| `peers` | list | `[]` | Known cluster peers. Each entry has `id` (integer) and `address` (string `host:port`). List all nodes except this one. **This list is fixed at bootstrap and cannot be changed without a full-cluster restart.** |
 | `tls_cert_path` | path | — | **Required.** Path to this node's PEM certificate (presented to peers during mTLS). |
 | `tls_key_path` | path | — | **Required.** Path to this node's PEM private key. |
 | `tls_ca_cert_path` | path | — | **Required.** Path to the CA certificate used to verify peer certificates. All nodes must share the same CA. |
-| `read_lag_threshold_ms` | integer | `500` | Maximum follower replication lag in milliseconds before reads are refused. When exceeded, the caller receives a redirect to the leader's address. |
+| `read_lag_threshold_ms` | integer | `500` | Maximum follower replication lag in milliseconds. Currently informational — see write routing note below. |
 
 ```yaml
 cluster:
@@ -220,9 +222,13 @@ cluster:
   read_lag_threshold_ms: 500   # optional — omit to use the default
 ```
 
-**Write routing:** Writes that arrive on a follower return an error with the leader's address. Your load balancer or client should retry the write against that address. Writes go through Raft and are only acknowledged after quorum commit.
+**Write routing (H-3):** Writes that arrive on a follower currently return HTTP 500. There is no leader-redirect response. Route all write traffic exclusively to the leader node at the load balancer layer.
 
-**Read routing:** Follower reads are served locally when replication lag is below `read_lag_threshold_ms`. When lag is exceeded, reads also return the leader's address for redirect.
+**Follower RBAC cache (C-5):** Follower nodes do not invalidate their in-process RBAC or session caches when writes are applied from the Raft log. A permission revoked on the leader will continue to be accepted on followers until those followers restart.
+
+**Membership (C-6):** The `peers` list is set once at `POST /admin/cluster/bootstrap` and cannot be changed in a running cluster. Adding or removing a node requires stopping all nodes, updating each node's `peers` list in YAML, and restarting.
+
+**Exclusive `data_dir` lock:** Hearth holds an OS advisory flock on `data_dir/LOCK` for the lifetime of the process. Each cluster node must use a separate `data_dir` on separate storage. Sharing a directory or network mount between nodes will cause startup failure.
 
 **Bootstrap:** On first cluster startup, call the bootstrap API on the designated bootstrap node once all peers are reachable. See the [Clustering guide](../guides/clustering.md) for the step-by-step sequence.
 
@@ -281,7 +287,7 @@ Operational limits and timeouts.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `request_timeout_secs` | integer | `30` | Maximum time in seconds for a single HTTP request. |
-| `shutdown_timeout_secs` | integer | `10` | Graceful shutdown timeout in seconds. |
+| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). In-flight HTTP and gRPC requests are given this long to complete before the process forces exit. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
 | `max_connections` | integer | `1024` | Maximum concurrent TCP connections. |
 | `queue_depth` | integer | `4096` | Internal work queue depth. |
 
