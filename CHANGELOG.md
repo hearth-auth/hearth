@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **BREAKING: three production misconfigurations now refuse to start instead of silently degrading
+  to insecure (HEA-2166).** Outside `--dev`, startup fails closed with an error naming the fix when:
+  (1) no key-encryption key is configured via `HEARTH_KEK` or `security.key_encryption_key` —
+  previously realm signing keys were written to storage **in plaintext** with no operator signal;
+  (2) neither `server.tls_cert_path` nor `server.trust_forwarded_proto: true` is set — previously
+  an error was logged and the server continued, issuing session cookies **without the `Secure`
+  attribute**; (3) `demo.enabled: true` — previously the mass demo seeder, whose accounts all share
+  a publicly documented default password, was ungated in production.  Additionally, `hearth serve`
+  with no config file previously booted from compiled-in defaults without running validation at
+  all; the defaults now pass through the same gates.  An existing deployment relying on any of
+  these will now refuse to start — that is the correct outcome; see the
+  [upgrading guide](docs/guides/upgrading.md#v16-v17) for the exact remediation per case.  `--dev`
+  behaviour is unchanged.
+
 ### Changed
 - **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and
   takes an exclusive advisory lock on `storage.data_dir`, so a second replica sharing the
