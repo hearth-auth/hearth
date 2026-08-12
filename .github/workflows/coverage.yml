@@ -91,16 +91,28 @@ jobs:
 
       - name: Run tests under coverage instrumentation
         run: |
-          mkdir -p coverage
+          mkdir -p coverage/html
+          # Run tests with coverage profiling; save raw profile data only.
+          # --html and --lcov cannot be combined in a single nextest invocation,
+          # so we collect profiles here and generate reports below.
           cargo llvm-cov nextest \
             --workspace \
             --ignore-filename-regex 'src/protocol/generated/' \
-            --html \
-            --output-dir coverage/html \
-            --lcov \
-            --output-path coverage/lcov.info
+            --no-report
         env:
           PROTOC: protoc
+
+      - name: Generate HTML and LCOV reports
+        if: always()
+        run: |
+          cargo llvm-cov report \
+            --ignore-filename-regex 'src/protocol/generated/' \
+            --html \
+            --output-dir coverage/html
+          cargo llvm-cov report \
+            --ignore-filename-regex 'src/protocol/generated/' \
+            --lcov \
+            --output-path coverage/lcov.info
 
       - name: Post coverage summary to job summary
         # Run even if the test step failed so partial results are still visible.
