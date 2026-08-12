@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -115,6 +115,22 @@ endif
 ## The seed-handle holds live tokens — keep it out of git (loadtest/reports/).
 seed:
 	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- seed $(ARGS)
+
+## Run test coverage locally (requires cargo-llvm-cov + cargo-nextest).
+## Install: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
+## Output: coverage/html/index.html  coverage/lcov.info
+coverage:
+	mkdir -p coverage
+	PROTOC=$(PROTOC) cargo llvm-cov nextest \
+		--workspace \
+		--ignore-filename-regex 'src/protocol/generated/' \
+		--html \
+		--output-dir coverage/html \
+		--lcov \
+		--output-path coverage/lcov.info
+	@echo ""
+	@echo "✓ HTML report: coverage/html/index.html"
+	@echo "✓ LCOV data:   coverage/lcov.info"
 
 fmt:
 	cargo fmt --check
