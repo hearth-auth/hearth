@@ -20,6 +20,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   these will now refuse to start — that is the correct outcome; see the
   [upgrading guide](docs/guides/upgrading.md#v16-v17) for the exact remediation per case.  `--dev`
   behaviour is unchanged.
+- **`X-Forwarded-For` is now honored only when the connection arrives from a configured
+  `server.trusted_proxies` address (HEA-2165)** — previously any directly-connecting client could
+  spoof its IP per-request by sending the header, defeating per-IP rate limits (credential-stuffing
+  protection) and falsifying session/audit IP records.  From an untrusted peer the header is now
+  ignored entirely and the socket address is used; an empty `trusted_proxies` list fails closed.
+  Additionally, an unparseable hop in the forwarded chain stops the right-to-left walk (previously
+  it was skipped, letting a client-supplied value past a trusted chain), and all extracted
+  addresses are canonicalized (`::ffff:a.b.c.d` → `a.b.c.d`) so one client cannot occupy two
+  per-IP rate-limit buckets.  Deployments behind a reverse proxy **must** set
+  `server.trusted_proxies`, or all requests will be attributed to the proxy address.
 
 ### Changed
 - **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and
