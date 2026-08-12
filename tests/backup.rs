@@ -25,7 +25,7 @@ fn make_exporter(h: &common::TestHarness) -> BackupExporter {
 
 /// Builds a `BackupImporter` from a harness.
 fn make_importer(h: &common::TestHarness) -> BackupImporter {
-    BackupImporter::new(h.identity_arc(), h.rbac_arc())
+    BackupImporter::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
 }
 
 /// Creates a realm, one user with a password, seeds RBAC, and returns the realm
@@ -257,8 +257,11 @@ async fn test_restore_preserves_signing_keys() {
         nonce: None,
         azp: None,
         cnf: None,
+        // AUDIT: justified-empty-fixture: JWT fixture exercises signing-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (HEA-2160)
         roles: Vec::new(),
+        // AUDIT: justified-empty-fixture: JWT fixture exercises signing-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (HEA-2160)
         groups: Vec::new(),
+        // AUDIT: justified-empty-fixture: JWT fixture exercises signing-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (HEA-2160)
         org_groups: Vec::new(),
         permissions: Vec::new(),
         custom: BTreeMap::new(),
@@ -749,6 +752,303 @@ async fn audit_included_flag() {
             "manifest audit_events must match the queried event count"
         );
     }
+}
+
+// ── 10. full authorization model round-trip (HEA-2160 / C-1) ──────────────────
+
+/// The single highest-blast-radius restore defect: prior to HEA-2160 the
+/// importer read only 5 of the 12 exported archive members. Roles,
+/// permissions, groups, assignments, scopes, and organizations were dropped
+/// **silently** while restore reported success — an operator recovering from an
+/// incident got a server that authenticated users but had lost its entire
+/// authorization model.
+///
+/// This test seeds a realm with a NON-EMPTY set of every authorization entity
+/// type, exports it, restores into a fresh engine, and asserts the destination
+/// engine holds each entity member-by-member. It fails RED against `af4edb59`
+/// because none of these entities are restored there.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn roundtrip_restores_full_authorization_model() {
+    use hearth::rbac::{
+        AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, Permission, Scope, ScopeSpec,
+        Subject,
+    };
+
+    // ── Source: realm seeded with custom authz entities ────────────────
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    // Custom permission (registered in the realm's permission registry).
+    src.rbac()
+        .reconcile_permissions(&realm, &["docs.publish".to_string()])
+        .expect("reconcile permission");
+
+    // Custom role carrying the custom permission.
+    let role = src
+        .rbac()
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: "docs.publisher".to_string(),
+                description: Some("Can publish docs".to_string()),
+                permissions: vec![Permission::new("docs.publish").expect("perm")],
+                ..Default::default()
+            },
+        )
+        .expect("create role");
+
+    // Custom group.
+    let group = src
+        .rbac()
+        .create_group(
+            &realm,
+            &CreateGroupRequest {
+                name: "Editors".to_string(),
+                slug: "editors".to_string(),
+                description: Some("Editorial staff".to_string()),
+            },
+        )
+        .expect("create group");
+
+    // Assignment binding the custom role to the user.
+    let assignment = src
+        .rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role");
+
+    // Custom scope.
+    src.rbac()
+        .reconcile_scopes(
+            &realm,
+            &[ScopeSpec {
+                name: "docs".to_string(),
+                permissions: Some(vec!["docs.publish".to_string()]),
+            }],
+        )
+        .expect("reconcile scope");
+
+    // Organization.
+    let org = src
+        .identity()
+        .create_organization(
+            &realm,
+            &hearth::identity::CreateOrganizationRequest {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+                description: Some("Acme Corp".to_string()),
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("create org");
+
+    // Snapshot the full source authorization model.
+    let src_roles = collect_roles(src.rbac(), &realm);
+    let src_perms = sorted_perms(src.rbac(), &realm);
+    let src_groups = collect_groups(src.rbac(), &realm);
+    let src_assignments = sorted_assignments(src.rbac(), &realm);
+    let src_scopes = sorted_scopes(src.rbac(), &realm);
+    let src_orgs = collect_orgs(src.identity(), &realm);
+
+    // Sanity: the source really is non-empty for every entity type — otherwise
+    // this test would be vacuous (the W0-T2 lesson: empty fixtures can't catch
+    // a silent drop).
+    assert!(!src_roles.is_empty(), "source must have roles");
+    assert!(!src_perms.is_empty(), "source must have permissions");
+    assert!(!src_groups.is_empty(), "source must have groups");
+    assert!(!src_assignments.is_empty(), "source must have assignments");
+    assert!(!src_scopes.is_empty(), "source must have scopes");
+    assert!(!src_orgs.is_empty(), "source must have organizations");
+
+    // ── Export → restore into a fresh engine ───────────────────────────
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+
+    // ── Assert: destination holds the full authorization model ─────────
+    let dst_roles = collect_roles(dst.rbac(), &restored_realm);
+    let dst_perms = sorted_perms(dst.rbac(), &restored_realm);
+    let dst_groups = collect_groups(dst.rbac(), &restored_realm);
+    let dst_assignments = sorted_assignments(dst.rbac(), &restored_realm);
+    let dst_scopes = sorted_scopes(dst.rbac(), &restored_realm);
+    let dst_orgs = collect_orgs(dst.identity(), &restored_realm);
+
+    assert_eq!(
+        dst_roles, src_roles,
+        "roles must be restored member-by-member (found custom role: {})",
+        role.name
+    );
+    assert_eq!(
+        dst_perms, src_perms,
+        "permissions must be restored member-by-member"
+    );
+    assert_eq!(
+        dst_groups, src_groups,
+        "groups must be restored member-by-member (found custom group: {})",
+        group.slug
+    );
+    assert_eq!(
+        dst_assignments,
+        src_assignments,
+        "assignments must be restored member-by-member (assignment id: {})",
+        assignment.id.as_uuid()
+    );
+    assert_eq!(
+        dst_scopes, src_scopes,
+        "scopes must be restored member-by-member"
+    );
+    assert_eq!(
+        dst_orgs,
+        src_orgs,
+        "organizations must be restored member-by-member (found org: {})",
+        org.slug()
+    );
+
+    // Per-member ImportReport counts must be populated (not a boolean).
+    assert_eq!(report.roles.created, src_roles.len() as u64, "role count");
+    assert_eq!(
+        report.permissions.created,
+        src_perms.len() as u64,
+        "permission count"
+    );
+    assert_eq!(
+        report.groups.created,
+        src_groups.len() as u64,
+        "group count"
+    );
+    assert_eq!(
+        report.assignments.created,
+        src_assignments.len() as u64,
+        "assignment count"
+    );
+    assert_eq!(
+        report.scopes.created,
+        src_scopes.len() as u64,
+        "scope count"
+    );
+    assert_eq!(
+        report.organizations.created,
+        src_orgs.len() as u64,
+        "organization count"
+    );
+}
+
+/// Exports permissions sorted by name for stable member-by-member comparison.
+fn sorted_perms(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::PermissionRecord> {
+    let mut v = rbac.export_all_permissions(realm).expect("perms");
+    v.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    v
+}
+
+/// Exports assignments sorted by ID for stable member-by-member comparison.
+fn sorted_assignments(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::RoleAssignment> {
+    let mut v = rbac.export_all_assignments(realm).expect("assignments");
+    v.sort_by_key(|a| *a.id.as_uuid());
+    v
+}
+
+/// Exports scopes sorted by name for stable member-by-member comparison.
+fn sorted_scopes(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::ScopeExport> {
+    let mut v = rbac.export_all_scopes(realm).expect("scopes");
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+/// Collects every role in a realm, sorted by ID for stable comparison.
+fn collect_roles(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::Role> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = rbac
+            .list_roles(realm, cursor.as_deref(), 500)
+            .expect("roles");
+        all.extend(page.items);
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    all.sort_by_key(|r| *r.id.as_uuid());
+    all
+}
+
+/// Collects every group in a realm, sorted by ID for stable comparison.
+fn collect_groups(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::Group> {
+    let mut all = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = rbac
+            .list_groups(realm, &hearth::core::PageRequest::new(offset, 500))
+            .expect("groups");
+        let n = page.items.len() as u64;
+        all.extend(page.items);
+        if n == 0 || offset + n >= page.total {
+            break;
+        }
+        offset += n;
+    }
+    all.sort_by_key(|g| *g.id.as_uuid());
+    all
+}
+
+/// Collects every organization in a realm, sorted by ID for stable comparison.
+fn collect_orgs(
+    identity: &dyn hearth::identity::IdentityEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::identity::Organization> {
+    let mut all = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = identity
+            .list_organizations(realm, &hearth::core::PageRequest::new(offset, 500))
+            .expect("orgs");
+        let n = page.items.len() as u64;
+        all.extend(page.items);
+        if n == 0 || offset + n >= page.total {
+            break;
+        }
+        offset += n;
+    }
+    all.sort_by_key(|o| *o.id().as_uuid());
+    all
 }
 
 // ── property tests ────────────────────────────────────────────────────────────
