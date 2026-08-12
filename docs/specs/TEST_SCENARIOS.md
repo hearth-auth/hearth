@@ -670,8 +670,8 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 #### Adversarial
 
 - [x] Privilege escalation: non-admin user accessing admin endpoints receives 403 with no data leak `P0` `fast`
-- [ ] Admin endpoint rate limiting: excessive requests from single admin trigger throttling `P1` `fast` <!-- HEA-1766 audit: was overclaimed; http_rate_limit.rs has no admin-scoped 429 test. Coverage dispatched in HEA-1834. -->
-- [ ] Mass enumeration via admin listing: response times constant regardless of result count (no timing leak) `P0` `fast` <!-- HEA-1766 audit: was overclaimed; no constant-time assertion on admin listing exists. Coverage dispatched in HEA-1834. -->
+- [x] Admin endpoint rate limiting: excessive requests from single admin trigger throttling `P1` `fast` <!-- HEA-2185: covered by `tests/http_rate_limit.rs::admin_endpoint_rate_limit_exceeded_returns_429` -->
+- [x] Mass enumeration via admin listing: response times constant regardless of result count (no timing leak) `P0` `fast` <!-- HEA-2186: test `admin_listing_response_time_constant_wrt_user_count` in tests/adversarial.rs -->
 
 ---
 
