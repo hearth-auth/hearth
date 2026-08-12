@@ -4623,7 +4623,7 @@ async fn admin_backup_restore(
                 .map_err(|(_, body)| format!("{}", body.0))?;
         }
 
-        let importer = BackupImporter::new(identity, rbac);
+        let importer = BackupImporter::new(identity, rbac, Arc::clone(&state.audit));
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
             let mk = std::env::var("HEARTH_MASTER_KEY")
                 .map_err(|_| "HEARTH_MASTER_KEY not set for encrypted restore".to_string())?;

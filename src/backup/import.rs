@@ -280,6 +280,42 @@ impl BackupImporter {
             }
         }
 
+        // ── Audit events (restored FIRST) ───────────────────────────────────
+        //
+        // Audit events are re-chained under the destination realm's HMAC key
+        // (the source key is not portable), so the integrity hash changes but
+        // the event content is preserved. They MUST be restored before any
+        // other member: the identity/RBAC `import_*` calls below emit their own
+        // fresh audit events with current timestamps, so replaying the older
+        // historical events afterwards would interleave newer-then-older records
+        // and break the tamper-evident chain (verification walks events in
+        // timestamp order, which must equal insertion order). The exporter
+        // writes events in ascending-timestamp scan order, so NDJSON line order
+        // is already chronological. Each event carries its own realm ID, which
+        // equals the restored realm ID (restore never remaps realm IDs).
+        let audit_key = format!("realms/{realm_slug}/audit.ndjson");
+        if let Some(raw) = files.get(&audit_key) {
+            let decrypted = try_decrypt(raw)?;
+            for line in decrypted.split(|&b| b == b'\n') {
+                let line = trim_bytes(line);
+                if line.is_empty() {
+                    continue;
+                }
+                let event: AuditEvent = serde_json::from_slice(line)?;
+                if opts.dry_run {
+                    report.audit_events.created += 1;
+                    continue;
+                }
+                match self.audit.import_event(&event) {
+                    Ok(()) => report.audit_events.created += 1,
+                    Err(e) => {
+                        warn!(err = %e, "import audit event failed");
+                        report.audit_events.errored += 1;
+                    }
+                }
+            }
+        }
+
         // Parse realm.json — required.
         let realm_key = format!("realms/{realm_slug}/realm.json");
         let realm_raw = files.get(&realm_key).ok_or_else(|| {
@@ -448,37 +484,6 @@ impl BackupImporter {
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;
-
-        // ── Audit events ────────────────────────────────────────────────────
-        //
-        // Audit events are re-chained under the destination realm's HMAC key
-        // (the source key is not portable), so the integrity hash changes but
-        // event content is preserved and the restored chain verifies. Events
-        // must be applied in chronological order — the exporter writes them in
-        // ascending-timestamp scan order, so NDJSON line order is already
-        // chronological.
-        let audit_key = format!("realms/{realm_slug}/audit.ndjson");
-        if let Some(raw) = files.get(&audit_key) {
-            let decrypted = try_decrypt(raw)?;
-            for line in decrypted.split(|&b| b == b'\n') {
-                let line = trim_bytes(line);
-                if line.is_empty() {
-                    continue;
-                }
-                let event: AuditEvent = serde_json::from_slice(line)?;
-                if opts.dry_run {
-                    report.audit_events.created += 1;
-                    continue;
-                }
-                match self.audit.import_event(&event) {
-                    Ok(()) => report.audit_events.created += 1,
-                    Err(e) => {
-                        warn!(err = %e, "import audit event failed");
-                        report.audit_events.errored += 1;
-                    }
-                }
-            }
-        }
 
         Ok(report)
     }

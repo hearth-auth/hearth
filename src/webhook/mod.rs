@@ -101,6 +101,15 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         Ok(result)
     }
 
+    fn import_event(
+        &self,
+        event: &crate::audit::AuditEvent,
+    ) -> Result<(), crate::audit::AuditError> {
+        // Restore path: re-chain the event through the inner engine. No webhook
+        // broadcast — restore is an operator recovery action, not a live event.
+        self.inner.import_event(event)
+    }
+
     fn query(
         &self,
         query: &crate::audit::AuditQuery,

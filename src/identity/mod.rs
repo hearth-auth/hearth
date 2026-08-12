@@ -141,8 +141,8 @@ pub use webauthn::{
 
 use crate::audit::AuditContext;
 use crate::core::{
-    AgentId, ClientId, InvitationId, OrganizationId, PageRequest, PagedResult, RealmId,
-    ResourceServerId, SessionId, Timestamp, UserId, WebhookId,
+    AgentId, ClientId, ImportOutcome, InvitationId, OrganizationId, PageRequest, PagedResult,
+    RealmId, ResourceServerId, SessionId, Timestamp, UserId, WebhookId,
 };
 
 // Maximum page size for all paginated list operations (A-23).
@@ -1428,6 +1428,21 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         page: &PageRequest,
     ) -> Result<PagedResult<Organization>, IdentityError>;
+
+    /// Restores an organization verbatim from a backup archive, preserving its
+    /// ID, slug index, and every field (HEA-2160).
+    ///
+    /// Unlike [`create_organization`](Self::create_organization) this does not
+    /// generate a new ID, validate quotas, or check slug cooldowns — it writes
+    /// the record and slug index exactly as exported so a backup round-trip is
+    /// faithful. When an org with the same ID already exists, `overwrite`
+    /// selects replace (`true`) or skip (`false`).
+    fn import_organization(
+        &self,
+        realm_id: &RealmId,
+        org: &Organization,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
 
     /// Adds a user as a member of an organization.
     ///

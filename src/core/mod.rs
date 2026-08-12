@@ -13,6 +13,7 @@ pub use pagination::{
 };
 pub use time::{Clock, FakeClock, SystemClock, Timestamp};
 pub use types::{
-    AgentCredentialId, AgentId, AuditEventId, ClientId, IdpId, InvitationId, OrganizationId,
-    RealmId, ResourceServerId, SessionId, Uri, UriError, UserId, WebhookDeliveryId, WebhookId,
+    AgentCredentialId, AgentId, AuditEventId, ClientId, IdpId, ImportOutcome, InvitationId,
+    OrganizationId, RealmId, ResourceServerId, SessionId, Uri, UriError, UserId, WebhookDeliveryId,
+    WebhookId,
 };

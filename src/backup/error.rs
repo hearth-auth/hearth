@@ -40,4 +40,17 @@ pub enum BackupError {
     /// A cryptographic operation failed (key generation, encryption, decryption).
     #[error("crypto error: {0}")]
     Crypto(String),
+
+    /// The archive contained a member the importer does not know how to
+    /// restore. Restore is fail-closed: rather than silently dropping the
+    /// member (and reporting success), the whole restore aborts so the
+    /// operator does not end up with a partially-restored realm (HEA-2160).
+    #[error(
+        "unrecognized archive member '{path}' — this Hearth version cannot fully \
+         restore this backup; refusing to proceed rather than silently drop data"
+    )]
+    UnrecognizedMember {
+        /// Archive-relative path of the member that could not be restored.
+        path: String,
+    },
 }

@@ -8,6 +8,21 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+/// Outcome of importing a single record during a backup restore.
+///
+/// Distinguishes the three ways a per-record import can resolve so the restore
+/// report can surface accurate per-member counts (rather than a boolean). Used
+/// by the backup importer and the engine `import_*` methods it drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// The record did not exist and was written.
+    Created,
+    /// The record already existed and was left untouched (Skip / Merge mode).
+    Skipped,
+    /// The record already existed and was replaced (Overwrite mode).
+    Overwritten,
+}
+
 /// Generates a newtype ID wrapper around `Uuid` with consistent behavior.
 ///
 /// Each generated type gets:

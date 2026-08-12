@@ -956,6 +956,77 @@ async fn roundtrip_restores_full_authorization_model() {
     );
 }
 
+// ── 11. audit events restored when included (HEA-2160) ────────────────────────
+
+/// With `include_audit`, the `audit.ndjson` member must be restored: every
+/// source event lands in the destination realm (by ID) and the re-chained log
+/// verifies under the destination realm's HMAC key.
+#[tokio::test]
+async fn audit_events_restored_when_included() {
+    use std::collections::HashSet;
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    // seeded_realm creates a realm + user, which emit audit events.
+    let (realm, _email, _password) = seeded_realm(&src);
+
+    let src_events = src
+        .audit()
+        .query(&AuditQuery::for_realm(realm.clone()))
+        .expect("query src audit");
+    assert!(
+        !src_events.is_empty(),
+        "source realm must have audit events to make this test meaningful"
+    );
+    let src_ids: HashSet<uuid::Uuid> = src_events.iter().map(|e| *e.id.as_uuid()).collect();
+
+    let tmp = export_realm_to_file(
+        &src,
+        &realm,
+        &ExportOptions {
+            include_audit: true,
+            ..Default::default()
+        },
+    );
+    let slug = realm_slug(&src, &realm);
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+
+    assert_eq!(
+        report.audit_events.created,
+        src_events.len() as u64,
+        "every source audit event must be restored"
+    );
+    assert_eq!(report.audit_events.errored, 0, "no audit import errors");
+
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+    let dst_events = dst
+        .audit()
+        .query(&AuditQuery::for_realm(restored_realm.clone()))
+        .expect("query dst audit");
+    let dst_ids: HashSet<uuid::Uuid> = dst_events.iter().map(|e| *e.id.as_uuid()).collect();
+
+    // Every source event ID must be present in the destination (restore may add
+    // its own events, so this is a subset check rather than an equality).
+    assert!(
+        src_ids.is_subset(&dst_ids),
+        "all source audit event IDs must survive restore"
+    );
+
+    // The re-chained log must verify under the destination realm's HMAC key.
+    assert!(
+        dst.audit()
+            .verify_integrity(&restored_realm, None, None)
+            .expect("verify integrity"),
+        "restored audit chain must verify under the destination realm key"
+    );
+}
+
 /// Exports permissions sorted by name for stable member-by-member comparison.
 fn sorted_perms(
     rbac: &dyn hearth::rbac::RbacEngine,

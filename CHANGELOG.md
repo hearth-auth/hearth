@@ -19,6 +19,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Backup restore no longer silently destroys the entire authorization model (HEA-2160)** — a
+  restore previously reported **success** while discarding every role, permission, group, role
+  assignment, scope, organization, and audit event: the exporter wrote 12 archive members but the
+  importer read only 5 (realm, users, credentials, clients, signing key), skipping the rest with no
+  warning.  An operator recovering from an incident got a server that authenticated users but had
+  lost its entire RBAC and organization state.  All 12 members are now restored verbatim (IDs and
+  indexes preserved so assignments still reference their roles and subjects); audit events are
+  re-chained under the destination realm's HMAC key.  Restore is now **fail-closed**: an
+  unrecognized archive member aborts the restore with a hard error instead of a silent skip, so a
+  backup this version cannot fully restore never reports success.  `ImportReport` now carries a
+  per-member `EntityCounts` field (`roles`, `permissions`, `groups`, `assignments`, `scopes`,
+  `organizations`, `audit_events`) instead of tracking only realms/users/clients.
 - **SIGTERM now triggers graceful drain (HEA-2161)** — `docker stop`, `kubectl delete pod`, and
   `systemctl stop` all send SIGTERM; previously the OS default handler killed the process
   immediately, dropping in-flight requests.  SIGTERM now fires the same axum
@@ -49,6 +61,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   explicit at 60 s (drain deadline + 30 s buffer).
 
 ### Security
+- **TLS path now records the real client IP instead of 127.0.0.1 (HEA-2164)** — `serve_tls_router`
+  managed its own accept loop and called `app.into_service()` without injecting
+  `ConnectInfo<SocketAddr>`.  Every TLS-sourced request therefore fell through to `FALLBACK_PEER`
+  (`127.0.0.1`), collapsing per-IP login rate-limiter buckets into a single global bucket (one
+  exhausted client could lock out every tenant) and storing `127.0.0.1` in every session and audit
+  record, destroying forensics for the entire TLS listener.  The fix mirrors what axum's
+  `into_make_service_with_connect_info` does: layer `ConnectInfo<SocketAddr>` onto the router
+  **before** `into_service()` so the real TCP peer address is visible to handlers.
 - **Host key and KEK-file writes are now crash-durable (HEA-2162)** — on first boot Hearth
   auto-generates `hearth.host_key` and, on the first realm, creates `hearth.keys`. Neither write
   fsync'd the file's parent directory, and the host-key write did not even fsync its own contents.

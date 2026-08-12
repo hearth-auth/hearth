@@ -3157,8 +3157,7 @@ fn maybe_upgrade_email_transport(config: &mut Config) -> bool {
 #[cfg(unix)]
 async fn wait_for_shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut sigterm =
-        signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             result.expect("failed to install SIGINT handler");
@@ -3969,10 +3968,10 @@ fn run_backup_restore(
     std::fs::create_dir_all(data_dir)?;
     let storage_config = StorageConfig::dev(data_dir.to_path_buf());
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, _audit, rbac) =
+    let (identity, audit, rbac) =
         build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
 
-    let importer = BackupImporter::new(identity, rbac);
+    let importer = BackupImporter::new(identity, rbac, audit);
     let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
         let pp = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
             mk
