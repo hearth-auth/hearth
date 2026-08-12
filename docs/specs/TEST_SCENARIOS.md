@@ -440,6 +440,19 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 > **Note:** Counts reflect the post-RBAC-migration plan. Simulation scenarios related to the removed pre-migration watch/cache surfaces (`cache_stampede`, `watch_partition`) are dropped; RBAC resolution is synchronous with no equivalent simulation surface. A concurrent-role-assignment property test covers the remaining concurrency surface (`simulation/src/tests/rbac_concurrent_assignments.rs`).
 
+> **Release-cut count verification (owner: QA).** Before any release, QA must grep the Phase 1
+> section of this file for unchecked items (`[ ]`) and confirm the completed count in `README.md`
+> matches. Command:
+> `awk '/^## Phase 1/,/^## Phase 2/' docs/specs/TEST_SCENARIOS.md | grep -c '^\- \[ \]'` — must
+> return 0 for a fully green release, or the README must name every open item. The **Column Total**
+> row above must also be self-consistent: the per-layer cells must sum to the bolded grand total.
+> This prevents silent count drift between the table, the checkboxes, and the README.
+>
+> **Known drift as of HEA-2190 (2026-08-12): this check does not currently pass.** The command
+> returns `1` (the pbjson int64-coercion scenario is still `[ ]`), the per-layer cells above sum to
+> `125/133` rather than the bolded `133/133`, and `README.md` states `132/135`. Three sources, three
+> different numbers. Reconciling them is tracked in HEA-2195 and blocks the next release cut.
+
 ---
 
 ### OAuth 2.0 Complete
