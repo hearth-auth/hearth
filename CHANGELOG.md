@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **SIGTERM now triggers graceful drain (HEA-2161)** — `docker stop`, `kubectl delete pod`, and
+  `systemctl stop` all send SIGTERM; previously the OS default handler killed the process
+  immediately, dropping in-flight requests.  SIGTERM now fires the same axum
+  `with_graceful_shutdown` drain path as SIGINT (Ctrl+C), waiting for in-flight HTTP and gRPC
+  requests to complete before exiting 0.  The drain deadline is `operational.shutdown_timeout_secs`
+  (default 10 s; recommended production value 30 s, with `terminationGracePeriodSeconds: 60` in the
+  Helm chart providing a 30 s buffer above the drain deadline).
+- **Source builds now stamp the correct version (HEA-2156)** — `Cargo.toml` was pinned at
+  `1.0.0` while releases were at `v1.6.9`, causing `hearth --version` and backup manifest
+  `hearth_version` fields to report a stale placeholder.  `build.rs` now resolves the version via
+  `HEARTH_RELEASE_VERSION` (release builds) → `git describe --tags` (dev/CI source builds) →
+  Cargo.toml (shallow-clone fallback, now updated to `1.6.9`).  A regression test in
+  `src/backup/types.rs` asserts the stamped version is not the old placeholder.
 - **Helm readiness probe now uses `/readyz` (HEA-2169)** — the Helm chart, Dockerfile, and
   docker-compose healthcheck all pointed to `/health` (always-200 process heartbeat) for both
   liveness and readiness.  Kubernetes therefore routed traffic to pods whose storage was not yet
