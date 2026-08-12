@@ -274,7 +274,13 @@ impl KeyRegistry {
             reason: "key file mutex poisoned".to_string(),
         })?;
 
-        if file_guard.is_none() {
+        // Whether this call creates hearth.keys for the first time. A brand-new
+        // file's directory entry is not durable until the parent directory is
+        // fsync'd, so we must sync_dir after the data fsync below — otherwise a
+        // power loss can lose the whole file, orphaning this realm's KEK
+        // (HEA-2162, same defect class as the host-key write above).
+        let created = file_guard.is_none();
+        if created {
             // Create key file with version header
             *file_guard = Some(self.fs.create(&self.key_file_path)?);
             let version_bytes = KEY_FILE_VERSION.to_le_bytes();
@@ -291,6 +297,14 @@ impl KeyRegistry {
         })?;
         f.write_all(&entry)?;
         f.sync_all()?;
+
+        if created {
+            let parent = self
+                .key_file_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."));
+            self.fs.sync_dir(parent)?;
+        }
 
         Ok(())
     }
@@ -420,7 +434,7 @@ fn load_or_create_host_key(
     );
 
     let host_key = generate_host_key()?;
-    write_host_key_private(&host_key_path, &host_key)?;
+    write_host_key_private(&host_key_path, &host_key, fs)?;
 
     Ok(host_key)
 }
@@ -432,7 +446,23 @@ fn load_or_create_host_key(
 ///
 /// On non-Unix platforms the mode flag is a no-op; callers should use
 /// `HEARTH_MASTER_KEY` instead of the file to maintain access control.
-fn write_host_key_private(path: &Path, key: &HostKey) -> Result<(), StorageError> {
+///
+/// # Durability
+///
+/// The file's contents are `fsync`'d (`sync_all`) **and** the parent directory
+/// is `fsync`'d (via [`Fs::sync_dir`]) — in that order — before this returns
+/// success. Both are mandatory: without the data fsync the 72 bytes may never
+/// leave the page cache, and without the directory fsync the newly created
+/// directory entry may be lost, leaving `hearth.host_key` absent after a
+/// crash. Either failure permanently orphans every realm KEK encrypted under
+/// this host key — an unrecoverable dataset. This is the first-boot power-loss
+/// hazard tracked by HEA-2162 (same defect class as the WAL/SST parent-dir
+/// fsync work in HEA-1855).
+///
+/// The file itself is created with raw `std::fs` (not `fs`) so the security
+/// framing — `create_new` overwrite protection and mode `0o600` — is
+/// preserved; only the directory fsync is routed through `fs`.
+fn write_host_key_private(path: &Path, key: &HostKey, fs: &dyn Fs) -> Result<(), StorageError> {
     let hmac_tag = host_key_file_hmac(key.as_bytes());
     let mut content = Vec::with_capacity(HOST_KEY_FILE_SIZE);
     content.extend_from_slice(HOST_KEY_MAGIC);
@@ -448,6 +478,12 @@ fn write_host_key_private(path: &Path, key: &HostKey) -> Result<(), StorageError
     }
     let mut file = opts.open(path)?;
     std::io::Write::write_all(&mut file, &content)?;
+    // 1. Flush the key bytes to stable storage.
+    file.sync_all()?;
+    // 2. Commit the directory entry so the file survives a power loss that
+    //    strikes immediately after this write (first-boot provisioning).
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs.sync_dir(parent)?;
     Ok(())
 }
 
@@ -532,6 +568,10 @@ fn rewrite_keys_file(
     }
 
     fs.rename(&tmp_path, path)?;
+    // The rename is not crash-durable until the containing directory's metadata
+    // is itself synced — without this, a power loss after the rename can resolve
+    // the *old* inode (or none), losing every re-encrypted KEK (HEA-2162).
+    fs.sync_dir(parent)?;
     Ok(fs.open_append(path)?)
 }
 
@@ -875,6 +915,166 @@ mod tests {
             mk(current),
             previous.map(mk),
         )
+    }
+
+    // ── HEA-2162: parent-directory fsync on key-material writes ───────────────
+    //
+    // A recording filesystem that delegates every operation to `RealFs` but
+    // captures the argument to each `sync_dir` call. This is the same
+    // observation `FaultFs::dir_syncs()` provides in the simulation crate; it is
+    // reproduced here because `KeyRegistry` is `pub(crate)` and therefore
+    // unreachable from that external crate. Recording the path before
+    // delegating means the assertions hold on non-unix too, where the real
+    // `sync_dir` is a no-op.
+    struct RecordingFs {
+        inner: crate::storage::fs::RealFs,
+        dir_syncs: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    }
+
+    impl RecordingFs {
+        fn new() -> (Arc<Self>, Arc<Mutex<Vec<std::path::PathBuf>>>) {
+            let dir_syncs = Arc::new(Mutex::new(Vec::new()));
+            let fs = Arc::new(Self {
+                inner: crate::storage::fs::RealFs,
+                dir_syncs: Arc::clone(&dir_syncs),
+            });
+            (fs, dir_syncs)
+        }
+    }
+
+    impl Fs for RecordingFs {
+        fn open_append(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_append(path)
+        }
+        fn create(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.create(path)
+        }
+        fn open_read(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+        fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            if let Ok(mut g) = self.dir_syncs.lock() {
+                g.push(dir.to_path_buf());
+            }
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    #[test]
+    fn host_key_write_fsyncs_parent_directory() {
+        // First-boot provisioning auto-generates hearth.host_key. The write MUST
+        // fsync the file's parent directory so a power loss right after it cannot
+        // leave the file absent — which would orphan every KEK forever.
+        // RED at af4edb59: write_host_key_private called no sync_dir at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (fs, dir_syncs) = RecordingFs::new();
+
+        let registry =
+            KeyRegistry::load_with_fs(dir.path(), fs, /* dev_mode */ true).expect("load");
+
+        let synced = dir_syncs.lock().expect("lock").clone();
+        assert!(
+            synced.iter().any(|p| p == dir.path()),
+            "host-key write must fsync its parent directory (data_dir); recorded: {synced:?}"
+        );
+
+        // Crash-then-reopen surrogate: a KEK created under the generated host key
+        // must decrypt after a fresh reopen that reads the persisted key file.
+        let realm = RealmId::generate();
+        registry.ensure_kek_for_realm(&realm).expect("ensure kek");
+        drop(registry);
+
+        let reopened = KeyRegistry::load(dir.path(), true).expect("reopen");
+        assert!(
+            reopened.get_kek_for_realm(&realm).is_some(),
+            "KEK must decrypt after reopen against the durably-written host key"
+        );
+    }
+
+    #[test]
+    fn first_kek_append_fsyncs_parent_directory() {
+        // The first KEK for any realm creates hearth.keys. Creating that file is
+        // not crash-durable until its directory entry is fsync'd.
+        // RED at af4edb59: append_kek_entry created the file with no sync_dir.
+        // Uses an explicit host key (load_with_keys) so no host-key file is
+        // written — this isolates the append path's directory fsync.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (fs, dir_syncs) = RecordingFs::new();
+
+        let registry = KeyRegistry::load_with_keys(dir.path(), fs, mk(make_test_key_bytes()), None)
+            .expect("load");
+
+        // No hearth.keys yet, so nothing should have fsync'd the dir on load.
+        assert!(
+            dir_syncs.lock().expect("lock").is_empty(),
+            "load with no key file must not fsync the data dir yet"
+        );
+
+        let realm = RealmId::generate();
+        registry.ensure_kek_for_realm(&realm).expect("ensure kek");
+
+        let synced = dir_syncs.lock().expect("lock").clone();
+        assert!(
+            synced.iter().any(|p| p == dir.path()),
+            "first KEK append (creates hearth.keys) must fsync its parent directory; \
+             recorded: {synced:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_keys_file_fsyncs_parent_directory() {
+        // The re-encrypt path writes hearth.keys.tmp then renames it over
+        // hearth.keys. The rename is not durable until the directory is fsync'd.
+        // RED at af4edb59: rewrite_keys_file synced the tmp file but omitted the
+        // post-rename directory fsync.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let key1 = make_test_key_bytes();
+        let key2 = make_test_key_bytes();
+
+        // Seed a KEK under key1.
+        {
+            let r = load_with_two_keys(dir.path(), key1, None).expect("load k1");
+            r.ensure_kek_for_realm(&realm).expect("ensure");
+        }
+
+        // Reopen with key2 as current + key1 as previous → re-encrypt + rewrite.
+        let (fs, dir_syncs) = RecordingFs::new();
+        let registry = KeyRegistry::load_with_keys(dir.path(), fs, mk(key2), Some(mk(key1)))
+            .expect("rewrite under new key");
+
+        let synced = dir_syncs.lock().expect("lock").clone();
+        assert!(
+            synced.iter().any(|p| p == dir.path()),
+            "rewrite path must fsync its parent directory after rename; recorded: {synced:?}"
+        );
+
+        // The re-encrypted KEK must survive a reopen under key2 alone.
+        assert!(registry.get_kek_for_realm(&realm).is_some());
+        drop(registry);
+        let reopened = load_with_two_keys(dir.path(), key2, None).expect("reopen k2 only");
+        assert!(
+            reopened.get_kek_for_realm(&realm).is_some(),
+            "re-encrypted KEK must decrypt under the new key after reopen"
+        );
     }
 
     #[test]
