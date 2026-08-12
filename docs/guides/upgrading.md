@@ -42,10 +42,35 @@ Work through this list for every upgrade, including patch releases.
   ```bash
   hearth backup inspect \
     --input /backups/pre-upgrade-<timestamp>.hearth-backup
-  # Output includes: hearth_version, realm count, user count, backup timestamp
+  # Archive:           /backups/pre-upgrade-<timestamp>.hearth-backup
+  #   format version : 1
+  #   hearth version : 1.6.9        ← the binary that wrote the archive
+  #   created at     : 2026-08-11T20:45:16Z
+  #   signing key DEK: absent       ← "present (passphrase-protected)" if --encrypt was used
+  #   checksummed files: 42
+  #   realms (2): …
   ```
 
-- [ ] **Be aware of the WAL format version.** The WAL (`{data_dir}/hearth.wal`) carries a 2-byte format version in its header. **Downgrading to a binary that does not support the current WAL version is unsupported** — the older binary will refuse to start and print `WAL format version N is not supported by this binary`. See [Rollback](#rollback-procedure) for the safe path when you cannot downgrade in place.
+  If `signing key DEK` reports `present (passphrase-protected)`, you will be prompted for the
+  passphrase on restore — make sure you still have it before relying on this archive for rollback.
+
+- [ ] **Check the WAL format version.** The WAL header layout is `[4B magic "HWAL"][2B version, little-endian]`. Read the current version directly:
+
+  ```bash
+  xxd -l 6 /var/lib/hearth/data/hearth.wal
+  # → 00000000: 4857 414c 0100    HWAL..
+  #                       ^^^^ version 1 (little-endian u16)
+  ```
+
+  **As of the current release the WAL format version is `1`, and it has not changed across any shipped
+  v1.x release.** The only migration in the table is `v0 → v1`, which upgrades the legacy pre-header
+  format. In practice this means **in-place binary rollback between shipped v1.x versions is safe** —
+  the data directory is byte-compatible. The constraint below matters only if a future release bumps
+  the version, which will be called out in `CHANGELOG.md` under `**Breaking:**`.
+
+  When a bump *does* occur it is one-way: upgrading rewrites the file to the new version on startup,
+  and the older binary will then refuse to start with `WAL format version N is not supported by this
+  binary; upgrade Hearth or restore from backup`. See [Rollback](#rollback-procedure) for that path.
 
 - [ ] **Confirm single-writer invariant.** Ensure no other process is pointing at the same `storage.data_dir`:
 
@@ -185,7 +210,14 @@ The Hearth Helm chart uses `strategy.type: Recreate` in its Deployment. This mea
    kill %1
    ```
 
-> **Why `Recreate` instead of `RollingUpdate`?** Hearth holds an exclusive advisory lock on `storage.data_dir` via `{data_dir}/LOCK`. A rolling strategy would start the new pod while the old one is still running and holding the lock — the new pod would crash-loop with `ERROR storage: data directory '…' is already locked`. `Recreate` prevents this by ensuring only one pod is ever scheduled against the PVC at a time. Use Raft cluster mode for zero-downtime failover.
+> **Why `Recreate` instead of `RollingUpdate`?** Hearth holds an exclusive advisory lock on `storage.data_dir` via `{data_dir}/LOCK`. A rolling strategy would start the new pod while the old one is still running and holding the lock — the new pod would crash-loop with:
+>
+> ```
+> data directory '/var/lib/hearth/data' is already locked by another process;
+> stop the running Hearth instance before starting a new one
+> ```
+>
+> `Recreate` prevents this by ensuring only one pod is ever scheduled against the PVC at a time. Use Raft cluster mode for zero-downtime failover.
 
 ---
 
@@ -237,16 +269,26 @@ Run these checks immediately after bringing the new binary up, regardless of dep
 
 Rollback to the previous binary is safe in place **if and only if the WAL format version did not change** between the old and new binary.
 
-- If the WAL format was the same in both versions: stop the new binary, reinstall the old binary, start the service. The data directory is fully compatible.
-- If you are unsure whether the format changed: **check the CHANGELOG for the version you are downgrading from**, or treat it as a version-bump rollback (below).
+**For every currently shipped v1.x release this is the case** — the WAL format version has been `1`
+throughout, so in-place rollback is the normal path:
+
+1. Stop the new binary.
+2. Reinstall the old binary.
+3. Start the service.
+
+The data directory is fully compatible and no restore is required. Confirm with the `xxd` check in the
+[pre-upgrade checklist](#pre-upgrade-checklist) if you want positive verification before starting.
+
+If you are unsure whether a future version changed the format, **check `CHANGELOG.md` for a
+`**Breaking:**` WAL-format entry**, or treat it as a version-bump rollback (below).
 
 ### When the WAL format version changed
 
-Hearth's WAL reader rejects files written by a **newer** binary:
+Hearth's WAL reader rejects files written by a **newer** binary. Startup fails with:
 
 ```
-ERROR storage: WAL format version N is not supported by this binary;
-               upgrade Hearth or restore from backup
+WAL format version N is not supported by this binary;
+upgrade Hearth or restore from backup
 ```
 
 Older binaries cannot read WAL files written by newer binaries. To roll back:
@@ -310,11 +352,30 @@ helm rollback hearth -n hearth
 
 This section lists configuration or behavior changes that require operator action on upgrade. Entries are appended for each Hearth minor or major release.
 
-### v1.x → v1.6
+### Copied-from-example configs: `*_lifetime_secs`
 
-- **`access_token_lifetime_secs` / `refresh_token_lifetime_secs` removed.** These keys were replaced by `access_token_ttl` / `refresh_token_ttl` (duration strings, e.g. `"15m"`) in an earlier release. Any `hearth.yaml` still using the old keys will be rejected at startup with `unknown field`. Update before upgrading.
+If your `hearth.yaml` was derived from `examples/auth0-migration/` or `examples/keycloak-migration/`,
+it may contain `access_token_lifetime_secs` / `refresh_token_lifetime_secs`. **These were never valid
+Hearth config keys** — they were stale placeholders in the example files (corrected in HEA-2143).
+
+They were silently ignored by older binaries, so token TTLs quietly fell back to defaults rather than
+the values you set. Replace them with the real keys, which take duration strings:
+
+```yaml
+token:
+  access_token_ttl: "15m"    # default: 15 minutes
+  refresh_token_ttl: "7d"    # default: 7 days
+```
+
+Once `deny_unknown_fields` lands (see below), leaving them in place becomes a hard startup error
+instead of a silent no-op.
+
+<a id="v16-v17"></a>
 
 ### v1.6 → v1.7
+
+> These changes currently sit under `## [Unreleased]` in `CHANGELOG.md` — they ship in the first
+> release after v1.6.9. Re-check the changelog at the moment you upgrade.
 
 All config structs now carry `#[serde(deny_unknown_fields)]`. Previously, a misspelled or removed key was silently discarded; it is now a hard startup error. The following keys formerly appeared in documentation but were never implemented — remove or rename them before upgrading:
 
