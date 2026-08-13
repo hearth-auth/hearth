@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **`createRealm` removed from all SDKs (HEA-2171)** — the Go, Kotlin, Node, PHP,
+  Python, Rust, and TypeScript SDKs each shipped a `createRealm` client method
+  that posted to `POST /admin/realms`, which the server has always rejected with
+  `405 Method Not Allowed`. Realms are provisioned via `hearth.yaml` and reconciled
+  at startup; manage them there and restart Hearth to apply changes. Read paths
+  (`getRealm`, `listRealms`) are unaffected. All seven SDK test suites now run in CI.
+
 ### Added
 - **SCIM `If-Match` optimistic concurrency is now enforced (HEA-2172)** — `ServiceProviderConfig`
   advertises `etag.supported: true`, and Hearth now honours it. Every single-resource SCIM response

@@ -247,9 +247,9 @@ const page = await admin.listUsers({ limit: 50 });
 // page.items: User[], page.next_cursor: string | null
 await admin.deleteUser(user.id);
 
-// Realms
-const realm = await admin.createRealm({ name: "acme-corp" });
-await admin.deleteRealm(realm.id);
+// Realms are provisioned via hearth.yaml, not the admin API — there is no
+// createRealm() (the server returns 405). Only read paths are exposed.
+const realm = await admin.getRealm("<realm-id>");
 ```
 
 ---

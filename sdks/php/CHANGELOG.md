@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed
+- **`AdminClient::createRealm()`** — realms are provisioned via `hearth.yaml` and
+  reconciled at startup, not through the admin API. The server returns
+  `405 Method Not Allowed` for `POST /admin/realms`, so this method never worked
+  against a real server. Manage realms in `hearth.yaml` and restart Hearth to
+  apply changes; read them with `getRealm()`/`listRealms()` (HEA-2171).
+
 ### Changed
 
 - **§5 error taxonomy** — renamed exceptions to match the SDK Common Specification (HEA-963):

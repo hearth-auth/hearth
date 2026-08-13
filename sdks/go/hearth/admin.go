@@ -68,15 +68,6 @@ func (a *AdminClient) ListRealms(ctx context.Context, opts ListOptions) (*PageRe
 	return &result, nil
 }
 
-// CreateRealm creates a new realm via the admin API.
-func (a *AdminClient) CreateRealm(ctx context.Context, req CreateRealmRequest) (*Realm, error) {
-	var result Realm
-	if err := a.post(ctx, "/admin/realms", req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 // GetRealm retrieves a realm by ID via the admin API.
 func (a *AdminClient) GetRealm(ctx context.Context, realmID string) (*Realm, error) {
 	var result Realm

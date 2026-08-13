@@ -76,7 +76,6 @@ export type {
   AuthorizePermissionOptions,
   AuthorizeResponse,
   BootstrapResponse,
-  CreateRealmParams,
   CreateUserParams,
   JwksDocument,
   JsonWebKey,

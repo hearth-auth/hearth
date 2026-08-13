@@ -57,11 +57,6 @@ class Realm(BaseModel):
     created_at: Optional[str] = None
 
 
-class CreateRealmRequest(BaseModel):
-    name: str
-    config: Optional[dict] = None
-
-
 class UpdateRealmRequest(BaseModel):
     name: Optional[str] = None
     config: Optional[dict] = None

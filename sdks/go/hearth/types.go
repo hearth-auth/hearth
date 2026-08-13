@@ -147,11 +147,6 @@ type UpdateUserRequest struct {
 	Status      *string `json:"status,omitempty"`
 }
 
-// CreateRealmRequest contains parameters for creating a realm.
-type CreateRealmRequest struct {
-	Name string `json:"name"`
-}
-
 // Realm represents a realm record from the API.
 type Realm struct {
 	ID        string `json:"id"`

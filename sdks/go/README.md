@@ -211,10 +211,8 @@ err = admin.DeleteUser(ctx, "<user-id>")
 ### Realms
 
 ```go
-// Create a realm
-realm, err := admin.CreateRealm(ctx, hearth.CreateRealmRequest{
-    Name: "acme-corp",
-})
+// Realms are provisioned via hearth.yaml, not the admin API — there is no
+// CreateRealm client method (the server returns 405). Only read paths exist.
 
 // Get a realm by ID
 realm, err := admin.GetRealm(ctx, "<realm-id>")
@@ -356,11 +354,6 @@ type User struct {
     Status      string `json:"status"`
     CreatedAt   int64  `json:"created_at,omitempty"` // Unix epoch seconds
     UpdatedAt   int64  `json:"updated_at,omitempty"`
-}
-
-// CreateRealmRequest — argument to AdminClient.CreateRealm
-type CreateRealmRequest struct {
-    Name string `json:"name"`
 }
 
 // UpdateRealmRequest — argument to AdminClient.UpdateRealm (nil fields = no change)

@@ -4,6 +4,13 @@ All notable changes to `hearth-go` are documented here.
 
 ## [Unreleased]
 
+### Removed
+- **`AdminClient.CreateRealm` and `CreateRealmRequest`** — realms are provisioned
+  via `hearth.yaml` and reconciled at startup, not through the admin API. The
+  server returns `405 Method Not Allowed` for `POST /admin/realms`, so this method
+  never worked against a real server. Manage realms in `hearth.yaml` and restart
+  Hearth to apply changes; read them with `GetRealm`/`ListRealms` (HEA-2171).
+
 ### Fixed
 - **Token endpoints now send JSON, not form-encoding** — `ClientCredentials`,
   `StartDeviceFlow`, and `ExchangeMagicLink` previously posted

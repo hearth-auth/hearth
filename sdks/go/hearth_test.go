@@ -292,16 +292,6 @@ func TestAdminCRUD(t *testing.T) {
 	if fetchedRealm.ID != srv.bootstrap.RealmID {
 		t.Fatalf("realm id mismatch: %q != %q", fetchedRealm.ID, srv.bootstrap.RealmID)
 	}
-
-	// Create is rejected — realms are config-managed.
-	_, err = admin.CreateRealm(ctx, hearth.CreateRealmRequest{Name: "go-test-realm"})
-	if err == nil {
-		t.Fatal("expected error creating realm via admin API")
-	}
-	apiErr, ok = err.(*hearth.APIError)
-	if !ok || apiErr.StatusCode != 405 {
-		t.Fatalf("expected 405 on realm create, got: %v", err)
-	}
 }
 
 func TestTransparentRefresh(t *testing.T) {

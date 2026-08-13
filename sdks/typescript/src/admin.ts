@@ -1,6 +1,5 @@
 import { HearthError } from "./client.js";
 import type {
-  CreateRealmParams,
   CreateUserParams,
   PageResponse,
   Realm,
@@ -69,14 +68,10 @@ export class AdminClient {
   }
 
   // === Realms ===
-
-  /** POST /admin/realms — create a realm. */
-  async createRealm(params: CreateRealmParams): Promise<Realm> {
-    return this.post("/admin/realms", {
-      name: params.name,
-      config: params.config,
-    });
-  }
+  //
+  // Realms are provisioned via hearth.yaml, not the admin API. There is no
+  // `createRealm`/`updateRealm` client method: the server returns 405 for
+  // POST and PATCH /admin/realms (HEA-2171). Only read paths are exposed.
 
   /** GET /admin/realms — list realms with pagination. */
   async listRealms(options?: {

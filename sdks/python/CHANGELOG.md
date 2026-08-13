@@ -4,6 +4,13 @@ All notable changes to `hearth-python` are documented here.
 
 ## [Unreleased]
 
+### Removed
+- **`AdminClient.create_realm` and `CreateRealmRequest`** — realms are provisioned
+  via `hearth.yaml` and reconciled at startup, not through the admin API. The
+  server returns `405 Method Not Allowed` for `POST /admin/realms`, so this method
+  never worked against a real server. Manage realms in `hearth.yaml` and restart
+  Hearth to apply changes; read them with `get_realm`/`list_realms` (HEA-2171).
+
 ### Added
 - **`generate_pkce_pair()`** — RFC 7636 S256 PKCE helper; returns a `PkcePair(code_verifier, code_challenge)` (HEA-1561).
 - **`JwksCache`** — JWKS key cache with TTL, `Cache-Control: max-age` respect, 24-hour cap, and re-fetch on cache miss. Supports OKP/Ed25519 keys; silently skips unrecognised `kty` values per spec §2 (HEA-1561).

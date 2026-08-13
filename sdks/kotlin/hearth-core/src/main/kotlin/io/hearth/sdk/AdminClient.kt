@@ -66,10 +66,10 @@ class AdminClient(
     }
 
     // ── Realms ─────────────────────────────────────────────────────────────────
-
-    /** Creates a new realm. */
-    suspend fun createRealm(request: CreateRealmRequest): Realm =
-        httpClient.post("$baseUrl/admin/realms", request, authHeaders())
+    //
+    // Realms are provisioned via hearth.yaml, not the admin API. There is no
+    // `createRealm` method: the server returns 405 for POST /admin/realms
+    // (HEA-2171). Only read paths are exposed.
 
     /** Retrieves a realm by [realmId]. */
     suspend fun getRealm(realmId: String): Realm =
