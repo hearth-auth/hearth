@@ -1,0 +1,9 @@
+[Unit]
+Description=Hearth /scratch retention policy — remove stale cargo target dirs and tmp entries
+Documentation=file:///home/brad/Code/personal/hearth/scripts/scratch-retention.sh
+
+[Service]
+Type=oneshot
+ExecStart=/home/brad/Code/personal/hearth/scripts/scratch-retention.sh
+StandardOutput=append:/scratch/cache/retention.log
+StandardError=append:/scratch/cache/retention.log

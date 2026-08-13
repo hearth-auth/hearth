@@ -7,7 +7,7 @@
 #   target-hea-*   per-issue cargo builds  →  delete if idle > 7 days
 #   target-*       other named target dirs  →  delete if idle > 14 days
 #   /scratch/tmp   temp entries             →  delete if idle > 7 days
-#   target (shared active)                 →  never deleted; cargo sweep --time 14
+#   target (shared active)                 →  never deleted; cargo sweep sweep --time 14
 #
 # USAGE
 #   ./scripts/scratch-retention.sh              # live run
@@ -121,9 +121,9 @@ if [[ ! -d "$ACTIVE_TARGET" ]]; then
   log "Active target not found at $ACTIVE_TARGET; skipping sweep."
 elif command -v cargo-sweep &>/dev/null; then
   if "$DRY_RUN"; then
-    log "DRY-RUN  would run: cargo sweep --time 14 $ACTIVE_TARGET"
+    log "DRY-RUN  would run: cargo sweep sweep --time 14 $ACTIVE_TARGET"
   else
-    cargo-sweep --time 14 "$ACTIVE_TARGET" \
+    cargo-sweep sweep --time 14 "$ACTIVE_TARGET" \
       && log "cargo sweep complete on $ACTIVE_TARGET" \
       || log "WARNING: cargo sweep failed (non-fatal — likely an unfamiliar target layout)"
   fi
