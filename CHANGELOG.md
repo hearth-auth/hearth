@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **SCIM `If-Match` optimistic concurrency is now enforced (HEA-2172)** — `ServiceProviderConfig`
+  advertises `etag.supported: true`, and Hearth now honours it. Every single-resource SCIM response
+  (`POST`/`GET`/`PUT`/`PATCH` on `/scim/v2/Users` and `/scim/v2/Groups`) carries an `ETag` header, and
+  a `PUT`, `PATCH`, or `DELETE` that supplies a stale `If-Match` validator is rejected with
+  **412 Precondition Failed** instead of silently overwriting a newer write. Provisioning pipelines
+  (Okta, Azure AD) that use `If-Match` for concurrency control no longer lose updates when two
+  operations race. Requests without `If-Match` are unaffected.
+
 ### Changed
 - **Multi-node clustering is documented and flagged as EXPERIMENTAL (HEA-2154)** — Hearth 1.x has
   no production-supported multi-node path.  Starting a node with a `cluster:` section now emits a
