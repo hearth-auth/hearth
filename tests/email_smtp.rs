@@ -25,6 +25,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
   transport: smtp
   from: "Hearth <auth@example.com>"
@@ -55,6 +59,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
   transport: smtp
   from: "auth@example.com"
@@ -71,6 +79,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
   transport: smtp
   smtp:
@@ -89,6 +101,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
   transport: smtp
   from: "auth@example.com"
@@ -109,6 +125,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
   transport: smtp
   from: "auth@example.com"
@@ -129,6 +149,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 "#;
     let config = Config::from_yaml_str(yaml).expect("default config should parse");
     assert_eq!(config.email.transport, EmailTransport::Log);
@@ -159,6 +183,10 @@ storage:
   data_dir: "/tmp/hearth"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
   transport: smtp
   from: "Hearth <auth@example.com>"

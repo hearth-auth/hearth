@@ -391,6 +391,31 @@ All config structs now carry `#[serde(deny_unknown_fields)]`. Previously, a miss
 
 The `metrics.bearer_token` rename is particularly important: operators who had `security.bearer_token` set believed `/metrics` was protected. It was not. After the rename, set the correct key under `metrics:` and verify the endpoint requires authentication.
 
+#### Production startup now fails closed on three insecure configurations (HEA-2166)
+
+Outside `--dev`, the server now **refuses to start** — instead of silently running insecurely —
+when any of the following holds. If your deployment currently relies on one of these, it was
+running with a real vulnerability; fix the configuration before upgrading:
+
+| Condition | Previous behavior | Required action |
+|---|---|---|
+| No key-encryption key configured | Realm signing keys (Ed25519 private keys) were written to storage **in plaintext**, with no warning | Set the `HEARTH_KEK` env var (recommended) or `security.key_encryption_key` to a random 64-hex-char value: `openssl rand -hex 32` |
+| Neither `server.tls_cert_path` nor `server.trust_forwarded_proto: true` set | An `error!` line was logged and startup continued; session cookies were issued **without the `Secure` attribute** | Configure direct TLS (`server.tls_cert_path` + `server.tls_key_path`), or set `server.trust_forwarded_proto: true` if TLS terminates at a reverse proxy |
+| `demo.enabled: true` | The mass demo seeder ran in production — every seeded account shares a single, publicly documented default password | Remove the `demo:` block from production configs |
+
+Each violation aborts startup with an error naming the offending key and the fix. `--dev`
+behavior is unchanged: the developer loop still requires none of these.
+
+Relatedly, `hearth serve` with **no config file** previously booted a production server from
+compiled-in defaults without running validation at all. The defaults now pass through the same
+gates, so a bare `hearth serve` refuses to start until a config satisfying the production
+checklist is provided (or `--dev` is passed for local development).
+
+**Key-encryption caveat:** setting `HEARTH_KEK` for the first time on an existing data directory
+is safe — legacy plaintext key records remain readable and are flagged with a startup warning.
+Keys written after the change are encrypted. To supersede the plaintext copies, rotate each
+realm's signing key after the upgrade (`POST /admin/realms/{id}/rotate-signing-key`).
+
 ### v1.6.x → later
 
 Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking changes before upgrading from a release candidate or a development build.
