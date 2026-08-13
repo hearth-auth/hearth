@@ -189,10 +189,12 @@ jobs:
       - name: RBAC storage-write lint (check-rbac-storage-writes.sh)
         run: bash scripts/check-rbac-storage-writes.sh
 
-      # HEA-2116: prevent a release from shipping with stale install-instruction
-      # version references in README.md. Compares every pinned release URL / tag
-      # against the latest git semver tag. The filter checkout uses fetch-depth: 0
-      # so git tags are available for the comparison.
+      # HEA-2116 / HEA-2199: prevent a release from shipping with stale install-instruction
+      # version references in README.md. Compares every pinned release URL / tag against
+      # the latest PUBLISHED GitHub Release (not the latest git tag — a tag without
+      # artifacts must not block merges; see HEA-2199). Uses `gh release list` with a
+      # strict semver regex to exclude SDK releases (sdk-ts-v1.6.10, …). Skips
+      # non-blocking when no published release is found (e.g. fresh repo, gh unauthed).
       - name: README version drift (check-readme-version.sh)
         run: bash scripts/check-readme-version.sh
 
