@@ -75,7 +75,16 @@ Fields removed from proto definitions must first be deprecated for one major rel
 | Add a new optional key | No |
 | Change a default value | Yes if the old default was the only safe choice; No otherwise |
 
-Config structs carry `#[serde(deny_unknown_fields)]` from the 1.7 release onward (see the v1.6 → v1.7 entry in [`docs/guides/upgrading.md`](docs/guides/upgrading.md)). Removed keys that were formerly silently ignored will now produce a hard startup error. Check the `### Changed` / `### Removed` section of CHANGELOG before upgrading.
+Config structs carry `#[serde(deny_unknown_fields)]` from the 1.7 release onward (see the v1.6 → v1.7 entry in [`docs/guides/upgrading.md`](docs/guides/upgrading.md)). Keys that were formerly silently ignored now produce a hard startup error. Check the `### Changed` / `### Removed` section of CHANGELOG before upgrading.
+
+> **Open conflict — `deny_unknown_fields` in 1.7.** Under the table above, tightening validation on an
+> existing key is breaking, and under the status section a breaking change requires a major bump. The
+> `deny_unknown_fields` change is therefore scheduled to ship in a **minor** release (1.7) in violation
+> of this policy. It is arguably a defect fix rather than a break — a silently-discarded key was never
+> a supported surface — but the operator-visible effect is a server that refuses to start after an
+> upgrade that SemVer says is safe, which is the exact harm this policy exists to prevent. Ship it in
+> 1.7 as a declared exception, or hold it for 2.0. That decision is tracked in **HEA-2205** and is not
+> settled by this document.
 
 ### On-disk storage format (WAL, SST)
 
@@ -99,14 +108,18 @@ Removed or renamed SDK methods are breaking. Methods annotated with `@deprecated
 
 ## Support window for the 1.x line
 
-| Phase | Duration | What ships |
-|---|---|---|
-| Active development | Until 1.0 GA | Features, fixes, breaking changes (with CHANGELOG entry) |
-| Active support | 18 months from 1.0 GA date | Feature releases, bug fixes, security fixes |
-| Security-only | 6 months after active support ends | Security fixes only; no new features or non-security bug fixes |
-| End-of-life | 24 months from 1.0 GA date | No further patches; migrate to 2.x |
+The 1.x support window is anchored to the **1.0 GA date of 2026-06-21**, giving these concrete dates:
 
-The 1.0 GA date will be recorded in `CHANGELOG.md` when the `## [Unreleased]` header is replaced with `## [1.0.0] — YYYY-MM-DD`.
+| Phase | Window | Ends | What ships |
+|---|---|---|---|
+| Active support | 18 months from 1.0 GA | **2027-12-21** | Feature releases, bug fixes, security fixes |
+| Security-only | 6 months after active support ends | **2028-06-21** | Security fixes only; no new features or non-security bug fixes |
+| End-of-life | 24 months from 1.0 GA | **2028-06-21** | No further patches; migrate to 2.x |
+
+These dates are a **minimum commitment**. They may be extended by announcement, never shortened.
+
+If a 2.0 release ships before 2027-12-21, the 1.x line still receives security fixes through
+2028-06-21; a 2.0 release does not accelerate 1.x EOL.
 
 **Security fixes** during the security-only phase are released as patch versions (e.g., 1.x.y → 1.x.z). They are back-ported from the 2.x main branch where feasible.
 
@@ -122,7 +135,7 @@ Before removing or renaming any endpoint, config key, CLI flag, or SDK method:
 
 Deprecation annotations in source code:
 - Rust: `#[deprecated(since = "1.x.0", note = "...")]`
-- TypeScript/Go/Python/Kotlin/PHP: language-native deprecation annotation
+- Go, Kotlin, Node, PHP, Python, TypeScript: language-native deprecation annotation
 
 ---
 

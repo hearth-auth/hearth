@@ -187,9 +187,12 @@ dominated by the resource server's outbound call, not by Hearth's internal proce
 
 See [`VERSIONING.md`](../../VERSIONING.md) for the full operator-facing SemVer policy, support window, deprecation rules, and EOL communication process. The structural rules below are normative for engineers working on this codebase.
 
-**Pre-1.0-GA**: Breaking changes to wire format, config, and on-disk storage are permitted with a changelog entry. However, on-disk format changes MUST NOT silently corrupt data — if the format is incompatible, startup MUST fail with a clear error directing the operator to re-initialize.
+**1.0 GA shipped on 2026-06-21** (tag `v1.0.0`); the current line is 1.6.x. The rules below are in
+force now. A breaking change is no longer authorized merely by adding a changelog entry — it requires
+a major version bump. On-disk format changes MUST NOT silently corrupt data: if the format is
+incompatible, startup MUST fail with a clear error directing the operator to re-initialize.
 
-**Post-1.0-GA**:
+**Post-1.0-GA (in force)**:
 
 - HTTP/gRPC endpoints MUST be versioned (`/v1/...`). Breaking changes require a new API version. Previous versions MUST be supported for at least one major release.
 - Config changes MUST NOT break existing config files. New required fields MUST have defaults. Removed fields MUST produce a clear error, not silent behavior change.
