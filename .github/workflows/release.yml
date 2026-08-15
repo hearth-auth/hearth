@@ -146,7 +146,167 @@ jobs:
           path: ${{ matrix.artifact }}${{ matrix.exe_suffix }}
           if-no-files-found: error
 
-  # ── 2. CycloneDX SBOM ─────────────────────────────────────────────────────
+  # ── 2. Release validation (HEA-1264) ──────────────────────────────────────
+  # §13.4 gate: a documented, reproducible validation run attached to the
+  # release. Mirrors docs/ops/RELEASE_VALIDATION.md steps 1-3, 7 and 9 on the
+  # exact release commit, and emits validation-summary.txt as a release asset.
+  #
+  # Gate structure: every gate runs (continue-on-error) so the summary reports
+  # the FULL picture rather than stopping at the first failure. The final
+  # "Enforce hard gates" step re-raises any hard-gate failure, so a red test
+  # suite still fails this job — and `release` needs: validation, so it blocks
+  # publishing. bench-gate is advisory by design (see runbook step 7): a >20%
+  # regression needs human judgement against the recorded baseline, so it is
+  # recorded in the summary but never fails the job on its own.
+  validation:
+    name: Release validation (test matrix + bench gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # proto/breaking comparisons and `git describe` need real history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk space (Rust debug builds need ~12 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Setup Rust toolchain + buf + tailwind (HEA-676 reusable)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+          install-buf: "true"
+          install-tailwind: "true"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+
+      # ── Hard gates ────────────────────────────────────────────────────────
+      - name: "Step 1 — Full workspace test suite (cargo nextest)"
+        id: nextest
+        continue-on-error: true
+        env:
+          PROTOC: protoc
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --no-fail-fast 2>&1 | tee nextest.log
+
+      - name: "Step 2 — Test quality gate (make test-quality)"
+        id: test_quality
+        continue-on-error: true
+        run: make test-quality
+
+      - name: "Step 3 — Abuse coverage gate (make abuse-check)"
+        id: abuse_check
+        continue-on-error: true
+        run: make abuse-check
+
+      - name: "Step 9 — ROPC ban gate (make security-gate)"
+        id: security_gate
+        continue-on-error: true
+        run: make security-gate
+
+      # ── Advisory gate ─────────────────────────────────────────────────────
+      - name: "Step 7 — Benchmark gate (make bench-gate, advisory)"
+        id: bench
+        continue-on-error: true
+        env:
+          PROTOC: protoc
+        run: |
+          set -o pipefail
+          make bench-gate 2>&1 | tee bench.log
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      # always() so a failed run still publishes a diagnostic summary artifact.
+      # This does NOT rescue the job status — "Enforce hard gates" below still
+      # fails the job, which is what actually blocks `release`.
+      - name: Compose validation-summary.txt
+        if: always()
+        env:
+          NEXTEST: ${{ steps.nextest.outcome }}
+          TEST_QUALITY: ${{ steps.test_quality.outcome }}
+          ABUSE: ${{ steps.abuse_check.outcome }}
+          SECURITY: ${{ steps.security_gate.outcome }}
+          BENCH: ${{ steps.bench.outcome }}
+        run: |
+          verdict() { [ "$1" = "success" ] && echo "PASS" || echo "FAIL"; }
+          TESTS_LINE=$(grep -oE '[0-9]+ tests run: .*' nextest.log 2>/dev/null | tail -1)
+          [ -n "$TESTS_LINE" ] || TESTS_LINE="test summary unavailable (suite did not complete)"
+
+          # Capture first, then test for emptiness: `grep ... | head || echo` can
+          # never reach the fallback, because the pipeline exits with head's 0.
+          BENCH_LINES=$(grep -E 'change:|time:' bench.log 2>/dev/null | head -40)
+          [ -n "$BENCH_LINES" ] || BENCH_LINES="  (no benchmark output captured)"
+
+          {
+            echo "Hearth ${GITHUB_REF_NAME} — Release Validation Summary"
+            echo "Runbook:  docs/ops/RELEASE_VALIDATION.md (HEA-1264)"
+            echo "Commit:   ${GITHUB_SHA}"
+            echo "Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo ""
+            echo "Hard gates (a FAIL here blocks publishing):"
+            echo "  $(verdict "$NEXTEST")  Step 1 — Full workspace test suite — ${TESTS_LINE}"
+            echo "  $(verdict "$TEST_QUALITY")  Step 2 — Test quality gate (false-confidence patterns)"
+            echo "  $(verdict "$ABUSE")  Step 3 — Abuse coverage gate (§3.41 adversarial matrix)"
+            echo "  $(verdict "$SECURITY")  Step 9 — ROPC password-grant ban gate"
+            echo ""
+            echo "Advisory gates (recorded, reviewed by the release engineer):"
+            echo "  $(verdict "$BENCH")  Step 7 — Benchmark gate (rbac_check, session_lookup,"
+            echo "        storage_gate, demotion_latency, validate_token)"
+            echo ""
+            if [ "$BENCH" != "success" ]; then
+              echo "NOTE: the benchmark gate did not exit cleanly. Review bench.log in the"
+              echo "      workflow artifacts before shipping."
+              echo ""
+            fi
+            echo "Criterion 'change:' lines from this run:"
+            echo "$BENCH_LINES"
+          } > validation-summary.txt
+
+          cat validation-summary.txt
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validation-summary
+          path: |
+            validation-summary.txt
+            nextest.log
+            bench.log
+          if-no-files-found: error
+
+      # Re-raise any hard-gate failure that continue-on-error swallowed above.
+      # Without this the job would report success with a red test suite.
+      - name: Enforce hard gates
+        if: always()
+        env:
+          NEXTEST: ${{ steps.nextest.outcome }}
+          TEST_QUALITY: ${{ steps.test_quality.outcome }}
+          ABUSE: ${{ steps.abuse_check.outcome }}
+          SECURITY: ${{ steps.security_gate.outcome }}
+        run: |
+          failed=0
+          for gate in NEXTEST TEST_QUALITY ABUSE SECURITY; do
+            if [ "${!gate}" != "success" ]; then
+              echo "::error::Release validation hard gate failed: ${gate} (${!gate})"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Release is NOT cleared to publish — see validation-summary.txt."
+            exit 1
+          fi
+          echo "All hard gates passed."
+
+  # ── 3. CycloneDX SBOM ─────────────────────────────────────────────────────
   sbom:
     name: Generate CycloneDX SBOM
     runs-on: ubuntu-latest
@@ -180,7 +340,7 @@ jobs:
           path: hearth-sbom.cdx.json
           if-no-files-found: error
 
-  # ── 3. Compute SHA-256 hashes (SLSA subjects) + write SHA256SUMS ──────────
+  # ── 4. Compute SHA-256 hashes (SLSA subjects) + write SHA256SUMS ──────────
   hash:
     name: Compute artifact hashes
     needs: [build, sbom]
@@ -215,7 +375,7 @@ jobs:
           path: artifacts/SHA256SUMS
           if-no-files-found: error
 
-  # ── 4. Cosign keyless signing ──────────────────────────────────────────────
+  # ── 5. Cosign keyless signing ──────────────────────────────────────────────
   sign:
     name: Sign with cosign (keyless OIDC)
     needs: [build, sbom, hash]
@@ -253,7 +413,7 @@ jobs:
             artifacts/*.pem
           if-no-files-found: error
 
-  # ── 5. SLSA L1 provenance ─────────────────────────────────────────────────
+  # ── 6. SLSA L1 provenance ─────────────────────────────────────────────────
   # Runs in a slsa-github-generator-controlled job to establish the attestation.
   provenance:
     needs: [hash]
@@ -277,10 +437,13 @@ jobs:
       # the false "Repository is private" detection.
       private-repository: true
 
-  # ── 6. Publish GitHub Release ─────────────────────────────────────────────
+  # ── 7. Publish GitHub Release ─────────────────────────────────────────────
   release:
     name: Publish GitHub Release
-    needs: [sign, provenance]
+    # HEA-1264 §13.4: `validation` gates publishing — a red test suite, test
+    # quality gate, abuse-coverage gate, or ROPC ban gate fails that job and
+    # the release never goes live.
+    needs: [validation, sign, provenance]
     # Skip on workflow_dispatch dry-runs (sign/provenance are also skipped;
     # this explicit guard prevents a confusing "skipped needs" failure message).
     if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
@@ -316,6 +479,29 @@ jobs:
             dist/SHA256SUMS \
             dist/*.sig \
             dist/*.pem \
-            dist/multiple.intoto.jsonl
+            dist/multiple.intoto.jsonl \
+            dist/validation-summary.txt
+
+          # HEA-1264 §13.4: append a Validation section to the generated notes.
+          # Read the generated body back and extend it, rather than passing
+          # --notes alongside --generate-notes (whose merge order is version
+          # dependent), so the result is deterministic.
+          gh release view "$TAG" --repo "$REPO" --json body -q .body > release-notes.md
+          cat >> release-notes.md <<EOF
+
+          ## Validation
+
+          This release was validated on commit \`${{ github.sha }}\` using the
+          [release validation runbook](https://github.com/$REPO/blob/$TAG/docs/ops/RELEASE_VALIDATION.md).
+
+          The full test matrix (\`cargo nextest run --workspace\`), test-quality gate,
+          abuse-coverage gate and ROPC ban gate all passed — publishing is blocked
+          otherwise. Benchmark results are advisory and recorded for comparison.
+
+          See **[\`validation-summary.txt\`](https://github.com/$REPO/releases/download/$TAG/validation-summary.txt)**
+          for the per-gate verdicts, test counts, and Criterion benchmark deltas.
+          EOF
+          gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md
+
           # Publish only after every asset is confirmed uploaded.
           gh release edit "$TAG" --draft=false --repo "$REPO"

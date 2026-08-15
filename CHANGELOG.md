@@ -15,6 +15,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (`getRealm`, `listRealms`) are unaffected. All seven SDK test suites now run in CI.
 
 ### Added
+- **Releases now ship a validation summary and are gated on the test suite (HEA-1264)** —
+  every GitHub Release carries a new `validation-summary.txt` asset recording the per-gate
+  verdicts, test counts, and benchmark deltas from the tagged commit, and the release notes
+  link to it under a **Validation** heading. The publish job is gated on that validation run,
+  so a release whose test suite, test-quality gate, abuse-coverage gate, or ROPC ban gate
+  fails is never published. The manual procedure is documented in
+  [`docs/ops/RELEASE_VALIDATION.md`](docs/ops/RELEASE_VALIDATION.md).
 - **SCIM `If-Match` optimistic concurrency is now enforced (HEA-2172)** — `ServiceProviderConfig`
   advertises `etag.supported: true`, and Hearth now honours it. Every single-resource SCIM response
   (`POST`/`GET`/`PUT`/`PATCH` on `/scim/v2/Users` and `/scim/v2/Groups`) carries an `ETag` header, and
