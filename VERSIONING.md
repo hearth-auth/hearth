@@ -2,15 +2,19 @@
 
 Hearth follows [Semantic Versioning 2.0.0](https://semver.org/). This document defines what constitutes a breaking change for each public surface, how long the 1.x line is supported, and how deprecations are communicated before a breaking change ships.
 
-## Pre-1.0-GA notice
+## Status: normative
 
-Hearth is currently releasing on the 1.x version track while working toward a **1.0 GA** milestone (see [`docs/specs/READINESS_AUDIT_1_0.md`](docs/specs/READINESS_AUDIT_1_0.md)). Until 1.0 GA ships:
+**1.0 GA shipped on 2026-06-21** (`## [1.0.0]` in [`CHANGELOG.md`](CHANGELOG.md); tag `v1.0.0`). The
+current release line is 1.6.x. The rules in this document are therefore **normative today** — they
+are not aspirational, and they are not deferred to a future GA milestone.
 
-- Breaking changes to wire format, configuration, on-disk storage, and SDK API surfaces are permitted, provided they appear in `CHANGELOG.md` under `### Changed` or `### Removed` with a `**Breaking:**` prefix.
-- On-disk format changes must **not** silently corrupt data. If a format is incompatible, Hearth must fail at startup with a clear error.
-- The operator-facing stability commitment described below activates at 1.0 GA, not at the current 1.x patch release.
+Two consequences follow, and they bind every PR:
 
-The strict compat rules in this document are therefore **aspirational before 1.0 GA** and **normative from 1.0 GA forward**.
+- On-disk format changes must **not** silently corrupt data. If a format is incompatible, Hearth
+  must fail at startup with a clear error.
+- A change that is breaking under the definitions below requires a **major version bump**. It may
+  not ship in a 1.x minor or patch release merely because it carries a `**Breaking:**` CHANGELOG
+  entry. A CHANGELOG entry documents a break; it does not authorize one.
 
 ---
 
@@ -20,18 +24,25 @@ Different surfaces carry different stability commitments. A change is breaking f
 
 ### REST HTTP API
 
-The REST surface is not uniformly version-prefixed today. Four route families exist, and the versioning commitment differs per family:
+The REST surface is not uniformly version-prefixed today. These route families exist, and the
+versioning commitment differs per family:
 
 | Route family | Prefix | Versioning |
 |---|---|---|
-| Agent API | `/v1/agents…` | URL-versioned. A breaking change ships under `/v2/agents…`. |
+| URL-versioned API | `/v1/…` | URL-versioned. Covers agents, AATs, approval requests, cross-realm policies, SPIFFE mappings, transaction tokens, tool invocation, `/v1/me/permissions`, and `/v1/{realm}/auth/magic-link`. A breaking change ships under `/v2/…`. |
 | Admin API | `/admin/…` | Unprefixed. Versioned by the release version; breaking changes follow the deprecation policy below. |
 | OIDC / OAuth 2.0 per-realm | `/realms/{realm}/…` | Shape is pinned by the OIDC and OAuth 2.0 specifications, not by Hearth's version. |
 | SCIM 2.0 | `/scim/v2/…` | `v2` is the SCIM protocol version (RFC 7644), not a Hearth API version. |
+| Discovery / operational | `/.well-known/…`, `/health` | Unprefixed. Discovery document shapes are pinned by their respective specs (OIDC Discovery, RFC 9728); `/health` is operational and stable. |
+
+Browser-facing (`/ui/…`) and dev-only (`/dev/…`) routes are **not** a public API surface and carry no
+compatibility commitment. `/dev/…` routes are registered only when the server runs in dev mode, so they
+are absent from the production route table entirely (regression-guarded by
+`dev_seed_password_absent_in_production_mode`); they must never be exposed in production.
 
 Extending the `/v1/` prefix to the admin surface is itself a breaking change and is therefore a 2.0 candidate, tracked as a migration-guide item.
 
-The table below defines what counts as breaking for **all four** families:
+The table below defines what counts as breaking for **every** committed family above:
 
 | Change | Breaking? |
 |---|---|
