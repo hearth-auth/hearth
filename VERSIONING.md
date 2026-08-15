@@ -83,7 +83,7 @@ Config structs carry `#[serde(deny_unknown_fields)]` from the 1.7 release onward
 > of this policy. It is arguably a defect fix rather than a break — a silently-discarded key was never
 > a supported surface — but the operator-visible effect is a server that refuses to start after an
 > upgrade that SemVer says is safe, which is the exact harm this policy exists to prevent. Ship it in
-> 1.7 as a declared exception, or hold it for 2.0. That decision is tracked in **HEA-2205** and is not
+> 1.7 as a declared exception, or hold it for 2.0. That decision is tracked in **HEA-2206** and is not
 > settled by this document.
 
 ### On-disk storage format (WAL, SST)
