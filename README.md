@@ -265,9 +265,9 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (132/135 scenarios). **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
 
-> **3 Phase 1 scenarios open** (not yet covered by tests): (1) admin-endpoint rate limiting — `docs/specs/TEST_SCENARIOS.md` §Admin API › Adversarial; (2) mass-enumeration timing leak — §Admin API › Adversarial; (3) pbjson int64-as-string coercion — §Proto & API Contract Validation › Unit. See HEA-2185 and HEA-2186 for the two security scenarios.
+> **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — `docs/specs/TEST_SCENARIOS.md` §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
 
 ---
 

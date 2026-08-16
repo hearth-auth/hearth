@@ -433,10 +433,10 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 | TLS Termination | 3/3 | 3/3 | -- | -- | -- | 2/2 | -- | -- | **8/8** |
 | SDK Integration (TS & Go) | -- | 6/6 | -- | -- | -- | -- | -- | -- | **6/6** |
 | OIDC Conformance | -- | -- | -- | -- | -- | -- | 5/5 | -- | **5/5** |
-| Proto & API Contract | 5/5 | -- | -- | -- | -- | -- | -- | -- | **5/5** |
+| Proto & API Contract | 4/5 | -- | -- | -- | -- | -- | -- | -- | **4/5** |
 | Phase 1 E2E Flows | -- | 4/4 | -- | -- | -- | -- | -- | -- | **4/4** |
 | Phase 1 Cross-Cutting | -- | -- | -- | -- | -- | 3/3 | -- | 2/2 | **5/5** |
-| **Column Total** | **40/44** | **34/36** | **10/10** | **1/1** | **4/4** | **22/24** | **8/8** | **6/6** | **133/133** |
+| **Column Total** | **43/44** | **36/36** | **10/10** | **1/1** | **4/4** | **24/24** | **8/8** | **6/6** | **132/133** |
 
 > **Note:** Counts reflect the post-RBAC-migration plan. Simulation scenarios related to the removed pre-migration watch/cache surfaces (`cache_stampede`, `watch_partition`) are dropped; RBAC resolution is synchronous with no equivalent simulation surface. A concurrent-role-assignment property test covers the remaining concurrency surface (`simulation/src/tests/rbac_concurrent_assignments.rs`).
 
@@ -448,10 +448,11 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 > row above must also be self-consistent: the per-layer cells must sum to the bolded grand total.
 > This prevents silent count drift between the table, the checkboxes, and the README.
 >
-> **Known drift as of HEA-2190 (2026-08-12): this check does not currently pass.** The command
-> returns `1` (the pbjson int64-coercion scenario is still `[ ]`), the per-layer cells above sum to
-> `125/133` rather than the bolded `133/133`, and `README.md` states `132/135`. Three sources, three
-> different numbers. Reconciling them is tracked in HEA-2195 and blocks the next release cut.
+> **Known open item as of HEA-2195 (2026-08-14):** The command returns `1` — `pbjson int64-as-string
+> coercion` at `§Proto & API Contract Validation › Unit` (line 776) remains unchecked. The column
+> cells now sum to the bolded grand total (`132/133`), and `README.md` reflects `134/135`. The Admin
+> API Adversarial scenarios (rate limiting, mass enumeration) were verified complete (HEA-2185,
+> HEA-2186) and are now `[x]`. The pbjson coverage is tracked in HEA-1836.
 
 ---
 

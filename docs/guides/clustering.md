@@ -58,7 +58,7 @@ If you are evaluating cluster behaviour for integration work or contributing to 
 
 > **Cluster init failure is fatal.** If a `cluster:` section is present in `hearth.yaml` and Raft initialization fails (for example, because peer nodes are unreachable), Hearth exits non-zero. It does **not** fall back to running as a standalone single-node writer. To run single-node, omit the `cluster:` section entirely.
 
-> **Startup will emit an EXPERIMENTAL warning (HEA-2188).** When the `cluster:` section is present, Hearth will log a `WARN`-level message at startup indicating that cluster mode is experimental and not production-supported. This is tracked in HEA-2188 and not yet implemented.
+> **Startup emits an EXPERIMENTAL warning.** When the `cluster:` section is present, Hearth logs a `WARN`-level message at startup indicating that cluster mode is experimental and not production-supported (HEA-2154).
 
 ### Prerequisites
 

@@ -93,7 +93,7 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    sudo systemctl stop hearth
    ```
 
-   Wait for the service to reach the `inactive` state before continuing:
+   `systemctl stop` sends SIGTERM. Hearth catches SIGTERM and drains in-flight HTTP and gRPC requests before exiting cleanly (controlled by `operational.shutdown_timeout_secs`, default 10 s). Wait for the service to reach the `inactive` state before continuing:
 
    ```bash
    sudo systemctl is-active hearth
@@ -231,6 +231,16 @@ Run these checks immediately after bringing the new binary up, regardless of dep
   curl -fsS http://localhost:8420/health
   # → {"status":"ok"}
   ```
+
+  For Kubernetes probes use the purpose-specific endpoints (both return `200 OK` when healthy):
+
+  | Endpoint | Purpose | Kubernetes probe type |
+  |----------|----------|-----------------------|
+  | `/health` | Process liveness — always 200 if the binary is running | `livenessProbe` |
+  | `/healthz` | Same as `/health` (alias) | `livenessProbe` |
+  | `/readyz` | Readiness — verifies storage is responsive; fails until WAL replay completes | `readinessProbe` |
+
+  The Helm chart already routes these correctly. If you are writing your own Kubernetes manifests, configure `/health` or `/healthz` as the liveness probe and `/readyz` as the readiness probe.
 
 - [ ] **OIDC discovery documents are served for all realms.** Replace `<realm>` with each realm name in your deployment:
 
