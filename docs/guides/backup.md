@@ -100,7 +100,7 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
 | `--data-dir` | `data` | Path to the target data directory |
 
-Restore prints a per-entity-type table of inserted and skipped counts. Exit `0` means all records imported cleanly; exit `1` means partial success (some records skipped or failed); exit `2` means a fatal error (archive unreadable, target unopenable).
+Restore prints a per-entity-type table of inserted and skipped counts, broken down by entity type (roles, permissions, groups, assignments, scopes, organizations, audit events). Exit `0` means all records imported cleanly; exit `1` means partial success (some records skipped or failed); exit `2` means a fatal error (archive unreadable, target unopenable, or unrecognized archive member).
 
 **Examples:**
 
@@ -126,6 +126,8 @@ hearth backup restore \
 > **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — run `hearth realm rotate-signing-key` explicitly. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
 >
 > **Fail-closed on a missing signing key (HEA-2168).** If the archive carries no restorable signing key (an unencrypted archive, one produced before signing-key export, or an encrypted archive opened without the passphrase), restore **refuses** with a clear error rather than silently minting a fresh key that would invalidate every pre-backup JWT and session. The remedy is to restore from an encrypted archive whose key round-trips (`hearth backup create --encrypt` / `HEARTH_MASTER_KEY`). If you genuinely intend to start the realm on a new key, pass `--allow-missing-signing-key` to acknowledge that every token issued before the backup will stop validating. The HTTP restore endpoint always fails closed and has no override.
+>
+> **Fail-closed on unrecognized archive members (HEA-2160).** If the archive contains a member not recognized by the importer (for example, an archive produced by a newer or forked version of Hearth), restore aborts with exit `2` rather than silently skipping the unknown data. This prevents a partial restore from appearing successful while quietly discarding state. To recover, ensure the Hearth binary version matches or exceeds the version that produced the archive.
 
 **Exit codes:** `0` success · `1` partial (some records skipped/failed) · `2` fatal error.
 
