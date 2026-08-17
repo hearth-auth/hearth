@@ -80,7 +80,7 @@ serde_norway = "0.9"
 # request bodies (revoke/introspect/token). Already in the tree via axum.
 serde_urlencoded = "0.7"
 tempfile = "3"
-tera = "1"
+tera = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
