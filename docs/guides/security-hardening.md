@@ -231,9 +231,10 @@ see HEA-862). This is the intended behaviour but causes a short-lived support-ti
 **Pre-flight checklist**
 
 - Confirm the user is `realm-admin` for the target realm (or company-level admin).
-- Verify all Hearth replicas in the target deployment are healthy (`/health` 200) and on the
-  same release. A rotation against a mixed-version fleet can produce inconsistent fingerprint
-  behaviour until the slowest replica observes the new secret.
+- Verify all Hearth replicas in the target deployment are ready (`/readyz` 200, confirming
+  storage is accessible) and on the same release. A rotation against a mixed-version fleet or
+  a replica whose storage has not yet completed WAL replay can produce inconsistent fingerprint
+  behaviour until all replicas are fully ready.
 - Locate the current secret in the source of truth (Vault path, AWS Secrets Manager ARN, …)
   and the env-var name it maps to (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`).
 - Snapshot or version the secret store entry so you can roll back.
