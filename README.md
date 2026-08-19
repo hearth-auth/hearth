@@ -63,7 +63,7 @@ docker pull ghcr.io/hearth-auth/hearth:v1.6.9
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
 docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.9 serve --dev
-curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
+curl -fsS http://127.0.0.1:8420/readyz   # → {"status":"ready","storage":"ok"}
 ```
 
 > **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run -- serve --dev`).
@@ -96,7 +96,7 @@ For signature and SLSA provenance verification of binaries, see [docs/guides/ver
 ```bash
 cargo build --release
 ./target/release/hearth serve --dev          # in-memory store, binds 127.0.0.1:8420
-curl -fsS http://127.0.0.1:8420/health       # → {"status":"ok"}
+curl -fsS http://127.0.0.1:8420/readyz       # → {"status":"ready","storage":"ok"}
 curl -X POST http://127.0.0.1:8420/admin/bootstrap | jq .
 ```
 
@@ -296,7 +296,7 @@ Dev mode uses in-memory storage in a temp directory, `debug` logging, `fsync` di
 ### 3. Verify
 
 ```bash
-curl -fsS http://127.0.0.1:8420/health
+curl -fsS http://127.0.0.1:8420/readyz
 curl -fsS http://127.0.0.1:8420/.well-known/openid-configuration | head
 ```
 
