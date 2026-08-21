@@ -47,6 +47,10 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | `cd sdks/php && composer test` | Run PHP SDK unit tests (smoke-test the PHP SDK locally) |
 | `make seed` | Seed a deterministic corpus onto a running dev instance for load tests — pass params via `ARGS` (see `loadtest/README.md`) |
 | `make loadtest` | Run the `hearth-loadtest` Goose harness against a seeded instance; writes JSON + HTML reports. Nightly/pre-release only, **not** a per-PR gate (`loadtest/README.md`) |
+| `make coverage` | Line + branch coverage via `cargo-llvm-cov` → `coverage/html/index.html` + `coverage/lcov.info`. Requires `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`. |
+| `make scratch-prune` | Prune stale `/scratch` cargo target dirs and temp files (HEA-2198). Retention: `target-hea-*` > 7 d, other `target-*` > 14 d, `/scratch/tmp` > 7 d. |
+| `make scratch-prune-dry-run` | Preview what `scratch-prune` would remove without deleting anything. |
+| `make scratch-timer-install` | Install a systemd user timer that runs `scratch-prune` daily at 03:00. Idempotent. |
 
 ### UI Test Pre-commit Workflow
 
