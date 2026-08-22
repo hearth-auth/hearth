@@ -417,9 +417,72 @@ newly disclosed vulnerabilities in dependencies.
 
 ## Rate Limiting
 
-The admin API enforces 100 requests per minute per authenticated admin. Adjust this at the
-infrastructure level (API gateway, load balancer) if you need tighter limits for your
-deployment.
+Hearth enforces multiple rate-limit tiers out of the box. All thresholds are tunable under
+[`security.rate_limiting`](../specs/CONFIGURATION.md#securityrate_limiting) in `hearth.yaml`
+and per-realm under `realms.<name>.auth.rate_limit`.
+
+### Per-IP login rate limit
+
+Blocks credential-stuffing and distributed brute-force attacks by IP address.
+
+| Config key | Default | Effect |
+|---|---|---|
+| `login_per_ip.max_attempts` | `10` | Failed login attempts before IP is blocked |
+| `login_per_ip.window_seconds` | `60` | Sliding window length in seconds |
+
+After the window closes, the IP is released automatically. This limiter is **in-memory** — it
+does not survive a server restart. Deploy a reverse-proxy (nginx, Caddy, Cloudflare) with its
+own IP-based limiting if your threat model requires persistence across restarts.
+
+> **TLS connections:** when Hearth terminates TLS directly (no reverse proxy), the real client
+> IP is correctly extracted from the TCP connection and attributed to the rate limiter (HEA-2164).
+> Releases before this fix collapsed all TLS-sourced requests into a single global bucket,
+> making per-IP limits ineffective on the TLS listener.
+
+### Per-account lockout
+
+Blocks sustained per-account password attacks.
+
+| Config key | Default | Effect |
+|---|---|---|
+| `login_per_account.max_failures` | `5` | Consecutive failures before account is locked |
+| `login_per_account.lockout_seconds` | `300` | Lockout duration (5 min default) |
+
+This limiter **persists across restarts** — the lockout state is WAL-persisted and restored at
+startup.
+
+### Admin API rate limit
+
+| Config key | Default | Effect |
+|---|---|---|
+| `admin_per_minute` | `100` | Requests/minute per admin user (REST + gRPC shared) |
+
+Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable (logs a `WARN`
+at startup and emits `hearth_rate_limiters_disabled{reason="config_zero"} 1`; never set `0`
+on a production bind).
+
+### Token endpoint rate limit
+
+| Config key | Default | Effect |
+|---|---|---|
+| `token_per_minute` | `200` | Requests/minute per `(realm, client)` pair |
+
+Applies to token issuance, introspection, and device-authorization requests. Same zero-warning
+behaviour as `admin_per_minute`.
+
+### Rate-limit durability across restarts
+
+| Limiter | Restart-safe? |
+|---|---|
+| Per-account lockout (`login_per_account`) | **Yes** — WAL-persisted |
+| Per-IP login flood (`login_per_ip`) | **No** — in-memory only |
+| Magic-link / password-reset request rate | **No** — in-memory only |
+| Self-registration rate | **No** — in-memory only |
+
+An attacker who triggers or waits for a server restart can transiently bypass the in-memory
+limiters immediately after startup. Mitigations: keep restart windows short, deploy a
+proxy-level rate limiter, and enable CAPTCHA or MFA for magic-link and password-reset flows
+in high-threat environments.
 
 ---
 
