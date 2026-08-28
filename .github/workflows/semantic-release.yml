@@ -57,7 +57,7 @@ jobs:
     steps:
       # Fetch full history so semantic-release can walk all commits.
       # Use the PAT so tags pushed back trigger the downstream publish workflows.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -101,7 +101,7 @@ jobs:
     steps:
       # Fetch full history so semantic-release can walk all commits.
       # Use the PAT so the pushed v* tag triggers docker.yml, helm.yml, release.yml.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
