@@ -3363,7 +3363,13 @@ fn load_config(
         } else if dev {
             return Ok(Config::dev());
         } else {
-            Config::default()
+            // HEA-2166: the compiled-in defaults were the one config path that
+            // never ran `validate()` — a bare `hearth serve` with no config
+            // file booted a production server with no KEK and no TLS. Route
+            // the defaults through the same fail-closed gates as a file.
+            let config = Config::default();
+            config.validate()?;
+            config
         }
     };
 

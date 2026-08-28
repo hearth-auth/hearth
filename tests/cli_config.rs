@@ -22,10 +22,15 @@ fn hearth_bin() -> std::path::PathBuf {
 
 // === hearth config validate ===
 
-/// A minimal valid production config (data_dir prevents the empty-dir error).
+/// A minimal valid production config (data_dir prevents the empty-dir error;
+/// the KEK and trust_forwarded_proto satisfy the HEA-2166 fail-closed gates).
 const VALID_CONFIG: &str = r#"
+server:
+  trust_forwarded_proto: true
 storage:
   data_dir: "/tmp/hearth-test"
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 oidc:
   issuer: "https://auth.example.com"
 "#;
@@ -332,8 +337,13 @@ fn example_output_file_option_writes_file() {
         .expect("written example must be valid YAML");
 }
 
+/// HEA-2166: the generated example is a *starting point*, not a production
+/// config. `config validate` applies production rules, so the example must
+/// FAIL until the operator supplies a key-encryption key and TLS — and the
+/// report must name each gap with its remediation. A silently-valid example
+/// is how plaintext-key deployments happened in the first place.
 #[test]
-fn example_written_config_passes_validate() {
+fn example_written_config_fails_validate_naming_production_gaps() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("hearth.yaml");
 
@@ -348,18 +358,27 @@ fn example_written_config_passes_validate() {
         .status()
         .expect("spawn hearth for example");
 
-    // The example YAML must pass validate
-    let validate_status = Command::new(hearth_bin())
+    let output = Command::new(hearth_bin())
         .args([
             "config",
             "validate",
             config_path.to_str().expect("valid UTF-8 path"),
         ])
-        .status()
+        .env_remove("HEARTH_KEK")
+        .output()
         .expect("spawn hearth for validate");
 
     assert!(
-        validate_status.success(),
-        "the generated example config should pass validate"
+        !output.status.success(),
+        "the out-of-the-box example must not validate as a production config"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("security.key_encryption_key") && stderr.contains("HEARTH_KEK"),
+        "report must name the missing KEK and the env-var fix; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("server.tls_cert_path") && stderr.contains("trust_forwarded_proto"),
+        "report must name both TLS remediations; got: {stderr}"
     );
 }

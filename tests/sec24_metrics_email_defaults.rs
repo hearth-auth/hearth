@@ -41,8 +41,11 @@ fn prod_config_yaml(realm_auth_snippet: &str) -> String {
 server:
   port: 8420
   bind_address: "127.0.0.1"
+  trust_forwarded_proto: true
 storage:
   data_dir: "/tmp/hearth-sec24-test"
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 oidc:
   issuer: "https://auth.example.com"
 email:
@@ -117,8 +120,11 @@ fn prod_log_transport_without_email_features_is_ok() {
 server:
   port: 8420
   bind_address: "127.0.0.1"
+  trust_forwarded_proto: true
 storage:
   data_dir: "/tmp/hearth-sec24-test"
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 oidc:
   issuer: "https://auth.example.com"
 email:

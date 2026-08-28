@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **BREAKING: three production misconfigurations now refuse to start instead of silently degrading
+  to insecure (HEA-2166).** Outside `--dev`, startup fails closed with an error naming the fix when:
+  (1) no key-encryption key is configured via `HEARTH_KEK` or `security.key_encryption_key` —
+  previously realm signing keys were written to storage **in plaintext** with no operator signal;
+  (2) neither `server.tls_cert_path` nor `server.trust_forwarded_proto: true` is set — previously
+  an error was logged and the server continued, issuing session cookies **without the `Secure`
+  attribute**; (3) `demo.enabled: true` — previously the mass demo seeder, whose accounts all share
+  a publicly documented default password, was ungated in production.  Additionally, `hearth serve`
+  with no config file previously booted from compiled-in defaults without running validation at
+  all; the defaults now pass through the same gates.  An existing deployment relying on any of
+  these will now refuse to start — that is the correct outcome; see the
+  [upgrading guide](docs/guides/upgrading.md#v16-v17) for the exact remediation per case.  `--dev`
+  behaviour is unchanged.
+- **`X-Forwarded-For` is now honored only when the connection arrives from a configured
+  `server.trusted_proxies` address (HEA-2165)** — previously any directly-connecting client could
+  spoof its IP per-request by sending the header, defeating per-IP rate limits (credential-stuffing
+  protection) and falsifying session/audit IP records.  From an untrusted peer the header is now
+  ignored entirely and the socket address is used; an empty `trusted_proxies` list fails closed.
+  Additionally, an unparseable hop in the forwarded chain stops the right-to-left walk (previously
+  it was skipped, letting a client-supplied value past a trusted chain), and all extracted
+  addresses are canonicalized (`::ffff:a.b.c.d` → `a.b.c.d`) so one client cannot occupy two
+  per-IP rate-limit buckets.  Deployments behind a reverse proxy **must** set
+  `server.trusted_proxies`, or all requests will be attributed to the proxy address.
+
 ### Changed
 - **Multi-node clustering is documented and flagged as EXPERIMENTAL (HEA-2154)** — Hearth 1.x has
   no production-supported multi-node path.  Starting a node with a `cluster:` section now emits a

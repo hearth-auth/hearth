@@ -23,9 +23,22 @@
 # │ [ ] server.bind_address  — default "127.0.0.1" is localhost-only.  │
 # │                            Set to "0.0.0.0" or your specific IP.   │
 # │                                                                     │
-# │ [ ] server.tls_cert_path — TLS is required in production.          │
-# │     server.tls_key_path    Configure a certificate or terminate     │
-# │                            TLS at your load balancer.               │
+# │ [ ] server.tls_cert_path — TLS is required in production; the      │
+# │     server.tls_key_path    server refuses to start without it.      │
+# │                            Configure a certificate, or terminate    │
+# │                            TLS at your load balancer and set        │
+# │                            server.trust_forwarded_proto: true.      │
+# │                                                                     │
+# │ [ ] HEARTH_KEK (env var)  — key-encryption key; required in         │
+# │     or security.            production or the server refuses to     │
+# │     key_encryption_key      start. Without it, realm signing keys   │
+# │                            would sit in storage in plaintext.       │
+# │                            Generate: openssl rand -hex 32           │
+# │                                                                     │
+# │ [ ] demo.enabled          — must be absent/false in production;     │
+# │                            demo accounts share one well-known       │
+# │                            password. The server refuses to start    │
+# │                            with it enabled outside --dev.           │
 # │                                                                     │
 # │ [ ] email.transport      — default "log" silently discards all     │
 # │                            verification and transactional mail.     │
@@ -48,6 +61,11 @@
 #   port: 443
 #   tls_cert_path: "/etc/hearth/tls/server.crt"
 #   tls_key_path:  "/etc/hearth/tls/server.key"
+#
+# security:
+#   # Or set the HEARTH_KEK env var (recommended — keeps the key out of YAML).
+#   # Generate with: openssl rand -hex 32
+#   key_encryption_key: "${HEARTH_KEK}"
 #
 # oidc:
 #   issuer: "https://auth.example.com"
