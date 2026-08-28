@@ -2,34 +2,132 @@
 
 All notable changes to Hearth will be documented in this file.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See [VERSIONING.md](VERSIONING.md) for the SemVer policy, support window, and deprecation rules.
 
 ## [Unreleased]
 
+### Removed
+- **`createRealm` removed from all SDKs (HEA-2171)** — the Go, Kotlin, Node, PHP,
+  Python, Rust, and TypeScript SDKs each shipped a `createRealm` client method
+  that posted to `POST /admin/realms`, which the server has always rejected with
+  `405 Method Not Allowed`. Realms are provisioned via `hearth.yaml` and reconciled
+  at startup; manage them there and restart Hearth to apply changes. Read paths
+  (`getRealm`, `listRealms`) are unaffected. All seven SDK test suites now run in CI.
+
+### Added
+- **Releases now ship a validation summary and are gated on the test suite (HEA-1264)** —
+  every GitHub Release carries a new `validation-summary.txt` asset recording the per-gate
+  verdicts, test counts, and benchmark deltas from the tagged commit, and the release notes
+  link to it under a **Validation** heading. The publish job is gated on that validation run,
+  so a release whose test suite, test-quality gate, abuse-coverage gate, or ROPC ban gate
+  fails is never published. The manual procedure is documented in
+  [`docs/ops/RELEASE_VALIDATION.md`](docs/ops/RELEASE_VALIDATION.md).
+- **SCIM `If-Match` optimistic concurrency is now enforced (HEA-2172)** — `ServiceProviderConfig`
+  advertises `etag.supported: true`, and Hearth now honours it. Every single-resource SCIM response
+  (`POST`/`GET`/`PUT`/`PATCH` on `/scim/v2/Users` and `/scim/v2/Groups`) carries an `ETag` header, and
+  a `PUT`, `PATCH`, or `DELETE` that supplies a stale `If-Match` validator is rejected with
+  **412 Precondition Failed** instead of silently overwriting a newer write. Provisioning pipelines
+  (Okta, Azure AD) that use `If-Match` for concurrency control no longer lose updates when two
+  operations race. Requests without `If-Match` are unaffected.
+
+### Changed
+- **Multi-node clustering is documented and flagged as EXPERIMENTAL (HEA-2154)** — Hearth 1.x has
+  no production-supported multi-node path.  Starting a node with a `cluster:` section now emits a
+  `WARN` on every startup naming the three known defects: followers never invalidate RBAC or
+  session caches after a revocation (C-5), cluster membership is fixed at bootstrap and cannot be
+  changed without a full-cluster restart (C-6), and writes routed to a follower fail with HTTP 500
+  with no leader hint (H-3).  The clustering guide, `hearth.example.yaml`, the Helm `values.yaml` /
+  `values-prod.yaml` comments, `CONFIGURATION.md`, `ARCHITECTURE.md`, the README, and VISION.md no
+  longer imply that HA works today.  The exclusive `data_dir` advisory lock is now documented,
+  including that it forbids two nodes sharing a directory or a `ReadWriteMany` mount.  **The
+  supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
+
 ### Security
-- **BREAKING: three production misconfigurations now refuse to start instead of silently degrading
-  to insecure (HEA-2166).** Outside `--dev`, startup fails closed with an error naming the fix when:
-  (1) no key-encryption key is configured via `HEARTH_KEK` or `security.key_encryption_key` —
-  previously realm signing keys were written to storage **in plaintext** with no operator signal;
-  (2) neither `server.tls_cert_path` nor `server.trust_forwarded_proto: true` is set — previously
-  an error was logged and the server continued, issuing session cookies **without the `Secure`
-  attribute**; (3) `demo.enabled: true` — previously the mass demo seeder, whose accounts all share
-  a publicly documented default password, was ungated in production.  Additionally, `hearth serve`
-  with no config file previously booted from compiled-in defaults without running validation at
-  all; the defaults now pass through the same gates.  An existing deployment relying on any of
-  these will now refuse to start — that is the correct outcome; see the
-  [upgrading guide](docs/guides/upgrading.md#v16-v17) for the exact remediation per case.  `--dev`
-  behaviour is unchanged.
-- **`X-Forwarded-For` is now honored only when the connection arrives from a configured
-  `server.trusted_proxies` address (HEA-2165)** — previously any directly-connecting client could
-  spoof its IP per-request by sending the header, defeating per-IP rate limits (credential-stuffing
-  protection) and falsifying session/audit IP records.  From an untrusted peer the header is now
-  ignored entirely and the socket address is used; an empty `trusted_proxies` list fails closed.
-  Additionally, an unparseable hop in the forwarded chain stops the right-to-left walk (previously
-  it was skipped, letting a client-supplied value past a trusted chain), and all extracted
-  addresses are canonicalized (`::ffff:a.b.c.d` → `a.b.c.d`) so one client cannot occupy two
-  per-IP rate-limit buckets.  Deployments behind a reverse proxy **must** set
-  `server.trusted_proxies`, or all requests will be attributed to the proxy address.
+- **Backup restore no longer silently drops the realm signing key (HEA-2168)** — restoring an
+  archive that carried no usable signing key (an unencrypted archive, one produced before signing-key
+  export, or one opened without the DEK) previously generated a **fresh** key and continued with only
+  a `warn` in the log. The restored realm could no longer validate any JWT or session issued before
+  the backup — every outstanding token was silently invalidated — and the only warning was a log line
+  an operator may never have seen. Restore now **fails closed** with an actionable error
+  (`BackupError::SigningKeyMissing`) when no signing key can be restored, naming exactly how to
+  produce an archive whose key round-trips (`--encrypt` / `HEARTH_MASTER_KEY`). An operator who
+  genuinely wants a new key can pass the new `hearth backup restore --allow-missing-signing-key` flag
+  to opt in explicitly. The HTTP restore endpoint always fails closed (no override). When the signing
+  key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
+
+### Fixed
+- **Backup export now takes a referentially consistent snapshot (HEA-2167)** — export previously
+  paginated live reads with no snapshot or lock, so any write concurrent with a backup could tear the
+  archive: a role assignment (or any cross-entity reference) read late could point at a user created
+  after the users were read, producing an archive that never atomically existed and was discovered
+  only during a restore. Since backups run on a schedule against a live server, this was the normal
+  case. Export now acquires a per-node **consistency barrier** for the duration of each realm's read
+  pass. **Operational impact operators must know before scheduling backups:** while an export holds
+  the barrier, writes to that node block until the export's read pass for that realm completes; reads
+  (token validation, lookups) are never blocked. Schedule backups during low-write windows for large
+  realms. The barrier is single-node; multi-node export consistency is not yet provided (clustering
+  is EXPERIMENTAL — see HEA-2154).
+- **Backup restore no longer silently destroys the entire authorization model (HEA-2160)** — a
+  restore previously reported **success** while discarding every role, permission, group, role
+  assignment, scope, organization, and audit event: the exporter wrote 12 archive members but the
+  importer read only 5 (realm, users, credentials, clients, signing key), skipping the rest with no
+  warning.  An operator recovering from an incident got a server that authenticated users but had
+  lost its entire RBAC and organization state.  All 12 members are now restored verbatim (IDs and
+  indexes preserved so assignments still reference their roles and subjects); audit events are
+  re-chained under the destination realm's HMAC key.  Restore is now **fail-closed**: an
+  unrecognized archive member aborts the restore with a hard error instead of a silent skip, so a
+  backup this version cannot fully restore never reports success.  `ImportReport` now carries a
+  per-member `EntityCounts` field (`roles`, `permissions`, `groups`, `assignments`, `scopes`,
+  `organizations`, `audit_events`) instead of tracking only realms/users/clients.
+- **SIGTERM now triggers graceful drain (HEA-2161)** — `docker stop`, `kubectl delete pod`, and
+  `systemctl stop` all send SIGTERM; previously the OS default handler killed the process
+  immediately, dropping in-flight requests.  SIGTERM now fires the same axum
+  `with_graceful_shutdown` drain path as SIGINT (Ctrl+C), waiting for in-flight HTTP and gRPC
+  requests to complete before exiting 0.  The drain deadline is `operational.shutdown_timeout_secs`
+  (default 10 s; recommended production value 30 s, with `terminationGracePeriodSeconds: 60` in the
+  Helm chart providing a 30 s buffer above the drain deadline).
+- **Source builds now stamp the correct version (HEA-2156)** — `Cargo.toml` was pinned at
+  `1.0.0` while releases were at `v1.6.9`, causing `hearth --version` and backup manifest
+  `hearth_version` fields to report a stale placeholder.  `build.rs` now resolves the version via
+  `HEARTH_RELEASE_VERSION` (release builds) → `git describe --tags` (dev/CI source builds) →
+  Cargo.toml (shallow-clone fallback, now updated to `1.6.9`).  A regression test in
+  `src/backup/types.rs` asserts the stamped version is not the old placeholder.
+- **Helm readiness probe now uses `/readyz` (HEA-2169)** — the Helm chart, Dockerfile, and
+  docker-compose healthcheck all pointed to `/health` (always-200 process heartbeat) for both
+  liveness and readiness.  Kubernetes therefore routed traffic to pods whose storage was not yet
+  ready.  Readiness is now wired to `/readyz` (genuine WAL + memtable probe) while liveness stays
+  on `/health`; a storage failure causing liveness to flap would trigger a pod kill-loop, which is
+  worse than keeping the pod alive while storage recovers.  The Dockerfile and compose healthchecks
+  are updated to `/readyz` so `depends_on: condition: service_healthy` also waits for storage.
+- **systemd unit no longer restart-loops on startup (HEA-2169)** — `Type=notify` requires the
+  process to call `sd_notify(READY=1)`, which Hearth does not do.  systemd waited for the
+  notification timeout, killed the service, and restarted in a loop.  Changed to `Type=exec`:
+  systemd marks the service active as soon as the main PID is assigned.
+- **Helm chart sets `terminationGracePeriodSeconds: 60` explicitly (HEA-2169)** — the production
+  profile configures `shutdown_timeout_secs: 30`; relying on the Kubernetes default of 30 s left
+  zero buffer and could race kubelet's SIGKILL against Hearth's drain.  The grace period is now
+  explicit at 60 s (drain deadline + 30 s buffer).
+
+### Security
+- **TLS path now records the real client IP instead of 127.0.0.1 (HEA-2164)** — `serve_tls_router`
+  managed its own accept loop and called `app.into_service()` without injecting
+  `ConnectInfo<SocketAddr>`.  Every TLS-sourced request therefore fell through to `FALLBACK_PEER`
+  (`127.0.0.1`), collapsing per-IP login rate-limiter buckets into a single global bucket (one
+  exhausted client could lock out every tenant) and storing `127.0.0.1` in every session and audit
+  record, destroying forensics for the entire TLS listener.  The fix mirrors what axum's
+  `into_make_service_with_connect_info` does: layer `ConnectInfo<SocketAddr>` onto the router
+  **before** `into_service()` so the real TCP peer address is visible to handlers.
+- **Host key and KEK-file writes are now crash-durable (HEA-2162)** — on first boot Hearth
+  auto-generates `hearth.host_key` and, on the first realm, creates `hearth.keys`. Neither write
+  fsync'd the file's parent directory, and the host-key write did not even fsync its own contents.
+  A power loss in the seconds after initial provisioning could leave `hearth.host_key` empty or its
+  directory entry uncommitted — and every realm KEK is encrypted under that host key, so losing it
+  makes the **entire encrypted dataset permanently undecryptable** with no recovery path. All three
+  key-material write paths — the host-key write, the first-KEK `hearth.keys` create, and the
+  master-key-rotation atomic rewrite (which fsync'd the temp file but omitted the post-rename
+  directory fsync) — now `sync_all()` the file **and** fsync the parent directory before returning
+  success. This is the same defect class as the WAL/SST parent-directory fsync work (HEA-1855/1857),
+  where the host key was flagged as an open HIGH; it is now confirmed and closed.
 
 ### Changed
 - **Helm chart refuses to render with `replicaCount > 1` (HEA-2107)** — Hearth is single-writer and

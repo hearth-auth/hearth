@@ -72,6 +72,19 @@ pub trait AuditEngine: Send + Sync {
     /// Returns the complete event including computed fields.
     fn append(&self, event: &CreateAuditEvent) -> Result<AuditEvent, AuditError>;
 
+    /// Restores an audit event from a backup archive (HEA-2160).
+    ///
+    /// Unlike [`append`](Self::append), the event's original `id`, `timestamp`,
+    /// `actor`, `action`, and resource fields are preserved; only the
+    /// `integrity_hash` is recomputed so the event re-chains under the
+    /// destination realm's HMAC key (the source realm's key is not portable
+    /// across a restore). The restored chain therefore verifies under the
+    /// destination realm even though individual hashes differ from the source.
+    ///
+    /// Events MUST be imported in chronological (ascending-timestamp) order so
+    /// the re-chained sequence matches the original ordering.
+    fn import_event(&self, event: &AuditEvent) -> Result<(), AuditError>;
+
     /// Queries audit events matching the given criteria.
     ///
     /// Results are returned in chronological order. All filters are

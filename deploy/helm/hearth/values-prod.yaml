@@ -17,8 +17,10 @@ image:
   tag: ""          # defaults to Chart.yaml appVersion; pin to a release tag in production
 
 # -- Replicas --------------------------------------------------------------------
-# Hearth is single-writer (WAL is fsync-bound). Keep replicaCount=1 unless you
-# are using ReadWriteMany storage and a coordinated HA setup.
+# Hearth 1.x is single-node only. Keep replicaCount=1.
+# Multi-node clustering is EXPERIMENTAL and NOT production-supported — known
+# defects include follower RBAC cache staleness (C-5), immutable membership
+# (C-6), and HTTP 500 on follower writes (H-3). See docs/guides/clustering.md.
 replicaCount: 1
 
 # -- Ingress ---------------------------------------------------------------------

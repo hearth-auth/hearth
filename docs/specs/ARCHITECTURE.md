@@ -185,9 +185,14 @@ dominated by the resource server's outbound call, not by Hearth's internal proce
 
 ### 4.3 API Versioning
 
-**Pre-1.0**: Breaking changes to wire format, config, and on-disk storage are permitted with a changelog entry. However, on-disk format changes MUST NOT silently corrupt data — if the format is incompatible, startup MUST fail with a clear error directing the operator to re-initialize.
+See [`VERSIONING.md`](../../VERSIONING.md) for the full operator-facing SemVer policy, support window, deprecation rules, and EOL communication process. The structural rules below are normative for engineers working on this codebase.
 
-**Post-1.0**:
+**1.0 GA shipped on 2026-06-21** (tag `v1.0.0`); the current line is 1.6.x. The rules below are in
+force now. A breaking change is no longer authorized merely by adding a changelog entry — it requires
+a major version bump. On-disk format changes MUST NOT silently corrupt data: if the format is
+incompatible, startup MUST fail with a clear error directing the operator to re-initialize.
+
+**Post-1.0-GA (in force)**:
 
 - HTTP/gRPC endpoints MUST be versioned (`/v1/...`). Breaking changes require a new API version. Previous versions MUST be supported for at least one major release.
 - Config changes MUST NOT break existing config files. New required fields MUST have defaults. Removed fields MUST produce a clear error, not silent behavior change.
@@ -536,7 +541,7 @@ These crates are pre-approved and need no additional justification:
 | CLI | `clap` | Derive-based |
 | Lock-free concurrency | `crossbeam-epoch`, `arc-swap` | |
 | Memory-mapped I/O | `memmap2` | |
-| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; not yet production-validated at scale |
+| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; **EXPERIMENTAL in 1.x — not production-supported.** Known defects: C-5 (no follower cache invalidation), C-6 (immutable membership), H-3 (follower writes return HTTP 500). |
 | HTTP framework | `axum` | `tower`-compatible |
 | Time handling | `std::time`, `tokio::time` | |
 | Testing | `proptest`, `criterion`, `insta` | Test-only |
@@ -658,7 +663,7 @@ Key architectural decisions codified in this document, with rationale:
 | Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
 | Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch`, `arc-swap` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
 | TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
-| Pre-1.0 compatibility | Breaking changes permitted | Semver 0.x convention; strict compatibility rules activate at v1.0 |
+| Pre-1.0-GA compatibility | Breaking changes permitted | Semver convention; the strict rules activate at 1.0 GA. Those rules are written down in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, support window, deprecation policy, and the 2.0 process. |
 | Encryption at rest mechanism | Envelope encryption (AES-256-GCM) | Key rotation is O(DEKs) not O(data). Industry standard (AWS KMS, GCP KMS). |
 | Batch writes | Atomic multi-op WAL entries | Identity operations span multiple records; individual fsyncs are both slow and unsafe (crash between ops = inconsistency). |
 | Cluster read consistency | Follower reads, bounded staleness | 50–100ms staleness acceptable for auth; linearizable reads bottleneck the leader. Followers stop serving if lag exceeds threshold. |

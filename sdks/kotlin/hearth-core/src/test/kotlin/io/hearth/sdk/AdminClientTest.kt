@@ -116,13 +116,6 @@ class AdminClientTest {
     // ── Realms ────────────────────────────────────────────────────────────────
 
     @Test
-    fun `createRealm POSTs to admin slash realms`() = runTest {
-        server.enqueue(MockResponse().setBody(realmJson()).setResponseCode(200))
-        client.createRealm(CreateRealmRequest("Test Realm"))
-        assertEquals("/admin/realms", server.takeRequest().path)
-    }
-
-    @Test
     fun `getRealm GETs admin slash realms slash id`() = runTest {
         server.enqueue(MockResponse().setBody(realmJson()).setResponseCode(200))
         client.getRealm("r1")

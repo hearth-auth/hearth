@@ -149,13 +149,6 @@ pub struct Realm {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateRealmRequest {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<serde_json::Value>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateRealmRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

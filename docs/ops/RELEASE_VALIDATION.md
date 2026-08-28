@@ -1,0 +1,249 @@
+# Release Validation Runbook
+
+**Audience:** Release engineer running the pre-release validation pass before tagging a Hearth release.
+**Goal:** Confirm the release commit passes the full test matrix and benchmark gate before the signed binary and SBOM are published.
+
+This runbook must be completed on the release commit (the commit that bumps `Cargo.toml` version and replaces `## [Unreleased]` in `CHANGELOG.md`). Do not run it on an unrelated working commit.
+
+---
+
+## Prerequisites
+
+- Rust toolchain matching the MSRV declared in `Cargo.toml` (currently **1.88.0**).
+- `PROTOC` environment variable pointing to a `protoc` binary (`which protoc` or set via `make PROTOC=protoc`).
+- `buf` CLI installed (`brew install bufbuild/buf/buf` or https://buf.build/docs/installation).
+- Docker available (used by `make sdk-smoke-local`).
+- A quiesced host: no other cargo builds, no background servers on port 8420.
+
+```bash
+export PROTOC=$(which protoc)
+```
+
+---
+
+## Step 1 — Full Rust test suite
+
+Run the complete workspace test suite with no parallelism cap (uses all available threads).
+
+```bash
+cargo nextest run --workspace --no-fail-fast 2>&1 | tee /tmp/nextest-release.log
+echo "Exit: $?"
+```
+
+Expected: all tests pass (exit 0). A non-zero exit means a test failed — **do not proceed with the release.**
+
+Check the tail of the log for a line like:
+```
+Summary [  X.Xs]: NNN tests run: NNN passed, 0 failed, 0 skipped
+```
+
+If `failed` is non-zero, file an issue, fix the root cause, and re-run from this step.
+
+---
+
+## Step 2 — Test quality gate
+
+Ensures no anti-patterns (vacuous asserts, zero-assert bodies, stale ignores) slipped in. This gate runs faster than the full suite.
+
+```bash
+make test-quality 2>&1 | tee /tmp/test-quality-release.log
+echo "Exit: $?"
+```
+
+Expected: exit 0 with no `FAIL` lines. Any failures name the offending test file and pattern.
+
+---
+
+## Step 3 — Abuse coverage gate
+
+Runs `scripts/check-abuse-coverage.sh` (§3.41). Fails if any A-N row in
+`docs/plans/HEA-1114-abuse-prevention.md` lacks at least one negative-scenario test in
+`tests/abuse_*.rs`. This is a *coverage* gate — it proves each abuse scenario has a test,
+not that the tests pass (Step 1 covers that).
+
+```bash
+make abuse-check 2>&1 | tee /tmp/abuse-check-release.log
+echo "Exit: $?"
+```
+
+Expected: exit 0.
+
+---
+
+## Step 4 — Lint and format
+
+```bash
+make clippy
+make fmt
+```
+
+Both must exit 0. `make fmt` exits non-zero if `rustfmt` would make any changes — run `cargo fmt` to apply and re-check.
+
+---
+
+## Step 5 — Proto check
+
+```bash
+make proto-check
+```
+
+Runs `buf lint`, `buf breaking --against main` (no wire regressions), and `buf generate` to confirm generated code is in sync. Exit 0 required.
+
+---
+
+## Step 6 — CSS freshness
+
+```bash
+make css-check
+```
+
+Fails if `src/protocol/web/assets/app.css` is stale relative to the Tailwind inputs. If it fails, run `make css` and commit the result.
+
+---
+
+## Step 7 — Benchmark gate
+
+Runs the five Criterion benchmark suites against the hot path. This is an advisory gate — use it to catch regressions, not as a pass/fail blocker unless a benchmark shows >20% regression against the baseline recorded in `docs/perf/PUBLISHED_FIGURES.md`.
+
+```bash
+make bench-gate 2>&1 | tee /tmp/bench-gate-release.log
+echo "Exit: $?"
+```
+
+The benchmarks are:
+- `rbac_check` — RBAC permission resolution
+- `session_lookup` — session fetch and validation
+- `storage_gate` — WAL write throughput
+- `demotion_latency` — hot→cold tier demotion
+- `validate_token` — JWT validation (engine plane)
+
+Review the `change:` column in the Criterion output for each benchmark. If any shows a regression of 20% or more against the documented baseline, **stop the release**, file an issue, and investigate before proceeding.
+
+---
+
+## Step 8 — SDK smoke tests
+
+Builds Hearth in dev mode, starts the server, runs the TypeScript and Go SDK example smoke scripts, and tears down the server.
+
+```bash
+make sdk-smoke-local 2>&1 | tee /tmp/sdk-smoke-release.log
+echo "Exit: $?"
+```
+
+Expected: exit 0 with all SDK scripts completing without error. If the server fails to start, check port 8420 is free.
+
+---
+
+## Step 9 — Security gates
+
+`make security-gate` asserts the RFC 6749 §4.3 ROPC password grant is unreachable
+(`scripts/check-ropc-ban.sh`, HEA-1814/1816/1862) — it checks *both* the config
+allowlist and the HTTP token dispatch, because HEA-1862 showed those two can drift apart.
+It does **not** run supply-chain scanning, so run those two separately:
+
+```bash
+make security-gate                # ROPC ban assertion — exit 0 required
+cargo audit --deny warnings       # RustSec advisories (needs cargo-audit)
+cargo deny check                  # licenses + bans + advisories (needs cargo-deny)
+```
+
+All three must exit 0. `cargo audit` / `cargo deny` are not Make targets — install with
+`cargo install cargo-audit cargo-deny` or via `taiki-e/install-action` as CI does.
+`.cargo/audit.toml` carries the sim-only `bincode` exception.
+
+---
+
+## Step 10 — Compile the validation summary
+
+After all steps pass, write a `validation-summary.txt`:
+
+```bash
+cat > /tmp/validation-summary.txt << EOF
+Hearth $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version') — Release Validation Summary
+Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Commit: $(git rev-parse HEAD)
+
+PASS  Step 1 — Full test suite (cargo nextest, $(grep -oP '\d+ passed' /tmp/nextest-release.log | tail -1))
+PASS  Step 2 — Test quality gate
+PASS  Step 3 — Abuse-check adversarial gate
+PASS  Step 4 — Lint (clippy) + format (rustfmt)
+PASS  Step 5 — Proto check (buf lint + breaking + generate)
+PASS  Step 6 — CSS freshness
+PASS  Step 7 — Benchmark gate (no >20% regression)
+PASS  Step 8 — SDK smoke tests (TS + Go)
+PASS  Step 9 — Security gate (cargo audit + cargo deny)
+
+All 9 steps passed. Release is cleared to tag and publish.
+EOF
+cat /tmp/validation-summary.txt
+```
+
+Replace any `PASS` with `FAIL: <reason>` for any step that did not pass. A summary with any `FAIL` lines means the release is **not cleared to publish**.
+
+> **Note:** you do not need to upload this file by hand. Once the tag is pushed, the
+> `validation` job in `release.yml` generates its own `validation-summary.txt` for the
+> gates it runs and attaches it to the GitHub Release (see
+> [CI automation](#ci-automation-hea-1264) below). Keep this manual summary as your record
+> of the steps CI does **not** cover — 5, 6, and 8.
+
+---
+
+## Release tag command
+
+After all steps pass:
+
+```bash
+VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+git tag -s "v$VERSION" -m "Release v$VERSION"
+git push origin "v$VERSION"
+```
+
+The `release.yml` workflow fires on the new tag and builds the signed binaries, SBOM, SLSA provenance, and publishes the GitHub Release automatically.
+
+---
+
+## CI automation (HEA-1264)
+
+The `validation` job in `.github/workflows/release.yml` runs a subset of this runbook
+automatically on the tagged release commit, so the §13.4 evidence is produced without
+manual effort:
+
+| Runbook step | Automated in `validation`? | Gate type |
+|---|---|---|
+| 1 — Full test suite (`cargo nextest run --workspace`) | ✅ | **Hard** — blocks publish |
+| 2 — Test quality (`make test-quality`) | ✅ | **Hard** — blocks publish |
+| 3 — Abuse coverage (`make abuse-check`) | ✅ | **Hard** — blocks publish |
+| 9 — ROPC ban (`make security-gate`) | ✅ | **Hard** — blocks publish |
+| 7 — Benchmarks (`make bench-gate`) | ✅ | Advisory — recorded, reviewed by a human |
+| 4 — clippy / fmt | ❌ (gated on every PR by `ci.yml`) | — |
+| 5 — proto-check, 6 — css-check | ❌ (gated on every PR by `ci.yml`) | — |
+| 8 — SDK smoke (`make sdk-smoke-local`) | ❌ (`sdk-smoke.yml` runs it separately) | — |
+| 9 — `cargo audit` / `cargo deny` | ❌ (`security.yml` runs these) | — |
+
+**How the gating works.** Each gate step uses `continue-on-error: true` so the summary
+reports every gate rather than stopping at the first failure. A final **Enforce hard
+gates** step re-raises any hard-gate failure and fails the job. Because the publish job
+declares `needs: [validation, sign, provenance]`, a red test suite means the GitHub
+Release is never created.
+
+> The benchmark gate is deliberately advisory: judging a regression requires comparing
+> against the baseline in `docs/perf/PUBLISHED_FIGURES.md`, which needs human judgement.
+> Its output is captured to the summary and to `bench.log` in the workflow artifacts.
+
+**Outputs.** The job uploads a `validation-summary` artifact containing
+`validation-summary.txt`, `nextest.log`, and `bench.log`. The publish job attaches
+`validation-summary.txt` to the GitHub Release and appends a **Validation** section to
+the release notes linking to it.
+
+**Steps you must still run manually** before tagging: 5, 6, and 8 (and 4 if you are
+tagging a commit that never went through PR CI). The manual summary in Step 10 remains
+useful for recording those.
+
+---
+
+## Related
+
+- [CHANGELOG.md](../../CHANGELOG.md) — read before releasing; all `## [Unreleased]` entries become the release notes
+- [VERSIONING.md](../../VERSIONING.md) — SemVer policy, support windows, deprecation rules
+- [docs/release-runbook.md](../release-runbook.md) — semantic-release automation, conventional commits, and how tags trigger the publish workflow
+- [docs/guides/upgrading.md](../guides/upgrading.md) — operator upgrade notes generated from this release

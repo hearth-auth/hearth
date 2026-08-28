@@ -115,6 +115,7 @@ spec:
         app.kubernetes.io/name: hearth
         app.kubernetes.io/instance: hearth
     spec:
+      terminationGracePeriodSeconds: 60
       serviceAccountName: hearth
       securityContext:
         fsGroup: 10001
@@ -160,7 +161,7 @@ spec:
           readinessProbe:
             failureThreshold: 3
             httpGet:
-              path: /health
+              path: /readyz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

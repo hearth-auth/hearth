@@ -139,9 +139,10 @@ oidc:
 hearth serve -c hearth.yaml
 ```
 
-Verify the server is healthy:
+Verify the server is ready (storage engine up, WAL replay complete):
 ```bash
-curl http://127.0.0.1:8420/health
+curl http://127.0.0.1:8420/readyz
+# → {"status":"ready","storage":"ok"}
 ```
 
 ---

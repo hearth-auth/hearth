@@ -58,40 +58,19 @@ describe("TypeScript SDK: Admin CRUD", () => {
       expect((e as { status: number }).status).toBe(404);
     }
 
-    // === Realm CRUD ===
-
-    // Create
-    const realm = await admin.createRealm({
-      name: "test-realm-crud",
-    });
-    expect(realm.id).toBeTruthy();
-    expect(realm.name).toBe("test-realm-crud");
-    expect(realm.status).toBe("REALM_STATUS_ACTIVE");
-
-    // Read
-    const fetchedRealm = await admin.getRealm(realm.id);
-    expect(fetchedRealm.id).toBe(realm.id);
-    expect(fetchedRealm.name).toBe("test-realm-crud");
-
-    // Update
-    const updatedRealm = await admin.updateRealm(realm.id, {
-      name: "updated-realm-name",
-    });
-    expect(updatedRealm.name).toBe("updated-realm-name");
+    // === Realm read paths ===
+    //
+    // Realms are provisioned via hearth.yaml, not the admin API: POST and
+    // PATCH /admin/realms return 405 ("Realms are managed via hearth.yaml").
+    // The SDK exposes only the read paths, so exercise those against the
+    // realm the dev server bootstrapped.
 
     // List
     const realmPage = await admin.listRealms({ limit: 10 });
     expect(realmPage.items.length).toBeGreaterThanOrEqual(1);
 
-    // Delete
-    await admin.deleteRealm(realm.id);
-
-    // Verify deleted — should 404
-    try {
-      await admin.getRealm(realm.id);
-      expect.fail("should have thrown");
-    } catch (e: unknown) {
-      expect((e as { status: number }).status).toBe(404);
-    }
+    // Read the bootstrapped realm by ID
+    const fetchedRealm = await admin.getRealm(server.bootstrap.realm_id);
+    expect(fetchedRealm.id).toBe(server.bootstrap.realm_id);
   });
 });

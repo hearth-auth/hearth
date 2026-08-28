@@ -231,6 +231,19 @@ impl BackupExporter {
         opts: &ExportOptions,
         dek: &[u8; 32],
     ) -> Result<RealmManifest, BackupError> {
+        // Acquire a consistent-snapshot barrier so no write can interleave
+        // between the per-entity read passes below (HEA-2167). While this guard
+        // is held, all storage writes block; reads — including ours — proceed.
+        // Every entity read below therefore reflects a single point in time, so
+        // the archive cannot be torn (e.g. a group membership referencing a
+        // user the archive omits). Engines without a barrier (test doubles,
+        // cluster wrapper) return `None` and the export proceeds without
+        // isolation. Held until this function returns.
+        let barrier = self.identity.backup_barrier();
+        let _snapshot = barrier
+            .as_ref()
+            .map(|b| b.write().unwrap_or_else(std::sync::PoisonError::into_inner));
+
         let realm = self
             .identity
             .get_realm(realm_id)

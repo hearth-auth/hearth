@@ -7,7 +7,11 @@ Wants=network-online.target
 # crash-loop doesn't hammer the system.
 
 [Service]
-Type=notify
+# Type=exec: systemd considers the service active as soon as ExecStart returns
+# the main PID. Type=notify would require a sd_notify(READY=1) call from the
+# binary, which Hearth does not emit. Without it systemd waits for the
+# notification timeout, kills the service, and restart-loops.
+Type=exec
 User=hearth
 Group=hearth
 WorkingDirectory=/var/lib/hearth

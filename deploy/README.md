@@ -31,9 +31,9 @@ cp hearth.example.yaml hearth.yaml
 # 2. Start the stack
 docker compose -f deploy/docker-compose.yml up -d
 
-# 3. Check health
-curl http://localhost:8420/health
-# → {"status":"ok"}
+# 3. Check readiness
+curl http://localhost:8420/readyz
+# → {"status":"ready","storage":"ok"}
 ```
 
 Services started:
@@ -104,7 +104,7 @@ sudo systemctl enable --now hearth
 
 # 7. Check status
 sudo systemctl status hearth
-curl http://localhost:8420/health
+curl http://localhost:8420/readyz
 ```
 
 ### Logs

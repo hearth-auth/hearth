@@ -10,16 +10,38 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::core::{ClientId, RealmId};
+use crate::audit::{AuditEngine, AuditEvent};
+use crate::core::{ClientId, ImportOutcome, RealmId};
 use crate::identity::{
     ClientTrustLevel, CreateRealmRequest, IdentityEngine, IdentityError, ImportClientRequest,
-    ImportUserRequest, RawCredential, Realm, User,
+    ImportUserRequest, Organization, RawCredential, Realm, User,
 };
-use crate::rbac::RbacEngine;
+use crate::rbac::{Group, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport};
 
 use zeroize::Zeroizing;
 
 use super::{decrypt_bytes, unwrap_dek, ArchiveReader, BackupError};
+
+/// Every archive member (relative to `realms/<slug>/`) the importer knows how
+/// to restore. A member NOT in this list is a hard error — see the fail-closed
+/// check in [`BackupImporter::import_realm`] (HEA-2160).
+///
+/// Keep in sync with the members written by
+/// [`BackupExporter::export_realm`](super::BackupExporter::export_realm).
+const RECOGNIZED_MEMBERS: &[&str] = &[
+    "realm.json",
+    "users.ndjson",
+    "credentials.ndjson",
+    "clients.ndjson",
+    "roles.ndjson",
+    "permissions.ndjson",
+    "groups.ndjson",
+    "assignments.ndjson",
+    "scopes.ndjson",
+    "organizations.ndjson",
+    "signing_key.json",
+    "audit.ndjson",
+];
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -51,6 +73,15 @@ pub struct ImportOptions {
     ///
     /// Must be `Some` for any archive produced by format v2+.
     pub dek_passphrase: Option<SecretString>,
+    /// Allow restore to proceed when the archive carries no restorable signing
+    /// key (unencrypted archive, pre-signing-key export, or opened without the
+    /// DEK). Defaults to `false`: restore fails closed with
+    /// [`BackupError::SigningKeyMissing`] rather than silently generating a
+    /// fresh key that invalidates every pre-restore JWT and session (HEA-2168).
+    ///
+    /// When `true`, the operator has explicitly accepted that a new signing key
+    /// will be generated and all previously issued tokens will stop validating.
+    pub allow_missing_signing_key: bool,
 }
 
 /// Per-entity-type outcome counts for a single realm restore operation.
@@ -78,7 +109,14 @@ pub struct Conflict {
 }
 
 /// Full outcome report for a realm import operation.
+///
+/// Every archive member has its own [`EntityCounts`] field so an operator can
+/// see per-member results (created / skipped / overwritten / errored) rather
+/// than a single boolean. Prior to HEA-2160 only `realms`, `users`, and
+/// `clients` were populated — the RBAC and organization members were dropped
+/// silently while restore reported success.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ImportReport {
     /// Outcome counts for realm records (0 or 1 per call).
     pub realms: EntityCounts,
@@ -86,8 +124,32 @@ pub struct ImportReport {
     pub users: EntityCounts,
     /// Outcome counts for OAuth client records.
     pub clients: EntityCounts,
+    /// Outcome counts for RBAC role records.
+    pub roles: EntityCounts,
+    /// Outcome counts for permission-registry records.
+    pub permissions: EntityCounts,
+    /// Outcome counts for RBAC group records.
+    pub groups: EntityCounts,
+    /// Outcome counts for role-assignment records.
+    pub assignments: EntityCounts,
+    /// Outcome counts for OAuth scope records.
+    pub scopes: EntityCounts,
+    /// Outcome counts for organization records.
+    pub organizations: EntityCounts,
+    /// Outcome counts for restored audit events.
+    pub audit_events: EntityCounts,
     /// Conflicts encountered — populated in Skip / Merge mode only.
     pub conflicts: Vec<Conflict>,
+}
+
+/// Records the outcome of a single record import into the matching
+/// [`EntityCounts`] bucket.
+fn tally(counts: &mut EntityCounts, outcome: ImportOutcome) {
+    match outcome {
+        ImportOutcome::Created => counts.created += 1,
+        ImportOutcome::Skipped => counts.skipped += 1,
+        ImportOutcome::Overwritten => counts.overwritten += 1,
+    }
 }
 
 // ── Internal archive record types ────────────────────────────────────────────
@@ -139,14 +201,22 @@ struct BackupClient {
 /// traits — no raw storage is accessed.
 pub struct BackupImporter {
     identity: Arc<dyn IdentityEngine>,
-    #[allow(dead_code)] // RBAC import reserved for future use (roles, groups)
     rbac: Arc<dyn RbacEngine>,
+    audit: Arc<dyn AuditEngine>,
 }
 
 impl BackupImporter {
     /// Creates a new importer backed by the given engine instances.
-    pub fn new(identity: Arc<dyn IdentityEngine>, rbac: Arc<dyn RbacEngine>) -> Self {
-        Self { identity, rbac }
+    pub fn new(
+        identity: Arc<dyn IdentityEngine>,
+        rbac: Arc<dyn RbacEngine>,
+        audit: Arc<dyn AuditEngine>,
+    ) -> Self {
+        Self {
+            identity,
+            rbac,
+            audit,
+        }
     }
 
     /// Restores one realm from `reader` using the archive slug `realm_slug`.
@@ -159,6 +229,7 @@ impl BackupImporter {
     /// must be set so the DEK can be unwrapped before decrypting sections.
     ///
     /// Returns an [`ImportReport`] with counts and any conflicts encountered.
+    #[allow(clippy::too_many_lines)]
     pub fn import_realm(
         &self,
         realm_slug: &str,
@@ -203,6 +274,92 @@ impl BackupImporter {
         // Load all files for this realm in a single archive pass.
         let files = reader.read_all_realm_files(realm_slug)?;
 
+        // ── Fail closed on any unrecognized member (HEA-2160) ──────────────
+        //
+        // Before writing anything, verify every member of this realm is one we
+        // know how to restore. A member this version cannot handle is a HARD
+        // ERROR, not a silent skip: an operator recovering from an incident
+        // must never be told a restore "succeeded" while it quietly dropped
+        // data it did not understand.
+        let member_prefix = format!("realms/{realm_slug}/");
+        for key in files.keys() {
+            let member = key.strip_prefix(&member_prefix).unwrap_or(key);
+            if !RECOGNIZED_MEMBERS.contains(&member) {
+                return Err(BackupError::UnrecognizedMember { path: key.clone() });
+            }
+        }
+
+        // ── Signing key (decrypted, optional) ──────────────────────────────
+        //
+        // Decrypt the archive's signing_key.json *before* creating the realm
+        // so that `import_realm` can install the original key atomically with
+        // the realm record (preserving the create_realm invariant that a
+        // realm always has a usable key). A decrypt failure here is fatal:
+        // silently generating a fresh key would invalidate every JWT issued
+        // under this realm prior to backup (the bug HEA-745 fixes).
+        //
+        // The load + fail-closed check runs BEFORE any writes (audit events,
+        // realm record, users, …) so a refusal leaves the target untouched —
+        // no partial restore (HEA-2168).
+        let signing_key_pkcs8 = self.load_signing_key(realm_slug, &files, dek.as_deref())?;
+        if signing_key_pkcs8.is_none() && !opts.allow_missing_signing_key {
+            // Fail closed. The archive is unencrypted, predates signing-key
+            // export, or was opened without the DEK — restoring anyway would
+            // mint a fresh key and invalidate every pre-restore token. Refuse
+            // with an actionable error rather than a `warn` on the default path
+            // (HEA-2168). Nothing has been written yet.
+            return Err(BackupError::SigningKeyMissing {
+                slug: realm_slug.to_string(),
+            });
+        }
+        if signing_key_pkcs8.is_none() {
+            // Operator explicitly opted in via `allow_missing_signing_key`. A
+            // fresh key will be generated; pre-restore JWTs will fail to
+            // validate — log loudly so this shows up in restore audit trails.
+            warn!(
+                slug = realm_slug,
+                "signing_key not restored — archive missing signing_key.json or wrapped_dek_b64; \
+                 proceeding under allow_missing_signing_key: pre-restore JWTs will fail to \
+                 validate against the freshly generated key"
+            );
+        }
+
+        // ── Audit events (restored FIRST) ───────────────────────────────────
+        //
+        // Audit events are re-chained under the destination realm's HMAC key
+        // (the source key is not portable), so the integrity hash changes but
+        // the event content is preserved. They MUST be restored before any
+        // other member: the identity/RBAC `import_*` calls below emit their own
+        // fresh audit events with current timestamps, so replaying the older
+        // historical events afterwards would interleave newer-then-older records
+        // and break the tamper-evident chain (verification walks events in
+        // timestamp order, which must equal insertion order). The exporter
+        // writes events in ascending-timestamp scan order, so NDJSON line order
+        // is already chronological. Each event carries its own realm ID, which
+        // equals the restored realm ID (restore never remaps realm IDs).
+        let audit_key = format!("realms/{realm_slug}/audit.ndjson");
+        if let Some(raw) = files.get(&audit_key) {
+            let decrypted = try_decrypt(raw)?;
+            for line in decrypted.split(|&b| b == b'\n') {
+                let line = trim_bytes(line);
+                if line.is_empty() {
+                    continue;
+                }
+                let event: AuditEvent = serde_json::from_slice(line)?;
+                if opts.dry_run {
+                    report.audit_events.created += 1;
+                    continue;
+                }
+                match self.audit.import_event(&event) {
+                    Ok(()) => report.audit_events.created += 1,
+                    Err(e) => {
+                        warn!(err = %e, "import audit event failed");
+                        report.audit_events.errored += 1;
+                    }
+                }
+            }
+        }
+
         // Parse realm.json — required.
         let realm_key = format!("realms/{realm_slug}/realm.json");
         let realm_raw = files.get(&realm_key).ok_or_else(|| {
@@ -222,27 +379,6 @@ impl BackupImporter {
         } else {
             std::collections::HashMap::new()
         };
-
-        // ── Signing key (decrypted, optional) ──────────────────────────────
-        //
-        // Decrypt the archive's signing_key.json *before* creating the realm
-        // so that `import_realm` can install the original key atomically with
-        // the realm record (preserving the create_realm invariant that a
-        // realm always has a usable key). A failure here is fatal: silently
-        // generating a fresh key would invalidate every JWT issued under
-        // this realm prior to backup, which is the bug HEA-745 fixes.
-        let signing_key_pkcs8 = self.load_signing_key(realm_slug, &files, dek.as_deref())?;
-        if signing_key_pkcs8.is_none() {
-            // The archive predates HEA-745 or shipped without a DEK in the
-            // manifest. Restore can still proceed but operators must rotate
-            // and re-issue tokens — log loudly so this shows up in restore
-            // audit trails.
-            warn!(
-                slug = realm_slug,
-                "signing_key not restored — archive missing signing_key.json or wrapped_dek_b64; \
-                 pre-restore JWTs will fail to validate against the freshly generated key"
-            );
-        }
 
         // ── Realm ──────────────────────────────────────────────────────────
         let target_name = opts.realm_target.as_deref().unwrap_or_else(|| realm.name());
@@ -286,7 +422,137 @@ impl BackupImporter {
             self.import_clients(&decrypted, &restored_realm_id, opts, &mut report)?;
         }
 
+        // ── Authorization model (HEA-2160) ─────────────────────────────────
+        //
+        // Restore the RBAC + organization members that were previously dropped.
+        // Order is chosen so referenced records exist first (permissions →
+        // roles → groups → assignments), though the engine `import_*` methods
+        // write verbatim and do not re-validate references.
+        let overwrite = opts.mode == RestoreMode::Overwrite;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/permissions.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.permissions,
+            |this, record: &PermissionRecord| {
+                this.rbac
+                    .import_permission(&restored_realm_id, record, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/roles.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.roles,
+            |this, role: &Role| {
+                this.rbac
+                    .import_role(&restored_realm_id, role, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/groups.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.groups,
+            |this, group: &Group| {
+                this.rbac
+                    .import_group(&restored_realm_id, group, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/organizations.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.organizations,
+            |this, org: &Organization| {
+                this.identity
+                    .import_organization(&restored_realm_id, org, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/assignments.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.assignments,
+            |this, assignment: &RoleAssignment| {
+                this.rbac
+                    .import_assignment(&restored_realm_id, assignment, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/scopes.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.scopes,
+            |this, scope: &ScopeExport| {
+                this.rbac
+                    .import_scope(&restored_realm_id, scope, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
         Ok(report)
+    }
+
+    /// Restores every NDJSON record in `key` (if present) by deserializing each
+    /// line into `T` and applying `import_one`, tallying outcomes into `counts`.
+    ///
+    /// A malformed line is a hard error (propagated); a per-record engine error
+    /// is counted in `counts.errored` and logged, matching the user/client
+    /// import behavior. Absent members are a no-op.
+    fn restore_member_ndjson<T, F>(
+        &self,
+        files: &std::collections::HashMap<String, Vec<u8>>,
+        key: &str,
+        try_decrypt: &impl Fn(&[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
+        opts: &ImportOptions,
+        counts: &mut EntityCounts,
+        import_one: F,
+    ) -> Result<(), BackupError>
+    where
+        T: serde::de::DeserializeOwned,
+        F: Fn(&Self, &T) -> Result<ImportOutcome, BackupError>,
+    {
+        let Some(raw) = files.get(key) else {
+            return Ok(());
+        };
+        let decrypted = try_decrypt(raw)?;
+        for line in decrypted.split(|&b| b == b'\n') {
+            let line = trim_bytes(line);
+            if line.is_empty() {
+                continue;
+            }
+            let record: T = serde_json::from_slice(line)?;
+            if opts.dry_run {
+                counts.created += 1;
+                continue;
+            }
+            match import_one(self, &record) {
+                Ok(outcome) => tally(counts, outcome),
+                Err(e) => {
+                    warn!(member = key, err = %e, "import record failed");
+                    counts.errored += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Decrypts `realms/<slug>/signing_key.json` using the provided DEK.
@@ -603,6 +869,7 @@ mod tests {
     struct TestRig {
         identity: Arc<dyn IdentityEngine>,
         rbac: Arc<dyn RbacEngine>,
+        audit: Arc<dyn AuditEngine>,
         // Held to keep the temp directory alive for the duration of the test.
         _dir: TempDir,
     }
@@ -618,13 +885,13 @@ mod tests {
         let audit = Arc::new(EmbeddedAuditEngine::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
-        ));
+        )) as Arc<dyn AuditEngine>;
         let identity = Arc::new(
             EmbeddedIdentityEngine::new(
                 Arc::clone(&storage),
                 Arc::clone(&clock),
                 IdentityConfig::default(),
-                audit as Arc<dyn crate::audit::AuditEngine>,
+                Arc::clone(&audit),
             )
             .expect("identity engine"),
         ) as Arc<dyn IdentityEngine>;
@@ -635,6 +902,7 @@ mod tests {
         TestRig {
             identity,
             rbac,
+            audit,
             _dir: dir,
         }
     }
@@ -647,9 +915,14 @@ mod tests {
     }
 
     /// Returns `ImportOptions` with the test passphrase pre-filled.
+    ///
+    /// `allow_missing_signing_key` is set because the shared `make_test_archive`
+    /// helper writes keyless archives; the dedicated signing-key tests build
+    /// their own options to exercise the fail-closed default (HEA-2168).
     fn opts_with_passphrase() -> ImportOptions {
         ImportOptions {
             dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
             ..Default::default()
         }
     }
@@ -757,7 +1030,11 @@ mod tests {
         let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
 
         let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
 
         let report = importer
             .import_realm(slug, &reader, &opts_with_passphrase())
@@ -780,10 +1057,15 @@ mod tests {
         let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
 
         let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
         let opts = ImportOptions {
             mode: RestoreMode::Skip,
             dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
             ..Default::default()
         };
 
@@ -815,7 +1097,11 @@ mod tests {
         let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
 
         let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
 
         // First import with Skip.
         importer
@@ -826,6 +1112,7 @@ mod tests {
         let opts = ImportOptions {
             mode: RestoreMode::Overwrite,
             dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
             ..Default::default()
         };
         let r2 = importer
@@ -852,10 +1139,15 @@ mod tests {
         let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
 
         let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
         let opts = ImportOptions {
             dry_run: true,
             dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
             ..Default::default()
         };
 
@@ -886,7 +1178,11 @@ mod tests {
         let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
 
         let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
 
         // No passphrase — must fail with a clear error.
         let result = importer.import_realm(slug, &reader, &ImportOptions::default());
@@ -903,7 +1199,11 @@ mod tests {
         let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
 
         let reader = BackupArchive::open(&archive_path).expect("open");
-        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
 
         let wrong_opts = ImportOptions {
             dek_passphrase: Some(SecretString::new("definitely-wrong-passphrase".into())),
@@ -911,5 +1211,280 @@ mod tests {
         };
         let result = importer.import_realm(slug, &reader, &wrong_opts);
         result.expect_err("import with wrong passphrase must fail");
+    }
+
+    /// Fail-closed (HEA-2160): an archive containing a member this version does
+    /// not recognize must abort the restore with a hard error — never a silent
+    /// skip — and must not create the realm (no partial restore).
+    #[test]
+    fn unrecognized_member_is_hard_error() {
+        let dir = TempDir::new().expect("tmpdir");
+        let archive_path = dir.path().join("surprise.hearth-backup");
+        let slug = "surprise-realm";
+        let realm_uuid = "00000000-0000-0000-0000-0000000000aa";
+
+        let realm_json = serde_json::json!({
+            "id": realm_uuid,
+            "name": slug,
+            "status": "Active",
+            "config": {},
+            "created_at": 0,
+            "updated_at": 0
+        });
+
+        let dek = BackupExporter::generate_dek().expect("dek");
+        let (wrapped_dek_b64, dek_wrapping_params) =
+            wrap_dek(&dek, &test_passphrase()).expect("wrap dek");
+        let realm_enc =
+            encrypt_bytes(&serde_json::to_vec(&realm_json).expect("ser"), &dek).expect("enc realm");
+        // A member with a name the importer has never heard of.
+        let surprise_enc = encrypt_bytes(b"{}\n", &dek).expect("enc surprise");
+
+        let manifest = BackupManifest {
+            format_version: crate::backup::MANIFEST_VERSION,
+            hearth_version: "0.0.0-test".to_string(),
+            created_at: Timestamp::from_micros(0),
+            realms: vec![RealmManifest {
+                realm_id: format!("realm_{realm_uuid}"),
+                slug: slug.to_string(),
+                record_counts: RecordCounts::default(),
+            }],
+            checksums: std::collections::HashMap::new(),
+            sections_encrypted: true,
+            wrapped_dek_b64: Some(wrapped_dek_b64),
+            signing_key_dek_b64: None,
+            dek_wrapping_params: Some(dek_wrapping_params),
+            detached_signature_b64: None,
+        };
+
+        let mut writer = BackupArchive::create(&archive_path).expect("create archive");
+        writer
+            .add_file(&format!("realms/{slug}/realm.json"), &realm_enc)
+            .expect("add realm.json");
+        writer
+            .add_file(
+                &format!("realms/{slug}/future_feature.ndjson"),
+                &surprise_enc,
+            )
+            .expect("add unknown member");
+        writer.finish(manifest).expect("finish");
+
+        let rig = make_rig();
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+
+        let err = importer
+            .import_realm(slug, &reader, &opts_with_passphrase())
+            .expect_err("restore must fail closed on an unrecognized member");
+        assert!(
+            matches!(err, BackupError::UnrecognizedMember { ref path } if path.contains("future_feature.ndjson")),
+            "expected UnrecognizedMember, got: {err:?}"
+        );
+
+        // Fail-closed: no realm may have been created.
+        let realm_id = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("parse uuid"));
+        assert!(
+            rig.identity
+                .get_realm(&realm_id)
+                .expect("get realm")
+                .is_none(),
+            "no realm must be created when the restore fails closed"
+        );
+    }
+
+    /// Builds a v2 encrypted archive containing `realm.json` and an encrypted
+    /// `signing_key.json` carrying `signing_key_pkcs8`. Used to prove the
+    /// signing key round-trips on restore (HEA-2168).
+    fn make_archive_with_signing_key(
+        tmp: &TempDir,
+        slug: &str,
+        realm_uuid: &str,
+        signing_key_pkcs8: &[u8],
+    ) -> std::path::PathBuf {
+        let archive_path = tmp.path().join("with-key.hearth-backup");
+
+        let realm_json = serde_json::json!({
+            "id": realm_uuid,
+            "name": slug,
+            "status": "Active",
+            "config": {},
+            "created_at": 0,
+            "updated_at": 0
+        });
+
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let passphrase = test_passphrase();
+        let (wrapped_dek_b64, dek_wrapping_params) = wrap_dek(&dek, &passphrase).expect("wrap DEK");
+
+        let realm_encrypted =
+            encrypt_bytes(&serde_json::to_vec(&realm_json).expect("ser realm"), &dek)
+                .expect("encrypt realm");
+        let sk_encrypted = encrypt_bytes(signing_key_pkcs8, &dek).expect("encrypt signing key");
+
+        let manifest = BackupManifest {
+            format_version: crate::backup::MANIFEST_VERSION,
+            hearth_version: "0.0.0-test".to_string(),
+            created_at: Timestamp::from_micros(0),
+            realms: vec![RealmManifest {
+                realm_id: format!("realm_{realm_uuid}"),
+                slug: slug.to_string(),
+                record_counts: RecordCounts::default(),
+            }],
+            checksums: std::collections::HashMap::new(),
+            sections_encrypted: true,
+            wrapped_dek_b64: Some(wrapped_dek_b64),
+            signing_key_dek_b64: None,
+            dek_wrapping_params: Some(dek_wrapping_params),
+            detached_signature_b64: None,
+        };
+
+        let mut writer = BackupArchive::create(&archive_path).expect("create archive");
+        writer
+            .add_file(&format!("realms/{slug}/realm.json"), &realm_encrypted)
+            .expect("add realm.json");
+        writer
+            .add_file(&format!("realms/{slug}/signing_key.json"), &sk_encrypted)
+            .expect("add signing_key.json");
+        writer.finish(manifest).expect("finish archive");
+        archive_path
+    }
+
+    /// HEA-2168 (red at af4edb59): an archive with no restorable signing key
+    /// must be REFUSED by default — not silently restored with a fresh key that
+    /// invalidates every pre-restore JWT. The refusal must also be fail-closed:
+    /// no realm may be created.
+    #[test]
+    fn missing_signing_key_refused_by_default() {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let rig = make_rig();
+
+        let realm_uuid = "00000000-0000-0000-0000-0000000000b1";
+        let slug = "no-key-realm";
+        let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
+
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+
+        // Default options: allow_missing_signing_key = false.
+        let opts = ImportOptions {
+            dek_passphrase: Some(test_passphrase()),
+            ..Default::default()
+        };
+
+        let err = importer
+            .import_realm(slug, &reader, &opts)
+            .expect_err("restore must refuse an archive with no restorable signing key");
+        assert!(
+            matches!(err, BackupError::SigningKeyMissing { slug: ref s } if s == slug),
+            "expected SigningKeyMissing, got: {err:?}"
+        );
+
+        // Fail-closed: nothing may have been written.
+        let realm_id = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("parse uuid"));
+        assert!(
+            rig.identity
+                .get_realm(&realm_id)
+                .expect("get realm")
+                .is_none(),
+            "no realm must be created when restore refuses on a missing signing key"
+        );
+    }
+
+    /// The explicit `allow_missing_signing_key` override lets an operator
+    /// restore a keyless archive anyway, accepting a freshly generated key.
+    #[test]
+    fn missing_signing_key_allowed_with_override() {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let rig = make_rig();
+
+        let realm_uuid = "00000000-0000-0000-0000-0000000000b2";
+        let slug = "override-realm";
+        let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
+
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+
+        let opts = ImportOptions {
+            dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
+            ..Default::default()
+        };
+
+        let report = importer
+            .import_realm(slug, &reader, &opts)
+            .expect("override restore must succeed");
+        assert_eq!(report.realms.created, 1, "realm should be created");
+        assert_eq!(report.users.created, 2, "two users should be created");
+    }
+
+    /// The signing key round-trips when the archive carries it: the restored
+    /// realm's PKCS#8 signing key must byte-for-byte equal the original, so
+    /// every pre-backup JWT keeps validating (HEA-2168, HEA-745).
+    #[test]
+    fn signing_key_round_trips_when_present() {
+        let realm_uuid = "00000000-0000-0000-0000-0000000000c3";
+        let slug = "key-roundtrip-realm";
+        let realm_id = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("parse uuid"));
+
+        // Produce a valid PKCS#8 signing key by creating a realm in a source
+        // engine and exporting its key.
+        let source = make_rig();
+        let create_req = CreateRealmRequest {
+            name: slug.to_string(),
+            config: None,
+        };
+        source
+            .identity
+            .import_realm(&create_req, Some(realm_id.clone()), None)
+            .expect("source realm");
+        let original_pkcs8 = source
+            .identity
+            .export_realm_signing_key_pkcs8(&realm_id)
+            .expect("export source signing key");
+
+        // Bake it into an archive and restore into a fresh engine.
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let archive_path =
+            make_archive_with_signing_key(&archive_dir, slug, realm_uuid, &original_pkcs8);
+
+        let dest = make_rig();
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(
+            Arc::clone(&dest.identity),
+            Arc::clone(&dest.rbac),
+            Arc::clone(&dest.audit),
+        );
+
+        // Default options (allow_missing_signing_key = false) must succeed here
+        // because the key is present — the fail-closed guard must not fire.
+        let opts = ImportOptions {
+            dek_passphrase: Some(test_passphrase()),
+            ..Default::default()
+        };
+        let report = importer
+            .import_realm(slug, &reader, &opts)
+            .expect("restore with signing key present must succeed");
+        assert_eq!(report.realms.created, 1, "realm should be created");
+
+        let restored_pkcs8 = dest
+            .identity
+            .export_realm_signing_key_pkcs8(&realm_id)
+            .expect("export restored signing key");
+        assert_eq!(
+            restored_pkcs8, original_pkcs8,
+            "restored signing key must byte-for-byte equal the original"
+        );
     }
 }

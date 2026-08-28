@@ -230,6 +230,36 @@ Maximum scan per request: 1 000 records. For large realms, iterate with `startIn
 4. Set **Secret Token** to your SCIM bearer token.
 5. Entra ID does not support custom headers natively for SCIM. Use an API gateway or reverse proxy to inject `X-Realm-ID: <realm-uuid>` before requests reach Hearth.
 
+## Optimistic concurrency (ETag / `If-Match`)
+
+Every single-resource response from Hearth's SCIM API carries a weak ETag header:
+
+```
+ETag: W/"1720000000000000"
+```
+
+The value is the resource's last-modified timestamp in microseconds. Store it on the initial read and echo it on subsequent writes to prevent lost updates when two operations race.
+
+```bash
+# 1. Read a user and capture the ETag
+RESP=$(curl -s -D - "http://127.0.0.1:8420/scim/v2/Users/$USER_ID" \
+  -H "Authorization: Bearer $SCIM_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID")
+ETAG=$(echo "$RESP" | grep -i '^etag:' | awk '{print $2}' | tr -d '\r')
+
+# 2. Update the user, supplying the captured ETag
+curl -X PATCH "http://127.0.0.1:8420/scim/v2/Users/$USER_ID" \
+  -H "Authorization: Bearer $SCIM_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "If-Match: $ETAG" \
+  -H "Content-Type: application/scim+json" \
+  -d '{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"displayName","value":"Alice Johnson"}]}'
+```
+
+If the resource was modified by another request between your read and your write, Hearth returns `412 Precondition Failed` instead of silently overwriting. Re-fetch the resource to obtain the current ETag, then retry.
+
+`If-Match` is optional. Requests without it are accepted unconditionally. Enterprise IdPs (Okta, Azure AD) typically include `If-Match` automatically; no additional configuration is required on the Hearth side.
+
 ## Known limitations
 
 The following SCIM features are deferred to a future hardening release:
@@ -237,7 +267,6 @@ The following SCIM features are deferred to a future hardening release:
 - Bracketed PATCH filter paths (e.g., `members[value eq "id"]`).
 - `/Bulk`, `/Me`, sorting (`sortBy`, `sortOrder`), and attribute projection (`attributes`, `excludedAttributes`).
 - Enterprise User Schema extension (`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`).
-- `If-Match` enforcement (ETag sent on responses but not enforced on inbound `If-Match`).
 
 ## Troubleshooting
 
@@ -247,5 +276,6 @@ The following SCIM features are deferred to a future hardening release:
 | `403 Forbidden` on PATCH / PUT / DELETE | Target user holds `hearth.admin` or `hearth.users.admin`. SCIM bearer tokens cannot mutate admin principals. Remove the admin role first, or use an admin JWT. |
 | `401 Unauthorized` | Bearer token mismatch. |
 | `400 Bad Request` / `invalidValue` | Missing `X-Realm-ID` header, or non-UUID value. |
+| `412 Precondition Failed` | Stale `If-Match` validator — the resource was modified after your last read. Re-fetch the resource, capture the new `ETag`, and retry. |
 | `429 Too Many Requests` | Rate limit exceeded (100 req/min per realm). Back off and retry. |
 | User created but cannot log in | `active` was `false` on provisioning. Send a PATCH to set `active: true`. |

@@ -17,8 +17,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    AgentCredentialId, AgentId, ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId,
-    Timestamp, UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, Clock, ImportOutcome, InvitationId, OrganizationId,
+    RealmId, SessionId, Timestamp, UserId, WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -10618,6 +10618,43 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         ))
     }
 
+    fn import_organization(
+        &self,
+        realm_id: &RealmId,
+        org: &Organization,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        // Mirror `create_organization`'s persisted layout (primary record +
+        // raw-UUID slug index) but preserve the org's own ID and every field.
+        let id_key = keys::encode_org_id(org.id());
+        let exists = self
+            .storage
+            .get(realm_id, &id_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let org_bytes = serde_json::to_vec(org).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        let slug_key = keys::encode_org_slug(org.slug());
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (id_key, org_bytes),
+                    (slug_key, org.id().as_uuid().as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
     fn add_member(
         &self,
         realm_id: &RealmId,
@@ -13120,6 +13157,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
         Ok(key.pkcs8_bytes().to_vec())
+    }
+
+    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
+        self.storage.backup_barrier()
     }
 
     fn initiate_logout(

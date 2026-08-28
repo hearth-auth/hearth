@@ -160,12 +160,6 @@ data class UpdateUserRequest(
 // ── Admin — Realms ────────────────────────────────────────────────────────────
 
 @Serializable
-data class CreateRealmRequest(
-    val name: String,
-    val config: JsonObject? = null,
-)
-
-@Serializable
 data class Realm(
     val id: String,
     val name: String,

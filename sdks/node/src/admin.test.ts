@@ -119,15 +119,6 @@ describe("AdminClient — Realms CRUD", () => {
     vi.unstubAllGlobals();
   });
 
-  it("createRealm sends POST /admin/realms", async () => {
-    fetchSpy.mockResolvedValue({ ok: true, status: 201, json: async () => ({ id: "realm_new", name: "Test Realm" }) });
-    const result = await client.createRealm({ name: "Test Realm" });
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://auth.example.com/admin/realms");
-    expect(init.method).toBe("POST");
-    expect(result).toMatchObject({ id: "realm_new" });
-  });
-
   it("getRealm sends GET /admin/realms/{id}", async () => {
     fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ id: "realm_1" }) });
     await client.getRealm("realm_1");

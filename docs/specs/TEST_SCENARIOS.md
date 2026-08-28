@@ -433,12 +433,26 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 | TLS Termination | 3/3 | 3/3 | -- | -- | -- | 2/2 | -- | -- | **8/8** |
 | SDK Integration (TS & Go) | -- | 6/6 | -- | -- | -- | -- | -- | -- | **6/6** |
 | OIDC Conformance | -- | -- | -- | -- | -- | -- | 5/5 | -- | **5/5** |
-| Proto & API Contract | 5/5 | -- | -- | -- | -- | -- | -- | -- | **5/5** |
+| Proto & API Contract | 4/5 | -- | -- | -- | -- | -- | -- | -- | **4/5** |
 | Phase 1 E2E Flows | -- | 4/4 | -- | -- | -- | -- | -- | -- | **4/4** |
 | Phase 1 Cross-Cutting | -- | -- | -- | -- | -- | 3/3 | -- | 2/2 | **5/5** |
-| **Column Total** | **40/44** | **34/36** | **10/10** | **1/1** | **4/4** | **22/24** | **8/8** | **6/6** | **133/133** |
+| **Column Total** | **43/44** | **36/36** | **10/10** | **1/1** | **4/4** | **24/24** | **8/8** | **6/6** | **132/133** |
 
 > **Note:** Counts reflect the post-RBAC-migration plan. Simulation scenarios related to the removed pre-migration watch/cache surfaces (`cache_stampede`, `watch_partition`) are dropped; RBAC resolution is synchronous with no equivalent simulation surface. A concurrent-role-assignment property test covers the remaining concurrency surface (`simulation/src/tests/rbac_concurrent_assignments.rs`).
+
+> **Release-cut count verification (owner: QA).** Before any release, QA must grep the Phase 1
+> section of this file for unchecked items (`[ ]`) and confirm the completed count in `README.md`
+> matches. Command:
+> `awk '/^## Phase 1/,/^## Phase 2/' docs/specs/TEST_SCENARIOS.md | grep -c '^\- \[ \]'` — must
+> return 0 for a fully green release, or the README must name every open item. The **Column Total**
+> row above must also be self-consistent: the per-layer cells must sum to the bolded grand total.
+> This prevents silent count drift between the table, the checkboxes, and the README.
+>
+> **Known open item as of HEA-2195 (2026-08-14):** The command returns `1` — `pbjson int64-as-string
+> coercion` at `§Proto & API Contract Validation › Unit` (line 776) remains unchecked. The column
+> cells now sum to the bolded grand total (`132/133`), and `README.md` reflects `134/135`. The Admin
+> API Adversarial scenarios (rate limiting, mass enumeration) were verified complete (HEA-2185,
+> HEA-2186) and are now `[x]`. The pbjson coverage is tracked in HEA-1836.
 
 ---
 
@@ -670,8 +684,8 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 #### Adversarial
 
 - [x] Privilege escalation: non-admin user accessing admin endpoints receives 403 with no data leak `P0` `fast`
-- [ ] Admin endpoint rate limiting: excessive requests from single admin trigger throttling `P1` `fast` <!-- HEA-1766 audit: was overclaimed; http_rate_limit.rs has no admin-scoped 429 test. Coverage dispatched in HEA-1834. -->
-- [ ] Mass enumeration via admin listing: response times constant regardless of result count (no timing leak) `P0` `fast` <!-- HEA-1766 audit: was overclaimed; no constant-time assertion on admin listing exists. Coverage dispatched in HEA-1834. -->
+- [x] Admin endpoint rate limiting: excessive requests from single admin trigger throttling `P1` `fast` <!-- HEA-2185: covered by `tests/http_rate_limit.rs::admin_endpoint_rate_limit_exceeded_returns_429` -->
+- [x] Mass enumeration via admin listing: response times constant regardless of result count (no timing leak) `P0` `fast` <!-- HEA-2186: test `admin_listing_response_time_constant_wrt_user_count` in tests/adversarial.rs -->
 
 ---
 

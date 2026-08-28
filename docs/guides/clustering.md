@@ -1,20 +1,70 @@
 # Clustering Guide
 
-Hearth supports multi-node Raft consensus for high availability and horizontal read scaling. In cluster mode, writes go through Raft log replication before being acknowledged; reads are served locally by followers as long as replication lag is within the configured threshold.
+> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is incomplete in Hearth 1.x. Known defects (described below) make multi-node deployments unsafe for production data. **The supported deployment model for Hearth 1.x is single-node.** Clustering improvements are tracked in Wave 5 of the production-readiness roadmap.
 
-> **Early access — not production-validated.** The Raft clustering implementation is complete and wired (`src/cluster/` + `openraft`), but no 3-node deployment has been chaos-tested under production load. For v1.0 deployments, single-node mode is recommended unless you are comfortable operating software at this validation level. HA clustering is the primary Phase 2 focus. Feedback from early cluster operators is welcome.
+Hearth includes a partial Raft consensus implementation (`src/cluster/` via `openraft`). The clustering code path exists, but several critical components are either unimplemented or incorrect. This guide documents the current state accurately so operators can make informed decisions.
 
-**Single-node mode is the default.** Omit the `cluster:` YAML section entirely if you do not need HA. There is zero overhead — no extra port, no Raft log, no election timers.
-
-> **Cluster init failure is fatal.** If a `cluster:` section is present in `hearth.yaml` and Raft initialization fails (for example, because peer nodes are unreachable), Hearth exits non-zero. It does **not** fall back to running as a standalone single-node writer. To run single-node, omit the `cluster:` section entirely.
+**Single-node mode is the default and only production-supported configuration.** Omit the `cluster:` YAML section entirely. There is zero overhead — no extra port, no Raft log, no election timers.
 
 ---
 
-## Prerequisites
+## Known Defects in Experimental Cluster Mode
 
-Before enabling cluster mode:
+### C-5 — Followers do not invalidate RBAC or session caches
 
-1. **NTP on every node.** Hearth embeds a `leader_timestamp` (wall-clock microseconds) in every Raft log entry so all nodes apply the same timestamp to concurrent writes. Clocks must be NTP-synchronized. Skew above 1 second triggers a startup warning; skew above several seconds will produce incorrectly ordered writes.
+When a permission is revoked or a session is terminated on the leader, that change propagates to followers via Raft log replication. However, `src/cluster/state_machine.rs` contains no cache-invalidation logic, and `RaftCommand` has no invalidation variant.
+
+**Consequence:** A permission revoked on the leader continues to be honoured on followers indefinitely. A user whose access is revoked can still authenticate successfully against a follower node.
+
+### C-6 — Cluster membership is immutable after bootstrap
+
+`add_learner` and `change_membership` are not implemented. The only path to set cluster membership is `raft.initialize()` from static YAML at first bootstrap.
+
+**Consequence:** Nodes cannot be added or removed from a running cluster. Replacing a failed node requires a full-cluster restart with updated YAML. Online membership changes are not possible in Hearth 1.x.
+
+### H-3 — Writes to a follower return HTTP 500
+
+In cluster mode, mutation requests (user creation, token issuance, session writes) that arrive on a follower return HTTP 500. The caller receives no leader-address hint to retry against.
+
+**Consequence:** A load balancer that distributes write traffic across all nodes will cause approximately `(n-1)/n` of write requests to fail in an n-node cluster. Writes must be routed exclusively to the leader node.
+
+### Exclusive `data_dir` lock
+
+Hearth holds an OS-level advisory flock on the `data_dir/LOCK` file for the lifetime of the process. A second process attempting to open the same `data_dir` will fail immediately with `StorageError::AlreadyLocked`.
+
+This lock is process-scoped and cannot be shared across nodes. Each node in a cluster must use a completely separate `data_dir` on separate storage. You cannot point two nodes at the same directory or network share.
+
+**In Kubernetes:** Use `accessMode: ReadWriteOnce` and a separate PVC per pod. A `ReadWriteMany` mount shared between pods will trigger the lock and prevent startup.
+
+---
+
+## When Clustering Will Be Production-Ready
+
+The Wave 5 roadmap items covering clustering are:
+- **HEA-2177 (W5-1)** — RBAC/claims cache invalidation on followers (C-5)
+- **HEA-2178 (W5-2)** — Online membership changes via `add_learner` / `change_membership` (C-6)
+- **HEA-2173 (W3-3)** — Follower-write 307 redirect to leader instead of HTTP 500 (H-3)
+
+All three are post-GA. Because Hearth 1.x ships **no supported multi-node path**, none of
+them gate the 1.0 release.
+
+Until these ship, the production deployment model is single-node with external backups and a planned failover procedure. If your reliability requirements exceed what a single node provides, contact us to understand the timeline.
+
+---
+
+## Experimental Usage (Development and Evaluation Only)
+
+If you are evaluating cluster behaviour for integration work or contributing to the clustering implementation, the following documents the current API. Do not run this in production.
+
+> **Cluster init failure is fatal.** If a `cluster:` section is present in `hearth.yaml` and Raft initialization fails (for example, because peer nodes are unreachable), Hearth exits non-zero. It does **not** fall back to running as a standalone single-node writer. To run single-node, omit the `cluster:` section entirely.
+
+> **Startup emits an EXPERIMENTAL warning.** When the `cluster:` section is present, Hearth logs a `WARN`-level message at startup indicating that cluster mode is experimental and not production-supported (HEA-2154).
+
+### Prerequisites
+
+Before enabling cluster mode in a test environment:
+
+1. **NTP on every node.** Hearth embeds a `leader_timestamp` (wall-clock microseconds) in every Raft log entry so all nodes apply the same timestamp to concurrent writes. Clocks must be NTP-synchronized.
 
 2. **Mutual TLS certificates.** All inter-node gRPC connections are mTLS — plaintext is unconditionally rejected. You need:
    - A CA certificate shared by all nodes
@@ -22,9 +72,11 @@ Before enabling cluster mode:
 
 3. **Port reachability.** Each node's `peer_address` port (default `8421`) must be reachable from all other nodes.
 
+4. **Separate `data_dir` per node.** The exclusive directory lock means no two nodes may share a `data_dir`.
+
 ---
 
-## Generating Certificates
+### Generating Certificates
 
 Any PKI tooling works. A minimal setup with `openssl`:
 
@@ -44,7 +96,7 @@ openssl x509 -req -days 3650 \
   -in node1.csr -out node1.crt
 ```
 
-For production, add a SAN matching the node's IP or hostname:
+For a test environment with IP-based SANs:
 
 ```bash
 openssl x509 -req -days 365 \
@@ -55,7 +107,7 @@ openssl x509 -req -days 365 \
 
 ---
 
-## Configuration
+### Configuration
 
 Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_address` are unique per node; the CA cert and `peers` list are the same across all nodes.
 
@@ -89,9 +141,11 @@ cluster:
 
 ---
 
-## Bootstrap Sequence
+### Bootstrap Sequence
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
+
+> **Membership is fixed at bootstrap.** The peers list set here cannot be changed without a full-cluster restart. There is no online membership change API in Hearth 1.x (see C-6 above).
 
 1. Start all nodes: `hearth serve -c hearth-N.yaml`
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).
@@ -99,17 +153,12 @@ Bootstrapping initializes the cluster's initial membership. Do this **once** —
 
 > **System-realm token required.** Cluster admin endpoints are gated to the system realm
 > (the nil UUID). Your admin token must carry `X-Realm-ID: 00000000-0000-0000-0000-000000000000`.
-> Tokens issued against a tenant realm return `403 Forbidden` even if the user is an admin.
-> Obtain a system-realm admin token with `POST /admin/bootstrap` (dev) or via your bootstrap
-> token in `hearth.yaml`.
 
 ```bash
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
-  -H "Authorization: Bearer <admin-token>" \
+  -H "Authorization: Bearer <system-admin-token>" \
   -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
 ```
-
-This sends the initial membership list (derived from the node's `peers` + its own `node_id`) to `openraft`'s `initialize()`. The cluster holds an election and begins accepting writes within one election timeout (~1.5–3 seconds).
 
 **Expected response (`200 OK`):**
 
@@ -121,163 +170,66 @@ This sends the initial membership list (derived from the node's `peers` + its ow
 }
 ```
 
-`leader_id` is the node that won the election. If the election has not completed within 3 seconds, the response still returns `200` with the best available values.
-
 **Error responses:**
 - `409 Conflict` — cluster already initialized (safe to ignore on retry)
 - `503 Service Unavailable` — server is running in single-node mode (no `cluster:` config)
 
-4. Verify with the cluster status endpoint:
+---
+
+### Write Routing
+
+**All writes must go to the leader.** Due to H-3, writes to a follower return HTTP 500. Your load balancer must route write traffic exclusively to the leader node. There is no automatic redirect.
+
+Reads from followers may be stale due to C-5 (no cache invalidation). For consistent reads, route all traffic to the leader.
+
+---
+
+### Quorum and Failure Tolerance
+
+| Cluster size | Fault tolerance |
+|:---:|:---:|
+| 1 | 0 (single-node mode, no Raft) |
+| 3 | 1 node failure |
+| 5 | 2 node failures |
+
+A majority (quorum) of nodes must be reachable for writes to succeed.
+
+**If a node fails permanently:** Replace it by restarting all remaining nodes with updated YAML (removing the failed node from the `peers` list). Online membership changes are not supported in Hearth 1.x.
+
+---
+
+### Cluster Status
 
 ```bash
 curl -s http://10.0.0.1:8420/admin/cluster/status \
-  -H "Authorization: Bearer <admin-token>" \
+  -H "Authorization: Bearer <system-admin-token>" \
   -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
 ```
 
-**Expected response (`200 OK`):**
-
-```json
-{
-  "role": "leader",
-  "term": 1,
-  "last_applied_index": 0,
-  "peers": [
-    { "id": 2, "addr": "10.0.0.2:8421", "is_healthy": true },
-    { "id": 3, "addr": "10.0.0.3:8421", "is_healthy": true }
-  ]
-}
-```
-
-`role` is one of `"leader"`, `"follower"`, `"candidate"`, `"learner"`, or `"unknown"`. `is_healthy` reflects whether the peer appears in the leader's replication map; on a follower node all peers report `is_healthy: false` (followers have no replication state).
-
-**Error responses:**
-- `503 Service Unavailable` — server is running in single-node mode or Raft is not yet initialized
+`role` is one of `"leader"`, `"follower"`, `"candidate"`, `"learner"`, or `"unknown"`. `is_healthy` reflects whether the peer appears in the leader's replication map.
 
 ---
 
-## Write and Read Routing
+### Graceful Shutdown
 
-### Writes
-
-Every mutation (user create, token issuance, session write, etc.) is proposed as a Raft log entry. Only the **leader** can propose entries.
-
-If a write arrives on a follower, Hearth returns an error with the leader's address. Your load balancer should route writes to the leader, or your client should retry against the returned address.
-
-### Reads
-
-Followers serve reads locally from their storage engine. A background task checks replication lag every 50 ms. If the follower's committed index lags the leader by more than `read_lag_threshold_ms` (default 500 ms), reads are refused and the caller is redirected to the leader.
-
-This means follower reads have **eventual consistency** within the configured threshold — appropriate for most identity lookups, where a 500 ms staleness window is acceptable.
-
----
-
-## Quorum and Failure Tolerance
-
-| Cluster size | Fault tolerance | Notes |
-|:---:|:---:|---|
-| 1 | 0 | Single-node mode (no Raft) |
-| 3 | 1 | Minimum recommended HA configuration |
-| 5 | 2 | Tolerates 2 simultaneous node failures |
-
-A majority (quorum) of nodes must be reachable for writes to succeed. A 3-node cluster tolerates one node failure; a 5-node cluster tolerates two.
-
----
-
-## Raft Timing Parameters
-
-These are compiled-in and not configurable today:
-
-| Parameter | Value |
-|---|---|
-| Heartbeat interval | 500 ms |
-| Election timeout | 1500–3000 ms (randomized) |
-| Lag monitor interval | 50 ms |
-
-A leader is elected within 1.5–3 seconds of the previous leader becoming unreachable.
-
----
-
-## Graceful Shutdown
-
-Before shutting down a node, initiate a **Raft leadership transfer** to avoid a brief unavailability window while the remaining nodes hold a new election. This is especially important when rolling a node that is currently the leader.
+Before shutting down the leader node, initiate a Raft leadership transfer to avoid an election timeout:
 
 ```bash
 # Transfer leadership before stopping the process
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/transfer-leadership \
-  -H "Authorization: Bearer <admin-token>" \
+  -H "Authorization: Bearer <system-admin-token>" \
   -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
 
 # Then stop the process
 systemctl stop hearth
 ```
 
-The request body is optional. To request a specific target node, pass:
-
-```json
-{ "target_node_id": 2 }
-```
-
-`target_node_id` is accepted for forward-compatibility. In the current release, openraft 0.9 does not support targeted transfer, so the election winner is not guaranteed to be the requested node. Check `exact_target` in the response to verify.
-
-**Expected response (`200 OK`):**
-
-```json
-{
-  "new_leader_id": 2,
-  "exact_target": true
-}
-```
-
-**Error responses:**
-- `409 Conflict` — this node is not the leader; transfer must be initiated from the leader
-- `503 Service Unavailable` — server is running in single-node mode
-
-The server drains in-flight requests (up to `operational.shutdown_timeout_secs`, default 10 s) after receiving `SIGTERM`. The leadership transfer should complete well within this window on a healthy cluster.
-
 ---
 
-## Backups
+### Backups
 
-Take backups from a **follower** to avoid adding I/O load to the leader (which is processing all writes).
+Take backups from a **follower** to avoid adding I/O load to the leader.
 
-```bash
-# Create a backup archive from a follower node
-hearth backup create \
-  --data-dir /var/lib/hearth/data \
-  --output /backups/hearth-$(date +%F).hearth-backup
-```
+See the [Backup and Restore Guide](./backup.md) for the full procedure.
 
-The Raft log (`raft.db`) is ephemeral metadata — only the storage WAL and SSTs need to be backed up. Restoring to a new node from a backup and then rejoining the cluster is the recommended recovery path for a completely failed node.
-
-See the [Backup and Restore Guide](./backup.md) for the full `hearth backup` CLI reference, archive format, and restore procedure.
-
----
-
-## Monitoring
-
-Key health signals to watch:
-
-| Signal | What to watch for |
-|---|---|
-| Leader changes | Frequent re-elections indicate network instability or overloaded nodes |
-| Replication lag | Persistent lag approaching `read_lag_threshold_ms` means a follower is struggling |
-| `ClusterError::NotLeader` rate | Spikes indicate the load balancer is not routing writes to the leader |
-| `ClusterError::ReplicationLagExceeded` rate | Follower is consistently behind; investigate node resources |
-
-These appear as structured log fields (`node_id`, `peer_address`, `read_lag_threshold_ms`) emitted at startup and in error events. Route them to your log aggregator and alert on `ClusterError::NotLeader` surges during non-maintenance windows.
-
----
-
-## Troubleshooting
-
-### Server exits immediately at startup with a cluster error
-
-If Hearth exits non-zero at startup and the log shows a cluster initialization error, the `cluster:` section is present but Raft cannot initialize — usually because peer nodes are unreachable.
-
-Remediation steps:
-1. Confirm all peer nodes are running and reachable on the configured `peer_address` port (default `8421`).
-2. Confirm mTLS certificates are valid and that every node trusts the cluster CA.
-3. If you intended to run a single-node instance, remove or comment out the entire `cluster:` section from `hearth.yaml`. Hearth will start cleanly in single-node mode.
-
-Hearth will not start with a partially-reachable cluster. This is intentional — silently degrading to a standalone writer when cluster membership was configured could produce a split-brain.
+> **Note on followers and stale RBAC state (C-5):** Because followers do not invalidate caches on permission changes, a backup taken from a follower may reflect the storage state correctly but should not be used to audit access-control decisions — the follower may have served stale permissions since the last leader write.

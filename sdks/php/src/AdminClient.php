@@ -121,16 +121,9 @@ final class AdminClient
     // Realms
     // =========================================================================
 
-    /**
-     * Creates a new realm.
-     *
-     * @param array<string, mixed> $params
-     * @return array<string, mixed>
-     */
-    public function createRealm(array $params): array
-    {
-        return $this->post('/admin/realms', $params);
-    }
+    // Realms are provisioned via hearth.yaml, not the admin API. There is no
+    // createRealm() method: the server returns 405 for POST /admin/realms
+    // (HEA-2171). Only read paths are exposed.
 
     /**
      * Retrieves a realm by ID.

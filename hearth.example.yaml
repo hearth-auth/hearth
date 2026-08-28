@@ -814,16 +814,38 @@ onboarding:
   # base_url: "https://auth.example.com"  # used in the setup URL logged at startup
   # notification_email: ops@example.com   # receives the setup URL on first boot (requires SMTP)
 
-# ── Cluster (multi-node Raft) ─────────────────────────────────────────────────
+# ── Cluster (multi-node Raft) — EXPERIMENTAL, NOT FOR PRODUCTION ──────────────
 #
-# Omit this section entirely for single-node deployments. When absent, Hearth
-# runs in single-node mode with no clustering overhead.
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  WARNING: Cluster mode is EXPERIMENTAL and NOT production-supported     │
+# │  in Hearth 1.x.                                                         │
+# │                                                                         │
+# │  Known defects:                                                         │
+# │  • C-5: Followers do NOT invalidate RBAC or session caches. A revoked  │
+# │    permission or terminated session is honoured indefinitely on         │
+# │    followers until they restart.                                        │
+# │  • C-6: Cluster membership is IMMUTABLE after bootstrap. Nodes cannot  │
+# │    be added or removed from a running cluster. Replacing a failed node  │
+# │    requires a full-cluster restart with updated YAML.                   │
+# │  • H-3: Writes to a follower return HTTP 500 (no redirect to leader).  │
+# │    All write traffic must be routed exclusively to the leader node.     │
+# │                                                                         │
+# │  The supported deployment model for Hearth 1.x is single-node.         │
+# │  Omit the cluster: section entirely for production deployments.         │
+# │                                                                         │
+# │  Hearth will emit a WARN-level "cluster mode EXPERIMENTAL" message at   │
+# │  startup when this section is present (tracked in HEA-2188).            │
+# └─────────────────────────────────────────────────────────────────────────┘
 #
-# Prerequisites before enabling cluster mode:
+# When absent, Hearth runs in single-node mode with no clustering overhead.
+#
+# Prerequisites before enabling cluster mode (test/development only):
 #   1. Generate a CA and per-node leaf certificates (see docs/guides/clustering.md).
 #   2. Ensure NTP is running on every node — clock skew causes incorrect write
 #      ordering. Hearth logs a warning if skew exceeds 1 second on startup.
 #   3. Open port 8421 (or your chosen peer_address port) between nodes.
+#   4. Each node MUST have a separate data_dir on separate storage. The
+#      process-wide data_dir lock prevents two nodes from sharing a directory.
 #
 # cluster:
 #   node_id: 1                           # unique integer per node (1, 2, 3, …)
@@ -837,8 +859,7 @@ onboarding:
 #   tls_cert_path: "/etc/hearth/certs/node1.crt"   # required — node leaf cert
 #   tls_key_path:  "/etc/hearth/certs/node1.key"   # required — node private key
 #   tls_ca_cert_path: "/etc/hearth/certs/ca.crt"   # required — CA shared by all nodes
-#   read_lag_threshold_ms: 500           # optional — redirect reads when follower
-#                                        # is lagging more than this (default: 500)
+#   read_lag_threshold_ms: 500           # optional — follower lag threshold (default: 500)
 
 
 # =============================================================================

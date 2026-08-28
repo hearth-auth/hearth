@@ -352,4 +352,28 @@ pub trait StorageEngine: Send + Sync {
     /// that have no persistent marker should return `Ok(())` explicitly —
     /// there is no silent default (HEA-2135).
     fn complete_snapshot_restore(&self) -> Result<(), StorageError>;
+
+    /// Returns the process-wide backup-consistency barrier, or `None` if this
+    /// engine does not support consistent snapshots (HEA-2167).
+    ///
+    /// A backup export acquires the returned lock in **write** mode and holds
+    /// it across its per-entity read pass. While held, every mutating
+    /// operation (`put`, `delete`, `put_batch`, `write_batch`,
+    /// `enqueue_batch`, `await_batch_durable`) blocks, so the export observes a
+    /// single point-in-time view and cannot capture a *torn* archive — e.g. a
+    /// group membership referencing a user the archive omits. Reads
+    /// (`get`/`scan`) are never blocked, so the hot path and the export's own
+    /// scans proceed freely.
+    ///
+    /// **Write-availability impact**: while an export holds the barrier, writes
+    /// to this node block until the export's read pass completes. Operators
+    /// scheduling backups against a live server must account for this window.
+    ///
+    /// The default returns `None` (no barrier) — correct for test doubles and
+    /// wrappers that do not provide snapshot isolation; callers that receive
+    /// `None` fall back to a non-isolated export. [`EmbeddedStorageEngine`]
+    /// overrides this with a real reader-writer barrier.
+    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
+        None
+    }
 }

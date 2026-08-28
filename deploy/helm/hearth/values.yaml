@@ -157,6 +157,14 @@ env:
   RUST_LOG: "info,hearth=debug"
 
 # -- Liveness / readiness probes ------------------------------------------------
+# Deliberate split:
+#   liveness  → /health  (always-200 process heartbeat; a storage failure that
+#                          triggers liveness causes an immediate pod kill, which
+#                          is worse than leaving the pod alive while storage
+#                          recovers.  Kill only when the process itself is hung.)
+#   readiness → /readyz  (genuine storage probe; fails until WAL + memtable are
+#                          ready.  Kubernetes removes the pod from the endpoints
+#                          list so traffic is not routed to an unready pod.)
 livenessProbe:
   httpGet:
     path: /health
@@ -168,12 +176,19 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
+    path: /readyz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
+
+# -- Graceful termination -------------------------------------------------------
+# Must exceed config.operational.shutdown_timeout_secs to avoid a race where
+# kubelet SIGKILLs the pod before Hearth finishes draining in-flight requests.
+# Default here (60 s) covers the production shutdown_timeout_secs of 30 s with
+# a 30 s buffer for tini signal forwarding and kernel scheduling jitter.
+terminationGracePeriodSeconds: 60
 
 # -- Node scheduling ------------------------------------------------------------
 nodeSelector: {}
@@ -187,7 +202,13 @@ podDisruptionBudget:
 
 # Autoscaling (HPA) is intentionally removed.
 # Hearth uses an embedded storage engine with an exclusive data_dir lock:
-# only one replica may be running at a time. Use strategy.type=Recreate
-# (set in deployment.yaml) and a PodDisruptionBudget for controlled rollouts.
-# Horizontal scaling requires a StatefulSet + external storage migration
-# (tracked as a follow-up; see HEA-2107 PR for the evaluation).
+# only one replica may be running at a time.
+#
+# IMPORTANT — Multi-node clustering is EXPERIMENTAL and NOT production-supported
+# in Hearth 1.x. Known defects include: follower RBAC cache staleness (C-5),
+# immutable cluster membership (C-6, no online node add/remove), and HTTP 500
+# on writes to follower nodes (H-3). The supported production topology is
+# replicaCount=1 with a ReadWriteOnce PVC and a PodDisruptionBudget.
+#
+# Use strategy.type=Recreate (set in deployment.yaml) and a PodDisruptionBudget
+# for controlled rollouts.

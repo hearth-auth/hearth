@@ -144,12 +144,6 @@ export interface UpdateUserParams {
   status?: string;
 }
 
-/** Parameters for creating a realm. */
-export interface CreateRealmParams {
-  name: string;
-  config?: Record<string, unknown>;
-}
-
 /** Realm record from the API. */
 export interface Realm {
   id: string;

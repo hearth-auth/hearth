@@ -608,6 +608,82 @@ impl AuditEngine for EmbeddedAuditEngine {
         })
     }
 
+    fn import_event(&self, source: &AuditEvent) -> Result<(), AuditError> {
+        // Mirrors `with_pending_append`'s chain read-modify-write but preserves
+        // the source event's identity, timestamp, and content — only the
+        // integrity hash and chain head are (re)computed under this realm's HMAC
+        // key. See the extensive comments in `with_pending_append` for why the
+        // chain lock covers the RMW + enqueue but not the fsync wait.
+        let realm_id = source.realm_id.clone();
+        let chain_lock = self.realm_chain_lock(&realm_id);
+        let chain_lock_for_rollback = Arc::clone(&chain_lock);
+
+        let durable_handle = {
+            let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
+            let hmac_key = self.get_realm_hmac_key(&realm_id)?;
+            let head = match cached.as_ref() {
+                Some(h) => h.clone(),
+                None => self.load_or_init_head(&realm_id, &hmac_key)?,
+            };
+            let prev_hash = head.last_hash.clone();
+            let seq = head.seq + 1;
+
+            let mut event = AuditEvent {
+                id: source.id.clone(),
+                realm_id: realm_id.clone(),
+                actor: source.actor.clone(),
+                action: source.action.clone(),
+                resource_type: source.resource_type.clone(),
+                resource_id: source.resource_id.clone(),
+                timestamp: source.timestamp,
+                metadata: source.metadata.clone(),
+                integrity_hash: String::new(),
+            };
+            event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
+
+            let value = encode_event(&event)?;
+            let primary_key = keys::encode_event_key(event.timestamp, seq, &event.id);
+            let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
+            let action_key =
+                keys::encode_action_index(event.action.as_str(), event.timestamp, &event.id);
+
+            let new_head = Self::signed_head(
+                &hmac_key,
+                head.anchor.clone(),
+                event.integrity_hash.clone(),
+                seq,
+                head.count + 1,
+            );
+            let head_value = Self::head_bytes(&new_head)?;
+            *cached = Some(new_head);
+
+            let audit_kvs = [
+                (primary_key.clone(), value),
+                (actor_key, primary_key.clone()),
+                (action_key, primary_key),
+                (keys::chain_head_key(), head_value),
+            ];
+
+            match self.storage.enqueue_batch(&realm_id, &audit_kvs) {
+                Ok(h) => h,
+                Err(e) => {
+                    *cached = None;
+                    return Err(AuditError::from(e));
+                }
+            }
+        };
+
+        let durable_result = self.storage.await_batch_durable(durable_handle);
+        if durable_result.is_err() {
+            let mut c = chain_lock_for_rollback
+                .lock()
+                .expect("realm chain lock poisoned");
+            *c = None;
+        }
+        durable_result?;
+        Ok(())
+    }
+
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
         // Determine if we're scanning by actor, action, or just time range
         if let Some(ref actor) = query.actor {

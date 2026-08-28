@@ -1,0 +1,149 @@
+# Coverage measurement — report only, no gate (HEA-2159).
+#
+# Publishes LLVM-based line/branch/function coverage numbers for every PR and
+# main-branch push that touches Rust source. Results appear in the GitHub
+# Actions Step Summary and as downloadable HTML + LCOV artifacts.
+#
+# Tool choice: cargo-llvm-cov
+#   • Uses LLVM's native -C instrument-coverage flag — no ptrace, no Docker
+#     restrictions, works on any Linux runner.
+#   • First-class nextest integration (`cargo llvm-cov nextest`).
+#   • ~20–30 % compile overhead vs a debug build; Swatinem/rust-cache keeps
+#     incremental rebuilds cheap on follow-up runs.
+#   • Produces HTML, LCOV, and text-summary in one pass.
+#   • cargo-tarpaulin was rejected: ptrace-based (fragile in rootless
+#     containers), no nextest integration, slower overall.
+#
+# This job is intentionally NOT wired into required-summary in ci.yml — a
+# coverage failure must never block a PR merge. continue-on-error: true at
+# the job level enforces that even if the coverage run itself faults.
+#
+# Ratcheting (threshold gate) is tracked in HEA-2159 and will land in a
+# follow-up once the baseline shape is understood.
+
+name: coverage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "simulation/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/coverage.yml"
+      - ".github/actions/setup-rust/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "simulation/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/coverage.yml"
+      - ".github/actions/setup-rust/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  coverage:
+    name: coverage (llvm-cov — report only, no gate)
+    runs-on: ubuntu-latest
+    # Report-only: a failure here MUST NOT block a PR merge (HEA-2159).
+    continue-on-error: true
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Coverage instrumentation roughly doubles binary size. Free the default
+      # runner's occupied disk before building.
+      - name: Free disk space (coverage builds need ~14 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          # llvm-tools-preview provides the LLVM profiling runtime required by
+          # cargo-llvm-cov. It must be installed alongside the stable toolchain.
+          components: clippy,rustfmt,llvm-tools-preview
+          # Disjoint cache key: coverage builds use -C instrument-coverage which
+          # produces different artifacts than the plain debug build in `quality`.
+          cache-key-suffix: llvm-cov
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Run tests under coverage instrumentation
+        run: |
+          mkdir -p coverage/html
+          # Run tests with coverage profiling; save raw profile data only.
+          # --html and --lcov cannot be combined in a single nextest invocation,
+          # so we collect profiles here and generate reports below.
+          cargo llvm-cov nextest \
+            --workspace \
+            --ignore-filename-regex 'src/protocol/generated/' \
+            --no-report
+        env:
+          PROTOC: protoc
+
+      - name: Generate HTML and LCOV reports
+        if: always()
+        run: |
+          cargo llvm-cov report \
+            --ignore-filename-regex 'src/protocol/generated/' \
+            --html \
+            --output-dir coverage/html
+          cargo llvm-cov report \
+            --ignore-filename-regex 'src/protocol/generated/' \
+            --lcov \
+            --output-path coverage/lcov.info
+
+      - name: Post coverage summary to job summary
+        # Run even if the test step failed so partial results are still visible.
+        if: always()
+        run: |
+          {
+            echo "## Coverage report"
+            echo ""
+            echo "Commit: \`${{ github.sha }}\`  |  Ref: \`${{ github.ref_name }}\`"
+            echo ""
+            echo '```'
+            cargo llvm-cov report --summary-only \
+              --ignore-filename-regex 'src/protocol/generated/' \
+              2>/dev/null || echo "(no coverage data — tests may have failed)"
+            echo '```'
+            echo ""
+            echo "_Report-only — no gate. Ratcheting threshold tracked in [HEA-2159](https://github.com/${{ github.repository }}/issues)._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-html-${{ github.sha }}
+          path: coverage/html/
+          retention-days: 30
+
+      - name: Upload LCOV data
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-lcov-${{ github.sha }}
+          path: coverage/lcov.info
+          retention-days: 30

@@ -93,7 +93,7 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    sudo systemctl stop hearth
    ```
 
-   Wait for the service to reach the `inactive` state before continuing:
+   `systemctl stop` sends SIGTERM. Hearth catches SIGTERM and drains in-flight HTTP and gRPC requests before exiting cleanly (controlled by `operational.shutdown_timeout_secs`, default 10 s). Wait for the service to reach the `inactive` state before continuing:
 
    ```bash
    sudo systemctl is-active hearth
@@ -118,13 +118,13 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    sudo systemctl start hearth
    ```
 
-4. **Confirm it is healthy.**
+4. **Confirm it is ready.**
 
    ```bash
    sudo systemctl is-active hearth
    # → active
-   curl -fsS http://localhost:8420/health
-   # → {"status":"ok"}
+   curl -fsS http://localhost:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    ```
 
    Check the journal for startup errors or warnings:
@@ -165,8 +165,8 @@ This procedure replaces the binary while the service is managed by systemd. Tota
 
    ```bash
    docker compose -f deploy/docker-compose.yml ps
-   curl -fsS http://localhost:8420/health
-   # → {"status":"ok"}
+   curl -fsS http://localhost:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    ```
 
 ---
@@ -205,8 +205,8 @@ The Hearth Helm chart uses `strategy.type: Recreate` in its Deployment. This mea
    ```bash
    kubectl get pods -n hearth
    kubectl port-forward -n hearth svc/hearth 8420:8420 &
-   curl -fsS http://127.0.0.1:8420/health
-   # → {"status":"ok"}
+   curl -fsS http://127.0.0.1:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    kill %1
    ```
 
@@ -225,12 +225,26 @@ The Hearth Helm chart uses `strategy.type: Recreate` in its Deployment. This mea
 
 Run these checks immediately after bringing the new binary up, regardless of deployment method.
 
-- [ ] **Health endpoint responds.**
+- [ ] **Readiness endpoint responds.**
 
   ```bash
-  curl -fsS http://localhost:8420/health
-  # → {"status":"ok"}
+  curl -fsS http://localhost:8420/readyz
+  # → {"status":"ready","storage":"ok"}
   ```
+
+  `/readyz` confirms both that the process is alive and that the storage engine completed
+  WAL replay and is accepting requests. A `503` here means storage is still recovering —
+  wait and retry before directing traffic to this instance.
+
+  For Kubernetes probes use the purpose-specific endpoints:
+
+  | Endpoint | Purpose | Kubernetes probe type |
+  |----------|----------|-----------------------|
+  | `/health` | Process liveness — always 200 if the binary is running | `livenessProbe` |
+  | `/healthz` | Same as `/health` (alias) | `livenessProbe` |
+  | `/readyz` | Readiness — verifies storage is responsive; fails until WAL replay completes | `readinessProbe` |
+
+  The Helm chart already routes these correctly. If you are writing your own Kubernetes manifests, configure `/health` or `/healthz` as the liveness probe and `/readyz` as the readiness probe.
 
 - [ ] **OIDC discovery documents are served for all realms.** Replace `<realm>` with each realm name in your deployment:
 
@@ -327,7 +341,8 @@ Older binaries cannot read WAL files written by newer binaries. To roll back:
 
    ```bash
    sudo systemctl start hearth
-   curl -fsS http://localhost:8420/health
+   curl -fsS http://localhost:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    ```
 
 6. **Reconcile writes made since the upgrade.** Any writes that occurred between the upgrade and the rollback will be missing from the restored data directory. Cross-reference your application's own request logs for the window between upgrade time and rollback time and replay them via the admin API if needed.

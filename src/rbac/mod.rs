@@ -36,7 +36,7 @@ pub use types::{
     UserPermissionGrant,
 };
 
-use crate::core::{OrganizationId, PageRequest, PagedResult, RealmId, Uri, UserId};
+use crate::core::{ImportOutcome, OrganizationId, PageRequest, PagedResult, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
 
 /// Callback trait used by [`RbacEngine`] to bump session versions when
@@ -389,4 +389,60 @@ pub trait RbacEngine: Send + Sync {
 
     /// Returns all role-assignment records in a realm for backup export.
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
+
+    // ------- Backup import helpers -------
+    //
+    // These restore records **verbatim**, preserving the record's own ID and
+    // every field (including timestamps and lifecycle status) so referential
+    // integrity survives a backup round-trip (assignments reference role and
+    // subject IDs; scopes reference permissions). They are the inverse of the
+    // `export_all_*` / `list_*` helpers above and MUST write every secondary
+    // index the corresponding `create_*` path writes. See HEA-2160.
+    //
+    // `overwrite` controls conflict handling when a record with the same ID
+    // already exists: `false` leaves it untouched (returns
+    // [`ImportOutcome::Skipped`]); `true` replaces it (returns
+    // [`ImportOutcome::Overwritten`]). A record that does not yet exist is
+    // always written (returns [`ImportOutcome::Created`]).
+
+    /// Restores a role verbatim, preserving its ID, name index, and all fields.
+    fn import_role(
+        &self,
+        realm_id: &RealmId,
+        role: &Role,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores a registered permission record verbatim.
+    fn import_permission(
+        &self,
+        realm_id: &RealmId,
+        record: &PermissionRecord,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores a group verbatim, preserving its ID and slug index.
+    fn import_group(
+        &self,
+        realm_id: &RealmId,
+        group: &Group,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores a role assignment verbatim, preserving its ID and every
+    /// secondary index (subject and role).
+    fn import_assignment(
+        &self,
+        realm_id: &RealmId,
+        assignment: &RoleAssignment,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores a scope definition verbatim.
+    fn import_scope(
+        &self,
+        realm_id: &RealmId,
+        scope: &ScopeExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
 }

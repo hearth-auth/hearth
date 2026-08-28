@@ -220,7 +220,7 @@ pub struct RealmConfig {
     /// theme is configured — the global theme applies.
     pub web_theme_css: Option<String>,
     /// Source theme name (e.g. `"ember"`, `"ocean"`, `"midnight"`,
-    /// `"forest"`, `"cloud"`, `"parchment"`) when the realm overrides
+    /// `"forest"`, `"cloud"`, `"slate"`) when the realm overrides
     /// `branding.theme` via `realms.<id>.web.theme` in `hearth.yaml`.
     /// Surfaced read-only on the realm detail page so operators can see
     /// which named theme drives this realm without inspecting the CSS.

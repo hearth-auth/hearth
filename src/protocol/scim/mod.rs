@@ -18,15 +18,15 @@
 //! - Pagination: `startIndex` + `count`, in-memory page slice over a
 //!   1000-record scan. Adequate for the per-IdP provisioning volumes we
 //!   care about in v1.
-//! - ETag: weak (`W/"<micros>"`) emitted on responses; inbound
-//!   `If-Match` is accepted-and-ignored.
+//! - ETag: weak (`W/"<micros>"`) emitted on every resource response;
+//!   inbound `If-Match` on `PUT`/`PATCH`/`DELETE` is enforced — a stale
+//!   validator yields `412 Precondition Failed` (see [`etag`]).
 //!
 //! # Deferred to hardening
 //!
 //! - Bracketed filter paths and PATCH complex value filters.
 //! - `/Bulk`, `/Me`, sorting, attribute projection.
 //! - Enterprise User schema extension + additional schema URNs.
-//! - `If-Match` enforcement / 412 responses.
 //! - Engine-level filter / pagination push-down.
 
 use std::sync::Arc;
@@ -39,6 +39,7 @@ use crate::protocol::http::AppState;
 pub mod auth;
 pub mod discovery;
 pub mod error;
+pub mod etag;
 pub mod filter;
 pub mod groups;
 pub mod patch_apply;
