@@ -88,6 +88,29 @@ run_case "unrelated version mentions do not trip the guard" 0 \
 Released 1.4.2 on 2026-01-01; see CHANGELOG for 1.0.0 history.' \
     "OK: all"
 
+# 7 — a failing gh (unauthenticated / no GH_TOKEN) must exit 1, not silently pass.
+#     Resolution is only attempted when README_LATEST_TAG is unset. A fake gh that
+#     exits 1 simulates a CI environment missing GH_TOKEN (HEA-2203).
+{
+    _fake_gh_dir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\necho "gh: error: authentication required" >&2\nexit 1\n' \
+        > "$_fake_gh_dir/gh"
+    chmod +x "$_fake_gh_dir/gh"
+    printf '%s\n' "$CURRENT" > "$TMP/README.md"
+    _ec=0
+    _out="$(README_PATH="$TMP/README.md" PATH="$_fake_gh_dir:$PATH" \
+        env -u README_LATEST_TAG bash "$CHECK" 2>&1)" || _ec=$?
+    rm -rf "$_fake_gh_dir"
+    if [[ "$_ec" -eq 0 ]]; then
+        echo "FAIL: failing-gh — expected exit 1 (gh auth error), got 0 (silent pass)"
+        echo "$_out" | sed 's/^/    /'
+        failures=$((failures + 1))
+    else
+        echo "ok: failing gh is rejected with exit ${_ec} (not a silent pass)"
+    fi
+    unset _fake_gh_dir _out _ec
+}
+
 echo ""
 if [[ "$failures" -ne 0 ]]; then
     echo "${failures} test case(s) failed."

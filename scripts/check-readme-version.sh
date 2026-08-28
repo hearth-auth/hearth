@@ -38,10 +38,25 @@ fi
 # Resolve the latest published binary release (e.g. v1.6.9).
 # Uses `gh release list` and excludes SDK-prefixed releases (sdk-ts-*, sdk-rust-*, etc.)
 # so a git tag pushed without binary artifacts does not advance the guard (HEA-2199).
-LATEST_TAG="${README_LATEST_TAG:-$(gh release list --limit 100 2>/dev/null \
-    | awk -F'\t' '{print $1}' \
-    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-    | sort -V | tail -1 || true)}"
+#
+# GH_TOKEN must be set in CI so `gh` can authenticate. An unauthenticated call fails
+# loudly here — no exit-0 skip branch; an unresolvable release is always a hard error
+# (HEA-2203).
+if [[ -n "${README_LATEST_TAG:-}" ]]; then
+    LATEST_TAG="$README_LATEST_TAG"
+else
+    _gh_err="$(mktemp)"
+    trap 'rm -f "$_gh_err"' EXIT
+    if ! _gh_list="$(gh release list --limit 100 2>"$_gh_err")"; then
+        echo "ERROR: gh release list failed — ensure GH_TOKEN is set in CI (HEA-2203)."
+        [[ -s "$_gh_err" ]] && sed 's/^/  /' "$_gh_err"
+        exit 1
+    fi
+    LATEST_TAG="$(printf '%s\n' "$_gh_list" \
+        | awk -F'\t' '{print $1}' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -V | tail -1 || true)"
+fi
 if [[ -z "$LATEST_TAG" ]]; then
     echo "ERROR: no published binary release found (gh release list returned nothing matching v[0-9]+.[0-9]+.[0-9]+)."
     echo "       SDK-prefixed releases (sdk-ts-*, etc.) are excluded by design."

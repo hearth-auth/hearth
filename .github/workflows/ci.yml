@@ -231,7 +231,11 @@ jobs:
       # against the latest published binary GitHub Release (HEA-2199: guard keys off
       # published artifacts, not git tags — a tag without a binary release must not
       # advance the pin requirement or it would publish 404 install docs).
+      # GH_TOKEN is required so `gh release list` can authenticate; without it the
+      # call fails and the script exits 1 — no silent skip (HEA-2203).
       - name: README version drift (check-readme-version.sh)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/check-readme-version.sh
 
       # The guard above is itself the test artifact for HEA-2116, so it needs a
