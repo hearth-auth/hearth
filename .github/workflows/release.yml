@@ -64,7 +64,7 @@ jobs:
             artifact: hearth-windows-amd64
             exe_suffix: .exe
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       # Strip the leading "v" from the tag (v1.0.0 → 1.0.0) and export it so
       # the build script can forward it to CARGO_PKG_VERSION via
@@ -164,7 +164,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout release commit
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           # proto/breaking comparisons and `git describe` need real history.
           fetch-depth: 0
@@ -311,7 +311,7 @@ jobs:
     name: Generate CycloneDX SBOM
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
