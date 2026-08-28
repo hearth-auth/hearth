@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.9](https://img.shields.io/badge/status-v1.6.9-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.10](https://img.shields.io/badge/status-v1.6.10-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -12,13 +12,13 @@ Every other identity provider is an application sitting on top of a generic data
 
 Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (`ArcSwap<HashMap>`) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Stable 1.6.9:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history and [VERSIONING.md](VERSIONING.md) for the SemVer policy, support window, and deprecation rules.
+> **Stable 1.6.10:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 
 ---
 
 ## Install
 
-Download pre-built v1.6.9 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.9), or use Docker or Helm.
+Download pre-built v1.6.10 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.10), or use Docker or Helm.
 
 ### Released binary — Linux / macOS
 
@@ -28,8 +28,8 @@ Download pre-built v1.6.9 artifacts from the [Releases page](https://github.com/
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.9/${ARTIFACT}"
-curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.9/SHA256SUMS
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/${ARTIFACT}"
+curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS
 
 # Verify the checksum
 sha256sum -c SHA256SUMS --ignore-missing
@@ -42,10 +42,10 @@ chmod +x "${ARTIFACT}"
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.9/hearth-windows-amd64.exe" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.9/SHA256SUMS" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS" `
   -OutFile SHA256SUMS
 
 # Verify the checksum
@@ -59,11 +59,11 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
 ```bash
-docker pull ghcr.io/hearth-auth/hearth:v1.6.9
+docker pull ghcr.io/hearth-auth/hearth:v1.6.10
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
-docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.9 serve --dev
-curl -fsS http://127.0.0.1:8420/readyz   # → {"status":"ready","storage":"ok"}
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.10 serve --dev
+curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
 > **Mac / Windows Docker Desktop:** `--network=host` does not map to the host loopback on Docker Desktop. Use the Docker Compose stack (`deploy/docker-compose.yml`) for a cross-platform setup, or run from source (`cargo run -- serve --dev`).
@@ -72,7 +72,7 @@ curl -fsS http://127.0.0.1:8420/readyz   # → {"status":"ready","storage":"ok"}
 
 ```bash
 helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
-  --version 1.6.9 \
+  --version 1.6.10 \
   --namespace auth \
   --create-namespace
 ```
@@ -84,7 +84,7 @@ cosign verify \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/hearth-auth/charts/hearth:1.6.9
+  ghcr.io/hearth-auth/charts/hearth:1.6.10
 ```
 
 For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
