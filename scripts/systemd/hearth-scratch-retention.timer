@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily /scratch retention sweep (Hearth HEA-2198)
+
+[Timer]
+# Run daily at 03:00, and once at boot if the last run was missed
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

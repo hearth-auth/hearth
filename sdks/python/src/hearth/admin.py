@@ -10,7 +10,6 @@ from .types import (
     CreateUserRequest,
     UpdateUserRequest,
     Realm,
-    CreateRealmRequest,
     UpdateRealmRequest,
     PageResponse,
     OAuthClient,
@@ -104,14 +103,9 @@ class AdminClient:
     # Realms
     # ------------------------------------------------------------------
 
-    def create_realm(self, req: CreateRealmRequest) -> Realm:
-        """Create a new realm."""
-        resp = self._http.post(
-            f"{self._base}/admin/realms", json=req.model_dump(exclude_none=True)
-        )
-        if resp.status_code not in (200, 201):
-            raise HearthError(resp.status_code, resp.text)
-        return Realm(**resp.json())
+    # Realms are provisioned via hearth.yaml, not the admin API. There is no
+    # ``create_realm`` method: the server returns 405 for POST /admin/realms
+    # (HEA-2171). Only read paths are exposed.
 
     def list_realms(self) -> List[Realm]:
         """List all realms."""

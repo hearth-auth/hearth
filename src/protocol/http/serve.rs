@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::ConnectInfo;
 use axum::http::StatusCode;
 use axum::Router;
 use tokio::net::TcpListener;
@@ -108,8 +109,14 @@ pub async fn serve_tls_router(
                     };
 
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
+                    // Mirror what `into_make_service_with_connect_info` does on the
+                    // plaintext path: layer `ConnectInfo<SocketAddr>` onto the router
+                    // before calling `into_service`. This ensures every handler sees
+                    // the real peer address via `PeerAddr` / `ConnectInfo<SocketAddr>`
+                    // rather than the FALLBACK_PEER sentinel (127.0.0.1).
                     let service = hyper_util::service::TowerToHyperService::new(
-                        app.into_service(),
+                        app.layer(axum::Extension(ConnectInfo::<SocketAddr>(peer_addr)))
+                            .into_service(),
                     );
 
                     // A-39: HTTP/2 rapid-reset defense (CVE-2023-44487).

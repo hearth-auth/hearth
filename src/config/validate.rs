@@ -38,6 +38,27 @@ struct DevModeYaml {
 pub(super) const VALID_UI_THEMES: &[&str] =
     &["ember", "ocean", "midnight", "forest", "cloud", "slate"];
 
+/// HEA-2166: production requires a key-encryption key — without one, realm
+/// signing keys (Ed25519 private keys) are written to storage in plaintext.
+const KEK_REQUIRED_IN_PROD: &str =
+    "production mode requires a key-encryption key; without one, realm signing keys are \
+     stored in plaintext. Set the HEARTH_KEK environment variable (recommended) or \
+     security.key_encryption_key to a random 64-hex-char value (openssl rand -hex 32). \
+     Dev mode (--dev) does not require this.";
+
+/// HEA-2166: production requires HTTPS so session cookies carry `Secure`.
+const TLS_REQUIRED_IN_PROD: &str =
+    "production mode requires HTTPS — without it, session cookies are issued without the \
+     Secure attribute and can be intercepted over plain HTTP. Set server.tls_cert_path + \
+     server.tls_key_path for direct TLS, or server.trust_forwarded_proto: true when behind \
+     a TLS-terminating reverse proxy. Dev mode (--dev) does not require this.";
+
+/// HEA-2166: the demo seeder creates accounts sharing a well-known password.
+const DEMO_FORBIDDEN_IN_PROD: &str =
+    "demo.enabled = true mass-seeds accounts that all share a well-known default password \
+     and is only permitted in dev mode (--dev). Remove the demo block from a production \
+     config.";
+
 /// Valid MFA method names.
 const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms"];
 
@@ -265,6 +286,31 @@ impl Config {
             });
         }
 
+        // HEA-2166: mirror the fail-closed production gates from `validate`
+        // so the admin config-check panel surfaces all three in one pass.
+        if !self.dev_mode {
+            if self.security.key_encryption_key.is_none()
+                && std::env::var_os("HEARTH_KEK").is_none()
+            {
+                issues.push(ValidationIssue {
+                    field: "security.key_encryption_key".to_string(),
+                    reason: KEK_REQUIRED_IN_PROD.to_string(),
+                });
+            }
+            if self.server.tls_cert_path.is_none() && !self.server.trust_forwarded_proto {
+                issues.push(ValidationIssue {
+                    field: "server.tls_cert_path".to_string(),
+                    reason: TLS_REQUIRED_IN_PROD.to_string(),
+                });
+            }
+            if self.demo.enabled {
+                issues.push(ValidationIssue {
+                    field: "demo.enabled".to_string(),
+                    reason: DEMO_FORBIDDEN_IN_PROD.to_string(),
+                });
+            }
+        }
+
         if !ObservabilityConfig::VALID_LOG_LEVELS.contains(&self.observability.log_level.as_str()) {
             issues.push(ValidationIssue {
                 field: "observability.log_level".to_string(),
@@ -415,6 +461,36 @@ impl Config {
                 field: "storage.data_dir".to_string(),
                 reason: "must not be empty".to_string(),
             });
+        }
+
+        // HEA-2166: three production paths that previously degraded silently
+        // to insecure are hard startup errors outside dev mode. Fail closed:
+        // a misconfigured production instance refuses to start rather than
+        // running insecurely with only a log line as the signal. The KEK
+        // check consults the HEARTH_KEK env var because env takes precedence
+        // over YAML at resolution time (see `serve` in main.rs) and is the
+        // recommended way to keep the key out of config files.
+        if !self.dev_mode {
+            if self.security.key_encryption_key.is_none()
+                && std::env::var_os("HEARTH_KEK").is_none()
+            {
+                return Err(ConfigError::ValidationError {
+                    field: "security.key_encryption_key".to_string(),
+                    reason: KEK_REQUIRED_IN_PROD.to_string(),
+                });
+            }
+            if self.server.tls_cert_path.is_none() && !self.server.trust_forwarded_proto {
+                return Err(ConfigError::ValidationError {
+                    field: "server.tls_cert_path".to_string(),
+                    reason: TLS_REQUIRED_IN_PROD.to_string(),
+                });
+            }
+            if self.demo.enabled {
+                return Err(ConfigError::ValidationError {
+                    field: "demo.enabled".to_string(),
+                    reason: DEMO_FORBIDDEN_IN_PROD.to_string(),
+                });
+            }
         }
 
         if !ObservabilityConfig::VALID_LOG_LEVELS.contains(&self.observability.log_level.as_str()) {
@@ -2741,6 +2817,10 @@ mod tests {
         let yaml = r#"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 realms:
   myrealm:
     applications:
@@ -2767,6 +2847,10 @@ realms:
         let yaml = r#"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 realms:
   myrealm:
     oauth_clients:
@@ -2794,6 +2878,10 @@ realms:
         let yaml = r#"
 oidc:
   issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 realms:
   myrealm:
     applications:

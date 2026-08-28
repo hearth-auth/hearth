@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -115,6 +115,22 @@ endif
 ## The seed-handle holds live tokens — keep it out of git (loadtest/reports/).
 seed:
 	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- seed $(ARGS)
+
+## Run test coverage locally (requires cargo-llvm-cov + cargo-nextest).
+## Install: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
+## Output: coverage/html/index.html  coverage/lcov.info
+coverage:
+	mkdir -p coverage
+	PROTOC=$(PROTOC) cargo llvm-cov nextest \
+		--workspace \
+		--ignore-filename-regex 'src/protocol/generated/' \
+		--html \
+		--output-dir coverage/html \
+		--lcov \
+		--output-path coverage/lcov.info
+	@echo ""
+	@echo "✓ HTML report: coverage/html/index.html"
+	@echo "✓ LCOV data:   coverage/lcov.info"
 
 fmt:
 	cargo fmt --check
@@ -507,3 +523,26 @@ ui-test-cross-browser:
 		cd tests/ui && npx playwright install chromium firefox webkit; \
 	fi
 	bash tests/ui/pw-run.sh test --project=smoke --project=flows --project=regression
+
+# ── Scratch Retention ─────────────────────────────────
+
+## Prune stale /scratch cargo target dirs and temp files (HEA-2198).
+## Retention: target-hea-* > 7d, other target-* > 14d, /scratch/tmp > 7d.
+## Sweeps the shared active target with cargo sweep sweep --time 14 (non-destructive).
+## To schedule: run make scratch-timer-install (installs systemd user timer, daily 03:00).
+scratch-prune:
+	bash scripts/scratch-retention.sh
+
+## Preview what scratch-prune would delete, without removing anything.
+scratch-prune-dry-run:
+	bash scripts/scratch-retention.sh --dry-run
+
+## Install systemd user timer that runs scratch-prune daily at 03:00.
+## Idempotent: safe to re-run after script updates.
+scratch-timer-install:
+	mkdir -p ~/.config/systemd/user
+	cp scripts/systemd/hearth-scratch-retention.service ~/.config/systemd/user/
+	cp scripts/systemd/hearth-scratch-retention.timer    ~/.config/systemd/user/
+	systemctl --user daemon-reload
+	systemctl --user enable --now hearth-scratch-retention.timer
+	systemctl --user list-timers hearth-scratch-retention.timer

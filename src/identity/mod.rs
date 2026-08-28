@@ -141,8 +141,8 @@ pub use webauthn::{
 
 use crate::audit::AuditContext;
 use crate::core::{
-    AgentId, ClientId, InvitationId, OrganizationId, PageRequest, PagedResult, RealmId,
-    ResourceServerId, SessionId, Timestamp, UserId, WebhookId,
+    AgentId, ClientId, ImportOutcome, InvitationId, OrganizationId, PageRequest, PagedResult,
+    RealmId, ResourceServerId, SessionId, Timestamp, UserId, WebhookId,
 };
 
 // Maximum page size for all paginated list operations (A-23).
@@ -1429,6 +1429,21 @@ pub trait IdentityEngine: Send + Sync {
         page: &PageRequest,
     ) -> Result<PagedResult<Organization>, IdentityError>;
 
+    /// Restores an organization verbatim from a backup archive, preserving its
+    /// ID, slug index, and every field (HEA-2160).
+    ///
+    /// Unlike [`create_organization`](Self::create_organization) this does not
+    /// generate a new ID, validate quotas, or check slug cooldowns — it writes
+    /// the record and slug index exactly as exported so a backup round-trip is
+    /// faithful. When an org with the same ID already exists, `overwrite`
+    /// selects replace (`true`) or skip (`false`).
+    fn import_organization(
+        &self,
+        realm_id: &RealmId,
+        org: &Organization,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
     /// Adds a user as a member of an organization.
     ///
     /// Creates bidirectional membership indexes (org→user and user→org).
@@ -2185,6 +2200,23 @@ pub trait IdentityEngine: Send + Sync {
     /// The caller is responsible for encrypting the bytes before writing
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
+
+    /// Returns the underlying storage engine's backup-consistency barrier, or
+    /// `None` if snapshot isolation is unavailable (HEA-2167).
+    ///
+    /// A backup export acquires the returned lock in **write** mode and holds
+    /// it across its read pass so no write can interleave and tear the archive.
+    /// The exporter reaches the storage layer through this engine, so this is
+    /// the seam the backup module uses to obtain the barrier. See
+    /// [`StorageEngine::backup_barrier`](crate::storage::StorageEngine::backup_barrier)
+    /// for the mechanism and its write-availability impact.
+    ///
+    /// The default returns `None` — correct for test doubles and any engine
+    /// whose storage does not support a barrier. The embedded engine overrides
+    /// it to delegate to its storage layer.
+    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
+        None
+    }
 
     // ===== Adaptive MFA — device fingerprint (HEA-839) =====
 

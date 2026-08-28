@@ -99,9 +99,9 @@ This usually indicates one of:
    # Compare mtimes against the time the error first appeared
    ```
 
-   When in doubt, run `hearth storage scan` (if available in your build) or
-   open each SST through the same engine. The first file that fails to
-   open is the corrupt one.
+   When in doubt, cross-reference each SST file's mtime against the
+   timestamp the error first appeared in your logs — the last file written
+   before the crash is typically the torn one.
 
 3. **Restore the affected SST from backup.** Hearth SSTs are immutable
    once written, so the bytes in your last `.hearth-backup` archive are
@@ -322,8 +322,8 @@ Symptoms in a multi-node cluster:
 
 - No leader election after `cluster.election_timeout_ms` × 3.
 - Followers log `term mismatch` or `index mismatch` on every AppendEntries.
-- `hearth cluster status` shows nodes in different `last_log_term` values
-  with no path to convergence.
+- `GET /admin/cluster/status` shows nodes with different `last_log_term` values
+  and no path to convergence.
 
 Root causes (in order of frequency):
 
@@ -354,13 +354,22 @@ rejoined empty.
 2. **Pick the authoritative side.** This is a business call —
    typically the side with the higher `applied_index` *and* the most
    recent user-visible writes. Identify it by checking each node's
-   storage:
+   storage (run on each diverging node; the server is already stopped):
 
    ```bash
-   hearth backup inspect --data-dir /var/lib/hearth/data
-   # Record counts per realm; the side with the most recent writes
-   # will usually have the highest user/session counts.
+   hearth backup create \
+     --data-dir /var/lib/hearth/data \
+     --output /tmp/inspect-$(hostname).hearth-backup
+   hearth backup inspect --input /tmp/inspect-$(hostname).hearth-backup
+   # Prints per-realm record counts: users, credentials, clients, roles,
+   # groups, orgs, audit. The side with the most recent writes usually has
+   # the highest user/credential counts.
    ```
+
+   Sessions are **not** in the manifest, so this comparison cannot tell you
+   which side served more logins — only which side holds more durable
+   records. `hearth backup create` takes an exclusive lock on the data
+   directory, so the node must be stopped (it is, from step 1).
 
 3. **Take a backup of every diverging node** before wiping anything:
 
@@ -379,8 +388,24 @@ rejoined empty.
 
    ```bash
    systemctl start hearth
-   hearth cluster status   # Should show: leader=this_node, peers=[]
+   curl -s -H "Authorization: Bearer $SYSTEM_TOKEN" \
+     -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
+     https://auth.example.com/admin/cluster/status
+   # Should show: {"role":"leader","term":<N>,"last_applied_index":<N>,"peers":[...]}
    ```
+
+   `/admin/cluster/*` requires the **system realm** (nil UUID) — a
+   realm-scoped admin token gets `403 {"error":"cluster admin requires
+   system realm"}`. The endpoint answers `503 {"error":"not in cluster
+   mode"}` when the node is running single-node.
+
+   **`peers` will not be empty.** Raft membership is persisted in the log
+   and is immutable after bootstrap (C-6, HEA-2154) — editing
+   `cluster.peers` in `hearth.yaml` does **not** remove the wiped nodes
+   from the membership config. Expect them to keep appearing with
+   `"is_healthy": false` until the cluster is re-bootstrapped in step 6.
+   The field to check here is `"role":"leader"`: it proves the surviving
+   node won its own election and is accepting writes.
 
 5. **Wipe the losing nodes' data directories** (after the backups in
    step 3 are confirmed off-cluster):
@@ -438,26 +463,45 @@ The `IdentityEngine::rotate_realm_signing_key` API (see
 grace deadline so in-flight RPs can re-fetch keys without an immediate
 verification failure.
 
-1. **Issue the rotation.** Through the admin API or CLI:
+1. **Issue the rotation.** Call the admin API with the realm's UUID:
 
    ```bash
-   hearth realm rotate-signing-key --realm production \
-     --grace-period-hours 24
+   curl -s -X POST \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: <realm-uuid>" \
+     https://auth.example.com/admin/realms/<realm-uuid>/rotate-signing-key
+   # Returns: {"message":"signing key rotated","grace_period_secs":<N>}
    ```
 
-   Choose a grace period that matches your slowest RP's JWKS cache TTL
-   plus a margin. 24 hours is the conservative default; 1 hour is fine
-   for an internally-controlled fleet that polls the JWKS endpoint every
-   5 minutes.
+   `X-Realm-ID` is **mandatory** on every `/admin` route — without it the
+   server answers `400 {"error":"missing X-Realm-ID header"}`, not `401`.
+   The token must carry `hearth.realm.admin` and be scoped to the same
+   realm named in the path; a token from another realm gets `403`.
+
+   The grace period is read from `hearth.yaml`
+   (`token.signing_key_rotation_grace_period`; default: 86400 s / 24 h).
+   Adjust that config value and restart the server before rotating if you
+   need a shorter or longer window. Choose a grace period that matches
+   your slowest RP's JWKS cache TTL plus a margin — 24 hours is the
+   conservative default; 1 hour is fine for an internally-controlled fleet
+   that polls the JWKS endpoint every 5 minutes.
 
 2. **Force re-issuance of all in-flight tokens.** Existing access tokens
-   stay valid until they hit `exp`. To invalidate immediately, revoke
-   every active session in the realm — clients will re-authenticate
-   against the new key on next request:
+   stay valid until they hit `exp`. To invalidate all active sessions
+   immediately, bump the session version for the realm — clients will
+   re-authenticate against the new key on their next request:
 
    ```bash
-   hearth session revoke-all --realm production
+   curl -s -X POST \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: <realm-uuid>" \
+     https://auth.example.com/admin/realms/<realm-uuid>/sv-bump-all
+   # Returns: {"bumped":<n>}
+   # Returns 404 if session versioning is disabled for this realm.
    ```
+
+   Also requires `hearth.realm.admin`. This is a heavy operation — it
+   generates one delta entry per active session.
 
 3. **Verify rotation took effect.** The realm's JWKS should now contain
    two keys (active + retiring); after the grace deadline, only the new
@@ -535,19 +579,45 @@ drill](#test-restore-drill-checklist).
 
 ### Recovery Point Objective (RPO) — how much data you can lose
 
+> **Hearth has no point-in-time recovery, no WAL archiving, and no
+> incremental backup.** Your recovery point is the last successful full
+> backup. See the [backup guide's RPO
+> statement](./backup.md#recovery-point-objective-rpo) for the canonical
+> operator-facing wording and the [design
+> spike](../plans/HEA-2170-pitr-wal-archiving-design.md) for the post-1.x
+> plan.
+
+Worst-case data loss is **the backup interval plus the duration of one
+backup run** — the recovery point is the *start* of a run, not its end:
+
 | Backup cadence | Worst-case data loss |
 |---|---|
-| Hourly | 1 hour of writes |
-| Every 6 hours | 6 hours of writes |
-| Daily (typical) | 24 hours of writes |
+| Hourly | ~1 hour + one run |
+| Every 6 hours | ~6 hours + one run |
+| Daily (typical) | ~24 hours + one run |
+
+Measure your own run duration — the RTO table below covers *restore* time,
+which is not a proxy for *backup* time (restore is dominated by per-record
+re-encryption on write; export is a read scan).
 
 RPO is dominated by your backup schedule, not by Hearth's recovery
 mechanics. Hearth itself is durable to the last `fsync` — for any single-
 node crash without disk loss, RPO is effectively zero because the WAL
 replays on startup.
 
+**Do not read that as disk-loss protection.** The WAL lives inside the data
+directory, is truncated in place on rotation rather than retained as
+history, and is never shipped off-host. It recovers a crashed process, not
+a lost disk.
+
 In cluster mode, RPO for a single-node failure is zero (the other nodes
-hold the writes). RPO for whole-cluster loss equals the backup cadence.
+hold the writes). RPO for whole-cluster loss equals the backup cadence
+plus one run.
+
+Archives are also **live scans rather than snapshots**, so an archive taken
+while the realm is under write load can be internally inconsistent within
+that one-run window — see [Consistency
+caveat](./backup.md#consistency-caveat--the-recovery-point-is-an-interval-not-an-instant).
 
 ### Recovery Time Objective (RTO) — how long recovery takes
 
@@ -629,8 +699,16 @@ Run this drill quarterly. An untested backup is not a backup.
 
 4. **Start a drill server** against the restored data:
 
+   `hearth serve` has no `--data-dir` flag — the data directory comes from
+   the config file only. Write a throwaway config pointing at the drill
+   directory, then bind with `--bind`/`--port`:
+
    ```bash
-   hearth serve --data-dir "$DRILL_DIR" --listen 127.0.0.1:8080 &
+   cat > /tmp/drill.yaml <<EOF
+   storage:
+     data_dir: "$DRILL_DIR"
+   EOF
+   hearth serve --config /tmp/drill.yaml --bind 127.0.0.1 --port 8080 &
    DRILL_PID=$!
    sleep 5
    ```
@@ -663,8 +741,13 @@ Run this drill quarterly. An untested backup is not a backup.
      TOKEN=$(curl -fsS -X POST http://127.0.0.1:8080/oauth/token \
        -d grant_type=client_credentials -d client_id=<id> -d client_secret=<secret> \
        | jq -r .access_token)
-     curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/admin/realms
+     curl -fsS -H "Authorization: Bearer $TOKEN" \
+       -H "X-Realm-ID: <realm-uuid>" \
+       http://127.0.0.1:8080/admin/realms
      ```
+     `X-Realm-ID` is required on `/admin` routes; omitting it returns `400`,
+     which `-fsS` surfaces as a drill failure indistinguishable from a real
+     backup-integrity bug. Use the UUID of the realm the client belongs to.
 
 6. **Tear down and document.**
 

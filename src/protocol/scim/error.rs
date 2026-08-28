@@ -98,6 +98,12 @@ impl ScimError {
         Self::bad_request("invalidPath", detail)
     }
 
+    /// 412 — the resource's current version does not satisfy the request's
+    /// `If-Match` precondition (optimistic concurrency, RFC 7644 §3.14).
+    pub fn precondition_failed(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::PRECONDITION_FAILED, detail)
+    }
+
     /// 413 — request carries more items than the server will process in one
     /// call (e.g. a PATCH `Operations` array over [`MAX_SCIM_OPERATIONS`]).
     ///

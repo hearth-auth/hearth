@@ -179,6 +179,16 @@ enum BackupAction {
         #[arg(long)]
         dry_run: bool,
 
+        /// Proceed even when the archive carries no restorable signing key.
+        ///
+        /// By default restore REFUSES an archive with no usable signing key
+        /// (unencrypted, pre-signing-key export, or opened without the DEK),
+        /// because restoring would generate a fresh key and invalidate every
+        /// JWT and session issued before the backup. Pass this flag to accept a
+        /// freshly generated key and restore anyway (HEA-2168).
+        #[arg(long)]
+        allow_missing_signing_key: bool,
+
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
@@ -560,9 +570,17 @@ async fn main() {
                     realm,
                     mode,
                     dry_run,
+                    allow_missing_signing_key,
                     data_dir,
                 } => {
-                    match run_backup_restore(&input, realm.as_deref(), &mode, dry_run, &data_dir) {
+                    match run_backup_restore(
+                        &input,
+                        realm.as_deref(),
+                        &mode,
+                        dry_run,
+                        allow_missing_signing_key,
+                        &data_dir,
+                    ) {
                         Ok(had_errors) => i32::from(had_errors),
                         Err(e) => {
                             tracing::error!("error: {e}");
@@ -1041,10 +1059,22 @@ async fn run_serve(
                             error!(error = %e, "Raft peer gRPC server terminated");
                         }
                     });
-                    info!(
+                    // HEA-2154: multi-node clustering is EXPERIMENTAL in 1.x.
+                    // Known defects: followers never invalidate RBAC/session
+                    // caches (C-5), membership is immutable after bootstrap
+                    // (C-6), and writes to a follower return HTTP 500 (H-3).
+                    // Operators must not learn this from the docs alone —
+                    // enabling `cluster:` warns on every startup.
+                    warn!(
                         node_id = cluster_cfg.node_id,
                         peer_address = %cluster_cfg.peer_address,
-                        "Raft cluster mode active"
+                        "EXPERIMENTAL: Raft cluster mode active. Multi-node clustering is NOT \
+                         production-supported in Hearth 1.x — followers serve stale RBAC and \
+                         session state after a revocation (C-5), cluster membership cannot be \
+                         changed without a full-cluster restart (C-6), and writes routed to a \
+                         follower fail with HTTP 500 (H-3). The supported production topology \
+                         is single-node: omit the `cluster:` section. See \
+                         docs/guides/clustering.md."
                     );
                     engine
                 }
@@ -2718,19 +2748,48 @@ async fn run_serve(
             });
         }
 
-        let shutdown = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install Ctrl+C handler");
-            info!("shutdown signal received, stopping server");
+        // Wire SIGINT + SIGTERM to the same graceful drain.  The channel lets
+        // the drain-deadline timer start exactly when the signal fires rather
+        // than at process startup.
+        let drain_secs = config.operational.shutdown_timeout_secs;
+        let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async move {
+            wait_for_shutdown_signal().await;
+            info!(
+                drain_deadline_secs = drain_secs,
+                "shutdown signal received, draining in-flight requests"
+            );
+            let _ = drain_start_tx.send(());
         };
-        http::serve_router(addr, app_router, shutdown).await?;
+        tokio::select! {
+            result = http::serve_router(addr, app_router, shutdown) => {
+                result?;
+            }
+            _ = async {
+                let _ = drain_start_rx.await;
+                tokio::time::sleep(Duration::from_secs(drain_secs)).await;
+            } => {
+                warn!(
+                    drain_deadline_secs = drain_secs,
+                    "graceful drain deadline exceeded, forcing shutdown"
+                );
+            }
+        }
     }
 
-    // Signal the gRPC task to shut down and wait for it.
+    // Signal the gRPC task to shut down and wait for it within the drain deadline.
     if let Some((tx, handle)) = grpc_shutdown {
         let _ = tx.send(());
-        let _ = handle.await;
+        let drain_secs = config.operational.shutdown_timeout_secs;
+        match tokio::time::timeout(Duration::from_secs(drain_secs), handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                warn!(
+                    drain_deadline_secs = drain_secs,
+                    "gRPC graceful drain deadline exceeded, forcing shutdown"
+                );
+            }
+        }
     }
 
     // Signal the webhook dispatcher to stop.
@@ -3108,6 +3167,30 @@ fn maybe_upgrade_email_transport(config: &mut Config) -> bool {
     }
 }
 
+/// Resolves when SIGINT (Ctrl+C) or SIGTERM is received, whichever arrives first.
+///
+/// Both signals initiate the same graceful drain sequence so that `docker stop`,
+/// `kubectl delete pod`, and `systemctl stop` — all of which send SIGTERM — behave
+/// identically to an interactive Ctrl+C (HEA-2161).
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.expect("failed to install SIGINT handler");
+        }
+        _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install SIGINT handler");
+}
+
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
 /// Registry type alias used for hot-swap on SIGHUP.
 type RegistrySwap = Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>>;
@@ -3203,18 +3286,35 @@ async fn run_serve_tls(
         });
     }
 
-    // Set up graceful shutdown on Ctrl+C
+    // Wire SIGINT + SIGTERM to the same graceful drain (HEA-2161).
+    let drain_secs = config.operational.shutdown_timeout_secs;
+    let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-        info!("shutdown signal received, stopping server");
+        wait_for_shutdown_signal().await;
+        info!(
+            drain_deadline_secs = drain_secs,
+            "shutdown signal received, draining in-flight requests"
+        );
+        let _ = drain_start_tx.send(());
         drop(shutdown_tx);
     });
 
-    // Start HTTPS server
+    // Start HTTPS server with drain deadline.
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    http::serve_tls_router(listener, app_router, acceptor, shutdown_rx).await?;
+    tokio::select! {
+        result = http::serve_tls_router(listener, app_router, acceptor, shutdown_rx) => {
+            result?;
+        }
+        _ = async {
+            let _ = drain_start_rx.await;
+            tokio::time::sleep(Duration::from_secs(drain_secs)).await;
+        } => {
+            warn!(
+                drain_deadline_secs = drain_secs,
+                "graceful drain deadline exceeded, forcing shutdown"
+            );
+        }
+    }
 
     let _ = redirect_handle.await;
     Ok(())
@@ -3263,7 +3363,13 @@ fn load_config(
         } else if dev {
             return Ok(Config::dev());
         } else {
-            Config::default()
+            // HEA-2166: the compiled-in defaults were the one config path that
+            // never ran `validate()` — a bare `hearth serve` with no config
+            // file booted a production server with no KEK and no TLS. Route
+            // the defaults through the same fail-closed gates as a file.
+            let config = Config::default();
+            config.validate()?;
+            config
         }
     };
 
@@ -3871,6 +3977,7 @@ fn run_backup_restore(
     realm_slug: Option<&str>,
     mode_str: &str,
     dry_run: bool,
+    allow_missing_signing_key: bool,
     data_dir: &std::path::Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupImporter, ImportOptions, RestoreMode};
@@ -3886,10 +3993,10 @@ fn run_backup_restore(
     std::fs::create_dir_all(data_dir)?;
     let storage_config = StorageConfig::dev(data_dir.to_path_buf());
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, _audit, rbac) =
+    let (identity, audit, rbac) =
         build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
 
-    let importer = BackupImporter::new(identity, rbac);
+    let importer = BackupImporter::new(identity, rbac, audit);
     let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
         let pp = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
             mk
@@ -3905,6 +4012,7 @@ fn run_backup_restore(
         dry_run,
         realm_target: None,
         dek_passphrase,
+        allow_missing_signing_key,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {

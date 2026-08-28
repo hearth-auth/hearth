@@ -102,11 +102,10 @@ export class AdminClient {
   }
 
   // ── Realms ─────────────────────────────────────────────────────────────────
-
-  /** Create a new realm. */
-  async createRealm(params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("POST", this.buildUrl("/admin/realms"), params);
-  }
+  //
+  // Realms are provisioned via hearth.yaml, not the admin API. There is no
+  // `createRealm` method: the server returns 405 for POST /admin/realms
+  // (HEA-2171). Only read paths are exposed.
 
   /** Get a realm by ID. */
   async getRealm(id: string): Promise<Record<string, unknown>> {

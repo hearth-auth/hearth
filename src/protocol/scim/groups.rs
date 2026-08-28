@@ -24,11 +24,18 @@ use crate::identity::{
 use crate::protocol::http::AppState;
 use crate::protocol::scim::auth::{authenticate, ScimAuth};
 use crate::protocol::scim::error::{from_identity_error, ScimError};
+use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
 use crate::protocol::scim::patch_apply::apply_group_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimGroup, ScimMember, GROUP_SCHEMA,
 };
+
+/// Current ETag validator for a group — the weak form of its last-modified
+/// micros, matching the `meta.version` emitted in the resource body.
+fn group_version(org: &Organization) -> String {
+    format!("W/\"{}\"", org.updated_at().as_micros())
+}
 
 fn iso8601(micros: i64) -> String {
     let nanos = i128::from(micros) * 1_000;
@@ -289,7 +296,9 @@ pub async fn get_group(
                 .ok()
                 .flatten();
             let members = load_members(&state, &auth.realm_id, &org_id);
-            Json(group_to_scim(&org, &members, ext)).into_response()
+            let version = group_version(&org);
+            let scim = group_to_scim(&org, &members, ext);
+            resource_response(&scim, &version)
         }
         Ok(None) => ScimError::not_found("group not found").into_response(),
         Err(e) => from_identity_error(&e).into_response(),
@@ -393,6 +402,12 @@ pub async fn replace_group(
         Err(e) => return from_identity_error(&e).into_response(),
     };
 
+    // Optimistic concurrency: reject a stale `If-Match` before mutating
+    // (HEA-2172).
+    if let Err(e) = check_if_match(&headers, &group_version(&existing)) {
+        return e.into_response();
+    }
+
     let req = UpdateOrganizationRequest {
         name: Some(body.display_name.clone()),
         description: None,
@@ -448,7 +463,9 @@ pub async fn replace_group(
         .ok()
         .flatten();
     let members = load_members(&state, &auth.realm_id, &org_id);
-    Json(group_to_scim(&refreshed, &members, ext)).into_response()
+    let version = group_version(&refreshed);
+    let scim = group_to_scim(&refreshed, &members, ext);
+    resource_response(&scim, &version)
 }
 
 /// `PATCH /scim/v2/Groups/{id}`
@@ -480,6 +497,13 @@ pub async fn patch_group(
         Ok(None) => return ScimError::not_found("group not found").into_response(),
         Err(e) => return from_identity_error(&e).into_response(),
     };
+
+    // Optimistic concurrency: reject a stale `If-Match` before mutating
+    // (HEA-2172).
+    if let Err(e) = check_if_match(&headers, &group_version(&existing)) {
+        return e.into_response();
+    }
+
     let current_ext = state
         .identity
         .get_scim_group_external_id(&auth.realm_id, &org_id)
@@ -554,7 +578,9 @@ pub async fn patch_group(
         .ok()
         .flatten();
     let members = load_members(&state, &auth.realm_id, &org_id);
-    Json(group_to_scim(&refreshed, &members, ext)).into_response()
+    let version = group_version(&refreshed);
+    let scim = group_to_scim(&refreshed, &members, ext);
+    resource_response(&scim, &version)
 }
 
 /// `DELETE /scim/v2/Groups/{id}`
@@ -571,6 +597,21 @@ pub async fn delete_group(
         return ScimError::not_found("group not found").into_response();
     };
     let org_id = OrganizationId::new(uuid);
+
+    // Optimistic concurrency: when the caller supplies `If-Match`, reject a
+    // stale validator before deleting (HEA-2172). Only pay the extra read
+    // when the header is present.
+    if headers.contains_key(axum::http::header::IF_MATCH) {
+        match state.identity.get_organization(&auth.realm_id, &org_id) {
+            Ok(Some(org)) => {
+                if let Err(e) = check_if_match(&headers, &group_version(&org)) {
+                    return e.into_response();
+                }
+            }
+            Ok(None) => return ScimError::not_found("group not found").into_response(),
+            Err(e) => return from_identity_error(&e).into_response(),
+        }
+    }
 
     match state.identity.delete_organization(&auth.realm_id, &org_id) {
         Ok(()) => {

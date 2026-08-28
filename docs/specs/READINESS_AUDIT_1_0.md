@@ -40,7 +40,8 @@ However, it is **not yet a drop-in replacement** for Keycloak in enterprise LDAP
 | PKCE — S256 mandatory (RFC 7636) | ✅ |
 | OIDC Core 1.0 | ✅ |
 | OIDC Discovery 1.0 | ✅ |
-| Dynamic Client Registration (RFC 7591/7592) | ✅ |
+| Dynamic Client Registration — registration (RFC 7591) | ✅ |
+| Dynamic Client Registration — management (RFC 7592) | ❌ Roadmap |
 | Token Introspection (RFC 7662) | ✅ |
 | Token Revocation (RFC 7009) | ✅ |
 | Device Authorization Grant (RFC 8628) | ✅ |

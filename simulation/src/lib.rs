@@ -94,6 +94,12 @@ pub struct FaultConfig {
     /// counter is what lets a test pin *which* sync each path uses — rotation
     /// changes metadata beyond the file length and must stay a full `sync_all`.
     pub datasync_count: Arc<AtomicU64>,
+    /// If true, the next `rename` call will fail with an injected error.
+    pub fail_next_rename: Arc<AtomicBool>,
+    /// If true, the next `remove_file` call will fail with an injected error.
+    pub fail_next_remove_file: Arc<AtomicBool>,
+    /// If true, the next `sync_dir` call will fail with an injected error.
+    pub fail_next_sync_dir: Arc<AtomicBool>,
 }
 
 impl Default for FaultConfig {
@@ -111,6 +117,9 @@ impl Default for FaultConfig {
             latency_seed: Arc::new(AtomicU64::new(0)),
             sync_count: Arc::new(AtomicU64::new(0)),
             datasync_count: Arc::new(AtomicU64::new(0)),
+            fail_next_rename: Arc::new(AtomicBool::new(false)),
+            fail_next_remove_file: Arc::new(AtomicBool::new(false)),
+            fail_next_sync_dir: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -135,6 +144,21 @@ impl FaultConfig {
     /// Arms an immediate read failure on the next call.
     pub fn arm_read_failure(&self) {
         self.fail_next_read.store(true, Ordering::SeqCst);
+    }
+
+    /// Arms an immediate `rename` failure on the next call.
+    pub fn arm_rename_failure(&self) {
+        self.fail_next_rename.store(true, Ordering::SeqCst);
+    }
+
+    /// Arms an immediate `remove_file` failure on the next call.
+    pub fn arm_remove_file_failure(&self) {
+        self.fail_next_remove_file.store(true, Ordering::SeqCst);
+    }
+
+    /// Arms an immediate `sync_dir` failure on the next call.
+    pub fn arm_sync_dir_failure(&self) {
+        self.fail_next_sync_dir.store(true, Ordering::SeqCst);
     }
 
     /// Configures per-op latency injection.
@@ -163,6 +187,9 @@ impl FaultConfig {
         self.fail_next_write.store(false, Ordering::SeqCst);
         self.fail_next_sync.store(false, Ordering::SeqCst);
         self.fail_next_read.store(false, Ordering::SeqCst);
+        self.fail_next_rename.store(false, Ordering::SeqCst);
+        self.fail_next_remove_file.store(false, Ordering::SeqCst);
+        self.fail_next_sync_dir.store(false, Ordering::SeqCst);
         self.writes_before_failure.store(u64::MAX, Ordering::SeqCst);
         self.write_count.store(0, Ordering::SeqCst);
         self.clear_latency();
@@ -417,14 +444,30 @@ impl Fs for FaultFs {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if self.config.fail_next_remove_file.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("injected remove_file fault"));
+        }
         hearth::storage::RealFs.remove_file(path)
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        hearth::storage::RealFs.rename(from, to)
+        // Perform the real rename first so the filesystem change is durable.
+        // If armed: the rename committed to disk but we then return an error,
+        // simulating a crash that landed after the atomic rename committed but
+        // before any subsequent unlink could run (the C-4 post-rename window).
+        hearth::storage::RealFs.rename(from, to)?;
+        if self.config.fail_next_rename.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other(
+                "injected rename fault (post-rename crash simulation)",
+            ));
+        }
+        Ok(())
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        if self.config.fail_next_sync_dir.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("injected sync_dir fault"));
+        }
         // Record the invocation so durability tests can assert the parent
         // directory was fsync'd after a create/rename (HEA-1855), then delegate
         // to the real fsync so behaviour matches production.

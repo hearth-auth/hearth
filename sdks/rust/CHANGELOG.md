@@ -4,6 +4,13 @@ All notable changes to `hearth-rust` are documented here.
 
 ## [Unreleased]
 
+### Removed
+- **`AdminClient::create_realm` and `CreateRealmRequest`** — realms are provisioned
+  via `hearth.yaml` and reconciled at startup, not through the admin API. The
+  server returns `405 Method Not Allowed` for `POST /admin/realms`, so this method
+  never worked against a real server. Manage realms in `hearth.yaml` and restart
+  Hearth to apply changes; read them with `get_realm`/`list_realms` (HEA-2171).
+
 ### Added
 - **Mode-aware permission enforcement** (HEA-927): `HearthClient::check_permission(token, permission, mode, opts)`
   resolves permissions according to an explicit `AccessTokenAuthorization` mode —

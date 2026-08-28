@@ -4,14 +4,35 @@ use std::process::Command;
 const GENERATED_DIR: &str = "src/protocol/generated";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Allow CI to stamp the binary version from the release tag without
-    // modifying Cargo.toml.  When HEARTH_RELEASE_VERSION=1.0.0 is exported
-    // before `cargo build`, `hearth --version` reports 1.0.0 instead of the
-    // Cargo.toml placeholder (0.1.0).
+    // Version stamping — three-tier resolution (first match wins):
+    //
+    //   1. HEARTH_RELEASE_VERSION env var — set by release.yml from the git tag
+    //      (e.g. HEARTH_RELEASE_VERSION=1.6.9).  Used for official release builds.
+    //
+    //   2. `git describe --tags` — used for source/dev builds from a checkout that
+    //      has tags (e.g. full-history clone).  CI's quality job uses fetch-depth: 0
+    //      so this resolves in every `cargo nextest run` run there.  Output is either
+    //      "1.6.9" (clean tag) or "1.6.9-3-gabcde12" (commits ahead of tag).
+    //
+    //   3. Cargo.toml `version` field — last resort for shallow clones or offline
+    //      builds.  Must be kept close to the latest release so it is a useful
+    //      approximation rather than a stale placeholder.  Update it when cutting a
+    //      release (the .releaserc.json prepareCmd edits it during semantic-release,
+    //      but without @semantic-release/git the change is never committed back — so
+    //      it must also be updated manually as a release-checklist step).
+    //
+    // Tradeoff: tier 2 requires `git` on PATH and tags reachable from HEAD.
+    // Tier 1 is the only path that guarantees an exact match in every environment.
     if let Ok(v) = std::env::var("HEARTH_RELEASE_VERSION") {
+        println!("cargo:rustc-env=CARGO_PKG_VERSION={v}");
+    } else if let Some(v) = git_describe_version() {
         println!("cargo:rustc-env=CARGO_PKG_VERSION={v}");
     }
     println!("cargo:rerun-if-env-changed=HEARTH_RELEASE_VERSION");
+    // Rebuild when the checked-out tag or HEAD changes so `git describe` stays current.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/tags");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 
     compile_tailwind_if_available();
 
@@ -107,6 +128,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/");
     println!("cargo:rerun-if-changed=build.rs");
     Ok(())
+}
+
+/// Returns the version from `git describe --tags --match 'v[0-9]*'`,
+/// stripping the leading "v".
+///
+/// Returns `None` if git is unavailable, the repo has no matching tags, or
+/// the output does not start with `v` followed by a digit (e.g. a bare commit
+/// SHA from `--always` with no reachable tags).
+fn git_describe_version() -> Option<String> {
+    let output = Command::new("git")
+        .args(["describe", "--tags", "--match", "v[0-9]*", "--always"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let s = raw.trim();
+    // A plain commit SHA (40 hex chars) starts with a hex digit but not "v";
+    // reject it so we don't stamp a commit hash as the version string.
+    if s.starts_with('v') && s[1..].starts_with(|c: char| c.is_ascii_digit()) {
+        Some(s[1..].to_string())
+    } else {
+        None
+    }
 }
 
 /// Finds the standard protobuf WKT include directory.

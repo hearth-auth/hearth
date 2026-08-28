@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use crate::core::{Clock, OrganizationId, RealmId, Uri, UserId};
+use crate::core::{Clock, ImportOutcome, OrganizationId, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
 use crate::storage::{StorageEngine, StorageError};
 
@@ -1785,6 +1785,137 @@ impl RbacEngine for EmbeddedRbacEngine {
             out.push(assignment);
         }
         Ok(out)
+    }
+
+    // -------------------- Backup import helpers (HEA-2160) --------------------
+    //
+    // Each writes the primary record plus every secondary index the matching
+    // `create_*` path writes, preserving the record's own ID and all fields so
+    // a backup round-trip is faithful and referentially intact.
+
+    fn import_role(
+        &self,
+        realm_id: &RealmId,
+        role: &Role,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let role_key = keys::encode_role(&role.id);
+        let exists = self.storage.get(realm_id, &role_key)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let name_key = keys::encode_role_name(realm_id, &role.name);
+        self.write_put_batch(
+            realm_id,
+            &[
+                (role_key, Self::ser(role)?),
+                (name_key, Self::ser(&role.id)?),
+            ],
+        )?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn import_permission(
+        &self,
+        realm_id: &RealmId,
+        record: &PermissionRecord,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let key = keys::encode_permission(realm_id, record.name.as_str());
+        let exists = self.storage.get(realm_id, &key)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        self.write_put(realm_id, &key, &Self::ser(record)?)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn import_group(
+        &self,
+        realm_id: &RealmId,
+        group: &Group,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let group_key = keys::encode_group(&group.id);
+        let exists = self.storage.get(realm_id, &group_key)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let slug_key = keys::encode_group_slug(realm_id, &group.slug);
+        self.write_put_batch(
+            realm_id,
+            &[
+                (group_key, Self::ser(group)?),
+                (slug_key, Self::ser(&group.id)?),
+            ],
+        )?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn import_assignment(
+        &self,
+        realm_id: &RealmId,
+        assignment: &RoleAssignment,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let pri = keys::encode_assignment(&assignment.id);
+        let exists = self.storage.get(realm_id, &pri)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let subject_idx = match &assignment.subject {
+            Subject::User(u) => keys::encode_assign_user(u, &assignment.id),
+            Subject::Group(g) => keys::encode_assign_group(g, &assignment.id),
+        };
+        let role_idx = keys::encode_assign_role(&assignment.role_id, &assignment.id);
+        self.write_put_batch(
+            realm_id,
+            &[
+                (pri, Self::ser(assignment)?),
+                (subject_idx, Self::ser(&assignment.id)?),
+                (role_idx, Self::ser(&assignment.id)?),
+            ],
+        )?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn import_scope(
+        &self,
+        realm_id: &RealmId,
+        scope: &ScopeExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let key = keys::encode_scope(realm_id, &scope.name);
+        let exists = self.storage.get(realm_id, &key)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let stored = StoredScope {
+            name: scope.name.clone(),
+            permissions: scope.permissions.clone(),
+        };
+        self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
     }
 }
 

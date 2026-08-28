@@ -11,6 +11,10 @@
 #                                              src/, or benches/
 #   J) Runnable rustdoc fences in src/         (```rust / ```no_run / ```ignore
 #                                              / ```should_panic / ```compile_fail)
+#   K) Empty authz-field fixture — roles:, groups:, or org_groups: initialized
+#      to Vec::new() or vec![] in tests/ and simulation/. An empty-collection
+#      fixture makes every round-trip assertion on those fields vacuous.
+#      Root cause of incident C-1 (HEA-2150 / HEA-2158).
 #
 # WARNS (does not fail) on:
 #   I) #[ignore] whose message contains "not yet implemented" — these tend to rot.
@@ -19,6 +23,7 @@
 # preceding line, and include a non-empty reason after the colon):
 #   // AUDIT: justified-weak-assert: <reason>     (suppresses an A finding)
 #   // AUDIT: justified-sleep: <reason>           (suppresses an E finding)
+#   // AUDIT: justified-empty-fixture: <reason>   (suppresses a K finding)
 #
 # Scope note: src/ #[cfg(test)] inline modules are NOT yet scanned for A/E.
 # They were outside the HEA-565 audit scope; broaden the lint after a follow-up
@@ -126,6 +131,29 @@ scan_with_escape_hatch \
   "Unconditional sleep — prefer tokio::time::advance or condition polling" \
   "sleep" \
   '(std::thread::sleep|tokio::time::sleep)[(]' \
+  tests simulation
+
+# ---------------------------------------------------------------------------
+# Check K — Empty authz-field fixture in tests/ + simulation/.
+#
+# A struct literal where roles:, groups:, or org_groups: is initialized to
+# Vec::new() or vec![] makes every round-trip assertion on those fields
+# vacuous: vec![] == vec![] regardless of whether the implementation under
+# test discards, truncates, or preserves the field.
+#
+# This was the direct cause of incident C-1 (HEA-2150): the backup round-trip
+# test used empty roles/groups/org_groups fixtures, so the full test suite
+# stayed green while the importer silently dropped all authz state on restore.
+#
+# Fix: populate the fixture with at least one non-empty value, or — when the
+# test genuinely does not exercise authz state — suppress with:
+#   // AUDIT: justified-empty-fixture: <reason referencing the test's actual scope>
+# Audit cleanup: HEA-2158.
+# ---------------------------------------------------------------------------
+scan_with_escape_hatch \
+  "Empty authz-field fixture — roles/groups/org_groups must be non-empty in round-trip tests (HEA-2158 / C-1)" \
+  "empty-fixture" \
+  '^[[:space:]]+(roles|groups|org_groups):[[:space:]]+(Vec::new[(][)]|vec![[][]])' \
   tests simulation
 
 # ---------------------------------------------------------------------------

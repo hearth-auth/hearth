@@ -10,7 +10,7 @@ Every application needs authentication and authorization. No application wants t
 
 The current landscape forces teams into a miserable choice: pay a SaaS vendor $50K–$500K per year for a black box you don't control, or self-host a JVM behemoth that requires a dedicated team to keep running. Neither option is acceptable for the growing number of teams that need auth to be fast, reliable, self-hosted, and operationally simple.
 
-**Hearth is a purpose-built identity database.** It is not another auth server bolted onto Postgres. It is a single-binary, memory-safe, high-performance database designed from first principles for identity workloads: storing users, managing sessions, validating tokens, enforcing permissions, and federating identity across protocols. It ships as one binary. It runs on one port. It stores its own data. It clusters and self-heals without external coordination. It targets sub-millisecond p99 latency on the hot path — the same class of performance you expect from Redis, because auth is on the critical path of every request.
+**Hearth is a purpose-built identity database.** It is not another auth server bolted onto Postgres. It is a single-binary, memory-safe, high-performance database designed from first principles for identity workloads: storing users, managing sessions, validating tokens, enforcing permissions, and federating identity across protocols. It ships as one binary. It runs on one port. It stores its own data. Multi-node clustering via Raft is included but currently experimental (see §6.1). It targets sub-millisecond p99 latency on the hot path — the same class of performance you expect from Redis, because auth is on the critical path of every request.
 
 The strategic insight is simple: **auth is a database problem masquerading as an application problem.** Keycloak, Ory, Auth0, and every other solution in this space are applications layered on top of generic databases. They inherit all the operational complexity of those databases (backups, replication, connection pooling, schema migrations) and add their own complexity on top. A purpose-built identity database collapses this entire stack into a single, optimized system — the same way TigerBeetle collapsed the "application + Postgres" ledger stack into a purpose-built ledger database, and the same way ClickHouse collapsed the "application + generic RDBMS" analytics stack.
 
@@ -140,7 +140,7 @@ The critical differentiator is in the "Storage" column. Every competitor depends
 
 TigerBeetle's insight was that financial ledgers have specific invariants (double-entry accounting, strict serializability, no data loss ever) that generic databases can enforce only with significant application-level complexity. By building a database that understands ledger semantics natively, they achieved:
 
-- **100x performance improvement** over application-on-Postgres
+- **Large performance improvement** over application-on-Postgres (TigerBeetle's own published claim; Hearth's performance against Postgres is not currently benchmarked in-repo — see Section 7 for measured engine-plane figures)
 - **Operational simplicity** — single binary, no external dependencies
 - **Correctness by construction** — the database enforces ledger invariants that the application layer had to enforce manually
 
@@ -231,7 +231,7 @@ Adopting new infrastructure is risky. Hearth de-risks adoption by treating migra
 
 ### 6.1 Single-Binary Architecture
 
-Hearth compiles to a single statically-linked binary. Inside that binary are several logically distinct subsystems:
+Hearth compiles to a single binary (dynamically linked against the system C library; no external database or runtime required). Inside that binary are several logically distinct subsystems:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -284,9 +284,11 @@ See [`AUTHORIZATION.md`](../specs/AUTHORIZATION.md) for the full normative model
 - **Roles, groups, and role assignments**: small in number relative to users and sessions, read at token-issue time, mutated by admin actions. Stored as plain key-value records with forward and reverse indexes (user→assignments, role→members, group→members, member→groups) for efficient resolution.
 - **Audit log**: append-only, write-heavy, rarely read except for compliance queries. Stored in a sequential log structure, compacted to S3-compatible object storage for long-term retention.
 
-All data types except the audit log participate in a **hot/cold tiered storage model**. Recently accessed records are held in the hot tier (in-memory, memory-mapped structures) for sub-microsecond read access. Records that have not been accessed within the eviction window are demoted to the cold tier (on-disk SSTs) and transparently promoted back to the hot tier on next access. The hot tier is auto-sized based on available system memory, enabling a single node to manage far more total records than fit in RAM while maintaining sub-millisecond latency for the active working set. See Section 7.3.1 for capacity implications.
+All data types except the audit log participate in a **hot/cold tiered storage model**. Recently accessed records are held in the hot tier (in-process lock-free hash structures) for sub-microsecond read access. Records that have not been accessed within the eviction window are demoted to the cold tier (on-disk SSTs) and transparently promoted back to the hot tier on next access. The hot tier is auto-sized based on available system memory, enabling a single node to manage far more total records than fit in RAM while maintaining sub-millisecond latency for the active working set. See Section 7.3.1 for capacity implications.
 
-**Cluster Layer**: Raft-based consensus for multi-node deployments. Automatic leader election, log replication, and snapshot-based recovery. The cluster layer is designed to be invisible in single-node mode — no configuration, no port allocation, no ceremony. In cluster mode, it handles membership changes, node failure detection, and data rebalancing without manual intervention.
+**Cluster Layer** *(Experimental in 1.x)*: Raft-based consensus for multi-node deployments. Automatic leader election, log replication, and snapshot-based recovery. The cluster layer is designed to be invisible in single-node mode — no configuration, no port allocation, no ceremony.
+
+> **Note (Hearth 1.x):** Multi-node clustering is present but experimental. Known limitations: follower nodes do not invalidate RBAC or session caches on leader writes (C-5); cluster membership is set at bootstrap and cannot be changed without a full-cluster restart (C-6, `add_learner`/`change_membership` not implemented); writes to follower nodes return HTTP 500 rather than redirecting to the leader (H-3). These are tracked for resolution in the Wave 5 roadmap. The supported production deployment for Hearth 1.x is single-node. See [Clustering Guide](../guides/clustering.md) for the full list of current limitations.
 
 ### 6.2 Embedded vs. Server Modes
 
@@ -325,7 +327,7 @@ Hearth is written in Rust. This is a deliberate choice, not a trend-following on
 The hot path — the code that executes on every authenticated request — is the most performance-critical part of the system. It's designed with the following constraints:
 
 1. **Zero allocations**: all data structures used on the hot path are pre-allocated or arena-allocated. No heap allocation per request.
-2. **No syscalls for hot reads**: hot-tier data (active sessions, frequently-accessed user records) lives in memory-mapped structures. Hot-tier reads are pointer dereferences, not I/O operations. Cold-tier reads incur a disk I/O on first access; see Section 7.3.1.
+2. **No syscalls for hot reads**: hot-tier data (active sessions, frequently-accessed user records) lives in lock-free in-process hash structures (`ArcSwap<HashMap>`, `src/storage/tiered.rs`). Hot-tier reads are in-memory hash lookups, not I/O operations. Cold-tier reads (SST files) use `memmap2` and incur a disk I/O on first access; see Section 7.3.1.
 3. **Lock-free reads**: read operations use epoch-based reclamation or read-copy-update patterns. Readers never block on writers.
 4. **Batched writes**: mutations are batched and committed to the WAL in groups, amortizing the cost of fsync across multiple operations.
 5. **CPU-cache-friendly layouts**: data structures are designed for sequential memory access patterns where possible, minimizing cache misses on the hot path.
@@ -396,7 +398,7 @@ Identity workloads follow a heavy power-law distribution. A system managing 100M
 
 Hearth addresses this with a two-tier storage model:
 
-**Hot tier.** Recently accessed records live in memory-mapped, cache-line-aligned structures designed for sub-microsecond reads. This is the tier described in Section 6.4: zero allocations, no syscalls, lock-free reads. The hot tier holds the *working set* — the subset of data actively being accessed — not the entire dataset. For a system with 1M daily active users, the hot tier may hold ~1–2M user records plus all active sessions; role and group records (far fewer and smaller than user records) comfortably fit alongside.
+**Hot tier.** Recently accessed records live in lock-free in-process hash structures (`ArcSwap<HashMap>`) designed for sub-microsecond reads. This is the tier described in Section 6.4: zero allocations on the read path, no syscalls, lock-free reads. The hot tier holds the *working set* — the subset of data actively being accessed — not the entire dataset. For a system with 1M daily active users, the hot tier may hold ~1–2M user records plus all active sessions; role and group records (far fewer and smaller than user records) comfortably fit alongside.
 
 **Cold tier.** Records that have not been accessed within the eviction window are stored in on-disk sorted string tables (SSTs), fully durable and queryable. Cold-tier reads are not failures — they are normal, expected operations for low-frequency data. Target latencies: < 5 ms on NVMe storage, < 20 ms on spinning disk. The cold tier uses the same data format as the hot tier, so no deserialization or format conversion is needed on promotion — just a memory copy.
 
@@ -426,7 +428,7 @@ Hearth replaces this entire chain:
 App → Hearth
 ```
 
-With comparable or better latency on the hot path (session lookups, token validation), there is no need for a caching layer. The cache *is* the database. Sessions live in memory-mapped structures with WAL-backed durability. You get Redis-class read performance with database-class durability, in a single system that also handles the authentication and authorization logic.
+With comparable or better latency on the hot path (session lookups, token validation), there is no need for a caching layer. The cache *is* the database. Sessions live in purpose-built in-process hash structures with WAL-backed durability. You get Redis-class read performance with database-class durability, in a single system that also handles the authentication and authorization logic.
 
 And unlike Redis, which evicts data permanently when memory is exhausted, Hearth's tiered storage model gracefully spills cold records to disk. No data is lost. No cache invalidation logic is needed. The system transparently manages the boundary between what lives in memory and what lives on disk, based on real access patterns and available resources.
 
@@ -595,20 +597,22 @@ This path is not the only option. The project could remain community-funded and 
 
 **Goal**: Multi-node deployment suitable for production use by teams with significant scale.
 
-- Raft-based consensus and log replication
-- Automatic leader election and failover
-- Online membership changes (add/remove nodes without downtime)
-- Snapshot-based recovery
-- SAML 2.0 support (SP and IdP)
-- SCIM 2.0 provisioning
-- Auth0 and Clerk import tools
-- Python, Rust, and Java SDKs
-- Shadow mode for zero-downtime migration
-- Prometheus metrics and OpenTelemetry tracing
-- Helm chart and systemd service file
-- Security audit by a reputable third-party firm
+> **Status (Hearth 1.x):** Most Phase 2 items have shipped. Multi-node clustering is present but currently **experimental** — the exit criteria below have not been met. Known blockers: follower RBAC cache staleness (C-5), immutable cluster membership requiring full restart (C-6), and HTTP 500 on follower writes (H-3). These are tracked for Wave 5. Until they ship, the production deployment model is single-node.
 
-**Exit criteria**: A team can deploy a 3-node Hearth cluster, survive node failures without downtime, and migrate from Auth0 or Keycloak with zero user-facing impact. v1.0 is declared production-ready.
+- Raft-based consensus and log replication *(shipped, experimental)*
+- Automatic leader election and failover *(shipped, experimental)*
+- Online membership changes (add/remove nodes without downtime) *(not yet — C-6)*
+- Snapshot-based recovery *(shipped)*
+- SAML 2.0 support (SP and IdP) *(shipped)*
+- SCIM 2.0 provisioning *(shipped)*
+- Auth0 and Clerk import tools *(shipped)*
+- Python, Rust, and Java SDKs *(shipped)*
+- Shadow mode for zero-downtime migration *(not yet)*
+- Prometheus metrics and OpenTelemetry tracing *(shipped)*
+- Helm chart and systemd service file *(shipped)*
+- Security audit by a reputable third-party firm *(not yet)*
+
+**Exit criteria**: A team can deploy a 3-node Hearth cluster, survive node failures without downtime, and migrate from Auth0 or Keycloak with zero user-facing impact. v1.0 is declared production-ready. *(Not yet met for clustering.)*
 
 ### Phase 3: Scale and Ecosystem (v2.0+)
 

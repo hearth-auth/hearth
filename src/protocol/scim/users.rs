@@ -16,6 +16,7 @@ use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
 use crate::protocol::http::AppState;
 use crate::protocol::scim::auth::authenticate;
 use crate::protocol::scim::error::{from_identity_error, ScimError};
+use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
 use crate::protocol::scim::patch_apply::apply_user_patch;
 use crate::protocol::scim::types::{
@@ -74,6 +75,12 @@ fn user_to_scim(user: &User, external_id: Option<String>, base_path: &str) -> Sc
             version,
         }),
     }
+}
+
+/// Current ETag validator for a user — the weak form of its last-modified
+/// micros, matching the `meta.version` emitted in the resource body.
+fn user_version(user: &User) -> String {
+    format!("W/\"{}\"", user.updated_at().as_micros())
 }
 
 fn iso8601(micros: i64) -> String {
@@ -299,8 +306,9 @@ pub async fn get_user(
                 .get_scim_external_id(&auth.realm_id, &user_id)
                 .ok()
                 .flatten();
+            let version = user_version(&user);
             let scim = user_to_scim(&user, ext, "/scim/v2/Users");
-            Json(scim).into_response()
+            resource_response(&scim, &version)
         }
         Ok(None) => ScimError::not_found("user not found").into_response(),
         Err(e) => from_identity_error(&e).into_response(),
@@ -405,10 +413,17 @@ pub async fn replace_user(
 
     // Ensure user exists first so 404 comes from the existence check, not
     // from a field mismatch downstream.
-    match state.identity.get_user(&auth.realm_id, &user_id) {
-        Ok(Some(_)) => {}
+    let existing = match state.identity.get_user(&auth.realm_id, &user_id) {
+        Ok(Some(u)) => u,
         Ok(None) => return ScimError::not_found("user not found").into_response(),
         Err(e) => return from_identity_error(&e).into_response(),
+    };
+
+    // Optimistic concurrency: reject if the caller's `If-Match` validator is
+    // stale, so a replace built against an out-of-date copy fails loudly
+    // instead of silently clobbering a newer write (HEA-2172).
+    if let Err(e) = check_if_match(&headers, &user_version(&existing)) {
+        return e.into_response();
     }
 
     // SCIM provisioning tokens may not replace admin principals (HEA-2032).
@@ -482,7 +497,9 @@ pub async fn replace_user(
         .get_scim_external_id(&auth.realm_id, &user_id)
         .ok()
         .flatten();
-    Json(user_to_scim(&refreshed, ext, "/scim/v2/Users")).into_response()
+    let version = user_version(&refreshed);
+    let scim = user_to_scim(&refreshed, ext, "/scim/v2/Users");
+    resource_response(&scim, &version)
 }
 
 /// `PATCH /scim/v2/Users/{id}`
@@ -515,6 +532,12 @@ pub async fn patch_user(
         Ok(None) => return ScimError::not_found("user not found").into_response(),
         Err(e) => return from_identity_error(&e).into_response(),
     };
+
+    // Optimistic concurrency: reject a stale `If-Match` before mutating
+    // (HEA-2172).
+    if let Err(e) = check_if_match(&headers, &user_version(&existing)) {
+        return e.into_response();
+    }
 
     // SCIM provisioning tokens may not patch admin principals (HEA-2032).
     if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {
@@ -628,7 +651,9 @@ pub async fn patch_user(
         .get_scim_external_id(&auth.realm_id, &user_id)
         .ok()
         .flatten();
-    Json(user_to_scim(&refreshed, ext, "/scim/v2/Users")).into_response()
+    let version = user_version(&refreshed);
+    let scim = user_to_scim(&refreshed, ext, "/scim/v2/Users");
+    resource_response(&scim, &version)
 }
 
 /// `DELETE /scim/v2/Users/{id}`
@@ -645,6 +670,21 @@ pub async fn delete_user(
         return ScimError::not_found("user not found").into_response();
     };
     let user_id = UserId::new(uuid);
+
+    // Optimistic concurrency: when the caller supplies `If-Match`, reject a
+    // stale validator so a delete built against an out-of-date copy fails
+    // loudly (HEA-2172). Only pay the extra read when the header is present.
+    if headers.contains_key(axum::http::header::IF_MATCH) {
+        match state.identity.get_user(&auth.realm_id, &user_id) {
+            Ok(Some(user)) => {
+                if let Err(e) = check_if_match(&headers, &user_version(&user)) {
+                    return e.into_response();
+                }
+            }
+            Ok(None) => return ScimError::not_found("user not found").into_response(),
+            Err(e) => return from_identity_error(&e).into_response(),
+        }
+    }
 
     // SCIM provisioning tokens may not delete admin principals (HEA-2032).
     if auth.is_scim_token && is_admin_principal(&state, &auth.realm_id, &user_id) {

@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.9](https://img.shields.io/badge/status-v1.6.9-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v1.6.10](https://img.shields.io/badge/status-v1.6.10-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -8,17 +8,17 @@ Every other identity provider is an application sitting on top of a generic data
 
 ---
 
-**Sub-millisecond p99 · One binary · Zero external dependencies**
+**Sub-millisecond p99 (engine plane) · One binary · Zero external dependencies**
 
-Token validation, session lookup, and permission checks run in-process against memory-mapped structures — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single static binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
+Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (`ArcSwap<HashMap>`) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Stable 1.6.9:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+> **Stable 1.6.10:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 
 ---
 
 ## Install
 
-Download pre-built v1.6.9 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.9), or use Docker or Helm.
+Download pre-built v1.6.10 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.10), or use Docker or Helm.
 
 ### Released binary — Linux / macOS
 
@@ -28,8 +28,8 @@ Download pre-built v1.6.9 artifacts from the [Releases page](https://github.com/
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.9/${ARTIFACT}"
-curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.9/SHA256SUMS
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/${ARTIFACT}"
+curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS
 
 # Verify the checksum
 sha256sum -c SHA256SUMS --ignore-missing
@@ -42,10 +42,10 @@ chmod +x "${ARTIFACT}"
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.9/hearth-windows-amd64.exe" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.9/SHA256SUMS" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS" `
   -OutFile SHA256SUMS
 
 # Verify the checksum
@@ -59,10 +59,10 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
 ```bash
-docker pull ghcr.io/hearth-auth/hearth:v1.6.9
+docker pull ghcr.io/hearth-auth/hearth:v1.6.10
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
-docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.9 serve --dev
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v1.6.10 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
@@ -72,7 +72,7 @@ curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 
 ```bash
 helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
-  --version 1.6.9 \
+  --version 1.6.10 \
   --namespace auth \
   --create-namespace
 ```
@@ -84,7 +84,7 @@ cosign verify \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/hearth-auth/charts/hearth:1.6.9
+  ghcr.io/hearth-auth/charts/hearth:1.6.10
 ```
 
 For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
@@ -96,7 +96,7 @@ For signature and SLSA provenance verification of binaries, see [docs/guides/ver
 ```bash
 cargo build --release
 ./target/release/hearth serve --dev          # in-memory store, binds 127.0.0.1:8420
-curl -fsS http://127.0.0.1:8420/health       # → {"status":"ok"}
+curl -fsS http://127.0.0.1:8420/readyz       # → {"status":"ready","storage":"ok"}
 curl -X POST http://127.0.0.1:8420/admin/bootstrap | jq .
 ```
 
@@ -138,7 +138,7 @@ A generic database has to serve every workload; an identity engine only has to s
 - **Roles, groups, and role assignments** — adjacency-list indexes that resolve in a single pass at token-issue time; effective permissions are baked into the JWT.
 - **Audit log** — append-only with a SHA-256 hash chain per realm.
 
-A **hot/cold tier** serves the working set from memory-mapped, cache-line-aligned structures and transparently demotes inactive records to on-disk SSTs, so a single node can manage datasets far larger than RAM without paying for it on every request.
+A **hot/cold tier** holds the active working set in a lock-free in-process hash structure and transparently demotes inactive records to on-disk SSTs, so a single node can manage datasets larger than RAM while serving the active working set from memory. RAM grows sub-linearly with corpus — measured log-log exponent 0.8778 above the block-cache saturation point, not O(1) (see [Performance](#performance)).
 
 ### In-JWT authorization, not a network hop
 
@@ -172,7 +172,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 - Cascading deletion across users, sessions, credentials, OAuth clients, role assignments, device codes, signing keys
 
 **Protocols**
-- OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591 / 7592)
+- OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591; RFC 7592 management endpoints are roadmap)
 - Token Introspection (RFC 7662), Revocation (RFC 7009), RP-initiated logout
 - SAML 2.0 (SP-initiated and IdP-initiated)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
@@ -181,7 +181,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 - REST/JSON over HTTP/1.1 and HTTP/2
 
 **Operations**
-- Single static binary
+- Single binary (dynamically linked; no external runtime or database dependency)
 - Embedded WAL + memtable + SST storage with hot/cold tiering
 - TLS 1.3 + mTLS, SIGHUP cert hot-reload, HTTP→HTTPS redirect
 - Audit log with SHA-256 hash chain and per-realm integrity verification
@@ -207,7 +207,7 @@ Do not place engine figures beside competitor HTTP figures — that is a categor
 
 ### Hot path (engine plane)
 
-All engine-plane figures are HEAD-verified at `1b6b7745`. Published values are conservative: where re-verification measured better than the prior report, the older lower figure is used.
+All engine-plane figures were measured on `dev-ryzen-7840hs` as of 2026-07-29; full methodology, raw artifacts, and per-figure notes: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md). Published values are conservative: where re-verification measured better than the prior report, the older lower figure is used. A re-verification pass against a current HEAD SHA is pending.
 
 | Operation | p50 latency | Throughput | Plane |
 |---|---|---|---|
@@ -265,7 +265,9 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (135/135 scenarios) complete. **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
+
+> **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — `docs/specs/TEST_SCENARIOS.md` §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
 
 ---
 
@@ -294,7 +296,7 @@ Dev mode uses in-memory storage in a temp directory, `debug` logging, `fsync` di
 ### 3. Verify
 
 ```bash
-curl -fsS http://127.0.0.1:8420/health
+curl -fsS http://127.0.0.1:8420/readyz
 curl -fsS http://127.0.0.1:8420/.well-known/openid-configuration | head
 ```
 
@@ -1016,12 +1018,12 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 | Protocol | `src/protocol/` | Stateless wire adapters (REST, gRPC, OIDC, SAML, SCIM). |
 | Identity | `src/identity/` | Users, credentials, sessions, realms, tokens. |
 | RBAC | `src/rbac/` | Roles, groups, assignments, permission resolution into JWT claims. |
-| Cluster | `src/cluster/` | Raft consensus (`openraft`). Invisible in single-node mode. |
+| Cluster | `src/cluster/` | Raft consensus (`openraft`). Invisible in single-node mode. **Experimental in 1.x — not production-supported.** |
 | Storage | `src/storage/` | WAL, memtable, SSTs, tiered storage. Leaf layer. |
 
 Dependencies flow strictly downward; `identity/` is the only layer allowed to call `rbac/` (to resolve permissions at token-issue time).
 
-**Guides:** [Getting Started](docs/guides/getting-started.md) · [Concepts](docs/guides/concepts.md) · [RBAC](docs/guides/rbac.md) · [Federation & Social Login](docs/guides/federation.md) · [SCIM Provisioning](docs/guides/scim-provisioning.md) · [Webhooks](docs/guides/webhooks.md) · [Organizations](docs/guides/organizations.md) · [Client-Scoped Roles](docs/guides/client-scoped-roles.md) · [Clustering & HA](docs/guides/clustering.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [Migrating from Keycloak](docs/guides/migrating-from-keycloak.md) · [Migrating from Auth0](docs/guides/migrating-from-auth0.md)
+**Guides:** [Getting Started](docs/guides/getting-started.md) · [Concepts](docs/guides/concepts.md) · [RBAC](docs/guides/rbac.md) · [Federation & Social Login](docs/guides/federation.md) · [SCIM Provisioning](docs/guides/scim-provisioning.md) · [Webhooks](docs/guides/webhooks.md) · [Organizations](docs/guides/organizations.md) · [Client-Scoped Roles](docs/guides/client-scoped-roles.md) · [Clustering (Experimental)](docs/guides/clustering.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [Migrating from Keycloak](docs/guides/migrating-from-keycloak.md) · [Migrating from Auth0](docs/guides/migrating-from-auth0.md)
 
 ---
 

@@ -496,6 +496,186 @@ async fn groups_patch_renames_group_and_adds_member() {
     assert!(member_ids.contains(&u2_id.as_str()), "new member added");
 }
 
+// ===== Optimistic concurrency (If-Match, HEA-2172) =====
+
+/// Provisions a user and returns `(id, etag)` read from the create response.
+async fn create_user_with_etag(rig: &Rig, realm: &RealmId, token: &str) -> (String, String) {
+    let post = scim_request("POST", "/scim/v2/Users", realm, token)
+        .body(Body::from(
+            json!({
+                "userName": "concurrent@example.com",
+                "name": {"givenName": "Con", "familyName": "Current"},
+                "active": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = rig.app.clone().oneshot(post).await.expect("create");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .expect("etag header on create")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    (json["id"].as_str().unwrap().to_string(), etag)
+}
+
+#[tokio::test]
+async fn users_get_returns_etag_header() {
+    let rig = build_rig();
+    let (realm, token) = setup_admin(&rig);
+    let (id, _) = create_user_with_etag(&rig, &realm, &token).await;
+
+    let get = scim_request("GET", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rig.app.clone().oneshot(get).await.expect("get");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get("etag").is_some(),
+        "GET must carry an ETag for the client's next conditional write"
+    );
+}
+
+#[tokio::test]
+async fn users_put_with_stale_if_match_is_412() {
+    let rig = build_rig();
+    let (realm, token) = setup_admin(&rig);
+    let (id, _) = create_user_with_etag(&rig, &realm, &token).await;
+
+    // A validator that can never match the resource's current version.
+    let put = scim_request("PUT", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .header("if-match", "W/\"1\"")
+        .body(Body::from(
+            json!({
+                "userName": "concurrent@example.com",
+                "name": {"givenName": "Con", "familyName": "Renamed"},
+                "active": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, body) = send(&rig.app, put).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body["status"], "412");
+    assert_eq!(
+        body["schemas"][0],
+        "urn:ietf:params:scim:api:messages:2.0:Error"
+    );
+
+    // The stale write must not have taken effect.
+    let get = scim_request("GET", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .body(Body::empty())
+        .unwrap();
+    let (_, after) = send(&rig.app, get).await;
+    assert_eq!(after["name"]["familyName"], "Current");
+}
+
+#[tokio::test]
+async fn users_put_with_current_if_match_succeeds() {
+    let rig = build_rig();
+    let (realm, token) = setup_admin(&rig);
+    let (id, etag) = create_user_with_etag(&rig, &realm, &token).await;
+
+    let put = scim_request("PUT", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .header("if-match", &etag)
+        .body(Body::from(
+            json!({
+                "userName": "concurrent@example.com",
+                "name": {"givenName": "Con", "familyName": "Renamed"},
+                "active": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, body) = send(&rig.app, put).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"]["familyName"], "Renamed");
+}
+
+#[tokio::test]
+async fn users_patch_with_stale_if_match_is_412() {
+    let rig = build_rig();
+    let (realm, token) = setup_admin(&rig);
+    let (id, _) = create_user_with_etag(&rig, &realm, &token).await;
+
+    let patch = scim_request("PATCH", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .header("if-match", "W/\"1\"")
+        .body(Body::from(
+            json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": "replace", "path": "active", "value": false}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, _) = send(&rig.app, patch).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+}
+
+#[tokio::test]
+async fn users_delete_with_stale_if_match_is_412_then_current_succeeds() {
+    let rig = build_rig();
+    let (realm, token) = setup_admin(&rig);
+    let (id, etag) = create_user_with_etag(&rig, &realm, &token).await;
+
+    // Stale validator → 412, resource still present.
+    let del_stale = scim_request("DELETE", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .header("if-match", "W/\"1\"")
+        .body(Body::empty())
+        .unwrap();
+    let resp = rig.app.clone().oneshot(del_stale).await.expect("delete");
+    assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+
+    // Current validator → 204.
+    let del_ok = scim_request("DELETE", &format!("/scim/v2/Users/{id}"), &realm, &token)
+        .header("if-match", &etag)
+        .body(Body::empty())
+        .unwrap();
+    let resp = rig.app.clone().oneshot(del_ok).await.expect("delete");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn groups_put_with_stale_if_match_is_412() {
+    let rig = build_rig();
+    let (realm, token) = setup_admin(&rig);
+    let gpost = scim_request("POST", "/scim/v2/Groups", &realm, &token)
+        .body(Body::from(
+            json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+                "displayName": "Concurrent"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, gbody) = send(&rig.app, gpost).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let group_id = gbody["id"].as_str().unwrap();
+
+    let put = scim_request(
+        "PUT",
+        &format!("/scim/v2/Groups/{group_id}"),
+        &realm,
+        &token,
+    )
+    .header("if-match", "W/\"1\"")
+    .body(Body::from(
+        json!({
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+            "displayName": "Renamed"
+        })
+        .to_string(),
+    ))
+    .unwrap();
+    let (status, _) = send(&rig.app, put).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+}
+
 // ===== Auth =====
 
 #[tokio::test]

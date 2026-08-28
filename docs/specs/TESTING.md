@@ -567,6 +567,48 @@ async fn server_mode_crud() { ... }
 
 ---
 
+### K — Empty-Collection Round-Trip Fixture
+
+**MUST NOT** construct a struct fixture with semantically significant authorization fields (`roles`, `groups`, `org_groups`) initialized to empty collections when that struct participates in a round-trip or backup/restore test. An empty-collection fixture makes every round-trip assertion on those fields vacuous: `vec![] == vec![]` holds whether the implementation preserves the field, truncates it, or discards it entirely.
+
+This is the same family as the existing vacuous-`is_ok()` rule (category A). The generalisation: *an assertion whose fixture cannot distinguish pass from fail is not a test.*
+
+```rust
+// Wrong: TokenClaims with empty roles/groups/org_groups in a backup round-trip test.
+// If the importer drops all authz state, verified_claims.roles is still [] — the test
+// cannot distinguish a working importer from one that silently destroys authz state.
+let claims = TokenClaims {
+    roles: Vec::new(),       // ← vacuous fixture
+    groups: Vec::new(),      // ← vacuous fixture
+    org_groups: Vec::new(),  // ← vacuous fixture
+    ..
+};
+// … export, restore … //
+assert_eq!(verified_claims.roles, vec![]); // passes even if importer dropped all roles
+
+// Right: populate each authz field so the round-trip assertion can actually fail.
+let claims = TokenClaims {
+    roles: vec!["docs.publisher".to_string()],
+    groups: vec!["editors".to_string()],
+    org_groups: vec!["acme/editors".to_string()],
+    ..
+};
+// … export, restore … //
+assert_eq!(verified_claims.roles, vec!["docs.publisher".to_string()],
+           "roles must survive backup/restore");
+```
+
+When a test genuinely does not need non-empty authz fields — for example, a signing-key continuity test that exercises the JWT signature path only — annotate each empty field with the escape hatch:
+
+```rust
+// AUDIT: justified-empty-fixture: JWT fixture for signing-key continuity test; RBAC state is covered by roundtrip_restores_full_authorization_model (HEA-2160)
+roles: Vec::new(),
+```
+
+Root cause of incident C-1 ([HEA-2150](/HEA/issues/HEA-2150)): the backup round-trip test used empty `roles`, `groups`, and `org_groups` fixtures, so the test suite remained green while the importer silently dropped every authorization entity on restore.
+
+---
+
 ### CI enforcement (`scripts/check-test-quality.sh`)
 
 A grep-based linter prevents re-introduction of the mechanical anti-patterns documented in this section. It runs as part of `make check`, `make ci-fast`, and the `check` job in `.github/workflows/ci.yml`, so a PR that introduces a banned pattern fails CI with a clear error message.
@@ -578,6 +620,7 @@ A grep-based linter prevents re-introduction of the mechanical anti-patterns doc
 | A | `assert!(<expr>.is_ok())` or `assert!(<expr>.is_err())` | `tests/`, `simulation/` | HEA-567 |
 | E | `std::thread::sleep(…)` or `tokio::time::sleep(…)`       | `tests/`, `simulation/` | HEA-569 |
 | I | `#[ignore = "…"]` whose message lacks an `HEA-####` tracking issue | `tests/`, `simulation/`, `src/`, `benches/` | HEA-568 |
+| K | `roles:`, `groups:`, or `org_groups:` field initialized to `Vec::new()` or `vec![]` in a test struct literal | `tests/`, `simulation/` | HEA-2158 |
 
 **Warn-only (does not fail):**
 
@@ -594,6 +637,7 @@ std::thread::sleep(Duration::from_millis(50));
 |--------|-----------|
 | `// AUDIT: justified-weak-assert: <reason>` | A — weak `is_ok()` / `is_err()` |
 | `// AUDIT: justified-sleep: <reason>`        | E — wall-clock sleep            |
+| `// AUDIT: justified-empty-fixture: <reason>` | K — empty authz-field fixture   |
 
 **Scope note** — `src/` `#[cfg(test)]` inline modules are intentionally NOT scanned for A/E. They were outside the [HEA-565](/HEA/issues/HEA-565) audit scope; broaden the lint after a follow-up audit, otherwise CI would fail on unaudited pre-existing patterns. Category I is scanned everywhere because the codebase has zero `#[ignore]` markers today, so no allow-list management is needed.
 

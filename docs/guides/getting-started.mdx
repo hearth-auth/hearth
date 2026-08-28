@@ -35,8 +35,8 @@ docker run --rm --network=host ghcr.io/hearth-auth/hearth:latest serve --dev
 Confirm it is up:
 
 ```bash
-curl -fsS http://127.0.0.1:8420/health
-# → {"status":"ok"}
+curl -fsS http://127.0.0.1:8420/readyz
+# → {"status":"ready","storage":"ok"}
 ```
 
 :::tip[Production deployment]

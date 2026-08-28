@@ -17,7 +17,8 @@ Hearth implements OpenID Connect Core 1.0 and the following related specificatio
 |---------------|--------|
 | OpenID Connect Core 1.0 | MUST |
 | OpenID Connect Discovery 1.0 | MUST |
-| OpenID Connect Dynamic Registration 1.0 (RFC 7591 / 7592) | MUST |
+| OpenID Connect Dynamic Registration 1.0 — registration (RFC 7591) | MUST |
+| OpenID Connect Dynamic Registration 1.0 — management (RFC 7592) | ROADMAP — not implemented |
 | OAuth 2.0 (RFC 6749) | MUST |
 | OAuth 2.0 PKCE (RFC 7636) | MUST — S256 only |
 | OAuth 2.0 Token Introspection (RFC 7662) | MUST |

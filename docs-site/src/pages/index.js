@@ -418,7 +418,7 @@ const FEATURES = [
   {
     tag: 'Performance',
     title: 'Sub-millisecond hot path',
-    desc: 'validate_token, lookup_session, and lookup_user serve from memory-mapped structures with zero heap allocations and no lock contention.',
+    desc: 'validate_token, lookup_session, and lookup_user serve from a lock-free in-process hash structure (ArcSwap<HashMap>) with zero per-request heap allocations and no lock contention.',
   },
   {
     tag: 'Standards',
@@ -443,7 +443,7 @@ const FEATURES = [
   {
     tag: 'Operations',
     title: 'Single binary, no deps',
-    desc: 'Embedded WAL storage engine. No Postgres, no Redis, no sidecar. Raft clustering for HA. Ships as one statically-linked binary.',
+    desc: 'Embedded WAL storage engine. No Postgres, no Redis, no sidecar. Raft clustering for HA. Ships as one binary — no external runtime required.',
   },
 ];
 

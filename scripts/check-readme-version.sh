@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/check-readme-version.sh — CI guard: README install references must match the latest git tag.
+# scripts/check-readme-version.sh — CI guard: README install references must match the latest published binary release.
 #
-# Tracks: HEA-2116. Ensures a release cannot ship with stale version pins in the
+# Tracks: HEA-2116 / HEA-2199. Ensures a release cannot ship with stale version pins in the
 # install section of README.md. The patterns checked are:
 #
 #   • GitHub Releases URLs:  /releases/tag/vX.Y.Z  and  /releases/download/vX.Y.Z/
@@ -15,14 +15,16 @@
 # Install line has both prose and a Releases URL). Filtering whole lines would
 # let a half-updated line pass, so each matched pin is checked on its own.
 #
-# The latest tag is the highest semver tag in the local repo (vX.Y.Z). The check
-# requires `git tag` history to be present — CI checkouts must use `fetch-depth: 0`.
+# The reference version is the highest semver GitHub Release whose tag does NOT carry
+# an SDK prefix (e.g. sdk-ts-v1.6.10 is excluded; v1.6.9 is included). This means
+# a git tag pushed without a corresponding binary release does NOT advance the guard —
+# preventing the trap where obeying the guard would publish 404 install docs (HEA-2199).
 #
 # Usage: scripts/check-readme-version.sh
 # Env (test hooks only — unset in CI):
-#   README_PATH        path to the file to check          (default: README.md)
-#   README_LATEST_TAG  override the resolved release tag  (default: highest local semver tag)
-# Exit:  0 if all references match the latest tag, 1 otherwise.
+#   README_PATH        path to the file to check               (default: README.md)
+#   README_LATEST_TAG  override the resolved release tag  (default: latest published binary release)
+# Exit:  0 if all references match the latest published release, 1 otherwise.
 
 set -euo pipefail
 
@@ -33,18 +35,38 @@ if [[ ! -f "$README" ]]; then
     exit 1
 fi
 
-# Resolve the latest semver tag (e.g. v1.6.6).
-LATEST_TAG="${README_LATEST_TAG:-$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)}"
+# Resolve the latest published binary release (e.g. v1.6.9).
+# Uses `gh release list` and excludes SDK-prefixed releases (sdk-ts-*, sdk-rust-*, etc.)
+# so a git tag pushed without binary artifacts does not advance the guard (HEA-2199).
+#
+# GH_TOKEN must be set in CI so `gh` can authenticate. An unauthenticated call fails
+# loudly here — no exit-0 skip branch; an unresolvable release is always a hard error
+# (HEA-2203).
+if [[ -n "${README_LATEST_TAG:-}" ]]; then
+    LATEST_TAG="$README_LATEST_TAG"
+else
+    _gh_err="$(mktemp)"
+    trap 'rm -f "$_gh_err"' EXIT
+    if ! _gh_list="$(gh release list --limit 100 2>"$_gh_err")"; then
+        echo "ERROR: gh release list failed — ensure GH_TOKEN is set in CI (HEA-2203)."
+        [[ -s "$_gh_err" ]] && sed 's/^/  /' "$_gh_err"
+        exit 1
+    fi
+    LATEST_TAG="$(printf '%s\n' "$_gh_list" \
+        | awk -F'\t' '{print $1}' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -V | tail -1 || true)"
+fi
 if [[ -z "$LATEST_TAG" ]]; then
-    echo "ERROR: no semver tags found in this repo (git tag returned nothing matching v[0-9]+.[0-9]+.[0-9]+)."
-    echo "       CI must use fetch-depth: 0 so tags are available."
+    echo "ERROR: no published binary release found (gh release list returned nothing matching v[0-9]+.[0-9]+.[0-9]+)."
+    echo "       SDK-prefixed releases (sdk-ts-*, etc.) are excluded by design."
     exit 1
 fi
 
 # Bare version string without the leading 'v' (e.g. 1.6.6).
 LATEST_BARE="${LATEST_TAG#v}"
 
-echo "Latest release tag: ${LATEST_TAG}  (bare: ${LATEST_BARE})"
+echo "Latest published binary release: ${LATEST_TAG}  (bare: ${LATEST_BARE})"
 
 # ── Patterns to check ────────────────────────────────────────────────────────
 #
@@ -89,12 +111,13 @@ done
 echo ""
 if [[ "$stale" -eq 1 ]]; then
     echo "ERROR: ${README} contains install-instruction version references that do not match the"
-    echo "       latest release tag (${LATEST_TAG})."
+    echo "       latest published binary release (${LATEST_TAG})."
     echo ""
     echo "  Update each STALE pin listed above so it references ${LATEST_TAG} / ${LATEST_BARE}."
     echo "  Do NOT edit Cargo.toml version — semantic-release owns that field."
+    echo "  Note: the guard keys off published binary releases, not git tags."
     exit 1
 fi
 
-echo "OK: all ${README} install-instruction version references match ${LATEST_TAG}."
+echo "OK: all ${README} install-instruction version references match the latest published binary release (${LATEST_TAG})."
 exit 0

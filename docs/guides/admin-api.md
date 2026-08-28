@@ -525,6 +525,105 @@ or
 
 ---
 
+## Realms
+
+Realms are the top-level tenancy boundary in Hearth. They are **not created or modified through the Admin API** — they are declared in `hearth.yaml` and reconciled at startup. `POST /admin/realms` and `PATCH /admin/realms/{id}` both return `405 Method Not Allowed` with a message directing you to `hearth.yaml`.
+
+To provision a realm:
+
+1. Add an entry under `realms:` in `hearth.yaml`.
+2. Restart Hearth (or send `SIGHUP` for a hot reload). The reconciler creates the realm on first startup.
+3. To suspend a realm, change its `status:` key to `suspended` in `hearth.yaml` and reload.
+4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
+
+→ See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
+
+**Authentication:** Realm admin endpoints require the `hearth.realm.admin` permission, which is held by the system token (returned by `POST /admin/bootstrap` as `system_access_token`). A per-realm admin token cannot list or delete realms — use the system token with `X-Realm-ID: <system_realm_id>`.
+
+### List realms
+
+```
+GET /admin/realms?limit=N&cursor=C
+```
+
+Returns a page of realm records.
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms | jq .
+```
+
+**Response:**
+
+```json
+{
+  "items": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "my-realm",
+      "status": "REALM_STATUS_ACTIVE",
+      "config": {},
+      "created_at": "1720000000000000",
+      "updated_at": "1720000000000000"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string (UUID) | Realm identifier |
+| `name` | string | Realm slug (URL-safe name used in `/realms/{name}/…` routes) |
+| `status` | string | `"REALM_STATUS_ACTIVE"` or `"REALM_STATUS_SUSPENDED"`. Archived and in-progress-deletion realms also appear as `"REALM_STATUS_SUSPENDED"` — the internal archived state is tracked server-side only. |
+| `config` | object | Per-realm overrides (session TTL, Argon2 cost). Empty object means server defaults apply. |
+| `created_at` / `updated_at` | string (int64 microseconds) | Unix epoch in microseconds |
+
+### Get realm
+
+```
+GET /admin/realms/{realm_id}
+```
+
+Returns a single realm by UUID. The `{realm_id}` must be a UUID; slugs are not accepted here.
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms/550e8400-e29b-41d4-a716-446655440000 | jq .
+```
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Realm found — body is a single Realm object |
+| `404` | Realm not found |
+
+### Delete realm
+
+```
+DELETE /admin/realms/{realm_id}
+```
+
+**Only archived realms can be permanently deleted.** Active or suspended realms must first be removed from `hearth.yaml` and the server restarted; the reconciler archives them. Then call this endpoint to purge the data.
+
+```bash
+curl -s -X DELETE \
+  -H "Authorization: Bearer $SYSTEM_TOKEN" \
+  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
+  http://127.0.0.1:8420/admin/realms/550e8400-e29b-41d4-a716-446655440000
+```
+
+| Status | Meaning |
+|--------|---------|
+| `204` | Realm permanently deleted |
+| `404` | Realm not found |
+| `409` | Realm is not archived — remove it from `hearth.yaml` and restart first |
+
+---
+
 ## Identity Providers (Federation)
 
 Federation connectors (Google, GitHub, Microsoft, Apple, generic OIDC, SAML) are **not managed through the Admin API or Admin UI**. They are declared in `hearth.yaml` and reconciled at startup.

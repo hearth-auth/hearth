@@ -265,10 +265,9 @@ admin.updateUser(user.id, UpdateUserRequest(status = "suspended"))
 admin.deleteUser(user.id)
 val page  = admin.listUsers(limit = 50)
 
-// Realms
-val realm = admin.createRealm(CreateRealmRequest("my-realm"))
-admin.updateRealm(realm.id, UpdateRealmRequest(name = "production"))
-admin.deleteRealm(realm.id)
+// Realms are provisioned via hearth.yaml, not the admin API — there is no
+// createRealm() (the server returns 405). Only read paths are exposed.
+val realm = admin.getRealm("<realm-id>")
 
 // OAuth client registration
 val oauthClient = admin.registerClient(

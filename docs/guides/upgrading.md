@@ -93,7 +93,7 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    sudo systemctl stop hearth
    ```
 
-   Wait for the service to reach the `inactive` state before continuing:
+   `systemctl stop` sends SIGTERM. Hearth catches SIGTERM and drains in-flight HTTP and gRPC requests before exiting cleanly (controlled by `operational.shutdown_timeout_secs`, default 10 s). Wait for the service to reach the `inactive` state before continuing:
 
    ```bash
    sudo systemctl is-active hearth
@@ -118,13 +118,13 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    sudo systemctl start hearth
    ```
 
-4. **Confirm it is healthy.**
+4. **Confirm it is ready.**
 
    ```bash
    sudo systemctl is-active hearth
    # → active
-   curl -fsS http://localhost:8420/health
-   # → {"status":"ok"}
+   curl -fsS http://localhost:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    ```
 
    Check the journal for startup errors or warnings:
@@ -165,8 +165,8 @@ This procedure replaces the binary while the service is managed by systemd. Tota
 
    ```bash
    docker compose -f deploy/docker-compose.yml ps
-   curl -fsS http://localhost:8420/health
-   # → {"status":"ok"}
+   curl -fsS http://localhost:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    ```
 
 ---
@@ -205,8 +205,8 @@ The Hearth Helm chart uses `strategy.type: Recreate` in its Deployment. This mea
    ```bash
    kubectl get pods -n hearth
    kubectl port-forward -n hearth svc/hearth 8420:8420 &
-   curl -fsS http://127.0.0.1:8420/health
-   # → {"status":"ok"}
+   curl -fsS http://127.0.0.1:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    kill %1
    ```
 
@@ -225,12 +225,26 @@ The Hearth Helm chart uses `strategy.type: Recreate` in its Deployment. This mea
 
 Run these checks immediately after bringing the new binary up, regardless of deployment method.
 
-- [ ] **Health endpoint responds.**
+- [ ] **Readiness endpoint responds.**
 
   ```bash
-  curl -fsS http://localhost:8420/health
-  # → {"status":"ok"}
+  curl -fsS http://localhost:8420/readyz
+  # → {"status":"ready","storage":"ok"}
   ```
+
+  `/readyz` confirms both that the process is alive and that the storage engine completed
+  WAL replay and is accepting requests. A `503` here means storage is still recovering —
+  wait and retry before directing traffic to this instance.
+
+  For Kubernetes probes use the purpose-specific endpoints:
+
+  | Endpoint | Purpose | Kubernetes probe type |
+  |----------|----------|-----------------------|
+  | `/health` | Process liveness — always 200 if the binary is running | `livenessProbe` |
+  | `/healthz` | Same as `/health` (alias) | `livenessProbe` |
+  | `/readyz` | Readiness — verifies storage is responsive; fails until WAL replay completes | `readinessProbe` |
+
+  The Helm chart already routes these correctly. If you are writing your own Kubernetes manifests, configure `/health` or `/healthz` as the liveness probe and `/readyz` as the readiness probe.
 
 - [ ] **OIDC discovery documents are served for all realms.** Replace `<realm>` with each realm name in your deployment:
 
@@ -327,7 +341,8 @@ Older binaries cannot read WAL files written by newer binaries. To roll back:
 
    ```bash
    sudo systemctl start hearth
-   curl -fsS http://localhost:8420/health
+   curl -fsS http://localhost:8420/readyz
+   # → {"status":"ready","storage":"ok"}
    ```
 
 6. **Reconcile writes made since the upgrade.** Any writes that occurred between the upgrade and the rollback will be missing from the restored data directory. Cross-reference your application's own request logs for the window between upgrade time and rollback time and replay them via the admin API if needed.
@@ -390,6 +405,31 @@ All config structs now carry `#[serde(deny_unknown_fields)]`. Previously, a miss
 | `realms[].display_name` (realm-level key) | Remove — not a supported top-level realm key |
 
 The `metrics.bearer_token` rename is particularly important: operators who had `security.bearer_token` set believed `/metrics` was protected. It was not. After the rename, set the correct key under `metrics:` and verify the endpoint requires authentication.
+
+#### Production startup now fails closed on three insecure configurations (HEA-2166)
+
+Outside `--dev`, the server now **refuses to start** — instead of silently running insecurely —
+when any of the following holds. If your deployment currently relies on one of these, it was
+running with a real vulnerability; fix the configuration before upgrading:
+
+| Condition | Previous behavior | Required action |
+|---|---|---|
+| No key-encryption key configured | Realm signing keys (Ed25519 private keys) were written to storage **in plaintext**, with no warning | Set the `HEARTH_KEK` env var (recommended) or `security.key_encryption_key` to a random 64-hex-char value: `openssl rand -hex 32` |
+| Neither `server.tls_cert_path` nor `server.trust_forwarded_proto: true` set | An `error!` line was logged and startup continued; session cookies were issued **without the `Secure` attribute** | Configure direct TLS (`server.tls_cert_path` + `server.tls_key_path`), or set `server.trust_forwarded_proto: true` if TLS terminates at a reverse proxy |
+| `demo.enabled: true` | The mass demo seeder ran in production — every seeded account shares a single, publicly documented default password | Remove the `demo:` block from production configs |
+
+Each violation aborts startup with an error naming the offending key and the fix. `--dev`
+behavior is unchanged: the developer loop still requires none of these.
+
+Relatedly, `hearth serve` with **no config file** previously booted a production server from
+compiled-in defaults without running validation at all. The defaults now pass through the same
+gates, so a bare `hearth serve` refuses to start until a config satisfying the production
+checklist is provided (or `--dev` is passed for local development).
+
+**Key-encryption caveat:** setting `HEARTH_KEK` for the first time on an existing data directory
+is safe — legacy plaintext key records remain readable and are flagged with a startup warning.
+Keys written after the change are encrypted. To supersede the plaintext copies, rotate each
+realm's signing key after the upgrade (`POST /admin/realms/{id}/rotate-signing-key`).
 
 ### v1.6.x → later
 

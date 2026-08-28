@@ -21,6 +21,33 @@ name: Benchmark Regression Gate
 # The stored baseline is keyed on the commit SHA so each main commit produces
 # a fresh anchor. PRs use restore-keys prefix matching to pick up the
 # nearest available baseline when the exact SHA key is missing.
+#
+# ADVISORY STATUS (HEA-2176, 2026-08-12)
+# ───────────────────────────────────────
+# `bench-required-summary` is an INTERNAL gate — it ensures the workflow
+# itself is coherent, but it is NOT listed in the branch ruleset's required
+# status checks. This workflow intentionally stays advisory for three reasons:
+#
+#  1. Absolute latency violations (bench binary panic) produce a visible FAIL
+#     check on the PR. Engineers must act on these before merging. The failure
+#     is not auto-blocking because the ±10–15% runner variance triggers
+#     spurious panics under cross-region load, and sustained regression
+#     requires multiple data points (a single CI run is insufficient evidence).
+#
+#  2. Compilation failures are already gated. If the codebase fails to
+#     compile, the `quality` job in ci.yml catches it and fails required-summary
+#     before bench even runs. A bench failure for the same reason is redundant.
+#
+#  3. Paths-filter trap. Making this workflow a standalone required status
+#     check in the branch ruleset would block doc-only PRs forever because the
+#     workflow never runs on them and GitHub never sees the check.
+#
+# Review cadence: PlatformEngineer checks bench job status at least monthly
+# (first Monday of each month). If bench has been red for more than 7 days
+# for reasons other than a known compilation failure, it must be triaged
+# before the next release.
+#
+# Next review due: 2026-09-01.
 
 on:
   pull_request:

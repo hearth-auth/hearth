@@ -165,8 +165,8 @@ $page  = $admin->listUsers(limit: 20);          // returns PageResponse
 $admin->updateUser($user['id'], ['username' => 'alice2']);
 $admin->deleteUser($user['id']);
 
-// Realms
-$realm = $admin->createRealm(['name' => 'acme', 'display_name' => 'Acme Corp']);
+// Realms are provisioned via hearth.yaml, not the admin API — there is no
+// createRealm() (the server returns 405). Only read paths are exposed.
 $page  = $admin->listRealms();
 
 // OAuth clients

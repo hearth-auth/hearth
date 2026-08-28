@@ -5,6 +5,30 @@ name: Fuzz
 # the target compiles, the seed corpus parses cleanly, and no immediate
 # panic is lurking. Extended / sustained fuzzing runs are out of scope here
 # and should be driven by a separate scheduled workflow or OSS-Fuzz.
+#
+# ADVISORY STATUS (HEA-2176, 2026-08-12)
+# ───────────────────────────────────────
+# This workflow runs on PRs but is NOT wired into the required-summary gate.
+# It intentionally stays advisory for three reasons:
+#
+#  1. Nightly toolchain. cargo-fuzz requires nightly, which has no stability
+#     guarantees. A nightly compiler regression (e.g. OOM under ASAN+sancov,
+#     see HEA-2019) should not block stable-channel PRs.
+#
+#  2. Compilation failures already gated. If the main codebase fails to
+#     compile, the `quality` job in ci.yml catches it and fails
+#     required-summary. Fuzz smoke failing for the same reason is redundant
+#     signal on a PR that is already blocked.
+#
+#  3. Paths-filter trap. Making this workflow a standalone required status
+#     check in the branch ruleset would block doc-only PRs forever because
+#     the workflow never runs on them and GitHub never sees the check.
+#
+# Review cadence: PlatformEngineer checks fuzz job status at least monthly
+# (first Monday of each month). If fuzz has been red for more than 14 days,
+# the nightly pin or seed corpus must be investigated before the next release.
+#
+# Next review due: 2026-09-01.
 
 on:
   pull_request:

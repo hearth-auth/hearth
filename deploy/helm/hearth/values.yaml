@@ -202,7 +202,13 @@ podDisruptionBudget:
 
 # Autoscaling (HPA) is intentionally removed.
 # Hearth uses an embedded storage engine with an exclusive data_dir lock:
-# only one replica may be running at a time. Use strategy.type=Recreate
-# (set in deployment.yaml) and a PodDisruptionBudget for controlled rollouts.
-# Horizontal scaling requires a StatefulSet + external storage migration
-# (tracked as a follow-up; see HEA-2107 PR for the evaluation).
+# only one replica may be running at a time.
+#
+# IMPORTANT — Multi-node clustering is EXPERIMENTAL and NOT production-supported
+# in Hearth 1.x. Known defects include: follower RBAC cache staleness (C-5),
+# immutable cluster membership (C-6, no online node add/remove), and HTTP 500
+# on writes to follower nodes (H-3). The supported production topology is
+# replicaCount=1 with a ReadWriteOnce PVC and a PodDisruptionBudget.
+#
+# Use strategy.type=Recreate (set in deployment.yaml) and a PodDisruptionBudget
+# for controlled rollouts.

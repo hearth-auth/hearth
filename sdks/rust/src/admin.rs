@@ -119,16 +119,9 @@ impl AdminClient {
     // Realms
     // ------------------------------------------------------------------
 
-    pub async fn create_realm(&self, req: &CreateRealmRequest) -> Result<Realm, HearthError> {
-        let resp = self
-            .http
-            .post(format!("{}/admin/realms", self.base_url))
-            .json(req)
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(resp.json().await?)
-    }
+    // Realms are provisioned via hearth.yaml, not the admin API. There is no
+    // `create_realm` method: the server returns 405 for POST /admin/realms
+    // (HEA-2171). Only read paths are exposed.
 
     pub async fn list_realms(&self) -> Result<Vec<Realm>, HearthError> {
         let resp = self

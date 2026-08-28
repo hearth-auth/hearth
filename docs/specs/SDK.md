@@ -514,12 +514,15 @@ All `AdminClient` implementations must provide at minimum:
 
 #### Realms
 
+Realms are provisioned via `hearth.yaml` and reconciled at startup, **not** through
+the admin API. SDKs MUST NOT expose a `createRealm` method: the server returns
+`405 Method Not Allowed` for `POST /admin/realms` (and for `PATCH /admin/realms/{id}`).
+Only the read paths and archived-realm deletion are exposed.
+
 | Method | HTTP Equivalent |
 |--------|-----------------|
-| `createRealm(params)` | `POST /admin/realms` |
 | `getRealm(id)` | `GET /admin/realms/{id}` |
-| `updateRealm(id, params)` | `PUT /admin/realms/{id}` |
-| `deleteRealm(id)` | `DELETE /admin/realms/{id}` |
+| `deleteRealm(id)` | `DELETE /admin/realms/{id}` (archived realms only) |
 | `listRealms(options)` | `GET /admin/realms?limit=N&cursor=C` |
 
 #### OAuth Clients, Roles, Groups, Organization Memberships
