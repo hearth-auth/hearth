@@ -38,7 +38,7 @@
 | OAuth 2.0 Token Introspection (RFC 7662) | ✅ Shipped | |
 | OAuth 2.0 Token Revocation (RFC 7009) | ✅ Shipped | |
 | Refresh token rotation | ✅ Shipped | Theft detection via family tracking |
-| Dynamic Client Registration (RFC 7591 / 7592) | ✅ Shipped | |
+| Dynamic Client Registration (RFC 7591) | ✅ Shipped | RFC 7592 management endpoints (`GET/PUT/DELETE /register/{client_id}`) are roadmap — zero implementation in `src/` |
 | DPoP sender-constrained tokens (RFC 9449) | ✅ Shipped | `src/identity/dpop.rs` |
 | TOTP / MFA | ✅ Shipped | Enrollment, recovery codes, brute-force lockout |
 | WebAuthn / Passkeys | ✅ Shipped | Registration, authentication, multi-credential |

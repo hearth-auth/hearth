@@ -32,6 +32,12 @@ Every backup includes an AES-256-GCM encrypted copy of each realm's Ed25519 sign
 
 When `--encrypt` is passed, the DEK is additionally wrapped with a passphrase using **Argon2id** (m=65536, t=3, p=4) so that the archive is self-contained and the passphrase is the only external secret needed to restore signing keys. KDF parameters (algorithm, memory, iterations, parallelism, salt) are stored alongside the wrapped DEK in `manifest.json`.
 
+#### What an unencrypted archive does *not* contain
+
+The `signing_key.json` member is only restorable when the archive is encrypted (the DEK is present and, for `--encrypt` archives, unwrappable with the passphrase). An **unencrypted** archive — one with no wrapped DEK, or opened without the passphrase — carries **no usable signing key**: the realm records, users, credentials, clients, RBAC model, organizations, and (optionally) audit events are all present, but the Ed25519 signing key is not.
+
+Restoring such an archive would generate a **fresh** signing key, which invalidates every JWT and session issued before the backup. Because that is a silent, data-loss-adjacent outcome, **restore fails closed** on a missing signing key (see [`hearth backup restore`](#hearth-backup-restore) below): it aborts with an actionable error rather than degrading. Produce a restorable archive by exporting with encryption enabled (`--encrypt`, or set `HEARTH_MASTER_KEY`), which the `hearth backup create` command now requires.
+
 ---
 
 ## Commands
@@ -91,6 +97,7 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--realm` | all realms | Restore only this realm (by archive slug) |
 | `--mode` | `skip` | Conflict resolution: `skip` keeps existing records, `overwrite` replaces them |
 | `--dry-run` | off | Parse and report without writing anything |
+| `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
 | `--data-dir` | `data` | Path to the target data directory |
 
 Restore prints a per-entity-type table of inserted and skipped counts. Exit `0` means all records imported cleanly; exit `1` means partial success (some records skipped or failed); exit `2` means a fatal error (archive unreadable, target unopenable).
@@ -117,6 +124,8 @@ hearth backup restore \
 ```
 
 > **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — run `hearth realm rotate-signing-key` explicitly. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
+>
+> **Fail-closed on a missing signing key (HEA-2168).** If the archive carries no restorable signing key (an unencrypted archive, one produced before signing-key export, or an encrypted archive opened without the passphrase), restore **refuses** with a clear error rather than silently minting a fresh key that would invalidate every pre-backup JWT and session. The remedy is to restore from an encrypted archive whose key round-trips (`hearth backup create --encrypt` / `HEARTH_MASTER_KEY`). If you genuinely intend to start the realm on a new key, pass `--allow-missing-signing-key` to acknowledge that every token issued before the backup will stop validating. The HTTP restore endpoint always fails closed and has no override.
 
 **Exit codes:** `0` success · `1` partial (some records skipped/failed) · `2` fatal error.
 
@@ -156,35 +165,153 @@ hearth backup inspect --input /backups/prod-2026-05-19.hearth-backup
 
 ---
 
+## Recovery point objective (RPO)
+
+> **Hearth has no point-in-time recovery.** There is no WAL archiving and no
+> incremental backup. **Your recovery point is the last successful full
+> backup** — everything written after it is lost in a disk-loss or
+> datacenter-loss event.
+
+State it to your stakeholders in these terms:
+
+> With hourly backups, the maximum data loss window is **one hour plus the
+> duration of one backup run.**
+
+The general form is:
+
+```
+worst-case data loss  =  backup interval  +  duration of one backup run
+```
+
+The backup's duration counts because the recovery point is the **start** of the
+run, not the end — see the consistency caveat below. Substitute your own
+cadence: daily backups mean a worst case of just over 24 hours.
+
+**Measure your own run duration** rather than assuming one; it scales with realm
+size and is the only term in the formula that is not under your direct control.
+Time a real backup on production-shaped data:
+
+```bash
+time curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
+  "http://127.0.0.1:8420/admin/backup" -o /tmp/timing-probe.hearth-backup
+```
+
+For small realms this is typically well under a minute, making the interval the
+dominant term. Confirm it during your [test-restore
+drill](./disaster-recovery.md#test-restore-drill-checklist) and re-measure as
+the realm grows.
+
+**What this figure does and does not cover:**
+
+| Failure | Data loss |
+|---|---|
+| Process crash / `kill -9`, disk intact | **Zero** — the WAL replays on startup |
+| Single node lost in a 3-node cluster | **Zero** — surviving nodes hold the writes |
+| Disk loss on a single-node deployment | **Last backup** (the formula above) |
+| Whole-cluster or datacenter loss | **Last backup** (the formula above) |
+
+WAL replay protects you from a crash, **not** from losing the disk: the WAL
+lives in the data directory alongside the data, and it is truncated in place
+when it rotates rather than being retained as history. It is not a recovery
+source beyond the current segment, and it is never shipped off-host.
+
+### Referential consistency — each realm is snapshotted (HEA-2167)
+
+An export reads each entity type at a different moment during the run (users
+first, then credentials, clients, roles, and so on). To stop a concurrent write
+from tearing the archive — for example a role assignment referring to a user
+created *after* `users.ndjson` was written — the exporter holds a per-node
+**consistency barrier** across the whole of a single realm's read pass. Every
+entity in a realm's archive therefore reflects one point in time, and every
+reference (an assignment's subject, a credential's user) resolves within the
+same archive.
+
+**Write-availability impact — know this before you schedule backups.** While an
+export holds the barrier, **writes to that node block** until the export's read
+pass for the current realm completes; they are not lost, only delayed. Reads —
+token validation, session and user lookups — are **never** blocked, so
+authentication continues normally during a backup. The blocking window scales
+with realm size (how long it takes to scan and serialise the realm's entities),
+so for very large realms prefer a low-write window. The barrier is released
+between realms, so a multi-realm backup does not hold all writes for the whole
+run.
+
+This barrier is **single-node**. Multi-node export consistency is not provided
+(clustering is EXPERIMENTAL — see the clustering guide). The offline CLI
+(`hearth backup create` against a stopped node's data directory) has no
+concurrent writer and so is trivially consistent.
+
+### Roadmap
+
+PITR, WAL archiving, and incremental backup are designed but **not in 1.x** —
+see the [design spike](../plans/HEA-2170-pitr-wal-archiving-design.md) for the
+approach, the phasing, and an explicit list of what will not be built.
+
+---
+
 ## Backup strategy recommendations
 
 ### Scheduled backups
 
-Use cron or your orchestration tool to run `hearth backup create` regularly. A typical setup:
+> **A running server holds an exclusive lock on its data directory.**
+> `hearth backup create --data-dir <live dir>` will fail with
+> `data directory '...' is already locked by another process` (exit code 2)
+> while `hearth serve` is running. The CLI is for **offline** data directories
+> only — a stopped node, or a copy of one.
+
+To back up a **live** server, use the admin HTTP endpoint, which runs inside the
+server process and needs no lock:
 
 ```bash
 # /etc/cron.d/hearth-backup
-0 2 * * * hearth /usr/bin/hearth backup create \
-  --data-dir /var/lib/hearth/data \
-  --output /backups/hearth-$(date +\%F).hearth-backup \
+0 * * * * hearth curl -fsS -X POST \
+  -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
+  "http://127.0.0.1:8420/admin/backup" \
+  -o /backups/hearth-$(date +\%FT\%H).hearth-backup \
   >> /var/log/hearth/backup.log 2>&1
+```
+
+The endpoint requires the `hearth.export` capability in addition to
+`hearth.admin`, and is rate-limited to **10 calls per hour per user**, which
+caps how tight a cadence you can schedule. Note that `POST /admin/backup` has
+no equivalent of the CLI's `--encrypt` flag; encrypt the resulting archive at
+rest yourself, or take encrypted archives from a stopped node with the CLI.
+
+Use the CLI form only against a data directory no server is using:
+
+```bash
+systemctl stop hearth
+hearth backup create --data-dir /var/lib/hearth/data \
+  --output /backups/hearth-$(date +%F).hearth-backup --encrypt
+systemctl start hearth
 ```
 
 Rotate old archives with a retention tool (e.g., `find /backups -name "*.hearth-backup" -mtime +30 -delete`).
 
 ### Cluster deployments
 
-In a multi-node cluster, **take backups from a follower** to avoid adding I/O load to the leader (which is processing all writes). Point `--data-dir` at the follower's data directory; its storage engine can be read while the cluster is live.
+In a multi-node cluster, **take backups from a follower** to avoid adding I/O
+load to the leader (which is processing all writes). Point the `POST
+/admin/backup` call at the follower's own admin listener — a running follower
+holds the exclusive lock on its data directory, so the CLI form will not work
+against it either.
 
 ### Verifying backups
 
-Always verify after creation and before storing off-site:
+Always verify after creation and before storing off-site. `hearth backup verify`
+reads only the archive, so it works regardless of which path produced it and
+does not touch the data directory:
 
 ```bash
-hearth backup create --data-dir /var/lib/hearth/data --output /tmp/latest.hearth-backup \
+curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
+  "http://127.0.0.1:8420/admin/backup" -o /tmp/latest.hearth-backup \
   && hearth backup verify --input /tmp/latest.hearth-backup \
   && mv /tmp/latest.hearth-backup /backups/
 ```
+
+An unverified backup is not a backup. Fold the `verify` step into the same
+scheduled job so a corrupt archive fails the run loudly instead of sitting
+undetected until a restore.
 
 ### Restoring to a new node
 

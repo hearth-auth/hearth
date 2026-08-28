@@ -40,7 +40,9 @@ services:
       HEARTH_BIND_ADDRESS: "0.0.0.0"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8420/health"]
+      # /readyz performs a genuine storage probe; /health is always-200 (process alive only).
+      # Using /readyz means depends_on: condition: service_healthy waits for storage to be ready.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8420/readyz"]
       interval: 10s
       timeout: 3s
       retries: 5

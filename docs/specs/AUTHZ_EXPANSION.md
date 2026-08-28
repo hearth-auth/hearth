@@ -20,7 +20,7 @@ The goal of this work is to turn authz from a code-and-config construct into a d
 **Two-track OAuth client model.** Clients are NOT exclusively YAML-defined. Hearth supports two coexisting tracks:
 
 - **Managed clients** — authored in `hearth.yaml` under `realms.<id>.oauth_clients`. Long-lived, configured by operators. Their `slug` is admin-supplied and stable across renames; the persisted record retains a UUID `ClientId` for runtime references.
-- **Runtime-registered clients** — created via RFC 7591 Dynamic Client Registration at `POST /register` (per [AGENT_AUTH.md](./AGENT_AUTH.md) §2.7). Used by agents auto-registering against a Hearth instance and by ephemeral integrations. Storage-backed (`oauth:client:{realm}:{client_id}`); their `slug` is auto-generated from the client name plus a uniqueness suffix. NOT subject to YAML reload; modified via RFC 7592 `PUT /register/{client_id}`.
+- **Runtime-registered clients** — created via RFC 7591 Dynamic Client Registration at `POST /register` (per [AGENT_AUTH.md](./AGENT_AUTH.md) §2.7). Used by agents auto-registering against a Hearth instance and by ephemeral integrations. Storage-backed (`oauth:client:{realm}:{client_id}`); their `slug` is auto-generated from the client name plus a uniqueness suffix. NOT subject to YAML reload. RFC 7592 management endpoints (`GET/PUT/DELETE /register/{client_id}`) are **roadmap** — not yet implemented.
 
 Both tracks produce records of the same `OauthClient` shape, and both participate in scope resolution and consent storage identically. They differ in **who is responsible for the client's identity**: managed-client slugs are admin-authored and stable; DCR slugs are auto-generated and treated as opaque.
 

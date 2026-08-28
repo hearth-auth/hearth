@@ -11,7 +11,7 @@ mod common;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use hearth::core::{OrganizationId, RealmId, Uri, UserId};
+use hearth::core::{ImportOutcome, OrganizationId, RealmId, Uri, UserId};
 use hearth::identity::{ClientTrustLevel, CreateUserRequest, SessionContext};
 use hearth::protocol::admin_auth::AdminRateLimiter;
 use hearth::protocol::grpc::identity::IdentityAdminSvc;
@@ -344,6 +344,52 @@ impl RbacEngine for FailSeedRbac {
 
     fn purge_user_from_realm(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), RbacError> {
         self.inner.purge_user_from_realm(realm_id, user_id)
+    }
+
+    fn import_role(
+        &self,
+        realm_id: &RealmId,
+        role: &Role,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        self.inner.import_role(realm_id, role, overwrite)
+    }
+
+    fn import_permission(
+        &self,
+        realm_id: &RealmId,
+        record: &PermissionRecord,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        self.inner.import_permission(realm_id, record, overwrite)
+    }
+
+    fn import_group(
+        &self,
+        realm_id: &RealmId,
+        group: &Group,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        self.inner.import_group(realm_id, group, overwrite)
+    }
+
+    fn import_assignment(
+        &self,
+        realm_id: &RealmId,
+        assignment: &RoleAssignment,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        self.inner
+            .import_assignment(realm_id, assignment, overwrite)
+    }
+
+    fn import_scope(
+        &self,
+        realm_id: &RealmId,
+        scope: &ScopeExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        self.inner.import_scope(realm_id, scope, overwrite)
     }
 }
 

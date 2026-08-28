@@ -230,6 +230,26 @@ mod tests {
         assert_eq!(manifest, deserialized);
     }
 
+    /// Verifies that `BackupManifest::new` stamps the build-time version, not the
+    /// Cargo.toml placeholder.  build.rs resolves the version via (in order):
+    /// HEARTH_RELEASE_VERSION → `git describe --tags` → Cargo.toml.
+    /// The Cargo.toml value is kept at the latest release so even the fallback path
+    /// produces a meaningful version, not "1.0.0".
+    ///
+    /// This test catches regressions in the build.rs version-stamping logic before
+    /// they reach backup manifests in the field.
+    #[test]
+    fn manifest_new_stamps_release_version_not_placeholder() {
+        let manifest = BackupManifest::new(vec![]);
+        assert_ne!(
+            manifest.hearth_version,
+            "1.0.0",
+            "hearth_version must not be the stale Cargo.toml placeholder; \
+             build.rs must resolve via HEARTH_RELEASE_VERSION, git describe, or \
+             an up-to-date Cargo.toml version field"
+        );
+    }
+
     /// `canonical_bytes` serializes the manifest with `detached_signature_b64 = null`
     /// so the signature covers a stable payload regardless of the field value.
     #[test]

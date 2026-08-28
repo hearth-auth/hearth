@@ -4,6 +4,8 @@
 //! old-file deletion), the engine recovers correctly with both old and
 //! new SSTs on disk. Newer SST entries take priority.
 
+use std::sync::Arc;
+
 use hearth::core::RealmId;
 use hearth::storage::{CompactionConfig, EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -91,5 +93,113 @@ fn simulation_compaction_leaked_files_after_crash() {
                 "key {key} must survive compaction crash with leaked SST files"
             );
         }
+    }
+}
+
+/// C-4 resurrection: crash between partial-compaction rename and unlink.
+///
+/// When a partial compaction drops tombstones (`drop_tombstones = true`,
+/// triggered when the run includes the oldest SST), it atomically renames the
+/// merged output over the tombstone-bearing SST (the run's newest member, i.e.
+/// `target_num`), then unlinks the older value-bearing members.  A crash
+/// **between the rename and the first unlink** leaves both files on disk:
+///
+/// - `{target_num}.sst` — merged output (tombstone was dropped, key absent)
+/// - `{older_num}.sst`  — original value-bearing SST (key present)
+///
+/// On recovery the engine loads both files. The merged SST is newer but has
+/// no entry for the deleted key, so the lookup falls through to the orphan and
+/// the deleted key reappears — a resurrection.
+///
+/// **This test FAILS at `af4edb59` (before W1-4 / HEA-1857 compaction
+/// manifest lands).** A passing run means the fix is in place.
+///
+/// The `FaultFs` rename hook used here performs the actual OS rename on disk
+/// (committing the filesystem change) then returns an error, recreating the
+/// exact disk state a kill -9 between rename and unlink would leave.  The WAL
+/// is removed before the second open to reproduce the case where the WAL had
+/// already rotated before the crash, leaving only the SST layer authoritative.
+#[test]
+fn simulation_c4_partial_compaction_crash_resurrects_deleted_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let realm = RealmId::generate();
+
+    // Phase 1: build two same-size SSTs and run partial compaction with a
+    // rename fault that commits the rename on disk then returns an error.
+    {
+        let fault = Arc::new(crate::FaultFs::new());
+        let mut config = StorageConfig::dev(dir.path().to_path_buf());
+        // 1-byte flush threshold: every put/delete immediately flushes the
+        // memtable to a new SST, giving us one entry per SST file.
+        config.set_memtable_flush_bytes(1);
+        // Disable background compaction; use merge_min=2 so two same-size SSTs
+        // immediately form a compactable run.
+        config.compaction = CompactionConfig {
+            enabled: false,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 2,
+        };
+        let engine = EmbeddedStorageEngine::open_with_fs(
+            config,
+            Arc::<crate::FaultFs>::clone(&fault) as Arc<dyn hearth::storage::fs::Fs>,
+        )
+        .expect("open engine");
+
+        // SST0 (oldest): doomed="secret" — flush is automatic because the
+        // 1-byte threshold is exceeded after the put.
+        engine.put(&realm, b"doomed", b"secret").expect("put");
+
+        // SST1 (newest): tombstone for doomed — automatic flush again.
+        engine.delete(&realm, b"doomed").expect("delete");
+
+        assert_eq!(
+            engine.get(&realm, b"doomed").expect("pre-compact get"),
+            None,
+            "key must be deleted before compaction"
+        );
+
+        // compact_partial selects [SST1, SST0] as a same-size run reaching the
+        // oldest SST => drop_tombstones=true.  It will:
+        //   1. write merged output to SST1.partial.tmp (no entry for doomed)
+        //   2. rename(SST1.partial.tmp → SST1)  ← our hook: rename commits on
+        //      disk, then returns Err (post-rename crash simulation)
+        //   3. remove_file(SST0) — never reached because step 2 returned Err
+        //
+        // Disk state after the injected "crash":
+        //   SST1 = merged output (tombstone dropped, doomed absent)
+        //   SST0 = value-bearing (doomed="secret", still present)
+        fault.config.arm_rename_failure();
+        let result = engine.compact_partial();
+        assert!(
+            result.is_err(),
+            "compact_partial must propagate the injected rename error"
+        );
+
+        // Engine is dropped here — simulating process death after the rename.
+    }
+
+    // Remove the WAL so reopen starts with an empty memtable. In production
+    // this corresponds to the WAL having rotated before the crash, leaving
+    // only the SST layer as the authoritative source of truth.
+    let wal_path = dir.path().join("hearth.wal");
+    std::fs::remove_file(&wal_path).expect("remove WAL to simulate post-rotation crash");
+
+    // Phase 2: reopen on real Fs; WAL is absent so the memtable starts empty
+    // and every read resolves entirely through the SST layer.
+    {
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let engine = EmbeddedStorageEngine::open(config).expect("reopen after crash");
+
+        // BUG at af4edb59 (C-4): the merged SST1 has no entry for "doomed"
+        // (tombstone was dropped), so the lookup falls through to the orphaned
+        // SST0 and returns the deleted value "secret" — a resurrection.
+        // After W1-4 / HEA-1857 this must return None.
+        assert_eq!(
+            engine.get(&realm, b"doomed").expect("get after crash"),
+            None,
+            "deleted key must not resurface after crash between rename and unlink (C-4)"
+        );
     }
 }

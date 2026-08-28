@@ -100,6 +100,7 @@ async fn reconcile_seed_users_is_idempotent() {
         email: "bob@seed.test".to_string(),
         display_name: "Bob Seed".to_string(),
         password: "S33dP@ssword!".to_string(),
+        // AUDIT: justified-empty-fixture: seed user intentionally has no roles — this is an idempotency test, not an RBAC preservation test (HEA-2158)
         roles: vec![],
         email_verified: true,
     }];

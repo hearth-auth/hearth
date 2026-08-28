@@ -10,6 +10,11 @@
 # fresh pin and a stale pin (README line 1: badge alt-text + badge URL; README
 # line 21: prose + Releases URL) passed the guard while half-updated.
 #
+# Resolution path (HEA-2199): the script resolves the reference version from
+# `gh release list`, not `git tag`, so a tag without published binary artifacts
+# does not advance the guard. The tests use README_LATEST_TAG to bypass
+# resolution entirely — they validate pattern-matching logic, not resolution.
+#
 # Usage: bash scripts/tests/check-readme-version.test.sh
 
 set -uo pipefail

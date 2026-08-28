@@ -25,7 +25,7 @@ fn make_exporter(h: &common::TestHarness) -> BackupExporter {
 
 /// Builds a `BackupImporter` from a harness.
 fn make_importer(h: &common::TestHarness) -> BackupImporter {
-    BackupImporter::new(h.identity_arc(), h.rbac_arc())
+    BackupImporter::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
 }
 
 /// Creates a realm, one user with a password, seeds RBAC, and returns the realm
@@ -257,8 +257,11 @@ async fn test_restore_preserves_signing_keys() {
         nonce: None,
         azp: None,
         cnf: None,
+        // AUDIT: justified-empty-fixture: JWT fixture exercises signing-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (HEA-2160)
         roles: Vec::new(),
+        // AUDIT: justified-empty-fixture: JWT fixture exercises signing-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (HEA-2160)
         groups: Vec::new(),
+        // AUDIT: justified-empty-fixture: JWT fixture exercises signing-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (HEA-2160)
         org_groups: Vec::new(),
         permissions: Vec::new(),
         custom: BTreeMap::new(),
@@ -751,6 +754,374 @@ async fn audit_included_flag() {
     }
 }
 
+// ── 10. full authorization model round-trip (HEA-2160 / C-1) ──────────────────
+
+/// The single highest-blast-radius restore defect: prior to HEA-2160 the
+/// importer read only 5 of the 12 exported archive members. Roles,
+/// permissions, groups, assignments, scopes, and organizations were dropped
+/// **silently** while restore reported success — an operator recovering from an
+/// incident got a server that authenticated users but had lost its entire
+/// authorization model.
+///
+/// This test seeds a realm with a NON-EMPTY set of every authorization entity
+/// type, exports it, restores into a fresh engine, and asserts the destination
+/// engine holds each entity member-by-member. It fails RED against `af4edb59`
+/// because none of these entities are restored there.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn roundtrip_restores_full_authorization_model() {
+    use hearth::rbac::{
+        AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, Permission, Scope, ScopeSpec,
+        Subject,
+    };
+
+    // ── Source: realm seeded with custom authz entities ────────────────
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    // Custom permission (registered in the realm's permission registry).
+    src.rbac()
+        .reconcile_permissions(&realm, &["docs.publish".to_string()])
+        .expect("reconcile permission");
+
+    // Custom role carrying the custom permission.
+    let role = src
+        .rbac()
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: "docs.publisher".to_string(),
+                description: Some("Can publish docs".to_string()),
+                permissions: vec![Permission::new("docs.publish").expect("perm")],
+                ..Default::default()
+            },
+        )
+        .expect("create role");
+
+    // Custom group.
+    let group = src
+        .rbac()
+        .create_group(
+            &realm,
+            &CreateGroupRequest {
+                name: "Editors".to_string(),
+                slug: "editors".to_string(),
+                description: Some("Editorial staff".to_string()),
+            },
+        )
+        .expect("create group");
+
+    // Assignment binding the custom role to the user.
+    let assignment = src
+        .rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role");
+
+    // Custom scope.
+    src.rbac()
+        .reconcile_scopes(
+            &realm,
+            &[ScopeSpec {
+                name: "docs".to_string(),
+                permissions: Some(vec!["docs.publish".to_string()]),
+            }],
+        )
+        .expect("reconcile scope");
+
+    // Organization.
+    let org = src
+        .identity()
+        .create_organization(
+            &realm,
+            &hearth::identity::CreateOrganizationRequest {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+                description: Some("Acme Corp".to_string()),
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("create org");
+
+    // Snapshot the full source authorization model.
+    let src_roles = collect_roles(src.rbac(), &realm);
+    let src_perms = sorted_perms(src.rbac(), &realm);
+    let src_groups = collect_groups(src.rbac(), &realm);
+    let src_assignments = sorted_assignments(src.rbac(), &realm);
+    let src_scopes = sorted_scopes(src.rbac(), &realm);
+    let src_orgs = collect_orgs(src.identity(), &realm);
+
+    // Sanity: the source really is non-empty for every entity type — otherwise
+    // this test would be vacuous (the W0-T2 lesson: empty fixtures can't catch
+    // a silent drop).
+    assert!(!src_roles.is_empty(), "source must have roles");
+    assert!(!src_perms.is_empty(), "source must have permissions");
+    assert!(!src_groups.is_empty(), "source must have groups");
+    assert!(!src_assignments.is_empty(), "source must have assignments");
+    assert!(!src_scopes.is_empty(), "source must have scopes");
+    assert!(!src_orgs.is_empty(), "source must have organizations");
+
+    // ── Export → restore into a fresh engine ───────────────────────────
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+
+    // ── Assert: destination holds the full authorization model ─────────
+    let dst_roles = collect_roles(dst.rbac(), &restored_realm);
+    let dst_perms = sorted_perms(dst.rbac(), &restored_realm);
+    let dst_groups = collect_groups(dst.rbac(), &restored_realm);
+    let dst_assignments = sorted_assignments(dst.rbac(), &restored_realm);
+    let dst_scopes = sorted_scopes(dst.rbac(), &restored_realm);
+    let dst_orgs = collect_orgs(dst.identity(), &restored_realm);
+
+    assert_eq!(
+        dst_roles, src_roles,
+        "roles must be restored member-by-member (found custom role: {})",
+        role.name
+    );
+    assert_eq!(
+        dst_perms, src_perms,
+        "permissions must be restored member-by-member"
+    );
+    assert_eq!(
+        dst_groups, src_groups,
+        "groups must be restored member-by-member (found custom group: {})",
+        group.slug
+    );
+    assert_eq!(
+        dst_assignments,
+        src_assignments,
+        "assignments must be restored member-by-member (assignment id: {})",
+        assignment.id.as_uuid()
+    );
+    assert_eq!(
+        dst_scopes, src_scopes,
+        "scopes must be restored member-by-member"
+    );
+    assert_eq!(
+        dst_orgs,
+        src_orgs,
+        "organizations must be restored member-by-member (found org: {})",
+        org.slug()
+    );
+
+    // Per-member ImportReport counts must be populated (not a boolean).
+    assert_eq!(report.roles.created, src_roles.len() as u64, "role count");
+    assert_eq!(
+        report.permissions.created,
+        src_perms.len() as u64,
+        "permission count"
+    );
+    assert_eq!(
+        report.groups.created,
+        src_groups.len() as u64,
+        "group count"
+    );
+    assert_eq!(
+        report.assignments.created,
+        src_assignments.len() as u64,
+        "assignment count"
+    );
+    assert_eq!(
+        report.scopes.created,
+        src_scopes.len() as u64,
+        "scope count"
+    );
+    assert_eq!(
+        report.organizations.created,
+        src_orgs.len() as u64,
+        "organization count"
+    );
+}
+
+// ── 11. audit events restored when included (HEA-2160) ────────────────────────
+
+/// With `include_audit`, the `audit.ndjson` member must be restored: every
+/// source event lands in the destination realm (by ID) and the re-chained log
+/// verifies under the destination realm's HMAC key.
+#[tokio::test]
+async fn audit_events_restored_when_included() {
+    use std::collections::HashSet;
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    // seeded_realm creates a realm + user, which emit audit events.
+    let (realm, _email, _password) = seeded_realm(&src);
+
+    let src_events = src
+        .audit()
+        .query(&AuditQuery::for_realm(realm.clone()))
+        .expect("query src audit");
+    assert!(
+        !src_events.is_empty(),
+        "source realm must have audit events to make this test meaningful"
+    );
+    let src_ids: HashSet<uuid::Uuid> = src_events.iter().map(|e| *e.id.as_uuid()).collect();
+
+    let tmp = export_realm_to_file(
+        &src,
+        &realm,
+        &ExportOptions {
+            include_audit: true,
+            ..Default::default()
+        },
+    );
+    let slug = realm_slug(&src, &realm);
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+
+    assert_eq!(
+        report.audit_events.created,
+        src_events.len() as u64,
+        "every source audit event must be restored"
+    );
+    assert_eq!(report.audit_events.errored, 0, "no audit import errors");
+
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+    let dst_events = dst
+        .audit()
+        .query(&AuditQuery::for_realm(restored_realm.clone()))
+        .expect("query dst audit");
+    let dst_ids: HashSet<uuid::Uuid> = dst_events.iter().map(|e| *e.id.as_uuid()).collect();
+
+    // Every source event ID must be present in the destination (restore may add
+    // its own events, so this is a subset check rather than an equality).
+    assert!(
+        src_ids.is_subset(&dst_ids),
+        "all source audit event IDs must survive restore"
+    );
+
+    // The re-chained log must verify under the destination realm's HMAC key.
+    assert!(
+        dst.audit()
+            .verify_integrity(&restored_realm, None, None)
+            .expect("verify integrity"),
+        "restored audit chain must verify under the destination realm key"
+    );
+}
+
+/// Exports permissions sorted by name for stable member-by-member comparison.
+fn sorted_perms(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::PermissionRecord> {
+    let mut v = rbac.export_all_permissions(realm).expect("perms");
+    v.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    v
+}
+
+/// Exports assignments sorted by ID for stable member-by-member comparison.
+fn sorted_assignments(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::RoleAssignment> {
+    let mut v = rbac.export_all_assignments(realm).expect("assignments");
+    v.sort_by_key(|a| *a.id.as_uuid());
+    v
+}
+
+/// Exports scopes sorted by name for stable member-by-member comparison.
+fn sorted_scopes(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::ScopeExport> {
+    let mut v = rbac.export_all_scopes(realm).expect("scopes");
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+/// Collects every role in a realm, sorted by ID for stable comparison.
+fn collect_roles(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::Role> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = rbac
+            .list_roles(realm, cursor.as_deref(), 500)
+            .expect("roles");
+        all.extend(page.items);
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    all.sort_by_key(|r| *r.id.as_uuid());
+    all
+}
+
+/// Collects every group in a realm, sorted by ID for stable comparison.
+fn collect_groups(
+    rbac: &dyn hearth::rbac::RbacEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::rbac::Group> {
+    let mut all = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = rbac
+            .list_groups(realm, &hearth::core::PageRequest::new(offset, 500))
+            .expect("groups");
+        let n = page.items.len() as u64;
+        all.extend(page.items);
+        if n == 0 || offset + n >= page.total {
+            break;
+        }
+        offset += n;
+    }
+    all.sort_by_key(|g| *g.id.as_uuid());
+    all
+}
+
+/// Collects every organization in a realm, sorted by ID for stable comparison.
+fn collect_orgs(
+    identity: &dyn hearth::identity::IdentityEngine,
+    realm: &hearth::core::RealmId,
+) -> Vec<hearth::identity::Organization> {
+    let mut all = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = identity
+            .list_organizations(realm, &hearth::core::PageRequest::new(offset, 500))
+            .expect("orgs");
+        let n = page.items.len() as u64;
+        all.extend(page.items);
+        if n == 0 || offset + n >= page.total {
+            break;
+        }
+        offset += n;
+    }
+    all.sort_by_key(|o| *o.id().as_uuid());
+    all
+}
+
 // ── property tests ────────────────────────────────────────────────────────────
 
 mod proptests {
@@ -914,4 +1285,185 @@ async fn large_realm_restore_under_60s() {
         elapsed.as_secs() < 60,
         "restore of 10 000 users must complete in < 60s; took {elapsed:?}"
     );
+}
+
+// ── referential consistency under concurrent writes (HEA-2167) ─────────────────
+
+/// Exports a realm keeping the raw DEK so the test can decrypt sections
+/// directly (no passphrase round-trip needed).
+fn export_realm_keep_dek(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+    opts: &ExportOptions,
+) -> (NamedTempFile, [u8; 32]) {
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
+    let exporter = make_exporter(h);
+    let dek = BackupExporter::generate_dek().expect("generate DEK");
+    let realm_manifest = exporter
+        .export_realm(realm, &mut writer, opts, &dek)
+        .expect("export realm");
+    let (wrapped_dek_b64, wrapping_params) =
+        BackupExporter::wrap_dek(&dek, &test_passphrase()).expect("wrap DEK");
+    let mut manifest = BackupManifest::new(vec![realm_manifest]);
+    manifest.sections_encrypted = true;
+    manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+    manifest.dek_wrapping_params = Some(wrapping_params);
+    writer.finish(manifest).expect("finish archive");
+    (tmp, dek)
+}
+
+/// Decrypts an NDJSON section and returns its non-empty lines, or an empty vec
+/// if the section is absent from the archive.
+fn decrypt_ndjson_lines(
+    reader: &hearth::backup::ArchiveReader,
+    archive_path: &str,
+    dek: &[u8; 32],
+) -> Vec<Vec<u8>> {
+    let Some(enc) = reader.read_file(archive_path).expect("read section") else {
+        return Vec::new();
+    };
+    let plain = hearth::backup::decrypt_bytes(&enc, dek).expect("decrypt section");
+    plain
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// H-4 (HEA-2167): an export taken while a writer concurrently creates users
+/// and role assignments must be **referentially consistent** — every role
+/// assignment whose subject is a user must resolve to a user present in the
+/// same archive.
+///
+/// The DB is referentially consistent at every instant (a user is always
+/// created *before* it is assigned a role), so any dangling reference in the
+/// archive can only come from a *torn* snapshot: the export captured the
+/// assignment (read late) but not its user (created after the users were read).
+///
+/// Demonstrated red at `af4edb59` (export paginated live reads with no
+/// snapshot): without the storage consistency barrier this fails within a few
+/// export iterations. With the barrier, every archive resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // seed + writer thread + export/verify loop
+async fn export_is_referentially_consistent_under_concurrent_writes() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed rbac");
+    let admin_role = h
+        .rbac()
+        .get_role_by_name(&realm, "realm.admin")
+        .expect("get role")
+        .expect("seeded")
+        .id;
+
+    // Seed a small initial corpus so the first exports have content.
+    let identity = h.identity_arc();
+    let rbac = h.rbac_arc();
+    for i in 0..20u64 {
+        let user = identity
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("seed-{i}-{}@hea2167.example", uuid::Uuid::new_v4()),
+                    display_name: "Seed".into(),
+                    first_name: "Seed".into(),
+                    last_name: "User".into(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("seed create_user");
+        rbac.assign_role(
+            &realm,
+            &hearth::rbac::AssignRoleRequest {
+                subject: hearth::rbac::Subject::User(user.id().clone()),
+                role_id: admin_role.clone(),
+                scope: hearth::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("seed assign_role");
+    }
+
+    // Background writer: create user U, then assign it a role. Because the user
+    // always exists before the assignment references it, the DB is never
+    // internally inconsistent — only a torn snapshot can dangle.
+    let stop = Arc::new(AtomicBool::new(false));
+    let created = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let identity = Arc::clone(&identity);
+        let rbac = Arc::clone(&rbac);
+        let realm = realm.clone();
+        let admin_role = admin_role.clone();
+        let stop = Arc::clone(&stop);
+        let created = Arc::clone(&created);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let user = match identity.create_user(
+                    &realm,
+                    &CreateUserRequest {
+                        email: format!("churn-{}@hea2167.example", uuid::Uuid::new_v4()),
+                        display_name: "Churn".into(),
+                        first_name: "Churn".into(),
+                        last_name: "User".into(),
+                        attributes: Default::default(),
+                    },
+                ) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let _ = rbac.assign_role(
+                    &realm,
+                    &hearth::rbac::AssignRoleRequest {
+                        subject: hearth::rbac::Subject::User(user.id().clone()),
+                        role_id: admin_role.clone(),
+                        scope: hearth::rbac::Scope::Realm,
+                        assigned_by: None,
+                    },
+                );
+                created.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
+
+    let slug = realm_slug(&h, &realm);
+    let users_path = format!("realms/{slug}/users.ndjson");
+    let assignments_path = format!("realms/{slug}/assignments.ndjson");
+
+    // Export repeatedly and assert each archive resolves. Bound the loop by the
+    // writer's progress so the corpus (and thus per-export cost) stays small.
+    let mut iterations = 0u32;
+    while created.load(Ordering::Relaxed) < 300 && iterations < 200 {
+        iterations += 1;
+        let (tmp, dek) = export_realm_keep_dek(&h, &realm, &ExportOptions::default());
+        let reader = BackupArchive::open(tmp.path()).expect("open archive");
+
+        // Set of user ids present in the archive.
+        let mut archive_users = std::collections::HashSet::new();
+        for line in decrypt_ndjson_lines(&reader, &users_path, &dek) {
+            let user: hearth::identity::User = serde_json::from_slice(&line).expect("parse user");
+            archive_users.insert(user.id().as_uuid().to_string());
+        }
+
+        // Every user-subject assignment must resolve to a user in the archive.
+        for line in decrypt_ndjson_lines(&reader, &assignments_path, &dek) {
+            let assignment: hearth::rbac::RoleAssignment =
+                serde_json::from_slice(&line).expect("parse assignment");
+            if let hearth::rbac::Subject::User(uid) = &assignment.subject {
+                assert!(
+                    archive_users.contains(&uid.as_uuid().to_string()),
+                    "torn archive (HEA-2167): assignment references user {} \
+                     not present in the archive (iteration {iterations})",
+                    uid.as_uuid()
+                );
+            }
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("writer thread");
+    assert!(iterations > 0, "must have run at least one export");
 }

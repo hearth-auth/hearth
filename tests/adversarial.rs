@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | Timing attack — user enumeration via credential error type | `timing_attack_*` | — |
 //! | Account lockout — brute-force protection | `account_lockout_*` | — |
+//! | Mass enumeration via admin listing — timing | `admin_listing_response_time_constant_wrt_user_count` | — |
 //! | User enumeration — magic link | — | `magic_link::magic_link_enumeration_resistance` |
 //! | TLS downgrade prevention | — | `tls::tls_downgrade_prevention_rejects_tls10` |
 //! | Privilege escalation (RBAC enforcement) | — | `admin_rbac_auth::permission_gated_denies_non_admin` |
@@ -234,5 +235,197 @@ fn account_lockout_blocks_correct_password_during_window() {
     assert!(
         matches!(result, Err(IdentityError::RateLimited)),
         "correct password must be blocked during lockout window: {result:?}"
+    );
+}
+
+// ── Mass enumeration timing: admin user listing ───────────────────────────────
+
+/// Vulnerability class: Mass Enumeration via Admin User Listing (timing)
+///
+/// `GET /admin/users` must not enable an attacker to infer realm user counts
+/// via response timing.  The non-filter path issues a bounded page scan:
+/// Phase 1 does a key-only scan for the total count (O(N_keys) but no value
+/// bytes read), then Phase 2 reads exactly `limit` entries.  For realistic
+/// realm sizes the Phase-1 overhead must not push the response time beyond a
+/// generous ratio relative to an empty realm.
+///
+/// Test methodology:
+/// - 5 warm-up calls (discarded) to stabilise JIT and in-process caches.
+/// - 20 timed samples against an empty realm → median_empty.
+/// - 50 regular users created in the realm.
+/// - 20 timed samples against the populated realm → median_populated.
+/// - Ratio bound: median_populated / median_empty < 25×.
+///
+/// Structural invariant: with `?limit=1` the `items` array always contains at
+/// most 1 entry regardless of total user count, confirming pagination bounds
+/// the response body independently of realm size.
+#[tokio::test]
+async fn admin_listing_response_time_constant_wrt_user_count() {
+    use std::time::Instant;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use hearth::identity::SessionContext;
+    use hearth::protocol::http::{router, AppState};
+    use hearth::rbac::{AssignRoleRequest, Scope, Subject};
+    use tower::ServiceExt as _;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed realm roles");
+
+    // Create an admin user with the realm.admin role and issue an access token.
+    let admin = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "admin@enum-timing-test.example".into(),
+                display_name: "Admin".into(),
+                first_name: "Admin".into(),
+                last_name: "User".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create admin user");
+    let role = h
+        .rbac()
+        .get_role_by_name(&realm, "realm.admin")
+        .expect("look up realm.admin role")
+        .expect("realm.admin must be present after seed_realm");
+    h.rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(admin.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign realm.admin role");
+    let session = h
+        .identity()
+        .create_session(&realm, admin.id(), &SessionContext::default())
+        .expect("create admin session");
+    let token = h
+        .identity()
+        .issue_tokens(&realm, admin.id(), session.id())
+        .expect("issue admin access token")
+        .access_token()
+        .to_string();
+    let realm_uuid = realm.as_uuid().to_string();
+
+    // Build the router once; clone it per call (Router is Arc-backed and cheap to clone).
+    let app = router(Arc::new(AppState::new(
+        h.identity_arc(),
+        h.rbac_arc(),
+        h.audit_arc(),
+    )));
+
+    let build_req = || {
+        Request::builder()
+            .method("GET")
+            .uri("/admin/users?limit=1")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", &realm_uuid)
+            .body(Body::empty())
+            .expect("build list request")
+    };
+
+    // Warm-up: 5 discarded calls to stabilise in-process caches.
+    for _ in 0..5 {
+        app.clone().oneshot(build_req()).await.expect("warm-up call");
+    }
+
+    // Phase 1: baseline timing (admin-only realm, 0 regular users).
+    const SAMPLES: usize = 20;
+    let mut times_empty: Vec<u128> = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let t0 = Instant::now();
+        let resp = app.clone().oneshot(build_req()).await.expect("empty sample");
+        let elapsed = t0.elapsed().as_micros();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "empty-realm listing must return 200 OK"
+        );
+        times_empty.push(elapsed);
+    }
+    times_empty.sort_unstable();
+    // Guard against sub-microsecond runs on very fast machines.
+    let median_empty = times_empty[SAMPLES / 2].max(1);
+
+    // Populate realm with 50 regular users.
+    for i in 0..50u32 {
+        h.identity()
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("user{i}@enum-timing-test.example"),
+                    display_name: format!("User {i}"),
+                    first_name: "User".into(),
+                    last_name: i.to_string(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("create regular user");
+    }
+
+    // Phase 2: populated timing (51 total users, page_size = 1).
+    let mut times_populated: Vec<u128> = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let t0 = Instant::now();
+        let resp = app
+            .clone()
+            .oneshot(build_req())
+            .await
+            .expect("populated sample");
+        let elapsed = t0.elapsed().as_micros();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "populated-realm listing must return 200 OK"
+        );
+        times_populated.push(elapsed);
+    }
+    times_populated.sort_unstable();
+    let median_populated = times_populated[SAMPLES / 2];
+
+    // Structural check: page bound is honoured regardless of total user count.
+    {
+        let resp = app
+            .clone()
+            .oneshot(build_req())
+            .await
+            .expect("structural check");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body bytes");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("parse JSON body");
+        let items = json["items"].as_array().expect("items must be an array");
+        assert!(
+            items.len() <= 1,
+            "limit=1 must return at most 1 item regardless of realm size; \
+             got {}: pagination contract is violated, enabling body-size enumeration",
+            items.len()
+        );
+    }
+
+    // Timing ratio assertion.
+    // 25× is a deliberately generous ceiling: well above any realistic
+    // constant-page-size scan difference, yet tight enough to catch an
+    // O(N)-value regression that would make timing-based count inference feasible.
+    // Integer comparison avoids u128-to-f64 precision loss.
+    let ceiling = 25 * median_empty;
+    assert!(
+        median_populated < ceiling,
+        "admin listing timing ratio exceeds 25× bound \
+         (median_empty={median_empty}µs, median_populated={median_populated}µs, \
+         25× ceiling={ceiling}µs). \
+         Response time appears to scale with user count, which would enable \
+         timing-based mass enumeration attacks against the admin listing endpoint."
     );
 }
