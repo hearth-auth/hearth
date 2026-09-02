@@ -21,6 +21,6 @@
   "_overridesExplainer": "is-generator-function <1.1 crashes on Node.js 24+ (TypeError: getGeneratorFunction is not a function). koa pulls it in transitively via oidc-provider; we pin the patched version until oidc-provider ships an update that does so directly.",
   "overrides": {
     "is-generator-function": "^1.1.0",
-    "qs": ">=6.15.2"
+    "qs": ">=6.15.3"
   }
 }
