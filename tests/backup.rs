@@ -611,10 +611,19 @@ async fn encrypted_wrong_passphrase() {
 
 // ── 8. overwrite_mode ─────────────────────────────────────────────────────────
 
-/// After a first restore, the user's display name is mutated. A second restore
-/// with `RestoreMode::Overwrite` must revert the mutation.
+/// B3 (audit 2026-08-28 §3 B3, §4.9#2): `RestoreMode::Overwrite` over a realm
+/// that is already present must be refused, and the realm left untouched.
+///
+/// This test previously asserted the opposite — that a second restore reverted
+/// a mutation — which locked in the delete-then-recreate behaviour that
+/// destroyed the realm. `delete_realm` backgrounds its cascade for a realm
+/// above `cascade_background_threshold` and returns `Ok` while it is still
+/// running, so the re-import raced its own deletion. Of 1,160 recorded CLI
+/// runs none completed and 975 left the realm destroyed or truncated. The old
+/// test passed only because its realm is small enough for the synchronous
+/// cascade path.
 #[tokio::test]
-async fn overwrite_mode() {
+async fn overwrite_mode_refuses_over_a_live_realm() {
     let src = common::TestHarness::embedded().await.expect("src harness");
     let (realm, email, _) = seeded_realm(&src);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
@@ -656,32 +665,38 @@ async fn overwrite_mode() {
         .expect("exists");
     assert_eq!(mutated.display_name(), "Mutated Name");
 
-    // Second restore with Overwrite — user must be reverted.
+    // Second restore with Overwrite — refused, with nothing deleted.
     let opts = ImportOptions {
         mode: RestoreMode::Overwrite,
         ..import_opts_with_passphrase()
     };
-    let report = importer
+    let err = importer
         .import_realm(&slug, &reader, &opts)
-        .expect("overwrite import");
-    // Overwrite deletes and recreates the realm (cascading user deletion), so the
-    // user is re-created fresh rather than counted as "overwritten". Either counter
-    // indicates the user made it into the restored realm.
-    assert_eq!(report.users.errored, 0, "no user errors");
+        .expect_err("overwrite over a live realm must be refused");
     assert!(
-        report.users.created >= 1 || report.users.overwritten >= 1,
-        "user must be created or overwritten after overwrite restore"
+        matches!(err, hearth::backup::BackupError::RealmExists { .. }),
+        "expected RealmExists, got: {err:?}"
     );
 
-    let reverted = dst
+    // Left untouched: the realm, the user, and the mutation all survive. The
+    // refusal is not a partial restore — it reverts nothing because it does
+    // nothing.
+    assert!(
+        dst.identity()
+            .get_realm(&restored_realm_id)
+            .expect("get realm")
+            .is_some(),
+        "a refused overwrite must leave the realm in place"
+    );
+    let after = dst
         .identity()
         .get_user_by_email(&restored_realm_id, &email)
         .expect("lookup")
-        .expect("exists");
+        .expect("user must survive a refused overwrite");
     assert_eq!(
-        reverted.display_name(),
-        "Backup User",
-        "display_name must revert to archive value"
+        after.display_name(),
+        "Mutated Name",
+        "a refused overwrite must change nothing, including the mutation"
     );
 }
 

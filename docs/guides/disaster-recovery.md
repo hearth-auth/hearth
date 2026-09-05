@@ -108,15 +108,28 @@ This usually indicates one of:
    authoritative for any key range that was already flushed to that SST at
    backup time:
 
+   Restore into a **fresh** data directory, then cut over. Restore refuses to
+   replace a realm that is already present (audit 2026-08-28 §3 B3), so
+   restoring on top of the damaged directory will not work — and the
+   `--mode overwrite` this step used to prescribe is what destroyed the realm
+   in 975 of 1,160 recorded runs.
+
    ```bash
-   # Restore the entire realm that owns the corrupt SST.
+   # Restore the entire realm that owns the corrupt SST into a new directory.
    # Use --realm if you know which realm's data is in the file (one SST
    # may contain entries from multiple realms — restoring all realms is
    # always safe).
+   systemctl stop hearth
+
    hearth backup restore \
      --input /backups/latest.hearth-backup \
-     --data-dir /var/lib/hearth/data \
-     --mode overwrite
+     --data-dir /var/lib/hearth/data-restored
+
+   # Cut over only after the restore reports success.
+   mv /var/lib/hearth/data /var/lib/hearth/data.corrupt.$(date -u +%Y%m%dT%H%M%SZ)
+   mv /var/lib/hearth/data-restored /var/lib/hearth/data
+
+   systemctl start hearth
    ```
 
 4. **If no backup is available**, you must accept the data loss in the

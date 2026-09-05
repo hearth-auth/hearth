@@ -80,7 +80,10 @@ mod tests {
     fn hdrs(if_match: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
         if let Some(v) = if_match {
-            h.insert(header::IF_MATCH, HeaderValue::from_str(v).unwrap());
+            h.insert(
+                header::IF_MATCH,
+                HeaderValue::from_str(v).expect("test If-Match value must be a valid header value"),
+            );
         }
         h
     }

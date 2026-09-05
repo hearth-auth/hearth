@@ -249,6 +249,105 @@ fn scoped_realm(auth: &AdminAuth, path_realm_id: RealmId) -> Result<RealmId, Res
     }
 }
 
+/// Scans every realm page for the realm whose name equals `slug`.
+///
+/// Blocking: call from inside `spawn_blocking`.
+fn find_realm_id_by_slug(
+    identity: &Arc<dyn crate::identity::IdentityEngine>,
+    slug: &str,
+) -> Result<RealmId, (StatusCode, String)> {
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let page = identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("list_realms: {e}"),
+                )
+            })?;
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            if realm.name() == slug {
+                return Ok(realm.id().clone());
+            }
+        }
+        if n == 0 || offset + n >= page.total {
+            return Err((StatusCode::NOT_FOUND, format!("realm '{slug}' not found")));
+        }
+        offset += n;
+    }
+}
+
+/// Lists every realm ID in the deployment.
+///
+/// Blocking: call from inside `spawn_blocking`.
+fn list_all_realm_ids(
+    identity: &Arc<dyn crate::identity::IdentityEngine>,
+) -> Result<Vec<RealmId>, (StatusCode, String)> {
+    let mut ids = Vec::new();
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let page = identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("list_realms: {e}"),
+                )
+            })?;
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            ids.push(realm.id().clone());
+        }
+        if n == 0 || offset + n >= page.total {
+            return Ok(ids);
+        }
+        offset += n;
+    }
+}
+
+/// Resolves the realms a backup export may cover, from the caller's identity
+/// rather than the request's query string.
+///
+/// `POST /admin/backup` previously resolved `?realm=<slug>` against every realm
+/// in the deployment with no ownership check, and covered every realm when the
+/// parameter was absent. A tenant admin could export a peer tenant in full
+/// (audit 2026-08-28 §3 B1, §4.1#1).
+///
+/// * The **system realm** (nil UUID) may name any realm, and covers every realm
+///   when no slug is given.
+/// * Every other caller covers its own realm only. A slug is compared against
+///   the caller's own realm name, so a peer slug is `403` and this function
+///   never becomes a realm-existence oracle.
+///
+/// Blocking: call from inside `spawn_blocking`.
+fn authorize_export_realms(
+    identity: &Arc<dyn crate::identity::IdentityEngine>,
+    auth_realm: &RealmId,
+    requested_slug: Option<&str>,
+) -> Result<Vec<RealmId>, (StatusCode, String)> {
+    if !auth_realm.as_uuid().is_nil() {
+        if let Some(slug) = requested_slug {
+            let own = identity
+                .get_realm(auth_realm)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get_realm: {e}")))?
+                .ok_or_else(|| (StatusCode::FORBIDDEN, "forbidden".to_string()))?;
+            if own.name() != slug {
+                return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+            }
+        }
+        return Ok(vec![auth_realm.clone()]);
+    }
+
+    match requested_slug {
+        Some(slug) => Ok(vec![find_realm_id_by_slug(identity, slug)?]),
+        None => list_all_realm_ids(identity),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handler implementations extracted verbatim from src/protocol/http.rs
 // (lines 3330-3302 skipped: rbac_error_to_response stays in parent module;
@@ -4300,6 +4399,31 @@ async fn admin_backup_create(
         return e.into_response();
     }
 
+    // B1: the realms this export covers come from the caller's identity, never
+    // from the query string (audit 2026-08-28 §3 B1, §4.1#1). Resolved before
+    // the watermark so a refused request does not record an export that never
+    // happened.
+    let scope_identity = Arc::clone(&state.identity);
+    let scope_realm = auth.realm_id.clone();
+    let scope_slug = params.realm.clone();
+    let realms_to_export = match tokio::task::spawn_blocking(move || {
+        authorize_export_realms(&scope_identity, &scope_realm, scope_slug.as_deref())
+    })
+    .await
+    {
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("scope task panicked: {e}")})),
+            )
+                .into_response()
+        }
+        Ok(Err((status, msg))) => {
+            return (status, Json(serde_json::json!({"error": msg}))).into_response()
+        }
+        Ok(Ok(realms)) => realms,
+    };
+
     // A-30: emit audit watermark at the start of every export.
     let export_id = uuid::Uuid::new_v4().to_string();
     emit_export_watermark(
@@ -4314,39 +4438,12 @@ async fn admin_backup_create(
     let identity = Arc::clone(&state.identity);
     let audit_engine = Arc::clone(&state.audit);
     let rbac = Arc::clone(&state.rbac);
-    let realm_filter_slug = params.realm.clone();
     let include_audit = params.include_audit;
     let auth_realm_id = auth.realm_id.clone();
     let actor = auth.user_id.as_uuid().to_string();
 
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
-
-        // Resolve optional realm slug to a RealmId.
-        let filter_id: Option<crate::core::RealmId> = if let Some(slug) = &realm_filter_slug {
-            let mut found = None;
-            let batch = crate::core::MAX_PAGE_LIMIT;
-            let mut offset = 0u64;
-            loop {
-                let page = identity
-                    .list_realms(&crate::core::PageRequest::new(offset, batch))
-                    .map_err(|e| format!("list_realms: {e}"))?;
-                let n = page.items.len() as u64;
-                for realm in &page.items {
-                    if realm.name() == slug {
-                        found = Some(realm.id().clone());
-                        break;
-                    }
-                }
-                if found.is_some() || n == 0 || offset + n >= page.total {
-                    break;
-                }
-                offset += n;
-            }
-            Some(found.ok_or_else(|| format!("realm '{slug}' not found"))?)
-        } else {
-            None
-        };
 
         // Write the archive to a temporary file; read it back as bytes.
         let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
@@ -4360,29 +4457,7 @@ async fn admin_backup_create(
         let dek = BackupExporter::generate_dek().map_err(|e| format!("generate_dek: {e}"))?;
         let opts = ExportOptions {
             include_audit,
-            realm_filter: filter_id.as_ref().map(|id| vec![id.clone()]),
-        };
-
-        let realms_to_export: Vec<crate::core::RealmId> = if let Some(id) = filter_id {
-            vec![id]
-        } else {
-            let mut ids = Vec::new();
-            let batch = crate::core::MAX_PAGE_LIMIT;
-            let mut offset = 0u64;
-            loop {
-                let page = identity
-                    .list_realms(&crate::core::PageRequest::new(offset, batch))
-                    .map_err(|e| format!("list_realms: {e}"))?;
-                let n = page.items.len() as u64;
-                for realm in &page.items {
-                    ids.push(realm.id().clone());
-                }
-                if n == 0 || offset + n >= page.total {
-                    break;
-                }
-                offset += n;
-            }
-            ids
+            realm_filter: Some(realms_to_export.clone()),
         };
 
         let mut writer =
@@ -4599,6 +4674,16 @@ async fn admin_backup_restore(
     let identity = Arc::clone(&state.identity);
     let rbac = Arc::clone(&state.rbac);
 
+    // B1: the realm this restore may write comes from the caller's identity,
+    // never from the query string or the archive's manifest. Only the system
+    // realm (nil UUID) may restore a realm other than its own
+    // (audit 2026-08-28 §3 B1, §4.1#1).
+    let allowed_realm = if auth.realm_id.as_uuid().is_nil() {
+        None
+    } else {
+        Some(auth.realm_id.clone())
+    };
+
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{
             BackupArchive, BackupImporter, ImportOptions, ImportReport, RestoreMode,
@@ -4609,24 +4694,30 @@ async fn admin_backup_restore(
             "merge" => RestoreMode::Merge,
             "skip" | "" => RestoreMode::Skip,
             other => {
-                return Err(format!(
-                    "unknown mode '{other}'; expected skip | overwrite | merge"
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown mode '{other}'; expected skip | overwrite | merge"),
                 ))
             }
         };
 
-        let reader = BackupArchive::open(&tmp_path).map_err(|e| format!("open archive: {e}"))?;
+        let reader = BackupArchive::open(&tmp_path)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("open archive: {e}")))?;
 
         // A-30: verify detached manifest signature when an operator verify key is configured.
         if let Some(key_bytes) = verify_key_bytes.as_ref() {
             verify_manifest_signature(&reader.manifest, key_bytes)
-                .map_err(|(_, body)| format!("{}", body.0))?;
+                .map_err(|(_, body)| (StatusCode::BAD_REQUEST, format!("{}", body.0)))?;
         }
 
         let importer = BackupImporter::new(identity, rbac, Arc::clone(&state.audit));
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
-            let mk = std::env::var("HEARTH_MASTER_KEY")
-                .map_err(|_| "HEARTH_MASTER_KEY not set for encrypted restore".to_string())?;
+            let mk = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "HEARTH_MASTER_KEY not set for encrypted restore".to_string(),
+                )
+            })?;
             Some(secrecy::SecretString::from(mk))
         } else {
             None
@@ -4641,13 +4732,17 @@ async fn admin_backup_restore(
             // key that invalidates every pre-restore token. The CLI exposes
             // `--allow-missing-signing-key` for the deliberate override (HEA-2168).
             allow_missing_signing_key: false,
+            allowed_realm,
         };
 
         let slugs: Vec<String> = if let Some(slug) = &realm_filter {
             if reader.realms().iter().any(|r| &r.slug == slug) {
                 vec![slug.clone()]
             } else {
-                return Err(format!("realm '{slug}' not found in archive"));
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("realm '{slug}' not found in archive"),
+                ));
             }
         } else {
             reader.realms().iter().map(|r| r.slug.clone()).collect()
@@ -4656,13 +4751,21 @@ async fn admin_backup_restore(
         let mut reports: std::collections::HashMap<String, ImportReport> =
             std::collections::HashMap::new();
         for slug in &slugs {
-            let report = importer
-                .import_realm(slug, &reader, &opts)
-                .map_err(|e| format!("import_realm '{slug}': {e}"))?;
+            let report = importer.import_realm(slug, &reader, &opts).map_err(|e| {
+                // A realm outside the caller's scope is an authorization
+                // refusal, and a live target realm is a conflict — neither is
+                // a malformed request.
+                let status = match e {
+                    crate::backup::BackupError::RealmNotPermitted { .. } => StatusCode::FORBIDDEN,
+                    crate::backup::BackupError::RealmExists { .. } => StatusCode::CONFLICT,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                (status, format!("import_realm '{slug}': {e}"))
+            })?;
             reports.insert(slug.clone(), report);
         }
 
-        Ok::<_, String>(reports)
+        Ok::<_, (StatusCode, String)>(reports)
     })
     .await;
 
@@ -4672,11 +4775,7 @@ async fn admin_backup_restore(
             Json(serde_json::json!({"error": format!("restore task panicked: {e}")})),
         )
             .into_response(),
-        Ok(Err(msg)) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response(),
+        Ok(Err((status, msg))) => (status, Json(serde_json::json!({"error": msg}))).into_response(),
         Ok(Ok(reports)) => {
             let mut realms_restored = 0u64;
             let mut counts = serde_json::Map::new();

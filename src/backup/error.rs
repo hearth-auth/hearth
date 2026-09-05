@@ -72,4 +72,40 @@ pub enum BackupError {
         /// Archive slug of the realm whose signing key could not be restored.
         slug: String,
     },
+
+    /// The archive carries a realm the caller is not authorized to restore.
+    ///
+    /// A restore takes the realm it may write from the caller's identity. An
+    /// archive naming any other realm is refused before anything is written,
+    /// so a tenant admin cannot overwrite a peer tenant by uploading that
+    /// tenant's archive (audit 2026-08-28 §3 B1, §4.1#1).
+    #[error(
+        "backup archive contains realm '{slug}', which is outside the caller's realm — \
+         a restore may only write the realm the caller is authenticated for"
+    )]
+    RealmNotPermitted {
+        /// Archive slug of the realm the caller may not restore.
+        slug: String,
+    },
+
+    /// `mode=overwrite` was asked to replace a realm that is still live.
+    ///
+    /// Overwrite used to delete the realm and then re-import it. `delete_realm`
+    /// backgrounds its cascade for a realm above `cascade_background_threshold`
+    /// and returns `Ok` while the cascade is still running, so the re-import
+    /// raced its own deletion and usually lost: the realm was left destroyed,
+    /// truncated, or without its signing key. Of 1,160 recorded CLI runs none
+    /// completed and 975 destroyed or truncated the realm. Restore now refuses
+    /// with nothing deleted (audit 2026-08-28 §3 B3, §4.9#2).
+    #[error(
+        "realm '{slug}' already exists — `mode=overwrite` will not replace a live realm. \
+         Overwriting required deleting it first, and a deletion that is still running races \
+         the restore and destroys the realm. Delete the realm explicitly, wait for the \
+         deletion to finish, then restore with the default `skip` mode; or restore into an \
+         instance where this realm is absent."
+    )]
+    RealmExists {
+        /// Name of the realm that is already present on the target.
+        slug: String,
+    },
 }

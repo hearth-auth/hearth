@@ -197,8 +197,8 @@ dev_mode: true
 branding:
   custom_css: "/does/not/exist/brand.css"
 "#;
-    let err = Config::from_yaml_str(yaml)
-        .expect_err("non-existent custom_css path must fail validation");
+    let err =
+        Config::from_yaml_str(yaml).expect_err("non-existent custom_css path must fail validation");
     let display = format!("{err}");
     assert!(
         !display.contains("unknown field"),

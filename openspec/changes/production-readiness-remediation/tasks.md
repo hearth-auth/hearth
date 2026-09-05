@@ -3,29 +3,29 @@ found it, the audit piece, and the report's severity.
 
 ## 1. Wave 0 — Make the build green (hard gate on every later wave)
 
-- [ ] 1.1 Remove the `unwrap()` at `src/protocol/scim/etag.rs:83`; clippy aborts here as a hard compile error, so `--all-targets` cannot complete (§2.3, §4.12#17 · P00 · Informational)
-- [ ] 1.2 Run `cargo fmt`; 7 diff hunks across 5 files fail `cargo fmt --check` (§2 · rc 1)
-- [ ] 1.3 Bump `h2` to `>=0.4.16` for RUSTSEC-2026-0258, an unauthenticated remote DoS reachable pre-auth on the plaintext listener (§2.2, §4.8#7 · MEDIUM)
-- [ ] 1.4 Resolve the yanked `validit 0.2.5` reached through `openraft 0.9.25` (§2.2 · `cargo audit`)
-- [ ] 1.5 Fix `hearth::backup_http backup_restore_dry_run_returns_counts` (§2.1 · FAIL)
-- [ ] 1.6 Fix `hearth::backup_http backup_restore_emits_pre_restore_audit_event`, red since the commit that changed the behaviour it guards (§2.1, §4.12#10 · P00 · MEDIUM)
-- [ ] 1.7 Fix the `sigterm_does_not_abort_inflight_http_request` harness, which starves its own request task and loses its race in every observed run; its sibling passes vacuously (§2.1, §4.11#10, §4.12#11 · P18/P00 · MEDIUM)
-- [ ] 1.8 Leave `simulation_c4_partial_compaction_crash_resurrects_deleted_key` red and confirm it is red for the right reason; its defect is blocker B7 in task 2.7 (§2.1, §4.12#2 · P00 · BLOCKER)
-- [ ] 1.9 Confirm `make check` runs every gate to completion, and that CI executes `cargo fmt --check` and the test suite on the commit (§1, §4.12#17 · P00)
+- [x] 1.1 Remove the `unwrap()` at `src/protocol/scim/etag.rs:83`; clippy aborts here as a hard compile error, so `--all-targets` cannot complete (§2.3, §4.12#17 · P00 · Informational)
+- [x] 1.2 Run `cargo fmt`; 7 diff hunks across 5 files fail `cargo fmt --check` (§2 · rc 1)
+- [x] 1.3 Bump `h2` to `>=0.4.16` for RUSTSEC-2026-0258, an unauthenticated remote DoS reachable pre-auth on the plaintext listener (§2.2, §4.8#7 · MEDIUM)
+- [x] 1.4 Resolve the yanked `validit 0.2.5` reached through `openraft 0.9.25` (§2.2 · `cargo audit`)
+- [x] 1.5 Fix `hearth::backup_http backup_restore_dry_run_returns_counts` (§2.1 · FAIL)
+- [x] 1.6 Fix `hearth::backup_http backup_restore_emits_pre_restore_audit_event`, red since the commit that changed the behaviour it guards (§2.1, §4.12#10 · P00 · MEDIUM)
+- [x] 1.7 Fix the `sigterm_does_not_abort_inflight_http_request` harness, which starves its own request task and loses its race in every observed run; its sibling passes vacuously (§2.1, §4.11#10, §4.12#11 · P18/P00 · MEDIUM)
+- [x] 1.8 Leave `simulation_c4_partial_compaction_crash_resurrects_deleted_key` red and confirm it is red for the right reason; its defect is blocker B7 in task 2.7 (§2.1, §4.12#2 · P00 · BLOCKER)
+- [x] 1.9 Confirm `make check` runs every gate to completion, and that CI executes `cargo fmt --check` and the test suite on the commit (§1, §4.12#17 · P00)
 
 ## 2. Wave 1 — The eleven blockers
 
-- [ ] 2.1 B1 — Take the realm on `POST /admin/backup` and `/admin/backup/restore` from the caller's identity, not a query parameter; a tenant admin exports and overwrite-restores a peer tenant (§3 B1, §4.1#1 · P13 · BLOCKER)
+- [x] 2.1 B1 — Take the realm on `POST /admin/backup` and `/admin/backup/restore` from the caller's identity, not a query parameter; a tenant admin exports and overwrite-restores a peer tenant (§3 B1, §4.1#1 · P13 · BLOCKER)
 - [ ] 2.2 B2 — Gate the container image, Helm chart, seven SDK releases and two registry packages on the same signal the binary channel uses; today they publish from a red commit and cosign plus SLSA attest to it (§3 B2, §4.8#1 · P27 · BLOCKER)
-- [ ] 2.3 B3 — Make `mode=overwrite` restore refuse rather than delete the target realm and then fail to restore it; 1,160 CLI runs, none completed, 975 left the realm destroyed or truncated, one reported exit 0 (§3 B3, §4.9#2 · P12 · BLOCKER)
+- [x] 2.3 B3 — Make `mode=overwrite` restore refuse rather than delete the target realm and then fail to restore it; 1,160 CLI runs, none completed, 975 left the realm destroyed or truncated, one reported exit 0 (§3 B3, §4.9#2 · P12 · BLOCKER)
 - [ ] 2.4 B4 — Stop WAL rotation destroying acknowledged writes under concurrent writers, and flush the memtable on the shutdown path; a clean `SIGTERM` is sufficient (§3 B4, §4.11#1 · P18 · BLOCKER)
 - [ ] 2.5 B5 — Fix XML Signature Wrapping in the SAML assertion consumer; `verify_signed_element` authenticates one assertion and `parse_response` consumes a different one (§3 B5, §4.10#1 · P23 · BLOCKER shape 4 / HIGH shapes 1–3)
 - [ ] 2.6 B6 — Stop the publish jobs running ahead of release validation; the v1.6.11 image and chart published 37 minutes before "Release is NOT cleared to publish" (§3 B6, §4.12#1 · P00 · BLOCKER)
-- [ ] 2.7 B7 — Order partial compaction so the tombstone is not destroyed before the value it shadows is unlinked; a crash in that window resurrects deleted keys on the shipped default config (§3 B7, §4.11#2, §4.12#2, §4.21#1 · P18/P00/P19 · BLOCKER)
+- [x] 2.7 B7 — Order partial compaction so the tombstone is not destroyed before the value it shadows is unlinked; a crash in that window resurrects deleted keys on the shipped default config (§3 B7, §4.11#2, §4.12#2, §4.21#1 · P18/P00/P19 · BLOCKER)
 - [ ] 2.8 B8 — Stop writing the first-run setup token to the production log at WARN at the default level; the full chain to first-admin takeover was reproduced (§3 B8, §4.12#8, §4.13#11, §4.14#1, §4.24#2 · P00/P02/P26/P17 · BLOCKER, escalated)
 - [ ] 2.9 B9 — Make signing-key rotation revoke the retired key; it mints new admin tokens for the full 24 h grace window and neither documented mitigation stops it (§3 B9, §4.15#1 · P06 · BLOCKER)
 - [ ] 2.10 B10 — Require proven user verification before a passkey satisfies `mfa_required`; the UV knob is dead code. Interim operator remedy: `passkey_requires_mfa: true` (§3 B10, §4.18#1 · P16 · BLOCKER)
-- [ ] 2.11 B11 — Make `reload_sst_readers()` fail loudly instead of silently dropping an unopenable SST, so the next partial compaction does not discard tombstones it must keep; no crash or restart is needed (§3 B11, §4.21#2 · P19 · BLOCKER)
+- [x] 2.11 B11 — Make `reload_sst_readers()` fail loudly instead of silently dropping an unopenable SST, so the next partial compaction does not discard tombstones it must keep; no crash or restart is needed (§3 B11, §4.21#2 · P19 · BLOCKER)
 
 ## 3. Wave 2 (HIGH) — Build and release integrity
 

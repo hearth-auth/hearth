@@ -179,8 +179,11 @@ async fn admin_endpoint_rate_limit_exceeded_returns_429() {
 
     // Set a very low admin rate limit (2 requests per minute).
     let state = Arc::new(
-        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
-            .with_rate_limits(Some(2), None, None),
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()).with_rate_limits(
+            Some(2),
+            None,
+            None,
+        ),
     );
 
     let realm_header = realm.as_uuid().to_string();

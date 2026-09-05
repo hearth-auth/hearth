@@ -135,8 +135,31 @@ coverage:
 fmt:
 	cargo fmt --check
 
-## Run all Rust checks (build + clippy + fmt + tests + test-quality guardrail).
-check: clippy fmt test-quality test
+## Run all Rust checks (clippy + fmt + test-quality guardrail + tests).
+##
+## Every gate runs to completion and reports its own result. The exit code
+## reflects the worst result, not the first. Prerequisite-style chaining
+## (`check: clippy fmt test-quality test`) aborted the whole target on the
+## first failure, so a denied clippy lint meant `cargo fmt --check` and the
+## test suite never executed on that commit (audit 2026-08-28 §1, §2.3).
+check:
+	@failed=""; \
+	for gate in clippy fmt test-quality test; do \
+	  echo ""; \
+	  echo "===> make $$gate"; \
+	  if $(MAKE) --no-print-directory $$gate; then \
+	    echo "===> $$gate: PASS"; \
+	  else \
+	    echo "===> $$gate: FAIL"; \
+	    failed="$$failed $$gate"; \
+	  fi; \
+	done; \
+	echo ""; \
+	if [ -n "$$failed" ]; then \
+	  echo "make check: FAILED gates:$$failed"; \
+	  exit 1; \
+	fi; \
+	echo "make check: all gates passed"
 
 ## Grep-based guardrail against false-confidence test patterns
 ## (weak is_ok/is_err asserts, unconditional sleeps, untracked #[ignore]).

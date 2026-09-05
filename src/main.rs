@@ -4013,6 +4013,10 @@ fn run_backup_restore(
         realm_target: None,
         dek_passphrase,
         allow_missing_signing_key,
+        // The CLI runs with full operator authority on the local data
+        // directory, so it may restore every realm the archive contains. The
+        // HTTP route scopes this to the caller's realm instead (B1).
+        allowed_realm: None,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {

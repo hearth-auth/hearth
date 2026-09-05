@@ -242,8 +242,7 @@ mod tests {
     fn manifest_new_stamps_release_version_not_placeholder() {
         let manifest = BackupManifest::new(vec![]);
         assert_ne!(
-            manifest.hearth_version,
-            "1.0.0",
+            manifest.hearth_version, "1.0.0",
             "hearth_version must not be the stale Cargo.toml placeholder; \
              build.rs must resolve via HEARTH_RELEASE_VERSION, git describe, or \
              an up-to-date Cargo.toml version field"

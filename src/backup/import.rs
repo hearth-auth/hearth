@@ -82,6 +82,18 @@ pub struct ImportOptions {
     /// When `true`, the operator has explicitly accepted that a new signing key
     /// will be generated and all previously issued tokens will stop validating.
     pub allow_missing_signing_key: bool,
+    /// Restrict the restore to a single realm.
+    ///
+    /// When `Some`, an archive whose `realm.json` carries any other realm ID is
+    /// refused with [`BackupError::RealmNotPermitted`] before anything is
+    /// written. `None` means the caller may restore every realm the archive
+    /// contains — the system realm and the CLI, which run with full operator
+    /// authority.
+    ///
+    /// The check reads the decrypted `realm.json`, not the manifest: the
+    /// manifest is caller-supplied and may name one realm while the archive
+    /// carries another (audit 2026-08-28 §3 B1, §4.1#1).
+    pub allowed_realm: Option<RealmId>,
 }
 
 /// Per-entity-type outcome counts for a single realm restore operation.
@@ -324,6 +336,36 @@ impl BackupImporter {
             );
         }
 
+        // Parse realm.json — required.
+        //
+        // This runs BEFORE any write so the realm-authorization check below can
+        // refuse with nothing written. The realm ID is taken from the decrypted
+        // `realm.json`, never from the manifest: the manifest is caller-supplied
+        // and an archive may name one realm in its manifest and carry another
+        // (audit 2026-08-28 §3 B1, §4.1#1).
+        let realm_key = format!("realms/{realm_slug}/realm.json");
+        let realm_raw = files.get(&realm_key).ok_or_else(|| {
+            BackupError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("realm.json not found for slug '{realm_slug}'"),
+            ))
+        })?;
+        let realm_bytes = try_decrypt(realm_raw)?;
+        let realm: Realm = serde_json::from_slice(&realm_bytes)?;
+
+        // ── Realm authorization (fail closed, before any write) ─────────────
+        //
+        // When the caller is scoped to a single realm, the archive may only
+        // restore that realm. Nothing has been written at this point, so a
+        // refusal leaves the target untouched.
+        if let Some(allowed) = &opts.allowed_realm {
+            if realm.id() != allowed {
+                return Err(BackupError::RealmNotPermitted {
+                    slug: realm_slug.to_string(),
+                });
+            }
+        }
+
         // ── Audit events (restored FIRST) ───────────────────────────────────
         //
         // Audit events are re-chained under the destination realm's HMAC key
@@ -360,17 +402,6 @@ impl BackupImporter {
             }
         }
 
-        // Parse realm.json — required.
-        let realm_key = format!("realms/{realm_slug}/realm.json");
-        let realm_raw = files.get(&realm_key).ok_or_else(|| {
-            BackupError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("realm.json not found for slug '{realm_slug}'"),
-            ))
-        })?;
-        let realm_bytes = try_decrypt(realm_raw)?;
-        let realm: Realm = serde_json::from_slice(&realm_bytes)?;
-
         // Parse credentials.ndjson — optional (users may have no passwords).
         let cred_key = format!("realms/{realm_slug}/credentials.ndjson");
         let credential_map = if let Some(raw) = files.get(&cred_key) {
@@ -390,6 +421,21 @@ impl BackupImporter {
         };
 
         let restored_realm_id = if opts.dry_run {
+            // A dry run reports what the real restore would do. An overwrite
+            // over a live realm is refused (B3), so the dry run must refuse
+            // too rather than report a success the restore would not deliver
+            // (audit 2026-08-28 §9 item 1).
+            if matches!(opts.mode, RestoreMode::Overwrite)
+                && self
+                    .identity
+                    .get_realm(&realm_id)
+                    .map_err(identity_to_backup_err)?
+                    .is_some()
+            {
+                return Err(BackupError::RealmExists {
+                    slug: target_name.to_string(),
+                });
+            }
             report.realms.created += 1;
             realm_id.clone()
         } else {
@@ -613,15 +659,23 @@ impl BackupImporter {
                         Ok(realm_id)
                     }
                     RestoreMode::Overwrite => {
-                        self.identity
-                            .delete_realm(&realm_id)
-                            .map_err(identity_to_backup_err)?;
-                        let r = self
-                            .identity
-                            .import_realm(req, Some(realm_id), signing_key_pkcs8)
-                            .map_err(identity_to_backup_err)?;
-                        report.realms.overwritten += 1;
-                        Ok(r.id().clone())
+                        // B3: refuse rather than half-execute. This arm used to
+                        // `delete_realm` and then re-import. `delete_realm`
+                        // backgrounds its cascade for a realm above
+                        // `cascade_background_threshold` and returns `Ok` while
+                        // it is still running, so the re-import raced its own
+                        // deletion: the cascade then removed the realm record,
+                        // the name index, the signing key and the freshly
+                        // written user, credential and session keys underneath
+                        // it (audit 2026-08-28 §3 B3, §4.9#2).
+                        //
+                        // Nothing has been deleted at this point, so the target
+                        // is untouched. Restoring into an instance where the
+                        // realm is absent is unaffected — the `import_realm`
+                        // above succeeds and this arm is never reached.
+                        Err(BackupError::RealmExists {
+                            slug: req.name.clone(),
+                        })
                     }
                 }
             }
@@ -1087,8 +1141,17 @@ mod tests {
         assert_eq!(r2.conflicts.len(), 3, "1 realm + 2 user conflicts");
     }
 
+    /// B3 (audit 2026-08-28 §3 B3, §4.9#2): `RestoreMode::Overwrite` over a
+    /// realm that is already present is refused, and nothing is deleted.
+    ///
+    /// This test previously asserted that overwrite cascaded a realm delete and
+    /// re-created the users. That is the behaviour that destroyed the realm:
+    /// `delete_realm` backgrounds its cascade above
+    /// `cascade_background_threshold` and returns while it is still running, so
+    /// the re-import raced its own deletion. Of 1,160 recorded CLI runs none
+    /// completed and 975 left the realm destroyed or truncated.
     #[test]
-    fn overwrite_mode_replaces_users() {
+    fn overwrite_mode_refuses_over_a_live_realm() {
         let archive_dir = TempDir::new().expect("archive tmpdir");
         let rig = make_rig();
 
@@ -1115,18 +1178,62 @@ mod tests {
             allow_missing_signing_key: true,
             ..Default::default()
         };
-        let r2 = importer
+        let err = importer
             .import_realm(slug, &reader, &opts)
-            .expect("overwrite import");
-        assert_eq!(r2.realms.overwritten, 1, "realm should be overwritten");
-        // Realm overwrite cascades: delete_realm removes all child users, so
-        // users are then imported fresh (created) rather than individually overwritten.
-        assert_eq!(
-            r2.users.created, 2,
-            "users re-created after realm cascade delete"
+            .expect_err("overwrite over a live realm must be refused");
+        assert!(
+            matches!(err, BackupError::RealmExists { slug: ref s } if s == slug),
+            "expected RealmExists, got: {err:?}"
         );
-        assert_eq!(r2.users.overwritten, 0);
-        assert_eq!(r2.users.errored, 0);
+
+        // Fail closed: the realm and its users must all survive the refusal.
+        let realm_id = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("parse uuid"));
+        assert!(
+            rig.identity
+                .get_realm(&realm_id)
+                .expect("get realm")
+                .is_some(),
+            "a refused overwrite must leave the realm in place"
+        );
+    }
+
+    /// A dry run reports what the real restore would do. An overwrite over a
+    /// live realm is refused, so the dry run must refuse too rather than report
+    /// a success the restore would not deliver (audit 2026-08-28 §9 item 1).
+    #[test]
+    fn dry_run_overwrite_over_a_live_realm_predicts_the_refusal() {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let rig = make_rig();
+
+        let realm_uuid = "00000000-0000-0000-0000-000000000031";
+        let slug = "dry-run-overwrite-realm";
+        let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
+
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+
+        importer
+            .import_realm(slug, &reader, &opts_with_passphrase())
+            .expect("first import");
+
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            dry_run: true,
+            dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
+            ..Default::default()
+        };
+        let err = importer
+            .import_realm(slug, &reader, &opts)
+            .expect_err("a dry-run overwrite over a live realm must predict the refusal");
+        assert!(
+            matches!(err, BackupError::RealmExists { .. }),
+            "expected RealmExists, got: {err:?}"
+        );
     }
 
     #[test]

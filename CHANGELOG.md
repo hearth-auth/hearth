@@ -31,6 +31,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   operations race. Requests without `If-Match` are unaffected.
 
 ### Changed
+- **`make check` now runs every gate and reports each result (audit 2026-08-28 §1, §2.3)** —
+  `check` chained `clippy`, `fmt`, `test-quality` and `test` as make prerequisites, so the first
+  failing gate aborted the whole target and the remaining gates never ran. A denied clippy lint
+  therefore meant `cargo fmt --check` and the test suite never executed on that commit, locally or
+  in CI, because the CI quality job invokes `make check`. Every gate now runs to completion and
+  prints its own `PASS`/`FAIL` line, and the exit code reflects the worst result rather than the
+  first.
 - **Multi-node clustering is documented and flagged as EXPERIMENTAL (HEA-2154)** — Hearth 1.x has
   no production-supported multi-node path.  Starting a node with a `cluster:` section now emits a
   `WARN` on every startup naming the three known defects: followers never invalidate RBAC or
@@ -43,6 +50,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Partial compaction no longer resurrects deleted keys after a crash (audit 2026-08-28 §3 B7,
+  §4.11#2, §4.12#2, §4.21#1)** — `compact_partial` installed its merged output over the run's
+  *newest* SST, which is the member carrying the tombstones, and unlinked the older value-bearing
+  members only afterwards. A crash in that window left the merged file — with tombstones already
+  discarded — live above an untouched value-bearing SST, so every key deleted in that run became
+  readable again. In an identity store that means a revoked credential, session or token record can
+  come back. No attacker and no unusual configuration is required; this fires on the shipped default
+  config. The merged output now takes the run's *oldest* number, so the tombstone-bearing member
+  stays on disk until the values it shadows are gone. Read recency is unchanged, because a
+  compaction run is contiguous: nothing outside the run can fall between its oldest and newest
+  members.
+- **An unopenable SST no longer disappears silently after a flush or compaction (audit 2026-08-28
+  §3 B11, §4.21#2)** — `reload_sst_readers()` logged a warning and skipped any SST whose encryption
+  header would not read, whose KEK was not registered, whose DEK would not unwrap, or whose reader
+  would not open. It ignored `allow_missing_keks` entirely, so an operator who had configured
+  fail-closed still got silent skips on every flush and compaction: start-up honoured the setting,
+  the reload path did not. The consequence reaches past that one file. The reader list is what
+  partial compaction measures to decide whether it may discard tombstones, so a dropped oldest SST
+  makes the next compaction conclude its run reaches the oldest file and discard tombstones that
+  still shadow live values there — resurrecting deleted keys with no crash and no restart. The
+  reload path now applies the same policy start-up applies.
+- **`mode=overwrite` restore no longer destroys the realm it cannot restore (audit 2026-08-28 §3 B3,
+  §4.9#2)** — overwrite deleted the target realm and then re-imported it. `delete_realm` runs its
+  cascade on a background task for any realm above `cascade_background_threshold` and returns `Ok`
+  while that cascade is still running, so the re-import raced its own deletion and usually lost: the
+  cascade then removed the realm record, the name index, the signing key, and the user, credential
+  and session keys the restore had just written. Of 1,160 recorded CLI runs **none completed**, 975
+  left the realm destroyed or truncated, and one reported exit 0. **BREAKING:** restore now refuses
+  when the target realm is already present — `409 Conflict` over HTTP, a non-zero exit on the CLI —
+  with nothing deleted. A `--dry-run` reports the same refusal rather than predicting a success the
+  restore would not deliver. Restoring into an instance where the realm is absent, which is the
+  disaster-recovery case, is unaffected. To replace a live realm, delete it explicitly, wait for the
+  deletion to complete, then restore. The backup guide and the disaster-recovery runbook — which
+  prescribed `--mode overwrite` against a live data directory — are corrected.
+- **Backup export and restore are scoped to the caller's realm (audit 2026-08-28 §3 B1, §4.1#1)** —
+  `POST /admin/backup` took the realm from a `?realm=<slug>` query parameter and resolved it against
+  every realm in the deployment, with no check that the caller owned it. With no parameter at all it
+  exported every tenant into one archive. `POST /admin/backup/restore` wrote every realm the uploaded
+  archive named. A tenant admin holding `hearth.export` could therefore export a peer tenant in full —
+  users, credentials, clients, RBAC and audit history — and `mode=overwrite`-restore over it.
+  **BREAKING:** both routes now act only on the realm the caller authenticated for. Naming another
+  realm's slug answers `403`. An archive containing another realm is refused with `403` before
+  anything is written, so a refused restore leaves the target untouched. Only the system realm (nil
+  UUID) may name another realm or cover every realm. The restore check reads the decrypted
+  `realm.json`, not the archive manifest, so an archive that names one realm in its manifest while
+  carrying another is still refused. `hearth backup restore` on the CLI is unchanged — it runs with
+  full operator authority on the local data directory.
+- **`h2` upgraded to 0.4.19 for RUSTSEC-2026-0258 (audit 2026-08-28 §2.2, §4.8#7)** — the HTTP/2
+  stack carried `h2 0.4.14`, which is affected by an unauthenticated remote denial of service
+  reachable before authentication on the plaintext listener. The same lockfile update resolves the
+  yanked `validit 0.2.5` reached through `openraft 0.9.25` to `0.2.6`. `cargo audit --deny yanked`
+  now reports no findings.
 - **Backup restore no longer silently drops the realm signing key (HEA-2168)** — restoring an
   archive that carried no usable signing key (an unencrypted archive, one produced before signing-key
   export, or one opened without the DEK) previously generated a **fresh** key and continued with only

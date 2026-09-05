@@ -369,6 +369,15 @@ pub struct EmbeddedStorageEngine {
     /// every reader so decrypted cold-tier residency is `O(cache_cap)`, not
     /// `O(corpus)` (HEA-1914).
     block_cache: Arc<crate::storage::block_cache::BlockCache>,
+    /// Whether an SST whose KEK is missing or whose DEK will not unwrap may be
+    /// skipped instead of failing the operation.
+    ///
+    /// Carried from [`StorageConfig::allow_missing_keks`] so
+    /// [`Self::reload_sst_readers`] applies the same policy start-up does.
+    /// Without it the reload path skipped unconditionally, and a silently
+    /// dropped SST makes the next partial compaction discard tombstones it must
+    /// keep (B11, audit 2026-08-28 §3 B11, §4.21#2).
+    allow_missing_keks: bool,
     /// Process-local guard: removes `data_dir` from `OPEN_DIRS` on drop.
     ///
     /// Must be declared after all fields that use `data_dir` so it is dropped
@@ -681,6 +690,7 @@ impl EmbeddedStorageEngine {
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_cache,
+            allow_missing_keks: config.allow_missing_keks,
             _process_lock: dir_lock_guard,
             _dir_lock: lock_file,
         })
@@ -772,8 +782,21 @@ impl EmbeddedStorageEngine {
     /// Vec from on-disk state. Files are sorted by SST number descending so the
     /// resulting Vec order matches the recency order that recovery
     /// ([`Self::open_with_fs`]) reconstructs — the invariant reads rely on
-    /// (newest wins). Individual files that fail to open (missing KEK, corrupt
-    /// header) are skipped with a warning rather than aborting the rebuild.
+    /// (newest wins).
+    ///
+    /// A file that cannot be opened is a hard error, under the same policy
+    /// [`Self::open_with_fs`] applies at start-up: a missing KEK or a failed DEK
+    /// unwrap is skipped only when the operator set `allow_missing_keks`, and an
+    /// unreadable header or a failed reader open always fails.
+    ///
+    /// This function used to `warn!` and skip on all four paths regardless of
+    /// that setting (B11, audit 2026-08-28 §3 B11, §4.21#2). A silently dropped
+    /// SST does more than hide its own data: the reader list is what
+    /// [`Self::compact_partial`] measures to decide `drop_tombstones`. If the
+    /// genuinely-oldest SST is missing from the list, the next partial
+    /// compaction concludes its run reaches the oldest SST and discards
+    /// tombstones that still shadow values in that file, so those deletes come
+    /// back. No crash and no restart is needed.
     ///
     /// Callers MUST hold `flush_lock` so the directory scan cannot race a flush
     /// writing a new file.
@@ -792,56 +815,55 @@ impl EmbeddedStorageEngine {
 
         let mut readers = Vec::with_capacity(all_sst_paths.len());
         for (path, sst_num) in &all_sst_paths {
-            let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to read encryption header"
-                    );
-                    continue;
-                }
-            };
+            let (kek_id, enc_header) = sst::read_encryption_header(path, &*self.fs)?;
             let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-            let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
-                Some(k) => k,
-                None => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        realm = %realm_for_kek,
-                        "SST file skipped: KEK not found"
-                    );
-                    continue;
-                }
+            let kek = if let Some(k) = self.key_registry.get_kek_for_realm(&realm_for_kek) {
+                k
+            } else if self.allow_missing_keks {
+                tracing::warn!(
+                    path = %path.display(),
+                    realm = %realm_for_kek,
+                    "SST file skipped: KEK not found in registry"
+                );
+                continue;
+            } else {
+                return Err(StorageError::Crypto {
+                    reason: format!(
+                        "SST {} references KEK for realm {} but no KEK is registered; refusing \
+                         to rebuild the reader set without it — a dropped SST makes the next \
+                         partial compaction discard tombstones it must keep",
+                        path.display(),
+                        realm_for_kek
+                    ),
+                });
             };
             let dek = match encryption::unwrap_dek(&enc_header, &kek) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: DEK unwrapping failed"
-                    );
-                    continue;
+                    if self.allow_missing_keks {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: DEK unwrapping failed"
+                        );
+                        continue;
+                    }
+                    return Err(StorageError::Crypto {
+                        reason: format!("SST {} DEK unwrapping failed: {}", path.display(), e),
+                    });
                 }
             };
-            match SstReader::open_with_fs(
+            let reader = SstReader::open_with_fs(
                 path,
                 &*self.fs,
                 *sst_num,
                 &dek,
                 Arc::clone(&self.block_cache),
-            ) {
-                Ok(reader) => readers.push(reader),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to open reader"
-                    );
-                }
-            }
+            )
+            .map_err(|e| StorageError::Crypto {
+                reason: format!("SST {} failed to open reader: {}", path.display(), e),
+            })?;
+            readers.push(reader);
         }
         Ok(readers)
     }
@@ -1137,11 +1159,30 @@ impl EmbeddedStorageEngine {
         };
 
         // `sst_readers` is newest-first; index `start` is the newest run member
-        // (highest number) and `end` the oldest. The merged output reuses the
-        // newest number/path so it splices back at the correct recency slot.
+        // (highest number) and `end` the oldest.
+        //
+        // B7: the merged output takes the run's OLDEST number, not its newest
+        // (audit 2026-08-28 §3 B7, §4.11#2, §4.12#2, §4.21#1).
+        //
+        // It used to reuse the newest number, which meant the commit renamed the
+        // merged file over the run's tombstone-bearing member and only then
+        // unlinked the older, value-bearing members. A crash in that window left
+        // the merged output (tombstones dropped) live above an untouched
+        // value-bearing SST, so every key deleted in the run came back.
+        //
+        // Writing to the oldest slot is recency-correct because the run is
+        // contiguous (`start..=end`): everything merged in is older than any SST
+        // above the run and newer than any SST below it, so no non-member can
+        // fall between them. It is also crash-safe in every window — the
+        // tombstone-bearing newest member stays on disk until the values it
+        // shadows are gone, and the merged output is durable before anything is
+        // unlinked, so a failure cannot lose live data either.
         let run = &sst_readers[start..=end];
-        let target_num = run[0].sst_number();
-        let other_nums: Vec<u64> = run[1..].iter().map(SstReader::sst_number).collect();
+        let target_num = run[run.len() - 1].sst_number();
+        let other_nums: Vec<u64> = run[..run.len() - 1]
+            .iter()
+            .map(SstReader::sst_number)
+            .collect();
         let input_count = run.len();
 
         // Merge inputs oldest-to-newest (newest value wins, matching read order).
@@ -1190,26 +1231,31 @@ impl EmbeddedStorageEngine {
             )));
         };
 
-        // Atomically replace the run's newest file with the merged output, then
+        // Atomically install the merged output at the run's OLDEST number, then
         // fsync the directory so the rename is durable (HEA-1855).
+        //
+        // At this point every original run member is still on disk, and all of
+        // them are newer than the merged output, so they shadow it. A crash here
+        // therefore reads exactly as it did before the compaction started: the
+        // run's tombstones are intact and no deleted key is visible. The merged
+        // output is redundant until the unlinks below remove what shadows it,
+        // which is what makes those unlinks safe to attempt.
         self.fs.rename(&tmp_path, &final_path)?;
         self.fs.sync_dir(&self.data_dir)?;
 
-        // Delete the other (older) run members. A failure here is FATAL to the
-        // commit. When `drop_tombstones` was set (the run reached the oldest SST)
-        // the merged output carries no delete markers, so an older run member that
-        // survives would resurrect a deleted key on the next reload (HEA-1982);
-        // warn-and-continue then let `reload_sst_readers()` re-open that orphan.
-        // Aborting instead leaves the pre-commit reader set in place, so the
-        // original (tombstone-bearing) run members keep shadowing deleted keys
-        // until a retry succeeds.
+        // Delete the remaining run members — every member except the oldest,
+        // whose number the merged output now occupies. A failure here is FATAL
+        // to the commit: aborting leaves the merged output shadowed by the
+        // surviving originals, which is a correct (if redundant) state that a
+        // retry converges from. A `NotFound` means a prior aborted attempt
+        // already removed the member; treat it as success.
         //
-        // Unlink OLDEST-first (`other_nums` is newest-first, so iterate reversed):
-        // a value-bearing member is always removed before the newer tombstone that
-        // shadows it, so any partial prefix — mid-loop error or crash — can only
-        // leave more tombstones than values on disk, never a resurrectable orphan
-        // (HEA-1986). A `NotFound` means a prior aborted attempt already removed the
-        // member; treat it as success so a retry converges.
+        // Unlink OLDEST-first (`other_nums` is newest-first, so iterate
+        // reversed): a value-bearing member is always removed before the newer
+        // tombstone that shadows it, so any partial prefix — mid-loop error or
+        // crash — can only leave more tombstones than values on disk, never a
+        // resurrectable orphan (HEA-1986). The run's newest member, which
+        // carries the newest tombstones, is unlinked last of all.
         for old_num in other_nums.iter().rev() {
             let old_path = self.data_dir.join(format!("{old_num:06}.sst"));
             match self.fs.remove_file(&old_path) {
@@ -1232,12 +1278,14 @@ impl EmbeddedStorageEngine {
         self.fs.sync_dir(&self.data_dir)?;
 
         // Rematerialise the reader list from disk (newest-first). The merged file
-        // now sits at `target_num`, exactly where the run's newest member was.
+        // now sits at `target_num`, the run's oldest slot — correct, because the
+        // run was contiguous, so nothing outside it falls between the run's
+        // oldest and newest members.
         let rebuilt = self.reload_sst_readers()?;
         let live_count = rebuilt.len();
         record_sst_file_count(live_count);
         // Attribute the merged output's record count to write amplification. The
-        // output reused `target_num`, so it is the reader now sitting at that
+        // output took `target_num`, so it is the reader now sitting at that
         // number (see the recency-ordering contract above).
         if let Some(merged) = rebuilt.iter().find(|r| r.sst_number() == target_num) {
             self.compaction_records_written.fetch_add(

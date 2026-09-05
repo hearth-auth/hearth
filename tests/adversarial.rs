@@ -260,6 +260,11 @@ fn account_lockout_blocks_correct_password_during_window() {
 /// most 1 entry regardless of total user count, confirming pagination bounds
 /// the response body independently of realm size.
 #[tokio::test]
+// The body is one timing methodology — warm-up, two sample sets, and the
+// structural pagination check — and splitting it would hide the sequence the
+// doc comment above describes. Revealed by the audit's Wave 0: clippy aborted
+// on a hard compile error before it ever reached this file (§2.3).
+#[allow(clippy::too_many_lines)]
 async fn admin_listing_response_time_constant_wrt_user_count() {
     use std::time::Instant;
 
@@ -335,7 +340,10 @@ async fn admin_listing_response_time_constant_wrt_user_count() {
 
     // Warm-up: 5 discarded calls to stabilise in-process caches.
     for _ in 0..5 {
-        app.clone().oneshot(build_req()).await.expect("warm-up call");
+        app.clone()
+            .oneshot(build_req())
+            .await
+            .expect("warm-up call");
     }
 
     // Phase 1: baseline timing (admin-only realm, 0 regular users).
@@ -343,7 +351,11 @@ async fn admin_listing_response_time_constant_wrt_user_count() {
     let mut times_empty: Vec<u128> = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let t0 = Instant::now();
-        let resp = app.clone().oneshot(build_req()).await.expect("empty sample");
+        let resp = app
+            .clone()
+            .oneshot(build_req())
+            .await
+            .expect("empty sample");
         let elapsed = t0.elapsed().as_micros();
         assert_eq!(
             resp.status(),
@@ -403,8 +415,7 @@ async fn admin_listing_response_time_constant_wrt_user_count() {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .expect("read body bytes");
-        let json: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("parse JSON body");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse JSON body");
         let items = json["items"].as_array().expect("items must be an array");
         assert!(
             items.len() <= 1,
