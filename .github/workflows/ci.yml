@@ -244,6 +244,26 @@ jobs:
       - name: README version drift — guard self-test
         run: bash scripts/tests/check-readme-version.test.sh
 
+      # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
+      # Helm chart and seven SDK releases published from a commit whose suite was
+      # red, because only the binary channel was gated. The v1.6.11 image and
+      # chart went out 37 minutes BEFORE the verdict said no. This guard fails
+      # the build if any publish job stops waiting for that verdict.
+      # Pure bash over .github/workflows — no Rust build required.
+      - name: Publish gating (check-publish-gating.sh)
+        run: bash scripts/check-publish-gating.sh
+
+      # The guard is the deliverable for B2/B6, so it needs a test proving it
+      # FAILS on an ungated publish job — otherwise an `exit 0` stub passes CI
+      # forever, which is the same class of defect the audit found.
+      - name: Publish gating — guard self-test
+        run: bash scripts/tests/check-publish-gating.test.sh
+
+      # The runtime half of the same fix: the wait itself. Its test proves it
+      # refuses on a red verdict, an absent verdict, and an unreadable API.
+      - name: Await-green-commit gate — self-test
+        run: bash scripts/tests/await-green-commit.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:

@@ -16,11 +16,11 @@ found it, the audit piece, and the report's severity.
 ## 2. Wave 1 — The eleven blockers
 
 - [x] 2.1 B1 — Take the realm on `POST /admin/backup` and `/admin/backup/restore` from the caller's identity, not a query parameter; a tenant admin exports and overwrite-restores a peer tenant (§3 B1, §4.1#1 · P13 · BLOCKER)
-- [ ] 2.2 B2 — Gate the container image, Helm chart, seven SDK releases and two registry packages on the same signal the binary channel uses; today they publish from a red commit and cosign plus SLSA attest to it (§3 B2, §4.8#1 · P27 · BLOCKER)
+- [x] 2.2 B2 — Gate the container image, Helm chart, seven SDK releases and two registry packages on the same signal the binary channel uses; today they publish from a red commit and cosign plus SLSA attest to it (§3 B2, §4.8#1 · P27 · BLOCKER)
 - [x] 2.3 B3 — Make `mode=overwrite` restore refuse rather than delete the target realm and then fail to restore it; 1,160 CLI runs, none completed, 975 left the realm destroyed or truncated, one reported exit 0 (§3 B3, §4.9#2 · P12 · BLOCKER)
 - [x] 2.4 B4 — Stop WAL rotation destroying acknowledged writes under concurrent writers, and flush the memtable on the shutdown path; a clean `SIGTERM` is sufficient (§3 B4, §4.11#1 · P18 · BLOCKER)
 - [x] 2.5 B5 — Fix XML Signature Wrapping in the SAML assertion consumer; `verify_signed_element` authenticates one assertion and `parse_response` consumes a different one (§3 B5, §4.10#1 · P23 · BLOCKER shape 4 / HIGH shapes 1–3)
-- [ ] 2.6 B6 — Stop the publish jobs running ahead of release validation; the v1.6.11 image and chart published 37 minutes before "Release is NOT cleared to publish" (§3 B6, §4.12#1 · P00 · BLOCKER)
+- [x] 2.6 B6 — Stop the publish jobs running ahead of release validation; the v1.6.11 image and chart published 37 minutes before "Release is NOT cleared to publish" (§3 B6, §4.12#1 · P00 · BLOCKER)
 - [x] 2.7 B7 — Order partial compaction so the tombstone is not destroyed before the value it shadows is unlinked; a crash in that window resurrects deleted keys on the shipped default config (§3 B7, §4.11#2, §4.12#2, §4.21#1 · P18/P00/P19 · BLOCKER)
 - [x] 2.8 B8 — Stop writing the first-run setup token to the production log at WARN at the default level; the full chain to first-admin takeover was reproduced (§3 B8, §4.12#8, §4.13#11, §4.14#1, §4.24#2 · P00/P02/P26/P17 · BLOCKER, escalated)
 - [x] 2.9 B9 — Make signing-key rotation revoke the retired key; it mints new admin tokens for the full 24 h grace window and neither documented mitigation stops it (§3 B9, §4.15#1 · P06 · BLOCKER)
@@ -29,7 +29,7 @@ found it, the audit piece, and the report's severity.
 
 ## 3. Wave 2 (HIGH) — Build and release integrity
 
-- [ ] 3.1 Stop minting cosign signatures and SLSA provenance for a build that fails validation; both documented verification commands currently pass on it (§4.8#2 · P27 · HIGH)
+- [x] 3.1 Stop minting cosign signatures and SLSA provenance for a build that fails validation; both documented verification commands currently pass on it (§4.8#2 · P27 · HIGH)
 - [ ] 3.2 Make a required check actually block a merge: one required context, zero reviews and an always-on bypass let the audited commit merge 41 minutes before that context reported failure (§4.8#3 · P27 · HIGH)
 - [ ] 3.3 Remove `continue-on-error` from both dependency-advisory gates and make `cargo deny` a required context that runs on every PR, not only lockfile changes; a 70-vulnerability scan produced a `success` job (§4.8#7, §4.12#3 · P27/P00 · HIGH)
 - [ ] 3.4 Make the README's Docker and Helm install paths anonymously reachable; two of three documented install paths fail at the first command (§4.8#5, §4.12#4 · P27/P00 · HIGH)

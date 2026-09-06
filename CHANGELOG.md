@@ -50,6 +50,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Every release channel now waits for a green verdict before it publishes (audit 2026-08-28
+  §3 B2, §3 B6, §4.8#1, §4.8#2, §4.12#1)** — only the GitHub Release binary channel was gated.
+  The container image, the Helm chart, seven SDK releases and two registry packages published
+  from a commit whose own test suite failed four tests, and cosign plus SLSA then attested to
+  it, so both documented verification commands passed on a red build. The v1.6.11 image and
+  chart were published **37 minutes before** the release-validation job wrote "Release is NOT
+  cleared to publish". `docker.yml` and `helm.yml` now wait for that job by name; the seven
+  SDK publish workflows wait for `required-summary` on their tagged commit; and `sign` and
+  `provenance` in `release.yml` now declare `needs: validation`, so no signature or provenance
+  statement is minted for a build that failed validation. The wait fails closed on a red
+  verdict, on a verdict that never arrives, and on a Checks API it cannot read — a missing
+  verdict is no longer treated as a pass. The gate also moved upstream to tag creation:
+  `semantic-release.yml` runs on every push to `main` and cuts the seven SDK Release objects
+  and every `v*` / `sdk-*-v*` tag, and it now waits for `required-summary` first, so a red
+  commit produces no tag and no downstream channel is triggered at all. **The Go module proxy
+  and Packagist publish from the git tag itself**, so their own workflow gate alarms rather
+  than blocks — for those two, not hand-pushing tags is the protection; see
+  [`docs/ops/RELEASE_VALIDATION.md`](docs/ops/RELEASE_VALIDATION.md).
+  `make publish-gate-check` fails the build if any publish job stops waiting.
 - **BREAKING: `POST /admin/realms/{id}/rotate-signing-key` now revokes the retired key (audit
   2026-08-28 §3 B9, §4.15#1)** — rotation is the documented remedy for a leaked signing key, and it
   did not remedy it: the retired key stayed valid for the configured grace window (24 h by default),

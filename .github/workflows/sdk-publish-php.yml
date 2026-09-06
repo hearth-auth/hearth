@@ -28,6 +28,41 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ── Gate: alarm when the tagged commit's CI is not green ───────────────────
+  # Audit blocker B2 (§4.8#1): seven SDK releases shipped from a commit whose
+  # own suite failed four tests, because only the binary channel was gated.
+  #
+  # This gate cannot BLOCK the PHP channel, and that limit is deliberate rather
+  # than hidden: Packagist publishes from the git tag on its own webhook, so the
+  # publish already happened when this workflow starts. The gate turns an
+  # ungreen tag into a red run an operator can see and retract. Blocking the PHP
+  # channel needs the check to move to tag creation, which is outside a workflow.
+  gate:
+    name: Await CI on this commit
+    runs-on: ubuntu-latest
+    # Must exceed the 120-minute wait in await-green-commit.
+    timeout-minutes: 130
+
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Await a green verdict on this commit
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ./.github/actions/await-green-commit
+        with:
+          check-name: required-summary
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Not a release tag — nothing to gate
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: echo "::notice::Not a release tag — nothing to gate."
+
   validate:
     name: composer validate hearth-auth/php-sdk
     runs-on: ubuntu-latest

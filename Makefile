@@ -193,6 +193,16 @@ security-gate: ## Assert the ROPC password grant is unreachable (HEA-1814/1816/1
 rbac-storage-check: ## Lint for un-invalidating RBAC storage writes (HEA-1781)
 	@bash scripts/check-rbac-storage-writes.sh
 
+## Guard: every publish job must wait for a green verdict on its own commit
+## (audit 2026-08-28 blockers B2 §4.8#1 and B6 §4.12#1). The container image,
+## the Helm chart and seven SDK releases published from a red commit; the
+## v1.6.11 image and chart went out 37 minutes before release validation wrote
+## "Release is NOT cleared to publish". Runs in ci.yml's filter job.
+publish-gate-check: ## Assert no release channel publishes ahead of its verdict
+	@bash scripts/check-publish-gating.sh
+	@bash scripts/tests/check-publish-gating.test.sh
+	@bash scripts/tests/await-green-commit.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

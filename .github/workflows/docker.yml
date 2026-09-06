@@ -52,6 +52,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ── Gate: nothing is pushed before release validation reports green ────────
+  # Audit blockers B2 (§4.8#1) and B6 (§4.12#1). B6 is the concrete one: the
+  # v1.6.11 image was published 37 minutes BEFORE release.yml's validation job
+  # wrote "Release is NOT cleared to publish". Both workflows fire on the same
+  # tag push, so the image raced the verdict and won.
+  #
+  # This job waits for that verdict — the same signal the binary channel uses —
+  # and fails closed when it is red, absent, or unreadable.
+  gate:
+    name: Await release validation
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Must exceed the 120-minute wait in await-green-commit, which in turn
+    # exceeds release validation's own 90-minute timeout.
+    timeout-minutes: 130
+
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Await a green verdict on this commit
+        uses: ./.github/actions/await-green-commit
+        with:
+          check-name: Release validation (test matrix + bench gate)
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
   # ── PR smoke test: amd64-only build, no registry push ──────────────────────
   # Validates Dockerfile correctness without QEMU (~5–10 min).
   # arm64 is intentionally skipped for PRs — native arm64 runners are only
@@ -93,6 +125,7 @@ jobs:
   # final tagged multi-arch index from this digest + the arm64 digest.
   build-amd64:
     name: Build linux/amd64
+    needs: [gate]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -149,6 +182,7 @@ jobs:
   # tag push from v1.0.6 through v1.0.14, HEA-1525).
   build-arm64:
     name: Build linux/arm64 (native)
+    needs: [gate]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 45
@@ -201,7 +235,7 @@ jobs:
   # Source images referenced by immutable digest (not mutable tag) for integrity.
   merge-and-sign:
     name: Merge manifest + sign + SBOM attest
-    needs: [build-amd64, build-arm64]
+    needs: [gate, build-amd64, build-arm64]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20

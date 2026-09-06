@@ -159,6 +159,10 @@ jobs:
   # regression needs human judgement against the recorded baseline, so it is
   # recorded in the summary but never fails the job on its own.
   validation:
+    # publish-gate — this job writes the verdict every publish channel waits for.
+    # docker.yml, helm.yml and the seven SDK workflows read it by this job's name
+    # through .github/actions/await-green-commit. Renaming this job breaks that
+    # wait, so scripts/check-publish-gating.sh fails if the marker disappears.
     name: Release validation (test matrix + bench gate)
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -378,7 +382,12 @@ jobs:
   # ── 5. Cosign keyless signing ──────────────────────────────────────────────
   sign:
     name: Sign with cosign (keyless OIDC)
-    needs: [build, sbom, hash]
+    # `validation` is a dependency, not just an ordering hint (audit §4.8#2):
+    # cosign was minting signatures for a build that failed validation, and both
+    # documented verification commands passed on the result. An attestation that
+    # the artefact came from a commit says nothing about whether the commit is
+    # good — so the signature must not exist until the verdict is green.
+    needs: [validation, build, sbom, hash]
     # Skip on workflow_dispatch dry-runs: cosign OIDC requires a tag-scoped ref.
     if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     runs-on: ubuntu-latest
@@ -416,7 +425,9 @@ jobs:
   # ── 6. SLSA L1 provenance ─────────────────────────────────────────────────
   # Runs in a slsa-github-generator-controlled job to establish the attestation.
   provenance:
-    needs: [hash]
+    # Same reason as `sign` (audit §4.8#2): SLSA provenance for a red build is a
+    # true statement about the wrong thing.
+    needs: [validation, hash]
     # Skip on workflow_dispatch dry-runs: SLSA generator requires tag context.
     if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     permissions:

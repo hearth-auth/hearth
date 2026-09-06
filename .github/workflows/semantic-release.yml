@@ -41,8 +41,40 @@ concurrency:
   cancel-in-progress: false   # never cancel a release mid-run
 
 jobs:
+  # ── Gate: no tag is cut from a commit whose CI is not green ────────────────
+  # Audit blockers B2 (§4.8#1) and B6 (§4.12#1). This workflow is upstream of
+  # every other channel: it creates the seven SDK Release objects and pushes the
+  # v* and sdk-*-v* tags that trigger release.yml, docker.yml, helm.yml and the
+  # seven sdk-publish-*.yml workflows. It ran on every push to main with nothing
+  # gating it, so a red commit became a tag before CI finished.
+  #
+  # Gating here is what makes the Go module proxy and Packagist safe. Both
+  # publish from the tag itself and cannot be blocked downstream. If the tag is
+  # never cut, there is nothing for them to index.
+  gate:
+    name: Await CI on this commit
+    runs-on: ubuntu-latest
+    # Must exceed the 120-minute wait in await-green-commit.
+    timeout-minutes: 130
+
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Await a green verdict on this commit
+        uses: ./.github/actions/await-green-commit
+        with:
+          check-name: required-summary
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
   release:
     name: release ${{ matrix.pkg }}
+    needs: [gate]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -91,6 +123,7 @@ jobs:
 
   release-server:
     name: release server
+    needs: [gate]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

@@ -222,9 +222,10 @@ manual effort:
 
 **How the gating works.** Each gate step uses `continue-on-error: true` so the summary
 reports every gate rather than stopping at the first failure. A final **Enforce hard
-gates** step re-raises any hard-gate failure and fails the job. Because the publish job
-declares `needs: [validation, sign, provenance]`, a red test suite means the GitHub
-Release is never created.
+gates** step re-raises any hard-gate failure and fails the job. The publish job declares
+`needs: [validation, sign, provenance]`, and `sign` and `provenance` each declare
+`needs: validation` as well, so a red test suite produces no GitHub Release, no cosign
+signature and no SLSA provenance (audit §4.8#2).
 
 > The benchmark gate is deliberately advisory: judging a regression requires comparing
 > against the baseline in `docs/perf/PUBLISHED_FIGURES.md`, which needs human judgement.
@@ -238,6 +239,72 @@ the release notes linking to it.
 **Steps you must still run manually** before tagging: 5, 6, and 8 (and 4 if you are
 tagging a commit that never went through PR CI). The manual summary in Step 10 remains
 useful for recording those.
+
+---
+
+## Publish gating — every release channel
+
+The 2026-08-28 audit recorded two blockers here.
+
+- **B2 (§4.8#1)** — the container image, the Helm chart, seven SDK releases and two
+  registry packages shipped from a commit whose own suite failed four tests. Only the
+  binary channel was gated.
+- **B6 (§4.12#1)** — the v1.6.11 image and chart published **37 minutes before** the
+  `validation` job wrote "Release is NOT cleared to publish".
+
+Every channel now waits for a verdict on its own commit before it ships.
+
+The wait is `.github/actions/await-green-commit`. It reads the Checks API for the named
+check on the commit. It exits 0 only on `success`. It fails closed on a red verdict, on
+a verdict that never arrives, and on an API it cannot read. A missing verdict is not a
+pass — that was the old behaviour.
+
+The gate sits at two levels.
+
+**Level 1 — tag creation.** `semantic-release.yml` runs on every push to `main`. It
+creates the seven SDK Release objects and pushes the `v*` and `sdk-*-v*` tags that
+trigger every other workflow. It now waits for `required-summary` on that commit. A red
+commit produces no tag, so no downstream channel is ever triggered.
+
+**Level 2 — each publish.** Every publishing workflow waits again on its own commit.
+Level 1 can be bypassed by a hand-pushed tag; level 2 cannot.
+
+| Channel | Workflow | Verdict awaited | Effect |
+|---|---|---|---|
+| All tags + SDK Release objects | `semantic-release.yml` | `required-summary` | Blocks |
+| GitHub Release binaries | `release.yml` | `validation` (same workflow) | Blocks |
+| cosign signatures | `release.yml` | `validation` (same workflow) | Blocks |
+| SLSA provenance | `release.yml` | `validation` (same workflow) | Blocks |
+| Container image | `docker.yml` | `Release validation (test matrix + bench gate)` | Blocks |
+| Helm chart | `helm.yml` | `Release validation (test matrix + bench gate)` | Blocks |
+| npm `@hearth-auth/node` | `sdk-publish-node.yml` | `required-summary` | Blocks |
+| npm `@hearth-auth/sdk` | `sdk-publish-typescript.yml` | `required-summary` | Blocks |
+| crates.io `hearth-sdk` | `sdk-publish-rust.yml` | `required-summary` | Blocks |
+| PyPI `hearth-sdk` | `sdk-publish-python.yml` | `required-summary` | Blocks |
+| Maven Central `io.hearth` | `sdk-publish-kotlin.yml` | `required-summary` | Blocks |
+| Go module proxy | `sdk-publish-go.yml` | `required-summary` | Alarms at level 2 |
+| Packagist `hearth-auth/php-sdk` | `sdk-publish-php.yml` | `required-summary` | Alarms at level 2 |
+
+Server release tags wait for the release-validation job by name. SDK tags point at a
+commit on `main`, so they wait for `required-summary`, the repository's single required
+context.
+
+**The Go and PHP channels behave differently at level 2.** `proxy.golang.org` and
+Packagist publish from the git tag itself, not from a workflow step. If a tag exists,
+the publish has already happened when `sdk-publish-go.yml` or `sdk-publish-php.yml`
+starts. Their level-2 gate turns an ungreen tag into a red run to retract; it does not
+prevent the publish.
+
+For those two channels, **level 1 is the protection.** Do not hand-push a `sdks/go/v*`
+or `sdk-php-v*` tag. Let `semantic-release.yml` cut it, and it will not cut one from a
+red commit. If a red level-2 run does appear on either, treat it as a retract signal:
+the package is already public.
+
+**The guard.** `make publish-gate-check` asserts that no publish job has stopped waiting.
+It runs in `ci.yml`'s `filter` job on every PR. It fails if a publish job's `needs:` chain
+reaches no gate, and if a workflow in its channel manifest loses its gate or disappears.
+`scripts/tests/check-publish-gating.test.sh` proves the guard fails on an ungated job, so
+it cannot decay into a stub that always passes.
 
 ---
 

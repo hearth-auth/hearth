@@ -30,7 +30,43 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ── Gate: no package publishes from a commit whose CI is not green ─────────
+  # Audit blocker B2 (§4.8#1): seven SDK releases and two registry packages
+  # shipped from a commit whose own suite failed four tests, because only the
+  # binary channel in release.yml was gated.
+  #
+  # An SDK tag points at a commit on main, so the verdict to wait for is
+  # `required-summary` — the repository's single required context. The job
+  # always runs so PR and main dry-runs keep working; only the wait is
+  # tag-scoped, because only a tag publishes.
+  gate:
+    name: Await CI on this commit
+    runs-on: ubuntu-latest
+    # Must exceed the 120-minute wait in await-green-commit.
+    timeout-minutes: 130
+
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Await a green verdict on this commit
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ./.github/actions/await-green-commit
+        with:
+          check-name: required-summary
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Not a release tag — nothing to gate
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: echo "::notice::Not a release tag — dry-run only, no publish to gate."
+
   publish:
+    needs: [gate]
     name: npm publish @hearth-auth/sdk
     runs-on: ubuntu-latest
     timeout-minutes: 10

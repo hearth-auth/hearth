@@ -53,9 +53,45 @@ jobs:
       - name: helm template snapshot diff
         run: make helm-template
 
+  # ── Gate: no chart is pushed before release validation reports green ───────
+  # Audit blockers B2 (§4.8#1) and B6 (§4.12#1). The v1.6.11 chart published 37
+  # minutes before release.yml's validation job wrote "Release is NOT cleared to
+  # publish". This job waits for that verdict and fails closed without it.
+  #
+  # The job itself always runs so the workflow_dispatch dry-run keeps working;
+  # only the wait is tag-scoped, because only a tag publishes.
+  gate:
+    name: Await release validation
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Must exceed the 120-minute wait in await-green-commit.
+    timeout-minutes: 130
+
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Await a green verdict on this commit
+        if: github.ref_type == 'tag'
+        uses: ./.github/actions/await-green-commit
+        with:
+          check-name: Release validation (test matrix + bench gate)
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dry-run — nothing to gate
+        if: github.ref_type != 'tag'
+        run: echo "::notice::Not a release tag — packaging dry-run only; push and sign are skipped."
+
   publish:
     name: Package + publish Helm chart (OCI, signed)
     # Run on release tags (live publish) or manual workflow_dispatch (dry-run only).
+    needs: [gate]
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
