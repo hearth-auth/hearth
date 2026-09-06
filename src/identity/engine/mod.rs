@@ -12995,6 +12995,163 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(out)
     }
 
+    fn export_all_mfa_factors(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::MfaFactorExport>, IdentityError> {
+        use crate::identity::MfaFactorExport;
+
+        let serde_err = |e: serde_json::Error| IdentityError::Serialization {
+            reason: e.to_string(),
+        };
+        let mut out = Vec::new();
+
+        // TOTP state — decrypted via `load_mfa_state`, which handles the
+        // per-realm MFA DEK and the legacy signing-key-derived fallback. The
+        // plaintext travels only inside the archive, which encrypts every
+        // section (audit 2026-08-28 §4.18#5).
+        let prefix = keys::mfa_totp_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        for entry in &entries {
+            let uuid_bytes = &entry.key[prefix.len()..];
+            let Some(uuid) = std::str::from_utf8(uuid_bytes)
+                .ok()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            else {
+                tracing::warn!("skipping TOTP export: unparseable user id in storage key");
+                continue;
+            };
+            let user_id = UserId::new(uuid);
+            let Some(state) = self.load_mfa_state(realm_id, &user_id)? else {
+                continue;
+            };
+            out.push(MfaFactorExport::Totp {
+                user_id,
+                state: serde_json::to_value(&state).map_err(serde_err)?,
+            });
+        }
+
+        // WebAuthn passkeys — public-key material, stored as plaintext JSON;
+        // exported verbatim. Key format: `webauthn:cred:{user_uuid}:{cred_b64}`.
+        let prefix = keys::webauthn_credential_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        for entry in &entries {
+            let suffix = &entry.key[prefix.len()..];
+            let Some(uuid) = std::str::from_utf8(suffix)
+                .ok()
+                .and_then(|s| s.split_once(':'))
+                .and_then(|(uuid_str, _)| uuid::Uuid::parse_str(uuid_str).ok())
+            else {
+                tracing::warn!("skipping passkey export: unparseable user id in storage key");
+                continue;
+            };
+            let stored: crate::identity::webauthn::StoredWebAuthnCredential =
+                match serde_json::from_slice(&entry.value) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(err = %e, "skipping passkey export: undecodable record");
+                        continue;
+                    }
+                };
+            out.push(MfaFactorExport::Passkey {
+                user_id: UserId::new(uuid),
+                credential: serde_json::to_value(&stored).map_err(serde_err)?,
+            });
+        }
+
+        Ok(out)
+    }
+
+    fn import_mfa_factor(
+        &self,
+        realm_id: &RealmId,
+        factor: &crate::identity::MfaFactorExport,
+        overwrite: bool,
+    ) -> Result<crate::core::ImportOutcome, IdentityError> {
+        use crate::core::ImportOutcome;
+        use crate::identity::MfaFactorExport;
+
+        let serde_err = |e: serde_json::Error| IdentityError::Serialization {
+            reason: e.to_string(),
+        };
+        match factor {
+            MfaFactorExport::Totp { user_id, state } => {
+                let key = keys::encode_mfa_totp_key(user_id);
+                let exists = self
+                    .storage
+                    .get(realm_id, &key)
+                    .map_err(Self::storage_err)?
+                    .is_some();
+                if exists && !overwrite {
+                    return Ok(ImportOutcome::Skipped);
+                }
+                let state: totp::StoredMfaState =
+                    serde_json::from_value(state.clone()).map_err(serde_err)?;
+                // Re-encrypts under THIS realm's MFA DEK, so the restore does
+                // not depend on the source deployment's keys.
+                self.save_mfa_state(realm_id, user_id, &state)?;
+                Ok(if exists {
+                    ImportOutcome::Overwritten
+                } else {
+                    ImportOutcome::Created
+                })
+            }
+            MfaFactorExport::Passkey {
+                user_id,
+                credential,
+            } => {
+                let stored: crate::identity::webauthn::StoredWebAuthnCredential =
+                    serde_json::from_value(credential.clone()).map_err(serde_err)?;
+                // The credential ID becomes part of a storage key — refuse
+                // anything that is not clean base64url (no separators).
+                if URL_SAFE_NO_PAD
+                    .decode(stored.credential_id_b64.as_bytes())
+                    .is_err()
+                {
+                    return Err(IdentityError::InvalidInput {
+                        reason: "passkey credential_id_b64 is not valid base64url".into(),
+                    });
+                }
+                let key = keys::encode_webauthn_credential(user_id, &stored.credential_id_b64);
+                let exists = self
+                    .storage
+                    .get(realm_id, &key)
+                    .map_err(Self::storage_err)?
+                    .is_some();
+                if exists && !overwrite {
+                    return Ok(ImportOutcome::Skipped);
+                }
+                let bytes = serde_json::to_vec(&stored).map_err(serde_err)?;
+                self.storage
+                    .put(realm_id, &key, &bytes)
+                    .map_err(Self::storage_err)?;
+                if stored.discoverable {
+                    let disc_key = keys::encode_webauthn_discoverable(&stored.credential_id_b64);
+                    self.storage
+                        .put(
+                            realm_id,
+                            &disc_key,
+                            user_id.as_uuid().to_string().as_bytes(),
+                        )
+                        .map_err(Self::storage_err)?;
+                }
+                Ok(if exists {
+                    ImportOutcome::Overwritten
+                } else {
+                    ImportOutcome::Created
+                })
+            }
+        }
+    }
+
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
         Ok(key.pkcs8_bytes().to_vec())

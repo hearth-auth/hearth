@@ -14,7 +14,7 @@ use crate::audit::{AuditEngine, AuditEvent};
 use crate::core::{ClientId, ImportOutcome, RealmId};
 use crate::identity::{
     ClientTrustLevel, CreateRealmRequest, IdentityEngine, IdentityError, ImportClientRequest,
-    ImportUserRequest, Organization, RawCredential, Realm, User,
+    ImportUserRequest, MfaFactorExport, Organization, RawCredential, Realm, User,
 };
 use crate::rbac::{Group, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport};
 
@@ -32,6 +32,7 @@ const RECOGNIZED_MEMBERS: &[&str] = &[
     "realm.json",
     "users.ndjson",
     "credentials.ndjson",
+    "mfa_factors.ndjson",
     "clients.ndjson",
     "roles.ndjson",
     "permissions.ndjson",
@@ -134,6 +135,9 @@ pub struct ImportReport {
     pub realms: EntityCounts,
     /// Outcome counts for user records.
     pub users: EntityCounts,
+    /// Outcome counts for second-factor records — TOTP state and `WebAuthn`
+    /// passkeys (audit 2026-08-28 §4.18#5).
+    pub mfa_factors: EntityCounts,
     /// Outcome counts for OAuth client records.
     pub clients: EntityCounts,
     /// Outcome counts for RBAC role records.
@@ -460,6 +464,24 @@ impl BackupImporter {
                 &mut report,
             )?;
         }
+
+        // ── MFA factors (audit 2026-08-28 §4.18#5) ─────────────────────────
+        //
+        // After users so the owning records exist. TOTP state is re-encrypted
+        // under the destination realm's MFA DEK inside `import_mfa_factor`.
+        let overwrite_mfa = opts.mode == RestoreMode::Overwrite;
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/mfa_factors.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.mfa_factors,
+            |this, factor: &MfaFactorExport| {
+                this.identity
+                    .import_mfa_factor(&restored_realm_id, factor, overwrite_mfa)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
 
         // ── Clients ────────────────────────────────────────────────────────
         let clients_key = format!("realms/{realm_slug}/clients.ndjson");

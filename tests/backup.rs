@@ -1482,3 +1482,180 @@ async fn export_is_referentially_consistent_under_concurrent_writes() {
     writer.join().expect("writer thread");
     assert!(iterations > 0, "must have run at least one export");
 }
+
+// ── 12. MFA factors round-trip (audit 2026-08-28 §4.18#5) ────────────────────
+
+/// Computes a TOTP code for a base32 secret at `unix_secs` — mirrors
+/// `src/identity/totp.rs::compute_totp`.
+fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {
+    let secret_bytes = data_encoding::BASE32_NOPAD
+        .decode(secret_base32.as_bytes())
+        .expect("decode base32");
+    let step = unix_secs / 30;
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &secret_bytes);
+    let tag = ring::hmac::sign(&key, &step.to_be_bytes());
+    let hash = tag.as_ref();
+    let offset = (hash[hash.len() - 1] & 0x0f) as usize;
+    let binary = u32::from_be_bytes([
+        hash[offset] & 0x7f,
+        hash[offset + 1],
+        hash[offset + 2],
+        hash[offset + 3],
+    ]);
+    format!("{:06}", binary % 1_000_000)
+}
+
+/// A realm's enrolled TOTP factor must survive backup + restore. Before the
+/// fix, the exporter carried only password credentials, so an operator who
+/// restored a realm silently lost every second factor (audit §4.18#5).
+#[tokio::test]
+async fn restore_carries_totp_factor() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm_a, email, _password) = seeded_realm(&src);
+    let user_a = src
+        .identity()
+        .get_user_by_email(&realm_a, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    // Enroll and activate TOTP on the source realm.
+    let enrollment = src
+        .identity()
+        .enroll_totp(&realm_a, user_a.id())
+        .expect("enroll totp");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let enroll_code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    src.identity()
+        .verify_totp_enrollment(&realm_a, user_a.id(), &enroll_code)
+        .expect("verify enrollment");
+    assert!(
+        src.identity()
+            .mfa_enabled(&realm_a, user_a.id())
+            .expect("mfa_enabled src"),
+        "precondition: TOTP active on the source realm"
+    );
+
+    let tmp = export_realm_to_file(&src, &realm_a, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm_a);
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    assert_eq!(report.users.errored, 0, "no user import errors");
+    assert_eq!(
+        report.mfa_factors.created, 1,
+        "the TOTP factor must be restored"
+    );
+    assert_eq!(report.mfa_factors.errored, 0, "no MFA factor import errors");
+
+    let restored_realm_id: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+    let user_b = dst
+        .identity()
+        .get_user_by_email(&restored_realm_id, &email)
+        .expect("lookup restored user")
+        .expect("user must exist after restore");
+
+    assert!(
+        dst.identity()
+            .mfa_enabled(&restored_realm_id, user_b.id())
+            .expect("mfa_enabled dst"),
+        "TOTP factor must survive backup + restore (audit §4.18#5)"
+    );
+
+    // The restored secret must verify. Use the NEXT time step: the enrollment
+    // consumed the current step, and the restored state keeps last_used_step
+    // for replay protection.
+    let next_code = compute_totp_code(&enrollment.secret_base32, now_secs + 30);
+    dst.identity()
+        .verify_totp(&restored_realm_id, user_b.id(), &next_code)
+        .expect("restored TOTP secret must verify (audit §4.18#5)");
+}
+
+/// A user's passkey must survive backup + restore, including the
+/// discoverable-credential index (audit §4.18#5). The source passkey is
+/// seeded through the import surface — the export path must then pick it up
+/// and carry it.
+#[tokio::test]
+async fn restore_carries_passkey_factor() {
+    use hearth::identity::MfaFactorExport;
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm_a, email, _password) = seeded_realm(&src);
+    let user_a = src
+        .identity()
+        .get_user_by_email(&realm_a, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    // "test-cred-id" in base64url (no padding).
+    let cred_id_b64 = "dGVzdC1jcmVkLWlk";
+    let passkey = MfaFactorExport::Passkey {
+        user_id: user_a.id().clone(),
+        credential: serde_json::json!({
+            "credential_id_b64": cred_id_b64,
+            "cose_public_key_b64": "pQECAyYgASFYIAab",
+            "algorithm": -7,
+            "sign_count": 3,
+            "discoverable": true,
+            "rp_id": "backup-test.example",
+            "created_at": 1_700_000_000_000_000i64,
+            "name": "Backup Test Key"
+        }),
+    };
+    src.identity()
+        .import_mfa_factor(&realm_a, &passkey, false)
+        .expect("seed passkey on source");
+    assert_eq!(
+        src.identity()
+            .list_webauthn_credentials(&realm_a, user_a.id())
+            .expect("list src passkeys")
+            .len(),
+        1,
+        "precondition: passkey present on the source realm"
+    );
+
+    let tmp = export_realm_to_file(&src, &realm_a, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm_a);
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    assert_eq!(
+        report.mfa_factors.created, 1,
+        "the passkey must be restored"
+    );
+    assert_eq!(report.mfa_factors.errored, 0, "no MFA factor import errors");
+
+    let restored_realm_id: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+    let user_b = dst
+        .identity()
+        .get_user_by_email(&restored_realm_id, &email)
+        .expect("lookup restored user")
+        .expect("user must exist after restore");
+
+    let creds = dst
+        .identity()
+        .list_webauthn_credentials(&restored_realm_id, user_b.id())
+        .expect("list restored passkeys");
+    assert_eq!(
+        creds.len(),
+        1,
+        "passkey must survive backup + restore (audit §4.18#5)"
+    );
+    assert_eq!(
+        creds[0].credential_id_b64url(),
+        cred_id_b64,
+        "restored passkey must keep its credential ID"
+    );
+}

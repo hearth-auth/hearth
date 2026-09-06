@@ -19,8 +19,14 @@ pub const MANIFEST_VERSION: u32 = 2;
 pub struct RecordCounts {
     /// Number of user records.
     pub users: u64,
-    /// Number of credential records (passwords, TOTP, passkeys, etc.).
+    /// Number of password credential records (PHC hash strings). Second
+    /// factors are counted separately in `mfa_factors`.
     pub credentials: u64,
+    /// Number of second-factor records: TOTP/recovery-code state and
+    /// `WebAuthn` passkeys (audit 2026-08-28 §4.18#5). Zero for archives
+    /// created before `mfa_factors.ndjson` existed.
+    #[serde(default)]
+    pub mfa_factors: u64,
     /// Number of OAuth 2.0 client registrations.
     pub clients: u64,
     /// Number of RBAC role definitions.

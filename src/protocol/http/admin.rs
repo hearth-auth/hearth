@@ -4843,6 +4843,12 @@ async fn admin_backup_restore(
                             "overwritten": report.users.overwritten,
                             "errored": report.users.errored,
                         },
+                        "mfa_factors": {
+                            "created": report.mfa_factors.created,
+                            "skipped": report.mfa_factors.skipped,
+                            "overwritten": report.mfa_factors.overwritten,
+                            "errored": report.mfa_factors.errored,
+                        },
                         "clients": {
                             "created": report.clients.created,
                             "skipped": report.clients.skipped,

@@ -4096,9 +4096,10 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
         let rc = &r.record_counts;
         tracing::info!("    {slug:<24}  id={id}", slug = r.slug, id = r.realm_id);
         tracing::info!(
-            "      users={u}  credentials={c}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
+            "      users={u}  credentials={c}  mfa_factors={m}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
             u = rc.users,
             c = rc.credentials,
+            m = rc.mfa_factors,
             cl = rc.clients,
             ro = rc.roles,
             g = rc.groups,
@@ -4125,6 +4126,13 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         report.users.skipped,
         report.users.overwritten,
         report.users.errored
+    );
+    tracing::info!(
+        "  mfa      — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.mfa_factors.created,
+        report.mfa_factors.skipped,
+        report.mfa_factors.overwritten,
+        report.mfa_factors.errored
     );
     tracing::info!(
         "  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",

@@ -212,8 +212,8 @@ impl BackupExporter {
     /// Exports all entities for `realm_id` into `writer`.
     ///
     /// Writes one encrypted JSON/NDJSON file per entity type (users, credentials,
-    /// clients, roles, groups, permissions, scopes, assignments, organizations)
-    /// plus an AES-256-GCM encrypted `signing_key.json` and, when
+    /// MFA factors, clients, roles, groups, permissions, scopes, assignments,
+    /// organizations) plus an AES-256-GCM encrypted `signing_key.json` and, when
     /// `opts.include_audit` is true, an encrypted `audit.ndjson` file.
     ///
     /// ALL sections are encrypted with `dek`. The DEK itself must be wrapped
@@ -285,6 +285,21 @@ impl BackupExporter {
             let data = to_ndjson(&credentials)?;
             let encrypted = encrypt_bytes(&data, dek)?;
             writer.add_file(&format!("{prefix}/credentials.ndjson"), &encrypted)?;
+        }
+
+        // mfa_factors.ndjson — TOTP/recovery-code state (decrypted; every
+        // archive section is itself AES-256-GCM encrypted) and WebAuthn
+        // passkeys. Without this an operator who restores a realm silently
+        // loses every second factor (audit 2026-08-28 §4.18#5).
+        let mfa_factors = self
+            .identity
+            .export_all_mfa_factors(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.mfa_factors = mfa_factors.len() as u64;
+        if !mfa_factors.is_empty() {
+            let data = to_ndjson(&mfa_factors)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/mfa_factors.ndjson"), &encrypted)?;
         }
 
         // clients.ndjson

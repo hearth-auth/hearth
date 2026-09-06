@@ -50,7 +50,7 @@ found it, the audit piece, and the report's severity.
 
 ## 6. Wave 2 (HIGH) — Backup and restore safety
 
-- [ ] 6.1 Carry every TOTP secret, passkey and OTP factor through backup and restore, or make the record type stop claiming it does; an operator restoring loses every second factor in the realm (§4.18#5 · P16 · HIGH)
+- [x] 6.1 Carry every TOTP secret, passkey and OTP factor through backup and restore, or make the record type stop claiming it does; an operator restoring loses every second factor in the realm (§4.18#5 · P16 · HIGH)
 
 ## 7. Wave 2 (HIGH) — Tenant isolation
 

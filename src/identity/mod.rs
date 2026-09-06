@@ -114,13 +114,14 @@ pub use types::{
     ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
     CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
     DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
-    PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
-    Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session, SessionContext,
-    SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
+    InvitationStatus, MfaFactorExport, MigrationReport, Organization, OrganizationConfig,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
+    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session,
+    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
+    WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -2194,6 +2195,30 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
     ) -> Result<Vec<CredentialExport>, IdentityError>;
+
+    /// Returns every second-factor record in a realm for backup export
+    /// (audit 2026-08-28 §4.18#5).
+    ///
+    /// Covers TOTP/recovery-code state (decrypted — the archive encrypts it)
+    /// and `WebAuthn` passkeys. SMS-OTP and email-OTP factors have no
+    /// separate durable record: they ride on the user record's phone and
+    /// email fields, which the user export already carries.
+    fn export_all_mfa_factors(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<MfaFactorExport>, IdentityError>;
+
+    /// Writes one second-factor record from a backup archive into the realm.
+    ///
+    /// TOTP state is re-encrypted under this realm's MFA DEK before it is
+    /// stored. When the factor already exists, `overwrite` decides between
+    /// replacing it and skipping it.
+    fn import_mfa_factor(
+        &self,
+        realm_id: &RealmId,
+        factor: &MfaFactorExport,
+        overwrite: bool,
+    ) -> Result<crate::core::ImportOutcome, IdentityError>;
 
     /// Returns the raw PKCS#8 DER bytes for a realm's Ed25519 signing key.
     ///

@@ -274,6 +274,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **Backups now carry every second factor: TOTP state, recovery codes, and passkeys (audit
+  2026-08-28 §4.18#5)** — the exporter carried only password hashes while the manifest's record
+  type claimed credentials included "TOTP, passkeys, etc.", so an operator who restored a realm
+  silently lost every user's second factor. Archives now include an encrypted
+  `mfa_factors.ndjson` per realm: TOTP/recovery-code state (decrypted from the source realm's MFA
+  data-encryption key and re-encrypted under the destination's on restore, so restores do not
+  depend on the source deployment's keys) and WebAuthn passkeys including the
+  discoverable-credential index. `hearth backup inspect`, the restore CLI summary, and the
+  `/admin/backup/restore` response all report the new `mfa_factors` counts. **Compatibility:**
+  older Hearth versions refuse to restore archives created by this version (their fail-closed
+  unknown-member check rejects `mfa_factors.ndjson`); this version restores older archives, which
+  simply carry no second factors.
 - **Cold-read promotion no longer clones the entire hot-tier cache under one global lock (audit
   2026-08-28 §4.21#4)** — every hot-tier write (a cold read's cache fill, and the invalidation a
   delete or credential revocation performs) copied the whole 100k-entry map while holding a single

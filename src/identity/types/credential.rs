@@ -18,6 +18,55 @@ pub struct CredentialExport {
     pub created_at_micros: i64,
 }
 
+/// A second-factor record exported from a realm for backup purposes
+/// (audit 2026-08-28 §4.18#5).
+///
+/// TOTP state is exported **decrypted**: the archive section that carries it
+/// is AES-256-GCM encrypted, mirroring how the realm signing key is exported,
+/// and the state is re-encrypted under the destination realm's MFA DEK on
+/// import. A restore therefore does not depend on the source deployment's
+/// KEK or MFA DEK. Passkey records hold public-key material only.
+///
+/// The payloads are the identity engine's own serialized records
+/// (`StoredMfaState` / `StoredWebAuthnCredential`); only the engine reads or
+/// writes them.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MfaFactorExport {
+    /// A user's TOTP and recovery-code state.
+    Totp {
+        /// The user this factor belongs to.
+        user_id: UserId,
+        /// Decrypted TOTP state, serialized by the identity engine.
+        state: serde_json::Value,
+    },
+    /// A user's `WebAuthn` passkey.
+    Passkey {
+        /// The user this passkey belongs to.
+        user_id: UserId,
+        /// The stored credential record, serialized by the identity engine.
+        credential: serde_json::Value,
+    },
+}
+
+// Manual Debug: the TOTP variant carries a decrypted secret — never print it.
+impl std::fmt::Debug for MfaFactorExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Totp { user_id, .. } => f
+                .debug_struct("MfaFactorExport::Totp")
+                .field("user_id", user_id)
+                .field("state", &"[REDACTED]")
+                .finish(),
+            Self::Passkey { user_id, .. } => f
+                .debug_struct("MfaFactorExport::Passkey")
+                .field("user_id", user_id)
+                .field("credential", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
 /// A pre-hashed credential to attach to an imported user.
 ///
 /// Unlike `CreateUserRequest` + `set_password`, imports preserve the

@@ -798,6 +798,14 @@ pub(crate) fn encode_webauthn_credentials_prefix(user_id: &UserId) -> Vec<u8> {
     format!("{WEBAUTHN_CRED_PREFIX}{}:", user_id.as_uuid()).into_bytes()
 }
 
+/// Returns the scan-start prefix for every `WebAuthn` credential in a realm,
+/// across all users. Used by the backup exporter (audit 2026-08-28 §4.18#5).
+///
+/// Format: `webauthn:cred:`
+pub(crate) fn webauthn_credential_scan_prefix() -> Vec<u8> {
+    WEBAUTHN_CRED_PREFIX.as_bytes().to_vec()
+}
+
 /// Encodes the discoverable credential index key.
 ///
 /// Format: `webauthn:disc:{credential_id_b64url}`
