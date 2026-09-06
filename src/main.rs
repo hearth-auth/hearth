@@ -1496,6 +1496,7 @@ async fn run_serve(
             Some(&base_url),
             Some(email_service.as_ref()),
             config.onboarding.notification_email.as_deref(),
+            config.dev_mode,
         ) {
             Ok(token) => token,
             Err(e) => {

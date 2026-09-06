@@ -50,6 +50,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **The first-run setup token is no longer written to the log in production (audit 2026-08-28 §3 B8,
+  §4.12#8, §4.13#11, §4.14#1, §4.24#2)** — on first boot Hearth logged the full setup URL, including
+  the `?token=` query parameter, at `WARN` — the default level — in every mode. The setup token is
+  the highest-privilege bootstrap credential in the system: it creates the first admin. Anyone with
+  read access to the operator log, which in most deployments means the log aggregator and everyone
+  on the on-call rota, could complete first-run setup and take the instance over. The production log
+  line now names the setup URL without the token and points at the `0600` `.setup_token` file in the
+  data directory; `dev_mode` still logs the clickable full URL. The opt-in
+  `onboarding.notification_email` still carries the token — that channel is private and explicitly
+  configured. **Operator action:** on a first boot, read the token from
+  `<data_dir>/.setup_token` rather than from the log.
 - **Partial compaction no longer resurrects deleted keys after a crash (audit 2026-08-28 §3 B7,
   §4.11#2, §4.12#2, §4.21#1)** — `compact_partial` installed its merged output over the run's
   *newest* SST, which is the member carrying the tombstones, and unlinked the older value-bearing

@@ -10,7 +10,9 @@
 //! 1. At startup, if the setup-token file exists (or no realms exist
 //!    and setup hasn't been completed), generate 32 random bytes
 //!    (base64url) and write them to `<data_dir>/.setup_token` with
-//!    `0600` perms. Log the full setup URL at WARN level.
+//!    `0600` perms. Log the setup URL at WARN level — with the token in
+//!    dev mode, without it in production, where the operator reads the
+//!    token from the file.
 //! 2. `/ui/setup` requires the token. Mismatch returns 404 (no leaks).
 //! 3. `complete_setup` finds the first realm (created by YAML
 //!    reconciliation or auto-created "default"), creates the admin user
@@ -146,6 +148,10 @@ pub fn is_first_run(engine: &dyn IdentityEngine) -> Result<bool, IdentityError> 
 /// additionally sends the setup URL to that address. Email failure is
 /// non-fatal — the WARN log is always emitted regardless.
 ///
+/// `dev_mode` controls the log line only: the token itself is written to
+/// the log in dev mode alone. In production the log names the setup URL
+/// and the token file, never the token (HEA-2150 B8).
+///
 /// # Errors
 ///
 /// Returns [`OnboardingError::Io`] on filesystem failure or
@@ -156,6 +162,7 @@ pub fn ensure_setup_token(
     base_url: Option<&str>,
     email_service: Option<&EmailService>,
     notification_email: Option<&str>,
+    dev_mode: bool,
 ) -> Result<Option<String>, OnboardingError> {
     let path = setup_token_path(data_dir);
 
@@ -164,7 +171,13 @@ pub fn ensure_setup_token(
     //    survives realm reconciliation creating realms).
     if path.exists() {
         let token = read_setup_token_file(&path)?;
-        log_and_notify_setup_url(&token, base_url, email_service, notification_email);
+        log_and_notify_setup_url(
+            &token,
+            base_url,
+            email_service,
+            notification_email,
+            dev_mode,
+        );
         return Ok(Some(token));
     }
 
@@ -172,7 +185,13 @@ pub fn ensure_setup_token(
     if is_first_run(engine)? {
         let token = generate_setup_token()?;
         write_setup_token_file(&path, &token)?;
-        log_and_notify_setup_url(&token, base_url, email_service, notification_email);
+        log_and_notify_setup_url(
+            &token,
+            base_url,
+            email_service,
+            notification_email,
+            dev_mode,
+        );
         return Ok(Some(token));
     }
 
@@ -182,20 +201,35 @@ pub fn ensure_setup_token(
 
 /// Logs the setup URL at WARN level and optionally sends a notification
 /// email. Email failure is non-fatal.
+///
+/// The setup token is the highest-privilege bootstrap credential in the
+/// system: it creates the first admin. In production it therefore never
+/// reaches the log — the logged URL carries no `token` query parameter and
+/// the operator reads the token from the `0600` file instead. Only
+/// `dev_mode` logs the clickable full URL.
 fn log_and_notify_setup_url(
     token: &str,
     base_url: Option<&str>,
     email_service: Option<&EmailService>,
     notification_email: Option<&str>,
+    dev_mode: bool,
 ) {
-    let url = match base_url {
-        Some(base) => format!("{}/ui/setup?token={}", base.trim_end_matches('/'), token),
-        None => format!("http://127.0.0.1:8420/ui/setup?token={token}"),
-    };
-    tracing::warn!(
-        setup_url = %url,
-        "first-run setup required: open this URL to create the initial admin account"
-    );
+    let base = base_url.map_or("http://127.0.0.1:8420", |b| b.trim_end_matches('/'));
+    let url = format!("{base}/ui/setup?token={token}");
+
+    if dev_mode {
+        tracing::warn!(
+            setup_url = %url,
+            "first-run setup required: open this URL to create the initial admin account"
+        );
+    } else {
+        tracing::warn!(
+            setup_url = %format!("{base}/ui/setup"),
+            token_file = SETUP_TOKEN_FILENAME,
+            "first-run setup required: open this URL and supply the token from the token file \
+             in the data directory"
+        );
+    }
 
     if let (Some(service), Some(to)) = (email_service, notification_email) {
         if let Err(e) = service.send_setup_notification(to, &url) {
@@ -660,5 +694,84 @@ mod tests {
         }
         .into();
         assert!(matches!(err, OnboardingError::Email(_)));
+    }
+
+    /// Collects every formatted `tracing` event into a shared buffer so a
+    /// test can assert on what an operator's log would contain.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CaptureWriter {
+        fn contents(&self) -> String {
+            let bytes = self.0.lock().expect("capture mutex").clone();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `f` with every event at TRACE and above captured.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        writer.contents()
+    }
+
+    /// B8: the setup token is the highest-privilege bootstrap credential.
+    /// In production it must not reach the operator log at any level — the
+    /// operator reads it from the `0600` file instead.
+    #[test]
+    fn production_setup_log_does_not_contain_the_token() {
+        let token = "T0kEn-cAnAry-DoNoTlOg-0123456789abcdef";
+        let out = capture_logs(|| {
+            log_and_notify_setup_url(token, Some("https://id.example.com"), None, None, false);
+        });
+
+        assert!(
+            !out.contains(token),
+            "production log leaks the setup token: {out}"
+        );
+        assert!(
+            out.contains("/ui/setup"),
+            "production log must still name the setup URL: {out}"
+        );
+        assert!(
+            out.contains(SETUP_TOKEN_FILENAME),
+            "production log must name the token file to read: {out}"
+        );
+    }
+
+    /// The dev-mode banner is unchanged: `make dev` keeps printing a URL an
+    /// operator can click.
+    #[test]
+    fn dev_setup_log_contains_the_token() {
+        let token = "dEvT0kEn-0123456789abcdef";
+        let out = capture_logs(|| {
+            log_and_notify_setup_url(token, Some("http://127.0.0.1:8420"), None, None, true);
+        });
+
+        assert!(out.contains(token), "dev log must carry the token: {out}");
     }
 }
