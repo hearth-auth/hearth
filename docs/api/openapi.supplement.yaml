@@ -430,6 +430,12 @@ paths:
   /admin/realms/{id}/rotate-signing-key:
     post:
       summary: Rotate the realm's Ed25519 signing key
+      description: >-
+        Publishes a new signing key and revokes every retired key for the realm.
+        Tokens signed with the old key stop validating immediately, which is what
+        makes this a usable remedy for a leaked key. A planned rotation may opt
+        into a grace window with `grace_period_secs`; do not use it after a
+        compromise, because the window protects whoever holds the leaked key too.
       operationId: adminRotateRealmSigningKey
       tags: [Admin]
       parameters:
@@ -438,9 +444,23 @@ paths:
           required: true
           schema:
             type: string
+        - name: grace_period_secs
+          in: query
+          required: false
+          description: >-
+            Seconds the retired key stays valid. Omit, or pass 0, to revoke it
+            immediately. A value that is not a non-negative integer is rejected
+            with 400.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
       responses:
         "200":
           description: New signing key published
+        "400":
+          description: grace_period_secs was not a non-negative integer
 
   /admin/realms/{id}/branding:
     get:

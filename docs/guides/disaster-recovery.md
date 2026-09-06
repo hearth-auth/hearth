@@ -470,11 +470,15 @@ property is required: every pre-incident JWT must be invalidated. Examples:
 
 ### Rotation procedure
 
-The `IdentityEngine::rotate_realm_signing_key` API (see
-`src/identity/engine.rs:2944`) issues a new key, marks the old one
-*retiring* with a grace period, and serves both via JWKS until the
-grace deadline so in-flight RPs can re-fetch keys without an immediate
-verification failure.
+Rotation issues a new key and, by default, **revokes every retired key
+for the realm**. A token signed with the old key stops validating at
+once. That is what makes rotation a remedy for a leaked key: while the
+old key stays valid, whoever holds it keeps minting new credentials.
+
+A *planned* rotation — routine key hygiene, no incident — may keep
+existing sessions alive by opting into a grace window, during which
+JWKS serves both keys so relying parties can re-fetch before their
+tokens fail. Never use a window after a compromise.
 
 1. **Issue the rotation.** Call the admin API with the realm's UUID:
 
@@ -491,13 +495,27 @@ verification failure.
    The token must carry `hearth.realm.admin` and be scoped to the same
    realm named in the path; a token from another realm gets `403`.
 
-   The grace period is read from `hearth.yaml`
-   (`token.signing_key_rotation_grace_period`; default: 86400 s / 24 h).
-   Adjust that config value and restart the server before rotating if you
-   need a shorter or longer window. Choose a grace period that matches
-   your slowest RP's JWKS cache TTL plus a margin — 24 hours is the
-   conservative default; 1 hour is fine for an internally-controlled fleet
-   that polls the JWKS endpoint every 5 minutes.
+   The response reports `"grace_period_secs":0` — the retired key is
+   revoked. This is the correct call for an incident.
+
+   For a **planned** rotation, ask for a window explicitly:
+
+   ```bash
+   curl -s -X POST \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: <realm-uuid>" \
+     "https://auth.example.com/admin/realms/<realm-uuid>/rotate-signing-key?grace_period_secs=3600"
+   ```
+
+   Choose a window that matches your slowest RP's JWKS cache TTL plus a
+   margin — 1 hour suits an internally-controlled fleet that polls JWKS
+   every 5 minutes. A value that is not a non-negative integer is
+   rejected with `400`.
+
+   `token.signing_key_rotation_grace_period` in `hearth.yaml` sets the
+   window for the config-driven rotation (`rotate_signing_key: true` on a
+   realm, applied at startup). It does **not** change this endpoint,
+   which revokes unless the request says otherwise.
 
 2. **Force re-issuance of all in-flight tokens.** Existing access tokens
    stay valid until they hit `exp`. To invalidate all active sessions
@@ -516,9 +534,9 @@ verification failure.
    Also requires `hearth.realm.admin`. This is a heavy operation — it
    generates one delta entry per active session.
 
-3. **Verify rotation took effect.** The realm's JWKS should now contain
-   two keys (active + retiring); after the grace deadline, only the new
-   key remains:
+3. **Verify rotation took effect.** After a revoking rotation the
+   realm's JWKS carries only the new key. After a rotation with a
+   window it carries two (active + retiring) until the deadline:
 
    ```bash
    curl https://auth.example.com/realms/production/.well-known/jwks.json

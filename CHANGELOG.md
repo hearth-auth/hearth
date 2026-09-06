@@ -50,6 +50,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **BREAKING: `POST /admin/realms/{id}/rotate-signing-key` now revokes the retired key (audit
+  2026-08-28 §3 B9, §4.15#1)** — rotation is the documented remedy for a leaked signing key, and it
+  did not remedy it: the retired key stayed valid for the configured grace window (24 h by default),
+  during which whoever held the leaked key kept minting **new** administrative credentials. A forged
+  post-rotation token still returned `200` on `GET /admin/users`, `/admin/realms` and `/admin/audit`,
+  and `201` on `POST /admin/users`. The endpoint now defaults to a grace period of 0: every retired
+  key for the realm is purged, including one retired by an earlier rotation that was still inside its
+  own window, and tokens signed with it stop validating immediately. A planned rotation can opt into
+  a window with `?grace_period_secs=3600`; a value that is not a non-negative integer is rejected
+  with `400`. `token.signing_key_rotation_grace_period` now applies only to the config-driven
+  rotation (`rotate_signing_key: true` on a realm, applied at startup). **Operator action:** a
+  routine rotation performed through this endpoint will invalidate outstanding access and refresh
+  tokens for that realm unless you pass `grace_period_secs`. The disaster-recovery and upgrade
+  guides carry the revised procedure. The Rust `AppState` field
+  `signing_key_rotation_grace_period_secs` and its builder are removed — the endpoint no longer
+  reads a server-wide default.
 - **A passkey satisfies `mfa_required` only when it proved user verification (audit 2026-08-28
   §3 B10, §4.18#1)** — the browser passkey login marked every ceremony as multi-factor before it
   ran, so an authenticator that reported user *presence* only — a touch, no PIN and no biometric —

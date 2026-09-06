@@ -2093,14 +2093,6 @@ async fn run_serve(
         data_dir.clone(),
     ));
 
-    let rotation_grace_period_secs = config
-        .token
-        .signing_key_rotation_grace_period
-        .as_deref()
-        .and_then(|s| hearth::config::parse_duration_to_micros(s).ok())
-        .map(|micros| (micros / 1_000_000) as u64)
-        .unwrap_or(86_400);
-
     // Parse trusted proxy IPs early so both AppState (JSON API) and WebState
     // (browser UI) can use the same list for real client IP extraction.
     let api_trusted_proxies: Vec<std::net::IpAddr> = config
@@ -2322,7 +2314,6 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_metrics_bearer_token(config.metrics.bearer_token.clone())
-            .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
@@ -2347,7 +2338,6 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_metrics_bearer_token(config.metrics.bearer_token.clone())
-            .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))

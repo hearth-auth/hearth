@@ -5994,17 +5994,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // a configured KEK) private keys that would otherwise accumulate one
         // per rotation forever and be decrypted on every cache reload
         // (HEA-2093).
+        //
+        // `grace_period_secs == 0` is a revoking rotation — the remedy for a
+        // leaked key (audit 2026-08-28 B9). It purges *every* retiring key,
+        // not only the expired ones: a key retired by an earlier rotation is
+        // still inside its own window, and leaving it live would let the
+        // holder of that key keep minting credentials after the operator was
+        // told the realm had been re-keyed.
         let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
-        let purged = Self::purge_realm_retiring_keys(&self.storage, realm_id, Some(now_secs));
+        let revoking = grace_period_secs == 0;
+        let cutoff = if revoking { None } else { Some(now_secs) };
+        let purged = Self::purge_realm_retiring_keys(&self.storage, realm_id, cutoff);
 
-        // Store the old key as a retiring key with its expiry deadline.
+        // Store the old key as a retiring key with its expiry deadline. A
+        // revoking rotation stores nothing: a deadline of `now` can never
+        // verify a token, and the row is a wrapped private key that would sit
+        // in storage until some later rotation reaped it.
         let deadline_secs = now_secs.saturating_add(grace_period_secs);
-        let retiring_key_storage =
-            keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id);
-        let old_stored = crate::identity::key_encryption::wrap_key(&old_pkcs8, kek)?;
-        self.storage
-            .put(&sys_realm, &retiring_key_storage, &old_stored)
-            .map_err(Self::storage_err)?;
+        if !revoking {
+            let retiring_key_storage =
+                keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id);
+            let old_stored = crate::identity::key_encryption::wrap_key(&old_pkcs8, kek)?;
+            self.storage
+                .put(&sys_realm, &retiring_key_storage, &old_stored)
+                .map_err(Self::storage_err)?;
+        }
 
         // Bump the rotation epoch *before* clearing the cache so a concurrent
         // cache-miss fill that snapshotted the old epoch and read the outgoing
@@ -6035,8 +6049,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             new_kid = %new_key.key_id(),
             grace_period_secs,
             deadline_secs,
-            purged_expired_retiring_keys = purged,
-            "signing key rotated; old key enters grace period"
+            purged_retiring_keys = purged,
+            outcome = if revoking {
+                "every retired key for this realm is revoked"
+            } else {
+                "old key enters its grace period"
+            },
+            "signing key rotated"
         );
 
         Ok(())

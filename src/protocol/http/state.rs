@@ -58,9 +58,6 @@ pub struct AppState {
     /// carries a valid `detached_signature_b64` in its manifest. Fail-closed:
     /// archives without a valid signature are rejected.
     pub backup_verify_key_bytes: Option<[u8; 32]>,
-    /// Grace period (seconds) during which a retiring signing key remains in
-    /// JWKS after rotation. Sourced from `token.signing_key_rotation_grace_period`.
-    pub signing_key_rotation_grace_period_secs: u64,
     /// Trusted reverse-proxy IPs for `X-Forwarded-For` extraction.
     ///
     /// When non-empty, the OWASP "rightmost non-trusted" algorithm is applied
@@ -134,7 +131,6 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             // zero key is overridden in production via with_dpop_nonce_secret
@@ -168,7 +164,6 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
@@ -208,7 +203,6 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
@@ -282,12 +276,6 @@ impl AppState {
     /// `Authorization: Bearer <token>` header. Comparison is constant-time.
     pub fn with_metrics_bearer_token(mut self, token: Option<String>) -> Self {
         self.metrics_bearer_token = token;
-        self
-    }
-
-    /// Sets the signing key rotation grace period.
-    pub fn with_signing_key_rotation_grace_period_secs(mut self, secs: u64) -> Self {
-        self.signing_key_rotation_grace_period_secs = secs;
         self
     }
 

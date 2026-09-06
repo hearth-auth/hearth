@@ -429,7 +429,10 @@ checklist is provided (or `--dev` is passed for local development).
 **Key-encryption caveat:** setting `HEARTH_KEK` for the first time on an existing data directory
 is safe — legacy plaintext key records remain readable and are flagged with a startup warning.
 Keys written after the change are encrypted. To supersede the plaintext copies, rotate each
-realm's signing key after the upgrade (`POST /admin/realms/{id}/rotate-signing-key`).
+realm's signing key after the upgrade (`POST /admin/realms/{id}/rotate-signing-key`). That endpoint
+revokes the retired key, so every token signed with it stops validating at once. This is a planned
+rotation, not an incident: add `?grace_period_secs=3600` (or your slowest relying party's JWKS cache
+TTL plus a margin) to keep existing sessions working while clients re-fetch the key.
 
 ### v1.6.x → later
 

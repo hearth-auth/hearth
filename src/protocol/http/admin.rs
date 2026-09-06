@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -1617,15 +1617,56 @@ async fn admin_patch_realm_config(
     }
 }
 
+/// Reads the optional `grace_period_secs` query parameter for a signing-key
+/// rotation. Absent means 0 — revoke.
+///
+/// # Errors
+///
+/// Returns a `400` response when the parameter is present but is not a
+/// non-negative integer. Failing here rather than falling back to a default
+/// keeps the operator's intent explicit: a typo must not silently grant a
+/// window during an incident.
+fn parse_grace_period_secs(query: Option<&str>) -> Result<u64, Response> {
+    let Some(query) = query else {
+        return Ok(0);
+    };
+    let Some(raw) = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "grace_period_secs").then_some(value)
+    }) else {
+        return Ok(0);
+    };
+    raw.parse::<u64>().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "grace_period_secs must be a non-negative integer number of seconds"
+            })),
+        )
+            .into_response()
+    })
+}
+
 /// Admin: rotate the Ed25519 signing key for a realm.
 ///
-/// Generates a new key, promotes it to the active key, and keeps the old key
-/// in the JWKS response for the configured grace period (default 24 h) so
-/// tokens signed with the old key remain valid during that window.
+/// Generates a new key, promotes it to the active key, and **revokes every
+/// retired key for the realm**. Credentials signed with the old key stop
+/// validating immediately, which is what makes this endpoint a usable remedy
+/// for a leaked key (audit 2026-08-28 B9).
+///
+/// A planned rotation — routine key hygiene rather than an incident — can keep
+/// existing sessions alive by opting into a grace window:
+/// `?grace_period_secs=86400`. During that window a token signed with the
+/// retired key still validates. **Do not use it after a compromise:** the
+/// window protects whoever holds the leaked key just as faithfully.
+///
+/// Omitting the parameter revokes. `grace_period_secs=0` is the same thing
+/// said explicitly.
 async fn admin_rotate_realm_signing_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> impl IntoResponse {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -1650,7 +1691,12 @@ async fn admin_rotate_realm_signing_key(
         Err(e) => return e,
     };
 
-    let grace_period_secs = state.signing_key_rotation_grace_period_secs;
+    // Default 0 — revoke. An operator opts into a grace window explicitly,
+    // after authentication, so a malformed value cannot probe the endpoint.
+    let grace_period_secs = match parse_grace_period_secs(query.as_deref()) {
+        Ok(secs) => secs,
+        Err(response) => return response,
+    };
 
     match state
         .identity

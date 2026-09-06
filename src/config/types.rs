@@ -834,8 +834,13 @@ pub struct TokenYamlConfig {
     /// Default: 7 days.
     #[serde(default)]
     pub refresh_token_ttl: Option<String>,
-    /// Grace period during which the old signing key remains in JWKS after
-    /// rotation (e.g. `"24h"`). Default: 24 hours.
+    /// Grace period during which the old signing key remains in JWKS after a
+    /// **config-driven** rotation — `rotate_signing_key: true` on a realm,
+    /// applied at startup (e.g. `"24h"`). Default: 24 hours.
+    ///
+    /// It does not apply to `POST /admin/realms/{id}/rotate-signing-key`,
+    /// which revokes the retired key unless the request names a window
+    /// explicitly (audit 2026-08-28 B9).
     #[serde(default)]
     pub signing_key_rotation_grace_period: Option<String>,
     /// Maximum entries in the in-process token-claims cache on the
