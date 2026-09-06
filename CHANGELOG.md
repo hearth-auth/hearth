@@ -59,6 +59,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   ruleset and fails if the `required-summary` context is not required, if changes can reach
   `main` outside a pull request, or if any bypass actor reappears. An unreadable ruleset API is
   a failure, not a skip.
+- **Dependency-advisory gates can now fail a merge (audit 2026-08-28 §4.8#7, §4.12#3)** — the
+  `cargo audit` step in CI and the OSV-Scanner job were both `continue-on-error` with no
+  re-raise, so a scan reporting 70 vulnerabilities — one of them the unpatched HTTP/2 DoS
+  advisory shipped in v1.6.11 — produced a green job. The `cargo-deny` job was also skipped on
+  every PR that did not touch a dependency file, so a week-old advisory failure never blocked a
+  merge. The dedicated advisory job now runs `cargo deny check` and `cargo audit --deny
+  warnings` on **every** PR, feeds the one required check, and neither it nor OSV-Scanner is
+  `continue-on-error` anywhere. `scripts/check-advisory-gates.sh` runs on every PR and fails
+  the build if a scanner is disarmed again or the gate regains a paths filter.
 - **Every release channel now waits for a green verdict before it publishes (audit 2026-08-28
   §3 B2, §3 B6, §4.8#1, §4.8#2, §4.12#1)** — only the GitHub Release binary channel was gated.
   The container image, the Helm chart, seven SDK releases and two registry packages published

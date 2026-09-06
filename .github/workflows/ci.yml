@@ -281,6 +281,18 @@ jobs:
       - name: Branch protection — guard self-test
         run: bash scripts/tests/check-branch-protection.test.sh
 
+      # Audit findings §4.8#7 / §4.12#3: both dependency-advisory gates were
+      # continue-on-error with no re-raise (a 70-vulnerability scan produced a
+      # success job), and the cargo-deny job was skipped on every PR that did
+      # not touch the lockfile. This guard fails the build if an advisory
+      # scanner is disarmed again or the gate regains a paths filter.
+      - name: Advisory gates (check-advisory-gates.sh)
+        run: bash scripts/check-advisory-gates.sh
+
+      # Proof the guard can go red: it must reject both audited shapes.
+      - name: Advisory gates — guard self-test
+        run: bash scripts/tests/check-advisory-gates.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:
@@ -323,19 +335,12 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
-        with:
-          tool: cargo-audit
-
-      # HEA-1370: cargo-audit complements cargo-deny with the RustSec advisory
-      # database. --deny warnings promotes unmaintained/unsound advisories to
-      # hard failures; .cargo/audit.toml carries the sim-only bincode exception.
-      # HEA-1714: continue-on-error so an advisory never masks nextest failures.
-      # cargo-deny advisory/license/ban checks run in the dedicated cargo-deny job.
-      - name: Security audit (cargo audit --deny warnings)
-        continue-on-error: true
-        run: cargo audit --deny warnings
+      # cargo-audit and cargo-deny run in the dedicated cargo-deny job below,
+      # which runs on EVERY PR and can fail. The audit 2026-08-28 (§4.12#3)
+      # found the step here was continue-on-error with no re-raise, so a
+      # 70-vulnerability scan produced a `success` job. Do not re-add a
+      # disarmed advisory step; scripts/check-advisory-gates.sh fails if one
+      # appears.
 
       - name: make test-quality (block false-confidence test patterns — HEA-571)
         run: make test-quality
@@ -953,25 +958,29 @@ jobs:
             echo "| AC-7: write contention, 2 leadership changes | cluster_chaos.rs |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Dependency advisory gate (HEA-1652) ─────────────────────────────────────
+  # ── Dependency advisory gate (HEA-1652, audit 2026-08-28 §4.8#7, §4.12#3) ───
   #
-  # Dedicated cargo-deny job so advisory/license/ban violations appear as their
-  # own named CI check rather than being buried in the 30-minute quality job.
+  # Dedicated job so advisory/license/ban violations appear as their own named
+  # CI check rather than being buried in the 30-minute quality job.
   #
-  # Gated on the `deny` filter (deny.toml, Cargo.toml, Cargo.lock) so it only
-  # runs when dependency state actually changes. Always runs on pushes to main
-  # and schedule events (security.yml's weekly cron also fires cargo-deny, but
-  # that workflow does not feed required-summary — this one does).
+  # Runs on EVERY PR, unconditionally. It was gated on the `deny` paths filter
+  # (deny.toml, Cargo.toml, Cargo.lock), so a PR that did not touch dependency
+  # state never ran it, and a week-old advisory failure never blocked a merge
+  # (audit §4.8#7). An advisory can arrive with no diff at all: the advisory
+  # database moves while the tree stands still.
   #
-  # No Rust build needed: cargo-deny reads Cargo.lock and deny.toml directly.
-  # Runtime is ~30 s vs ~25 min for the full quality job.
+  # cargo-audit runs here too. It sat in the quality job as a continue-on-error
+  # step with no re-raise (audit §4.12#3): a 70-vulnerability scan produced a
+  # `success` job. Neither step here is continue-on-error — a finding fails
+  # this job, and required-summary needs this job, so it blocks the merge.
+  # scripts/check-advisory-gates.sh pins this shape.
+  #
+  # No Rust build needed: both tools read Cargo.lock directly. Runtime ~60 s.
 
   cargo-deny:
-    name: cargo-deny (advisories + licenses + bans)
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.deny == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    name: dependency-advisories (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -979,13 +988,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install cargo-deny
+      - name: Install cargo-deny + cargo-audit
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
         with:
-          tool: cargo-deny
+          tool: cargo-deny,cargo-audit
 
       - name: cargo deny check (advisories + licenses + bans)
         run: cargo deny check
+
+      # HEA-1370: cargo-audit complements cargo-deny with the RustSec advisory
+      # database. --deny warnings promotes unmaintained/unsound advisories to
+      # hard failures; .cargo/audit.toml carries the sim-only bincode exception.
+      - name: cargo audit (RustSec advisories, --deny warnings)
+        run: cargo audit --deny warnings
 
   # ── MSRV gate (HEA-2115) ─────────────────────────────────────────────────────
   #

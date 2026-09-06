@@ -252,9 +252,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # No continue-on-error: the audit 2026-08-28 (§4.12#3) found both
+      # dependency-advisory gates disarmed, and a 70-vulnerability scan
+      # produced a `success` job. A finding now fails this job; the SARIF
+      # upload below still runs (`if: always()`), so alerts reach Code
+      # Scanning either way.
       - name: Run OSV-Scanner
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        continue-on-error: true
         with:
           # HEA-1523: Explicit lockfile list instead of --recursive so examples/**
           # and tests/ui/** are never scanned. The [[PackageOverrides]] `group`
