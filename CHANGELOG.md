@@ -274,6 +274,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **Cold-read promotion no longer clones the entire hot-tier cache under one global lock (audit
+  2026-08-28 §4.21#4)** — every hot-tier write (a cold read's cache fill, and the invalidation a
+  delete or credential revocation performs) copied the whole 100k-entry map while holding a single
+  process-wide mutex, so unauthenticated cold reads could queue revocations behind full-map copies.
+  The tier is now split into up to 64 independent shards: a write copies only its own shard —
+  1/64th of the map — and a revocation contends only with writes to the same shard. Read behaviour,
+  capacity, eviction policy, and the `hearth_storage_hot_tier_*` metrics are unchanged. No operator
+  action required.
 - **A delete or update racing a cold read can no longer leave the stale value cached until restart
   (audit 2026-08-28 §4.21#3)** — a cold read fills the hot tier *after* it reads the authoritative
   value, and a write landing between those two steps invalidated a key that was not yet cached — a

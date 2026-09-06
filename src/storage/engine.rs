@@ -1492,7 +1492,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         // the promote below discards the then-stale fill — otherwise the
         // pre-write value would be served for the life of the process
         // (audit 2026-08-28 §4.21#3).
-        let fill = self.hot_tier.begin_fill();
+        let fill = self.hot_tier.begin_fill(realm_id, key);
 
         // 2. Active memtable — O(log n) BTreeMap lookup.
         // `get_entry` distinguishes a tombstone from an absent key so we can

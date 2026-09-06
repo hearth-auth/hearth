@@ -46,7 +46,7 @@ found it, the audit piece, and the report's severity.
 - [x] 5.2 Make realm archival a freeze; 11 of 16 mutating engine operations still write an archived realm, including `delete_user`, `set_password` and `register_client` (§4.20#5 · P14 · HIGH)
 - [x] 5.3 Delete consent records when a client is retired; a consent record outlives all three retirement routes and the deterministic YAML `ClientId` hands it to the next application (§4.20#1 · P14 · HIGH)
 - [x] 5.4 Fix the hot-tier fill/invalidation race; a delete or update overlapping an in-flight read is permanently invisible to `get()` for the life of the process, so a revoked credential stays readable (§4.21#3 · P19 · HIGH)
-- [ ] 5.5 Stop cold-read promotion cloning the entire hot-tier map under a global mutex — O(capacity·log capacity) on a path any unauthenticated request can drive, and it blocks revocation (§4.21#4 · P19 · HIGH)
+- [x] 5.5 Stop cold-read promotion cloning the entire hot-tier map under a global mutex — O(capacity·log capacity) on a path any unauthenticated request can drive, and it blocks revocation (§4.21#4 · P19 · HIGH)
 
 ## 6. Wave 2 (HIGH) — Backup and restore safety
 
