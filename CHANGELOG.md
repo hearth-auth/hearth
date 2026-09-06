@@ -284,6 +284,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **`token.signing_key_rotation_grace_period` is now validated at start-up (audit 2026-08-28
+  §4.15#2)** — a malformed value was silently swallowed and fell back to the 24-hour default, and a
+  negative value wrapped through an unsigned cast into an effectively infinite grace window,
+  keeping a retired signing key trusted indefinitely. Config validation now rejects an
+  unparseable, negative, or over-30-day grace period, naming the key, so the server refuses to
+  start rather than mis-applying it; the startup path also clamps defensively.
 - **The permission-decision endpoint now refuses a non-access token species (audit 2026-08-28
   §4.2#1, §4.19#9)** — `decide_token_permission` verified a token's signature, realm, audience,
   expiry, and revocation, but never checked `token_type`, so a refresh token — realm-signed with

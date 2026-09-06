@@ -1330,6 +1330,34 @@ fn validate_token(token: &TokenYamlConfig) -> Result<(), ConfigError> {
             );
         }
     }
+    // The rotation grace period was applied through a silent `if let Ok(..)`
+    // at startup: a malformed value fell back to the 24h default, and a
+    // negative value wrapped through an `as u64` cast into an effectively
+    // infinite window (audit 2026-08-28 §4.15#2). Validate it here so a bad
+    // value fails boot and names the key.
+    if let Some(grace) = &token.signing_key_rotation_grace_period {
+        let micros = parse_duration_to_micros(grace).map_err(|e| {
+            invalid(
+                "token.signing_key_rotation_grace_period",
+                format!("invalid duration: {e}"),
+            )
+        })?;
+        if micros < 0 {
+            return Err(invalid(
+                "token.signing_key_rotation_grace_period",
+                "signing-key rotation grace period must not be negative; \
+                 a negative window is applied as an effectively infinite grace \
+                 (audit 2026-08-28 §4.15#2)",
+            ));
+        }
+        if micros > REFRESH_TOKEN_TTL_MAX_MICROS {
+            return Err(invalid(
+                "token.signing_key_rotation_grace_period",
+                "signing-key rotation grace period must not exceed 30 days; \
+                 the retired key stays trusted for the whole window",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2345,6 +2373,67 @@ mod tests {
         assert!(
             validate_token(&token).is_ok(),
             "TTL exactly at cap must be accepted"
+        );
+    }
+
+    // ===== §4.15#2: signing-key rotation grace period validation =====
+
+    /// A negative grace period must fail boot, not wrap to an infinite window.
+    #[test]
+    fn grace_period_negative_is_rejected() {
+        let token = TokenYamlConfig {
+            signing_key_rotation_grace_period: Some("-1h".to_string()),
+            ..Default::default()
+        };
+        let result = validate_token(&token);
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError; got: {result:?}");
+        };
+        assert_eq!(field, "token.signing_key_rotation_grace_period");
+        assert!(
+            reason.contains("negative"),
+            "reason should mention negative: {reason}"
+        );
+    }
+
+    /// A malformed grace period must fail boot rather than fall back to 24h.
+    #[test]
+    fn grace_period_unparseable_is_rejected() {
+        let token = TokenYamlConfig {
+            signing_key_rotation_grace_period: Some("not-a-duration".to_string()),
+            ..Default::default()
+        };
+        let result = validate_token(&token);
+        let Err(ConfigError::ValidationError { field, .. }) = result else {
+            panic!("expected ValidationError; got: {result:?}");
+        };
+        assert_eq!(field, "token.signing_key_rotation_grace_period");
+    }
+
+    /// A grace period beyond 30 days is rejected.
+    #[test]
+    fn grace_period_over_30d_is_rejected() {
+        let token = TokenYamlConfig {
+            signing_key_rotation_grace_period: Some("31d".to_string()),
+            ..Default::default()
+        };
+        let result = validate_token(&token);
+        let Err(ConfigError::ValidationError { field, .. }) = result else {
+            panic!("expected ValidationError; got: {result:?}");
+        };
+        assert_eq!(field, "token.signing_key_rotation_grace_period");
+    }
+
+    /// A sane grace period is accepted.
+    #[test]
+    fn grace_period_valid_is_accepted() {
+        let token = TokenYamlConfig {
+            signing_key_rotation_grace_period: Some("24h".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            validate_token(&token).is_ok(),
+            "a 24h grace period must be accepted"
         );
     }
 

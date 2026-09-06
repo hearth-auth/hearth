@@ -1149,8 +1149,12 @@ async fn run_serve(
             }
         }
         if let Some(ttl) = &config.token.signing_key_rotation_grace_period {
+            // A negative value is rejected by `validate_token` before we reach
+            // here; clamp defensively so a stray negative can never wrap
+            // through `as u64` into an effectively infinite grace window
+            // (audit 2026-08-28 §4.15#2).
             if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
-                tc.signing_key_rotation_grace_period_secs = (micros / 1_000_000) as u64;
+                tc.signing_key_rotation_grace_period_secs = micros.max(0) as u64 / 1_000_000;
             }
         }
         if let Some(max) = config.token.claims_cache_max {
