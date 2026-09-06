@@ -7374,6 +7374,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::ClientCredentialsRequest,
     ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
+        // Sessionless grants have no session for suspension to revoke, so the
+        // realm-status gate is the only thing that stops a suspended tenant's
+        // M2M plane minting fresh tokens (audit 2026-08-28 §4.19#6).
+        self.require_active_realm(realm_id)?;
         self.client_credentials_token_inner(realm_id, request)
     }
 
@@ -7391,6 +7395,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::JwtBearerRequest,
     ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
+        // Sessionless grant — realm status is the only suspension control
+        // that reaches it (audit 2026-08-28 §4.19#6).
+        self.require_active_realm(realm_id)?;
         self.jwt_bearer_token_inner(realm_id, request)
     }
 
@@ -7477,6 +7484,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::TokenIntrospectionRequest,
     ) -> Result<crate::identity::oidc::IntrospectionResponse, IdentityError> {
+        // A suspended or archived realm's tokens are not active (audit
+        // 2026-08-28 §4.19#6). RFC 7662 semantics: report `active: false`
+        // rather than erroring, and fail closed on any status-read error.
+        if self.require_active_realm(realm_id).is_err() {
+            return Ok(crate::identity::oidc::IntrospectionResponse::inactive());
+        }
         self.introspect_token_inner(realm_id, request)
     }
 
@@ -7485,6 +7498,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::DecidePermissionRequest,
     ) -> Result<crate::identity::oidc::DecidePermissionResponse, IdentityError> {
+        // Fail closed: a non-active realm authorizes nothing (audit
+        // 2026-08-28 §4.19#6).
+        if self.require_active_realm(realm_id).is_err() {
+            return Ok(crate::identity::oidc::DecidePermissionResponse { allowed: false });
+        }
         self.decide_token_permission_inner(realm_id, request)
     }
 
@@ -13890,6 +13908,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<Rfc8693Response, IdentityError> {
         use crate::identity::mcp::intersect_three;
         use crate::identity::tokens::ActClaim;
+
+        // The delegation grant is sessionless: realm status is the only
+        // suspension control that reaches it (audit 2026-08-28 §4.19#6).
+        self.require_active_realm(realm_id)?;
 
         let now_micros = self.clock.now().as_micros();
         let now_secs = now_micros / 1_000_000;

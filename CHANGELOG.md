@@ -274,6 +274,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **Suspending a realm now stops its machine-to-machine plane (audit 2026-08-28 §4.19#6)** —
+  suspension revoked user sessions, but sessionless grants have no session, so a suspended
+  tenant's `client_credentials`, `jwt-bearer`, and RFC 8693 delegation grants kept minting fresh
+  tokens, and `introspect`/`decide` never consulted realm status. All three grants now refuse
+  with `realm_suspended` on a non-active realm, `introspect` reports the tenant's tokens
+  `active: false` (per RFC 7662, no error), and `decide` answers `allowed: false` fail-closed.
+  Applies to the REST and gRPC surfaces alike, since the gate sits in the identity engine.
 - **`GET /admin/realms` no longer returns every tenant to any realm admin (audit 2026-08-28
   §4.1#2)** — the REST handler listed all realms for any caller holding `hearth.realm.admin` in
   any realm, while its gRPC `ListRealms` twin has always filtered. The REST route now matches the
