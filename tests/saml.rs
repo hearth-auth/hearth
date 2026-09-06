@@ -336,3 +336,136 @@ async fn idp_can_issue_signed_response() {
     let html = build_post_form_html("https://sp/acs", "SAMLResponse", &signed, Some("rs"));
     assert!(html.contains("action=\"https://sp/acs\""));
 }
+
+/// Extracts the `<saml:Assertion>…</saml:Assertion>` substring from a
+/// built `<samlp:Response>`.
+fn extract_assertion(response_xml: &str) -> String {
+    let start = response_xml
+        .find("<saml:Assertion ")
+        .expect("assertion start");
+    let end = response_xml
+        .find("</saml:Assertion>")
+        .expect("assertion end")
+        + "</saml:Assertion>".len();
+    response_xml[start..end].to_string()
+}
+
+/// Builds a `<saml:Assertion>` for `subject` with the given ID, valid for
+/// `audience` at `now`.
+fn assertion_for(id: &str, subject: &str, audience: &str, acs_url: &str, now: Timestamp) -> String {
+    let response = build_response_xml(&ResponseBuilder {
+        response_id: "_ignored",
+        in_response_to: Some("_req1"),
+        issue_instant: now,
+        destination: acs_url,
+        issuer: "https://idp.example",
+        audience,
+        assertion_id: id,
+        subject_name_id: subject,
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess1",
+        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
+        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
+        attributes: &BTreeMap::new(),
+    });
+    extract_assertion(&response)
+}
+
+/// B5 — XML Signature Wrapping.
+///
+/// The IdP signs an assertion for `mallory@corp.example`. The attacker,
+/// who holds that legitimate upstream account, hides a second assertion
+/// for `ceo@corp.example` **inside the signed assertion's
+/// `<ds:Signature>` element**. The enveloped-signature transform strips
+/// that element before digesting, so the signature still verifies — while
+/// the response parser, which collects every `<saml:Assertion>` in the
+/// document, consumes the attacker's.
+///
+/// The element whose signature was verified MUST be the element that is
+/// consumed.
+#[test]
+fn sp_rejects_wrapped_assertion_signed_elsewhere_in_the_document() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cert_pem = cert_der_to_pem(idp_key.cert_der());
+
+    let sp_entity_id = "https://hearth.example/ui/realms/acme";
+    let acs_url = "https://hearth.example/ui/realms/acme/federation/saml/acs";
+    let idp_cfg = SamlIdpConfig {
+        idp_id: IdpId::generate(),
+        name: "test-idp".into(),
+        entity_id: "https://idp.example".into(),
+        sso_url: "https://idp.example/sso".into(),
+        slo_url: None,
+        idp_certificates_pem: vec![idp_cert_pem],
+        sign_authn_requests: false,
+        want_assertions_signed: true,
+        attribute_map: {
+            let mut m = BTreeMap::new();
+            m.insert("email".into(), "NameID".into());
+            m
+        },
+    };
+
+    let now = Timestamp::from_micros(1_700_000_000 * 1_000_000);
+
+    // 1. The IdP issues and signs an assertion for the attacker's own account.
+    let honest = assertion_for(
+        "_signed1",
+        "mallory@corp.example",
+        sp_entity_id,
+        acs_url,
+        now,
+    );
+    let signed_assertion =
+        sign_element(honest.as_bytes(), "_signed1", &idp_key).expect("sign assertion");
+    let signed_assertion = String::from_utf8(signed_assertion).expect("utf8");
+
+    // 2. The attacker forges an assertion for the victim.
+    let evil = assertion_for("_evil1", "ceo@corp.example", sp_entity_id, acs_url, now);
+
+    // 3. …and hides it inside the signed assertion's <ds:Signature>, which
+    //    the enveloped transform removes before the digest is computed.
+    let wrapped = signed_assertion.replace("</ds:Signature>", &format!("{evil}</ds:Signature>"));
+    assert!(
+        wrapped.contains("_evil1"),
+        "wrapping step did not inject the forged assertion"
+    );
+
+    // 4. The wrapped assertion is delivered inside an otherwise ordinary Response.
+    let carrier = build_response_xml(&ResponseBuilder {
+        response_id: "_r1",
+        in_response_to: Some("_req1"),
+        issue_instant: now,
+        destination: acs_url,
+        issuer: "https://idp.example",
+        audience: sp_entity_id,
+        assertion_id: "_signed1",
+        subject_name_id: "mallory@corp.example",
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess1",
+        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
+        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
+        attributes: &BTreeMap::new(),
+    });
+    let original = extract_assertion(&carrier);
+    let attack = carrier.replace(&original, &wrapped);
+
+    let outcome = SamlSpService::complete(
+        &idp_cfg,
+        sp_entity_id,
+        acs_url,
+        Some("_req1"),
+        now,
+        attack.as_bytes(),
+    );
+
+    match outcome {
+        SamlSpOutcome::Rejected { .. } => {}
+        SamlSpOutcome::Accepted {
+            identity, assertion, ..
+        } => panic!(
+            "XSW -> ACCEPTED  consumed assertion.id={}  identity.email={}  (IdP signed mallory@corp.example)",
+            assertion.id, identity.email
+        ),
+    }
+}

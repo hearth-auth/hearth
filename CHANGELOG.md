@@ -50,6 +50,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **SAML: the verified assertion is now the consumed assertion (audit 2026-08-28 §3 B5, §4.10#1)** —
+  the SP assertion consumer verified the signature on one `<saml:Assertion>` and then let the
+  response parser pick an assertion independently. Because the enveloped-signature transform strips
+  `<ds:Signature>` before the digest is computed, an attacker holding any legitimate account at the
+  upstream IdP could hide a second, forged assertion inside that element: the signature still
+  verified against the IdP's assertion while the SP consumed the forged one and logged the attacker
+  in as any user. The consumer now requires the document to carry exactly one `<saml:Assertion>` at
+  any depth, and requires the consumed assertion's `ID` to equal the ID of the element whose
+  signature was verified. Responses carrying more than one assertion — which this SP never
+  supported — are refused with a signature error.
 - **The first-run setup token is no longer written to the log in production (audit 2026-08-28 §3 B8,
   §4.12#8, §4.13#11, §4.14#1, §4.24#2)** — on first boot Hearth logged the full setup URL, including
   the `?token=` query parameter, at `WARN` — the default level — in every mode. The setup token is

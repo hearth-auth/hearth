@@ -6,7 +6,7 @@
 use super::response::{extract_and_validate_assertion, parse_response, Assertion, ValidateParams};
 use super::signature::verify_signed_element;
 use super::types::{AttributeMap, SamlIdpConfig};
-use super::xml::ns;
+use super::xml::{count_elements, ns};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
@@ -71,23 +71,42 @@ impl SamlSpService {
         now: Timestamp,
         xml: &[u8],
     ) -> Result<(ExternalIdentity, Option<String>, Assertion), IdentityError> {
-        // Signature verification: prefer Assertion-level signature if
-        // want_assertions_signed, else accept Response-level signature.
         let primary_cert = idp
             .idp_certificates_pem
             .first()
             .ok_or(IdentityError::Saml(SamlError::Signature))?;
-        let mut sig_ok = false;
-        if verify_signed_element(xml, "Assertion", primary_cert).is_ok() {
-            sig_ok = true;
+
+        // XML Signature Wrapping defence, part 1 (audit 2026-08-28 B5).
+        //
+        // The document must carry exactly one `<saml:Assertion>`. A wrapped
+        // response hides a second one where the signature cannot see it —
+        // inside the `<ds:Signature>` element, which the enveloped-signature
+        // transform strips before the digest is computed. Signature
+        // verification then passes on the IdP's assertion while the response
+        // parser, which collects every `<saml:Assertion>` at any depth,
+        // consumes the attacker's. Counting the whole document closes every
+        // placement, not just the one that was reproduced.
+        //
+        // This SP consumes a single assertion (`extract_and_validate_assertion`
+        // refuses more than one), so requiring exactly one here removes no
+        // supported case.
+        if count_elements(xml, ns::SAML, "Assertion")? != 1 {
+            return Err(IdentityError::Saml(SamlError::Signature));
         }
-        if !sig_ok {
-            if idp.want_assertions_signed {
-                return Err(IdentityError::Saml(SamlError::Signature));
+
+        // Signature verification: prefer Assertion-level signature if
+        // want_assertions_signed, else accept Response-level signature.
+        let verified_assertion_id = match verify_signed_element(xml, "Assertion", primary_cert) {
+            Ok(verified) => Some(verified.id),
+            Err(_) => {
+                if idp.want_assertions_signed {
+                    return Err(IdentityError::Saml(SamlError::Signature));
+                }
+                // Fall back to Response-level signature.
+                verify_signed_element(xml, "Response", primary_cert)?;
+                None
             }
-            // Fall back to Response-level signature.
-            verify_signed_element(xml, "Response", primary_cert)?;
-        }
+        };
 
         let resp = parse_response(xml)?;
         let assertion = extract_and_validate_assertion(
@@ -101,6 +120,14 @@ impl SamlSpService {
                 clock_skew_secs: 60,
             },
         )?;
+
+        // XML Signature Wrapping defence, part 2: the element whose
+        // signature was verified must be the element that is consumed.
+        if let Some(verified_id) = verified_assertion_id {
+            if assertion.id != verified_id {
+                return Err(IdentityError::Saml(SamlError::Signature));
+            }
+        }
 
         let identity =
             assertion_to_external_identity(idp.idp_id.clone(), &assertion, &idp.attribute_map)?;

@@ -318,6 +318,53 @@ pub fn find_element_range(
     }
 }
 
+/// Counts every element with the given (namespace_uri, local_name) in the
+/// document, at any depth — including elements nested inside a
+/// `<ds:Signature>`, which the enveloped-signature transform removes
+/// before a digest is computed.
+///
+/// Signature-wrapping defences need this: a wrapped document is one where
+/// the number of candidate elements the parser can reach differs from the
+/// one element whose signature was verified.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, on a `DOCTYPE` declaration, or
+/// when the document exceeds `MAX_SAML_XML_EVENTS`.
+pub fn count_elements(
+    xml: &[u8],
+    namespace_uri: &str,
+    local: &str,
+) -> Result<usize, IdentityError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut buf = Vec::new();
+    let mut count: usize = 0;
+    let mut event_count: usize = 0;
+
+    loop {
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+                if is_element(e, namespace_uri, local) {
+                    count += 1;
+                }
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Ok(count),
+            Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 fn id_match(e: &BytesStart<'_>, id_attr: Option<&str>) -> bool {
     match id_attr {
         None => true,
