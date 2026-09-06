@@ -458,3 +458,120 @@ async fn own_realm_admin_can_get_own_realm() {
         "realm admin must be able to GET their own realm"
     );
 }
+
+// ─── GET /admin/realms visibility (audit 2026-08-28 §4.1#2) ──────────────────
+// The gRPC ListRealms twin filters: system-realm admins see every realm,
+// regular realm admins see only their own. The REST handler returned every
+// tenant to any realm admin.
+
+/// Creates an admin in the system realm and returns its access token.
+fn system_admin_token(h: &common::TestHarness, suffix: &str) -> String {
+    let sys = system_realm_id();
+    h.rbac().seed_realm(&sys).expect("seed system rbac");
+    let user = h
+        .identity()
+        .create_admin_user(&hearth::identity::CreateUserRequest {
+            email: format!("sys-list-{suffix}@test.example"),
+            display_name: "SysAdmin".into(),
+            first_name: "Sys".into(),
+            last_name: "Admin".into(),
+            attributes: Default::default(),
+        })
+        .expect("create system admin");
+    let role = h
+        .rbac()
+        .get_role_by_name(&sys, "realm.admin")
+        .expect("lookup role")
+        .expect("realm.admin role exists after seed");
+    h.rbac()
+        .assign_role(
+            &sys,
+            &hearth::rbac::AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role");
+    let session = h
+        .identity()
+        .create_session(
+            &sys,
+            user.id(),
+            &hearth::identity::SessionContext::default(),
+        )
+        .expect("create session");
+    h.identity()
+        .issue_tokens(&sys, user.id(), session.id())
+        .expect("issue tokens")
+        .access_token()
+        .to_string()
+}
+
+/// Reads the realm IDs out of a `GET /admin/realms` response body.
+async fn listed_realm_ids(resp: axum::response::Response) -> Vec<String> {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse JSON");
+    body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|r| r["id"].as_str().expect("realm id").to_string())
+        .collect()
+}
+
+/// A tenant realm admin must see only their own realm — not every tenant.
+#[tokio::test]
+async fn list_realms_returns_only_callers_realm() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm_a, token_a) = setup_realm_admin(&h, "list-a").await;
+    let (realm_b, _) = setup_realm_admin(&h, "list-b").await;
+
+    let resp = build_app(&h)
+        .oneshot(req("GET", "/admin/realms".into(), &token_a, &realm_a, ""))
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let ids = listed_realm_ids(resp).await;
+    assert!(
+        ids.contains(&realm_a.as_uuid().to_string()),
+        "caller's own realm must be listed"
+    );
+    assert!(
+        !ids.contains(&realm_b.as_uuid().to_string()),
+        "a tenant realm admin must not see other tenants (audit §4.1#2); got {ids:?}"
+    );
+    assert_eq!(
+        ids.len(),
+        1,
+        "a tenant realm admin sees exactly their own realm; got {ids:?}"
+    );
+}
+
+/// The system-realm operator keeps full visibility.
+#[tokio::test]
+async fn system_realm_admin_lists_all_realms() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let (realm_a, _) = setup_realm_admin(&h, "syslist-a").await;
+    let (realm_b, _) = setup_realm_admin(&h, "syslist-b").await;
+    let sys = system_realm_id();
+    let sys_token = system_admin_token(&h, "syslist");
+
+    let resp = build_app(&h)
+        .oneshot(req("GET", "/admin/realms".into(), &sys_token, &sys, ""))
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let ids = listed_realm_ids(resp).await;
+    for realm in [&realm_a, &realm_b] {
+        assert!(
+            ids.contains(&realm.as_uuid().to_string()),
+            "system realm admin must see every tenant; missing {realm:?} in {ids:?}"
+        );
+    }
+}

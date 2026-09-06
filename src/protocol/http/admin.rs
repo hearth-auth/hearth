@@ -1126,13 +1126,33 @@ async fn admin_list_realms(
         return e.into_response();
     }
 
-    match state.identity.list_realms(&params.as_page_request()) {
-        Ok(page) => (
-            StatusCode::OK,
-            Json(proto_to_rest_json(&realm_page_to_proto(&page))),
-        )
-            .into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+    // System-realm admins may list all realms; a tenant realm admin sees only
+    // their own realm — the gRPC ListRealms twin has always filtered this way
+    // (audit 2026-08-28 §4.1#2).
+    if crate::identity::keys::is_system_realm(&auth.realm_id) {
+        match state.identity.list_realms(&params.as_page_request()) {
+            Ok(page) => (
+                StatusCode::OK,
+                Json(proto_to_rest_json(&realm_page_to_proto(&page))),
+            )
+                .into_response(),
+            Err(e) => identity_error_to_response(&e).into_response(),
+        }
+    } else {
+        match state.identity.get_realm(&auth.realm_id) {
+            Ok(realm) => {
+                let items = realm.as_ref().map(pb::Realm::from).into_iter().collect();
+                (
+                    StatusCode::OK,
+                    Json(proto_to_rest_json(&pb::RealmPage {
+                        items,
+                        next_cursor: None,
+                    })),
+                )
+                    .into_response()
+            }
+            Err(e) => identity_error_to_response(&e).into_response(),
+        }
     }
 }
 

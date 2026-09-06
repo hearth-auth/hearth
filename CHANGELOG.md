@@ -274,6 +274,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **`GET /admin/realms` no longer returns every tenant to any realm admin (audit 2026-08-28
+  §4.1#2)** — the REST handler listed all realms for any caller holding `hearth.realm.admin` in
+  any realm, while its gRPC `ListRealms` twin has always filtered. The REST route now matches the
+  gRPC behaviour: a tenant realm admin sees exactly their own realm; system-realm admins keep full
+  visibility. Integrations that relied on a tenant admin enumerating other tenants must use a
+  system-realm credential.
 - **Backups now carry every second factor: TOTP state, recovery codes, and passkeys (audit
   2026-08-28 §4.18#5)** — the exporter carried only password hashes while the manifest's record
   type claimed credentials included "TOTP, passkeys, etc.", so an operator who restored a realm

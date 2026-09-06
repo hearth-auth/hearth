@@ -54,7 +54,7 @@ found it, the audit piece, and the report's severity.
 
 ## 7. Wave 2 (HIGH) — Tenant isolation
 
-- [ ] 7.1 Filter `GET /admin/realms` to the caller's visibility; it returns every tenant to any realm admin while its gRPC twin filters, and only the gRPC behaviour is tested (§4.1#2 · P13 · HIGH)
+- [x] 7.1 Filter `GET /admin/realms` to the caller's visibility; it returns every tenant to any realm admin while its gRPC twin filters, and only the gRPC behaviour is tested (§4.1#2 · P13 · HIGH)
 - [ ] 7.2 Enforce realm status on the machine-to-machine plane: suspending a realm does not stop the two sessionless grants minting tokens, and neither `introspect` nor `decide` consults realm status (§4.19#6 · P05 · HIGH)
 
 ## 8. Wave 2 (HIGH) — Token and session integrity
