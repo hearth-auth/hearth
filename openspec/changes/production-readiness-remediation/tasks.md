@@ -61,7 +61,7 @@ found it, the audit piece, and the report's severity.
 
 - [x] 8.1 Require client authentication on `POST /realms/{name}/introspect` and `/revoke`, and apply the RFC 7662 audience restriction their header-form twins enforce; five pieces reached this from five angles (§4.1#3, §4.19#2, §4.22#1, §4.25#1 · P13/P05/P10/P08 · HIGH)
 - [x] 8.2 Verify the `id_token_hint` signature before acting on it; unauthenticated `GET /end_session` revokes any user's SSO session and mints a realm-signed logout token with an attacker-chosen `sub` (§4.2#3, §4.19#1 · P04/P05 · HIGH)
-- [ ] 8.3 Call `validate_token` in the gRPC `Decide` RPC, so a refresh token — and a DPoP-bound token replayed as a plain bearer — no longer authorizes (§4.2#1 · P04 · HIGH, evidence contested: reproduced variant is a token-species violation, not a privilege gain)
+- [x] 8.3 Call `validate_token` in the gRPC `Decide` RPC, so a refresh token — and a DPoP-bound token replayed as a plain bearer — no longer authorizes (§4.2#1 · P04 · HIGH, evidence contested: reproduced variant is a token-species violation, not a privilege gain)
 - [ ] 8.4 Validate `token.signing_key_rotation_grace_period` at start-up; a malformed value silently becomes 24 h and a negative value becomes effectively infinite (§4.15#2 · P06 · HIGH)
 - [ ] 8.5 Make refresh rotation atomic; it is an unsynchronised read-modify-write, so two concurrent presentations of one token both succeed and the loser is signed out (§4.16#1 · P07 · HIGH, no attacker required)
 - [ ] 8.6 Revoke a deleted OAuth client's outstanding refresh tokens; deletion strips the confidential-client authentication and FAPI DPoP gates instead (§4.16#3 · P07 · HIGH)
@@ -190,7 +190,7 @@ found it, the audit piece, and the report's severity.
 - [ ] 18.16 Stop an application refreshing after its consent is revoked (§4.16#11 · MEDIUM)
 - [ ] 18.17 Correct the six published documents and four in-tree comments stating properties of refresh rotation the code does not have (§4.16#14 · CLAIM-DEFECT)
 - [ ] 18.18 Enforce the DPoP sender-constraint on `/admin/*`, SCIM and the gRPC admin services, where a stolen `cnf`-bound admin token is replayable as a plain Bearer for reads and writes (§4.19#8 · MEDIUM)
-- [ ] 18.19 Add the `token_type` check to `decide_token_permission`, which its two siblings enforce; a refresh token the token endpoint refuses returns a live `allowed: true` (§4.19#9 · MEDIUM)
+- [x] 18.19 Add the `token_type` check to `decide_token_permission`, which its two siblings enforce; a refresh token the token endpoint refuses returns a live `allowed: true` (§4.19#9 · MEDIUM)
 - [ ] 18.20 Remove the two comments describing a "global-key fallback for Phase 0 realms" the signature-verification function does not implement (§4.19#11 · CLAIM-DEFECT)
 
 ## 19. Wave 3 — Authentication controls

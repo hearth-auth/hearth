@@ -980,3 +980,72 @@ async fn update_client_mode_changes_jwt_content() {
         "after mode update to Introspection, JWT must have no permissions"
     );
 }
+
+// ── §4.2#1 / §4.19#9: decide refuses a non-access token species ───────────────
+
+/// A refresh token must never authorize through `decide_token_permission`.
+/// It is realm-signed and carries the same `sub`/`aud`, so before the fix it
+/// passed every check the decision endpoint made and returned `allowed: true`,
+/// exactly as an access token would (audit 2026-08-28 §4.2#1, §4.19#9). The
+/// token endpoint refuses this species; `decide` must too.
+#[tokio::test]
+async fn decide_refuses_refresh_token_species() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = make_realm(&h);
+    let user = make_user(&h, &realm);
+    grant_permission(&h, &realm, &user, "docs.read");
+
+    let client = register_client(&h, &realm, AccessTokenAuthorization::Decision);
+    let session = h
+        .identity()
+        .create_session(&realm, &user, &SessionContext::default())
+        .expect("session");
+    let pair = h
+        .identity()
+        .issue_tokens_with_context(
+            &realm,
+            &user,
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: Some(client.client_id().clone()),
+                ..Default::default()
+            },
+        )
+        .expect("issue tokens");
+
+    // Sanity: the ACCESS token is authorized for the permission.
+    let with_access = h
+        .identity()
+        .decide_token_permission(
+            &realm,
+            &DecidePermissionRequest {
+                token: pair.access_token().to_string(),
+                permission: "docs.read".to_string(),
+                organization_id: None,
+                resource: None,
+            },
+        )
+        .expect("decide with access token");
+    assert!(
+        with_access.allowed,
+        "precondition: the access token authorizes docs.read"
+    );
+
+    // The REFRESH token — same subject, same realm signature — must NOT.
+    let with_refresh = h
+        .identity()
+        .decide_token_permission(
+            &realm,
+            &DecidePermissionRequest {
+                token: pair.refresh_token().to_string(),
+                permission: "docs.read".to_string(),
+                organization_id: None,
+                resource: None,
+            },
+        )
+        .expect("decide with refresh token");
+    assert!(
+        !with_refresh.allowed,
+        "a refresh token must not authorize through decide (audit §4.2#1, §4.19#9)"
+    );
+}

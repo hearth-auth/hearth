@@ -2837,6 +2837,17 @@ impl EmbeddedIdentityEngine {
             return Ok(DecidePermissionResponse { allowed: false });
         }
 
+        // Token-species guard: authorization decisions are defined for access
+        // tokens only. `introspect_token_inner` and `userinfo_inner` both
+        // refuse a non-access token here; without the same check a refresh
+        // token — realm-signed, same `sub`/`aud` — that the token endpoint
+        // refuses would return a live `allowed: true` (audit 2026-08-28
+        // §4.2#1, §4.19#9). This also refuses the gRPC `Decide` RPC's
+        // refresh-token replay, since it routes through here.
+        if claims.token_type != "access" {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+
         // Expiry check.
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         if now_secs >= claims.exp || claims.iat > now_secs + CLOCK_SKEW_SECS {

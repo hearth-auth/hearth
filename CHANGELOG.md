@@ -284,6 +284,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **The permission-decision endpoint now refuses a non-access token species (audit 2026-08-28
+  §4.2#1, §4.19#9)** — `decide_token_permission` verified a token's signature, realm, audience,
+  expiry, and revocation, but never checked `token_type`, so a refresh token — realm-signed with
+  the same `sub`/`aud` — returned a live `allowed: true` that the token endpoint would refuse.
+  Both `introspect` and `userinfo` already reject a non-access token here; `decide` now does too,
+  which also closes the gRPC `Decide` RPC's refresh-token replay since it routes through the same
+  domain method.
 - **`GET /end_session` now verifies the `id_token_hint` signature before acting (audit 2026-08-28
   §4.2#3, §4.19#1)** — RP-initiated logout decoded the `id_token_hint` without checking its
   signature, so an unauthenticated caller could name any victim's `sub`/`sid`, revoke that user's
