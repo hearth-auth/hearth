@@ -153,6 +153,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `onboarding.notification_email` still carries the token — that channel is private and explicitly
   configured. **Operator action:** on a first boot, read the token from
   `<data_dir>/.setup_token` rather than from the log.
+- **A corrupt WAL no longer destroys the acknowledged records that follow it (audit 2026-08-28
+  §4.11#3)** — recovery treated every CRC mismatch as a torn tail: it truncated the segment to
+  the last good record, re-keyed it, and `open()` returned `Ok`. For a genuine torn write that
+  is correct, but a mid-segment corruption — one flipped byte in a record that *was* durably
+  written — made recovery physically destroy every acknowledged record after it, silently.
+  Recovery now probes past a corrupt record for frames that CRC-verify **and** authenticate
+  under the segment's key; if any survive, the open refuses with the corrupt offset, the first
+  survivor's offset and the count of cleanly replayable records, and leaves the file
+  byte-for-byte intact for the operator. Only a corruption with no valid record after it — the
+  crash artifact — is still truncated automatically. **Operator action on the new error:** copy
+  the segment aside, restore from backup, or truncate at the reported offset to accept the loss
+  explicitly.
 - **Partial compaction no longer resurrects deleted keys after a crash (audit 2026-08-28 §3 B7,
   §4.11#2, §4.12#2, §4.21#1)** — `compact_partial` installed its merged output over the run's
   *newest* SST, which is the member carrying the tombstones, and unlinked the older value-bearing

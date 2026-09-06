@@ -675,6 +675,86 @@ struct RecordScan {
     valid_len: usize,
 }
 
+/// How many record numbers past the last good record the survivor probe tries
+/// when authenticating a candidate frame. Bounds the number of corrupt records
+/// a damaged region may span while survivors are still recognised.
+const SURVIVOR_PROBE_RECORD_WINDOW: u64 = 32;
+
+/// Scans `region[from..]` for a frame whose CRC verifies and whose ciphertext
+/// authenticates under `dek` — an acknowledged record surviving beyond a
+/// corrupt one. Returns its offset relative to the region start.
+///
+/// The scan is byte-granular because a corrupted length field destroys frame
+/// alignment. A CRC-32 collision on garbage is ~2^-32 per offset, and a
+/// candidate additionally has to pass AEAD with a positional nonce, so a false
+/// positive is not a practical concern.
+fn probe_survivors(
+    region: &[u8],
+    from: usize,
+    next_record_num: u64,
+    dek: &DataEncryptionKey,
+) -> Option<usize> {
+    // Minimum frame: 4B length + 16B GCM tag + 4B CRC.
+    const MIN_FRAME: usize = 4 + 16 + 4;
+
+    let mut off = from;
+    while off + MIN_FRAME <= region.len() {
+        let len_bytes: [u8; 4] = match region[off..off + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        if len < 16 || off + 4 + len + 4 > region.len() {
+            off += 1;
+            continue;
+        }
+        let ciphertext = &region[off + 4..off + 4 + len];
+        let crc_bytes: [u8; 4] = match region[off + 4 + len..off + 4 + len + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        if u32::from_le_bytes(crc_bytes) != crc32fast::hash(ciphertext) {
+            off += 1;
+            continue;
+        }
+        // CRC-valid frame — confirm it authenticates as a record of this
+        // segment generation at a plausible position.
+        for record_num in next_record_num..next_record_num + SURVIVOR_PROBE_RECORD_WINDOW {
+            let nonce = counter_nonce(record_num);
+            let aad = record_num.to_le_bytes();
+            if encryption::decrypt_section(ciphertext, dek, &nonce, &aad).is_ok() {
+                return Some(off);
+            }
+        }
+        off += 1;
+    }
+    None
+}
+
+/// Refuses the scan when a corrupt record at `corrupt_start` is followed by at
+/// least one cryptographically valid record (audit 2026-08-28 §4.11#3).
+///
+/// Truncating in that state would physically destroy acknowledged writes while
+/// `open()` reports `Ok`. The returned error carries absolute file offsets so
+/// the operator can copy the segment aside, restore from backup, or truncate
+/// explicitly. Offsets are absolute because the record region always starts at
+/// [`V1_RECORD_OFFSET`] in a v1 segment.
+fn refuse_if_survivors(
+    region: &[u8],
+    corrupt_start: usize,
+    recovered_records: u64,
+    dek: &DataEncryptionKey,
+) -> Result<(), StorageError> {
+    match probe_survivors(region, corrupt_start + 1, recovered_records + 1, dek) {
+        Some(survivor_off) => Err(StorageError::WalMidSegmentCorruption {
+            corrupt_offset: V1_RECORD_OFFSET + corrupt_start as u64,
+            survivor_offset: V1_RECORD_OFFSET + survivor_off as u64,
+            recovered_records,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Scans the record region of a WAL segment, stopping at the first record that
 /// is torn, CRC-invalid, or undecodable.
 ///
@@ -682,6 +762,10 @@ struct RecordScan {
 /// through this function so the "last valid record" boundary they compute can
 /// never diverge. A divergence is exactly what let post-recovery appends land
 /// beyond a corrupt tail and then vanish on the next restart (HEA-1853).
+///
+/// A corrupt record followed by cryptographically valid records is refused
+/// outright rather than truncated — see [`refuse_if_survivors`]
+/// (audit 2026-08-28 §4.11#3).
 fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, StorageError> {
     let mut entries = Vec::new();
     let mut pos: usize = 0;
@@ -704,7 +788,12 @@ fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, St
         // or missing CRC) are intentionally silent truncation:
         // the process crashed mid-write, and we return the valid
         // prefix from before the crash.
+        //
+        // A corrupted length field can fake this shape while acknowledged
+        // records still follow (audit 2026-08-28 §4.11#3), so probe before
+        // treating it as torn.
         if pos + payload_len + 4 > region.len() {
+            refuse_if_survivors(region, record_start, record_num, dek)?;
             break;
         }
 
@@ -721,23 +810,22 @@ fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, St
         pos += 4;
 
         if stored_crc != computed_crc {
-            // CRC mismatch at any position means the record was not
-            // durably written. Stop replay here and discard everything
-            // that follows — entries after a corrupt record cannot be
-            // applied safely since they may depend on state that the
-            // corrupt entry would have established.
-            //
-            // This covers both the tail-truncation case (process crashed
-            // mid-write, no records follow) and the concurrent write-fault
-            // case (another thread appended records after the crash, so
-            // bytes follow the corrupt entry). Both require the same
-            // response: truncate to the last fully-verified record.
+            // A CRC mismatch is either a torn tail (crash mid-write, nothing
+            // durable follows) or mid-segment corruption of a record that WAS
+            // durable — in which case acknowledged records follow it. The two
+            // must not get the same response: truncating the second physically
+            // destroys acknowledged writes while `open()` reports `Ok`
+            // (audit 2026-08-28 §4.11#3). Probe for cryptographically valid
+            // survivors and refuse the open when any exist; only a tail with
+            // no valid record after it is truncated.
+            refuse_if_survivors(region, record_start, record_num, dek)?;
+
             if pos < region.len() {
                 tracing::warn!(
                     offset = record_start,
-                    "WAL replay: CRC mismatch with trailing data — \
-                     truncating to last good record (possible concurrent \
-                     write fault or unclean shutdown)"
+                    "WAL replay: CRC mismatch with trailing data but no \
+                     surviving records — truncating to last good record \
+                     (torn write from an unclean shutdown)"
                 );
             }
             break;
@@ -1990,6 +2078,117 @@ mod tests {
                 "post-recovery append must survive the next restart"
             );
         }
+    }
+
+    /// Walks the record frames of a WAL file and returns the absolute byte
+    /// offset of frame `index`'s first byte (its length field).
+    fn frame_offset(data: &[u8], index: usize) -> usize {
+        #[allow(clippy::cast_possible_truncation)]
+        let mut pos = V1_RECORD_OFFSET as usize;
+        for _ in 0..index {
+            let len =
+                u32::from_le_bytes(data[pos..pos + 4].try_into().expect("len bytes")) as usize;
+            pos += 4 + len + 4;
+        }
+        pos
+    }
+
+    /// Audit 2026-08-28 §4.11#3: a single mid-segment CRC mismatch made
+    /// `open()` return `Ok` after physically destroying every acknowledged
+    /// record that followed it. When valid records survive beyond the
+    /// corruption, the open must refuse, and the file must stay
+    /// byte-for-byte intact so the operator can decide.
+    #[test]
+    fn open_refuses_mid_segment_corruption_and_preserves_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+
+        let entries: Vec<WalEntry> = (0..4)
+            .map(|i| make_entry(format!("key-{i}").as_bytes(), b"val", WalOperation::Put))
+            .collect();
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            for e in &entries {
+                wal.append(e).expect("append");
+            }
+        }
+
+        // Flip one ciphertext byte in record 1 — records 2 and 3 remain
+        // acknowledged, durable and cryptographically valid after it.
+        let mut data = std::fs::read(&wal_path).expect("read wal");
+        let target = frame_offset(&data, 1) + 4;
+        data[target] ^= 0x01;
+        std::fs::write(&wal_path, &data).expect("write corrupted wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(
+            &wal_path,
+            WalConfig::default(),
+            Arc::new(RealFs),
+            &kek,
+            kek_id,
+        );
+        match result {
+            Err(StorageError::WalMidSegmentCorruption {
+                recovered_records, ..
+            }) => {
+                assert_eq!(
+                    recovered_records, 1,
+                    "one record replays before the corruption"
+                );
+            }
+            Err(other) => panic!("expected WalMidSegmentCorruption, got: {other}"),
+            Ok(_) => {
+                panic!("open must refuse a mid-segment corruption with valid records after it")
+            }
+        }
+
+        let after = std::fs::read(&wal_path).expect("read wal after refused open");
+        assert_eq!(after, data, "a refused open must not rewrite the segment");
+    }
+
+    /// Same loss class through a corrupted length field: the frame walk sees
+    /// a bogus torn tail, but acknowledged records still follow it. The
+    /// byte-scan probe must find them and the open must refuse.
+    #[test]
+    fn open_refuses_corrupt_length_field_hiding_survivors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+
+        let entries: Vec<WalEntry> = (0..4)
+            .map(|i| make_entry(format!("key-{i}").as_bytes(), b"val", WalOperation::Put))
+            .collect();
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            for e in &entries {
+                wal.append(e).expect("append");
+            }
+        }
+
+        // Overwrite record 1's length field with a huge value. The frame walk
+        // now reads past EOF and would treat everything after record 0 as a
+        // torn tail — destroying records 2 and 3.
+        let mut data = std::fs::read(&wal_path).expect("read wal");
+        let len_field = frame_offset(&data, 1);
+        data[len_field..len_field + 4].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        std::fs::write(&wal_path, &data).expect("write corrupted wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(
+            &wal_path,
+            WalConfig::default(),
+            Arc::new(RealFs),
+            &kek,
+            kek_id,
+        );
+        match result {
+            Err(StorageError::WalMidSegmentCorruption { .. }) => {}
+            Err(other) => panic!("expected WalMidSegmentCorruption, got: {other}"),
+            Ok(_) => panic!("open must refuse a corrupt length field that hides survivors"),
+        }
+
+        let after = std::fs::read(&wal_path).expect("read wal after refused open");
+        assert_eq!(after, data, "a refused open must not rewrite the segment");
     }
 
     // --- P1 fast ---
