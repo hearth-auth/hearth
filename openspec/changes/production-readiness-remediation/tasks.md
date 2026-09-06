@@ -38,7 +38,7 @@ found it, the audit piece, and the report's severity.
 ## 4. Wave 2 (HIGH) — Storage durability
 
 - [x] 4.1 Stop `open()` returning `Ok` after physically destroying every acknowledged record following a mid-segment CRC mismatch (§4.11#3 · P18 · HIGH)
-- [ ] 4.2 Handle a torn SST body write that leaves a short file at the live `NNNNNN.sst` name; the next startup refuses to open the data directory (§4.11#4 · P18 · HIGH)
+- [x] 4.2 Handle a torn SST body write that leaves a short file at the live `NNNNNN.sst` name; the next startup refuses to open the data directory (§4.11#4 · P18 · HIGH)
 
 ## 5. Wave 2 (HIGH) — Deletion integrity
 

@@ -165,6 +165,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   crash artifact — is still truncated automatically. **Operator action on the new error:** copy
   the segment aside, restore from backup, or truncate at the reported offset to accept the loss
   explicitly.
+- **A torn SST write can no longer make the data directory unopenable (audit 2026-08-28
+  §4.11#4)** — a memtable flush wrote the SST body directly at its live `NNNNNN.sst` name, so a
+  crash or write fault mid-body left a short file there, and the next startup refused to open
+  the whole data directory. The body is now written to a `NNNNNN.sst.staging` sibling, fsync'd,
+  and renamed into place, so an interrupted write strands only a staging file the startup scan
+  never reads; engine open sweeps such orphans and recovery replays the acknowledged writes
+  from the WAL. Compaction merges already staged their output at `.tmp` names and are
+  unchanged. No operator action: directories bricked by the old defect can be repaired by
+  deleting the short live SST **only after** confirming it is the torn flush artifact (its
+  records are still in the WAL); when in doubt, restore from backup.
 - **Partial compaction no longer resurrects deleted keys after a crash (audit 2026-08-28 §3 B7,
   §4.11#2, §4.12#2, §4.21#1)** — `compact_partial` installed its merged output over the run's
   *newest* SST, which is the member carrying the tombstones, and unlinked the older value-bearing

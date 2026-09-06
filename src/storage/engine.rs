@@ -531,6 +531,30 @@ impl EmbeddedStorageEngine {
             memtable.apply_wal_entry(entry)?;
         }
 
+        // Sweep staging orphans before discovery. An interrupted SST write
+        // strands a `*.staging` file (memtable flush) or a `*.tmp` file
+        // (compaction merge); nothing ever references either — the rename
+        // onto the live name is what publishes a file — so they are dead
+        // bytes from a crash (audit 2026-08-28 §4.11#4). Removal failure is
+        // logged, not fatal: a stale orphan is harmless to correctness.
+        for p in fs.read_dir(&config.data_dir)? {
+            if p.extension()
+                .is_some_and(|ext| ext == "tmp" || ext == "staging")
+            {
+                match fs.remove_file(&p) {
+                    Ok(()) => tracing::warn!(
+                        path = %p.display(),
+                        "removed orphaned staging file left by an interrupted write"
+                    ),
+                    Err(e) => tracing::warn!(
+                        path = %p.display(),
+                        error = %e,
+                        "failed to remove orphaned staging file"
+                    ),
+                }
+            }
+        }
+
         // Discover existing SST files, sorted newest-first by filename
         let mut sst_paths: Vec<(PathBuf, u64)> = fs
             .read_dir(&config.data_dir)?
@@ -2064,6 +2088,125 @@ mod tests {
         );
     }
 
+    /// Audit 2026-08-28 §4.11#4: an interrupted SST body write left a short
+    /// file at the live `NNNNNN.sst` name, and the next startup refused to
+    /// open the whole data directory. The body is now staged at a `.tmp`
+    /// sibling and renamed into place, so the torn bytes never occupy a live
+    /// name, and the reopen recovers everything from the WAL.
+    #[test]
+    fn torn_sst_body_write_does_not_brick_the_data_directory() {
+        use crate::storage::fs::{Fs, FsFile, RealFs};
+        use std::io;
+        use std::path::{Path, PathBuf};
+
+        /// Fails every body write to a file whose name contains `.sst` —
+        /// the torn-write shape: the file exists, its body never lands.
+        struct TornSstFs;
+        struct FailingFile;
+
+        impl FsFile for FailingFile {
+            fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
+                Err(io::Error::other("injected torn SST body write"))
+            }
+            fn read_to_end(&mut self, _buf: &mut Vec<u8>) -> io::Result<usize> {
+                Err(io::Error::other("injected"))
+            }
+            fn sync_all(&self) -> io::Result<()> {
+                Ok(())
+            }
+            fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+            fn set_len(&self, _size: u64) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Fs for TornSstFs {
+            fn open_append(&self, path: &Path) -> io::Result<Box<dyn FsFile>> {
+                RealFs.open_append(path)
+            }
+            fn create(&self, path: &Path) -> io::Result<Box<dyn FsFile>> {
+                let inner = RealFs.create(path)?;
+                let is_sst = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(".sst"));
+                if is_sst {
+                    drop(inner);
+                    Ok(Box::new(FailingFile))
+                } else {
+                    Ok(inner)
+                }
+            }
+            fn open_read(&self, path: &Path) -> io::Result<Box<dyn FsFile>> {
+                RealFs.open_read(path)
+            }
+            fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+                RealFs.read(path)
+            }
+            fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+                RealFs.write(path, data)
+            }
+            fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+                RealFs.create_dir_all(path)
+            }
+            fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+                RealFs.read_dir(path)
+            }
+            fn remove_file(&self, path: &Path) -> io::Result<()> {
+                RealFs.remove_file(path)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                RealFs.rename(from, to)
+            }
+            fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+                RealFs.sync_dir(dir)
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        // Put through a torn-write filesystem, then tear the flush.
+        {
+            let config = StorageConfig::test_config(dir.path().to_path_buf());
+            let engine = EmbeddedStorageEngine::open_with_fs(config, Arc::new(TornSstFs))
+                .expect("open with fault fs");
+            engine
+                .put(&realm, b"survives", b"the-torn-write")
+                .expect("put");
+            engine
+                .flush_memtable()
+                .expect_err("the torn SST body write must surface as an error");
+        }
+
+        // The crash: reopen with the real filesystem. The torn bytes must not
+        // occupy a live SST name, so the directory opens and the WAL replays.
+        {
+            let config = StorageConfig::test_config(dir.path().to_path_buf());
+            let engine = EmbeddedStorageEngine::open(config)
+                .expect("a torn SST body write must not make the data directory unopenable");
+            assert_eq!(
+                engine.get(&realm, b"survives").expect("get"),
+                Some(b"the-torn-write".to_vec()),
+                "the acknowledged write must be recovered from the WAL"
+            );
+        }
+
+        // The staging orphan from the interrupted write is swept at open.
+        let leftover = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "tmp" || ext == "staging")
+            })
+            .count();
+        assert_eq!(leftover, 0, "orphaned staging files must be swept at open");
+    }
+
     // HEA-2167: while a backup export holds the consistency barrier in write
     // mode, all mutating operations must block; they resume the instant the
     // barrier is released. Reads are never blocked (asserted separately below).
@@ -3552,8 +3695,11 @@ mod tests {
             &self,
             path: &std::path::Path,
         ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
-            let is_tmp = path.extension().is_some_and(|e| e == "tmp");
-            if is_tmp {
+            // The compaction merge streams to a `*.tmp` target. A memtable
+            // flush stages at `*.sst.staging` (audit §4.11#4) and must NOT be
+            // gated, or the setup puts would park here forever.
+            let is_merge_tmp = path.extension().is_some_and(|e| e == "tmp");
+            if is_merge_tmp {
                 // Signal once, then park until the test releases the gate.
                 if let Some(tx) = self.reached.lock().expect("reached lock").take() {
                     let _ = tx.send(());
@@ -3726,11 +3872,11 @@ mod tests {
     struct FlushGateFs {
         inner: RealFs,
         armed: Arc<std::sync::atomic::AtomicBool>,
-        /// Fires once when the armed flush `*.sst` create is entered.
+        /// Fires once when the armed flush `*.sst.staging` create is entered.
         flush_reached: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
         /// Set to `true` (with notify) by the test to release the parked flush.
         flush_release: Arc<(Mutex<bool>, std::sync::Condvar)>,
-        /// Fires once when a compaction merge `*.tmp` create is entered.
+        /// Fires once when a compaction merge `*.tmp.tmp` create is entered.
         comp_reached: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
     }
 
@@ -3748,9 +3894,10 @@ mod tests {
         ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
             if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
                 match path.extension().and_then(|e| e.to_str()) {
-                    // Flush writes `NNNNNN.sst` directly — park it (while it holds
-                    // `flush_lock`) until the test releases the gate.
-                    Some("sst") => {
+                    // Flush stages `NNNNNN.sst.staging` (audit §4.11#4) — park
+                    // it (while it holds `flush_lock`) until the test releases
+                    // the gate.
+                    Some("staging") => {
                         if let Some(tx) = self.flush_reached.lock().expect("flush_reached").take() {
                             let _ = tx.send(());
                             let (lock, cv) = &*self.flush_release;

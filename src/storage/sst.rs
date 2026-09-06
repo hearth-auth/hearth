@@ -229,6 +229,23 @@ fn bloom_hashes(realm_id: &RealmId, key: &[u8]) -> (u64, u64) {
 type ParsedV2 = (Vec<(CompositeKey, MemtableValue)>, Option<BloomFilter>);
 
 /// Serialises a `CompositeKey` into a v3 footer: `realm(16) + len(4) + bytes`.
+/// Staging name for an SST being written: the target name with `.staging`
+/// appended (`000123.sst` → `000123.sst.staging`).
+///
+/// `.staging` rather than `.tmp` so a staged memtable flush is
+/// distinguishable from a compaction merge output, whose temporary target
+/// already uses the `.tmp` suffix. Files with either extension are invisible
+/// to the startup SST scan, and engine open sweeps any left behind by a crash
+/// or write fault (audit 2026-08-28 §4.11#4).
+fn staging_path_for(path: &Path) -> std::path::PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".staging");
+    path.with_file_name(name)
+}
+
 fn write_footer_key(buf: &mut Vec<u8>, key: &CompositeKey) {
     buf.extend_from_slice(key.realm_id().as_uuid().as_bytes());
     #[allow(clippy::cast_possible_truncation)]
@@ -334,7 +351,14 @@ impl SstWriter {
             &mut dyn FnMut(&CompositeKey, &MemtableValue) -> Result<(), StorageError>,
         ) -> Result<(), StorageError>,
     {
-        let mut file = fs.create(path)?;
+        // Stage the body at a `.staging` sibling and rename into place at the
+        // end, so an interrupted body write can never leave a torn file at
+        // the live `NNNNNN.sst` name — a short live SST made the next
+        // startup refuse to open the whole data directory (audit 2026-08-28
+        // §4.11#4). A crash or write fault strands only the `.staging` file,
+        // which the startup scan ignores and engine open sweeps.
+        let staging_path = staging_path_for(path);
+        let mut file = fs.create(&staging_path)?;
 
         // --- Build V3 block-structured body (HEA-1914) ---
         //
@@ -440,11 +464,14 @@ impl SstWriter {
 
         file.write_all(&out)?;
         file.sync_all()?;
-        // Fsync the parent directory so the freshly created SST's directory
-        // entry is durable. A newly created file can otherwise vanish entirely
-        // if power is lost before the dir update commits (HEA-1855). Callers
-        // that finalize via rename (compaction) additionally fsync the dir after
-        // the rename.
+        drop(file);
+        // Publish: the fully-written, fsync'd body atomically takes the live
+        // name. Then fsync the parent directory so both the rename and the
+        // file's directory entry are durable — a newly created file can
+        // otherwise vanish entirely if power is lost before the dir update
+        // commits (HEA-1855). Callers that finalize via a second rename
+        // (compaction) additionally fsync the dir after that rename.
+        fs.rename(&staging_path, path)?;
         if let Some(parent) = path.parent() {
             fs.sync_dir(parent)?;
         }
