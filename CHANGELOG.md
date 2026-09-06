@@ -284,6 +284,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **`GET /end_session` now verifies the `id_token_hint` signature before acting (audit 2026-08-28
+  §4.2#3, §4.19#1)** — RP-initiated logout decoded the `id_token_hint` without checking its
+  signature, so an unauthenticated caller could name any victim's `sub`/`sid`, revoke that user's
+  SSO session, and receive a realm-signed back-channel logout token with an attacker-chosen
+  subject. The hint's Ed25519 signature is now verified against the realm's signing key (retiring
+  keys included) before any claim is read; an unsigned or forged hint revokes no session and mints
+  no logout token. Expired hints are still accepted, per OIDC RP-Initiated Logout §2.
 - **Suspending a realm now stops its machine-to-machine plane (audit 2026-08-28 §4.19#6)** —
   suspension revoked user sessions, but sessionless grants have no session, so a suspended
   tenant's `client_credentials`, `jwt-bearer`, and RFC 8693 delegation grants kept minting fresh

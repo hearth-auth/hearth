@@ -3815,9 +3815,14 @@ impl EmbeddedIdentityEngine {
     ) -> Result<RpLogoutResult, IdentityError> {
         // Resolve session ID and user ID from id_token_hint or explicit session_id.
         let (session_id, user_id) = if let Some(hint) = &request.id_token_hint {
-            // Decode without signature verification — OIDC spec allows expired hints.
-            let claims =
-                tokens::decode_claims_unverified(hint).map_err(|_| IdentityError::InvalidToken)?;
+            // Verify the hint's Ed25519 signature against this realm's key
+            // (retiring keys included) BEFORE acting on any claim. Expiry is
+            // deliberately not enforced — OIDC RP-Initiated Logout §2 allows an
+            // expired hint — but an unsigned or forged hint must revoke no
+            // session and mint no logout token: otherwise an unauthenticated
+            // caller sets `sub`/`sid` freely and gets a realm-signed logout
+            // token for a victim (audit 2026-08-28 §4.2#3, §4.19#1).
+            let claims = self.verify_token_signature_for_realm(realm_id, hint)?;
             let sid = Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
             let uid = Self::parse_user_id_claim(&claims)?;
             (sid, uid)
