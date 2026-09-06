@@ -16,10 +16,15 @@ pub struct SessionContext {
     pub user_agent_raw: Option<String>,
     /// Pre-parsed device label, e.g. `"Chrome, Mac OSX"`.
     pub device_label: Option<String>,
-    /// Set to `true` when the session originates from a completed WebAuthn
-    /// (passkey) ceremony. Passkeys are inherently multi-factor
-    /// (possession + biometric/PIN), so they satisfy a realm's `mfa_required`
-    /// policy without requiring a separate TOTP enrollment check.
+    /// Set to `true` only when the session originates from a WebAuthn
+    /// (passkey) ceremony **that proved user verification** — the
+    /// authenticator collected a PIN, a biometric, or an equivalent local
+    /// check and set the UV flag.
+    ///
+    /// Such a ceremony is two factors (possession + the local check) and so
+    /// satisfies a realm's `mfa_required` policy. A ceremony that proved user
+    /// *presence* only is a touch: possession alone, one factor, and it must
+    /// not set this (audit 2026-08-28 B10).
     pub satisfies_mfa_via_passkey: bool,
 }
 

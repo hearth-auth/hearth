@@ -1644,10 +1644,12 @@ fn passkey_login_complete_impl(
     peer_addr: SocketAddr,
 ) -> Response {
     use base64::Engine as _;
-    let mut session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
-    // Passkeys are inherently multi-factor (possession + biometric/PIN), so they
-    // satisfy any realm-level mfa_required policy without a separate TOTP gate.
-    session_ctx.satisfies_mfa_via_passkey = true;
+    // `satisfies_mfa_via_passkey` is deliberately left false here. Only the
+    // completed ceremony knows whether the authenticator proved user
+    // verification, so `passkey_complete_for_user` sets it from the result
+    // (audit 2026-08-28 B10). Setting it up front asserted a second factor
+    // before anything had been verified.
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
 
     let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -1720,6 +1722,69 @@ fn passkey_login_complete_impl(
     )
 }
 
+/// Decides whether a completed passkey ceremony still owes a second factor,
+/// and returns the response that collects it.
+///
+/// `Some(response)` means no session may be issued: the caller must return
+/// it. `None` means the ceremony satisfies the realm's policy.
+///
+/// Two realm settings reach here:
+///
+/// * `passkey_requires_mfa` — a regulated deployment wants a separate factor
+///   after *any* passkey, verified or not.
+/// * `mfa_required` — satisfied by a passkey only when that passkey proved
+///   user verification. A UV-less passkey is possession alone, so it owes a
+///   second factor like a password does (audit 2026-08-28 B10).
+fn passkey_second_factor_gate(
+    state: &Arc<WebState>,
+    realm: &Realm,
+    user_id: &crate::core::UserId,
+    user_verified: bool,
+    secure: bool,
+) -> Option<Response> {
+    let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
+    let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
+    // True when this ceremony is possession alone against a realm that
+    // mandates a second factor.
+    let passkey_is_not_a_second_factor = realm_requires_mfa && !user_verified;
+
+    if !(require_mfa_after_passkey || passkey_is_not_a_second_factor) {
+        return None;
+    }
+
+    let mfa_on = state
+        .identity
+        .mfa_enabled(realm.id(), user_id)
+        .unwrap_or(false);
+
+    // Nothing enrolled to challenge, and the passkey already counts as the
+    // second factor: only `passkey_requires_mfa` asked, and its behaviour is
+    // unchanged — the session proceeds.
+    if !(mfa_on || passkey_is_not_a_second_factor) {
+        return None;
+    }
+
+    let cookie = issue_mfa_pending_cookie(
+        &state.cookie_secret,
+        realm.id(),
+        user_id,
+        None, // no return_to for passkey flow
+        secure,
+    );
+    state.set_current_realm(realm.id().clone());
+
+    // An enrolled factor is challenged. With none enrolled the realm still
+    // mandates one, so force enrolment — either way no session is issued.
+    let redirect = if mfa_on {
+        "/ui/mfa-challenge"
+    } else {
+        "/ui/mfa-enroll-required"
+    };
+    let mut response = axum::Json(serde_json::json!({ "redirect": redirect })).into_response();
+    append_cookie(&mut response, &cookie);
+    Some(response)
+}
+
 /// Completes the `WebAuthn` authentication against the resolved realm
 /// and creates a session. Extracted so the bare and scoped variants
 /// share the same completion logic.
@@ -1768,43 +1833,33 @@ fn passkey_complete_for_user(
         }
     };
 
-    // Check realm policy: some regulated environments require TOTP
-    // even after passkey auth despite its inherent multi-factor nature.
-    let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
+    // A passkey counts as two factors only when the ceremony proved user
+    // verification — a PIN, a biometric, or an equivalent local check. The
+    // UP flag alone is a touch, which proves possession and nothing else.
+    // Treating every passkey as inherently multi-factor let a UV-less
+    // authenticator satisfy `mfa_required` outright (audit 2026-08-28 B10).
+    let user_verified = auth_result.user_verified();
 
-    if require_mfa_after_passkey {
-        let mfa_on = state
-            .identity
-            .mfa_enabled(realm.id(), auth_result.user_id())
-            .unwrap_or(false);
-        if mfa_on {
-            let cookie = issue_mfa_pending_cookie(
-                &state.cookie_secret,
-                realm.id(),
-                auth_result.user_id(),
-                None, // no return_to for passkey flow
-                secure,
-            );
-            state.set_current_realm(realm.id().clone());
-            let response_json = axum::Json(serde_json::json!({
-                "redirect": "/ui/mfa-challenge",
-            }));
-            let mut response = response_json.into_response();
-            append_cookie(&mut response, &cookie);
-            return response;
-        }
+    if let Some(response) =
+        passkey_second_factor_gate(state, realm, auth_result.user_id(), user_verified, secure)
+    {
+        return response;
     }
 
-    // Passkey authentication bypasses the TOTP gate — a passkey
-    // is inherently multi-factor (possession + biometric/PIN).
-    // Only reached if passkey_requires_mfa is false or user has no MFA enrolled.
+    // Reaching here means either the realm asks for no second factor, or the
+    // passkey proved user verification and is itself the second factor.
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
+    // The engine's own `mfa_required` gate reads this flag, so it must carry
+    // what the ceremony proved rather than an assumption made before it ran.
+    let mut session_ctx = session_ctx.clone();
+    session_ctx.satisfies_mfa_via_passkey = user_verified;
+
     match state
         .identity
-        .create_session(realm.id(), auth_result.user_id(), session_ctx)
+        .create_session(realm.id(), auth_result.user_id(), &session_ctx)
     {
         Ok(session) => {
             let IssuedCookies {

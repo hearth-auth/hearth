@@ -186,6 +186,9 @@ pub struct WebAuthnAuthResult {
     user_id: UserId,
     /// The updated sign counter.
     sign_count: u32,
+    /// Whether the authenticator set the UV (user verified) flag — it
+    /// collected a PIN, a biometric or an equivalent local check.
+    user_verified: bool,
 }
 
 impl WebAuthnAuthResult {
@@ -202,6 +205,16 @@ impl WebAuthnAuthResult {
     /// Returns the updated signature counter.
     pub fn sign_count(&self) -> u32 {
         self.sign_count
+    }
+
+    /// Returns `true` when the authenticator proved user verification.
+    ///
+    /// User presence (a touch) is proof of possession only. A passkey is a
+    /// second factor only when this is `true`, so every caller deciding
+    /// whether a ceremony satisfies `mfa_required` MUST consult it
+    /// (audit 2026-08-28 B10).
+    pub fn user_verified(&self) -> bool {
+        self.user_verified
     }
 }
 
@@ -754,6 +767,25 @@ pub fn fuzz_parse_webauthn(data: &[u8]) {
 ///
 /// Validates the attestation response against the stored challenge, extracts
 /// the credential public key, and returns the credential info + stored record.
+/// Reports whether a registration ceremony's authenticator data carries the
+/// UV (user verified) flag.
+///
+/// The realm policy lives in the engine, so the engine asks this question
+/// after a registration validates rather than this module deciding it
+/// (audit 2026-08-28 B10).
+///
+/// # Errors
+///
+/// Returns the same parse errors as [`complete_registration`] when the
+/// attestation object or its authenticator data is malformed.
+pub(crate) fn registration_user_verified(
+    attestation_object_bytes: &[u8],
+) -> Result<bool, IdentityError> {
+    let att_obj = parse_attestation_object(attestation_object_bytes)?;
+    let auth_data = parse_authenticator_data(&att_obj.auth_data)?;
+    Ok(auth_data.flags & 0x04 != 0)
+}
+
 /// Validates the attestation response against the stored challenge, extracts
 /// the credential public key, and returns the credential info + stored record.
 ///
@@ -1067,6 +1099,10 @@ pub(crate) fn complete_authentication(
         credential_id,
         user_id,
         sign_count: auth_data.sign_count,
+        // UV (0x04) is set only when the authenticator performed a local
+        // user check — PIN, biometric or equivalent. UP (0x01), checked
+        // above, is a touch and proves possession alone.
+        user_verified: auth_data.flags & 0x04 != 0,
     })
 }
 

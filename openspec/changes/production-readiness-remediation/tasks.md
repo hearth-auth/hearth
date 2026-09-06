@@ -24,7 +24,7 @@ found it, the audit piece, and the report's severity.
 - [x] 2.7 B7 — Order partial compaction so the tombstone is not destroyed before the value it shadows is unlinked; a crash in that window resurrects deleted keys on the shipped default config (§3 B7, §4.11#2, §4.12#2, §4.21#1 · P18/P00/P19 · BLOCKER)
 - [x] 2.8 B8 — Stop writing the first-run setup token to the production log at WARN at the default level; the full chain to first-admin takeover was reproduced (§3 B8, §4.12#8, §4.13#11, §4.14#1, §4.24#2 · P00/P02/P26/P17 · BLOCKER, escalated)
 - [ ] 2.9 B9 — Make signing-key rotation revoke the retired key; it mints new admin tokens for the full 24 h grace window and neither documented mitigation stops it (§3 B9, §4.15#1 · P06 · BLOCKER)
-- [ ] 2.10 B10 — Require proven user verification before a passkey satisfies `mfa_required`; the UV knob is dead code. Interim operator remedy: `passkey_requires_mfa: true` (§3 B10, §4.18#1 · P16 · BLOCKER)
+- [x] 2.10 B10 — Require proven user verification before a passkey satisfies `mfa_required`; the UV knob is dead code. Interim operator remedy: `passkey_requires_mfa: true` (§3 B10, §4.18#1 · P16 · BLOCKER)
 - [x] 2.11 B11 — Make `reload_sst_readers()` fail loudly instead of silently dropping an unopenable SST, so the next partial compaction does not discard tombstones it must keep; no crash or restart is needed (§3 B11, §4.21#2 · P19 · BLOCKER)
 
 ## 3. Wave 2 (HIGH) — Build and release integrity

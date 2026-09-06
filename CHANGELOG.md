@@ -50,6 +50,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A passkey satisfies `mfa_required` only when it proved user verification (audit 2026-08-28
+  §3 B10, §4.18#1)** — the browser passkey login marked every ceremony as multi-factor before it
+  ran, so an authenticator that reported user *presence* only — a touch, no PIN and no biometric —
+  logged the user straight in on a realm with `mfa_required: true`. That is possession alone: one
+  factor. The login now reads the authenticator's UV flag and, when it is clear, issues no session
+  and directs the user to the MFA challenge, or to forced enrolment when no second factor exists.
+  A user-verified passkey is unaffected. **`webauthn_user_verification: required` is now
+  enforced**: it previously only decorated the options sent to the browser, and nothing checked the
+  response. Both registration and authentication ceremonies are refused when the realm requires
+  user verification and the authenticator does not prove it. **Operator action:** a realm running
+  `mfa_required: true` whose users hold UV-less authenticators (older security keys with no PIN)
+  will now see those users sent to the MFA challenge or enrolment.
 - **SAML: the verified assertion is now the consumed assertion (audit 2026-08-28 §3 B5, §4.10#1)** —
   the SP assertion consumer verified the signature on one `<saml:Assertion>` and then let the
   response parser pick an assertion independently. Because the enveloped-signature transform strips

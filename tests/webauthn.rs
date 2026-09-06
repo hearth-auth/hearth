@@ -143,12 +143,22 @@ mod webauthn_helper {
             buf
         }
 
+        /// Builds authenticator data, optionally setting the UV (user
+        /// verified, `0x04`) flag alongside UP (user present, `0x01`).
         #[allow(clippy::cast_possible_truncation)]
-        fn build_auth_data(&self, sign_count: u32, include_credential: bool) -> Vec<u8> {
+        fn build_auth_data_with_uv(
+            &self,
+            sign_count: u32,
+            include_credential: bool,
+            user_verified: bool,
+        ) -> Vec<u8> {
             let rp_id_hash = ring::digest::digest(&ring::digest::SHA256, self.rp_id.as_bytes());
             let mut data = Vec::new();
             data.extend_from_slice(rp_id_hash.as_ref());
-            let flags: u8 = if include_credential { 0x41 } else { 0x01 };
+            let mut flags: u8 = if include_credential { 0x41 } else { 0x01 };
+            if user_verified {
+                flags |= 0x04;
+            }
             data.push(flags);
             data.extend_from_slice(&sign_count.to_be_bytes());
 
@@ -183,15 +193,35 @@ mod webauthn_helper {
             sig.as_ref().to_vec()
         }
 
-        /// Builds a registration response with "none" attestation.
+        /// Builds a registration response with "none" attestation, proving
+        /// user presence only.
         pub fn build_registration_response(
             &self,
             challenge: &[u8],
             origin: &str,
         ) -> (Vec<u8>, Vec<u8>) {
+            self.build_registration(challenge, origin, false)
+        }
+
+        /// Builds a registration response whose authenticator also proved
+        /// user verification (the UV flag).
+        pub fn build_verified_registration_response(
+            &self,
+            challenge: &[u8],
+            origin: &str,
+        ) -> (Vec<u8>, Vec<u8>) {
+            self.build_registration(challenge, origin, true)
+        }
+
+        fn build_registration(
+            &self,
+            challenge: &[u8],
+            origin: &str,
+            user_verified: bool,
+        ) -> (Vec<u8>, Vec<u8>) {
             let client_data_json =
                 Self::build_client_data_json("webauthn.create", challenge, origin);
-            let auth_data = self.build_auth_data(0, true);
+            let auth_data = self.build_auth_data_with_uv(0, true, user_verified);
 
             let att_obj = ciborium::Value::Map(vec![
                 (
@@ -213,7 +243,8 @@ mod webauthn_helper {
             (client_data_json, att_bytes)
         }
 
-        /// Builds an authentication response (assertion).
+        /// Builds an authentication response (assertion) that proves user
+        /// presence only — a touch, with no PIN and no biometric.
         pub fn build_authentication_response(
             &self,
             challenge: &[u8],
@@ -221,8 +252,31 @@ mod webauthn_helper {
             sign_count: u32,
             user_handle: Option<&str>,
         ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
+            self.build_assertion(challenge, origin, sign_count, user_handle, false)
+        }
+
+        /// Builds an assertion whose authenticator proved user verification
+        /// (the UV flag) as well as user presence.
+        pub fn build_verified_authentication_response(
+            &self,
+            challenge: &[u8],
+            origin: &str,
+            sign_count: u32,
+            user_handle: Option<&str>,
+        ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
+            self.build_assertion(challenge, origin, sign_count, user_handle, true)
+        }
+
+        fn build_assertion(
+            &self,
+            challenge: &[u8],
+            origin: &str,
+            sign_count: u32,
+            user_handle: Option<&str>,
+            user_verified: bool,
+        ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
             let client_data_json = Self::build_client_data_json("webauthn.get", challenge, origin);
-            let auth_data = self.build_auth_data(sign_count, false);
+            let auth_data = self.build_auth_data_with_uv(sign_count, false, user_verified);
 
             let client_data_hash = ring::digest::digest(&ring::digest::SHA256, &client_data_json);
             let mut signed_data = auth_data.clone();
@@ -947,5 +1001,498 @@ async fn webauthn_discoverable_userhandle_spoofing_rejected() {
     assert!(
         matches!(err, IdentityError::InvalidAssertion { .. }),
         "expected InvalidAssertion for spoofed userHandle, got: {err}"
+    );
+}
+
+// ============================================================================
+// B10 — user verification (audit 2026-08-28 §3 B10, §4.18#1)
+// ============================================================================
+
+/// Creates a realm with an explicit config.
+fn create_realm_with_config(
+    harness: &common::TestHarness,
+    config: hearth::identity::RealmConfig,
+) -> RealmId {
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("webauthn-uv-{}", uuid::Uuid::new_v4()),
+            config: Some(config),
+        })
+        .expect("create realm");
+    realm.id().clone()
+}
+
+/// Registers a discoverable credential for `user` and returns the
+/// authenticator that owns it.
+fn register_discoverable(
+    harness: &common::TestHarness,
+    realm: &RealmId,
+    user: &User,
+    rp_id: &str,
+    origin: &str,
+    user_verified: bool,
+) -> webauthn_helper::TestAuthenticator {
+    let authenticator = webauthn_helper::TestAuthenticator::new(rp_id);
+    let challenge = harness
+        .identity()
+        .start_webauthn_registration(
+            realm,
+            user.id(),
+            &RegistrationOptions {
+                rp_id: rp_id.to_string(),
+                discoverable: true,
+            },
+        )
+        .expect("start registration");
+    let (cdj, att) = if user_verified {
+        authenticator.build_verified_registration_response(&challenge, origin)
+    } else {
+        authenticator.build_registration_response(&challenge, origin)
+    };
+    harness
+        .identity()
+        .complete_webauthn_registration(realm, user.id(), &cdj, &att, origin, true)
+        .expect("complete registration");
+    authenticator
+}
+
+/// A realm that sets `webauthn_user_verification: required` must refuse an
+/// assertion whose authenticator never proved user verification. Today the
+/// value only decorates the request options the browser receives; nothing
+/// checks the response, so the knob is dead code.
+#[tokio::test]
+async fn realm_requiring_user_verification_refuses_an_unverified_assertion() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm_with_config(
+        &harness,
+        hearth::identity::RealmConfig {
+            webauthn_user_verification: Some("required".to_string()),
+            ..hearth::identity::RealmConfig::default()
+        },
+    );
+    let user = create_user(&harness, &realm);
+    let origin = "https://example.com";
+    let authenticator = register_discoverable(&harness, &realm, &user, "example.com", origin, true);
+
+    let challenge = harness
+        .identity()
+        .start_webauthn_authentication(
+            &realm,
+            Some(user.id()),
+            &AuthenticationOptions {
+                rp_id: "example.com".to_string(),
+            },
+        )
+        .expect("start authentication");
+
+    // The authenticator reports user presence only — a touch, no PIN and no
+    // biometric.
+    let (cdj, auth_data, sig, _) =
+        authenticator.build_authentication_response(&challenge, origin, 1, None);
+
+    let err = harness
+        .identity()
+        .complete_webauthn_authentication(
+            &realm,
+            &CompleteAuthenticationParams {
+                credential_id: &authenticator.credential_id,
+                client_data_json: &cdj,
+                authenticator_data: &auth_data,
+                signature: &sig,
+                user_handle: None,
+                origin,
+            },
+        )
+        .expect_err("realm policy requires user verification");
+
+    assert!(
+        matches!(err, IdentityError::InvalidAssertion { .. }),
+        "expected InvalidAssertion for a UV-less assertion under a required policy, got: {err}"
+    );
+}
+
+/// The same realm accepts the assertion once the authenticator proves user
+/// verification.
+#[tokio::test]
+async fn realm_requiring_user_verification_accepts_a_verified_assertion() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm_with_config(
+        &harness,
+        hearth::identity::RealmConfig {
+            webauthn_user_verification: Some("required".to_string()),
+            ..hearth::identity::RealmConfig::default()
+        },
+    );
+    let user = create_user(&harness, &realm);
+    let origin = "https://example.com";
+    let authenticator = register_discoverable(&harness, &realm, &user, "example.com", origin, true);
+
+    let challenge = harness
+        .identity()
+        .start_webauthn_authentication(
+            &realm,
+            Some(user.id()),
+            &AuthenticationOptions {
+                rp_id: "example.com".to_string(),
+            },
+        )
+        .expect("start authentication");
+
+    let (cdj, auth_data, sig, _) =
+        authenticator.build_verified_authentication_response(&challenge, origin, 1, None);
+
+    let result = harness
+        .identity()
+        .complete_webauthn_authentication(
+            &realm,
+            &CompleteAuthenticationParams {
+                credential_id: &authenticator.credential_id,
+                client_data_json: &cdj,
+                authenticator_data: &auth_data,
+                signature: &sig,
+                user_handle: None,
+                origin,
+            },
+        )
+        .expect("a user-verified assertion satisfies a required policy");
+
+    assert!(
+        result.user_verified(),
+        "the result must report that user verification was proven"
+    );
+    assert_eq!(result.user_id(), user.id());
+}
+
+// ---------------------------------------------------------------------------
+// B10 end to end: a UV-less passkey must not satisfy `mfa_required`
+// ---------------------------------------------------------------------------
+
+/// Builds the `/ui` router over the harness's engines.
+fn build_web_app(harness: &common::TestHarness) -> axum::Router {
+    use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
+    use hearth::identity::onboarding::OnboardingService;
+    use hearth::protocol::web::{self, CookieSecret, WebState};
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().to_path_buf();
+    std::mem::forget(temp);
+
+    let email = Arc::new(
+        EmailService::new(
+            Arc::new(LoggingEmailSender::new()),
+            "Hearth".to_string(),
+            None,
+            EmailBranding::default(),
+            String::new(),
+            None,
+        )
+        .expect("email service"),
+    );
+    let onboarding = Arc::new(OnboardingService::new(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        email,
+        data_dir,
+    ));
+    let state = WebState::new(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+        onboarding,
+        CookieSecret::from_bytes([7u8; 32]),
+        None,
+    )
+    .with_dev_mode(true);
+    web::router(state)
+}
+
+/// Computes a TOTP code from a base32 secret — mirrors `src/identity/totp.rs`.
+fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {
+    let secret_bytes = data_encoding::BASE32_NOPAD
+        .decode(secret_base32.as_bytes())
+        .expect("decode base32");
+    let step = unix_secs / 30;
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &secret_bytes);
+    let tag = ring::hmac::sign(&key, &step.to_be_bytes());
+    let hash = tag.as_ref();
+    let offset = (hash[hash.len() - 1] & 0x0f) as usize;
+    let binary = u32::from_be_bytes([
+        hash[offset] & 0x7f,
+        hash[offset + 1],
+        hash[offset + 2],
+        hash[offset + 3],
+    ]);
+    format!("{:06}", binary % 1_000_000)
+}
+
+/// Enrols and activates TOTP so `mfa_enabled` reports a second factor.
+fn enroll_totp(harness: &common::TestHarness, realm: &RealmId, user: &User) {
+    let enrollment = harness
+        .identity()
+        .enroll_totp(realm, user.id())
+        .expect("enroll_totp");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, now);
+    harness
+        .identity()
+        .verify_totp_enrollment(realm, user.id(), &code)
+        .expect("verify_totp_enrollment");
+}
+
+/// B10 — the blocker, end to end through the browser router.
+///
+/// The realm sets `mfa_required`. A passkey that proves user *presence*
+/// only — a touch, no PIN and no biometric — is possession alone, so it is
+/// one factor, not two. It must not produce a session.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one linear browser flow; splitting it hides the sequence
+async fn uv_less_passkey_does_not_satisfy_mfa_required() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use tower::ServiceExt as _;
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm_id = create_realm_with_config(
+        &harness,
+        hearth::identity::RealmConfig {
+            mfa_required: Some(true),
+            ..hearth::identity::RealmConfig::default()
+        },
+    );
+    let realm_name = harness
+        .identity()
+        .get_realm(&realm_id)
+        .expect("get realm")
+        .expect("realm exists")
+        .name()
+        .to_string();
+
+    let user = create_user(&harness, &realm_id);
+    harness
+        .identity()
+        .update_user(
+            &realm_id,
+            user.id(),
+            &hearth::identity::UpdateUserRequest {
+                status: Some(hearth::identity::UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate user");
+    enroll_totp(&harness, &realm_id, &user);
+
+    let origin = "http://example.com";
+    let authenticator =
+        register_discoverable(&harness, &realm_id, &user, "example.com", origin, false);
+
+    let app = build_web_app(&harness);
+
+    // 1. Begin: the browser asks for a challenge.
+    let begin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/realms/{realm_name}/login/passkey-begin"))
+                .header("host", "example.com")
+                .body(Body::empty())
+                .expect("build begin request"),
+        )
+        .await
+        .expect("begin response");
+    assert_eq!(begin.status(), StatusCode::OK, "passkey-begin must succeed");
+    let begin_bytes = axum::body::to_bytes(begin.into_body(), 64 * 1024)
+        .await
+        .expect("read begin body");
+    let begin_json: serde_json::Value =
+        serde_json::from_slice(&begin_bytes).expect("begin body is JSON");
+    let challenge = URL_SAFE_NO_PAD
+        .decode(
+            begin_json["challenge"]
+                .as_str()
+                .expect("challenge in begin body"),
+        )
+        .expect("challenge is base64url");
+
+    // 2. Complete: the authenticator signs with UP set and UV clear.
+    let (cdj, auth_data, sig, _) = authenticator.build_authentication_response(
+        &challenge,
+        origin,
+        1,
+        Some(&user.id().as_uuid().to_string()),
+    );
+    let body = serde_json::json!({
+        "credential_id": URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
+        "client_data_json": URL_SAFE_NO_PAD.encode(&cdj),
+        "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_data),
+        "signature": URL_SAFE_NO_PAD.encode(&sig),
+        "user_handle": URL_SAFE_NO_PAD.encode(user.id().as_uuid().to_string().as_bytes()),
+    });
+    let complete = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/realms/{realm_name}/login/passkey-complete"))
+                .header("host", "example.com")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build complete request"),
+        )
+        .await
+        .expect("complete response");
+
+    let cookies: Vec<String> = complete
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    let status = complete.status();
+    let body_bytes = axum::body::to_bytes(complete.into_body(), 64 * 1024)
+        .await
+        .expect("read complete body");
+    let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+    let session_cookie = cookies
+        .iter()
+        .find(|c| c.starts_with("hearth_ui_session=") && !c.starts_with("hearth_ui_session=;"));
+    assert!(
+        session_cookie.is_none(),
+        "a passkey that never proved user verification was issued a session under \
+         mfa_required: status={status} cookie={session_cookie:?} body={body_text}"
+    );
+    assert!(
+        body_text.contains("/ui/mfa-challenge"),
+        "the response must direct the user to the MFA challenge, got: {body_text}"
+    );
+}
+
+/// The counterpart: a passkey that *did* prove user verification is a
+/// second factor, so the same realm issues a session. Without this the fix
+/// above could pass by refusing every passkey.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one linear browser flow; splitting it hides the sequence
+async fn uv_proven_passkey_satisfies_mfa_required() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use tower::ServiceExt as _;
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm_id = create_realm_with_config(
+        &harness,
+        hearth::identity::RealmConfig {
+            mfa_required: Some(true),
+            ..hearth::identity::RealmConfig::default()
+        },
+    );
+    let realm_name = harness
+        .identity()
+        .get_realm(&realm_id)
+        .expect("get realm")
+        .expect("realm exists")
+        .name()
+        .to_string();
+
+    let user = create_user(&harness, &realm_id);
+    harness
+        .identity()
+        .update_user(
+            &realm_id,
+            user.id(),
+            &hearth::identity::UpdateUserRequest {
+                status: Some(hearth::identity::UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate user");
+
+    let origin = "http://example.com";
+    let authenticator =
+        register_discoverable(&harness, &realm_id, &user, "example.com", origin, false);
+    let app = build_web_app(&harness);
+
+    let begin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/realms/{realm_name}/login/passkey-begin"))
+                .header("host", "example.com")
+                .body(Body::empty())
+                .expect("build begin request"),
+        )
+        .await
+        .expect("begin response");
+    assert_eq!(begin.status(), StatusCode::OK);
+    let begin_bytes = axum::body::to_bytes(begin.into_body(), 64 * 1024)
+        .await
+        .expect("read begin body");
+    let begin_json: serde_json::Value =
+        serde_json::from_slice(&begin_bytes).expect("begin body is JSON");
+    let challenge = URL_SAFE_NO_PAD
+        .decode(begin_json["challenge"].as_str().expect("challenge"))
+        .expect("challenge is base64url");
+
+    let (cdj, auth_data, sig, _) = authenticator.build_verified_authentication_response(
+        &challenge,
+        origin,
+        1,
+        Some(&user.id().as_uuid().to_string()),
+    );
+    let body = serde_json::json!({
+        "credential_id": URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
+        "client_data_json": URL_SAFE_NO_PAD.encode(&cdj),
+        "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_data),
+        "signature": URL_SAFE_NO_PAD.encode(&sig),
+        "user_handle": URL_SAFE_NO_PAD.encode(user.id().as_uuid().to_string().as_bytes()),
+    });
+    let complete = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/realms/{realm_name}/login/passkey-complete"))
+                .header("host", "example.com")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build complete request"),
+        )
+        .await
+        .expect("complete response");
+
+    let cookies: Vec<String> = complete
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    let body_bytes = axum::body::to_bytes(complete.into_body(), 64 * 1024)
+        .await
+        .expect("read complete body");
+    let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("hearth_ui_session=") && !c.starts_with("hearth_ui_session=;")),
+        "a user-verified passkey must produce a session: cookies={cookies:?} body={body_text}"
     );
 }

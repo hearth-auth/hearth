@@ -448,9 +448,11 @@ async fn mfa_required_allows_session_when_user_has_mfa() {
 
 #[tokio::test]
 async fn mfa_required_passkey_satisfies_policy() {
-    // Passkeys are inherently multi-factor (possession + biometric/PIN).
-    // A session created via passkey authentication must bypass the TOTP
-    // enrollment gate even when the realm sets mfa_required = true.
+    // A passkey ceremony that proved user verification (possession + PIN or
+    // biometric) is two factors, so it must bypass the TOTP enrollment gate
+    // even when the realm sets mfa_required = true. The web handler sets
+    // `satisfies_mfa_via_passkey` only for such a ceremony (audit B10); this
+    // test exercises the engine gate with that flag already established.
     let harness = common::TestHarness::embedded().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,

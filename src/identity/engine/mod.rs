@@ -4718,6 +4718,21 @@ impl EmbeddedIdentityEngine {
 
         Ok(cascade_work_done)
     }
+
+    /// Returns `true` when the realm's `webauthn_user_verification` policy is
+    /// `required`, so every ceremony must prove user verification and not
+    /// merely user presence (audit 2026-08-28 B10).
+    ///
+    /// An unreadable realm is treated as not requiring it: the ceremony has
+    /// other realm-bound checks that fail first, and this must not turn a
+    /// storage hiccup into a lockout.
+    fn realm_requires_user_verification(&self, realm_id: &RealmId) -> bool {
+        self.get_realm(realm_id)
+            .ok()
+            .flatten()
+            .and_then(|realm| realm.config().webauthn_user_verification.clone())
+            .is_some_and(|policy| policy.eq_ignore_ascii_case("required"))
+    }
 }
 
 // Private helpers that share the full update/delete logic with audit-context
@@ -8179,6 +8194,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .flatten()
             .and_then(|r| r.config().webauthn_attestation.clone());
 
+        // B10: a realm that requires user verification must not accept the
+        // enrolment of a credential that cannot prove it — such a credential
+        // would fail every subsequent login under the same policy.
+        if self.realm_requires_user_verification(realm_id)
+            && !webauthn::registration_user_verified(attestation_object)?
+        {
+            return Err(IdentityError::WebAuthnRegistrationFailed {
+                reason: "realm policy requires user verification; the authenticator proved user \
+                         presence only"
+                    .to_string(),
+            });
+        }
+
         let (mut info, mut stored) = webauthn::complete_registration(
             &pending,
             client_data_json,
@@ -8347,6 +8375,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             user_handle,
             origin,
         )?;
+
+        // SECURITY (audit 2026-08-28 B10): `webauthn_user_verification: required`
+        // is a realm policy, and a policy the browser is merely *asked* to honour
+        // is not a policy. The authenticator's UV flag is the only proof that a
+        // PIN or biometric was collected, so enforce it on the response rather
+        // than trusting the request options the ceremony started with.
+        if self.realm_requires_user_verification(realm_id) && !result.user_verified() {
+            return Err(IdentityError::InvalidAssertion {
+                reason: "realm policy requires user verification; the authenticator proved user \
+                         presence only"
+                    .to_string(),
+            });
+        }
 
         // SECURITY (HEA-1720): In the discoverable flow, `webauthn::complete_authentication`
         // derives `user_id` from the client-supplied, unsigned `userHandle`. The discoverable
