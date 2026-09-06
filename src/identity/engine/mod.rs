@@ -16236,6 +16236,67 @@ mod tests {
             .expect("register client")
     }
 
+    /// Audit 2026-08-28 §4.20#1: a consent record outlived client deletion,
+    /// and the deterministic YAML `ClientId` handed it to whatever application
+    /// next claimed the key. The scrub matched consent keys by
+    /// `ends_with(client_uuid)`, but the canonical key is
+    /// `oauth:consent:{user}:{client}:_realm:_default` — it ends with
+    /// `_default`, so every extended-key consent survived.
+    #[test]
+    fn deleting_a_client_scrubs_its_extended_key_consent() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm);
+        let user = create_test_user(&engine, &realm);
+
+        // Grant consent — written under the canonical extended key.
+        engine
+            .grant_consent(
+                &realm,
+                user.id(),
+                client.client_id(),
+                &["openid".to_string()],
+            )
+            .expect("grant consent");
+        assert!(
+            engine
+                .get_consent(&realm, user.id(), client.client_id())
+                .expect("get consent")
+                .is_some(),
+            "consent must exist before deletion"
+        );
+
+        engine
+            .delete_client(&realm, client.client_id())
+            .expect("delete client");
+
+        assert!(
+            engine
+                .get_consent(&realm, user.id(), client.client_id())
+                .expect("get consent after delete")
+                .is_none(),
+            "consent must be scrubbed when the client is deleted"
+        );
+
+        // The raw key space carries no residual consent for this client either.
+        let residual = engine
+            .storage
+            .scan(
+                &realm,
+                keys::oauth_consent_scan_prefix().as_slice(),
+                keys::prefix_end(&keys::oauth_consent_scan_prefix()).as_slice(),
+            )
+            .expect("scan consents");
+        let client_uuid = client.client_id().as_uuid().to_string();
+        for entry in &residual {
+            let k = String::from_utf8_lossy(&entry.key);
+            assert!(
+                !k.contains(&client_uuid),
+                "residual consent key references the deleted client: {k}"
+            );
+        }
+    }
+
     // ===== Unit Test 1: Generate authorization code with correct parameters =====
 
     #[test]

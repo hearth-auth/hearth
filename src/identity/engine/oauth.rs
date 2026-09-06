@@ -3319,8 +3319,13 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Cascade: scrub every consent record referencing this client.
-        // Consent keys are `oauth:consent:{user_uuid}:{client_uuid}`, so
-        // we scan the whole namespace and match the trailing client segment.
+        // A consent key is `oauth:consent:{user}:{client}` (legacy) or
+        // `oauth:consent:{user}:{client}:{org}:{resource}` (canonical). The
+        // client UUID is always the fourth colon-delimited field. The old
+        // scrub matched `ends_with(client_uuid)`, which caught only the legacy
+        // form — every extended-key consent survived and was handed to the
+        // deterministic YAML `ClientId`'s next occupant (audit 2026-08-28
+        // §4.20#1). Match the field, not the suffix.
         let consent_prefix = keys::oauth_consent_scan_prefix();
         let consent_end = keys::prefix_end(&consent_prefix);
         let consent_entries = self
@@ -3330,7 +3335,8 @@ impl EmbeddedIdentityEngine {
         let client_uuid_str = client_id.as_uuid().to_string();
         for entry in &consent_entries {
             if let Ok(key_str) = std::str::from_utf8(&entry.key) {
-                if key_str.ends_with(&client_uuid_str) {
+                // Fields: ["oauth", "consent", "{user}", "{client}", ...].
+                if key_str.split(':').nth(3) == Some(client_uuid_str.as_str()) {
                     self.storage
                         .delete(realm_id, &entry.key)
                         .map_err(Self::storage_err)?;

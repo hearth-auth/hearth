@@ -153,6 +153,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `onboarding.notification_email` still carries the token — that channel is private and explicitly
   configured. **Operator action:** on a first boot, read the token from
   `<data_dir>/.setup_token` rather than from the log.
+- **Deleting an OAuth client now scrubs all of its consent records (audit 2026-08-28 §4.20#1)** —
+  the delete cascade matched consent keys by `ends_with(client_uuid)`, but the canonical consent
+  key is `oauth:consent:{user}:{client}:_realm:_default` — it ends with `_default`, so every
+  consent written in the current key format survived client deletion. Because a YAML-managed
+  application's `ClientId` is deterministic, re-adding an application under the same key handed
+  the surviving consents to the new application, which could then skip the consent prompt for
+  scopes the previous application's users had approved. The cascade now matches the client UUID
+  as its proper key field, scrubbing legacy and extended consent records alike, across all three
+  delete routes (REST, gRPC, admin UI).
 - **Archiving a realm now freezes it: every mutation is refused (audit 2026-08-28 §4.20#5)** —
   archival is the control an operator reaches for during an incident — freeze the tenant, then
   investigate — but it was not a freeze: 11 of 16 mutating operations still wrote an archived
