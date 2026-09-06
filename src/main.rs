@@ -2786,6 +2786,21 @@ async fn run_serve(
     // Signal the webhook dispatcher to stop.
     let _ = wh_shutdown_tx.send(());
 
+    // Flush the memtable now that no request can write. Acknowledged writes
+    // are already durable in the WAL — this shortens the next start-up's replay
+    // and leaves the data directory readable by a file copy without one
+    // (audit 2026-08-28 §3 B4, §4.11#1). A failure here loses no data, so it is
+    // logged rather than propagated: the WAL still holds every record.
+    match storage.flush_memtable() {
+        Ok(()) => info!("memtable flushed on shutdown"),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "memtable flush on shutdown failed; the WAL still holds every acknowledged write"
+            );
+        }
+    }
+
     // Clean up PID file on exit.
     let _ = std::fs::remove_file(&pid_file_path);
     info!("Hearth server stopped");

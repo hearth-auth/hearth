@@ -2,8 +2,32 @@
 //!
 //! `EmbeddedStorageEngine` implements the `StorageEngine` trait by layering:
 //! - **Read path**: hot tier → memtable → SST files (newest first)
-//! - **Write path**: WAL append → memtable insert → hot tier invalidate
+//! - **Write path**: memtable insert → hot tier invalidate → WAL append +
+//!   `fsync` (the acknowledgement)
 //! - **Recovery**: WAL replay into fresh memtable on open
+//!
+//! ## Apply before acknowledge
+//!
+//! Every mutating operation applies its change to the memtable *before* it
+//! waits for the WAL `fsync` that acknowledges it. The rule it upholds: **a
+//! record that is durable is never missing from the memtable.**
+//!
+//! The reverse order — append, `fsync`, acknowledge, then apply — leaves a
+//! window in which a record is durable and the memtable does not have it.
+//! WAL rotation flushes the memtable and then truncates the segment, so a
+//! rotation driven by a second writer inside that window flushes a memtable
+//! without the record and then erases the record. The write was acknowledged
+//! and it is gone. Two concurrent writers were enough; no crash, no attacker,
+//! no disk fault (audit 2026-08-28 §3 B4, §4.11#1).
+//!
+//! The order has one cost, and it is deliberate. Between the memtable apply
+//! and the acknowledgement a value is readable inside this process before it
+//! is durable. If the WAL write then fails, the operation returns an error
+//! while its value stays readable. That state is bounded: a WAL write fault
+//! fences the WAL, every later write is rejected, and the operator must
+//! restart — and the restart rebuilds the memtable from the WAL, which never
+//! held the record. Losing an acknowledged write is the worse failure, and it
+//! is the one this order removes.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -45,14 +69,15 @@ fn record_sst_file_count(count: usize) {
 /// Returned (wrapped in a [`StorageDurabilityHandle`]) by
 /// [`EmbeddedStorageEngine::enqueue_batch`] when `SyncMode::EveryWrite` is active.
 /// Passed back to [`EmbeddedStorageEngine::await_batch_durable`], which runs the
-/// WAL leader loop (or waits as a follower) and then applies the entries to the
-/// memtable once the `fsync` succeeds.
+/// WAL leader loop (or waits as a follower) until the `fsync` succeeds.
+///
+/// The handle carries only the commit position. The batch's entries are applied
+/// to the memtable at enqueue time, before the durability wait, so a durable
+/// record is never missing from the memtable (audit 2026-08-28 §3 B4).
 pub(crate) struct PendingBatchHandle {
     pub(crate) am_leader: bool,
     /// Position in the WAL commit stream this batch is waiting on.
     pub(crate) ticket: u64,
-    pub(crate) realm_id: crate::core::RealmId,
-    pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Name of the marker file written before a two-phase snapshot restore and
@@ -378,6 +403,15 @@ pub struct EmbeddedStorageEngine {
     /// dropped SST makes the next partial compaction discard tombstones it must
     /// keep (B11, audit 2026-08-28 §3 B11, §4.21#2).
     allow_missing_keks: bool,
+    /// Test-only hook fired inside a mutating operation immediately after the
+    /// WAL has acknowledged the write as durable, and before the operation
+    /// returns.
+    ///
+    /// A simulation test uses it to park one writer at exactly that point and
+    /// drive a WAL rotation from another thread, which is the interleaving
+    /// behind blocker B4 (audit 2026-08-28 §3 B4, §4.11#1).
+    #[cfg(feature = "test-hooks")]
+    post_ack_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Process-local guard: removes `data_dir` from `OPEN_DIRS` on drop.
     ///
     /// Must be declared after all fields that use `data_dir` so it is dropped
@@ -691,9 +725,36 @@ impl EmbeddedStorageEngine {
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_cache,
             allow_missing_keks: config.allow_missing_keks,
+            #[cfg(feature = "test-hooks")]
+            post_ack_hook: Mutex::new(None),
             _process_lock: dir_lock_guard,
             _dir_lock: lock_file,
         })
+    }
+
+    /// Installs the test-only post-acknowledgement hook.
+    ///
+    /// The hook runs on the writer's own thread inside `put`, `delete` and
+    /// `put_batch`, after the WAL reports the record durable. Simulation tests
+    /// use it to hold a writer at its acknowledgement point.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_post_ack_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.post_ack_hook.lock() {
+            *slot = Some(hook);
+        }
+    }
+
+    /// Runs the post-acknowledgement hook, if one is installed.
+    #[cfg(feature = "test-hooks")]
+    fn run_post_ack_hook(&self) {
+        let hook = self
+            .post_ack_hook
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Flushes the memtable to a new SST file and clears it.
@@ -1421,7 +1482,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["put"])
             .start_timer();
 
-        // 1. WAL append + fsync
         let entry = WalEntry {
             timestamp: crate::core::Timestamp::now(),
             realm_id: realm_id.clone(),
@@ -1429,14 +1489,24 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: key.to_vec(),
             value: value.to_vec(),
         };
+
+        // 1. Memtable insert, *before* the WAL durability wait. See
+        //    `apply-before-acknowledge` in this module's docs: a record that is
+        //    durable must never be absent from the memtable, because a
+        //    concurrent writer's rotation flushes the memtable and then
+        //    truncates the segment (audit 2026-08-28 §3 B4, §4.11#1).
+        self.active_memtable.put(realm_id, key, value)?;
+
+        // 2. Hot tier invalidate (stale cached value)
+        self.hot_tier.invalidate(realm_id, key);
+
+        // 3. WAL append + fsync. The write is acknowledged only when this
+        //    returns `Ok`.
         self.wal
             .append_with_pre_rotate(&entry, || self.trigger_flush())?;
 
-        // 2. Memtable insert
-        self.active_memtable.put(realm_id, key, value)?;
-
-        // 3. Hot tier invalidate (stale cached value)
-        self.hot_tier.invalidate(realm_id, key);
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
 
         // 4. Check flush threshold
         if self.active_memtable.should_flush() {
@@ -1454,7 +1524,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["delete"])
             .start_timer();
 
-        // 1. WAL append + fsync
         let entry = WalEntry {
             timestamp: crate::core::Timestamp::now(),
             realm_id: realm_id.clone(),
@@ -1462,14 +1531,22 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: key.to_vec(),
             value: vec![],
         };
+
+        // 1. Memtable tombstone, before the durability wait — same ordering
+        //    rule as `put` (audit 2026-08-28 §3 B4). A tombstone that is
+        //    durable but absent from the memtable is a deletion that comes
+        //    back.
+        self.active_memtable.delete(realm_id, key)?;
+
+        // 2. Hot tier invalidate
+        self.hot_tier.invalidate(realm_id, key);
+
+        // 3. WAL append + fsync
         self.wal
             .append_with_pre_rotate(&entry, || self.trigger_flush())?;
 
-        // 2. Memtable tombstone
-        self.active_memtable.delete(realm_id, key)?;
-
-        // 3. Hot tier invalidate
-        self.hot_tier.invalidate(realm_id, key);
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
 
         // 4. Check flush threshold
         if self.active_memtable.should_flush() {
@@ -1517,21 +1594,24 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        self.wal
-            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
-
-        // 2. Apply all sub-entries to the in-memory state. The memtable update
-        //    is done in a single copy-on-write cycle (one map clone for the
-        //    whole batch, not one per entry) so bulk loads stay O(N), then we
-        //    invalidate any cached reads. If a failure occurs here (e.g.,
-        //    memtable mutex poisoned), the WAL record is already durable;
-        //    recovery on the next open replays the batch in full.
+        // 2. Apply all sub-entries to the in-memory state *before* the
+        //    durability wait (audit 2026-08-28 §3 B4). The memtable update is
+        //    a single copy-on-write cycle (one map clone for the whole batch,
+        //    not one per entry) so bulk loads stay O(N), then we invalidate any
+        //    cached reads.
         self.active_memtable.put_batch(realm_id, entries)?;
         for (key, _value) in entries {
             self.hot_tier.invalidate(realm_id, key);
         }
 
-        // 3. Single flush check at the tail — the batch may have pushed us
+        // 3. WAL append + fsync — the batch is acknowledged here.
+        self.wal
+            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
+
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
+
+        // 4. Single flush check at the tail — the batch may have pushed us
         //    over the threshold, but we don't need to check per-entry.
         if self.active_memtable.should_flush() {
             self.trigger_flush()?;
@@ -1554,10 +1634,8 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         // Block while a backup export holds the consistency barrier (HEA-2167).
-        // In `SyncMode::None` the memtable is applied inline below; in
-        // `EveryWrite` the apply is deferred to `await_batch_durable`, which
-        // takes the barrier again. Either way no memtable mutation lands while
-        // an export's read pass is in flight.
+        // The memtable apply happens here in both sync modes, so no memtable
+        // mutation lands while an export's read pass is in flight.
         let _barrier = self.enter_write();
         let sub_entries: Vec<BatchEntry> = entries
             .iter()
@@ -1580,13 +1658,24 @@ impl StorageEngine for EmbeddedStorageEngine {
             .wal
             .enqueue_entry(&wal_entry, || self.trigger_flush())?;
 
+        // Apply to the memtable here, in both sync modes, rather than after the
+        // fsync in `await_batch_durable` (audit 2026-08-28 §3 B4, §4.11#1).
+        //
+        // This was the widest instance of the defect: the entry became durable
+        // when the group-commit leader fsync'd it, and only became visible to a
+        // memtable flush once *this* thread was scheduled again. A rotation in
+        // that gap flushed a memtable without the entry and then truncated the
+        // segment holding it. Applying at enqueue time also keeps memtable
+        // order equal to WAL order, because callers enqueue while holding
+        // whatever lock serialises them (HEA-1948).
+        self.active_memtable.put_batch(realm_id, entries)?;
+        for (key, _) in entries {
+            self.hot_tier.invalidate(realm_id, key);
+        }
+
         match wal_handle {
             WalDurabilityHandle::Immediate => {
-                // SyncMode::None path: write already committed, apply to memtable now.
-                self.active_memtable.put_batch(realm_id, entries)?;
-                for (key, _) in entries {
-                    self.hot_tier.invalidate(realm_id, key);
-                }
+                // SyncMode::None path: the record is already written.
                 if self.active_memtable.should_flush() {
                     self.trigger_flush()?;
                 }
@@ -1595,15 +1684,11 @@ impl StorageEngine for EmbeddedStorageEngine {
                 ))
             }
             WalDurabilityHandle::Pending { am_leader, ticket } => {
-                // EveryWrite path: WAL entry is queued but not yet fsync'd.
-                // Store entries for post-durability memtable update in await_batch_durable.
+                // EveryWrite path: the WAL entry is queued but not yet fsync'd.
+                // `await_batch_durable` waits for the fsync; the memtable is
+                // already up to date, so it has no apply left to do.
                 Ok(StorageDurabilityHandle(
-                    StorageDurabilityHandleKind::Pending(PendingBatchHandle {
-                        am_leader,
-                        ticket,
-                        realm_id: realm_id.clone(),
-                        entries: entries.to_vec(),
-                    }),
+                    StorageDurabilityHandleKind::Pending(PendingBatchHandle { am_leader, ticket }),
                 ))
             }
         }
@@ -1615,8 +1700,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             StorageDurabilityHandleKind::Pending(p) => p,
         };
 
-        // Block while a backup export holds the consistency barrier so the
-        // deferred memtable apply below cannot land mid-snapshot (HEA-2167).
+        // Block while a backup export holds the consistency barrier, so the
+        // flush check below cannot run mid-snapshot (HEA-2167).
         let _barrier = self.enter_write();
 
         // Run the group-commit leader loop (or wait as a follower) until the
@@ -1629,20 +1714,14 @@ impl StorageEngine for EmbeddedStorageEngine {
             || self.trigger_flush(),
         );
 
-        // Apply entries to the memtable only after confirmed durability. On WAL
-        // failure we skip the memtable update; the WAL is fenced after a write
-        // fault, so callers that retry will see the fence error. On the next
-        // open, WAL replay restores the memtable from the last successfully
-        // committed record.
-        if wal_result.is_ok() {
-            self.active_memtable
-                .put_batch(&pending.realm_id, &pending.entries)?;
-            for (key, _) in &pending.entries {
-                self.hot_tier.invalidate(&pending.realm_id, key);
-            }
-            if self.active_memtable.should_flush() {
-                self.trigger_flush()?;
-            }
+        // The memtable was updated in `enqueue_batch`, before this wait: a
+        // durable record must never be missing from the memtable, or a
+        // concurrent rotation flushes without it and then truncates the segment
+        // that holds it (audit 2026-08-28 §3 B4). Nothing to apply here; only
+        // the threshold check remains, and it runs after durability so a flush
+        // is never driven by an unacknowledged write.
+        if wal_result.is_ok() && self.active_memtable.should_flush() {
+            self.trigger_flush()?;
         }
 
         wal_result
@@ -1722,12 +1801,9 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        self.wal
-            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
-
         // 2. Apply puts to in-memory state in a single copy-on-write cycle
-        //    (one map clone for the whole batch). If this fails after the WAL
-        //    write, recovery on next open will replay the full batch.
+        //    (one map clone for the whole batch), before the durability wait
+        //    (audit 2026-08-28 §3 B4).
         self.active_memtable.put_batch(realm_id, puts)?;
         for (key, _value) in puts {
             self.hot_tier.invalidate(realm_id, key);
@@ -1739,7 +1815,14 @@ impl StorageEngine for EmbeddedStorageEngine {
             self.hot_tier.invalidate(realm_id, key);
         }
 
-        // 4. Single flush check at the tail.
+        // 4. WAL append + fsync — the batch is acknowledged here.
+        self.wal
+            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
+
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
+
+        // 5. Single flush check at the tail.
         if self.active_memtable.should_flush() {
             self.trigger_flush()?;
         }
@@ -1885,6 +1968,10 @@ impl StorageEngine for EmbeddedStorageEngine {
     fn backup_barrier(&self) -> Option<Arc<RwLock<()>>> {
         Some(Arc::clone(&self.backup_barrier))
     }
+
+    fn flush_memtable(&self) -> Result<(), StorageError> {
+        self.trigger_flush()
+    }
 }
 
 impl std::fmt::Debug for EmbeddedStorageEngine {
@@ -1938,6 +2025,42 @@ mod tests {
         assert_eq!(
             engine.get(&realm, b"jti").expect("get"),
             Some(b"1".to_vec())
+        );
+    }
+
+    /// The shutdown path calls `flush_memtable`, so it must actually write the
+    /// buffered records out to an SST rather than being a name with no effect
+    /// (audit 2026-08-28 §3 B4, §4.11#1).
+    #[test]
+    fn flush_memtable_writes_the_buffer_out_to_an_sst() {
+        let (dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine
+            .put(&realm, b"shutdown-key", b"shutdown-value")
+            .expect("put");
+
+        let ssts_before = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count();
+
+        engine.flush_memtable().expect("flush on shutdown");
+
+        let ssts_after = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count();
+        assert_eq!(
+            ssts_after,
+            ssts_before + 1,
+            "flush_memtable must write one SST"
+        );
+        assert_eq!(
+            engine.get(&realm, b"shutdown-key").expect("get"),
+            Some(b"shutdown-value".to_vec()),
+            "the flushed record must still read back"
         );
     }
 

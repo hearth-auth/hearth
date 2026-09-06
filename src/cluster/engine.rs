@@ -546,6 +546,14 @@ impl ClusterEngine {
     pub(crate) fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
         self.inner.complete_snapshot_restore()
     }
+
+    /// Flushes the underlying storage engine's memtable.
+    ///
+    /// Local and durable, not a replicated write — the shutdown path calls it
+    /// on every node for its own data directory.
+    pub(crate) fn flush_memtable(&self) -> Result<(), crate::storage::StorageError> {
+        self.inner.flush_memtable()
+    }
 }
 
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
@@ -832,6 +840,10 @@ impl StorageEngine for ClusterStorageAdapter {
 
     fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
         self.engine.complete_snapshot_restore()
+    }
+
+    fn flush_memtable(&self) -> Result<(), crate::storage::StorageError> {
+        self.engine.flush_memtable()
     }
 }
 

@@ -71,3 +71,122 @@ fn simulation_memtable_flushed_before_wal_rotation() {
         }
     }
 }
+
+/// B4 (audit 2026-08-28 §3 B4, §4.11#1): a WAL rotation must not destroy a
+/// write another thread has already been told is durable.
+///
+/// The interleaving needs no fault injection and no crash timing skill:
+///
+/// 1. Writer A appends its record and the WAL `fsync`s it. A is now entitled
+///    to be told the write is durable.
+/// 2. Before A applies its value to the memtable, writer B fills the segment
+///    and triggers a rotation. Rotation flushes the memtable — which does not
+///    contain A's value — and then truncates the segment, erasing A's record.
+/// 3. A applies its value to the memtable, where it is the only copy.
+/// 4. The process exits. A's acknowledged write is gone.
+///
+/// `CLAUDE.md` states the WAL is `fsync`'d before a write is acknowledged and
+/// that acknowledged writes survive `kill -9`. Two concurrent writers are
+/// enough to break that, with no crash at all.
+#[test]
+fn simulation_concurrent_writer_ack_survives_wal_rotation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let realm = RealmId::generate();
+
+    {
+        let mut config = StorageConfig::dev(dir.path().to_path_buf());
+        // Small segment so the filler writes below force several rotations,
+        // and production sync semantics so "acknowledged" means fsync'd.
+        config.wal_config = WalConfig {
+            max_size: 4096,
+            sync_mode: SyncMode::EveryWrite,
+        };
+        let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
+
+        // Rendezvous: `parked` fires when the writer reaches its
+        // acknowledgement point; `release` lets it continue.
+        let parked = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let armed = Arc::new(AtomicBool::new(true));
+
+        {
+            let parked = Arc::clone(&parked);
+            let release = Arc::clone(&release);
+            let armed = Arc::clone(&armed);
+            engine.set_post_ack_hook(Arc::new(move || {
+                // Only the first writer parks; the filler writes must run.
+                if !armed.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                {
+                    let (lock, cv) = &*parked;
+                    *lock.lock().expect("parked lock") = true;
+                    cv.notify_all();
+                }
+                let (lock, cv) = &*release;
+                let mut go = lock.lock().expect("release lock");
+                while !*go {
+                    go = cv.wait(go).expect("release wait");
+                }
+            }));
+        }
+
+        let writer = {
+            let engine = Arc::clone(&engine);
+            let realm = realm.clone();
+            std::thread::spawn(move || {
+                engine
+                    .put(&realm, b"survivor", b"acknowledged-before-rotation")
+                    .expect("the write is acknowledged");
+            })
+        };
+
+        // Wait until the writer holds its acknowledgement.
+        {
+            let (lock, cv) = &*parked;
+            let mut is_parked = lock.lock().expect("parked lock");
+            while !*is_parked {
+                is_parked = cv.wait(is_parked).expect("parked wait");
+            }
+        }
+
+        // Drive rotations from this thread while the writer is parked.
+        for i in 0u32..200 {
+            let key = format!("filler-{i:04}");
+            engine.put(&realm, key.as_bytes(), &[0u8; 64]).expect("put");
+        }
+
+        // A rotation must have happened, otherwise the test proves nothing:
+        // the pre-rotation flush is what writes an SST.
+        let sst_count = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count();
+        assert!(
+            sst_count >= 1,
+            "the filler writes must have rotated the WAL (found {sst_count} SSTs)"
+        );
+
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().expect("release lock") = true;
+            cv.notify_all();
+        }
+        writer.join().expect("writer thread");
+        // Exit without an explicit flush — the acknowledged write must not
+        // depend on a clean shutdown.
+    }
+
+    let engine = EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+        .expect("reopen after exit");
+    let got = engine.get(&realm, b"survivor").expect("get");
+    assert_eq!(
+        got.as_deref(),
+        Some(&b"acknowledged-before-rotation"[..]),
+        "a write acknowledged before a concurrent rotation must survive it"
+    );
+}

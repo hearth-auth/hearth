@@ -164,6 +164,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **WAL rotation no longer destroys acknowledged writes (audit 2026-08-28 §3 B4, §4.11#1)** — a
+  mutating operation appended its record, waited for the `fsync`, told the caller the write was
+  durable, and only then applied the value to the memtable. In that gap the record was durable and
+  the memtable did not have it. WAL rotation flushes the memtable and then truncates the segment, so
+  a rotation driven by a second writer inside that gap flushed a memtable without the record and
+  then erased the record: the write was acknowledged and it was gone at the next start-up. Two
+  concurrent writers were enough — no crash, no attacker, no disk fault, and the split-commit path
+  used by batched writes held the gap open longest. Every mutating path (`put`, `delete`,
+  `put_batch`, `write_batch`, `enqueue_batch`) now applies to the memtable **before** the durability
+  wait, so a durable record is never missing from the memtable. The deliberate cost: between the
+  apply and the acknowledgement a value is readable inside the process before it is durable, so a
+  write that ends in a WAL I/O error can be read until the process restarts — and a WAL write fault
+  already fences the WAL and forces that restart, after which replay never produces the record.
+- **The memtable is flushed on graceful shutdown (audit 2026-08-28 §3 B4, §4.11#1)** — `SIGTERM` and
+  `SIGINT` now flush the memtable to an SST after the request drain. No acknowledged write depended
+  on this (the WAL carries them all), but the next start-up replays less, and a file-level copy of a
+  cleanly stopped data directory no longer needs a replay to be complete. A failed flush is logged,
+  not fatal.
 - **Backup export now takes a referentially consistent snapshot (HEA-2167)** — export previously
   paginated live reads with no snapshot or lock, so any write concurrent with a backup could tear the
   archive: a role assignment (or any cross-entity reference) read late could point at a user created

@@ -376,4 +376,22 @@ pub trait StorageEngine: Send + Sync {
     fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
         None
     }
+
+    /// Writes the in-memory write buffer out to a durable file.
+    ///
+    /// Called on the graceful-shutdown path. Durability does **not** depend on
+    /// it: every acknowledged write is in the WAL before it is acknowledged,
+    /// and recovery replays the WAL on the next open. Flushing on shutdown
+    /// shortens that replay and leaves the data directory in a state a file
+    /// copy can read without one (audit 2026-08-28 §3 B4, §4.11#1).
+    ///
+    /// The default is a no-op — correct for test doubles and for wrappers with
+    /// no buffer of their own. [`EmbeddedStorageEngine`] overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from writing the SST.
+    fn flush_memtable(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
