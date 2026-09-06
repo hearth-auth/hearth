@@ -412,6 +412,15 @@ pub struct EmbeddedStorageEngine {
     /// behind blocker B4 (audit 2026-08-28 §3 B4, §4.11#1).
     #[cfg(feature = "test-hooks")]
     post_ack_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only hook fired inside `get`'s fall-through path, after the
+    /// authoritative memtable/SST read has resolved to data and immediately
+    /// before the hot-tier fill.
+    ///
+    /// A simulation test uses it to park a reader at exactly that point and
+    /// drive a `delete` from another thread, which is the fill/invalidation
+    /// race behind audit 2026-08-28 §4.21#3.
+    #[cfg(feature = "test-hooks")]
+    pre_promote_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Process-local guard: removes `data_dir` from `OPEN_DIRS` on drop.
     ///
     /// Must be declared after all fields that use `data_dir` so it is dropped
@@ -751,6 +760,8 @@ impl EmbeddedStorageEngine {
             allow_missing_keks: config.allow_missing_keks,
             #[cfg(feature = "test-hooks")]
             post_ack_hook: Mutex::new(None),
+            #[cfg(feature = "test-hooks")]
+            pre_promote_hook: Mutex::new(None),
             _process_lock: dir_lock_guard,
             _dir_lock: lock_file,
         })
@@ -773,6 +784,31 @@ impl EmbeddedStorageEngine {
     fn run_post_ack_hook(&self) {
         let hook = self
             .post_ack_hook
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Installs the test-only pre-promotion hook.
+    ///
+    /// The hook runs on the reader's own thread inside `get`, after the
+    /// memtable/SST read and before the hot-tier fill. Simulation tests use
+    /// it to hold a reader inside the fill/invalidation race window.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_pre_promote_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.pre_promote_hook.lock() {
+            *slot = Some(hook);
+        }
+    }
+
+    /// Runs the pre-promotion hook, if one is installed.
+    #[cfg(feature = "test-hooks")]
+    fn run_pre_promote_hook(&self) {
+        let hook = self
+            .pre_promote_hook
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref().map(Arc::clone));
@@ -1451,6 +1487,13 @@ impl StorageEngine for EmbeddedStorageEngine {
         // latency and SST-probe count to the tier that resolves the read.
         let started = std::time::Instant::now();
 
+        // Open the fill window BEFORE the authoritative read. A delete or
+        // update landing after this point bumps the invalidation epoch, and
+        // the promote below discards the then-stale fill — otherwise the
+        // pre-write value would be served for the life of the process
+        // (audit 2026-08-28 §4.21#3).
+        let fill = self.hot_tier.begin_fill();
+
         // 2. Active memtable — O(log n) BTreeMap lookup.
         // `get_entry` distinguishes a tombstone from an absent key so we can
         // stop searching deeper layers on a delete. This MUST NOT fall back to
@@ -1460,7 +1503,9 @@ impl StorageEngine for EmbeddedStorageEngine {
         match self.active_memtable.get_entry(realm_id, key) {
             Some(MemtableValue::Data(data)) => {
                 // Promote to hot tier on memtable hit
-                self.hot_tier.promote(realm_id, key, &data);
+                #[cfg(feature = "test-hooks")]
+                self.run_pre_promote_hook();
+                self.hot_tier.promote(fill, realm_id, key, &data);
                 metrics.record_get_fallthrough("memtable_hit", started.elapsed(), 0);
                 return Ok(Some(data));
             }
@@ -1481,7 +1526,9 @@ impl StorageEngine for EmbeddedStorageEngine {
                 match value {
                     MemtableValue::Data(data) => {
                         // Cold hit — promote to hot tier
-                        self.hot_tier.promote(realm_id, key, &data);
+                        #[cfg(feature = "test-hooks")]
+                        self.run_pre_promote_hook();
+                        self.hot_tier.promote(fill, realm_id, key, &data);
                         metrics.record_get_fallthrough("sst_hit", started.elapsed(), ssts_probed);
                         return Ok(Some(data));
                     }
@@ -4210,7 +4257,7 @@ mod tests {
             promote_sample_rate: 1,
         });
         let realm = RealmId::generate();
-        tier.promote(&realm, b"key", b"data");
+        tier.promote_now(&realm, b"key", b"data");
 
         let first = tier.get(&realm, b"key").expect("should be cached");
         let second = tier.get(&realm, b"key").expect("should still be cached");

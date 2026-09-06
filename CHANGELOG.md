@@ -274,6 +274,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
 
 ### Fixed
+- **A delete or update racing a cold read can no longer leave the stale value cached until restart
+  (audit 2026-08-28 §4.21#3)** — a cold read fills the hot tier *after* it reads the authoritative
+  value, and a write landing between those two steps invalidated a key that was not yet cached — a
+  no-op — so the read then installed the pre-write value and every later read served it for the
+  life of the process. In an identity store that meant a revoked credential could stay readable
+  until restart. Cold reads now open a fill window before the authoritative read, and a fill whose
+  window overlapped any invalidation is discarded (observable via the new
+  `hearth_storage_hot_tier_stale_fills_discarded_total` metric); the record stays servable from the
+  durable layers. No operator action required.
 - **WAL rotation no longer destroys acknowledged writes (audit 2026-08-28 §3 B4, §4.11#1)** — a
   mutating operation appended its record, waited for the `fsync`, told the caller the write was
   durable, and only then applied the value to the memtable. In that gap the record was durable and

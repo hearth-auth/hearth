@@ -230,6 +230,14 @@ pub struct Metrics {
     /// promotion attempts, so it tracks real map-clone churn.
     pub storage_hot_tier_promotions_total: Counter,
 
+    /// Hot-tier fills discarded because an invalidation raced the fill.
+    ///
+    /// Incremented when a cold read's promote is dropped because a delete or
+    /// update invalidated the tier between the read and the fill
+    /// (audit 2026-08-28 §4.21#3). A nonzero rate is normal under write
+    /// contention; the discarded record stays servable from memtable/SST.
+    pub storage_hot_tier_stale_fills_discarded_total: Counter,
+
     /// Live SST file count backing the storage engine.
     ///
     /// Updated off the hot path whenever the SST reader set is swapped (flush,
@@ -516,6 +524,18 @@ impl Metrics {
             .register(Box::new(storage_hot_tier_promotions_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_hot_tier_stale_fills_discarded_total = Counter::new(
+            "hearth_storage_hot_tier_stale_fills_discarded_total",
+            "Hot-tier fills discarded because a delete or update invalidated \
+             the tier between the authoritative read and the fill",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(
+                storage_hot_tier_stale_fills_discarded_total.clone(),
+            ))
+            .expect("metric registration succeeds on a fresh registry");
+
         let storage_sst_files = Gauge::new(
             "hearth_storage_sst_files",
             "Live SST file count backing the storage engine",
@@ -625,6 +645,7 @@ impl Metrics {
             storage_get_ssts_probed,
             storage_hot_tier_evictions_total,
             storage_hot_tier_promotions_total,
+            storage_hot_tier_stale_fills_discarded_total,
             storage_sst_files,
             kdf_in_flight,
             kdf_admin_in_flight,

@@ -11,6 +11,7 @@ mod snapshot_restore_crash;
 mod sst_compact_crash;
 mod sst_crash;
 mod tiered_crash;
+mod tiered_fill_race;
 mod txn_concurrent;
 mod txn_raft_concurrent;
 mod txn_single_use;

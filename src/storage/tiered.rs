@@ -4,6 +4,12 @@
 //! evict) are serialized behind a `Mutex` and use clone-mutate-swap — acceptable
 //! because they are off the hot path.
 //!
+//! A fill (`promote`) is guarded against racing an invalidation: the caller
+//! opens a [`FillGuard`] before its authoritative memtable/SST read, and a
+//! fill whose window saw an invalidation is discarded. Without the guard, a
+//! delete or update overlapping an in-flight read left the stale value
+//! cached for the life of the process (audit 2026-08-28 §4.21#3).
+//!
 //! The clock algorithm approximates LRU:
 //! - Each entry has an `AtomicBool` reference bit.
 //! - On read hit: set `reference_bit` = true (atomic store, no lock).
@@ -46,6 +52,19 @@ impl Clone for HotEntry {
             reference_bit: AtomicBool::new(self.reference_bit.load(Ordering::Relaxed)),
         }
     }
+}
+
+/// Proof that a hot-tier fill began before any conflicting invalidation.
+///
+/// Captured with [`HotTier::begin_fill`] *before* the caller reads the
+/// authoritative memtable/SST value it intends to cache. [`HotTier::promote`]
+/// discards the fill when any invalidation ran after the guard was taken, so
+/// a delete or update that overlaps an in-flight read is never shadowed by
+/// the stale value (audit 2026-08-28 §4.21#3).
+#[derive(Clone, Copy)]
+pub(crate) struct FillGuard {
+    /// The invalidation epoch observed when the fill window opened.
+    epoch: u64,
 }
 
 /// Production promotion sample rate: admit 1-in-N cold promotions to bound
@@ -101,6 +120,10 @@ pub(crate) struct HotTier {
     /// Count of promotions actually admitted (took the write lock + cloned the
     /// map). Compared against total calls to measure sampler effectiveness.
     admitted_promotions: AtomicU64,
+    /// Monotonic count of invalidations. `promote` admits a fill only when
+    /// the epoch still matches its [`FillGuard`], which proves no delete or
+    /// update landed between the caller's authoritative read and the fill.
+    invalidation_epoch: AtomicU64,
     /// Configuration.
     config: TieredConfig,
 }
@@ -116,7 +139,21 @@ impl HotTier {
             write_lock: Mutex::new(()),
             promote_counter: AtomicU64::new(0),
             admitted_promotions: AtomicU64::new(0),
+            invalidation_epoch: AtomicU64::new(0),
             config,
+        }
+    }
+
+    /// Opens a fill window for a later [`HotTier::promote`].
+    ///
+    /// Call this *before* reading the authoritative memtable/SST value. The
+    /// guard captures the invalidation epoch; `promote` discards the fill
+    /// when the epoch has moved, so a value read before a concurrent delete
+    /// or update cannot be installed after that write's invalidation
+    /// (audit 2026-08-28 §4.21#3).
+    pub(crate) fn begin_fill(&self) -> FillGuard {
+        FillGuard {
+            epoch: self.invalidation_epoch.load(Ordering::SeqCst),
         }
     }
 
@@ -153,13 +190,20 @@ impl HotTier {
     /// If the tier is at capacity, runs clock sweep to evict entries first.
     /// This is a write operation (off hot path) — acquires the write lock.
     ///
+    /// The `guard` must come from a [`HotTier::begin_fill`] call made before
+    /// the caller read `value` from the authoritative layers. A fill whose
+    /// guard epoch is stale — an invalidation ran inside the fill window — is
+    /// discarded, because `value` may predate a delete or update
+    /// (audit 2026-08-28 §4.21#3). The record stays servable from the
+    /// memtable/SST layers.
+    ///
     /// Promotion is *probabilistically admitted*: only 1-in-`promote_sample_rate`
     /// calls proceed to take the write lock and clone the map. On cold-read-heavy
     /// workloads this bounds write-lock contention and O(capacity) map clones
     /// without changing which records are servable — an unadmitted record is
     /// still returned from the memtable/SST layers, and repeatedly-read (hot)
     /// keys are admitted quickly (HEA-1775).
-    pub(crate) fn promote(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
+    pub(crate) fn promote(&self, guard: FillGuard, realm_id: &RealmId, key: &[u8], value: &[u8]) {
         // Probabilistic admission gate — cheap atomic, evaluated before any
         // allocation (CompositeKey) or lock acquisition so skipped promotions
         // cost almost nothing. Counter starts at 0, so the first promotion is
@@ -174,9 +218,20 @@ impl HotTier {
 
         let composite = CompositeKey::new(realm_id.clone(), key.to_vec());
 
-        let Ok(_guard) = self.write_lock.lock() else {
+        let Ok(_lock) = self.write_lock.lock() else {
             return; // Poisoned mutex — silently skip promotion
         };
+
+        // An invalidation ran inside the fill window: the value in hand may
+        // predate a delete or update, and installing it would serve the stale
+        // value for the life of the process. Discard the fill
+        // (audit 2026-08-28 §4.21#3).
+        if self.invalidation_epoch.load(Ordering::SeqCst) != guard.epoch {
+            crate::metrics::metrics()
+                .storage_hot_tier_stale_fills_discarded_total
+                .inc();
+            return;
+        }
 
         // Admitted: this call takes the write lock and clones the map below.
         self.admitted_promotions.fetch_add(1, Ordering::Relaxed);
@@ -208,6 +263,12 @@ impl HotTier {
     ///
     /// Called on writes/deletes to ensure stale data isn't served.
     pub(crate) fn invalidate(&self, realm_id: &RealmId, key: &[u8]) {
+        // Bump the epoch before anything else — including when the key is
+        // not (yet) cached. An in-flight fill for this key is invisible
+        // here; the epoch is what stops it landing after we return
+        // (audit 2026-08-28 §4.21#3).
+        self.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
+
         let composite = CompositeKey::new(realm_id.clone(), key.to_vec());
 
         let Ok(_guard) = self.write_lock.lock() else {
@@ -301,6 +362,13 @@ impl HotTier {
         self.admitted_promotions.load(Ordering::Relaxed)
     }
 
+    /// Test convenience: a fill with no interleaved invalidation — the guard
+    /// is taken immediately before the promote.
+    #[cfg(test)]
+    pub(crate) fn promote_now(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
+        self.promote(self.begin_fill(), realm_id, key, value);
+    }
+
     /// Runs clock sweep eviction on the mutable map (write lock must be held).
     ///
     /// First pass: scan all entries, clear ref bits, evict first unreferenced.
@@ -380,7 +448,7 @@ mod tests {
         let realm = RealmId::generate();
 
         // Promote an entry
-        tier.promote(&realm, b"key1", b"value1");
+        tier.promote_now(&realm, b"key1", b"value1");
         assert!(tier.contains(&realm, b"key1"));
 
         // Read it (sets reference bit)
@@ -421,7 +489,7 @@ mod tests {
         let realm = RealmId::generate();
 
         // Promote an entry
-        tier.promote(&realm, b"lonely", b"value");
+        tier.promote_now(&realm, b"lonely", b"value");
         assert!(tier.contains(&realm, b"lonely"));
 
         // First sweep: clears the reference bit (was set on promote)
@@ -450,9 +518,9 @@ mod tests {
         let realm = RealmId::generate();
 
         // Fill to capacity (all entries get ref_bit=true from promote)
-        tier.promote(&realm, b"key1", b"v1");
-        tier.promote(&realm, b"key2", b"v2");
-        tier.promote(&realm, b"key3", b"v3");
+        tier.promote_now(&realm, b"key1", b"v1");
+        tier.promote_now(&realm, b"key2", b"v2");
+        tier.promote_now(&realm, b"key3", b"v3");
         assert_eq!(tier.len(), 3);
 
         // ONE sweep pass clears all reference bits (no eviction since all were true)
@@ -469,7 +537,7 @@ mod tests {
 
         // Promote a new key (triggers eviction since at capacity)
         // evict_locked will find key2 with ref_bit=false and evict it
-        tier.promote(&realm, b"key4", b"v4");
+        tier.promote_now(&realm, b"key4", b"v4");
 
         // key2 should have been evicted (unaccessed), others survive
         assert!(
@@ -515,10 +583,10 @@ mod tests {
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
 
-        tier.promote(&realm, b"key1", b"old");
+        tier.promote_now(&realm, b"key1", b"old");
         assert_eq!(tier.get(&realm, b"key1").as_deref(), Some(b"old" as &[u8]));
 
-        tier.promote(&realm, b"key1", b"new");
+        tier.promote_now(&realm, b"key1", b"new");
         assert_eq!(tier.get(&realm, b"key1").as_deref(), Some(b"new" as &[u8]));
         assert_eq!(tier.len(), 1, "update should not add a second entry");
     }
@@ -533,7 +601,7 @@ mod tests {
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
 
-        tier.promote(&realm, b"key1", b"value1");
+        tier.promote_now(&realm, b"key1", b"value1");
         assert!(tier.contains(&realm, b"key1"));
 
         tier.invalidate(&realm, b"key1");
@@ -551,6 +619,61 @@ mod tests {
         assert_eq!(tier.len(), 0);
     }
 
+    // ===== Audit 2026-08-28 §4.21#3: fill/invalidation race =====
+
+    // Models the engine's `get`/`delete` interleaving: the reader opens its
+    // fill window, reads the pre-delete value from the store, the delete's
+    // invalidation lands, and the fill completes last. The stale fill must
+    // be discarded — before the guard existed it was installed permanently.
+    #[test]
+    fn stale_fill_after_invalidate_is_discarded() {
+        let tier = HotTier::new(TieredConfig::default());
+        let realm = RealmId::generate();
+
+        let fill = tier.begin_fill();
+        tier.invalidate(&realm, b"cred"); // the concurrent delete wins the race
+        tier.promote(fill, &realm, b"cred", b"stale");
+
+        assert_eq!(
+            tier.get(&realm, b"cred"),
+            None,
+            "a fill whose window saw an invalidation must be discarded"
+        );
+    }
+
+    // The guard must fire even when the invalidated key was never cached —
+    // the old `invalidate` early-returned on an absent key, which is exactly
+    // how the in-flight fill slipped past it.
+    #[test]
+    fn invalidate_of_uncached_key_still_blocks_stale_fill() {
+        let tier = HotTier::new(TieredConfig::default());
+        let realm = RealmId::generate();
+        assert!(!tier.contains(&realm, b"cred"), "key must start uncached");
+
+        let fill = tier.begin_fill();
+        tier.invalidate(&realm, b"cred");
+        tier.promote(fill, &realm, b"cred", b"stale");
+
+        assert_eq!(tier.get(&realm, b"cred"), None);
+    }
+
+    // A fill window opened after the invalidation is clean and must land.
+    #[test]
+    fn fresh_fill_after_invalidate_is_admitted() {
+        let tier = HotTier::new(TieredConfig::default());
+        let realm = RealmId::generate();
+
+        tier.invalidate(&realm, b"cred");
+        let fill = tier.begin_fill();
+        tier.promote(fill, &realm, b"cred", b"current");
+
+        assert_eq!(
+            tier.get(&realm, b"cred").as_deref(),
+            Some(b"current" as &[u8]),
+            "a fill that began after the invalidation is not stale"
+        );
+    }
+
     #[test]
     fn realm_isolation() {
         let config = TieredConfig::default();
@@ -558,8 +681,8 @@ mod tests {
         let realm_a = RealmId::generate();
         let realm_b = RealmId::generate();
 
-        tier.promote(&realm_a, b"shared_key", b"value-a");
-        tier.promote(&realm_b, b"shared_key", b"value-b");
+        tier.promote_now(&realm_a, b"shared_key", b"value-a");
+        tier.promote_now(&realm_b, b"shared_key", b"value-b");
 
         assert_eq!(
             tier.get(&realm_a, b"shared_key").as_deref(),
@@ -609,8 +732,8 @@ mod tests {
 
         for i in 0..n {
             let key = i.to_be_bytes();
-            always.promote(&realm, &key, b"v");
-            sampled.promote(&realm, &key, b"v");
+            always.promote_now(&realm, &key, b"v");
+            sampled.promote_now(&realm, &key, b"v");
         }
 
         // rate=1 must admit (write-lock + clone) every single promotion.
@@ -645,7 +768,7 @@ mod tests {
         let tier = HotTier::new(sampling_config(4));
 
         // First promotion is always admitted.
-        tier.promote(&realm, b"first", b"v");
+        tier.promote_now(&realm, b"first", b"v");
         assert!(
             tier.contains(&realm, b"first"),
             "first promotion must be admitted deterministically"
@@ -654,7 +777,7 @@ mod tests {
         // A repeatedly-promoted (hot) key is admitted within a bounded number
         // of attempts even under sampling.
         for _ in 0..4 {
-            tier.promote(&realm, b"hot", b"v");
+            tier.promote_now(&realm, b"hot", b"v");
         }
         assert!(
             tier.contains(&realm, b"hot"),
@@ -675,7 +798,7 @@ mod tests {
         // the sampled production config where a lone promote may be skipped.
         let tier = HotTier::new(TieredConfig::default());
         let realm = RealmId::generate();
-        tier.promote(&realm, b"once", b"v");
+        tier.promote_now(&realm, b"once", b"v");
         assert!(
             tier.contains(&realm, b"once"),
             "default (sample_rate=1) config must admit every single promotion"
@@ -725,7 +848,7 @@ mod tests {
             for op in &ops {
                 match op {
                     TierOp::Promote(k, v) => {
-                        tier.promote(&realm, k, v);
+                        tier.promote_now(&realm, k, v);
                         oracle.insert(k.clone(), v.clone());
                     }
                     TierOp::Get(k) => {
@@ -810,7 +933,7 @@ mod tests {
 
                 // Try to read; if miss, promote (simulates cold path promotion)
                 if tier.get(&realm, key).is_none() {
-                    tier.promote(&realm, key, &[42u8; 8]);
+                    tier.promote_now(&realm, key, &[42u8; 8]);
                 }
 
                 // Occasional sweep
@@ -873,11 +996,11 @@ mod tests {
             for i in 0..ROUNDS {
                 for key in &hot_keys {
                     if tier.get(&realm, key).is_none() {
-                        tier.promote(&realm, key, &[42u8; 8]);
+                        tier.promote_now(&realm, key, &[42u8; 8]);
                     }
                 }
                 #[allow(clippy::cast_possible_truncation)]
-                tier.promote(&realm, &[200u8, i as u8], &[7u8; 8]);
+                tier.promote_now(&realm, &[200u8, i as u8], &[7u8; 8]);
                 resident_total += hot_keys.iter().filter(|k| tier.contains(&realm, k)).count();
             }
             #[allow(clippy::cast_precision_loss)]
