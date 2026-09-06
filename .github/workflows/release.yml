@@ -217,6 +217,17 @@ jobs:
         continue-on-error: true
         run: make security-gate
 
+      # Audit §4.8#5 / §4.12#4: the README's Docker and Helm install paths
+      # were not anonymously reachable — both GHCR packages were private, so
+      # two of the three documented install paths failed at the first command.
+      # This gate performs the anonymous manifest fetch `docker pull` and
+      # `helm install` start with, for the exact versions the README pins.
+      # See docs/ops/RELEASE_VALIDATION.md § "Publish gating".
+      - name: "Install-path gate (anonymous ghcr.io reachability)"
+        id: install_paths
+        continue-on-error: true
+        run: bash scripts/check-install-paths.sh
+
       # ── Advisory gate ─────────────────────────────────────────────────────
       - name: "Step 7 — Benchmark gate (make bench-gate, advisory)"
         id: bench
@@ -238,6 +249,7 @@ jobs:
           TEST_QUALITY: ${{ steps.test_quality.outcome }}
           ABUSE: ${{ steps.abuse_check.outcome }}
           SECURITY: ${{ steps.security_gate.outcome }}
+          INSTALL_PATHS: ${{ steps.install_paths.outcome }}
           BENCH: ${{ steps.bench.outcome }}
         run: |
           verdict() { [ "$1" = "success" ] && echo "PASS" || echo "FAIL"; }
@@ -260,6 +272,7 @@ jobs:
             echo "  $(verdict "$TEST_QUALITY")  Step 2 — Test quality gate (false-confidence patterns)"
             echo "  $(verdict "$ABUSE")  Step 3 — Abuse coverage gate (§3.41 adversarial matrix)"
             echo "  $(verdict "$SECURITY")  Step 9 — ROPC password-grant ban gate"
+            echo "  $(verdict "$INSTALL_PATHS")  Install-path gate — README Docker/Helm paths anonymously reachable"
             echo ""
             echo "Advisory gates (recorded, reviewed by the release engineer):"
             echo "  $(verdict "$BENCH")  Step 7 — Benchmark gate (rbac_check, session_lookup,"
@@ -296,9 +309,10 @@ jobs:
           TEST_QUALITY: ${{ steps.test_quality.outcome }}
           ABUSE: ${{ steps.abuse_check.outcome }}
           SECURITY: ${{ steps.security_gate.outcome }}
+          INSTALL_PATHS: ${{ steps.install_paths.outcome }}
         run: |
           failed=0
-          for gate in NEXTEST TEST_QUALITY ABUSE SECURITY; do
+          for gate in NEXTEST TEST_QUALITY ABUSE SECURITY INSTALL_PATHS; do
             if [ "${!gate}" != "success" ]; then
               echo "::error::Release validation hard gate failed: ${gate} (${!gate})"
               failed=1

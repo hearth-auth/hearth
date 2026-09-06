@@ -22,6 +22,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   so a release whose test suite, test-quality gate, abuse-coverage gate, or ROPC ban gate
   fails is never published. The manual procedure is documented in
   [`docs/ops/RELEASE_VALIDATION.md`](docs/ops/RELEASE_VALIDATION.md).
+- **Release validation now verifies the documented install paths work anonymously (audit
+  2026-08-28 §4.8#5, §4.12#4)** — the README's `docker pull` and `helm install` commands failed
+  at the first request because both GHCR packages are private. `scripts/check-install-paths.sh`
+  now runs as a hard gate in the release `validation` job: it performs the anonymous manifest
+  fetch those commands start with, for the exact versions the README pins, and a refusal blocks
+  the release. **Operator action (org admin, one-time):** set the `hearth` and `charts/hearth`
+  GHCR packages to Public via Package settings → Danger Zone; there is no API for this toggle.
+  See `docs/ops/RELEASE_VALIDATION.md` § "Install-path reachability gate".
 - **SCIM `If-Match` optimistic concurrency is now enforced (HEA-2172)** — `ServiceProviderConfig`
   advertises `etag.supported: true`, and Hearth now honours it. Every single-resource SCIM response
   (`POST`/`GET`/`PUT`/`PATCH` on `/scim/v2/Users` and `/scim/v2/Groups`) carries an `ETag` header, and

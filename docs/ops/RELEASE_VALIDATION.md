@@ -306,6 +306,25 @@ reaches no gate, and if a workflow in its channel manifest loses its gate or dis
 `scripts/tests/check-publish-gating.test.sh` proves the guard fails on an ungated job, so
 it cannot decay into a stub that always passes.
 
+### Install-path reachability gate
+
+The audit (§4.8#5, §4.12#4) found the README's Docker and Helm install paths failed at
+the first command: both GHCR packages were private, so an anonymous `docker pull` or
+`helm install` got a 403 before touching a single byte of Hearth.
+
+The `validation` job now runs `scripts/check-install-paths.sh` as a hard gate. It makes
+the anonymous manifest fetch those commands start with, for the exact image tag and chart
+version the README pins, with no credentials. A refusal fails validation, and the publish
+channels wait on validation, so a release cannot ship while its own install
+documentation does not work.
+
+Package visibility is not controlled by this repository, and GitHub has no API for the
+toggle. If this gate goes red, an org admin must set both packages to Public:
+`github.com` → `hearth-auth` org → Packages → `hearth` (and `charts/hearth`) →
+Package settings → Danger Zone → Change visibility → Public. New GHCR packages are
+created private by default, so a renamed or recreated package will trip this gate on the
+next release — that is the gate working.
+
 ---
 
 ## Related
