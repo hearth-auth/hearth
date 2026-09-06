@@ -153,6 +153,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `onboarding.notification_email` still carries the token — that channel is private and explicitly
   configured. **Operator action:** on a first boot, read the token from
   `<data_dir>/.setup_token` rather than from the log.
+- **Realm deletion now sweeps the realm's entire key space (audit 2026-08-28 §4.9#1)** —
+  `delete_realm` deleted a hand-written allowlist of key prefixes, so `cred:history:` (Argon2id
+  password hashes) and every `audit:*` family (events, actor/action indexes, the HMAC chain key)
+  survived deletion. Shipped read paths then served those survivors to whoever next held that
+  realm ID — in practice the same operator after a restore. Both the synchronous and the
+  background cascade now enumerate the realm's full key space — the same `scan(realm, "",
+  [0xFF; 256])` bound the cluster snapshot path uses — so a key family is removed whether or not
+  any code knows its name. The `RealmDeleted` audit event is now written under the system realm
+  (from all of the engine, REST, and UI delete paths), because writing it under the just-deleted
+  realm would re-create `audit:*` keys the sweep must leave empty. Realm-scoped in-process
+  caches (sessions, per-realm MFA key) are purged on delete so a deleted realm's session cannot
+  be served from the hot cache. **Operator note:** a `RealmDeleted` entry now appears in the
+  system realm's audit log rather than the deleted realm's (which no longer exists).
 - **A corrupt WAL no longer destroys the acknowledged records that follow it (audit 2026-08-28
   §4.11#3)** — recovery treated every CRC mismatch as a torn tail: it truncated the segment to
   the last good record, re-keyed it, and `open()` returned `Ok`. For a genuine torn write that

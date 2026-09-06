@@ -1244,8 +1244,11 @@ async fn admin_delete_realm(
         {
             match state.identity.delete_realm(&tid) {
                 Ok(()) => {
+                    // Scoped to the SYSTEM realm: appending under the realm
+                    // that was just deleted would re-create `audit:*` keys in
+                    // a key space the cascade must leave empty (§4.9#1).
                     let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: tid.clone(),
+                        realm_id: crate::identity::keys::system_realm_id(),
                         actor: auth.user_id.as_uuid().to_string(),
                         action: crate::audit::AuditAction::RealmDeleted,
                         resource_type: "realm".to_string(),

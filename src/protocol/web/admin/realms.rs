@@ -300,8 +300,17 @@ fn audit_realm_event(
         "delete" => AuditAction::RealmDeleted,
         _ => return,
     };
+    // Deletion evidence is scoped to the SYSTEM realm: appending under the
+    // realm that was just deleted would re-create `audit:*` keys in a key
+    // space the cascade must leave empty (§4.9#1). Create/update stay scoped
+    // to the realm they describe.
+    let scope_realm = if op == "delete" {
+        crate::identity::keys::system_realm_id()
+    } else {
+        realm_id.clone()
+    };
     if let Err(e) = state.audit.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
+        realm_id: scope_realm,
         actor: session.user_id.as_uuid().to_string(),
         action,
         resource_type: "realm".to_string(),

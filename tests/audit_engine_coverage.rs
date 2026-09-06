@@ -148,23 +148,39 @@ async fn test_delete_realm_cascading_one_event() {
         .delete_realm(&realm_id)
         .expect("delete realm");
 
-    let events = harness
+    // The RealmDeleted event is written under the SYSTEM realm, not the
+    // deleted realm: appending under the deleted realm would re-create
+    // `audit:*` keys in a key space the cascade must leave empty
+    // (audit 2026-08-28 §4.9#1).
+    let system_realm = RealmId::new(uuid::Uuid::nil());
+    let system_events = harness
         .audit()
-        .query(&AuditQuery::for_realm(realm_id))
-        .expect("query audit");
-
-    let realm_deleted_events: Vec<_> = events
+        .query(&AuditQuery::for_realm(system_realm))
+        .expect("query system-realm audit");
+    let realm_deleted_events: Vec<_> = system_events
         .iter()
-        .filter(|e| e.action == AuditAction::RealmDeleted)
+        .filter(|e| {
+            e.action == AuditAction::RealmDeleted && e.resource_id == realm_id.as_uuid().to_string()
+        })
         .collect();
     assert_eq!(
         realm_deleted_events.len(),
         1,
-        "delete_realm should emit exactly 1 RealmDeleted event"
+        "delete_realm should emit exactly 1 RealmDeleted event under the system realm"
     );
+    assert_eq!(realm_deleted_events[0].actor, "system");
 
-    let event = realm_deleted_events[0];
-    assert_eq!(event.actor, "system");
+    // The deleted realm's own key space carries no audit events — nothing at
+    // all survives the sweep.
+    let deleted_realm_events = harness
+        .audit()
+        .query(&AuditQuery::for_realm(realm_id))
+        .expect("query deleted-realm audit");
+    assert!(
+        deleted_realm_events.is_empty(),
+        "the deleted realm's audit log must be empty, found {} event(s)",
+        deleted_realm_events.len()
+    );
 }
 
 #[tokio::test]

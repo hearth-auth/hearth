@@ -901,13 +901,6 @@ pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
     format!("{JWT_BEARER_JTI_PREFIX}{jti}").into_bytes()
 }
 
-/// Returns the scan prefix for all JWT bearer assertion JTIs in a realm.
-///
-/// Used during cascade realm deletion to purge the replay store.
-pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
-    JWT_BEARER_JTI_PREFIX.as_bytes().to_vec()
-}
-
 /// Encodes the storage key for a consumed `private_key_jwt` assertion JTI.
 ///
 /// Format: `oauth:ca-jti:{jti}`
@@ -915,13 +908,6 @@ pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
 /// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention.
 pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
     format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
-}
-
-/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
-///
-/// Used during cascade realm deletion to purge the replay store.
-pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
-    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a JAR (RFC 9101) signed request object JTI.
