@@ -50,6 +50,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A merge to `main` is now blocked until its required check reports success (audit 2026-08-28
+  §4.8#3)** — the `Protect main` ruleset granted the repository admin role an always-on bypass,
+  and the audited commit merged **41 minutes before** its one required context reported failure.
+  Both bypass actors are removed from the ruleset, so `gh pr merge --admin` no longer exists as a
+  standing path around CI; the emergency escape is an explicit ruleset edit in repository
+  settings. CI now runs `scripts/check-branch-protection.sh` on every PR: it reads the live
+  ruleset and fails if the `required-summary` context is not required, if changes can reach
+  `main` outside a pull request, or if any bypass actor reappears. An unreadable ruleset API is
+  a failure, not a skip.
 - **Every release channel now waits for a green verdict before it publishes (audit 2026-08-28
   §3 B2, §3 B6, §4.8#1, §4.8#2, §4.12#1)** — only the GitHub Release binary channel was gated.
   The container image, the Helm chart, seven SDK releases and two registry packages published

@@ -264,6 +264,23 @@ jobs:
       - name: Await-green-commit gate — self-test
         run: bash scripts/tests/await-green-commit.test.sh
 
+      # Audit finding §4.8#3: the audited commit merged 41 minutes before its
+      # one required context reported failure, via an always-on admin bypass on
+      # the "Protect main" ruleset. This guard reads the live ruleset and fails
+      # if the required-summary context is not required, changes can reach main
+      # outside a PR, or ANY bypass actor exists. An unreadable API is a FAIL,
+      # not a skip.
+      - name: Branch protection (check-branch-protection.sh)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/check-branch-protection.sh
+
+      # The guard is the deliverable for §4.8#3, so it needs a test proving it
+      # FAILS on the audited shape — the always-on bypass — otherwise an
+      # `exit 0` stub passes CI forever.
+      - name: Branch protection — guard self-test
+        run: bash scripts/tests/check-branch-protection.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:

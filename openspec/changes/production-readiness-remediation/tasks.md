@@ -30,7 +30,7 @@ found it, the audit piece, and the report's severity.
 ## 3. Wave 2 (HIGH) — Build and release integrity
 
 - [x] 3.1 Stop minting cosign signatures and SLSA provenance for a build that fails validation; both documented verification commands currently pass on it (§4.8#2 · P27 · HIGH)
-- [ ] 3.2 Make a required check actually block a merge: one required context, zero reviews and an always-on bypass let the audited commit merge 41 minutes before that context reported failure (§4.8#3 · P27 · HIGH)
+- [x] 3.2 Make a required check actually block a merge: one required context, zero reviews and an always-on bypass let the audited commit merge 41 minutes before that context reported failure (§4.8#3 · P27 · HIGH)
 - [ ] 3.3 Remove `continue-on-error` from both dependency-advisory gates and make `cargo deny` a required context that runs on every PR, not only lockfile changes; a 70-vulnerability scan produced a `success` job (§4.8#7, §4.12#3 · P27/P00 · HIGH)
 - [ ] 3.4 Make the README's Docker and Helm install paths anonymously reachable; two of three documented install paths fail at the first command (§4.8#5, §4.12#4 · P27/P00 · HIGH)
 - [ ] 3.5 Derive the version from the server release tag and supply it explicitly when `.git` is absent — the container build's exact condition; it is wrong in five of seven operator-visible surfaces including both published SBOMs (§2.4, §4.8#11, §4.12#5 · P27/P00 · HIGH)
