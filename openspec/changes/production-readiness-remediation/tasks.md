@@ -59,7 +59,7 @@ found it, the audit piece, and the report's severity.
 
 ## 8. Wave 2 (HIGH) — Token and session integrity
 
-- [ ] 8.1 Require client authentication on `POST /realms/{name}/introspect` and `/revoke`, and apply the RFC 7662 audience restriction their header-form twins enforce; five pieces reached this from five angles (§4.1#3, §4.19#2, §4.22#1, §4.25#1 · P13/P05/P10/P08 · HIGH)
+- [x] 8.1 Require client authentication on `POST /realms/{name}/introspect` and `/revoke`, and apply the RFC 7662 audience restriction their header-form twins enforce; five pieces reached this from five angles (§4.1#3, §4.19#2, §4.22#1, §4.25#1 · P13/P05/P10/P08 · HIGH)
 - [ ] 8.2 Verify the `id_token_hint` signature before acting on it; unauthenticated `GET /end_session` revokes any user's SSO session and mints a realm-signed logout token with an attacker-chosen `sub` (§4.2#3, §4.19#1 · P04/P05 · HIGH)
 - [ ] 8.3 Call `validate_token` in the gRPC `Decide` RPC, so a refresh token — and a DPoP-bound token replayed as a plain bearer — no longer authorizes (§4.2#1 · P04 · HIGH, evidence contested: reproduced variant is a token-species violation, not a privilege gain)
 - [ ] 8.4 Validate `token.signing_key_rotation_grace_period` at start-up; a malformed value silently becomes 24 h and a negative value becomes effectively infinite (§4.15#2 · P06 · HIGH)
@@ -160,7 +160,7 @@ found it, the audit piece, and the report's severity.
 
 ## 17. Wave 3 — Tenant isolation
 
-- [ ] 17.1 Include `active` on the negative `/realms/{name}/introspect` response, per RFC 7662 §2.2 (§4.1#4 · MEDIUM)
+- [x] 17.1 Include `active` on the negative `/realms/{name}/introspect` response, per RFC 7662 §2.2 (§4.1#4 · MEDIUM)
 - [ ] 17.2 Stop the pre-shared SCIM bearer token reading a suspended or archived realm's user directory (§4.1#5 · MEDIUM)
 - [ ] 17.3 Fix the four handlers that bypass the `scoped_realm` BOLA guard — two permissively, two so strictly the system operator is locked out (§4.1#6 · LOW)
 - [ ] 17.4 Make the reserved system realm reject role and group writes through public APIs, as the README states (§4.1#7 · CLAIM-DEFECT)

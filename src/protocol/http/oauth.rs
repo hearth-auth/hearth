@@ -2930,67 +2930,99 @@ async fn realm_token_exchange(
     resp
 }
 
+/// `POST /realms/{realm}/revoke` — realm-scoped twin of `/revoke`.
+///
+/// Requires client authentication and applies the same rate limit and RFC
+/// 7009 semantics as the header-form twin. Before this the route read no
+/// client credentials at all, so an anonymous internet caller could destroy
+/// any session it held a token string for (audit 2026-08-28 §4.1#3,
+/// §4.19#2, §4.22#1, §4.25#1).
 async fn realm_token_revocation(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    JsonOrForm(body): JsonOrForm<serde_json::Value>,
+    headers: HeaderMap,
+    JsonOrForm(body): JsonOrForm<HttpRevocationBody>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
-    let token = match body.get("token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "token required"})),
-            )
-                .into_response()
-        }
+    let client_id = match verify_endpoint_client(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        body.client_secret.as_deref(),
+    ) {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
-    let request = crate::identity::TokenRevocationRequest {
-        token,
-        token_type_hint: None,
-    };
-    match state.identity.revoke_token(&realm_id, &request) {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
     }
+
+    let request = crate::identity::TokenRevocationRequest {
+        token: body.token,
+        token_type_hint: body.token_type_hint,
+    };
+    let mut resp = match state.identity.revoke_token(&realm_id, &request) {
+        Ok(()) => {
+            // A successful revoke ends a session; keep the gauge consistent.
+            crate::metrics::metrics().active_sessions.dec();
+            StatusCode::OK.into_response()
+        }
+        Err(crate::identity::IdentityError::InvalidToken) => {
+            // RFC 7009: always return 200 OK
+            StatusCode::OK.into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    };
+    apply_cors_to_response(&mut resp, &state, &realm_id, &client_id, &headers);
+    resp
 }
 
+/// `POST /realms/{realm}/introspect` — realm-scoped twin of `/introspect`.
+///
+/// Requires client authentication, applies the RFC 7662 §2 audience
+/// restriction via `introspecting_client_id`, and answers with the same
+/// wire format as the header-form twin — the domain type always emits
+/// `active: false` for inactive tokens, where the previous proto3
+/// serialization omitted it (audit 2026-08-28 §4.1#3, §4.1#4).
 async fn realm_token_introspection(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    JsonOrForm(body): JsonOrForm<serde_json::Value>,
+    headers: HeaderMap,
+    JsonOrForm(body): JsonOrForm<HttpIntrospectionBody>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
-    let token = match body.get("token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "token required"})),
-            )
-                .into_response()
-        }
+    let client_id = match verify_endpoint_client(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        body.client_secret.as_deref(),
+    ) {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
-    let request = crate::identity::TokenIntrospectionRequest {
-        token,
-        token_type_hint: None,
-        introspecting_client_id: None,
-    };
-    match state.identity.introspect_token(&realm_id, &request) {
-        Ok(info) => (
-            StatusCode::OK,
-            Json(proto_to_rest_json(&pb::IntrospectionResponse::from(&info))),
-        )
-            .into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
     }
+
+    let request = crate::identity::TokenIntrospectionRequest {
+        token: body.token,
+        token_type_hint: body.token_type_hint,
+        introspecting_client_id: Some(client_id.clone()),
+    };
+    let mut resp = match state.identity.introspect_token(&realm_id, &request) {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    };
+    apply_cors_to_response(&mut resp, &state, &realm_id, &client_id, &headers);
+    resp
 }
 
 async fn realm_userinfo(

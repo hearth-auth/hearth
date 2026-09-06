@@ -39,6 +39,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   operations race. Requests without `If-Match` are unaffected.
 
 ### Changed
+- **BREAKING: `POST /realms/{realm}/introspect` and `/revoke` now require client authentication
+  (audit 2026-08-28 §4.1#3, §4.19#2, §4.22#1, §4.25#1)** — the realm-scoped routes read no client
+  credentials at all, so an anonymous internet caller got `active: true` with the token's subject
+  from introspection and could destroy a session through revocation. Both routes now authenticate
+  the client exactly like their header-form twins (HTTP Basic or body
+  `client_id`/`client_secret`), apply the same token-endpoint rate limit, and enforce the RFC 7662
+  §2 audience restriction, so a client can no longer inspect another client's machine-to-machine
+  token. The introspection response now uses the same wire format as `/introspect`, which also
+  puts the mandatory explicit `active: false` on negative responses (RFC 7662 §2.2, §4.1#4).
+  Integrations calling these realm-scoped routes anonymously must now send client credentials.
 - **The version an operator sees is now the version that is running (audit 2026-08-28 §2.4,
   §4.8#11, §4.12#5)** — the container build has no `.git`, so the binary inside every published
   image silently fell back to a stale `Cargo.toml` value, and both published SBOMs described
