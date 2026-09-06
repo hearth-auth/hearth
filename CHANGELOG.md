@@ -153,6 +153,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `onboarding.notification_email` still carries the token — that channel is private and explicitly
   configured. **Operator action:** on a first boot, read the token from
   `<data_dir>/.setup_token` rather than from the log.
+- **Archiving a realm now freezes it: every mutation is refused (audit 2026-08-28 §4.20#5)** —
+  archival is the control an operator reaches for during an incident — freeze the tenant, then
+  investigate — but it was not a freeze: 11 of 16 mutating operations still wrote an archived
+  realm, including `set_password`, `delete_user` and `register_client`. Every write operation on
+  the identity engine (user, credential, session, client, MFA, consent, organization,
+  invitation, webhook, agent, SCIM, IdP/SAML, protected-resource, delegation and policy
+  mutations — 55 in all) now returns `RealmSuspended` on a `Suspended` or `Archived` realm.
+  Realm lifecycle operations (`update_realm`, `delete_realm`, signing-key rotation),
+  migration/restore imports, and authentication paths are deliberately exempt — the last because
+  a non-active realm already accepts no token. **Operator note:** an archived realm now rejects
+  admin writes with a suspended-realm error; reactivate the realm (or restore it from YAML)
+  before mutating it.
 - **Realm deletion now sweeps the realm's entire key space (audit 2026-08-28 §4.9#1)** —
   `delete_realm` deleted a hand-written allowlist of key prefixes, so `cred:history:` (Argon2id
   password hashes) and every `audit:*` family (events, actor/action indexes, the HMAC chain key)

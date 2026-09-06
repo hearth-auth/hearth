@@ -3937,6 +3937,18 @@ impl EmbeddedIdentityEngine {
     /// Call this at the top of every mutating operation. Both `Suspended` and
     /// `Archived` realms return `RealmSuspended`; a missing realm returns
     /// `RealmNotFound`.
+    ///
+    /// Archival is the incident-response freeze control, so every write
+    /// operation gates here (audit 2026-08-28 §4.20#5). The deliberate
+    /// exceptions, and why each is safe to omit:
+    /// - realm lifecycle — `update_realm` (the status-change mechanism),
+    ///   `delete_realm` (archival is its precondition), `rotate_realm_signing_key`;
+    /// - migration/restore — `import_realm`/`import_user`/`import_client`/
+    ///   `import_organization`, which populate a realm out of band;
+    /// - authentication and token/session verification — `validate_token`,
+    ///   `verify_*`, `complete_webauthn_authentication` — already fail closed
+    ///   on a non-active realm via the `realm_status_cache` check on the token
+    ///   path, so a frozen realm accepts no credential regardless.
     fn require_active_realm(&self, realm_id: &RealmId) -> Result<(), IdentityError> {
         let realm = self
             .get_realm(realm_id)?
@@ -5501,6 +5513,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         ra_token: &str,
         new_password: crate::identity::credentials::CleartextPassword,
     ) -> Result<crate::identity::types::RequiredActionTokenResponse, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         use crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE;
         use crate::identity::types::{RequiredAction, RequiredActionTokenResponse};
 
@@ -5586,6 +5601,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Issue the verification token (stores SHA-256 hash in storage).
         // Email delivery requires the email service in WebState; the engine
         // does not have access to it. Callers that need the email sent must
@@ -5797,10 +5815,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         request: &UpdateUserRequest,
     ) -> Result<User, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.update_user_impl(realm_id, user_id, request, None)
     }
 
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.delete_user_impl(realm_id, user_id, None)
     }
 
@@ -5809,6 +5833,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<usize, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
@@ -5847,6 +5874,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         request: &UpdateUserRequest,
         audit_ctx: &AuditContext,
     ) -> Result<User, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.update_user_impl(realm_id, user_id, request, Some(audit_ctx))
     }
 
@@ -5856,6 +5886,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         audit_ctx: &AuditContext,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.delete_user_impl(realm_id, user_id, Some(audit_ctx))
     }
 
@@ -5866,6 +5899,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         password: &CleartextPassword,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Validate password length (DoS bound) and HSEC-003 floor.
         validation::validate_password_length(password.as_bytes())?;
         validation::validate_password_floor(password.as_bytes())?;
@@ -6439,6 +6475,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         session_id: &SessionId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let mut session = self
             .load_session_raw(realm_id, session_id)?
             .ok_or(IdentityError::SessionNotFound)?;
@@ -6627,6 +6666,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         keep: Option<&SessionId>,
     ) -> Result<u32, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let mut offset = 0u64;
         let batch = crate::core::MAX_PAGE_LIMIT;
         let mut revoked: u32 = 0;
@@ -7256,6 +7298,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &RegisterClientRequest,
     ) -> Result<OAuthClient, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.register_client_inner(realm_id, request)
     }
 
@@ -7421,6 +7466,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::TokenRevocationRequest,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.revoke_token_inner(realm_id, request)
     }
 
@@ -7447,6 +7495,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<TotpEnrollment, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Ensure user exists
         let user = self
             .get_user(realm_id, user_id)?
@@ -7504,6 +7555,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         code: &str,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let mut state = self
             .load_mfa_state(realm_id, user_id)?
             .ok_or(IdentityError::MfaNotEnabled)?;
@@ -7811,6 +7865,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         origin: &str,
         discoverable: bool,
     ) -> Result<WebAuthnCredentialInfo, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Extract challenge from clientDataJSON to look up pending
         let client_data: serde_json::Value =
             serde_json::from_slice(client_data_json).map_err(|e| {
@@ -8106,6 +8163,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         credential_id: &[u8],
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let cred_id_b64 = URL_SAFE_NO_PAD.encode(credential_id);
 
         // Delete credential record
@@ -8197,6 +8257,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         email: &str,
     ) -> Result<MagicLinkResponse, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Enforce realm policy before any user-visible work.
         self.check_allowed_auth_method(realm_id, "magic_link")?;
 
@@ -8339,6 +8402,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &RegisterUserRequest,
     ) -> Result<RegisterUserResponse, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // The system realm never accepts self-registration — it is
         // Hearth's admin home, not an application realm.
         if keys::is_system_realm(realm_id) {
@@ -8501,6 +8567,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         email: &str,
     ) -> Result<Option<String>, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // 1. Normalize email
         let normalized = validation::validate_email(email)?;
 
@@ -8550,6 +8619,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         token: &str,
         new_password: &CleartextPassword,
     ) -> Result<UserId, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // 1. SHA-256 hash the incoming token
         let token_hash = Self::sha256_hex(token.as_bytes());
         let key = keys::encode_password_reset_token(&token_hash);
@@ -9270,6 +9342,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client_id: &crate::core::ClientId,
         request: &crate::identity::oidc::UpdateClientRequest,
     ) -> Result<OAuthClient, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.update_client_inner(realm_id, client_id, request)
     }
 
@@ -9286,6 +9361,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         client_id: &crate::core::ClientId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.delete_client_inner(realm_id, client_id)
     }
 
@@ -9294,6 +9372,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         requests: &[CreateUserRequest],
     ) -> Result<Vec<BulkResult<User>>, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.bulk_create_users_inner(realm_id, requests)
     }
 
@@ -9302,6 +9383,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_ids: &[UserId],
     ) -> Result<Vec<BulkResult<()>>, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.bulk_disable_users_inner(realm_id, user_ids)
     }
 
@@ -9340,6 +9424,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         client_id: &ClientId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.revoke_consent_inner(realm_id, user_id, client_id)
     }
 
@@ -9348,6 +9435,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<usize, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.revoke_all_consents_for_user_inner(realm_id, user_id)
     }
 
@@ -10065,6 +10155,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         org_id: &OrganizationId,
         request: &UpdateOrganizationRequest,
     ) -> Result<Organization, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         if keys::is_system_realm(realm_id) {
             return Err(IdentityError::SystemRealmProtected {
                 operation: "update_organization",
@@ -10128,6 +10221,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         org_id: &OrganizationId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let org = self
             .get_organization(realm_id, org_id)?
             .ok_or(IdentityError::OrganizationNotFound)?;
@@ -10356,6 +10452,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         role: OrganizationRole,
     ) -> Result<OrganizationMembership, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Verify org exists and is active
         let org = self
             .get_organization(realm_id, org_id)?
@@ -10430,6 +10529,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         org_id: &OrganizationId,
         user_id: &UserId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let fwd_key = keys::encode_membership_by_org(org_id, user_id);
         let membership_bytes = self
             .storage
@@ -10491,6 +10593,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         new_role: OrganizationRole,
     ) -> Result<OrganizationMembership, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let fwd_key = keys::encode_membership_by_org(org_id, user_id);
         let membership_bytes = self
             .storage
@@ -10876,6 +10981,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         invitation_id: &InvitationId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let inv_key = keys::encode_invitation_id(invitation_id);
         let inv_bytes = self
             .storage
@@ -11070,6 +11178,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         idp_id: &crate::core::IdpId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Sever every external-identity link this connector owns before
         // removing the connector record itself. Forward indexes
         // `fed:ext_fwd:{user}:{idp}` are cleaned by first enumerating
@@ -11321,6 +11432,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         external_id: &str,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         if external_id.is_empty() {
             return Err(IdentityError::InvalidInput {
                 reason: "externalId must not be empty".to_string(),
@@ -11441,6 +11555,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         org_id: &OrganizationId,
         external_id: &str,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         if external_id.is_empty() {
             return Err(IdentityError::InvalidInput {
                 reason: "externalId must not be empty".to_string(),
@@ -11560,6 +11677,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         req: &crate::identity::CreateWebhookRequest,
     ) -> Result<crate::identity::Webhook, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         use crate::identity::types::Webhook;
         let id = WebhookId::generate();
         let now = self.clock.now();
@@ -11651,6 +11771,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         webhook_id: &WebhookId,
         req: &crate::identity::UpdateWebhookRequest,
     ) -> Result<crate::identity::Webhook, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         use crate::identity::types::Webhook;
         let existing = self
             .get_webhook(realm_id, webhook_id)?
@@ -11680,6 +11803,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         webhook_id: &WebhookId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let key = keys::encode_webhook_id(webhook_id);
         match self
             .storage
@@ -11850,6 +11976,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         request: &UpdateAgentRequest,
         caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let key = keys::encode_agent_id(agent_id);
         let mut agent = self
             .get_agent(realm_id, agent_id)?
@@ -11923,6 +12052,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         agent_id: &AgentId,
         caller: Option<&crate::core::UserId>,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -12146,6 +12278,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         agent_id: &AgentId,
         caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let mut agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -12190,6 +12325,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         request: &CreateAgentApiKeyRequest,
         caller: Option<&crate::core::UserId>,
     ) -> Result<CreateAgentApiKeyResponse, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         // Agent must exist and be active
         let agent = self
             .get_agent(realm_id, agent_id)?
@@ -12313,6 +12451,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         cred_id: &AgentCredentialId,
         caller: Option<&crate::core::UserId>,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let cred_key = keys::encode_agent_credential(agent_id, cred_id);
         let bytes = self
             .storage
@@ -12641,6 +12782,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         sp: &crate::identity::federation::saml::SamlServiceProvider,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let key = keys::encode_saml_sp_key(&sp.sp_key);
         let bytes = serde_json::to_vec(sp).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
@@ -12707,6 +12851,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let key = keys::encode_saml_sp_key(sp_key);
         self.storage
             .delete(realm_id, &key)
@@ -13381,6 +13528,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &RegisterProtectedResourceRequest,
     ) -> Result<ProtectedResource, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         if request.resource_uri.is_empty() {
             return Err(IdentityError::InvalidInput {
                 reason: "resource_uri must not be empty".to_string(),
@@ -13490,6 +13640,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         resource_id: &crate::core::ResourceServerId,
         request: &UpdateProtectedResourceRequest,
     ) -> Result<ProtectedResource, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let key = keys::encode_resource_server_id(resource_id);
         let bytes = self
             .storage
@@ -13536,6 +13689,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         resource_id: &crate::core::ResourceServerId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let key = keys::encode_resource_server_id(resource_id);
         let bytes = self
             .storage
@@ -13905,6 +14061,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         delegation_id: &str,
         user_sub: &str,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.revoke_delegation_grant_inner(realm_id, delegation_id, user_sub)
     }
 
@@ -13913,6 +14072,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::types::CreateApprovalRequestInput,
     ) -> Result<crate::identity::types::ApprovalRequest, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         let approval = self.create_approval_request_inner(realm_id, request)?;
         // C.5: attempt immediate webhook delivery; outbox entry is already
         // WAL-durable so failures are safe (recovery scan will retry).
@@ -13992,6 +14154,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn revoke_aat(&self, realm_id: &RealmId, jti: &str) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.revoke_aat_inner(realm_id, jti)
     }
 
@@ -14030,6 +14195,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::types::CreateCrossRealmPolicyRequest,
     ) -> Result<crate::identity::types::CrossRealmTrustPolicy, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.create_cross_realm_policy_inner(realm_id, request)
     }
 
@@ -14053,6 +14221,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         policy_id: &str,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.delete_cross_realm_policy_inner(realm_id, policy_id)
     }
 
@@ -14072,6 +14243,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::types::RegisterSpiffeIdRequest,
     ) -> Result<crate::identity::types::SpiffeIdentityMapping, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.register_spiffe_mapping_inner(realm_id, request)
     }
 
@@ -14088,6 +14262,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
     ) -> Result<(), IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5).
+        self.require_active_realm(realm_id)?;
         self.delete_spiffe_mapping_inner(realm_id, agent_id)
     }
 
@@ -17627,6 +17804,107 @@ mod tests {
             "{} key(s) survived realm deletion: {names:?}",
             names.len()
         );
+    }
+
+    /// Audit 2026-08-28 §4.20#5: realm archival is the incident-response
+    /// freeze control, but 11 of 16 mutating engine operations still wrote an
+    /// archived realm — `set_password`, `delete_user` and `register_client`
+    /// among them. An archived realm must refuse every mutation.
+    #[test]
+    fn archived_realm_refuses_mutations() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        // Archive the realm.
+        engine
+            .update_realm(
+                &realm,
+                &UpdateRealmRequest {
+                    name: None,
+                    status: Some(RealmStatus::Archived),
+                    config: None,
+                },
+            )
+            .expect("archive realm");
+
+        // set_password — the audit named this one.
+        let pw = CleartextPassword::from_string("valid-password789".to_string());
+        assert!(
+            matches!(
+                engine.set_password(&realm, user.id(), &pw),
+                Err(IdentityError::RealmSuspended)
+            ),
+            "set_password must be refused on an archived realm"
+        );
+
+        // register_client — the audit named this one.
+        assert!(
+            matches!(
+                engine.register_client(
+                    &realm,
+                    &RegisterClientRequest {
+                        client_name: "Late App".to_string(),
+                        redirect_uris: vec!["https://late.example.com/cb".to_string()],
+                        grant_types: vec!["authorization_code".to_string()],
+                        ..Default::default()
+                    },
+                ),
+                Err(IdentityError::RealmSuspended)
+            ),
+            "register_client must be refused on an archived realm"
+        );
+
+        // delete_user — the audit named this one.
+        assert!(
+            matches!(
+                engine.delete_user(&realm, user.id()),
+                Err(IdentityError::RealmSuspended)
+            ),
+            "delete_user must be refused on an archived realm"
+        );
+
+        // A revoke of an existing session must also be refused.
+        let session = {
+            // Un-archive briefly to mint a session, then re-archive.
+            engine
+                .update_realm(
+                    &realm,
+                    &UpdateRealmRequest {
+                        name: None,
+                        status: Some(RealmStatus::Active),
+                        config: None,
+                    },
+                )
+                .expect("reactivate");
+            let s = engine
+                .create_session(&realm, user.id(), &SessionContext::default())
+                .expect("create session");
+            engine
+                .update_realm(
+                    &realm,
+                    &UpdateRealmRequest {
+                        name: None,
+                        status: Some(RealmStatus::Archived),
+                        config: None,
+                    },
+                )
+                .expect("re-archive");
+            s
+        };
+        assert!(
+            matches!(
+                engine.revoke_session(&realm, session.id()),
+                Err(IdentityError::RealmSuspended)
+            ),
+            "revoke_session must be refused on an archived realm"
+        );
+
+        // delete_realm itself MUST still work on an archived realm — archival
+        // is the precondition for permanent deletion, not a block on it.
+        engine
+            .delete_realm(&realm)
+            .expect("delete_realm must succeed on an archived realm");
     }
 
     #[test]
