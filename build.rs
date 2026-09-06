@@ -23,10 +23,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Tradeoff: tier 2 requires `git` on PATH and tags reachable from HEAD.
     // Tier 1 is the only path that guarantees an exact match in every environment.
-    if let Ok(v) = std::env::var("HEARTH_RELEASE_VERSION") {
+    //
+    // Audit 2026-08-28 §4.8#11 / §4.12#5: the container build has no `.git`
+    // (`.dockerignore` strips it), so tier 2 cannot run there and tier 3 used
+    // to engage silently — `hearth --version` inside the published image
+    // reported a stale Cargo.toml value. The Dockerfile now threads the
+    // release tag through as HEARTH_RELEASE_VERSION, and the tier-3 fallback
+    // below is loud instead of silent. An empty HEARTH_RELEASE_VERSION is
+    // treated as unset so a misplumbed CI variable cannot stamp "".
+    let release_version = std::env::var("HEARTH_RELEASE_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if let Some(v) = release_version {
         println!("cargo:rustc-env=CARGO_PKG_VERSION={v}");
     } else if let Some(v) = git_describe_version() {
         println!("cargo:rustc-env=CARGO_PKG_VERSION={v}");
+    } else {
+        println!(
+            "cargo:warning=version fallback: no HEARTH_RELEASE_VERSION and no usable \
+             `git describe` — the binary will report Cargo.toml's version ({}), which is \
+             only an approximation of the latest release. Release builds must set \
+             HEARTH_RELEASE_VERSION (audit 2026-08-28 §4.12#5).",
+            std::env::var("CARGO_PKG_VERSION")
+                .as_deref()
+                .unwrap_or("unknown")
+        );
     }
     println!("cargo:rerun-if-env-changed=HEARTH_RELEASE_VERSION");
     // Rebuild when the checked-out tag or HEAD changes so `git describe` stays current.

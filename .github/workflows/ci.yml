@@ -293,6 +293,13 @@ jobs:
       - name: Advisory gates — guard self-test
         run: bash scripts/tests/check-advisory-gates.test.sh
 
+      # Audit §4.8#11 / §4.12#5: release SBOMs described a stale version
+      # because cargo-cyclonedx reads Cargo.toml. release.yml and docker.yml
+      # stamp the tag's version with scripts/stamp-version.sh first; this
+      # test proves the stamp touches the [package] version and nothing else.
+      - name: Version stamp — self-test
+        run: bash scripts/tests/stamp-version.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:

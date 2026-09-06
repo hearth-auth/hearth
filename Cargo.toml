@@ -8,7 +8,7 @@ exclude = ["loadtest"]
 
 [package]
 name = "hearth"
-version = "1.6.9"
+version = "1.6.11"
 edition = "2021"
 description = "Purpose-built identity database: authentication, authorization, and session management"
 license = "Apache-2.0"

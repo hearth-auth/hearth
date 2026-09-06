@@ -74,10 +74,23 @@ COPY benches ./benches
 # example config contains no credentials and is safe to include.
 COPY hearth.example.yaml ./
 
+# Thread the release version into the compiled binary. The build context has
+# no .git (`.dockerignore` strips it), so build.rs cannot `git describe` here;
+# without an explicit version the binary inside the published image reports
+# Cargo.toml's stale fallback (audit 2026-08-28 §4.8#11, §4.12#5). CI passes
+# BUILD_VERSION=<git tag>; a non-release value (the `dev` default, `pr-N`)
+# deliberately leaves HEARTH_RELEASE_VERSION unset, and build.rs warns loudly.
+ARG BUILD_VERSION=dev
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release --bin hearth \
+    case "$BUILD_VERSION" in \
+        v[0-9]*) export HEARTH_RELEASE_VERSION="${BUILD_VERSION#v}" ;; \
+        [0-9]*)  export HEARTH_RELEASE_VERSION="$BUILD_VERSION" ;; \
+        *)       echo "BUILD_VERSION='$BUILD_VERSION' is not a release version;" \
+                      "the binary will report the Cargo.toml fallback" ;; \
+    esac \
+    && cargo build --release --bin hearth \
     && strip target/release/hearth \
     && cp target/release/hearth /tmp/hearth
 

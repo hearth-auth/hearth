@@ -39,6 +39,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   operations race. Requests without `If-Match` are unaffected.
 
 ### Changed
+- **The version an operator sees is now the version that is running (audit 2026-08-28 §2.4,
+  §4.8#11, §4.12#5)** — the container build has no `.git`, so the binary inside every published
+  image silently fell back to a stale `Cargo.toml` value, and both published SBOMs described
+  that stale version too; the audit found the version wrong in five of seven operator-visible
+  surfaces. The Dockerfile now threads the release tag into the compiled binary
+  (`BUILD_VERSION` → `HEARTH_RELEASE_VERSION`), both SBOM jobs stamp the tag's version into
+  `Cargo.toml` before generating (`scripts/stamp-version.sh`), and a build that resolves no
+  release version warns loudly instead of falling back silently. `Cargo.toml` is bumped to
+  `1.6.11` to match the newest server tag.
 - **`make check` now runs every gate and reports each result (audit 2026-08-28 §1, §2.3)** —
   `check` chained `clippy`, `fmt`, `test-quality` and `test` as make prerequisites, so the first
   failing gate aborted the whole target and the remaining gates never ran. A denied clippy lint

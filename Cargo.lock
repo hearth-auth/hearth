@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "hearth"
-version = "1.6.9"
+version = "1.6.11"
 dependencies = [
  "arc-swap",
  "argon2",

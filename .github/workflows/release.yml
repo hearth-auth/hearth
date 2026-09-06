@@ -346,6 +346,13 @@ jobs:
         with:
           tool: cargo-cyclonedx@0.5.9
 
+      # cargo-cyclonedx reads Cargo.toml, which carries the last manually
+      # bumped version, not the tag being released. Stamp the tag's version
+      # first so the published SBOM describes the release it ships with
+      # (audit 2026-08-28 §4.8#11, §4.12#5).
+      - name: Stamp workspace version from the release tag
+        run: bash scripts/stamp-version.sh "${GITHUB_REF_NAME}"
+
       - name: Generate SBOM
         run: cargo cyclonedx --format json --spec-version 1.4
 
