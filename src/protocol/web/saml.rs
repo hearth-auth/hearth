@@ -21,8 +21,8 @@ use crate::identity::federation::saml::types::{SamlNameIdFormat, SamlStateBag};
 use crate::identity::federation::saml::{
     build_authn_request_xml, build_idp_metadata, build_logout_response_xml, build_post_form_html,
     build_redirect_url, build_response_xml, build_sp_metadata, parse_authn_request,
-    parse_logout_request, parse_post_form_saml, sign_element, BuildLogoutResponseParams,
-    IdpMetadataParams, SamlSpOutcome, SamlSpService, SpMetadataParams,
+    parse_logout_request, parse_post_form_saml, sign_element, verify_signed_element,
+    BuildLogoutResponseParams, IdpMetadataParams, SamlSpOutcome, SamlSpService, SpMetadataParams,
 };
 use crate::identity::federation::IdpKind;
 
@@ -658,6 +658,30 @@ async fn idp_complete_slo(
     let Ok(Some(sp)) = state.identity.get_saml_sp_by_entity_id(&realm, &req.issuer) else {
         return (StatusCode::NOT_FOUND, "unknown SP").into_response();
     };
+
+    // This endpoint mints a realm-key-signed LogoutResponse below, so it is a
+    // signing oracle. Refuse to sign unless the inbound LogoutRequest is
+    // authenticated by the SP's registered certificate — an unauthenticated
+    // caller must never drive the realm key (audit 2026-08-28 §4.10#2). Fail
+    // closed when the SP has no certificate registered (nothing to verify
+    // against) or the embedded signature does not verify. The HTTP-Redirect
+    // binding carries its signature as query parameters, not in the XML, so
+    // an SP using SLO must present a signed HTTP-POST LogoutRequest.
+    let Some(sp_cert) = sp.sp_certificate_pem.as_deref() else {
+        return (
+            StatusCode::FORBIDDEN,
+            "SP has no certificate registered; a signed LogoutRequest is required",
+        )
+            .into_response();
+    };
+    if verify_signed_element(&xml, "LogoutRequest", sp_cert).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            "LogoutRequest signature did not verify",
+        )
+            .into_response();
+    }
+
     let Some(slo_url) = sp.slo_url.clone() else {
         return (StatusCode::BAD_REQUEST, "SP has no SLO URL registered").into_response();
     };

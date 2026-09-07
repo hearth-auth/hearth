@@ -44,6 +44,13 @@ fn null_email_service() -> Arc<EmailService> {
 }
 
 fn build_app() -> axum::Router {
+    build_app_full().0
+}
+
+/// Like [`build_app`] but also returns the shared identity engine and realm id
+/// so a test can register additional SPs (with known certs) against the same
+/// storage the router reads.
+fn build_app_full() -> (axum::Router, Arc<dyn IdentityEngine>, hearth::core::RealmId) {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -101,6 +108,27 @@ fn build_app() -> axum::Router {
         )
         .expect("register sp");
 
+    // An SP with an SLO URL registered — the IdP-side SLO endpoint mints a
+    // realm-key-signed LogoutResponse for this SP, so it must authenticate
+    // the inbound LogoutRequest (audit 2026-08-28 §4.10#2).
+    identity
+        .register_saml_sp(
+            realm.id(),
+            &SamlServiceProvider {
+                sp_key: "logout-sp".to_string(),
+                entity_id: "https://sp.example".to_string(),
+                acs_url: "https://sp.example/acs".to_string(),
+                slo_url: Some("https://sp.example/slo".to_string()),
+                sp_certificate_pem: None,
+                sign_assertions: true,
+                sign_responses: true,
+                want_authn_requests_signed: false,
+                nameid_format: SamlNameIdFormat::EmailAddress,
+                attribute_map: BTreeMap::new(),
+            },
+        )
+        .expect("register slo sp");
+
     let onboarding = Arc::new(OnboardingService::new(
         Arc::clone(&identity),
         Arc::clone(&authz),
@@ -118,7 +146,25 @@ fn build_app() -> axum::Router {
     )
     .with_dev_mode(true);
 
-    web::router(state)
+    (
+        web::router(state),
+        Arc::clone(&identity),
+        realm.id().clone(),
+    )
+}
+
+/// Encodes a DER certificate as PEM (mirrors the helper in `tests/saml.rs`).
+fn cert_der_to_pem(der: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    let b64 = B64.encode(der);
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).expect("base64 is valid utf8"));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
 }
 
 fn send(app: &axum::Router, req: Request<Body>) -> axum::http::Response<Body> {
@@ -223,6 +269,122 @@ fn idp_sso_init_unauthenticated_redirects_to_login() {
             .unwrap(),
     );
     assert_redirect_to_login(resp);
+}
+
+/// An unsigned but well-formed SAML `LogoutRequest` from `https://sp.example`,
+/// base64-encoded for the HTTP-POST binding.
+fn unsigned_logout_request_b64() -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    B64.encode(
+        br#"<samlp:LogoutRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_lo1" Version="2.0" IssueInstant="2024-01-01T00:00:00Z" Destination="https://hearth.example/ui/realms/demo/saml/slo-idp"><saml:Issuer>https://sp.example</saml:Issuer><saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress">victim@sp.example</saml:NameID></samlp:LogoutRequest>"#,
+    )
+}
+
+/// §4.10#2 (audit 2026-08-28): the IdP-side SLO endpoint is an unauthenticated
+/// realm-key signing oracle. An anonymous caller posts a `LogoutRequest` for a
+/// registered SP and gets back a realm-signed `LogoutResponse`, because the
+/// inbound request's signature is never verified. The endpoint MUST refuse to
+/// sign for an unauthenticated (unsigned / unverifiable) LogoutRequest.
+#[test]
+fn idp_slo_post_unsigned_request_is_not_a_signing_oracle() {
+    let app = build_app();
+    let form = format!(
+        "SAMLRequest={}",
+        urlencoding_lite(&unsigned_logout_request_b64())
+    );
+    let resp = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/ui/realms/demo/saml/slo-idp")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(form))
+            .unwrap(),
+    );
+    let status = resp.status();
+    let body = body_string(resp);
+    assert!(
+        !body.contains("SAMLResponse"),
+        "no realm-signed SAMLResponse may be minted for an unauthenticated \
+         LogoutRequest (§4.10#2); got status {status}, body: {body}"
+    );
+    assert!(
+        status == axum::http::StatusCode::FORBIDDEN
+            || status == axum::http::StatusCode::BAD_REQUEST,
+        "an unsigned LogoutRequest must be refused (403/400), got {status}"
+    );
+}
+
+/// A LogoutRequest signed by the SP's registered certificate must still be
+/// honored — the §4.10#2 fix must authenticate the request, not refuse all of
+/// them. Proves the gate is a real signature check, not a blanket denial.
+#[test]
+fn idp_slo_post_signed_request_is_honored() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::core::Timestamp;
+    use hearth::identity::federation::saml::{
+        build_logout_request_xml, sign_element, BuildLogoutRequestParams, SamlNameIdFormat,
+        SamlServiceProvider,
+    };
+    use hearth::identity::tokens::RsaSigningKey;
+
+    let (app, identity, realm_id) = build_app_full();
+
+    // SP keypair; register the SP with its cert so Hearth can authenticate it.
+    let sp_key = RsaSigningKey::generate("test-sp", 365).expect("sp key");
+    let sp_cert_pem = cert_der_to_pem(sp_key.cert_der());
+    identity
+        .register_saml_sp(
+            &realm_id,
+            &SamlServiceProvider {
+                sp_key: "signed-sp".to_string(),
+                entity_id: "https://signed-sp.example".to_string(),
+                acs_url: "https://signed-sp.example/acs".to_string(),
+                slo_url: Some("https://signed-sp.example/slo".to_string()),
+                sp_certificate_pem: Some(sp_cert_pem),
+                sign_assertions: true,
+                sign_responses: true,
+                want_authn_requests_signed: true,
+                nameid_format: SamlNameIdFormat::EmailAddress,
+                attribute_map: BTreeMap::new(),
+            },
+        )
+        .expect("register signed sp");
+
+    let req_xml = build_logout_request_xml(&BuildLogoutRequestParams {
+        id: "_lo_signed_1",
+        destination: "https://hearth.example/ui/realms/demo/saml/slo-idp",
+        issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        issuer: "https://signed-sp.example",
+        name_id: "victim@signed-sp.example",
+        name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: None,
+    });
+    let signed = sign_element(req_xml.as_bytes(), "_lo_signed_1", &sp_key).expect("sign request");
+    let form = format!("SAMLRequest={}", urlencoding_lite(&B64.encode(&signed)));
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/ui/realms/demo/saml/slo-idp")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(form))
+            .unwrap(),
+    );
+    let status = resp.status();
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "a signature-verified LogoutRequest must be honored, got {status}"
+    );
+    let body = body_string(resp);
+    assert!(
+        body.contains("SAMLResponse"),
+        "a signature-verified LogoutRequest must receive a signed SAMLResponse"
+    );
 }
 
 /// Minimal percent-encoding for the base64 alphabet's `+`, `/`, and `=`.

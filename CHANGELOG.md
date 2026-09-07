@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **The SAML IdP-side SLO endpoint is no longer an unauthenticated signing oracle (audit
+  2026-08-28 §4.10#2)** — `POST`/`GET /ui/realms/{realm}/saml/slo-idp` minted a realm-key-signed
+  `<LogoutResponse>` for any resolvable SP without verifying the inbound `<LogoutRequest>`, so an
+  anonymous caller could drive the realm's SAML signing key. The endpoint now verifies the
+  request's XML signature against the SP's registered `sp_certificate_pem` before signing, and
+  fails closed (`403`) when the SP has no certificate registered or the signature does not
+  verify. An SP that uses SLO must present a signed HTTP-POST `LogoutRequest` and have its
+  certificate registered; the HTTP-Redirect binding (query-string signature) is not accepted for
+  SLO.
 - **A revoked delegation is now refused by `introspect` and `decide` (audit 2026-08-28
   §4.19#5)** — both endpoints consulted the JTI revocation blocklist only for sessionless
   (`sid == "none"`) tokens. A delegation/OBO access token from RFC 8693 token exchange is
