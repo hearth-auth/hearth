@@ -73,7 +73,7 @@ found it, the audit piece, and the report's severity.
 ## 9. Wave 2 (HIGH) — Authentication controls
 
 - [x] 9.1 Stop `/ui/realms/{realm}/saml/slo-idp` acting as an unauthenticated realm-key signing oracle (§4.10#2 · P23 · HIGH)
-- [ ] 9.2 Stop recovery credentials reaching the operator log: the onboarding invitation writes a live realm-admin password-reset URL at WARN, and reset links reach the log on the default transport (§4.14#2, §4.24#2 · P26/P17 · HIGH)
+- [x] 9.2 Stop recovery credentials reaching the operator log: the onboarding invitation writes a live realm-admin password-reset URL at WARN, and reset links reach the log on the default transport (§4.14#2, §4.24#2 · P26/P17 · HIGH)
 - [ ] 9.3 Parse `X-Forwarded-For` across every field line rather than `get()`'s first line only, so a client-supplied line cannot shadow the proxy-appended one (§4.17#1 · P15 · HIGH — degrades to near-nil behind a merge-style proxy such as nginx)
 - [ ] 9.4 Rate-shape the login form so a forged per-request client IP cannot drive unbounded pre-auth Argon2id work with no 429, no 503 and green health checks (§4.17#2 · P15 · HIGH — same proxy-shape caveat as 9.3)
 - [ ] 9.5 Require a step-up authentication for passkey enrolment; a stolen session otherwise becomes a permanent MFA-free credential (§4.18#2 · P16 · HIGH)

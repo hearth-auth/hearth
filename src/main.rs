@@ -3011,6 +3011,10 @@ fn build_email_sender(
                 .ok_or("MailcatcherState must be pre-built before build_email_sender")?;
             Arc::new(MailcatcherSender::new(state))
         }
+        // Dev logs the full body so an engineer can click the link; production
+        // suppresses it — the body carries recovery links (audit 2026-08-28
+        // §4.14#2, §4.24#2).
+        EmailTransport::Log if config.dev_mode => Arc::new(LoggingEmailSender::new_dev()),
         EmailTransport::Log => Arc::new(LoggingEmailSender::new()),
         EmailTransport::Smtp => Arc::new(smtp_sender_from_config(&config.email)?),
         EmailTransport::Sendgrid => {

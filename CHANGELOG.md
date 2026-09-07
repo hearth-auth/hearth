@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **The default `log` email transport no longer writes recovery links to the operator log in
+  production (audit 2026-08-28 §4.14#2, §4.24#2)** — with no external mail server configured,
+  the log transport emitted the full email body at WARN, so password-reset links, email-
+  verification links, the first-run setup URL and organization-invitation accept URLs — each a
+  single-use recovery credential — landed in the operator log. In production the body and
+  subject are now suppressed (only the recipient and a "configure a real transport" note are
+  logged); `--dev` still logs the full body so an engineer can follow the link from the
+  terminal. Operators relying on reading links from production logs must configure a real
+  `email.transport`.
 - **The SAML IdP-side SLO endpoint is no longer an unauthenticated signing oracle (audit
   2026-08-28 §4.10#2)** — `POST`/`GET /ui/realms/{realm}/saml/slo-idp` minted a realm-key-signed
   `<LogoutResponse>` for any resolvable SP without verifying the inbound `<LogoutRequest>`, so an
