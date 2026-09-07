@@ -1204,3 +1204,124 @@ async fn introspection_scoped_to_intended_audience() {
         "unscoped introspect (server-side) must still return active"
     );
 }
+
+// ===== Every refresh token belongs to a family (audit 2026-08-28 §4.19#3, §4.16#6) =====
+
+/// A ROPC (password grant) refresh token must carry an `fid` and rotate.
+///
+/// The password, step-up-MFA, device and password-reset grants minted refresh
+/// tokens with no `fid`, so `refresh_tokens` took the legacy branch that has
+/// neither rotation, nor reuse detection, nor the confidential-client and
+/// FAPI DPoP gates — the token replayed forever and theft detection could
+/// never fire (production-readiness audit 2026-08-28 §4.19#3, §4.16#6).
+#[tokio::test]
+async fn password_grant_refresh_token_carries_fid_and_rotates() {
+    use hearth::identity::decode_claims_unverified;
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+    let password = "correct-horse-battery-staple";
+    harness
+        .identity()
+        .set_password(
+            &realm,
+            user.id(),
+            &CleartextPassword::from_string(password.to_string()),
+        )
+        .expect("set password");
+
+    let response = harness
+        .identity()
+        .password_grant_token(
+            &realm,
+            &PasswordGrantRequest {
+                email: user.email().to_string(),
+                password: password.to_string(),
+                scope: None,
+                ..Default::default()
+            },
+        )
+        .expect("password_grant_token should succeed");
+
+    let refresh = response.refresh_token().to_string();
+    let claims = decode_claims_unverified(&refresh).expect("decode refresh token");
+    assert!(
+        claims.fid.is_some(),
+        "a ROPC refresh token must carry a grant-family identifier (fid), got none"
+    );
+
+    // Rotation: redeeming the token succeeds once…
+    let rotated = harness
+        .identity()
+        .refresh_tokens(&realm, &refresh, None, None)
+        .expect("first refresh must succeed");
+    assert!(
+        decode_claims_unverified(rotated.refresh_token())
+            .expect("decode rotated refresh")
+            .fid
+            .is_some(),
+        "the rotated refresh token must keep its fid"
+    );
+
+    // …and replaying the pre-rotation token is refused as reuse.
+    let replay = harness
+        .identity()
+        .refresh_tokens(&realm, &refresh, None, None);
+    assert!(
+        matches!(replay, Err(IdentityError::TokenRevoked)),
+        "replaying a rotated ROPC refresh token must trip reuse detection \
+         (TokenRevoked), got: {replay:?}"
+    );
+}
+
+/// A device-grant refresh token must carry an `fid` (same defect class).
+#[tokio::test]
+async fn device_grant_refresh_token_carries_fid() {
+    use hearth::identity::decode_claims_unverified;
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Device Grant Fid".to_string(),
+                redirect_uris: vec![],
+                client_secret: None,
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                require_consent: true,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let device_resp = harness
+        .identity()
+        .device_authorize(
+            &realm,
+            &DeviceAuthorizationRequest {
+                client_id: client.client_id().clone(),
+                scope: Some("openid".to_string()),
+            },
+        )
+        .expect("device authorize");
+    harness
+        .identity()
+        .approve_device(&realm, &device_resp.user_code, user.id())
+        .expect("approve device");
+
+    let tokens = harness
+        .identity()
+        .poll_device_token(&realm, &device_resp.device_code, client.client_id())
+        .expect("poll after approval must return tokens");
+    let claims =
+        decode_claims_unverified(tokens.refresh_token()).expect("decode device refresh token");
+    assert!(
+        claims.fid.is_some(),
+        "a device-grant refresh token must carry a grant-family identifier (fid), got none"
+    );
+}

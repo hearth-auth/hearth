@@ -77,6 +77,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **BREAKING: every refresh token now belongs to a grant family and rotates (audit 2026-08-28
+  §4.19#3, §4.16#6)** — the ROPC, step-up-MFA, device-code and password-reset flows minted
+  refresh tokens with no family identifier (`fid`), so refreshing them took a legacy branch with
+  no rotation, no reuse detection, and none of the confidential-client or FAPI DPoP gates: the
+  same refresh token replayed forever and theft detection could never fire. Token issuance now
+  creates a grant family for every pair, so all refresh tokens rotate and a replayed
+  pre-rotation token revokes the family and its session. Integrations that redeem a refresh
+  token and keep using the old one will now be signed out on the replay — store the rotated
+  refresh token from every refresh response, per RFC 9700 §4.14.2. Previously-issued (`fid`-less)
+  refresh tokens keep working through the legacy branch until they expire.
 - **A revoked sessionless token is now refused on every cluster node (audit 2026-08-28
   §4.16#5)** — the hot-path revoked-JTI projection was populated once at startup and updated
   only by the node's own API handlers, so a `client_credentials` token revoked on one node

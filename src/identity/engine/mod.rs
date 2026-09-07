@@ -7145,7 +7145,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // here would produce tokens that never validate. Mirrors the refresh
         // path, which already uses `get_signing_key_or_default`.
         let realm_signing_key = self.get_signing_key_or_default(realm_id);
-        realm_signing_key.issue_token_pair(&IssueTokenRequest {
+        // Every refresh token belongs to a grant family, so rotation and
+        // reuse detection apply to ROPC, step-up-MFA, device-grant and
+        // password-reset refreshes exactly as they do to the
+        // authorization-code grant. Without an `fid`, `refresh_tokens` takes
+        // the legacy branch that has neither rotation, nor reuse detection,
+        // nor the client-authentication gates (audit 2026-08-28 §4.19#3,
+        // §4.16#6).
+        let family_id = uuid::Uuid::new_v4().to_string();
+        let pair = realm_signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
             sid: &session_id.to_string(),
             tid: &realm_id.to_string(),
@@ -7174,7 +7182,44 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             } else {
                 Some(scope_str)
             },
-        })
+            fid: Some(family_id.clone()),
+        })?;
+
+        let family = crate::identity::oidc::StoredGrantFamily {
+            family_id: family_id.clone(),
+            current_refresh_hash: Self::sha256_hex(pair.refresh_token().as_bytes()),
+            session_id: session_id.clone(),
+            realm_id: realm_id.clone(),
+            revoked: false,
+            created_at: now,
+            expires_at: crate::core::Timestamp::from_micros(
+                now.as_micros() + effective_token_cfg.refresh_token_ttl_secs * 1_000_000,
+            ),
+            client_id: ctx.client_id.clone(),
+            resources: ctx.resource.iter().cloned().collect(),
+            amr_values: Vec::new(),
+            ua_hash: None,
+            bound_asn: None,
+            bound_jkt: None,
+        };
+        let family_bytes =
+            serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_grant_family(&family_id),
+                &family_bytes,
+            )
+            .map_err(Self::storage_err)?;
+        // Index session → family for cascade revocation on session termination.
+        let sfam_key = keys::encode_session_grant_family(session_id, &family_id);
+        self.storage
+            .put(realm_id, &sfam_key, &[])
+            .map_err(Self::storage_err)?;
+
+        Ok(pair)
     }
 
     fn validate_token(

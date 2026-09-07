@@ -736,7 +736,7 @@ impl SigningKey {
             oid: request.oid.map(str::to_string),
             token_type: "access".to_string(),
             jti: Some(Uuid::new_v4().to_string()),
-            fid: None,
+            fid: request.fid.clone(),
             scope: request.scope.clone(),
             nonce: None,
             azp: None,
@@ -766,7 +766,7 @@ impl SigningKey {
             oid: request.oid.map(str::to_string),
             token_type: "refresh".to_string(),
             jti: None,
-            fid: None,
+            fid: request.fid.clone(),
             scope: None,
             nonce: None,
             azp: None,
@@ -843,6 +843,13 @@ pub struct IssueTokenRequest<'a> {
     /// Set to `Some(scope_str)` when the token is issued within an explicit
     /// OAuth grant so that token-exchange can enforce scope intersection.
     pub scope: Option<String>,
+    /// Grant-family identifier embedded in both tokens' `fid` claim.
+    ///
+    /// A refresh token whose `fid` is present rotates through the grant
+    /// family and is subject to reuse detection; one without falls into the
+    /// legacy non-rotating branch (audit 2026-08-28 §4.19#3, §4.16#6). The
+    /// caller is responsible for persisting the matching `StoredGrantFamily`.
+    pub fid: Option<String>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -1584,6 +1591,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("issue pair");
 
@@ -1626,6 +1634,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("reissue pair");
 
@@ -2113,6 +2122,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("issue pair");
 
@@ -2146,6 +2156,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("issue pair2");
         let second_access_claims =
