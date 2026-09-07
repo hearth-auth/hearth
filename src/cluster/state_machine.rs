@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{Cursor, Read as _, Write as _};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use flate2::read::GzDecoder;
@@ -30,6 +30,7 @@ use tokio::task::spawn_blocking;
 use tracing::{debug, info, instrument};
 
 use crate::cluster::types::{HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
+use crate::cluster::ReplicatedWriteObserver;
 use crate::core::RealmId;
 use crate::storage::StorageEngine;
 
@@ -174,17 +175,38 @@ pub struct HearthStateMachine {
     last_membership: StoredMembership<u64, HearthNode>,
     /// Most recently built or installed snapshot (kept for `get_current_snapshot`).
     current_snapshot: Option<StoredSnapshot>,
+    /// Slot for the node-local projection observer (audit 2026-08-28 §4.16#5).
+    ///
+    /// A shared `OnceLock` rather than a direct field because the state
+    /// machine is consumed by `Raft::new` before the identity engine — the
+    /// observer's implementor — exists. `build_clustered` keeps a clone of
+    /// this slot and the server composition root fills it after construction
+    /// via [`super::engine::ClusterEngine::set_replicated_write_observer`].
+    observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
 }
 
 impl HearthStateMachine {
     /// Create a state machine wrapping an existing storage engine.
     pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
+        Self::with_observer_slot(engine, Arc::new(OnceLock::new()))
+    }
+
+    /// Create a state machine with a shared observer slot.
+    ///
+    /// The slot may be filled at any later point; applies before that are
+    /// simply not observed (matching startup, where the projection is built
+    /// by a full scan anyway).
+    pub fn with_observer_slot(
+        engine: Arc<dyn StorageEngine>,
+        observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
+    ) -> Self {
         Self {
             engine,
             known_realms: BTreeSet::new(),
             last_applied: None,
             last_membership: StoredMembership::default(),
             current_snapshot: None,
+            observer,
         }
     }
 }
@@ -287,6 +309,17 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             .await
             .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
 
+        // The whole key-space was replaced — node-local projections derived
+        // from it (revoked-JTI blocklist, …) must be rebuilt from storage
+        // (audit 2026-08-28 §4.16#5). The rebuild scans storage, so it runs
+        // on the blocking pool like the restore itself.
+        if let Some(obs) = self.observer.get() {
+            let obs = Arc::clone(obs);
+            spawn_blocking(move || obs.on_replicated_reset())
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))?;
+        }
+
         // Rebuild known_realms from the snapshot.
         self.known_realms = realm_ids;
 
@@ -342,9 +375,15 @@ impl HearthStateMachine {
                 value,
             } => {
                 self.known_realms.insert(realm.clone());
-                spawn_blocking(move || engine.put(&realm, &key, &value).map_err(to_write_err))
-                    .await
-                    .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
+                spawn_blocking(move || {
+                    engine.put(&e_realm, &e_key, &e_value).map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    obs.on_replicated_put(&realm, &key, &value);
+                }
             }
 
             RaftCommand::Delete {
@@ -353,9 +392,13 @@ impl HearthStateMachine {
                 key,
             } => {
                 self.known_realms.insert(realm.clone());
-                spawn_blocking(move || engine.delete(&realm, &key).map_err(to_write_err))
+                let (e_realm, e_key) = (realm.clone(), key.clone());
+                spawn_blocking(move || engine.delete(&e_realm, &e_key).map_err(to_write_err))
                     .await
                     .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    obs.on_replicated_delete(&realm, &key);
+                }
             }
 
             RaftCommand::Batch {
@@ -364,9 +407,17 @@ impl HearthStateMachine {
                 entries,
             } => {
                 self.known_realms.insert(realm.clone());
-                spawn_blocking(move || engine.put_batch(&realm, &entries).map_err(to_write_err))
-                    .await
-                    .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                let (e_realm, e_entries) = (realm.clone(), entries.clone());
+                spawn_blocking(move || {
+                    engine.put_batch(&e_realm, &e_entries).map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    for (key, value) in &entries {
+                        obs.on_replicated_put(&realm, key, value);
+                    }
+                }
             }
 
             RaftCommand::PutIfAbsent {
@@ -379,13 +430,19 @@ impl HearthStateMachine {
                 // State machine entries are applied sequentially — no concurrent
                 // apply can interleave between the get and the put here, so the
                 // check-and-write is atomically serialised by Raft ordering.
+                let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
                 let success = spawn_blocking(move || {
                     engine
-                        .put_if_absent(&realm, &key, &value)
+                        .put_if_absent(&e_realm, &e_key, &e_value)
                         .map_err(to_write_err)
                 })
                 .await
                 .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if success {
+                    if let Some(obs) = self.observer.get() {
+                        obs.on_replicated_put(&realm, &key, &value);
+                    }
+                }
                 return Ok(HearthLogResponse {
                     success,
                     payload: Vec::new(),
@@ -1038,5 +1095,130 @@ mod tests {
         // Snapshot must include all pairs.
         let payload = decompress_payload(&snap.snapshot.into_inner()).unwrap();
         assert_eq!(payload.realms[0].entries.len(), 20);
+    }
+
+    // ── Follower revoked-JTI projection (audit 2026-08-28 §4.16#5) ────────────
+
+    /// An `oauth:revjti:` write applied by the state machine must reach the
+    /// node-local revoked-JTI projection without a restart.
+    ///
+    /// On a follower, a sessionless-token revocation arrives only as this raw
+    /// storage write. The projection (`revoked_jti_cache`) was populated once
+    /// at startup and updated only by the node's own API handlers, so a token
+    /// revoked on the leader stayed valid on every follower until that
+    /// follower restarted.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn applied_revjti_put_reaches_follower_projection() {
+        use crate::audit::{AuditEngine, EmbeddedAuditEngine};
+        use crate::core::{Clock, FakeClock, Timestamp};
+        use crate::identity::{
+            decode_claims_unverified, ClientCredentialsRequest, CreateRealmRequest,
+            CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
+            RegisterClientRequest,
+        };
+
+        let dir = tempdir().unwrap();
+        let storage: Arc<dyn StorageEngine> = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().join("data"))).unwrap(),
+        );
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let mk_identity = || {
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            ));
+            EmbeddedIdentityEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+                identity_config.clone(),
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("identity engine")
+        };
+
+        // The "leader" seeds the shared replicated state and mints a
+        // sessionless client-credentials token.
+        let leader = mk_identity();
+        let realm = leader
+            .create_realm(&CreateRealmRequest {
+                name: "revjti-cluster-realm".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+        let realm_id = realm.id().clone();
+        let secret = "revjti-secret-abcdefgh!";
+        let client = leader
+            .register_client(
+                &realm_id,
+                &RegisterClientRequest {
+                    client_name: "M2M".to_string(),
+                    redirect_uris: vec![],
+                    client_secret: Some(secret.to_string()),
+                    grant_types: vec!["client_credentials".to_string()],
+                    require_consent: false,
+                    client_logo_url: None,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+        let response = leader
+            .client_credentials_token(
+                &realm_id,
+                &ClientCredentialsRequest {
+                    client_id: client.client_id().clone(),
+                    client_secret: Some(secret.to_string()),
+                    scope: Some("read".to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
+                },
+            )
+            .expect("client credentials token");
+        let token = response.access_token().to_string();
+        let claims = decode_claims_unverified(&token).expect("decode");
+        let jti = claims.jti.clone().expect("sessionless token carries jti");
+
+        // The "follower": a second engine over the same replicated storage,
+        // built before the revocation — its startup scan sees no revocation.
+        let follower = Arc::new(mk_identity());
+        assert!(
+            follower.validate_token(&realm_id, &token).is_ok(),
+            "sanity: the follower must accept the token before revocation"
+        );
+
+        // The leader's revocation reaches the follower as a raw replicated
+        // write applied by the state machine — same key and value the revoke
+        // handler writes. Observer wiring mirrors `build_clustered` + the
+        // server composition root: slot first, observer registered later.
+        let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
+            Arc::new(OnceLock::new());
+        let mut sm = HearthStateMachine::with_observer_slot(
+            Arc::clone(&storage),
+            Arc::clone(&observer_slot),
+        );
+        observer_slot
+            .set(Arc::clone(&follower) as Arc<dyn ReplicatedWriteObserver>)
+            .ok();
+        let revjti_key = crate::identity::keys::encode_revoked_jti(&jti);
+        sm.apply([make_put_entry(
+            1,
+            realm_id.clone(),
+            revjti_key,
+            claims.exp.to_le_bytes().to_vec(),
+        )])
+        .await
+        .unwrap();
+
+        let after = follower.validate_token(&realm_id, &token);
+        assert!(
+            after.is_err(),
+            "a token revoked via a replicated write must be refused by the follower \
+             without a restart (§4.16#5), got: {after:?}"
+        );
     }
 }

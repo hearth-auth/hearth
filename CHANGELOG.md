@@ -77,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A revoked sessionless token is now refused on every cluster node (audit 2026-08-28
+  §4.16#5)** — the hot-path revoked-JTI projection was populated once at startup and updated
+  only by the node's own API handlers, so a `client_credentials` token revoked on one node
+  stayed valid on every other node until that node restarted. The Raft state machine now
+  notifies a projection observer for every applied write (and rebuilds projections after a
+  snapshot install), so a replicated `oauth:revjti:` write reaches each follower's blocklist
+  immediately. Multi-node clustering remains EXPERIMENTAL and not production-supported in 1.x;
+  this closes one of the known follower-staleness defects (C-5 class).
 - **A refresh now re-resolves the subject's current claims (audit 2026-08-28 §4.16#4)** — the
   rotation path copied the presented token's `roles`, `groups`, `org_groups`, `permissions` and
   custom claims verbatim into the new pair, so a role revoked after issuance was re-minted on

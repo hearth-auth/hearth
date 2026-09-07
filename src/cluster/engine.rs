@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use openraft::error::{ClientWriteError, RaftError};
@@ -31,6 +31,7 @@ use crate::cluster::network::HearthNetworkFactory;
 use crate::cluster::server::IncomingRpcDispatch;
 use crate::cluster::state_machine::HearthStateMachine;
 use crate::cluster::types::{HearthNode, HearthRaftConfig, RaftCommand};
+use crate::cluster::ReplicatedWriteObserver;
 use crate::config::ClusterConfig;
 use crate::core::RealmId;
 use crate::storage::{EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine};
@@ -89,6 +90,10 @@ pub struct ClusterEngine {
     /// bootstrap HTTP handler without requiring access to `ClusterConfig`.
     /// `None` in single-node mode.
     initial_members: Option<BTreeMap<u64, HearthNode>>,
+    /// Shared slot for the state machine's projection observer (audit
+    /// 2026-08-28 §4.16#5). `None` in single-node mode — there is no state
+    /// machine, and the node's own API handlers keep projections coherent.
+    observer_slot: Option<Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>>,
 }
 
 impl ClusterEngine {
@@ -103,6 +108,23 @@ impl ClusterEngine {
             read_lag_threshold_ms: 500,
             self_node_id: None,
             initial_members: None,
+            observer_slot: None,
+        }
+    }
+
+    /// Register the node-local projection observer with the state machine
+    /// (audit 2026-08-28 §4.16#5).
+    ///
+    /// Called by the server composition root once the identity engine exists —
+    /// the state machine is consumed by `Raft::new` before that point, so the
+    /// registration goes through the shared slot. No-op in single-node mode.
+    /// A second call is ignored with a warning; the observer is set once at
+    /// startup.
+    pub fn set_replicated_write_observer(&self, observer: Arc<dyn ReplicatedWriteObserver>) {
+        if let Some(slot) = &self.observer_slot {
+            if slot.set(observer).is_err() {
+                warn!("replicated-write observer already set; ignoring second registration");
+            }
         }
     }
 
@@ -121,7 +143,14 @@ impl ClusterEngine {
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
         let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
-        let state_machine = HearthStateMachine::new(sm_engine);
+        // Shared observer slot: the state machine is consumed by `Raft::new`
+        // below, but the projection observer (the identity engine) is built
+        // later — the composition root fills the slot via
+        // `set_replicated_write_observer` (audit 2026-08-28 §4.16#5).
+        let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
+            Arc::new(OnceLock::new());
+        let state_machine =
+            HearthStateMachine::with_observer_slot(sm_engine, Arc::clone(&observer_slot));
 
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
@@ -189,6 +218,7 @@ impl ClusterEngine {
             read_lag_threshold_ms: threshold,
             self_node_id: Some(config.node_id),
             initial_members: Some(initial_members),
+            observer_slot: Some(observer_slot),
         })
     }
 

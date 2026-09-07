@@ -852,6 +852,48 @@ impl std::fmt::Debug for EmbeddedIdentityEngine {
     }
 }
 
+/// Node-local projection maintenance for writes applied by the Raft state
+/// machine (audit 2026-08-28 §4.16#5).
+///
+/// On a follower, a sessionless-token revocation arrives only as a raw
+/// `oauth:revjti:` storage write. These callbacks keep the hot-path
+/// revoked-JTI projection coherent with such writes; the node's own API
+/// handlers update the projection synchronously and never pass through here.
+impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
+    fn on_replicated_put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
+        let prefix = keys::revoked_jti_scan_prefix();
+        if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
+            let jti = String::from_utf8_lossy(jti_bytes);
+            // Same two storage-value formats `populate_revoked_jti_cache`
+            // accepts: 8-byte LE i64 expiry, or legacy `b"1"` (no expiry).
+            let exp: i64 = if value.len() == 8 {
+                i64::from_le_bytes(value.try_into().unwrap_or([0xff_u8; 8]))
+            } else {
+                i64::MAX
+            };
+            self.insert_revoked_jti_cache(realm_id, &jti, exp);
+        }
+    }
+
+    fn on_replicated_delete(&self, realm_id: &RealmId, key: &[u8]) {
+        let prefix = keys::revoked_jti_scan_prefix();
+        if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
+            let jti = String::from_utf8_lossy(jti_bytes);
+            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
+            self.revoked_jti_cache.remove(cache_key.as_str());
+        }
+    }
+
+    fn on_replicated_reset(&self) {
+        if let Err(e) = self.populate_revoked_jti_cache() {
+            tracing::error!(
+                error = %e,
+                "failed to rebuild the revoked-JTI projection after snapshot install"
+            );
+        }
+    }
+}
+
 impl EmbeddedIdentityEngine {
     fn claim_profile_overrides(
         &self,

@@ -1346,6 +1346,12 @@ async fn run_serve(
     )?);
     // Wire session-version bumping so RBAC changes invalidate standing tokens.
     raw_rbac_engine.init_sv_bumper(Arc::clone(&raw_identity_engine) as Arc<dyn SvBumper>);
+    // Wire the Raft state machine's projection observer so a revocation
+    // replicated to this node reaches the hot-path revoked-JTI blocklist
+    // without a restart (audit 2026-08-28 §4.16#5). No-op in single-node mode.
+    cluster_engine.set_replicated_write_observer(
+        Arc::clone(&raw_identity_engine) as Arc<dyn hearth::cluster::ReplicatedWriteObserver>
+    );
     let identity_engine: Arc<dyn IdentityEngine> = raw_identity_engine;
 
     // Build the PermissionRegistry from the initial config and wrap it in an
