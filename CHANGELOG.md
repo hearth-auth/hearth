@@ -77,6 +77,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **The federation confirm-link password verify now shares the KDF admission gate (audit
+  2026-08-28 §4.17#2 class)** — `POST /ui/federation/confirm-link` ran its Argon2id
+  `verify_password` outside the shared bounded gate, the last such ungated caller; it now routes
+  through the same permit pool as every other pre-auth hash and sheds `503 Retry-After` when the
+  gate is saturated, so total concurrent hashing stays bounded across all callers. The login
+  form itself was already gated; combined with the `X-Forwarded-For` fix above, a forged
+  per-request client IP can no longer drive unbounded pre-auth Argon2id work.
 - **`X-Forwarded-For` is now parsed across every field line, not just the first (audit
   2026-08-28 §4.17#1)** — the client-IP extractor read only `get("x-forwarded-for")`'s first
   header line. A merge-style proxy (e.g. nginx) appends its observed peer as a *separate*

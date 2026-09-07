@@ -581,12 +581,36 @@ pub async fn confirm_link_submit(
     ) {
         return Redirect::to("/ui/login").into_response();
     }
-    // Verify local password.
+    // Verify local password. This is an Argon2id op, so route it through the
+    // shared KDF admission gate — every pre-auth hash MUST join the one permit
+    // pool that bounds total hashing work and sheds 503 on overload
+    // (audit 2026-08-28 §4.17#2 class; HEA-1891/F3). This callsite was the last
+    // ungated `verify_password`.
     let cleartext = crate::identity::CleartextPassword::from_string(form.password);
-    let ok = state
-        .identity
-        .verify_password(&realm_id, &ticket_rec.user_id, &cleartext)
-        .unwrap_or(false);
+    let realm_for_verify = realm_id.clone();
+    let user_for_verify = ticket_rec.user_id.clone();
+    let identity = state.identity.clone();
+    let ok = match crate::identity::gate()
+        .run(move || identity.verify_password(&realm_for_verify, &user_for_verify, &cleartext))
+        .await
+    {
+        Ok(Ok(true)) => true,
+        Ok(Ok(false) | Err(_)) => false,
+        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+            return super::handlers::kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                None,
+                None,
+                None,
+            );
+        }
+        Err(crate::identity::KdfGateError::Join(e)) => {
+            tracing::warn!(error = %e, "confirm-link verify_password KDF task panicked");
+            false
+        }
+    };
     if !ok {
         // Redirect to login rather than back to the confirm-link page.
         // Returning to confirm-link with the ticket reveals that the ticket
