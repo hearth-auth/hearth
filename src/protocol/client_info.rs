@@ -67,11 +67,24 @@ pub fn extract_client_ip(
         return peer.ip().to_canonical().to_string();
     }
 
-    // Parse X-Forwarded-For (comma-separated, rightmost = closest proxy)
-    let xff = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    // Combine EVERY `X-Forwarded-For` field line in received order, not just
+    // the first. A merge-style proxy (e.g. nginx) appends its observed peer as
+    // a separate header line rather than extending the client's; RFC 7230
+    // §3.2.2 makes N same-name lines equivalent to one comma-joined value in
+    // received order. Reading `get()`'s first line only let a client-supplied
+    // line shadow the proxy-appended one, so the attacker chose his own client
+    // IP (audit 2026-08-28 §4.17#1). A non-UTF-8 line is unverifiable, so the
+    // walk fails closed on it exactly as it does for an unparseable hop.
+    let mut xff = String::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let Ok(part) = value.to_str() else {
+            return peer.ip().to_canonical().to_string();
+        };
+        if !xff.is_empty() {
+            xff.push(',');
+        }
+        xff.push_str(part);
+    }
 
     // Walk right-to-left, find the first non-trusted hop
     for ip_str in xff.rsplit(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -303,6 +316,29 @@ mod tests {
         ];
         let result = extract_client_ip(&headers, trusted_peer(), &trusted);
         assert_eq!(result, "203.0.113.50");
+    }
+
+    #[test]
+    fn multiple_xff_field_lines_are_all_parsed() {
+        // §4.17#1 (audit 2026-08-28): a merge-style proxy (nginx) appends its
+        // observed peer as a SEPARATE `X-Forwarded-For` header line rather than
+        // extending the client's. Reading `get()`'s first line only lets the
+        // client-supplied line shadow the proxy-appended one, so the attacker
+        // chooses his own client IP. All field lines must be combined in
+        // received order (RFC 7230 §3.2.2) before the rightmost-non-trusted
+        // walk runs.
+        let mut headers = HeaderMap::new();
+        // Line 1: attacker-supplied, forging a client IP.
+        headers.append("x-forwarded-for", HeaderValue::from_static("6.6.6.6"));
+        // Line 2: appended by the trusted proxy — the real client.
+        headers.append("x-forwarded-for", HeaderValue::from_static("203.0.113.50"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(
+            result, "203.0.113.50",
+            "the proxy-appended field line (rightmost non-trusted) must win over a \
+             client-supplied earlier line"
+        );
     }
 
     #[test]

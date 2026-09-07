@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **`X-Forwarded-For` is now parsed across every field line, not just the first (audit
+  2026-08-28 §4.17#1)** — the client-IP extractor read only `get("x-forwarded-for")`'s first
+  header line. A merge-style proxy (e.g. nginx) appends its observed peer as a *separate*
+  `X-Forwarded-For` line rather than extending the client's, so a client-supplied first line
+  shadowed the proxy-appended real one and the caller chose their own client IP — defeating
+  per-IP rate limiting and lockout. All field lines are now combined in received order (RFC 7230
+  §3.2.2) before the rightmost-non-trusted walk; a non-UTF-8 line fails closed to the peer.
+  Only affects deployments with `trusted_proxies` configured (XFF is ignored from an untrusted
+  peer). Behind an append-style front end that folds into a single line, behavior is unchanged.
 - **The default `log` email transport no longer writes recovery links to the operator log in
   production (audit 2026-08-28 §4.14#2, §4.24#2)** — with no external mail server configured,
   the log transport emitted the full email body at WARN, so password-reset links, email-
