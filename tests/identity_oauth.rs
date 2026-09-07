@@ -1479,3 +1479,99 @@ fn consent_records_are_realm_isolated() {
         .expect("get");
     assert!(other.is_none());
 }
+
+// ===== Refresh rotation atomicity (audit 2026-08-28 §4.16#1) =====
+
+/// Two concurrent presentations of one refresh token must not both succeed.
+///
+/// Rotation was an unsynchronised read-modify-write: racing refreshes all
+/// passed the current-hash check and each minted a pair, and whichever
+/// caller's family write landed last silently invalidated every other
+/// winner's refresh token — the loser's next rotation then tripped theft
+/// detection and revoked the whole family with no attacker involved
+/// (production-readiness audit 2026-08-28 §4.16#1).
+#[test]
+fn concurrent_refresh_of_one_token_yields_exactly_one_success() {
+    const ROUNDS: usize = 8;
+    const THREADS: usize = 8;
+
+    let (_dir, engine, clock) = setup_engine();
+    let engine = Arc::new(engine);
+    let realm_id = create_test_realm(&engine);
+    let client = register_test_client(&engine, &realm_id);
+
+    for round in 0..ROUNDS {
+        let user = create_test_user(&engine, &realm_id);
+        let auth = engine
+            .authorize(
+                &realm_id,
+                &AuthorizationRequest {
+                    client_id: client.client_id().clone(),
+                    redirect_uri: "https://app.example.com/callback".to_string(),
+                    scope: "openid".to_string(),
+                    state: format!("race-state-{round}"),
+                    response_type: "code".to_string(),
+                    user_id: user.id().clone(),
+                    code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+                    code_challenge_method: Some(CodeChallengeMethod::S256),
+                    nonce: None,
+                    resource: None,
+                    amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
+                },
+            )
+            .expect("authorize");
+        let tokens = engine
+            .exchange_authorization_code(
+                &realm_id,
+                &TokenExchangeRequest {
+                    client_id: client.client_id().clone(),
+                    code: auth.code().to_string(),
+                    redirect_uri: "https://app.example.com/callback".to_string(),
+                    code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
+                },
+            )
+            .expect("exchange");
+        let refresh = tokens.refresh_token().to_string();
+        clock.advance(1_000_000);
+
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                let realm = realm_id.clone();
+                let token = refresh.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    engine.refresh_tokens(&realm, &token, None, None)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("refresh thread panicked"))
+            .collect();
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "round {round}: exactly one of {THREADS} concurrent presentations of one \
+             refresh token may succeed, got {successes} — rotation must be atomic (§4.16#1)"
+        );
+        for result in &results {
+            if let Err(e) = result {
+                assert!(
+                    matches!(e, IdentityError::TokenRevoked),
+                    "round {round}: a losing concurrent presentation must be refused as \
+                     reuse (TokenRevoked), got: {e:?}"
+                );
+            }
+        }
+    }
+}

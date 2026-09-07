@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Refresh-token rotation is now atomic (audit 2026-08-28 §4.16#1)** — rotation was an
+  unsynchronised read-modify-write, so two concurrent presentations of the same refresh token
+  both succeeded and both minted a token pair; whichever caller's rotation landed last silently
+  invalidated the other's new refresh token, and that caller's next refresh tripped theft
+  detection and revoked the whole grant family — signing the user out with the eviction logged
+  against them, no attacker required. The rotation sequence now holds a per-grant-family lock
+  from hash check to rotated write, so exactly one concurrent presentation succeeds and every
+  other is refused as reuse (`401` / `token revoked`) instead of receiving a second,
+  soon-to-be-poisoned token pair.
 - **A merge to `main` is now blocked until its required check reports success (audit 2026-08-28
   §4.8#3)** — the `Protect main` ruleset granted the repository admin role an always-on bypass,
   and the audited commit merged **41 minutes before** its one required context reported failure.

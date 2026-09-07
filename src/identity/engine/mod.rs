@@ -830,6 +830,18 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
     // INVARIANT: inner (per-code) guard held only across the sync load + validate + delete window; no .await in scope.
     code_exchange_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-`(realm, fid)` advisory lock serializing grant-family rotation.
+    ///
+    /// Without it, `rotate_grant_family` is an unsynchronised read-modify-write:
+    /// two concurrent presentations of the same refresh token both pass the
+    /// current-hash check and both mint a pair, and whichever caller's family
+    /// write lands last silently invalidates the other winner's refresh token
+    /// (audit 2026-08-28 §4.16#1). Callers hold this lock across the entire
+    /// load → hash-check → issue → rotate-write sequence.
+    ///
+    // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
+    // INVARIANT: inner (per-family) guard held only across the sync rotation window; no .await in scope.
+    grant_family_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -1163,6 +1175,8 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
+            grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1719,6 +1733,8 @@ impl EmbeddedIdentityEngine {
             txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
+            grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -2888,6 +2904,14 @@ impl EmbeddedIdentityEngine {
         dpop_jkt: Option<&str>,
         bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError> {
+        // Serialize the whole load → hash-check → issue → rotate-write
+        // sequence per family. Without this, two concurrent presentations of
+        // one refresh token both pass the current-hash check below and both
+        // succeed (audit 2026-08-28 §4.16#1).
+        let rotation_lock = self.grant_family_lock(realm_id, fid);
+        // INVARIANT: guard held only across the sync rotation window; no .await in scope.
+        let _rotation_guard = rotation_lock.lock().expect("grant family lock poisoned");
+
         let family_key = keys::encode_grant_family(fid);
         let family_bytes = self
             .storage
@@ -4185,6 +4209,22 @@ impl EmbeddedIdentityEngine {
             map.entry(code_hash.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
+    }
+
+    /// Returns the per-`(realm_id, fid)` advisory lock serializing grant-family
+    /// rotation.
+    ///
+    /// Callers hold this lock across the entire load → hash-check → issue →
+    /// rotate-write sequence in `rotate_grant_family`, so two concurrent
+    /// presentations of one refresh token cannot both pass the current-hash
+    /// check (audit 2026-08-28 §4.16#1).
+    fn grant_family_lock(&self, realm_id: &RealmId, fid: &str) -> Arc<Mutex<()>> {
+        let key = format!("{}:{}", realm_id.as_uuid(), fid);
+        let mut map = self
+            .grant_family_locks
+            .lock()
+            .expect("grant_family_locks poisoned");
+        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
 
     /// Returns a per-request-id advisory lock for approval state transitions.
