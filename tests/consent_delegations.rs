@@ -254,6 +254,152 @@ async fn revoked_delegation_rejects_previously_issued_obo_token() {
     );
 }
 
+/// §4.19#5 (audit 2026-08-28): a revoked delegation's session-bound OBO token
+/// must go `active: false` on `introspect` and lose its permission on `decide`.
+///
+/// Both endpoints consulted the JTI revocation blocklist only in the
+/// `sid == "none"` branch. The OBO token from `rfc8693_token_exchange` is
+/// session-bound, so it took the session branch — which checks only that the
+/// session still exists. Revoking the delegation projects the token's `jti`
+/// into the blocklist and `validate_token` honours it, but `introspect` and
+/// `decide` did not, so a revoked delegation stayed `active: true` with live
+/// permissions on exactly the two endpoints a resource server calls.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // role setup + exchange + before/after on two endpoints
+async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
+    use hearth::identity::{DecidePermissionRequest, TokenIntrospectionRequest};
+    use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+
+    // Give the user a real permission so `decide` is `true` before revocation.
+    let role = harness
+        .rbac()
+        .create_role(
+            &realm_id,
+            &CreateRoleRequest {
+                name: "tools.user".to_string(),
+                description: None,
+                permissions: vec![Permission::new("tools.invoke").expect("perm")],
+                parent_roles: vec![],
+                ..Default::default()
+            },
+        )
+        .expect("create role");
+    harness
+        .rbac()
+        .assign_role(
+            &realm_id,
+            &AssignRoleRequest {
+                subject: Subject::User(user_id.clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role");
+
+    // Two scopes so `decide`'s single-scope narrowing is disabled and the
+    // user's realm-scoped `tools.invoke` permission resolves.
+    let scope = "mcp:tools:invoke openid";
+    let subject_token = build_subject_jwt(identity, &user_id, &realm_id, scope);
+    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, scope);
+    let request = Rfc8693Request {
+        client_id: actor_client_id,
+        subject_token,
+        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        actor_token: Some(actor_token),
+        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+        requested_token_type: None,
+        scope: Some(scope.to_string()),
+        resource: None,
+        audience: None,
+        dpop_jkt: None,
+    };
+    let obo_token = identity
+        .rfc8693_token_exchange(&realm_id, &request)
+        .expect("exchange should succeed")
+        .access_token;
+
+    // Sanity before revocation: introspect active, decide allowed.
+    let intro_before = identity
+        .introspect_token(
+            &realm_id,
+            &TokenIntrospectionRequest {
+                token: obo_token.clone(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("introspect before");
+    assert!(
+        intro_before.active,
+        "setup: OBO token must introspect active"
+    );
+    let decide_before = identity
+        .decide_token_permission(
+            &realm_id,
+            &DecidePermissionRequest {
+                token: obo_token.clone(),
+                permission: "tools.invoke".to_string(),
+                organization_id: None,
+                resource: None,
+            },
+        )
+        .expect("decide before");
+    assert!(
+        decide_before.allowed,
+        "setup: decide must allow before revoke"
+    );
+
+    // Revoke the delegation.
+    let user_sub = user_id.to_string();
+    let delegation_id = identity
+        .list_delegation_grants(&realm_id, &user_sub)
+        .expect("list")[0]
+        .delegation_id
+        .clone();
+    identity
+        .revoke_delegation_grant(&realm_id, &delegation_id, &user_sub)
+        .expect("revoke");
+
+    // Both resource-server endpoints must now refuse the token.
+    let intro_after = identity
+        .introspect_token(
+            &realm_id,
+            &TokenIntrospectionRequest {
+                token: obo_token.clone(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("introspect after");
+    assert!(
+        !intro_after.active,
+        "a revoked delegation's OBO token must introspect inactive (§4.19#5)"
+    );
+    let decide_after = identity
+        .decide_token_permission(
+            &realm_id,
+            &DecidePermissionRequest {
+                token: obo_token,
+                permission: "tools.invoke".to_string(),
+                organization_id: None,
+                resource: None,
+            },
+        )
+        .expect("decide after");
+    assert!(
+        !decide_after.allowed,
+        "a revoked delegation's OBO token must be denied by decide (§4.19#5)"
+    );
+}
+
 /// Revocation of another user's grant returns DelegationGrantNotFound.
 #[tokio::test]
 async fn revoke_other_users_delegation_is_not_found() {

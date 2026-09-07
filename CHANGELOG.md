@@ -77,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A revoked delegation is now refused by `introspect` and `decide` (audit 2026-08-28
+  §4.19#5)** — both endpoints consulted the JTI revocation blocklist only for sessionless
+  (`sid == "none"`) tokens. A delegation/OBO access token from RFC 8693 token exchange is
+  session-bound, so revoking the delegation — which projects the token's `jti` into the
+  blocklist and which `validate_token` already honoured — left the token `active: true` with a
+  live `allowed: true` on the two endpoints a resource server actually calls. Both now consult
+  the blocklist on every branch, so a revoked delegation is inactive and unauthorized
+  immediately.
 - **BREAKING: every refresh token now belongs to a grant family and rotates (audit 2026-08-28
   §4.19#3, §4.16#6)** — the ROPC, step-up-MFA, device-code and password-reset flows minted
   refresh tokens with no family identifier (`fid`), so refreshing them took a legacy branch with

@@ -2718,7 +2718,15 @@ impl EmbeddedIdentityEngine {
             return Ok(IntrospectionResponse::inactive());
         }
 
-        // 4. Check session validity (if session-bound) or JTI blocklist (if sessionless)
+        // 4. Consult the JTI revocation blocklist on BOTH branches. A
+        // session-bound OBO/delegation token carries a `jti` that delegation
+        // revocation projects into the blocklist; checking it only in the
+        // `sid == "none"` branch left a revoked delegation `active: true` with
+        // live permissions (audit 2026-08-28 §4.19#5). Mirrors the same guard
+        // in `validate_token` (G1).
+        if self.is_token_jti_revoked(realm_id, &claims) {
+            return Ok(IntrospectionResponse::inactive());
+        }
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
             if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
@@ -2726,12 +2734,6 @@ impl EmbeddedIdentityEngine {
                 if self.get_session(realm_id, &session_id)?.is_none() {
                     return Ok(IntrospectionResponse::inactive());
                 }
-            }
-        } else if let Some(ref jti) = claims.jti {
-            // Sessionless token — check JTI revocation projection (hot-path safe).
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            if self.revoked_jti_cache.contains_key(cache_key.as_str()) {
-                return Ok(IntrospectionResponse::inactive());
             }
         }
 
@@ -2854,19 +2856,19 @@ impl EmbeddedIdentityEngine {
             return Ok(DecidePermissionResponse { allowed: false });
         }
 
-        // Session / JTI revocation check.
+        // JTI revocation check on BOTH branches — a session-bound delegation
+        // token's `jti` is projected into the blocklist on revocation, and
+        // checking it only for `sid == "none"` left a revoked delegation
+        // returning `allowed: true` (audit 2026-08-28 §4.19#5).
+        if self.is_token_jti_revoked(realm_id, &claims) {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
             if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
                 if self.get_session(realm_id, &SessionId::new(uuid))?.is_none() {
                     return Ok(DecidePermissionResponse { allowed: false });
                 }
-            }
-        } else if let Some(ref jti) = claims.jti {
-            // Check JTI revocation projection (hot-path safe).
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            if self.revoked_jti_cache.contains_key(cache_key.as_str()) {
-                return Ok(DecidePermissionResponse { allowed: false });
             }
         }
 
