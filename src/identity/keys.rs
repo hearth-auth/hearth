@@ -710,7 +710,6 @@ pub(crate) fn encode_grant_family(family_id: &str) -> Vec<u8> {
 /// Returns the scan prefix for all grant families.
 ///
 /// Format: `oauth:family:`
-#[allow(dead_code)]
 pub(crate) fn grant_family_scan_prefix() -> Vec<u8> {
     GRANT_FAMILY_PREFIX.as_bytes().to_vec()
 }

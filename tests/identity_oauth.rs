@@ -17,8 +17,8 @@ use hearth::identity::RealmConfig;
 use hearth::identity::{
     AuthorizationRequest, CodeChallengeMethod, CreateRealmRequest, CreateUserRequest,
     CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, IdentityError,
-    OAuthClient, PendingAuthorizationRequest, RegisterClientRequest, SessionContext,
-    TokenExchangeRequest, User,
+    OAuthClient, PendingAuthorizationRequest, RefreshBindContext, RegisterClientRequest,
+    SessionContext, TokenExchangeRequest, User,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -1574,4 +1574,104 @@ fn concurrent_refresh_of_one_token_yields_exactly_one_success() {
             }
         }
     }
+}
+
+// ===== Client deletion revokes refresh tokens (audit 2026-08-28 §4.16#3) =====
+
+/// Deleting an OAuth client must revoke its outstanding refresh tokens.
+///
+/// Deletion removed the client record, which made `rotate_grant_family` skip
+/// every gate inside its `get_client` arm — the confidential-client
+/// authentication and the FAPI DPoP requirement — so a deleted client's
+/// refresh tokens kept rotating, with LESS authentication than before the
+/// deletion (production-readiness audit 2026-08-28 §4.16#3).
+#[test]
+fn deleting_a_client_revokes_its_outstanding_refresh_tokens() {
+    let (_dir, engine, clock) = setup_engine();
+    let realm_id = create_test_realm(&engine);
+    let user = create_test_user(&engine, &realm_id);
+    let client = engine
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "Doomed Confidential App".to_string(),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                client_secret: Some("delete-me-secret-abcdefgh!".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: true,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let auth = engine
+        .authorize(
+            &realm_id,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "https://app.example.com/cb".to_string(),
+                scope: "openid".to_string(),
+                state: "delete-state".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize");
+    let tokens = engine
+        .exchange_authorization_code(
+            &realm_id,
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth.code().to_string(),
+                redirect_uri: "https://app.example.com/cb".to_string(),
+                code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange");
+
+    // Sanity: while the client exists, an authenticated refresh rotates.
+    let bind = RefreshBindContext {
+        authenticated_client_id: Some(client.client_id().clone()),
+        ..Default::default()
+    };
+    clock.advance(1_000_000);
+    let rotated = engine
+        .refresh_tokens(&realm_id, tokens.refresh_token(), None, Some(&bind))
+        .expect("authenticated refresh must succeed while the client exists");
+
+    engine
+        .delete_client(&realm_id, client.client_id())
+        .expect("delete client");
+
+    // The deleted client's outstanding refresh token must be dead — even for
+    // a caller still presenting the client's (now meaningless) identity.
+    clock.advance(1_000_000);
+    let after_delete = engine.refresh_tokens(&realm_id, rotated.refresh_token(), None, Some(&bind));
+    assert!(
+        matches!(after_delete, Err(IdentityError::TokenRevoked)),
+        "a deleted client's refresh token must be refused with TokenRevoked, got: \
+         {after_delete:?}"
+    );
+
+    // And certainly for a caller presenting no client authentication at all —
+    // the audited exploit: deletion used to strip the confidential-client
+    // gate, making the token easier to redeem than before.
+    let unauthenticated = engine.refresh_tokens(&realm_id, rotated.refresh_token(), None, None);
+    assert!(
+        matches!(unauthenticated, Err(IdentityError::TokenRevoked)),
+        "a deleted client's refresh token must be refused unauthenticated, got: \
+         {unauthenticated:?}"
+    );
 }

@@ -3354,6 +3354,56 @@ impl EmbeddedIdentityEngine {
                 }
             }
         }
+
+        // Cascade: revoke every outstanding grant family issued to this
+        // client. Deleting only the client record left its families live
+        // while removing the record `rotate_grant_family` reads its
+        // confidential-client and FAPI DPoP gates from, so a deleted client's
+        // refresh tokens kept rotating with LESS authentication than before
+        // the deletion (audit 2026-08-28 §4.16#3).
+        let family_prefix = keys::grant_family_scan_prefix();
+        let family_end = keys::prefix_end(&family_prefix);
+        let family_entries = self
+            .storage
+            .scan(realm_id, &family_prefix, &family_end)
+            .map_err(Self::storage_err)?;
+        for entry in &family_entries {
+            let listed: StoredGrantFamily =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if listed.client_id.as_ref() != Some(client_id) {
+                continue;
+            }
+            // Serialize with any in-flight rotation on this family, then
+            // re-read under the lock so this revocation neither clobbers a
+            // concurrent rotation's hash write nor is clobbered by it.
+            let lock = self.grant_family_lock(realm_id, &listed.family_id);
+            // INVARIANT: guard held only across the sync re-read + revoke-write window; no .await in scope.
+            let _guard = lock.lock().expect("grant family lock poisoned");
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &entry.key)
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let mut family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if family.revoked {
+                continue;
+            }
+            family.revoked = true;
+            let updated =
+                serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &entry.key, &updated)
+                .map_err(Self::storage_err)?;
+        }
         self.record_audit(
             realm_id,
             None,

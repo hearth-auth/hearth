@@ -77,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Deleting an OAuth client now revokes its outstanding refresh tokens (audit 2026-08-28
+  §4.16#3)** — deletion removed only the client record, which is where the refresh path reads
+  its confidential-client authentication and FAPI DPoP requirements from, so a deleted client's
+  refresh tokens kept rotating indefinitely — and with *less* authentication than before the
+  deletion. All three delete routes (REST admin, gRPC, admin UI) now revoke every grant family
+  issued to the client, and the refresh path additionally refuses any grant family whose owning
+  client no longer exists. Integrations must obtain a new authorization after their client is
+  re-created; deletion is now a real credential revocation.
 - **Refresh-token rotation is now atomic (audit 2026-08-28 §4.16#1)** — rotation was an
   unsynchronised read-modify-write, so two concurrent presentations of the same refresh token
   both succeeded and both minted a token pair; whichever caller's rotation landed last silently

@@ -2933,35 +2933,41 @@ impl EmbeddedIdentityEngine {
         // standard-profile clients in a Baseline/Advanced realm cannot bypass
         // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
         if let Some(ref client_id) = family.client_id {
-            if let Some(client) = self.get_client(realm_id, client_id)? {
-                let realm_fapi = self
-                    .get_realm(realm_id)?
-                    .ok_or(IdentityError::RealmNotFound)?
-                    .config()
-                    .fapi_profile;
-                let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
-                if fapi_enforced && dpop_jkt.is_none() {
-                    return Err(IdentityError::FapiViolation {
-                        reason: "FAPI 2.0 requires sender-constrained tokens; \
-                                 include a DPoP proof and dpop_jkt in the token request"
-                            .to_string(),
-                    });
-                }
+            // Fail closed when the owning client no longer exists. Skipping
+            // this arm on a missing client stripped the confidential-client
+            // authentication and FAPI DPoP gates below, so a deleted client's
+            // refresh tokens kept rotating with LESS authentication than
+            // before the deletion (audit 2026-08-28 §4.16#3).
+            let Some(client) = self.get_client(realm_id, client_id)? else {
+                return Err(IdentityError::TokenRevoked);
+            };
+            let realm_fapi = self
+                .get_realm(realm_id)?
+                .ok_or(IdentityError::RealmNotFound)?
+                .config()
+                .fapi_profile;
+            let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
+            if fapi_enforced && dpop_jkt.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 requires sender-constrained tokens; \
+                             include a DPoP proof and dpop_jkt in the token request"
+                        .to_string(),
+                });
+            }
 
-                // O1 (HEA-1755): confidential-client refresh binding.
-                //
-                // The refresh grant carried no client authentication and no
-                // token↔client binding, so a refresh token issued to one
-                // confidential client could be redeemed unauthenticated or by a
-                // different client. Require that the caller authenticated as the
-                // exact confidential client the family was issued to. Public
-                // clients (no secret) are exempt — they have no secret channel
-                // and are already constrained by rotation + DPoP binding.
-                if client.client_secret_hash().is_some() {
-                    let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
-                    if authenticated != Some(client_id) {
-                        return Err(IdentityError::InvalidClient);
-                    }
+            // O1 (HEA-1755): confidential-client refresh binding.
+            //
+            // The refresh grant carried no client authentication and no
+            // token↔client binding, so a refresh token issued to one
+            // confidential client could be redeemed unauthenticated or by a
+            // different client. Require that the caller authenticated as the
+            // exact confidential client the family was issued to. Public
+            // clients (no secret) are exempt — they have no secret channel
+            // and are already constrained by rotation + DPoP binding.
+            if client.client_secret_hash().is_some() {
+                let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
+                if authenticated != Some(client_id) {
+                    return Err(IdentityError::InvalidClient);
                 }
             }
         }
