@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A refresh now re-resolves the subject's current claims (audit 2026-08-28 §4.16#4)** — the
+  rotation path copied the presented token's `roles`, `groups`, `org_groups`, `permissions` and
+  custom claims verbatim into the new pair, so a role revoked after issuance was re-minted on
+  every refresh, indefinitely — revocation never converged for a client that kept refreshing.
+  Rotation now runs the same claim resolution as fresh issuance: RBAC resolve at refresh time,
+  the realm claim profile, token-size validation, and the pre-token enrichment webhook (fired
+  with `grant_type: "refresh_token"`, honouring the realm's `on_error` policy). Scope, `oid`,
+  RFC 8707 resources and AMR remain bound to the original grant. Operators using the pre-token
+  webhook will now see it called on refresh as well as issuance.
 - **Deleting an OAuth client now revokes its outstanding refresh tokens (audit 2026-08-28
   §4.16#3)** — deletion removed only the client record, which is where the refresh path reads
   its confidential-client authentication and FAPI DPoP requirements from, so a deleted client's

@@ -3089,6 +3089,131 @@ impl EmbeddedIdentityEngine {
 
         self.refresh_session(realm_id, session_id)?;
 
+        // Re-resolve the subject's CURRENT authority instead of copying the
+        // presented token's RBAC claims verbatim. The copy re-minted a revoked
+        // role on every refresh, indefinitely — not a staleness window but a
+        // loop (audit 2026-08-28 §4.16#4). This mirrors
+        // `issue_tokens_with_context`: RBAC resolve, claim profile, size
+        // validation, and the pre-token webhook all run per rotation. Scope,
+        // `oid`, resources and AMR stay bound to the original grant.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+        let resolved = self
+            .rbac
+            .resolve_permissions(user_id, realm_id, None, None)
+            .map_err(|e| match e {
+                RbacError::TokenSizeExceeded {
+                    limit,
+                    limit_value,
+                    actual,
+                } => IdentityError::TokenTooLarge {
+                    limit: format!("access_token_{limit}"),
+                    limit_value,
+                    actual,
+                },
+                e => IdentityError::Internal {
+                    reason: format!("rbac resolve failed: {e}"),
+                },
+            })?;
+        let perm_strs: Vec<String> = resolved
+            .permissions
+            .iter()
+            .map(|p| p.as_str().to_string())
+            .collect();
+
+        let resolved_client = if let Some(ref cid) = family.client_id {
+            self.get_client(realm_id, cid)?
+        } else {
+            None
+        };
+        let sentinel_client = OAuthClient::new(
+            ClientId::generate(),
+            "session".to_string(),
+            Vec::new(),
+            self.clock.now(),
+        );
+        let effective_client = resolved_client.as_ref().unwrap_or(&sentinel_client);
+        let authz_mode = effective_client.access_token_authorization();
+        let access_resolved = if authz_mode == AccessTokenAuthorization::Embedded {
+            &resolved
+        } else {
+            &crate::rbac::ResolvedPermissions::default()
+        };
+
+        let granted_scopes: BTreeSet<String> = claims
+            .scope
+            .as_deref()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+        let (roles, groups, permissions, custom) = self.apply_claim_profile(
+            realm_id,
+            &user,
+            effective_client,
+            access_resolved,
+            &granted_scopes,
+            claims.oid.as_deref(),
+            ClaimTarget::AccessToken,
+        );
+        validate_claim_payload(ClaimTarget::AccessToken, &roles, &groups, &permissions)?;
+
+        let client_id_str = family
+            .client_id
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let extra_claims = self.fire_pre_token_webhook(
+            realm_id,
+            &user_id.to_string(),
+            &client_id_str,
+            "refresh_token",
+            claims.scope.as_deref(),
+            Some(&session_id.as_uuid().to_string()),
+            &roles,
+            &groups,
+            &permissions,
+            &custom,
+        )?;
+        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+
+        let embedded = authz_mode == AccessTokenAuthorization::Embedded;
+        let effective_perms: Vec<String> = if embedded {
+            if permissions.is_empty() {
+                perm_strs
+            } else {
+                permissions
+            }
+        } else {
+            Vec::new()
+        };
+        let effective_roles = if embedded { roles } else { Vec::new() };
+        let effective_groups = if embedded { groups } else { Vec::new() };
+
+        // Org-scoped group paths, mirroring `issue_token_pair`'s construction.
+        // A storage miss or parse failure is non-fatal: the token is rotated
+        // without org_groups rather than hard-failing the refresh.
+        let org_slug: Option<String> = claims.oid.as_deref().and_then(|oid_str| {
+            let org_id = oid_str.parse::<crate::core::OrganizationId>().ok()?;
+            match self.get_organization(realm_id, &org_id) {
+                Ok(Some(org)) => Some(org.slug().to_string()),
+                _ => {
+                    tracing::warn!(
+                        oid = oid_str,
+                        "org unresolved on refresh; org_groups omitted"
+                    );
+                    None
+                }
+            }
+        });
+        let org_groups: Vec<String> = match org_slug {
+            Some(slug) if !effective_groups.is_empty() => effective_groups
+                .iter()
+                .map(|g| format!("/{slug}/{g}"))
+                .collect(),
+            _ => Vec::new(),
+        };
+
         let signing_key = self.get_signing_key_or_default(realm_id);
         let iat = now_secs;
 
@@ -3121,17 +3246,17 @@ impl EmbeddedIdentityEngine {
             scope: claims.scope.clone(),
             nonce: None,
             azp: None,
-            roles: claims.roles.clone(),
-            groups: claims.groups.clone(),
-            org_groups: claims.org_groups.clone(),
-            permissions: claims.permissions.clone(),
+            roles: effective_roles.clone(),
+            groups: effective_groups.clone(),
+            org_groups,
+            permissions: effective_perms.clone(),
             required_actions: Vec::new(),
             act: None,
             amr: family.amr_values.clone(),
             cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
                 jkt: jkt.to_string(),
             }),
-            custom: claims.custom.clone(),
+            custom: custom.clone(),
             sv: claims.sv,
         };
         let new_refresh_claims = TokenClaims {
@@ -3150,10 +3275,10 @@ impl EmbeddedIdentityEngine {
             scope: claims.scope.clone(),
             nonce: None,
             azp: None,
-            roles: claims.roles.clone(),
-            groups: claims.groups.clone(),
+            roles: effective_roles,
+            groups: effective_groups,
             org_groups: Vec::new(),
-            permissions: claims.permissions.clone(),
+            permissions: effective_perms,
             required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
@@ -3162,7 +3287,7 @@ impl EmbeddedIdentityEngine {
                 .bound_jkt
                 .as_ref()
                 .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
-            custom: claims.custom.clone(),
+            custom,
             sv: None,
         };
 

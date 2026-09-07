@@ -65,7 +65,7 @@ found it, the audit piece, and the report's severity.
 - [x] 8.4 Validate `token.signing_key_rotation_grace_period` at start-up; a malformed value silently becomes 24 h and a negative value becomes effectively infinite (§4.15#2 · P06 · HIGH)
 - [x] 8.5 Make refresh rotation atomic; it is an unsynchronised read-modify-write, so two concurrent presentations of one token both succeed and the loser is signed out (§4.16#1 · P07 · HIGH, no attacker required)
 - [x] 8.6 Revoke a deleted OAuth client's outstanding refresh tokens; deletion strips the confidential-client authentication and FAPI DPoP gates instead (§4.16#3 · P07 · HIGH)
-- [ ] 8.7 Re-resolve claims on refresh instead of copying the presented token's RBAC claims and scope verbatim; a revoked role is re-minted on every refresh, indefinitely (§4.16#4 · P07 · HIGH)
+- [x] 8.7 Re-resolve claims on refresh instead of copying the presented token's RBAC claims and scope verbatim; a revoked role is re-minted on every refresh, indefinitely (§4.16#4 · P07 · HIGH)
 - [ ] 8.8 Replicate the revoked-JTI projection across the cluster; a sessionless token revoked on one node stays valid on every other until that node restarts (§4.16#5 · P07 · HIGH shape 3 only — the README labels this shape not production-supported)
 - [ ] 8.9 Mint every device-grant, step-up-MFA, ROPC and password-reset refresh token with an `fid`, so `refresh_tokens` runs the branch holding client authentication and reuse detection (§4.19#3 · P05 · HIGH)
 - [ ] 8.10 Consult the JTI revocation blocklist outside the `sid == "none"` branch of `introspect` and `decide`; a revoked delegation stays `active: true` with live permissions (§4.19#5 · P05 · HIGH)
