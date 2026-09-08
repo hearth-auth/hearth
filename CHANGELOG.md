@@ -77,6 +77,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A password-reset link now dies when something supersedes it (audit 2026-08-28 §4.24#1)** —
+  the stored reset record carried only a `used` flag and a timestamp, so a link stayed live after
+  the account's email changed, after an admin or the user changed the password out of band, and
+  after a newer reset link was issued. A mail delivered to a since-changed inbox, or a link an
+  attacker triggered before the owner secured the account, still took the account over. Hearth now
+  records a per-user reset watermark, bumped whenever a password is set or a newer link is issued,
+  and refuses any token stamped before it; a token is also refused when the account's current
+  email differs from the address the reset was requested for. All three cases return the existing
+  `PasswordResetTokenInvalid`. **Behaviour change:** a reset submission the realm's password policy
+  refuses no longer consumes the token — the user retries on the same link instead of having to
+  request a new one.
+- **Phone-OTP enrolment now verifies its required-action session cookie (audit 2026-08-28
+  §4.19#7)** — `GET /required-action/ENROLL_PHONE_OTP` and its `/send` sibling checked only that
+  the `hearth_ra_session` cookie was *present*, then read the realm out of the unverified payload
+  and issued an SMS OTP against it. An unauthenticated caller could mint a cookie naming any
+  realm and spend that tenant's SMS budget, and plant pending OTP records in it. Both routes now
+  verify the token's Ed25519 signature under the named realm's key before doing any work — the
+  same order the email twin has always used — and take the realm from the verified token. An
+  unverifiable cookie gets **400 Bad Request**; an expired one redirects to `/`, unchanged.
+- **A one-time code is now redeemable exactly once, including under concurrency (audit
+  2026-08-28 §4.18#4)** — every one-time-code verifier was an unsynchronised read-modify-write:
+  load the record, check the code, write the consumed record back. Two submissions of the same
+  code that raced both read the not-yet-consumed record and both succeeded, so one intercepted
+  TOTP, recovery, SMS-OTP or email-OTP code let an attacker authenticate alongside the legitimate
+  user. `verify_totp`, `verify_recovery_code`, `verify_sms_otp`, `verify_email_otp` and
+  `verify_totp_enrollment` now hold a per-code advisory lock across the whole
+  load → verify → consume window. Exactly one racing submission succeeds; the losers get the
+  same `InvalidMfaCode` / `InvalidSmsOtp` / `InvalidEmailOtp` a replayed code has always
+  returned. No API, config or wire change.
 - **`mfa_required` now gates factor use, not factor enrolment (audit 2026-08-28 §4.18#3)** —
   the engine asked whether the user *had* a second factor enrolled, so any login path that
   never ran a challenge issued a session on the strength of that enrolment alone. A user with

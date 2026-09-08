@@ -157,6 +157,9 @@ const EMAIL_CHANGE_TOKEN_PREFIX: &str = "email:change:";
 /// Prefix for password reset token storage (stored by SHA-256 hash).
 const PASSWORD_RESET_PREFIX: &str = "rst:token:";
 
+/// Prefix for the per-user password-reset invalidation watermark.
+const PASSWORD_RESET_WATERMARK_PREFIX: &str = "rst:wm:";
+
 /// Prefix for organization primary keys.
 const ORG_ID_PREFIX: &str = "org:id:";
 
@@ -878,6 +881,21 @@ pub(crate) fn encode_password_reset_token(token_hash: &str) -> Vec<u8> {
 #[allow(dead_code)]
 pub(crate) fn password_reset_scan_prefix() -> Vec<u8> {
     PASSWORD_RESET_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a user's password-reset invalidation watermark.
+///
+/// Format: `rst:wm:{user_uuid}`
+///
+/// The value is a JSON object carrying the microsecond timestamp at which every
+/// reset token older than it stopped being valid. Written when a password is
+/// set and when a newer reset token is issued (audit 2026-08-28 §4.24#1).
+pub(crate) fn encode_password_reset_watermark(user_id: &UserId) -> Vec<u8> {
+    format!(
+        "{PASSWORD_RESET_WATERMARK_PREFIX}{}",
+        user_id.as_uuid().as_hyphenated()
+    )
+    .into_bytes()
 }
 
 /// Encodes the storage key for a revoked token JTI.

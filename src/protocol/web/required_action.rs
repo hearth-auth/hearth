@@ -1353,10 +1353,46 @@ pub async fn enroll_phone_otp_page(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Response {
-    if read_ra_cookie(&headers).is_none() {
-        return handlers_common::bad_request("No active required-action session");
+    // Verify the RA session token, exactly as the email twin does — cookie
+    // presence alone proves nothing (audit 2026-08-28 §4.19#7).
+    if let Err(response) = validated_ra_session(&state, &headers) {
+        return response;
     }
     render_enroll_phone_page(&state, None)
+}
+
+/// Verifies the RA session cookie and returns its realm and claims.
+///
+/// The realm is read from the payload only to select the verification key; the
+/// signature is checked under that realm's key immediately afterwards, so a
+/// caller cannot name a realm it does not hold a token for
+/// (audit 2026-08-28 §4.19#7).
+fn validated_ra_session(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+) -> Result<(RealmId, ra_token::RaClaims), Response> {
+    let Some(token) = read_ra_cookie(headers) else {
+        return Err(handlers_common::bad_request(
+            "No active required-action session",
+        ));
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return Err(handlers_common::bad_request("Malformed RA session token"));
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return Err(handlers_common::bad_request(
+            "Malformed realm in RA session token",
+        ));
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(claims) => Ok((realm, claims)),
+        Err(ra_token::RaTokenError::Expired) => Err(Redirect::to("/").into_response()),
+        Err(_) => Err(handlers_common::bad_request(
+            "Invalid required-action session token",
+        )),
+    }
 }
 
 /// Sends an SMS OTP to the supplied E.164 phone number and renders the
@@ -1370,9 +1406,13 @@ pub async fn enroll_phone_otp_send(
     headers: HeaderMap,
     Form(form): Form<EnrollPhoneOtpSendForm>,
 ) -> Response {
-    if read_ra_cookie(&headers).is_none() {
-        return handlers_common::bad_request("No active required-action session");
-    }
+    // Verify the RA session token before doing anything that costs the realm
+    // money: the realm below comes from the verified token, not from the
+    // unauthenticated payload (audit 2026-08-28 §4.19#7).
+    let realm = match validated_ra_session(&state, &headers) {
+        Ok((realm, _claims)) => realm,
+        Err(response) => return response,
+    };
 
     let phone = form.phone.trim().to_string();
 
@@ -1396,7 +1436,7 @@ pub async fn enroll_phone_otp_send(
     let now_ts = now_unix_ts();
 
     let nonce = match state.identity.issue_sms_otp(
-        &extract_realm_from_ra_cookie(&headers),
+        &realm,
         &phone,
         &hmac_key,
         sms_sender.as_ref(),
@@ -1635,21 +1675,7 @@ fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
         .unwrap_or_else(|| vec![0u8; 32])
 }
 
-/// Extracts the realm from the RA session cookie without full JWT verification
-/// (used to provide a `RealmId` to `issue_sms_otp` before full token validation).
-fn extract_realm_from_ra_cookie(headers: &HeaderMap) -> RealmId {
-    read_ra_cookie(headers)
-        .as_deref()
-        .and_then(ra_token::extract_realm_unchecked)
-        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-        .map(RealmId::new)
-        .unwrap_or_else(|| {
-            // Should not happen; caller already verified the cookie exists.
-            tracing::warn!("extract_realm_from_ra_cookie: falling back to nil realm");
-            RealmId::new(uuid::Uuid::nil())
-        })
-}
-
+/// Returns the current Unix timestamp in whole seconds.
 fn now_unix_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

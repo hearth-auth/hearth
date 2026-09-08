@@ -842,6 +842,19 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
     // INVARIANT: inner (per-family) guard held only across the sync rotation window; no .await in scope.
     grant_family_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-code advisory lock serializing one-time-code redemption.
+    ///
+    /// Every one-time-code verifier is an unsynchronised read-modify-write:
+    /// load the record, check it, write the consumed record back. Without this
+    /// lock two concurrent submissions of the same TOTP, recovery, SMS-OTP or
+    /// email-OTP code both load the not-yet-consumed record and both succeed
+    /// (audit 2026-08-28 §4.18#4). Callers hold this lock across the entire
+    /// load → verify → consume-write sequence. Key: see
+    /// [`Self::mfa_state_lock_key`] and [`Self::pending_otp_lock_key`].
+    ///
+    // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
+    // INVARIANT: inner (per-code) guard held only across the sync verify window; no .await in scope.
+    otp_redemption_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -1219,6 +1232,8 @@ impl EmbeddedIdentityEngine {
             code_exchange_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
+            otp_redemption_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1777,6 +1792,8 @@ impl EmbeddedIdentityEngine {
             code_exchange_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
+            otp_redemption_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -2212,6 +2229,64 @@ impl EmbeddedIdentityEngine {
     const MFA_MAX_ATTEMPTS: u32 = 5;
     /// MFA lockout duration: 5 minutes in microseconds.
     const MFA_LOCKOUT_MICROS: i64 = 5 * 60 * 1_000_000;
+    /// Size at which `otp_redemption_locks` sheds entries no caller still holds.
+    const OTP_LOCK_MAP_PRUNE_THRESHOLD: usize = 1024;
+
+    // ===== Password-reset invalidation watermark =====
+
+    /// Records the moment before which every reset token for `user_id` is stale.
+    ///
+    /// Written when a password is set and when a newer reset link is issued
+    /// (audit 2026-08-28 §4.24#1). A watermark never moves backwards, so a
+    /// clock that steps back cannot revive a superseded link.
+    fn set_password_reset_watermark(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        at_micros: i64,
+    ) -> Result<(), IdentityError> {
+        let current = self.password_reset_watermark(realm_id, user_id)?;
+        if at_micros <= current {
+            return Ok(());
+        }
+        let key = keys::encode_password_reset_watermark(user_id);
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({ "at_micros": at_micros })).map_err(|e| {
+                IdentityError::Serialization {
+                    reason: e.to_string(),
+                }
+            })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)
+    }
+
+    /// Returns the user's reset-token watermark, or `0` when none is recorded.
+    ///
+    /// A record written before this feature existed has no watermark, so it is
+    /// judged on its `used` flag and expiry alone.
+    fn password_reset_watermark(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<i64, IdentityError> {
+        let key = keys::encode_password_reset_watermark(user_id);
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(0);
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        Ok(value
+            .get("at_micros")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0))
+    }
 
     /// Builds an MFA tracker key from realm and user IDs.
     fn mfa_tracker_key(realm_id: &RealmId, user_id: &UserId) -> String {
@@ -4400,6 +4475,41 @@ impl EmbeddedIdentityEngine {
         Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
 
+    /// Lock key for the per-`(realm, user)` MFA state record.
+    ///
+    /// TOTP and recovery-code redemption both consume the one `MfaState`
+    /// record, so they share one key and serialize against each other.
+    fn mfa_state_lock_key(realm_id: &RealmId, user_id: &UserId) -> String {
+        format!("mfa-state:{}:{}", realm_id.as_uuid(), user_id.as_uuid())
+    }
+
+    /// Lock key for a pending SMS or email OTP record, keyed by its nonce.
+    fn pending_otp_lock_key(realm_id: &RealmId, channel: &str, nonce: &str) -> String {
+        format!("otp:{}:{channel}:{nonce}", realm_id.as_uuid())
+    }
+
+    /// Returns the per-code advisory lock for one-time-code single-use
+    /// enforcement (audit 2026-08-28 §4.18#4).
+    ///
+    /// Callers hold this lock across the entire load → verify → consume-write
+    /// sequence, so two concurrent submissions of one code cannot both read the
+    /// record before either writes it back consumed.
+    fn otp_redemption_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut map = self
+            .otp_redemption_locks
+            .lock()
+            .expect("otp_redemption_locks poisoned");
+        // Drop entries no other caller still holds, so the map cannot grow
+        // without bound across the lifetime of the process.
+        if map.len() > Self::OTP_LOCK_MAP_PRUNE_THRESHOLD {
+            map.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        Arc::clone(
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
     /// Returns a per-request-id advisory lock for approval state transitions.
     ///
     /// Callers hold this lock across the read → status-check → mint → write
@@ -6252,6 +6362,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &cred_key, &cred_bytes)
             .map_err(Self::storage_err)?;
 
+        // A password now exists that no outstanding reset link knows about, so
+        // every link issued before this moment is stale (audit 2026-08-28
+        // §4.24#1). Written after the credential lands, so a refused password
+        // leaves outstanding links alone.
+        self.set_password_reset_watermark(realm_id, user_id, now)?;
+
         self.record_audit(
             realm_id,
             None,
@@ -7863,6 +7979,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+
+        // Activation is the same read-modify-write on the MFA state record that
+        // redemption is, so it takes the same per-user lock: two concurrent
+        // activations must not both hash and write recovery codes
+        // (audit 2026-08-28 §4.18#4).
+        let redemption_lock =
+            self.otp_redemption_lock(&Self::mfa_state_lock_key(realm_id, user_id));
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _redemption_guard = redemption_lock
+            .lock()
+            .expect("otp redemption lock poisoned");
+
         let mut state = self
             .load_mfa_state(realm_id, user_id)?
             .ok_or(IdentityError::MfaNotEnabled)?;
@@ -7918,6 +8046,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Rate limit check
         self.check_mfa_rate_limit(realm_id, user_id)?;
 
+        // Single-use under concurrency: hold the per-user lock across the
+        // load → validate → last-used-step write window, so two submissions of
+        // one code cannot both read a state that has not consumed it yet
+        // (audit 2026-08-28 §4.18#4).
+        let redemption_lock =
+            self.otp_redemption_lock(&Self::mfa_state_lock_key(realm_id, user_id));
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _redemption_guard = redemption_lock
+            .lock()
+            .expect("otp redemption lock poisoned");
+
         let mut state = self
             .load_mfa_state(realm_id, user_id)?
             .ok_or(IdentityError::MfaNotEnabled)?;
@@ -7960,6 +8099,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         // Rate limit check — same budget as TOTP to prevent recovery-code brute-force.
         self.check_mfa_rate_limit(realm_id, user_id)?;
+
+        // Single-use under concurrency: same per-user lock TOTP takes, because
+        // both consume the one MFA state record (audit 2026-08-28 §4.18#4).
+        let redemption_lock =
+            self.otp_redemption_lock(&Self::mfa_state_lock_key(realm_id, user_id));
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _redemption_guard = redemption_lock
+            .lock()
+            .expect("otp redemption lock poisoned");
 
         let mut state = self
             .load_mfa_state(realm_id, user_id)?
@@ -8924,8 +9072,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // 5. SHA-256 hash the token
         let token_hash = Self::sha256_hex(token.as_str().as_bytes());
 
-        // 6. Store the password reset record
+        // 6. Store the password reset record. Issuing a link supersedes every
+        //    earlier one: the watermark is written first, and only a token
+        //    stamped at or after it is redeemable (audit 2026-08-28 §4.24#1).
         let now = self.clock.now().as_micros();
+        self.set_password_reset_watermark(realm_id, user.id(), now)?;
         let stored = StoredPasswordReset {
             email: normalized.clone(),
             user_id: user.id().as_uuid().to_string(),
@@ -8983,6 +9134,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::PasswordResetTokenInvalid);
         }
 
+        // 3b. Refuse a token that something has superseded: a password set out
+        //     of band, or a newer reset link (audit 2026-08-28 §4.24#1).
+        let uuid =
+            uuid::Uuid::parse_str(&stored.user_id).map_err(|e| IdentityError::Serialization {
+                reason: format!("invalid stored user_id: {e}"),
+            })?;
+        let user_id = UserId::new(uuid);
+        if stored.created_at_micros < self.password_reset_watermark(realm_id, &user_id)? {
+            return Err(IdentityError::PasswordResetTokenInvalid);
+        }
+
+        // 3c. Refuse a token issued for an address the account no longer holds.
+        //     A reset mail sent to the old inbox must not survive the change.
+        let current_email = self
+            .get_user(realm_id, &user_id)?
+            .ok_or(IdentityError::PasswordResetTokenInvalid)?
+            .email()
+            .to_string();
+        if !current_email.eq_ignore_ascii_case(&stored.email) {
+            return Err(IdentityError::PasswordResetTokenInvalid);
+        }
+
         // 4. Check expiry — use realm-specific TTL when configured, else default (30 minutes).
         let expiry_micros = self
             .get_realm(realm_id)
@@ -8999,7 +9172,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::PasswordResetTokenInvalid);
         }
 
-        // 5. Mark as used (write before returning so no second caller can pass step 3)
+        // 5. Set the new password FIRST. A password the realm's policy refuses
+        //    must not burn the link — the user retries on the same one. The
+        //    per-token lock above is held across this whole window, so no
+        //    second caller can pass step 3 while the write is in flight.
+        self.set_password(realm_id, &user_id, new_password)?;
+
+        // 6. The password is set; consume the token so it cannot be replayed.
         stored.used = true;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -9008,14 +9187,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &key, &updated_bytes)
             .map_err(Self::storage_err)?;
-
-        // 6. Parse user ID and set new password
-        let uuid =
-            uuid::Uuid::parse_str(&stored.user_id).map_err(|e| IdentityError::Serialization {
-                reason: format!("invalid stored user_id: {e}"),
-            })?;
-        let user_id = UserId::new(uuid);
-        self.set_password(realm_id, &user_id, new_password)?;
 
         // 7. Invalidate all existing sessions — credential change should force re-auth.
         // Revoke all sessions for this user via offset pagination.
@@ -13706,6 +13877,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let otp_key = keys::encode_sms_pending_otp(nonce);
 
+        // 0. Single-use under concurrency: hold the per-nonce lock across the
+        //    load → verify → delete window (audit 2026-08-28 §4.18#4).
+        let redemption_lock =
+            self.otp_redemption_lock(&Self::pending_otp_lock_key(realm_id, "sms", nonce));
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _redemption_guard = redemption_lock
+            .lock()
+            .expect("otp redemption lock poisoned");
+
         // 1. Load the OTP record.
         let bytes = self
             .storage
@@ -13820,6 +14000,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         use crate::identity::sms::otp::StoredOtp;
 
         let otp_key = keys::encode_email_pending_otp(nonce);
+
+        // Single-use under concurrency: hold the per-nonce lock across the
+        // load → verify → delete window (audit 2026-08-28 §4.18#4).
+        let redemption_lock =
+            self.otp_redemption_lock(&Self::pending_otp_lock_key(realm_id, "email", nonce));
+        // INVARIANT: sync window only — no `.await` between here and return.
+        let _redemption_guard = redemption_lock
+            .lock()
+            .expect("otp redemption lock poisoned");
 
         let bytes = self
             .storage
