@@ -107,6 +107,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **A realm wedged mid-delete is recoverable, and no longer stops the server booting (audit
+  2026-08-28 §4.20#3)** — `delete_realm` stamps `DeletingInProgress` on a realm before it starts
+  the cascade, so a process death between the `204` and the end of the cascade left the realm in
+  that status for good. Two things then held it there: `DELETE /admin/realms/{id}` accepted only
+  an `Archived` realm and answered `409`, and startup reconciliation called `update_realm` on the
+  realm, which refuses that status, and the error aborted the whole reconciliation — one wedged
+  realm and the server did not start. The delete endpoint now also accepts a realm already in
+  `DeletingInProgress`, whose deletion was authorised on the earlier call; the cascade is
+  idempotent and converges on the retry. Reconciliation now logs an `ERROR` naming the realm and
+  the recovery command, records it in the reconcile report's new `wedged` list, and carries on
+  with the other declared realms. Recovery runs as a **system-realm** admin: stamping
+  `DeletingInProgress` revokes every session in the realm, so its own admins hold no token that
+  still authenticates. After the retried delete succeeds, the next startup recreates the realm
+  from its `hearth.yaml` block.
 - **Realm deletion no longer does different work depending on realm size (audit 2026-08-28
   §4.20#2)** — `delete_realm` chose between two hand-written cascades by how big the realm was,
   and the two disagreed. The backgrounded one, taken for large realms, never wrote the post-delete

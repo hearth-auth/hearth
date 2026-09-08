@@ -1257,10 +1257,19 @@ async fn admin_delete_realm(
         Err(e) => return e,
     };
 
-    // Check realm status — only Archived realms can be permanently deleted.
+    // Check realm status. Only an archived realm can be permanently deleted —
+    // plus one already stamped `DeletingInProgress`, whose deletion was
+    // authorised on an earlier call that did not finish. The cascade is
+    // idempotent and converges on retry, so refusing that status leaves the
+    // realm undeletable for the life of the deployment (audit 2026-08-28
+    // §4.20#3).
     match state.identity.get_realm(&tid) {
         Ok(Some(realm))
-            if realm.status() == crate::identity::RealmStatus::Archived =>
+            if matches!(
+                realm.status(),
+                crate::identity::RealmStatus::Archived
+                    | crate::identity::RealmStatus::DeletingInProgress
+            ) =>
         {
             match state.identity.delete_realm(&tid) {
                 Ok(()) => {

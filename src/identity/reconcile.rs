@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use tracing::{info, trace, warn};
+use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::config::{
@@ -33,8 +33,8 @@ use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientReques
 use crate::identity::{
     CleartextPassword, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
     DemoSeedSpec, IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus,
-    RealmConfig, RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
-    UserStatus,
+    Realm, RealmConfig, RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest,
+    UpdateUserRequest, UserStatus,
 };
 use crate::rbac::{
     AssignRoleRequest, Group, GroupId, Permission, ProtectedResource, RbacEngine, Scope,
@@ -194,6 +194,14 @@ pub struct ReconcileReport {
     pub archived: Vec<String>,
     /// Names of realms un-archived (reappeared in YAML).
     pub unarchived: Vec<String>,
+    /// Names of declared realms skipped because they are wedged mid-delete.
+    ///
+    /// A realm stamped `DeletingInProgress` had a cascade start and not
+    /// finish. Every mutating call refuses it, so reconciliation skips it
+    /// rather than aborting startup (audit 2026-08-28 §4.20#3). Converge it
+    /// with `DELETE /admin/realms/{id}` as a system-realm admin; the next
+    /// startup recreates it from its YAML block.
+    pub wedged: Vec<String>,
     /// Application reconciliation results per realm.
     pub applications: Vec<AppReconcileEntry>,
     /// Organization reconciliation results per realm.
@@ -761,6 +769,72 @@ fn reconcile_demo_seeding(
 }
 
 /// Reconciles a declared `realms:` map.
+/// Reports a realm wedged mid-delete and tells the caller to skip it.
+///
+/// A realm stamped `DeletingInProgress` had a delete cascade start and not
+/// finish — the process died between the `204` and the end of the sweep. Every
+/// mutating call refuses that status, so reconciling the realm would fail and
+/// abort the whole startup: one wedged realm and the server never boots
+/// (audit 2026-08-28 §4.20#3).
+///
+/// Skipping it loudly lets the other declared realms reconcile. The operator
+/// converges it with `DELETE /admin/realms/{id}` as a system-realm admin — the
+/// realm's own admins hold no token that still authenticates — and the next
+/// startup recreates it from the same YAML block.
+fn report_wedged_realm(
+    status: RealmStatus,
+    name: &str,
+    realm_id: &RealmId,
+    report: &mut ReconcileReport,
+) -> bool {
+    if status != RealmStatus::DeletingInProgress {
+        return false;
+    }
+    error!(
+        realm = name,
+        realm_id = %realm_id.as_uuid(),
+        "reconcile_realms: realm is wedged mid-delete and was skipped; finish the \
+         delete with DELETE /admin/realms/{} as a system-realm admin, then restart \
+         to recreate it from hearth.yaml",
+        realm_id.as_uuid()
+    );
+    report.wedged.push(name.to_string());
+    true
+}
+
+/// Applies a YAML realm block to a realm that already exists.
+///
+/// Writes only when the stored config drifted from YAML or the realm is
+/// archived and has reappeared in YAML, and records which of the two happened
+/// in `report`.
+fn update_existing_realm(
+    engine: &dyn IdentityEngine,
+    existing: &Realm,
+    name: &str,
+    realm_config: RealmConfig,
+    report: &mut ReconcileReport,
+) -> Result<(), IdentityError> {
+    let needs_config_update = existing.config() != &realm_config;
+    let needs_unarchive = existing.status() == RealmStatus::Archived;
+    if !needs_config_update && !needs_unarchive {
+        return Ok(());
+    }
+
+    let mut update = UpdateRealmRequest::default();
+    if needs_config_update {
+        update.config = Some(realm_config);
+    }
+    if needs_unarchive {
+        update.status = Some(RealmStatus::Active);
+        report.unarchived.push(name.to_string());
+    }
+    engine.update_realm(existing.id(), &update)?;
+    if needs_config_update && !needs_unarchive {
+        report.updated.push(name.to_string());
+    }
+    Ok(())
+}
+
 fn reconcile_declared_realms(
     engine: &dyn IdentityEngine,
     rbac: &dyn RbacEngine,
@@ -816,24 +890,11 @@ fn reconcile_declared_realms(
                 realm.id().clone()
             }
             Some(existing) => {
-                // Update if config changed or status needs un-archiving
-                let needs_config_update = existing.config() != &realm_config;
-                let needs_unarchive = existing.status() == RealmStatus::Archived;
-
-                if needs_config_update || needs_unarchive {
-                    let mut update = UpdateRealmRequest::default();
-                    if needs_config_update {
-                        update.config = Some(realm_config);
-                    }
-                    if needs_unarchive {
-                        update.status = Some(RealmStatus::Active);
-                        report.unarchived.push(name.clone());
-                    }
-                    engine.update_realm(existing.id(), &update)?;
-                    if needs_config_update && !needs_unarchive {
-                        report.updated.push(name.clone());
-                    }
+                if report_wedged_realm(existing.status(), name, existing.id(), report) {
+                    continue;
                 }
+
+                update_existing_realm(engine, &existing, name, realm_config, report)?;
                 // Re-run seed on existing realms too. `seed_realm` is
                 // idempotent: it skips already-correct records and rewrites
                 // only roles whose `scope_kind` drifted from the spec (e.g.
