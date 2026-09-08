@@ -390,6 +390,18 @@ pub trait StorageEngine: Send + Sync {
     ///
     /// # Errors
     ///
+    /// Reports whether the write-ahead log has fenced writes after a write
+    /// fault (audit 2026-08-28 §4.11#8).
+    ///
+    /// A fenced engine refuses every write for the life of the process, while
+    /// reads keep working. `/readyz` reads this so a fenced node stops
+    /// receiving traffic it cannot accept; restart it to clear the fence.
+    ///
+    /// The default returns `false`, which is correct for engines with no WAL.
+    fn is_write_fenced(&self) -> bool {
+        false
+    }
+
     /// Returns any error from writing the SST.
     fn flush_memtable(&self) -> Result<(), StorageError> {
         Ok(())

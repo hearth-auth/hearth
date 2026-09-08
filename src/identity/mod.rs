@@ -2227,6 +2227,18 @@ pub trait IdentityEngine: Send + Sync {
         true
     }
 
+    /// Reports whether the storage layer has fenced writes after a write fault
+    /// (audit 2026-08-28 §4.11#8).
+    ///
+    /// A fenced node serves reads but refuses every write for the life of the
+    /// process. `/readyz` reports not-ready while this is `true`, so the node
+    /// stops receiving traffic it cannot accept; restart it to clear the fence.
+    ///
+    /// The default returns `false` (suitable for in-memory or mock engines).
+    fn is_write_fenced(&self) -> bool {
+        false
+    }
+
     // ===== Backup export helpers =====
 
     /// Returns all stored credentials in a realm for backup export.

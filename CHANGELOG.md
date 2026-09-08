@@ -15,6 +15,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (`getRealm`, `listRealms`) are unaffected. All seven SDK test suites now run in CI.
 
 ### Added
+- **The WAL write fence is now observable (audit 2026-08-28 §4.11#8)** — a write fault fences the
+  WAL, which refuses every write for the life of the process while reads keep working. It engaged
+  silently: no log line, no metric, and `/readyz` probed reads only, so a node that accepted no
+  writes kept reporting itself ready and kept receiving traffic. It now emits an `ERROR` log line
+  naming the fault, raises `hearth_wal_write_fenced{reason="..."}` (a new gauge, absent from
+  scrapes until a fence engages — alert on its presence), and makes `/readyz` return **503** with
+  `{"status":"not_ready","storage":"write_fenced"}`. Restart the node to clear a fence. Detection
+  and recovery are documented in
+  [`docs/guides/disaster-recovery.md`](docs/guides/disaster-recovery.md) under **WAL write
+  fence**.
 - **Releases now ship a validation summary, and the binary channel is gated on the test suite
   (HEA-1264)** — every GitHub Release carries a new `validation-summary.txt` asset recording the
   per-gate verdicts, test counts, and benchmark deltas from the tagged commit, and the release

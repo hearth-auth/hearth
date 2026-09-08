@@ -1178,6 +1178,41 @@ impl Wal {
     //                              concurrent writers can enqueue and coalesce into
     //                              the same group-commit batch.
 
+    /// Engages the WAL write fence, and makes it observable.
+    ///
+    /// The fence rejects every subsequent write for the life of the process:
+    /// bytes written after a torn record are discarded by `scan_records` on
+    /// replay, so acking them would ack data that recovery throws away.
+    ///
+    /// It used to engage silently — no log line, no metric, no accessor — so a
+    /// node that refused every write kept reporting itself ready
+    /// (audit 2026-08-28 §4.11#8). Every fence site goes through here.
+    ///
+    /// `reason` is a short static label, not free text: it becomes a metric
+    /// label value, so it must have bounded cardinality.
+    pub(crate) fn engage_fence(&self, reason: &'static str) {
+        // Only the first fence of a process logs and meters: the state is
+        // permanent, so a repeat carries no new information.
+        if self.fenced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        tracing::error!(
+            reason,
+            path = %self.path.display(),
+            "WAL write fence engaged — every subsequent write is refused for the \
+             life of this process; restart to clear it. /readyz reports not-ready."
+        );
+        crate::metrics::metrics().mark_wal_write_fenced(reason);
+    }
+
+    /// Reports whether the WAL write fence is engaged.
+    ///
+    /// Once engaged it stays engaged until the process restarts. `/readyz`
+    /// reads this through [`crate::storage::StorageEngine::is_write_fenced`].
+    pub fn is_fenced(&self) -> bool {
+        self.fenced.load(Ordering::Acquire)
+    }
+
     /// Enqueue a WAL entry for group commit without blocking for the fsync.
     ///
     /// For `SyncMode::None` (dev/test): writes the entry synchronously via
@@ -1482,7 +1517,7 @@ impl Wal {
                     } else {
                         // Rotation mutex poisoned: the counter cannot be
                         // released, so the next record would open a gap.
-                        self.fenced.store(true, Ordering::Release);
+                        self.engage_fence("record_counter_unreleasable");
                     }
                     // Restore the append cursor; `set_len` leaves it past EOF.
                     file.seek(SeekFrom::End(0))?;
@@ -1490,13 +1525,13 @@ impl Wal {
                 Err(truncate_err) => {
                     // The on-disk length is now unknown.  Fence rather than
                     // ack any later write that replay would discard.
-                    self.fenced.store(true, Ordering::Release);
                     tracing::error!(
                         error = %truncate_err,
                         base_len,
                         record_num,
-                        "WAL write fault: rollback truncation failed — WAL fenced"
+                        "WAL write fault: rollback truncation failed"
                     );
+                    self.engage_fence("write_rollback_failed");
                 }
             }
             return Err(err);
@@ -1687,7 +1722,7 @@ impl Wal {
         // WAL so subsequent appends are rejected rather than silently acking
         // data that replay will discard.
         if commit_result.is_err() {
-            self.fenced.store(true, Ordering::Release);
+            self.engage_fence("group_commit_write_fault");
         }
 
         // Propagate the outcome to every slot; errors travel as strings so
@@ -1862,12 +1897,12 @@ impl Wal {
         })();
 
         if let Err(err) = rotate_result {
-            self.fenced.store(true, Ordering::Release);
             tracing::error!(
                 error = %err,
-                "WAL rotation failed after the segment was truncated — WAL fenced; \
-                 the next start re-initialises the segment"
+                "WAL rotation failed after the segment was truncated; the next \
+                 start re-initialises the segment"
             );
+            self.engage_fence("rotation_write_fault");
             return Err(err);
         }
 
@@ -1972,6 +2007,46 @@ mod tests {
             V1_RECORD_OFFSET as usize,
             "new empty WAL should be exactly {} bytes",
             V1_RECORD_OFFSET
+        );
+    }
+
+    /// The WAL write fence must be observable: reported by an accessor,
+    /// counted in metrics, and therefore reflected in `/readyz`
+    /// (audit 2026-08-28 §4.11#8).
+    ///
+    /// The fence is permanent for the life of the process. It used to engage
+    /// silently — no log line, no metric, no accessor — so a node that refused
+    /// every write kept reporting itself ready.
+    #[test]
+    fn write_fence_is_reported_and_metered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+        let wal = open_test_wal(
+            &wal_path,
+            WalConfig {
+                max_size: 0,
+                sync_mode: SyncMode::None,
+            },
+        );
+
+        assert!(!wal.is_fenced(), "a healthy WAL must not report a fence");
+        assert!(
+            !crate::metrics::metrics()
+                .render()
+                .contains("hearth_wal_write_fenced"),
+            "the fence time series must be absent until a fence engages"
+        );
+
+        wal.engage_fence("test_fault");
+
+        assert!(wal.is_fenced(), "the fence must be reported once engaged");
+        wal.append(&make_entry(b"after-fence", b"v", WalOperation::Put))
+            .expect_err("a fenced WAL must refuse every write");
+
+        let rendered = crate::metrics::metrics().render();
+        assert!(
+            rendered.contains("hearth_wal_write_fenced{reason=\"test_fault\"} 1"),
+            "the fence must raise its metric; got: {rendered}"
         );
     }
 

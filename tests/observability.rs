@@ -30,9 +30,17 @@ use tower::ServiceExt as _;
 struct PartialFaultEngine {
     inner: Arc<EmbeddedStorageEngine>,
     block_reads: Arc<AtomicBool>,
+    /// When set, the wrapper reports the WAL write fence as engaged. Reads
+    /// keep working, which is exactly the state that used to leave `/readyz`
+    /// reporting ready while every write was refused.
+    write_fenced: Arc<AtomicBool>,
 }
 
 impl StorageEngine for PartialFaultEngine {
+    fn is_write_fenced(&self) -> bool {
+        self.write_fenced.load(Ordering::Relaxed) || self.inner.is_write_fenced()
+    }
+
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         if self.block_reads.load(Ordering::Relaxed) {
             return Err(StorageError::Io(std::io::Error::other(
@@ -159,6 +167,7 @@ async fn readyz_returns_503_when_storage_unhealthy() {
     let fault_storage: Arc<dyn StorageEngine> = Arc::new(PartialFaultEngine {
         inner: Arc::clone(&real_storage),
         block_reads: Arc::clone(&block_reads),
+        write_fenced: Arc::new(AtomicBool::new(false)),
     });
 
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -348,5 +357,86 @@ async fn metrics_audit_integrity_failure_increments() {
     assert!(
         metrics_body.contains("hearth_audit_integrity_failures_total"),
         "/metrics should expose the audit integrity failures counter"
+    );
+}
+
+/// `/readyz` returns `503 Service Unavailable` when the WAL write fence is
+/// engaged (audit 2026-08-28 §4.11#8).
+///
+/// The fence rejects every write for the life of the process, but reads keep
+/// working. `/readyz` probed reads only, so a fenced node kept reporting ready
+/// and Kubernetes kept sending it traffic it could not accept.
+#[tokio::test]
+async fn readyz_returns_503_when_wal_write_fenced() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let fault_dir = tempfile::tempdir().expect("tempdir for fault storage");
+    let real_storage = Arc::new(
+        EmbeddedStorageEngine::open(StorageConfig::dev(fault_dir.path().to_path_buf()))
+            .expect("open fault storage"),
+    );
+    let write_fenced = Arc::new(AtomicBool::new(false));
+    let fault_storage: Arc<dyn StorageEngine> = Arc::new(PartialFaultEngine {
+        inner: Arc::clone(&real_storage),
+        block_reads: Arc::new(AtomicBool::new(false)),
+        write_fenced: Arc::clone(&write_fenced),
+    });
+
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let config = IdentityConfig {
+        credential: CredentialConfig::fast_for_testing(),
+        ..IdentityConfig::default()
+    };
+    let identity: Arc<dyn IdentityEngine> = Arc::new(
+        EmbeddedIdentityEngine::with_rbac(
+            Arc::clone(&fault_storage),
+            clock,
+            config,
+            h.rbac_arc(),
+            h.audit_arc(),
+        )
+        .expect("identity engine creation"),
+    );
+
+    let state = Arc::new(AppState::new(identity, h.rbac_arc(), h.audit_arc()));
+
+    // Reads work and the fence is clear: ready.
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a node with working reads and no fence must be ready"
+    );
+
+    // Engage the fence. Reads still work — only writes are refused.
+    write_fenced.store(true, Ordering::Relaxed);
+
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a write-fenced node must not report ready"
+    );
+    let body = body_to_string(resp).await;
+    assert!(
+        body.contains("write_fenced"),
+        "the body must name the fence so an operator knows why; got: {body}"
     );
 }

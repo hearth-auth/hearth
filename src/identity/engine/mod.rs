@@ -13469,6 +13469,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage.get(&probe_realm, b"health:probe").is_ok()
     }
 
+    fn is_write_fenced(&self) -> bool {
+        self.storage.is_write_fenced()
+    }
+
     fn export_all_credentials(
         &self,
         realm_id: &RealmId,

@@ -187,6 +187,17 @@ pub struct Metrics {
     /// boot-time WARN log has scrolled past.
     pub rate_limiters_disabled: GaugeVec,
 
+    /// Set to `1` when the WAL write fence engages, labelled by the fault that
+    /// engaged it (audit 2026-08-28 §4.11#8).
+    ///
+    /// The fence rejects every subsequent write for the life of the process,
+    /// because bytes written after a torn record are discarded on replay. Reads
+    /// keep working, so nothing else in a scrape distinguishes a fenced node
+    /// from a healthy one. The time series is **absent** during normal
+    /// operation: its presence on a live scrape means the node accepts no
+    /// writes and must be restarted.
+    pub wal_write_fenced: GaugeVec,
+
     // ── Hot-tier / storage `get` observability (HEA-1869) ───────────────────
     /// Total storage `get` operations, labelled by the tier that satisfied
     /// (or failed to satisfy) the read.
@@ -462,6 +473,18 @@ impl Metrics {
             .register(Box::new(rate_limiters_disabled.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let wal_write_fenced = GaugeVec::new(
+            Opts::new(
+                "hearth_wal_write_fenced",
+                "Set to 1 when the WAL write fence is engaged and every write is refused",
+            ),
+            &["reason"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(wal_write_fenced.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let storage_get_total = CounterVec::new(
             Opts::new(
                 "hearth_storage_get_total",
@@ -639,6 +662,7 @@ impl Metrics {
             agent_aat_revoked_total,
             agent_txn_token_total,
             rate_limiters_disabled,
+            wal_write_fenced,
             storage_get_total,
             storage_get_hot_hit,
             storage_get_duration_seconds,
@@ -697,6 +721,15 @@ impl Metrics {
         self.rate_limiters_disabled
             .with_label_values(&[reason])
             .set(1.0);
+    }
+
+    /// Marks the `hearth_wal_write_fenced{reason=…}` gauge as active (`1`).
+    ///
+    /// Called by the WAL when a write fault fences it. Before the first call
+    /// the time series is absent from scrapes, so `reason` only ever appears
+    /// when the node is genuinely refusing writes.
+    pub fn mark_wal_write_fenced(&self, reason: &str) {
+        self.wal_write_fenced.with_label_values(&[reason]).set(1.0);
     }
 
     /// Renders all collected metrics in Prometheus text exposition format.

@@ -1466,6 +1466,10 @@ fn select_partial_run(readers: &[SstReader], merge_min: usize) -> Option<(usize,
 }
 
 impl StorageEngine for EmbeddedStorageEngine {
+    fn is_write_fenced(&self) -> bool {
+        self.wal.is_fenced()
+    }
+
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let metrics = crate::metrics::metrics();
 

@@ -225,18 +225,68 @@ Hearth also fences the WAL at that point, so every write after the fault is
 refused rather than acknowledged:
 
 ```
-ERROR storage: WAL rotation failed after the segment was truncated —
-               WAL fenced; the next start re-initialises the segment
+ERROR storage: WAL rotation failed after the segment was truncated;
+               the next start re-initialises the segment
 ```
-
-**A fence is permanent for the life of the process.** Restart Hearth to clear
-it.
 
 **When operator action is required.** If the warning returns on every restart,
 the device is rejecting writes. Stop writing to it, copy the data directory to
 known-good storage, and restart there. There is no manual repair command: do
 **not** hand-edit or delete a WAL segment that is 82 bytes or longer, because
 that one does hold records.
+
+---
+
+## WAL write fence
+
+### Failure shape
+
+A write fault in the WAL fences it. A fenced node serves reads normally and
+refuses **every** write, because bytes written after a torn record are discarded
+on replay: acknowledging them would acknowledge data that recovery throws away.
+
+You see this once, when it engages:
+
+```
+ERROR storage: WAL write fence engaged — every subsequent write is refused
+               for the life of this process; restart to clear it.
+               /readyz reports not-ready.
+```
+
+`reason` names the fault that engaged it: `group_commit_write_fault`,
+`rotation_write_fault`, `write_rollback_failed`, or
+`record_counter_unreleasable`.
+
+### How to detect it
+
+| Signal | What you see |
+|--------|--------------|
+| `/readyz` | `503`, body `{"status":"not_ready","storage":"write_fenced"}` |
+| `/metrics` | `hearth_wal_write_fenced{reason="..."} 1` |
+| Logs | the `ERROR storage: WAL write fence engaged` line above |
+
+The metric time series is **absent** during normal operation. Its presence on a
+live scrape means that node accepts no writes. Alert on presence, not on value:
+
+```yaml
+- alert: HearthWalWriteFenced
+  expr: hearth_wal_write_fenced == 1
+  for: 0m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Hearth node {{ $labels.instance }} refuses all writes (WAL fenced)"
+```
+
+### Recovery
+
+**A fence is permanent for the life of the process.** Restart Hearth to clear
+it. In a cluster, `/readyz` already removed the node from the load balancer, so
+a restart is not a further outage.
+
+A fence that returns after the restart means the device is rejecting writes.
+Follow **Partial WAL header** above: move the data directory to known-good
+storage.
 
 ---
 
