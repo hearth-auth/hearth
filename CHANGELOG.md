@@ -77,6 +77,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **CI jobs that could not fail a merge now can (audit 2026-08-28 §4.12#12)** — `required-summary`
+  in `ci.yml` is the only required status check on `main`, so a job blocks a merge exactly when it
+  reaches that job. Three did not: the `sdk-kotlin`, `sdk-go` and `sdk-typescript` jobs ran, went
+  red, and merged. Five whole workflows did not either — `commit-lint`, `proto`, `sdk-smoke`,
+  `security` and `pr-head-ancestor-guard` ran on their own `pull_request:` trigger, and GitHub
+  cannot express `needs:` across workflows. The three SDK jobs are now in `required-summary`, and
+  the five workflows are reusable workflows called from `ci.yml`, gated by the same paths filters
+  they used before; their `schedule`, `workflow_dispatch` and push runs are unchanged.
+  `pr-head-ancestor-guard` stays advisory by design — HEA-2106 holds that switch until its
+  false-positive rate against stacked PRs is measured. `ci.yml` now also runs on the `edited` pull
+  request type, so a title edited after a green run is still linted before it becomes the
+  squash-merge message. `scripts/check-required-summary-coverage.sh` holds the wiring, including
+  the fail-open where a job joins `needs:` but not the results loop.
 - **Published container images now state the correct licence (audit 2026-08-28 §4.12#7)** —
   every image carried `org.opencontainers.image.licenses="AGPL-3.0-only"`, three months after
   Hearth relicensed to Apache-2.0. A redistributor reads the licence off the image, so the label

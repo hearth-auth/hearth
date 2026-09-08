@@ -262,6 +262,12 @@ compose-env-check: ## Assert shipped compose files source only scoped env files
 	@bash scripts/check-compose-env-scope.sh
 	@bash scripts/tests/check-compose-env-scope.test.sh
 
+## Guard: every verification job must reach the one required check
+## (audit 2026-08-28 §4.12#12). Runs in ci.yml's filter job.
+required-summary-check: ## Assert every CI job can fail the required check
+	@bash scripts/check-required-summary-coverage.sh
+	@bash scripts/tests/check-required-summary-coverage.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

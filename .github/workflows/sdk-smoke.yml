@@ -3,17 +3,13 @@ name: SDK smoke
 # Verify that both quickstart examples run against the current Hearth binary.
 # Runs on PRs that touch SDK code or the examples, and on every push to main.
 
+# Audit 2026-08-28 §4.12#12: the PR run reached no required check, so a broken
+# quickstart example could not block a merge. The PR entry point is now ci.yml,
+# which calls this as a reusable workflow and lists `sdk-smoke` in
+# `required-summary`'s `needs:`. ci.yml also runs on push to main, so only the
+# nightly cron stays here.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "sdks/**"
-      - "examples/typescript-nextjs/**"
-      - "examples/go-gin/**"
-      - "src/**"
-      - ".github/workflows/sdk-smoke.yml"
-  push:
-    branches: [main]
+  workflow_call:
   schedule:
     # Nightly at 03:00 UTC — catch API drift between releases
     - cron: "0 3 * * *"
@@ -22,7 +18,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Literal prefix, not ${{ github.workflow }}: when ci.yml calls this workflow,
+  # github.workflow is "CI", and a shared group would cancel ci.yml's own run.
+  group: sdk-smoke-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

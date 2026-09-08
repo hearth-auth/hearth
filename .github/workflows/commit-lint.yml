@@ -10,10 +10,17 @@ name: Conventional Commits
 # Non-conforming PR titles are rejected with an error message that explains
 # the required format.
 
+# Audit 2026-08-28 §4.12#12: this workflow ran on its own `pull_request`
+# trigger, so its result reached no required check and a non-conforming title
+# merged clean. `required-summary` in ci.yml is the only required context on
+# main, and GitHub cannot express `needs:` across workflows — so this is now a
+# reusable workflow that ci.yml calls as one of that job's `needs:`.
+# ci.yml carries the `edited` PR type on its own trigger so a title edited
+# after a green run is still linted.
 on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened]
+  workflow_call:
 
+# Permissions come from the calling job in ci.yml.
 permissions:
   pull-requests: read
 

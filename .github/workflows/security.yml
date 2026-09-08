@@ -25,8 +25,10 @@ name: Security
 # workflow's Trivy job is a filesystem scan of the checkout and never reads the
 # image layers operators pull. Guard: scripts/check-scanner-coverage.sh.
 #
-# Doc-only PRs are skipped via paths-ignore — security scanners don't add value
-# on documentation diffs and would just burn runner minutes.
+# Doc-only PRs are skipped by ci.yml's `docs-only` filter output, which gates
+# the call to this workflow — security scanners don't add value on documentation
+# diffs and would just burn runner minutes. (This used to be a `paths-ignore` on
+# this file's own pull_request trigger; that trigger is gone, see below.)
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # Stale-analysis hygiene (HEA-716 / HEA-717)
@@ -57,15 +59,14 @@ name: Security
 #   analyses are an unconditional cleanup target in the script above.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Audit 2026-08-28 §4.12#12: the PR run reached no required check, so a CodeQL,
+# Trivy, cargo-deny or OSV failure could not block a merge. The PR entry point
+# is now ci.yml, which calls this as a reusable workflow and lists `security` in
+# `required-summary`'s `needs:`. ci.yml's filter skips it on doc-only PRs, which
+# is what the old paths-ignore did. ci.yml also runs on push to main, so only
+# the weekly cron and the manual dispatch stay here.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
-      - "CHANGELOG.md"
+  workflow_call:
   schedule:
     - cron: "0 6 * * 1"  # Weekly Monday 06:00 UTC
   # Allow manual re-runs to verify alert state after config changes (HEA-1523)
@@ -77,7 +78,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Literal prefix, not ${{ github.workflow }}: when ci.yml calls this workflow,
+  # github.workflow is "CI", and a shared group would cancel ci.yml's own run.
+  group: security-scanners-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
