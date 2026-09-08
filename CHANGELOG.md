@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **The SLSA provenance generator is now pinned to a reviewed commit (audit 2026-08-28 §4.8#13)** —
+  `slsa-framework/slsa-github-generator` was referenced by the mutable tag `@v2.1.0` while holding
+  `contents: write` and `id-token: write`, and the comment beside it claimed tag resolution gave
+  "equivalent security" to a SHA pin. It does not: whoever controls the upstream repository can
+  re-point the tag. The reference itself cannot become a SHA — upstream requires a tag — so the pin
+  now lives in `.github/slsa-generator.pin`, and `scripts/check-slsa-generator-pin.sh` fails if the
+  tag stops resolving to the reviewed commit. It runs on every PR and as a hard gate in the release
+  `validation` job, which the provenance job needs, so a moved upstream tag stops the release
+  before any provenance is minted under Hearth's identity.
 - **The documented release verification now proves something an attacker cannot forge (audit
   2026-08-28 §4.8#12)** — the README's headline install step downloaded the binary and `SHA256SUMS`
   from the same release page and ran `sha256sum -c`. Anyone able to replace the binary can replace

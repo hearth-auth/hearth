@@ -1,0 +1,17 @@
+# Pinned commit for the third-party SLSA provenance generator referenced by
+# .github/workflows/release.yml (audit 2026-08-28 §4.8#13).
+#
+# slsa-framework/slsa-github-generator MUST be referenced by tag, not by SHA:
+# its `generator` job downloads the builder binary from the release at the ref
+# `detect-env` resolves, and that "must be a tag reference" (upstream comment,
+# generator_generic_slsa3.yml at v2.1.0). A `@<sha>` reference fails there.
+#
+# A tag is mutable, so the tag reference alone is not equivalent to a SHA pin.
+# This file restores the missing property: scripts/check-slsa-generator-pin.sh
+# resolves the tag and fails if it no longer points at the commit below.
+#
+# To upgrade: review the upstream diff, then update BOTH the tag in
+# release.yml and the tag/commit here in the same commit.
+#
+# format: <tag> <commit-sha>
+v2.1.0 f7dd8c54c2067bafc12ca7a55595d5ee9b75204a

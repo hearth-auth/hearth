@@ -230,6 +230,14 @@ verify-docs-check: ## Assert the documented release-verification path works
 	@bash scripts/check-release-verification-docs.sh
 	@bash scripts/tests/check-release-verification-docs.test.sh
 
+## Guard: the SLSA provenance generator must still be the commit we reviewed
+## (audit 2026-08-28 §4.8#13). Upstream refuses a @<sha> reference, so the pin
+## lives in .github/slsa-generator.pin. Needs network. Runs in ci.yml's filter
+## job and as a hard gate in release.yml's validation job.
+slsa-pin-check: ## Assert the SLSA generator tag still resolves to the reviewed commit
+	@bash scripts/check-slsa-generator-pin.sh
+	@bash scripts/tests/check-slsa-generator-pin.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

@@ -232,6 +232,15 @@ jobs:
         continue-on-error: true
         run: bash scripts/check-install-paths.sh
 
+      # Audit §4.8#13: the SLSA provenance generator is the one third-party
+      # reference that cannot be a commit SHA — upstream requires a tag — and a
+      # tag is mutable. `provenance` needs this job, so refusing here stops a
+      # moved upstream tag from ever minting provenance under Hearth's identity.
+      - name: "SLSA generator pin gate (upstream tag still resolves to the reviewed commit)"
+        id: slsa_pin
+        continue-on-error: true
+        run: bash scripts/check-slsa-generator-pin.sh
+
       # ── Advisory gate ─────────────────────────────────────────────────────
       - name: "Step 7 — Benchmark gate (make bench-gate, advisory)"
         id: bench
@@ -254,6 +263,7 @@ jobs:
           ABUSE: ${{ steps.abuse_check.outcome }}
           SECURITY: ${{ steps.security_gate.outcome }}
           INSTALL_PATHS: ${{ steps.install_paths.outcome }}
+          SLSA_PIN: ${{ steps.slsa_pin.outcome }}
           BENCH: ${{ steps.bench.outcome }}
         run: |
           verdict() { [ "$1" = "success" ] && echo "PASS" || echo "FAIL"; }
@@ -295,6 +305,7 @@ jobs:
             echo "  $(verdict "$ABUSE")  Step 3 — Abuse coverage gate (§3.41 adversarial matrix)"
             echo "  $(verdict "$SECURITY")  Step 9 — ROPC password-grant ban gate"
             echo "  $(verdict "$INSTALL_PATHS")  Install-path gate — README Docker/Helm paths anonymously reachable"
+            echo "  $(verdict "$SLSA_PIN")  SLSA generator pin — upstream tag resolves to the reviewed commit"
             echo ""
             echo "Advisory gates (recorded, reviewed by the release engineer):"
             echo "  $(verdict "$BENCH")  Step 7 — Benchmark gate (rbac_check, session_lookup,"
@@ -332,9 +343,10 @@ jobs:
           ABUSE: ${{ steps.abuse_check.outcome }}
           SECURITY: ${{ steps.security_gate.outcome }}
           INSTALL_PATHS: ${{ steps.install_paths.outcome }}
+          SLSA_PIN: ${{ steps.slsa_pin.outcome }}
         run: |
           failed=0
-          for gate in NEXTEST TEST_QUALITY ABUSE SECURITY INSTALL_PATHS; do
+          for gate in NEXTEST TEST_QUALITY ABUSE SECURITY INSTALL_PATHS SLSA_PIN; do
             if [ "${!gate}" != "success" ]; then
               echo "::error::Release validation hard gate failed: ${gate} (${!gate})"
               failed=1
@@ -476,12 +488,28 @@ jobs:
     permissions:
       actions: read
       id-token: write
-      contents: write   # SLSA generator's nested upload-assets job statically requires write; upload-assets: false keeps it as a workflow artifact only
-    # v2.1.0 validates that the calling ref is a semver tag (refs/tags/vX.Y.Z)
-    # so it can look up the corresponding release binary. Using @SHA directly
-    # fails this check ("Invalid ref: SHA. Expected refs/tags/vX.Y.Z").
-    # GitHub Actions resolves the tag to f7dd8c54c2067bafc12ca7a55595d5ee9b75204a
-    # at checkout time, providing equivalent security.
+      # The generator's nested upload-assets job declares `contents: write`, and
+      # a caller's permissions must cover every job of the workflow it calls —
+      # even one that `if:` skips. `upload-assets: false` keeps the provenance a
+      # workflow artifact, but the grant cannot be dropped.
+      contents: write
+    # Audit §4.8#13. This is the ONE third-party reference in this repository
+    # that is not a commit SHA, and the reason is upstream, not convenience:
+    # the generator's `generator` job downloads its builder binary from the
+    # release at the ref `detect-env` resolves, and upstream states that ref
+    # "must be a tag reference". A `@<sha>` reference fails there.
+    #
+    # A tag is mutable, so this reference alone is NOT equivalent to a SHA pin —
+    # the comment that used to say so was wrong. Whoever controls the upstream
+    # repository can re-point v2.1.0, and this job runs with `contents: write`
+    # and `id-token: write`: enough to write release assets and to mint Sigstore
+    # certificates under Hearth's identity.
+    #
+    # The missing property is restored out of band. .github/slsa-generator.pin
+    # records the commit this tag must resolve to, and
+    # scripts/check-slsa-generator-pin.sh refuses a mismatch. It runs on every
+    # PR and as a hard gate in the `validation` job above — which this job
+    # needs — so a moved tag stops the release before provenance is minted.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: "${{ needs.hash.outputs.hashes }}"

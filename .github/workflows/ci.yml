@@ -273,6 +273,19 @@ jobs:
       - name: Release-verification docs — guard self-test
         run: bash scripts/tests/check-release-verification-docs.test.sh
 
+      # Audit §4.8#13: slsa-github-generator is the one third-party reference
+      # that cannot be a commit SHA — upstream requires a tag — and it runs with
+      # contents: write + id-token: write. .github/slsa-generator.pin records the
+      # commit the tag must resolve to; this guard refuses a mismatch, so a moved
+      # upstream tag surfaces on a PR rather than at release time.
+      - name: SLSA generator pin (check-slsa-generator-pin.sh)
+        run: bash scripts/check-slsa-generator-pin.sh
+
+      # Proof the guard can go red: it must reject a moved tag, a workflow/pin
+      # disagreement, a malformed pin, and an unresolvable upstream.
+      - name: SLSA generator pin — guard self-test
+        run: bash scripts/tests/check-slsa-generator-pin.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and
