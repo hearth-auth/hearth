@@ -111,7 +111,7 @@ found it, the audit piece, and the report's severity.
 - [x] 13.5 Stop the attribution freshness key hashing the whole `Cargo.lock` including the workspace's own version, which trips a legal-attribution gate with nothing to attribute (§4.8#10 · LOW)
 - [x] 13.6 Fix the two failing commands in the release-verification guide, and make the README's headline install step verify something an attacker could not forge (§4.8#12 · MEDIUM)
 - [x] 13.7 Pin the third-party reusable workflow holding `contents: write` + `id-token: write` to a commit SHA and correct its justification (§4.8#13 · MEDIUM)
-- [ ] 13.8 Make the systemd crash-loop limiter take effect; it is silently ignored (§4.8#14 · LOW)
+- [x] 13.8 Make the systemd crash-loop limiter take effect; it is silently ignored (§4.8#14 · LOW)
 - [ ] 13.9 Correct the three false statements the Dockerfile makes about the build it defines (§4.8#15 · Informational)
 - [ ] 13.10 Fix scanner configuration that overstates coverage: fifteen dead schedule conditions, advisory-only scanners, an unscanned image, and suppressions for packages absent from the tree they name (§4.8#16, §4.12#15 · Informational/LOW)
 - [ ] 13.11 Stop the shipped Docker Compose file sourcing the repository-root `.env` into the container's runtime environment (§4.8#17 · LOW)

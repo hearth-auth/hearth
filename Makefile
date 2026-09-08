@@ -238,6 +238,12 @@ slsa-pin-check: ## Assert the SLSA generator tag still resolves to the reviewed 
 	@bash scripts/check-slsa-generator-pin.sh
 	@bash scripts/tests/check-slsa-generator-pin.test.sh
 
+## Guard: every directive in a shipped systemd unit must sit in a section
+## systemd actually reads (audit 2026-08-28 §4.8#14). Runs in ci.yml's filter job.
+systemd-check: ## Assert shipped systemd units have no silently-ignored directives
+	@bash scripts/check-systemd-units.sh
+	@bash scripts/tests/check-systemd-units.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

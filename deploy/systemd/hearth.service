@@ -3,8 +3,15 @@ Description=Hearth — single-binary identity database
 Documentation=https://github.com/hearth-auth/hearth
 After=network-online.target
 Wants=network-online.target
-# Restart the service when it exits. Combine with RestartSec so that a
-# crash-loop doesn't hammer the system.
+# Crash-loop limiter. Audit 2026-08-28 §4.8#14: these two directives were in
+# [Service], where systemd ignores them — it parses StartLimitBurst and
+# StartLimitIntervalSec in [Unit] only (since v229) and logs "Unknown key name"
+# for them elsewhere. The service restarted forever every 5 s.
+#
+# Give up after 3 restarts within 60 s. Clear the counter with
+# `systemctl reset-failed hearth` after fixing the cause.
+StartLimitBurst=3
+StartLimitIntervalSec=60
 
 [Service]
 # Type=exec: systemd considers the service active as soon as ExecStart returns
@@ -19,11 +26,10 @@ ExecStart=/usr/local/bin/hearth serve -c /etc/hearth/hearth.yaml
 
 # Restart policy — restart on any unexpected exit (crashes, OOMs, etc.),
 # but not when systemd stops the service intentionally (e.g. systemctl stop).
+# The crash-loop limiter that bounds these restarts is StartLimitBurst /
+# StartLimitIntervalSec in [Unit] above — systemd rejects them here.
 Restart=on-failure
 RestartSec=5s
-# Give up after 3 rapid restarts in 60 s to avoid runaway crash loops.
-StartLimitBurst=3
-StartLimitIntervalSec=60
 
 # Graceful shutdown: send SIGTERM, wait up to 30 s, then SIGKILL.
 TimeoutStopSec=30

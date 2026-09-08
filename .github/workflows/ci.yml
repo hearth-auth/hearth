@@ -286,6 +286,19 @@ jobs:
       - name: SLSA generator pin — guard self-test
         run: bash scripts/tests/check-slsa-generator-pin.test.sh
 
+      # Audit §4.8#14: deploy/systemd/hearth.service put StartLimitBurst and
+      # StartLimitIntervalSec in [Service], where systemd ignores them — the
+      # documented "3 restarts in 60 s" crash-loop bound was never in force.
+      # The failure is silent: the unit still starts and the warning goes to a
+      # journal nobody reads. This parser needs no systemd.
+      - name: systemd units (check-systemd-units.sh)
+        run: bash scripts/check-systemd-units.sh
+
+      # Proof the guard can go red: it must reject the pre-fix [Service]
+      # placement and an unbounded restart policy.
+      - name: systemd units — guard self-test
+        run: bash scripts/tests/check-systemd-units.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and

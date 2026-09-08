@@ -77,6 +77,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **The systemd crash-loop limiter now takes effect (audit 2026-08-28 §4.8#14)** —
+  `deploy/systemd/hearth.service` set `StartLimitBurst=3` and `StartLimitIntervalSec=60` in
+  `[Service]`. systemd reads both in `[Unit]` only and logs "Unknown key ... ignoring", so the
+  documented "give up after 3 rapid restarts in 60 s" bound was never in force and systemd's 10 s
+  default window applied instead. Both directives moved to `[Unit]`.
+  **Operator action:** `systemctl daemon-reload` after updating the unit.
+  `scripts/check-systemd-units.sh` gates the placement in CI.
 - **The SLSA provenance generator is now pinned to a reviewed commit (audit 2026-08-28 §4.8#13)** —
   `slsa-framework/slsa-github-generator` was referenced by the mutable tag `@v2.1.0` while holding
   `contents: write` and `id-token: write`, and the comment beside it claimed tag resolution gave
