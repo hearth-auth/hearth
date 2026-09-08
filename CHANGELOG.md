@@ -87,6 +87,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **README build prerequisites and the end-to-end walkthrough corrected (audit 2026-08-28
+  §4.12#16)** — the prerequisites listed Rust and an optional `buf`, but omitted `protoc`, which
+  `build.rs` runs on every build; a clean clone failed at `cargo build --release`, the walkthrough's
+  own first step. The walkthrough's "Register a client" step then read `.client_secret` off the
+  `POST /clients` response. The server **accepts** `client_secret` and never returns it — the
+  response carries only `client_id`, `client_name`, `created_at`, `grant_types` and
+  `redirect_uris` — so `CLIENT_SECRET` was `null` and was sent as the literal string `null` to
+  `/token` twice. The step now generates the secret with `openssl rand`, sends it, and keeps the
+  local copy; registering a public client is documented as the alternative. The claims list said
+  the token contains `groups` and `oid`; both are omitted when the user has neither, which is true
+  of the very user the walkthrough creates. Verified against a running server: the token carries
+  `sub`, `roles`, `permissions`, `exp`, `iat`, `iss`, `aud`, `sid`, `tid`, `jti`, `fid` and
+  `token_type`. Use `/v1/me/permissions`, which always returns `groups`, to test membership.
 - **Local smoke scripts no longer boot against your own `hearth.yaml` (audit 2026-08-28 §4.12#13)** —
   `make sdk-smoke-local` launched `hearth serve --dev` from the repository root with no `--config`.
   That auto-detects a `hearth.yaml` in the working directory, and `CLAUDE.md` tells every

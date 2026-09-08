@@ -119,7 +119,7 @@ found it, the audit piece, and the report's severity.
 - [x] 13.13 Make three `ci.yml` SDK jobs and every job in five other workflows able to fail the required check (§4.12#12 · MEDIUM)
 - [x] 13.14 Fix `make sdk-smoke-local`, which fails on any checkout with the documented `hearth.yaml` because it boots `--dev` from the repo root with no `--config` (§4.12#13 · MEDIUM)
 - [x] 13.15 Correct the CHANGELOG claim that a release whose test suite fails "is never published" (§4.12#14 · CLAIM-DEFECT)
-- [ ] 13.16 Add `protoc` to the README prerequisites and correct the walkthrough's client secret and four JWT claims the server does not return (§4.12#16 · LOW)
+- [x] 13.16 Add `protoc` to the README prerequisites and correct the walkthrough's client secret and four JWT claims the server does not return (§4.12#16 · LOW)
 - [ ] 13.17 Make `[profile.ci]` live so a red suite does not under-report by a third and a real flake can be retried; every run is currently fail-fast (§4.12#18 · Informational)
 - [ ] 13.18 Fix the UI smoke suite's setup step, which invalidates the URL its next step depends on — the test deletes itself and the run exits 0 (§4.12#19 · Informational)
 

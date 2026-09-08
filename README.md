@@ -311,6 +311,10 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 ### Prerequisites
 
 - **Rust 1.88.0+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
+- **`protoc`** — `build.rs` runs it on every build to generate the gRPC types.
+  Install it (`brew install protobuf`, `apt install protobuf-compiler`, or a
+  release from [protobuf/releases](https://github.com/protocolbuffers/protobuf/releases))
+  and make sure it is on `PATH`, or set `PROTOC=/path/to/protoc`.
 - `buf` (optional — only needed if you edit `proto/**/*.proto`; see [`CONTRIBUTING.md`](CONTRIBUTING.md))
 
 ### 1. Build
@@ -601,22 +605,33 @@ The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an
 
 ### 2. Register a client
 
+`POST /clients` **accepts** a `client_secret` and never returns one. You generate
+the secret, send it, and keep your copy — the response body carries only
+`client_id`, `client_name`, `created_at`, `grant_types` and `redirect_uris`.
+Reading `.client_secret` off the response yields `null`.
+
 ```bash
+CLIENT_SECRET=$(openssl rand -base64 32)
+
 CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
   -H "X-Realm-ID: $REALM_ID" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "client_name":   "my-app",
-    "redirect_uris": ["https://myapp.example.com/callback"]
-  }')
+  -d "{
+    \"client_name\":    \"my-app\",
+    \"redirect_uris\":  [\"https://myapp.example.com/callback\"],
+    \"client_secret\":  \"$CLIENT_SECRET\"
+  }")
 
 CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)
-CLIENT_SECRET=$(echo "$CLIENT" | jq -r .client_secret)
 
 echo "Client ID:     $CLIENT_ID"
-echo "Client secret: $CLIENT_SECRET"
+echo "Client secret: $CLIENT_SECRET"   # your value — store it now
 ```
+
+Omit `client_secret` to register a public client. A public client must then omit
+`client_secret` from the `/token` calls in steps 5 and 9 as well; PKCE is what
+protects it.
 
 ### 3. Generate PKCE verifier and challenge
 
@@ -690,13 +705,21 @@ echo "$ACCESS_TOKEN" \
   | jq .
 ```
 
-The decoded payload contains:
+Always present:
 - `sub` — stable user identifier
 - `roles` — array of role names assigned to the user
-- `groups` — array of group slugs
 - `permissions` — effective permission set resolved at issuance time
-- `oid` — organization ID (if the user belongs to an org)
-- `exp`, `iat`, `iss` — standard JWT claims
+- `exp`, `iat`, `iss`, `aud` — standard JWT claims
+- `sid`, `tid`, `jti`, `fid`, `token_type` — session, realm (tenant), token id,
+  refresh-family id, and token kind
+
+Present only when the user has them — **absent** from the token this walkthrough
+mints, because the bootstrap admin belongs to no group and no organization:
+- `groups` — array of group slugs
+- `oid` — organization ID
+
+`/v1/me/permissions` (step 8) always returns `groups`, as an empty array when
+there are none, so use it rather than the token to test group membership.
 
 ### 7. Fetch user info (scope-filtered claims)
 
