@@ -77,6 +77,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **The legal-attribution gate no longer trips with nothing to attribute (audit 2026-08-28
+  §4.8#10)** — `make notice` stored a whole-file SHA-256 of `Cargo.lock`, and `make notice-check`
+  compared against it. The workspace's own packages are entries in that file, so every release
+  version bump changed the hash and failed the gate, telling the operator to regenerate
+  `THIRD_PARTY_LICENSES` for a change that alters nothing attributable. The stored key is now
+  `scripts/attribution-key.sh`: a hash of each third-party package's `name`, `version`, `source`
+  and `checksum`. It ignores the workspace's own version and dependency-edge churn, and still
+  moves on any added, removed, re-versioned, re-sourced or re-checksummed crate. **Operator
+  action:** none — `THIRD_PARTY_LICENSES` is unchanged; only `THIRD_PARTY_LICENSES.sha256` was
+  rewritten in the new format.
 - **Generated SDK types can no longer drift from `proto/` past the PR gate (audit 2026-08-28
   §4.8#8)** — `make proto-check` was the last step of CI's `quality` job, which is gated on the
   `rust` paths filter. That filter names codegen's inputs (`proto/**`) but never its outputs, so a

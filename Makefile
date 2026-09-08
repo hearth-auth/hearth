@@ -218,6 +218,11 @@ proto-freshness-check: ## Assert nothing can drift generated SDK types past the 
 	@bash scripts/check-proto-freshness-gate.sh
 	@bash scripts/tests/check-proto-freshness-gate.test.sh
 
+## Guard: the attribution freshness key must move on a licence change and stay
+## put on the release's own version bump (audit 2026-08-28 §4.8#10).
+attribution-key-check: ## Assert the THIRD_PARTY_LICENSES freshness key is honest
+	@bash scripts/tests/attribution-key.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).
@@ -282,14 +287,20 @@ openapi-check: openapi
 ## Regenerate THIRD_PARTY_LICENSES from the current Cargo.lock (requires cargo-about).
 ## Also updates THIRD_PARTY_LICENSES.sha256 for the staleness check.
 ## Run after any dependency update: `cargo update && make notice`.
+##
+## The stored key is scripts/attribution-key.sh, NOT a whole-file hash of
+## Cargo.lock. Audit 2026-08-28 §4.8#10: the workspace's own packages are
+## entries in that file, so every release version bump changed the hash and
+## failed the gate with nothing attributable to regenerate.
 notice:
 	@command -v cargo-about >/dev/null 2>&1 || cargo install cargo-about --features cli
 	cargo about generate about.hbs -o THIRD_PARTY_LICENSES
-	sha256sum Cargo.lock > THIRD_PARTY_LICENSES.sha256
+	@echo "$$(bash scripts/attribution-key.sh)  Cargo.lock (third-party packages only)" \
+		> THIRD_PARTY_LICENSES.sha256
 	@echo "✓ THIRD_PARTY_LICENSES regenerated. Commit both files if the tree changed."
 
 ## CI gate: fail if THIRD_PARTY_LICENSES is stale relative to Cargo.lock.
-## Does not regenerate — just checks the stored sha256 fingerprint.
+## Does not regenerate — just checks the stored attribution key.
 notice-check:
 	@if [ ! -f THIRD_PARTY_LICENSES ]; then \
 		echo "ERROR: THIRD_PARTY_LICENSES missing. Run 'make notice' and commit."; \
@@ -300,9 +311,12 @@ notice-check:
 		exit 1; \
 	fi
 	@STORED=$$(awk '{print $$1}' THIRD_PARTY_LICENSES.sha256); \
-	CURRENT=$$(sha256sum Cargo.lock | awk '{print $$1}'); \
+	CURRENT=$$(bash scripts/attribution-key.sh); \
 	if [ "$$STORED" != "$$CURRENT" ]; then \
-		echo "ERROR: THIRD_PARTY_LICENSES is stale (Cargo.lock changed). Run 'make notice' and commit."; \
+		echo "ERROR: THIRD_PARTY_LICENSES is stale (a third-party dependency changed)."; \
+		echo "       Run 'make notice' and commit both files."; \
+		echo "       stored:  $$STORED"; \
+		echo "       current: $$CURRENT"; \
 		exit 1; \
 	fi
 	@echo "✓ THIRD_PARTY_LICENSES is up to date."

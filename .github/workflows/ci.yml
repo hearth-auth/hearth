@@ -422,6 +422,15 @@ jobs:
       - name: make notice-check (fail if THIRD_PARTY_LICENSES is stale — HEA-1268)
         run: make notice-check
 
+      # Audit §4.8#10: the freshness key was a whole-file hash of Cargo.lock,
+      # which includes the workspace's own packages, so every release version
+      # bump failed this gate with nothing attributable to regenerate. The key
+      # is now scripts/attribution-key.sh. This self-test proves it ignores a
+      # workspace version bump and a re-pointed dependency edge, and still moves
+      # on anything that can change a licence.
+      - name: Attribution freshness key — self-test
+        run: bash scripts/tests/attribution-key.test.sh
+
   # ── Generated-SDK freshness (audit 2026-08-28 §4.8#8) ──────────────────────
   #
   # `make proto-check` regenerates the TypeScript and Go types from proto/ and
