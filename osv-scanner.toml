@@ -26,26 +26,47 @@
 # include a ticket reference and a revisit trigger (patched version available).
 # Real CVEs in production shipping paths that ARE exploitable MUST NOT be
 # suppressed — fix or escalate to SecurityAuditor.
+#
+# Every entry MUST carry a machine-checkable annotation on the line above it:
+#
+#   # guard: package=<name> lockfile=<path>
+#
+# scripts/check-scanner-coverage.sh (R4) verifies that <path> is a lockfile
+# security.yml actually scans and that <name> appears in it. Audit 2026-08-28
+# §4.12#15 found two suppressions naming packages absent from the tree their
+# rationale described: RUSTSEC-2023-0071's reason described the *server's* use
+# of `rsa`, but `rsa` is not in the root Cargo.lock at all, and
+# GHSA-g7r4-m6w7-qqqr suppressed `esbuild`, which is not installed in any
+# scanned lockfile. A suppression that matches nothing is coverage on paper.
 
+# guard: package=rsa lockfile=sdks/rust/Cargo.lock
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0071"
-reason = "Marvin Attack timing side-channel in rsa crate. Hearth uses rsa only for PKCS#8 key generation and serialization — no PKCS#1 v1.5 decryption is performed anywhere, which is the only affected code path. All RSA signing is delegated to ring::signature::RsaKeyPair (unaffected). No patched version of rsa is available; revisit when rsa 0.10+ lands with the tonic/tower ecosystem. Tracked in HEA-116."
+reason = "Marvin Attack timing side-channel in the rsa crate. Scope correction (audit 2026-08-28 §4.12#15): the server does not link rsa at all — it is absent from the root Cargo.lock. rsa reaches exactly one scanned tree, sdks/rust/Cargo.lock, as a transitive dependency of jsonwebtoken. The advisory's only affected code path is PKCS#1 v1.5 decryption; the Rust SDK performs no RSA decryption, and Hearth signs Ed25519 only (CLAUDE.md: no HS256, no alg:none). No patched version of rsa is available; revisit when rsa 0.10+ lands in the jsonwebtoken dependency tree. Tracked in HEA-116."
 
-[[IgnoredVulns]]
-id = "GHSA-g7r4-m6w7-qqqr"
-reason = "esbuild dev-server file read on Windows. Affects esbuild >=0.27.3 <0.28.1. The sdks/node devDependency is constrained to 0.27.x by vite@7.x's peer-dep; 0.28.1 is not yet reachable without a vite major bump. The vulnerability only triggers when running esbuild's HTTP dev server on Windows — Hearth's Node SDK never runs a dev server in CI or production, and the shipped artifact only contains jose. Low severity; Windows-only; dev-tooling-only surface. Revisit when vite@8 ships with esbuild >=0.28.1."
-
+# guard: package=google.golang.org/protobuf lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "CVE-2026-42507"
 reason = "In google.golang.org/protobuf (Go SDK transitive dep). The Hearth Go SDK is a thin client library that makes outbound HTTP/gRPC calls only — it never parses untrusted protobuf payloads in a server capacity. The advisory requires server-side parsing of attacker-controlled messages to trigger. Revisit when a patched google.golang.org/protobuf version is available (HEA-1528)."
 
+# guard: package=google.golang.org/protobuf lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "CVE-2026-42504"
 reason = "In google.golang.org/protobuf (Go SDK transitive dep). Same rationale as CVE-2026-42507: client-library-only usage with no server-side protobuf parsing. Revisit when a patched version is available (HEA-1528)."
 
+# guard: package=google.golang.org/genproto/googleapis/api lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "CVE-2026-27145"
 reason = "In google.golang.org/genproto/googleapis/api (Go SDK transitive dep). The genproto package provides generated gRPC type definitions for outbound calls to the Hearth server. The SDK never opens a listening socket or acts as a gRPC server, so the attack surface described in the advisory (server-side processing of malformed RPC messages) does not apply. Revisit when a patched upstream version is available (HEA-1528)."
+
+# GHSA-g7r4-m6w7-qqqr (esbuild dev-server file read on Windows) was removed on
+# 2026-09-08 by audit 2026-08-28 §4.12#15. Its reason called esbuild an
+# "sdks/node devDependency"; esbuild is not installed in sdks/node,
+# pnpm-lock.yaml or docs-site/package-lock.json. It appears only as an OPTIONAL
+# peer dependency of vite, which npm does not install. The suppression could
+# never match, so it was dead configuration claiming a decision had been made.
+# If a future vite bump does install esbuild, the advisory fires and is
+# assessed then — which is the correct behaviour.
 
 # No [[PackageOverrides]] path-exclusion entries — scope is controlled via
 # explicit --lockfile flags in security.yml, which is the correct mechanism.

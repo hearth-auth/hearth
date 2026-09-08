@@ -145,6 +145,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Security
+- **The published container image is now scanned, and the scanners that report on it can fail
+  a build (audit 2026-08-28 §4.8#16, §4.12#15)** — nothing had ever inspected the image layers
+  operators pull: the only Trivy job was a filesystem scan of the source checkout, and it
+  carried no `exit-code`, so a CRITICAL or HIGH finding still produced a successful job. Trivy
+  now runs against the built image on every pull request, and against the published multi-arch
+  index **by digest, before cosign signs it** — a CRITICAL or HIGH finding leaves the image
+  unsigned and un-attested, so it cannot pass the signature verification the README install
+  path requires. The filesystem scan is armed with `exit-code: '1'` as well. Two OSV-Scanner
+  suppressions that could never match were corrected: `RUSTSEC-2023-0071` was justified by the
+  server's use of the `rsa` crate, which the server does not link at all (`rsa` reaches only
+  `sdks/rust` via `jsonwebtoken`), and the `esbuild` suppression named a package no scanned
+  lockfile installs — it is removed, so the advisory will be assessed if a future `vite` bump
+  ever pulls it in. Fifteen unreachable `github.event_name == 'schedule'` conditions in `ci.yml`
+  (a workflow with no `schedule:` trigger) are removed; the periodic sweeps that do exist are
+  unaffected and still run from `security.yml` and `ui-nightly.yml`.
+  `scripts/check-scanner-coverage.sh` holds all four in place.
 - **The published binary no longer links `reqwest` or a second TLS backend (audit 2026-08-28
   §4.8#9)** — `opentelemetry-otlp`'s default exporter pulled `reqwest`, a policy-banned HTTP
   client, and `rustls`/`tokio-rustls` default features selected the `aws-lc-rs` provider on top

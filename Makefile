@@ -250,6 +250,12 @@ dockerfile-claims-check: ## Assert the Dockerfile's checkable claims are true
 	@bash scripts/check-dockerfile-claims.sh
 	@bash scripts/tests/check-dockerfile-claims.test.sh
 
+## Guard: scanner configuration must not claim coverage it does not have
+## (audit 2026-08-28 §4.8#16, §4.12#15). Runs in ci.yml's filter job.
+scanner-coverage-check: ## Assert every scanner gate and suppression is live
+	@bash scripts/check-scanner-coverage.sh
+	@bash scripts/tests/check-scanner-coverage.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

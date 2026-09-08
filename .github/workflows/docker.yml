@@ -103,12 +103,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v3.6.0
 
+      # `load: true` puts the built image in the local Docker daemon under a
+      # throwaway tag so the Trivy step below can read its layers. Without it
+      # the build result stays in the buildx cache and there is nothing to scan.
       - name: Build (linux/amd64, no push)
         uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
         with:
           context: .
           platforms: linux/amd64
           push: false
+          load: true
+          tags: hearth:pr-scan
           build-args: |
             BUILD_VERSION=pr-${{ github.event.pull_request.number }}
             BUILD_REVISION=${{ github.sha }}
@@ -116,9 +121,23 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
+      # Audit §4.8#16: the published container image was never scanned. The
+      # Trivy job in security.yml is `scan-type: fs` over the checkout — it
+      # never reads the base-OS packages or the linked binary that ship in the
+      # image. This scans the image the PR would publish, before it can merge.
+      - name: Scan the built image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
+        with:
+          scan-type: image
+          image-ref: hearth:pr-scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       - name: Summarize
         if: always()
-        run: echo "Build-only run (PR — no push, no signing)." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Build-only run (PR — no push, no signing). Image scanned by Trivy." >> "$GITHUB_STEP_SUMMARY"
 
   # ── Release: build linux/amd64 on native x86_64 runner ─────────────────────
   # Pushes a digest-only image (no tag). The merge-and-sign job assembles the
@@ -243,7 +262,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write   # cosign keyless OIDC token exchange
+      id-token: write         # cosign keyless OIDC token exchange
+      security-events: write  # image-scan SARIF upload (audit §4.8#16)
 
     outputs:
       image-digest: ${{ steps.inspect.outputs.digest }}
@@ -302,6 +322,28 @@ jobs:
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Merged manifest digest: $DIGEST"
+
+      # Audit §4.8#16: scan the exact index that operators pull, by digest,
+      # BEFORE cosign signs it. A CRITICAL/HIGH finding fails this job, so the
+      # image is never signed, never SBOM-attested, and never passes the
+      # signature verification the README install path requires.
+      - name: Scan the published image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/hearth-auth/hearth@${{ steps.inspect.outputs.digest }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload image SARIF to GitHub Code Scanning
+        if: always() && hashFiles('trivy-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
 
       - name: Install cosign
         uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1

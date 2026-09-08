@@ -9,8 +9,21 @@ name: Security
 #
 # Posture: each job uploads a separate SARIF category to GitHub Code Scanning,
 # so existing alert dedup + branch-protection rules continue to work. Failures
-# in one scanner do not cancel the others (no fail-fast); each writes its own
-# SARIF and is required to remain green independently.
+# in one scanner do not cancel the others (no fail-fast).
+#
+# How each scanner fails, stated exactly (audit 2026-08-28 §4.8#16 corrected an
+# earlier blanket claim that all of them were "required to remain green"):
+#
+#   trivy         fails its own job on a CRITICAL/HIGH finding (exit-code: '1').
+#   osv-scanner   fails its own job on any finding (no continue-on-error).
+#   cargo-deny    fails its own job on an advisory, licence or ban violation.
+#   codeql        does NOT fail its job on a finding. CodeQL reports to Code
+#                 Scanning; the gate is the branch-protection rule on the code
+#                 scanning results check, not this workflow's exit code.
+#
+# The published container image is scanned in docker.yml, not here — this
+# workflow's Trivy job is a filesystem scan of the checkout and never reads the
+# image layers operators pull. Guard: scripts/check-scanner-coverage.sh.
 #
 # Doc-only PRs are skipped via paths-ignore — security scanners don't add value
 # on documentation diffs and would just burn runner minutes.
@@ -192,12 +205,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Audit §4.8#16: this step carried no `exit-code`, so a CRITICAL or HIGH
+      # finding produced a `success` job while the header above called each
+      # scanner "required to remain green independently". `exit-code: '1'` arms
+      # it. The SARIF upload below is `if: always()`, so alerts still reach Code
+      # Scanning on the failing run.
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
+          exit-code: "1"
           # HEA-690: Trivy fs scan focuses on secrets + misconfigs in shipping
           # code. Tests, examples, fuzz, and node_modules are intentionally noisy
           # (fake creds in fixtures, vendored deps) and excluded.

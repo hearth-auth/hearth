@@ -12,7 +12,16 @@ name: CI
 #
 # Downstream jobs gate on the `filter` job's outputs so doc-only PRs run
 # only the filter job, while broad changes still run the full matrix.
-# On pushes to main and scheduled runs we bypass the filter and always run.
+# On pushes to main we bypass the filter and always run.
+#
+# There is no `schedule:` trigger, and therefore no scheduled full-matrix run.
+# Audit 2026-08-28 §4.8#16: fifteen jobs carried a
+# `|| github.event_name == 'schedule'` disjunct and this comment claimed
+# scheduled runs bypassed the filter. Neither was reachable — the workflow has
+# only ever run on pull_request and push. The dead disjuncts are removed rather
+# than made live: a nightly full matrix is a separate decision, and the periodic
+# sweeps that do exist live in security.yml and ui-nightly.yml, which declare
+# their own cron. Guard: scripts/check-scanner-coverage.sh (R1).
 #
 # This workflow is the prerequisite gate for Dependabot auto-merge
 # (see HEA-275 / .github/workflows/dependabot-automerge.yml).
@@ -312,6 +321,20 @@ jobs:
       - name: Dockerfile claims — guard self-test
         run: bash scripts/tests/check-dockerfile-claims.test.sh
 
+      # Audit §4.8#16 / §4.12#15: the scanner configuration claimed four kinds
+      # of cover it did not have — fifteen dead `event_name == 'schedule'`
+      # conditions in this very workflow, an advisory-only Trivy job, an
+      # unscanned published image, and two suppressions naming packages absent
+      # from the tree their rationale described. This guard fails the build if
+      # any of the four returns.
+      - name: Scanner coverage (check-scanner-coverage.sh)
+        run: bash scripts/check-scanner-coverage.sh
+
+      # Proof the guard can go red: it must reject each of the four audited
+      # shapes, not merely pass on the remediated tree.
+      - name: Scanner coverage — guard self-test
+        run: bash scripts/tests/check-scanner-coverage.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and
@@ -400,7 +423,7 @@ jobs:
     # guard, `needs.filter.outputs.rust` evaluates to '' on filter failure,
     # `'' == 'true'` is false, and branch protection treats `skipped` as
     # passing — allowing a PR to merge with zero quality checks run.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -505,7 +528,7 @@ jobs:
     needs: filter
     # Same HEA-685 shape as `quality`: a filter-job failure must FAIL this job,
     # not silently skip it, because branch protection treats `skipped` as pass.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.proto == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.proto == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -542,7 +565,7 @@ jobs:
     name: ui (Playwright — smoke + regression + accessibility + exploratory)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.ui == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.ui == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -648,7 +671,7 @@ jobs:
     name: sdk-node (${{ matrix.node-version }}.x)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -696,7 +719,7 @@ jobs:
     name: sdk-conformance (docs/specs/SDK.md)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -726,7 +749,7 @@ jobs:
   sdk-rust:
     name: sdk-rust
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -744,7 +767,7 @@ jobs:
   sdk-python:
     name: sdk-python
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-python == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-python == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -767,7 +790,7 @@ jobs:
   sdk-php:
     name: sdk-php
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-php == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-php == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -792,7 +815,7 @@ jobs:
   sdk-kotlin:
     name: sdk-kotlin
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-kotlin == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-kotlin == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -820,7 +843,7 @@ jobs:
   sdk-go:
     name: sdk-go
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-go == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-go == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -850,7 +873,7 @@ jobs:
   sdk-typescript:
     name: sdk-typescript
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-typescript == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-typescript == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -894,7 +917,7 @@ jobs:
     name: abuse-coverage (§3.41 adversarial test gate)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.abuse-coverage == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.abuse-coverage == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
@@ -925,7 +948,7 @@ jobs:
   ldap-integration:
     name: ldap-integration (OpenLDAP — HEA-1331)
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -1066,7 +1089,7 @@ jobs:
     name: cluster-chaos (Raft AC-1 through AC-7)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # AC-5–7 each have election windows (up to 10–15 s) and write loops.
     # 10 minutes is generous; typical runtime is ~90 s.
@@ -1170,7 +1193,7 @@ jobs:
   msrv:
     name: msrv (1.88.0)
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

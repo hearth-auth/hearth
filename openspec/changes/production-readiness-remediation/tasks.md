@@ -113,7 +113,7 @@ found it, the audit piece, and the report's severity.
 - [x] 13.7 Pin the third-party reusable workflow holding `contents: write` + `id-token: write` to a commit SHA and correct its justification (§4.8#13 · MEDIUM)
 - [x] 13.8 Make the systemd crash-loop limiter take effect; it is silently ignored (§4.8#14 · LOW)
 - [x] 13.9 Correct the three false statements the Dockerfile makes about the build it defines (§4.8#15 · Informational)
-- [ ] 13.10 Fix scanner configuration that overstates coverage: fifteen dead schedule conditions, advisory-only scanners, an unscanned image, and suppressions for packages absent from the tree they name (§4.8#16, §4.12#15 · Informational/LOW)
+- [x] 13.10 Fix scanner configuration that overstates coverage: fifteen dead schedule conditions, advisory-only scanners, an unscanned image, and suppressions for packages absent from the tree they name (§4.8#16, §4.12#15 · Informational/LOW)
 - [ ] 13.11 Stop the shipped Docker Compose file sourcing the repository-root `.env` into the container's runtime environment (§4.8#17 · LOW)
 - [ ] 13.12 Relabel published container images `Apache-2.0`; every image is labelled `AGPL-3.0-only` and the project relicensed three months ago (§4.12#7 · MEDIUM)
 - [ ] 13.13 Make three `ci.yml` SDK jobs and every job in five other workflows able to fail the required check (§4.12#12 · MEDIUM)
