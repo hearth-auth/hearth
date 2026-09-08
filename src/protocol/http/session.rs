@@ -148,16 +148,11 @@ async fn end_session(
         tokio::spawn(async move {
             let uri = target.uri.clone();
             let outcome = tokio::task::spawn_blocking(move || {
-                let body = form_urlencoded::Serializer::new(String::new())
-                    .append_pair("logout_token", &target.logout_token)
-                    .finish();
-                ureq::post(&target.uri)
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .send(body.as_bytes())
+                deliver_backchannel_logout(&target.uri, &target.logout_token)
             })
             .await;
             match outcome {
-                Ok(Ok(_)) => {}
+                Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     tracing::warn!(uri = %uri, error = %e, "backchannel logout delivery failed");
                 }
@@ -226,6 +221,54 @@ async fn end_session(
     }
 
     end_session_redirect(result.post_logout_redirect_uri, result.state)
+}
+
+/// Connect timeout for one back-channel logout POST.
+const BCL_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Total timeout for one back-channel logout POST.
+const BCL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Delivers one OIDC back-channel logout token to a relying party.
+///
+/// The destination comes from `backchannel_logout_uri`, a client field a tenant
+/// admin controls, and Hearth dereferences it server-side. It is therefore an
+/// SSRF sink and is guarded exactly as webhook egress is (audit §4.3#2):
+///
+/// 1. `check_webhook_url` refuses a non-`https` scheme and any host that
+///    resolves into a private, loopback, link-local or cloud-metadata range —
+///    `169.254.169.254` included.
+/// 2. The agent is built through `ssrf_agent`, so the connect-time DNS lookup
+///    is validated too, closing the rebinding race the pre-flight leaves open.
+/// 3. Redirects are refused, so a `3xx` cannot walk the request to an
+///    unchecked internal host.
+///
+/// Blocking: call from `spawn_blocking`.
+///
+/// # Errors
+///
+/// Returns a message describing the refusal or the transport failure. The
+/// caller logs it; a failed notification never fails the user's logout.
+fn deliver_backchannel_logout(uri: &str, logout_token: &str) -> Result<(), String> {
+    crate::webhook::ssrf::check_webhook_url(uri)
+        .map_err(|e| format!("SSRF guard blocked back-channel logout: {e}"))?;
+
+    let config = ureq::config::Config::builder()
+        .timeout_connect(Some(BCL_CONNECT_TIMEOUT))
+        .timeout_global(Some(BCL_REQUEST_TIMEOUT))
+        .https_only(true)
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build();
+    let agent = crate::webhook::ssrf::ssrf_agent(config);
+
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("logout_token", logout_token)
+        .finish();
+    agent
+        .post(uri)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send(body.as_bytes())
+        .map_err(|e| format!("HTTP error: {e}"))?;
+    Ok(())
 }
 
 /// Builds the post-logout redirect response, appending `state` when present.
@@ -483,5 +526,50 @@ async fn oauth_sv_snapshot(
             Json(serde_json::json!({"error": "internal error"})),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deliver_backchannel_logout;
+
+    /// A tenant admin must not be able to point back-channel logout at the
+    /// cloud instance-metadata service (audit §4.3#2).
+    #[test]
+    fn backchannel_delivery_refuses_the_metadata_address() {
+        let err = deliver_backchannel_logout("https://169.254.169.254/logout", "tok")
+            .expect_err("IMDS destination must be refused");
+        assert!(
+            err.contains("SSRF guard"),
+            "expected the SSRF guard to refuse it, got: {err}"
+        );
+    }
+
+    /// RFC 1918 and loopback destinations are refused for the same reason.
+    #[test]
+    fn backchannel_delivery_refuses_private_and_loopback_hosts() {
+        for uri in [
+            "https://10.0.0.1/logout",
+            "https://192.168.1.1/logout",
+            "https://127.0.0.1/logout",
+        ] {
+            let err = deliver_backchannel_logout(uri, "tok")
+                .expect_err("private/loopback destination must be refused");
+            assert!(
+                err.contains("SSRF guard"),
+                "expected the SSRF guard to refuse {uri}, got: {err}"
+            );
+        }
+    }
+
+    /// A non-https scheme never reaches the network.
+    #[test]
+    fn backchannel_delivery_refuses_non_https() {
+        let err = deliver_backchannel_logout("http://example.com/logout", "tok")
+            .expect_err("http:// must be refused");
+        assert!(
+            err.contains("SSRF guard"),
+            "expected the SSRF guard to refuse it, got: {err}"
+        );
     }
 }

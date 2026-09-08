@@ -77,6 +77,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Back-channel logout delivery is behind the SSRF guard (audit 2026-08-28 §4.3#2)** — the
+  `backchannel_logout_uri` POST that `GET /end_session` fans out used a bare `ureq` client, so a
+  tenant admin could aim it at an RFC 1918 host, loopback, or the cloud instance-metadata address
+  `169.254.169.254`. It now runs through the same guard as webhook egress: `https` only, every
+  resolved address checked, the connect-time DNS lookup checked again to close the rebinding race,
+  and redirects refused. **Operator action:** a back-channel logout URI on a private or loopback
+  address no longer receives notifications, and `PATCH /admin/clients/{id}` refuses to store one —
+  use a publicly-resolvable `https` endpoint. `frontchannel_logout_uri` still accepts loopback
+  `http` for local development, because the browser fetches it, not Hearth.
 - **Client logout URIs are restricted to `https` (audit 2026-08-28 §4.3#1)** — `frontchannel_logout_uri`
   was stored unvalidated and rendered into an `<iframe src>` on the Hearth origin by
   `GET /end_session`, so a `javascript:` or `data:` value executed script as the identity provider.

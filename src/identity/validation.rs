@@ -394,15 +394,22 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), IdentityError> {
 ///   identity provider;
 /// * the back-channel URI is dereferenced by the server itself.
 ///
-/// Only `https://`, and `http://` to a loopback host for local development,
-/// are therefore accepted. Custom schemes are refused.
+/// Only `https://` is accepted, except that the front-channel URI also allows
+/// `http://` to a loopback host so a locally-run relying party still works in
+/// development. The back-channel URI has no such exemption: Hearth fetches it
+/// itself, and the SSRF guard refuses loopback at delivery time anyway, so
+/// accepting one at write time would only store a URI that can never be used.
 ///
 /// # Errors
 ///
 /// Returns [`IdentityError::InvalidInput`] naming `field` when the URI is
-/// empty, over-long, carries a fragment or wildcard, or uses any scheme other
-/// than `https` (or loopback `http`).
-pub(crate) fn validate_logout_uri(field: &str, uri: &str) -> Result<(), IdentityError> {
+/// empty, over-long, carries a fragment or wildcard, or uses a scheme the
+/// field does not allow.
+pub(crate) fn validate_logout_uri(
+    field: &str,
+    uri: &str,
+    allow_loopback_http: bool,
+) -> Result<(), IdentityError> {
     if uri.is_empty() {
         return Err(IdentityError::InvalidInput {
             reason: format!("{field} must not be empty"),
@@ -431,7 +438,7 @@ pub(crate) fn validate_logout_uri(field: &str, uri: &str) -> Result<(), Identity
     let scheme = uri[..scheme_end].to_ascii_lowercase();
     match scheme.as_str() {
         "https" => Ok(()),
-        "http" => {
+        "http" if allow_loopback_http => {
             let host_start = scheme_end + 3;
             let host_end = uri[host_start..]
                 .find(['/', ':', '?', '#'])
@@ -454,14 +461,24 @@ pub(crate) fn validate_logout_uri(field: &str, uri: &str) -> Result<(), Identity
     }
 }
 
-/// Returns `true` when a stored logout URI is safe to emit or dereference.
+/// Returns `true` when a stored front-channel logout URI is safe to render.
 ///
 /// Write-time validation is the primary guard ([`validate_logout_uri`]); this
 /// is the read-side backstop for a client row written before that guard
 /// existed, or by any future path that forgets it.
 #[must_use]
-pub(crate) fn is_allowed_logout_uri(uri: &str) -> bool {
-    validate_logout_uri("logout URI", uri).is_ok()
+pub(crate) fn is_allowed_frontchannel_logout_uri(uri: &str) -> bool {
+    validate_logout_uri("frontchannel_logout_uri", uri, true).is_ok()
+}
+
+/// Returns `true` when a stored back-channel logout URI is safe to dereference.
+///
+/// Stricter than [`is_allowed_frontchannel_logout_uri`]: no loopback `http`.
+/// The SSRF guard at delivery time is the authority on the destination host;
+/// this only keeps an unusable scheme out of the fan-out.
+#[must_use]
+pub(crate) fn is_allowed_backchannel_logout_uri(uri: &str) -> bool {
+    validate_logout_uri("backchannel_logout_uri", uri, false).is_ok()
 }
 
 /// Validates OAuth scope tokens per RFC 6749 §3.3.

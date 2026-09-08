@@ -35,9 +35,20 @@ const REFUSED: &[&str] = &[
     "/logout",
 ];
 
-/// URIs that must keep working.
-const ACCEPTED: &[&str] = &[
+/// URIs that must keep working on the front channel. Loopback `http` stays
+/// usable there because the browser, not Hearth, fetches it.
+const FRONTCHANNEL_ACCEPTED: &[&str] = &[
     "https://app.example.com/logout",
+    "http://localhost:3000/logout",
+    "http://127.0.0.1:3000/logout",
+];
+
+/// The back channel is `https` only — Hearth dereferences it itself, and the
+/// SSRF guard refuses loopback at delivery time regardless.
+const BACKCHANNEL_ACCEPTED: &[&str] = &["https://app.example.com/logout"];
+
+/// Loopback `http` is a front-channel-only allowance.
+const BACKCHANNEL_ALSO_REFUSED: &[&str] = &[
     "http://localhost:3000/logout",
     "http://127.0.0.1:3000/logout",
 ];
@@ -94,7 +105,7 @@ async fn frontchannel_logout_uri_refuses_disallowed_schemes() {
 #[tokio::test]
 async fn backchannel_logout_uri_refuses_disallowed_schemes() {
     let (harness, realm_id, client) = setup().await;
-    for uri in REFUSED {
+    for uri in REFUSED.iter().chain(BACKCHANNEL_ALSO_REFUSED) {
         let result = harness.identity().update_client(
             &realm_id,
             client.client_id(),
@@ -111,9 +122,9 @@ async fn backchannel_logout_uri_refuses_disallowed_schemes() {
 }
 
 #[tokio::test]
-async fn logout_uris_accept_https_and_loopback_http() {
+async fn frontchannel_logout_uri_accepts_https_and_loopback_http() {
     let (harness, realm_id, client) = setup().await;
-    for uri in ACCEPTED {
+    for uri in FRONTCHANNEL_ACCEPTED {
         let updated = harness
             .identity()
             .update_client(
@@ -121,12 +132,29 @@ async fn logout_uris_accept_https_and_loopback_http() {
                 client.client_id(),
                 &UpdateClientRequest {
                     frontchannel_logout_uri: Some(Some((*uri).to_string())),
-                    backchannel_logout_uri: Some(Some((*uri).to_string())),
                     ..Default::default()
                 },
             )
             .unwrap_or_else(|e| panic!("update_client refused the allowed URI {uri:?}: {e}"));
         assert_eq!(updated.frontchannel_logout_uri(), Some(*uri));
+    }
+}
+
+#[tokio::test]
+async fn backchannel_logout_uri_accepts_https() {
+    let (harness, realm_id, client) = setup().await;
+    for uri in BACKCHANNEL_ACCEPTED {
+        let updated = harness
+            .identity()
+            .update_client(
+                &realm_id,
+                client.client_id(),
+                &UpdateClientRequest {
+                    backchannel_logout_uri: Some(Some((*uri).to_string())),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("update_client refused the allowed URI {uri:?}: {e}"));
         assert_eq!(updated.backchannel_logout_uri(), Some(*uri));
     }
 }

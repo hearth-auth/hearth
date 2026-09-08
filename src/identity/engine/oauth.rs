@@ -3217,13 +3217,13 @@ impl EmbeddedIdentityEngine {
         }
         if let Some(uri) = &request.backchannel_logout_uri {
             if let Some(value) = uri {
-                validation::validate_logout_uri("backchannel_logout_uri", value)?;
+                validation::validate_logout_uri("backchannel_logout_uri", value, false)?;
             }
             client.set_backchannel_logout_uri(uri.clone());
         }
         if let Some(uri) = &request.frontchannel_logout_uri {
             if let Some(value) = uri {
-                validation::validate_logout_uri("frontchannel_logout_uri", value)?;
+                validation::validate_logout_uri("frontchannel_logout_uri", value, true)?;
             }
             client.set_frontchannel_logout_uri(uri.clone());
         }
@@ -4005,7 +4005,7 @@ impl EmbeddedIdentityEngine {
                 // allowlist existed must not be framed or fetched now.
                 if let Some(bcl_uri) = client
                     .backchannel_logout_uri()
-                    .filter(|u| validation::is_allowed_logout_uri(u))
+                    .filter(|u| validation::is_allowed_backchannel_logout_uri(u))
                 {
                     let jti = uuid::Uuid::new_v4().to_string();
                     let logout_claims = LogoutTokenClaims::new(
@@ -4026,7 +4026,7 @@ impl EmbeddedIdentityEngine {
 
                 if let Some(fcl_uri) = client
                     .frontchannel_logout_uri()
-                    .filter(|u| validation::is_allowed_logout_uri(u))
+                    .filter(|u| validation::is_allowed_frontchannel_logout_uri(u))
                 {
                     frontchannel_targets.push(FrontchannelTarget {
                         uri: fcl_uri.to_string(),
