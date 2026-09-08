@@ -3626,6 +3626,24 @@ impl EmbeddedIdentityEngine {
         if let Ok(mut mfa) = self.mfa_dek_cache.lock() {
             mfa.remove(realm_id);
         }
+        // Per-realm DPoP nonce HMAC secret. The cascade sweeps its storage key
+        // with the rest of the realm's key space, but the cached copy stayed
+        // live for the life of the process, so a realm re-created under the
+        // same ID kept signing nonces with the deleted realm's key
+        // (audit 2026-08-28 §4.20#6).
+        if let Ok(mut nonce) = self.dpop_nonce_cache.lock() {
+            nonce.remove(realm_id);
+        }
+        // Signing-key rotation epoch. Not key material, but one entry per
+        // realm that nothing ever removed. A re-created realm starts from
+        // epoch 0 again, which is exactly what a never-rotated realm reads.
+        self.realm_key_epoch.remove(realm_id);
+        // Per-realm JTI serialisation lock. A concurrent holder owns its own
+        // `Arc`, so dropping the map entry is safe; it only stops the map
+        // growing by one entry for every realm ever deleted.
+        if let Ok(mut locks) = self.jti_locks.lock() {
+            locks.remove(realm_id);
+        }
     }
 
     // ===== Session lifecycle policy helpers (A-18) =====
@@ -22125,6 +22143,57 @@ mod tests {
                 .check_and_record_dpop_jti(&realm_b, "shared-jti", now_secs)
                 .is_ok(),
             "same jti in different realm must be independent"
+        );
+    }
+
+    /// Audit 2026-08-28 §4.20#6: key material must not outlive its realm.
+    ///
+    /// The realm's DPoP nonce HMAC secret is cached in memory on first use.
+    /// The delete cascade sweeps its storage key with the rest of the realm's
+    /// key space, but `purge_realm_caches` did not drop the cached copy, so the
+    /// secret stayed live for the life of the process — and a realm re-created
+    /// under the same ID silently kept signing nonces with the deleted realm's
+    /// key.
+    #[test]
+    fn dpop_nonce_secret_does_not_outlive_the_realm() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        let before = engine
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("load nonce secret");
+
+        engine.delete_realm(&realm).expect("delete realm");
+
+        assert!(
+            engine
+                .dpop_nonce_cache
+                .lock()
+                .expect("dpop_nonce_cache poisoned")
+                .get(&realm)
+                .is_none(),
+            "the deleted realm's DPoP nonce HMAC key must not stay in memory"
+        );
+
+        // Re-create the realm under its old ID, as a backup restore would.
+        engine
+            .import_realm(
+                &CreateRealmRequest {
+                    name: "dpop-restored".to_string(),
+                    config: None,
+                },
+                Some(realm.clone()),
+                None,
+            )
+            .expect("re-import realm under its old ID");
+
+        let after = engine
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("load nonce secret again");
+        assert_ne!(
+            before, after,
+            "a realm re-created under a deleted realm's ID must get a fresh \
+             nonce secret, never the deleted realm's key"
         );
     }
 

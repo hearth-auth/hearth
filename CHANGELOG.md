@@ -326,6 +326,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Security
+- **A deleted realm's cached key material is dropped from memory (audit 2026-08-28 §4.20#6)** —
+  the realm's DPoP nonce HMAC secret is cached on first use. The delete cascade sweeps its storage
+  key with the rest of the realm's key space, but the cached copy was never dropped, so the secret
+  stayed live for the life of the process — and a realm re-created under the same ID kept signing
+  DPoP nonces with the deleted realm's key. `delete_realm` now clears it, along with the realm's
+  signing-key rotation epoch and its JTI serialisation lock, neither of which was ever removed.
+  The other four families the audit named — password history, webhook secrets, org-owned agent
+  credentials, and the per-realm MFA data-encryption key — are all stored under the realm's own
+  partition and already went with the key-space sweep; that is now pinned by a test.
 - **The Docker Compose stack no longer injects the repository-root `.env` into the container
   (audit 2026-08-28 §4.8#17)** — `deploy/docker-compose.yml` carried
   `env_file: [{ path: ../.env }]`, and Compose injects *every* key of an `env_file` into the
