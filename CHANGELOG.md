@@ -77,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Client logout URIs are restricted to `https` (audit 2026-08-28 §4.3#1)** — `frontchannel_logout_uri`
+  was stored unvalidated and rendered into an `<iframe src>` on the Hearth origin by
+  `GET /end_session`, so a `javascript:` or `data:` value executed script as the identity provider.
+  Both `frontchannel_logout_uri` and `backchannel_logout_uri` now accept only `https://`, or
+  `http://` to a loopback host, and reject fragments and wildcards — the rules that already applied
+  to `redirect_uris`, minus the RFC 8252 custom-scheme allowance, which is unsafe for a URI Hearth
+  itself frames or fetches. `PATCH /admin/clients/{id}` refuses a disallowed value, and a row
+  written before this release is skipped at logout rather than emitted.
 - **Nine `/ui/admin` mutations now verify a CSRF token (audit 2026-08-28 §4.23#1a)** — password-reset
   send, MFA teardown (disable MFA, reset recovery codes), session revocation, passkey revocation,
   audit-log integrity verify, audit-log prune, config reload, and the config-editor diff preview

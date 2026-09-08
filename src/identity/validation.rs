@@ -382,6 +382,88 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), IdentityError> {
     Ok(())
 }
 
+/// Validates a client logout URI (`frontchannel_logout_uri` or
+/// `backchannel_logout_uri`).
+///
+/// These two fields are stricter than a redirect URI. A redirect URI is only
+/// ever handed back to the browser as a `Location`, so RFC 8252 native-app
+/// deep links are permitted there. A logout URI is different on both counts:
+///
+/// * the front-channel URI is rendered into an `<iframe src>` **on the Hearth
+///   origin**, so a `javascript:` or `data:` scheme executes script as the
+///   identity provider;
+/// * the back-channel URI is dereferenced by the server itself.
+///
+/// Only `https://`, and `http://` to a loopback host for local development,
+/// are therefore accepted. Custom schemes are refused.
+///
+/// # Errors
+///
+/// Returns [`IdentityError::InvalidInput`] naming `field` when the URI is
+/// empty, over-long, carries a fragment or wildcard, or uses any scheme other
+/// than `https` (or loopback `http`).
+pub(crate) fn validate_logout_uri(field: &str, uri: &str) -> Result<(), IdentityError> {
+    if uri.is_empty() {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("{field} must not be empty"),
+        });
+    }
+    if uri.len() > MAX_REDIRECT_URI_LENGTH {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "{field} exceeds maximum length of {MAX_REDIRECT_URI_LENGTH} characters"
+            ),
+        });
+    }
+    if uri.contains('#') {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("{field} must not contain a fragment component"),
+        });
+    }
+    if uri.contains('*') {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("{field} must not contain wildcards"),
+        });
+    }
+    let scheme_end = uri.find("://").ok_or_else(|| IdentityError::InvalidInput {
+        reason: format!("{field} must contain a scheme (https://)"),
+    })?;
+    let scheme = uri[..scheme_end].to_ascii_lowercase();
+    match scheme.as_str() {
+        "https" => Ok(()),
+        "http" => {
+            let host_start = scheme_end + 3;
+            let host_end = uri[host_start..]
+                .find(['/', ':', '?', '#'])
+                .map_or(uri.len(), |i| host_start + i);
+            let host = &uri[host_start..host_end];
+            if host == "localhost" || host == "127.0.0.1" || host == "[::1]" {
+                Ok(())
+            } else {
+                Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "http {field} is only permitted for loopback addresses \
+                         (localhost, 127.0.0.1, [::1])"
+                    ),
+                })
+            }
+        }
+        _ => Err(IdentityError::InvalidInput {
+            reason: format!("{field} scheme '{scheme}' is not permitted; use https"),
+        }),
+    }
+}
+
+/// Returns `true` when a stored logout URI is safe to emit or dereference.
+///
+/// Write-time validation is the primary guard ([`validate_logout_uri`]); this
+/// is the read-side backstop for a client row written before that guard
+/// existed, or by any future path that forgets it.
+#[must_use]
+pub(crate) fn is_allowed_logout_uri(uri: &str) -> bool {
+    validate_logout_uri("logout URI", uri).is_ok()
+}
+
 /// Validates OAuth scope tokens per RFC 6749 §3.3.
 ///
 /// Each whitespace-separated token must consist of printable ASCII

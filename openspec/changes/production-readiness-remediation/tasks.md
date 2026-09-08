@@ -95,7 +95,7 @@ found it, the audit piece, and the report's severity.
 
 ## 12. Wave 2 (HIGH) — Protocol surface hardening
 
-- [ ] 12.1 Validate `frontchannel_logout_uri` before rendering it into `<iframe src>` on the IdP origin; a `javascript:` scheme executes script on the identity-provider origin (§4.3#1 · P09 · HIGH, threat model assumes an untrusted tenant admin)
+- [x] 12.1 Validate `frontchannel_logout_uri` before rendering it into `<iframe src>` on the IdP origin; a `javascript:` scheme executes script on the identity-provider origin (§4.3#1 · P09 · HIGH, threat model assumes an untrusted tenant admin)
 - [ ] 12.2 Apply the SSRF guard to `backchannel_logout_uri`, which is stored unvalidated and dereferenced server-side, reaching internal and metadata addresses (§4.3#2 · P09 · HIGH, same threat-model caveat)
 - [ ] 12.3 Truncate on character boundaries in the audit-log pill and the SAML `NameID` sink; byte-offset slicing crashes the whole process under `panic=abort`, reproduced at `realms.rs:787:34` with `/health` going to connection-refused (§4.4#1, §4.10#3 · P25/P23 · HIGH)
 - [ ] 12.4 Bound SCIM filter recursion; a ~6 KB authenticated request overflows the stack and aborts the multi-tenant process on both `/Users` and `/Groups` (§4.6#1 · P24 · HIGH)
