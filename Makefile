@@ -274,6 +274,12 @@ dev-config-isolation-check: ## Assert every serve --dev launch is config-isolate
 	@bash scripts/check-dev-server-config-isolation.sh
 	@bash scripts/tests/check-dev-server-config-isolation.test.sh
 
+## Guard: a declared nextest profile must be selected somewhere, or it is a
+## comment (audit 2026-08-28 §4.12#18). Runs in ci.yml's filter job.
+nextest-profile-check: ## Assert every declared nextest profile is selected
+	@bash scripts/check-nextest-profile-live.sh
+	@bash scripts/tests/check-nextest-profile-live.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

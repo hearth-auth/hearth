@@ -87,6 +87,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **CI now runs the test suite under the profile written for it (audit 2026-08-28 §4.12#18)** —
+  `.config/nextest.toml` declared `[profile.ci]` with `retries = 2` and `fail-fast = false`, and
+  nothing anywhere selected it. Every run used `[profile.default]` instead: `retries = 0`,
+  `fail-fast = true`. A red suite therefore stopped at the first failure and reported a fraction
+  of what was broken, so each fix cost another full CI round trip, and a genuine flake failed the
+  build with no retry to tell it from a regression. The `quality` job now sets
+  `NEXTEST_PROFILE: ci`, which nextest reads directly — `make check` is unchanged, and the local
+  TDD loop keeps the fail-fast default where stopping early is what you want.
+  `scripts/check-nextest-profile-live.sh` fails the build if a declared profile stops being
+  selected.
 - **README build prerequisites and the end-to-end walkthrough corrected (audit 2026-08-28
   §4.12#16)** — the prerequisites listed Rust and an optional `buf`, but omitted `protoc`, which
   `build.rs` runs on every build; a clean clone failed at `cargo build --release`, the walkthrough's

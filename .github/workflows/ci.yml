@@ -382,6 +382,18 @@ jobs:
       - name: Dev-server config isolation — guard self-test
         run: bash scripts/tests/check-dev-server-config-isolation.test.sh
 
+      # Audit §4.12#18: [profile.ci] in .config/nextest.toml was dead — nothing
+      # selected it, so every run used [profile.default] (fail-fast, no
+      # retries). This guard fails the build if a declared profile stops being
+      # selected again.
+      - name: Nextest profile is live (check-nextest-profile-live.sh)
+        run: bash scripts/check-nextest-profile-live.sh
+
+      # Proof the guard can go red: it must reject the audited unselected
+      # [profile.ci], and must not accept a near-miss selector name.
+      - name: Nextest profile is live — guard self-test
+        run: bash scripts/tests/check-nextest-profile-live.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and
@@ -519,7 +531,16 @@ jobs:
       - name: make security-gate (assert ROPC password grant is unreachable — HEA-1862)
         run: make security-gate
 
+      # Audit §4.12#18: `[profile.ci]` in .config/nextest.toml (retries = 2,
+      # fail-fast = false) was dead — nothing selected it, so every run used
+      # `[profile.default]` (retries = 0, fail-fast = true). A red suite stopped
+      # at the first failure and under-reported the rest, and a genuine flake
+      # failed the build with no retry. nextest reads NEXTEST_PROFILE, so this
+      # one variable makes the profile live without changing `make check`, and
+      # leaves the local TDD loop on the fail-fast default where it belongs.
       - name: make check (clippy -D warnings + fmt --check + nextest --workspace)
+        env:
+          NEXTEST_PROFILE: ci
         run: make check
 
       - name: make css-check (rebuild Tailwind and fail if app.css drifts)
