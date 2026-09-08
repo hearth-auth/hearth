@@ -235,6 +235,19 @@ jobs:
       - name: cargo deny check (advisories + licenses + bans)
         run: cargo deny check
 
+      # Audit §4.8#9: a third crypto backend and a policy-banned HTTP client
+      # were linked into the published binary, and deny.toml encoded neither
+      # ban. deny.toml now does, but `reqwest`'s ban must permit the dev-only
+      # edge, so its wrapper would also permit a production one. This asks the
+      # resolver directly: is the crate in `cargo tree -e normal`?
+      - name: Production dependency bans (check-production-deps.sh)
+        run: bash scripts/check-production-deps.sh
+
+      # Proof the guard can go red: banning a crate that IS in the production
+      # graph must fail it.
+      - name: Production dependency bans — guard self-test
+        run: bash scripts/tests/check-production-deps.test.sh
+
   osv-scanner:
     name: osv-scanner
     runs-on: ubuntu-latest

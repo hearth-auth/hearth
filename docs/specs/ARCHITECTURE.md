@@ -310,6 +310,11 @@ Hearth's internal hot path validates tokens via **session lookup**, not signatur
 ### 8.2 Cryptographic Primitives
 
 - Use `ring` or `RustCrypto` crates only. No hand-rolled cryptography.
+- `aws-lc-rs` is permitted for exactly one purpose: `rcgen`'s RSA-2048 key
+  generation, which `ring` cannot do and which replaces the unpatched `rsa`
+  crate (RUSTSEC-2023-0071). It MUST NOT be selected as a TLS provider — pin
+  `ring` on `rustls` and `tokio-rustls`. `deny.toml` enforces this with
+  `wrappers = ["rcgen"]`.
 - All comparisons of secrets (tokens, hashes, keys) MUST use constant-time comparison functions.
 
 ### 8.3 Password Hashing
@@ -553,11 +558,17 @@ These crates are pre-approved and need no additional justification:
 - No `lazy_static`. Use `std::sync::OnceLock` or `std::sync::LazyLock`.
 - No `async-trait` on hot path code — it heap-allocates. Use return-position `impl Trait` in traits (RPITIT, stable since Rust 1.75).
 - No `reqwest` in production code. Hearth is a server, not an HTTP client. Test-only is fine.
+  Enforced by `deny.toml` and by `scripts/check-production-deps.sh`, which fails if a banned
+  crate reaches `cargo tree -e normal` — the transitive route that put `reqwest` in the
+  published binary via `opentelemetry-otlp`'s default exporter (audit 2026-08-28 §4.8#9).
+- No second TLS or crypto backend. `openssl`, `native-tls`, `hyper-tls` and `boring` are denied
+  outright in `deny.toml`.
 
 ### 15.4 Auditing
 
 - `cargo-audit` MUST run in CI on every PR.
-- `cargo-deny` MUST be configured to enforce license and duplicate-crate policies.
+- `cargo-deny` MUST be configured to enforce license, duplicate-crate, and dependency-ban
+  policies. The crypto-backend and HTTP-client bans above are encoded in `deny.toml`.
 - `cargo-vet` SHOULD be used to track audit status of third-party crates.
 
 ---

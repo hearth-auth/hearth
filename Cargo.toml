@@ -44,6 +44,10 @@ flate2 = "1"
 fs2 = "0.4"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto"] }
+# HTTPS connector for the OTLP/HTTP exporter. Ring provider only — the OTLP
+# HTTP client moved off `reqwest` (audit 2026-08-28 §4.8#9) and hyper's default
+# connector is plaintext-only, which would break an https:// collector.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-tokio"] }
 hmac = "0.12"
 lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport",
@@ -70,7 +74,10 @@ sha2 = "0.10"
 subtle = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 ring = "0.17"
-rustls = "0.23"
+# Pin the `ring` provider explicitly. rustls's default features select
+# `aws-lc-rs`, adding a third crypto backend to the binary by accident
+# (audit 2026-08-28 §4.8#9); aws-lc-rs stays only where rcgen needs it.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = "1"
 scrypt = "0.11"
 serde = { version = "1", features = ["derive"] }
@@ -84,7 +91,9 @@ tera = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
+# Default features select the `aws_lc_rs` provider, which is what actually
+# dragged aws-lc-rs into the TLS path (audit 2026-08-28 §4.8#9). Ring only.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 redb = "2"
@@ -100,7 +109,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.32"
 opentelemetry = { version = "0.31", features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+# `default-features = false` drops `reqwest-blocking-client`, the default HTTP
+# client, which linked the policy-banned `reqwest` into the published binary
+# (audit 2026-08-28 §4.8#9). The OTLP/HTTP exporter is kept and re-pointed at
+# `hyper-client` — hyper is already a production dependency.
+# Direct dependency so the OTLP/HTTP exporter can be handed an explicit
+# hyper+rustls client instead of otlp's reqwest default (audit §4.8#9).
+opentelemetry-http = { version = "0.31", default-features = false, features = ["hyper"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "hyper-client",
+    "trace",
+    "metrics",
+    "logs",
+    "internal-logs",
+] }
 opentelemetry-semantic-conventions = "0.31"
 ureq = { version = "3", features = ["json"] }
 unicode-normalization = "0.1"

@@ -255,6 +255,7 @@ fn build_exporter(cfg: &OtlpConfig) -> Result<opentelemetry_otlp::SpanExporter, 
         OtlpProtocol::Http => {
             let mut builder = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
+                .with_http_client(otlp_http_client())
                 .with_endpoint(endpoint);
 
             if !cfg.headers.is_empty() {
@@ -266,6 +267,23 @@ fn build_exporter(cfg: &OtlpConfig) -> Result<opentelemetry_otlp::SpanExporter, 
                 .map_err(|e| TelemetryError::OtlpBuild(Box::new(e)))
         }
     }
+}
+
+/// HTTP client for the OTLP/HTTP exporter.
+///
+/// `opentelemetry-otlp`'s own default was `reqwest`, a policy-banned HTTP
+/// client that reached the published binary (audit 2026-08-28 §4.8#9). Its
+/// `hyper-client` fallback builds a plaintext-only connector, which would
+/// break an `https://` collector, so the connector is supplied here: hyper
+/// over rustls with the `ring` provider — the same TLS stack the rest of
+/// Hearth uses.
+fn otlp_http_client() -> impl opentelemetry_http::HttpClient + 'static {
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+    opentelemetry_http::hyper::HyperClient::new(connector, std::time::Duration::from_secs(10), None)
 }
 
 fn tonic_metadata_from_headers(

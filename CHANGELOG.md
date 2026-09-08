@@ -85,6 +85,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Security
+- **The published binary no longer links `reqwest` or a second TLS backend (audit 2026-08-28
+  §4.8#9)** — `opentelemetry-otlp`'s default exporter pulled `reqwest`, a policy-banned HTTP
+  client, and `rustls`/`tokio-rustls` default features selected the `aws-lc-rs` provider on top
+  of `ring`, giving the binary a third crypto backend. Both are pinned out: OTLP over HTTP now
+  uses hyper with rustls (ring), and `aws-lc-rs` remains only as `rcgen`'s RSA key-generation
+  backend. `deny.toml` now encodes both bans, and `scripts/check-production-deps.sh` fails CI if
+  a banned crate reaches `cargo tree -e normal`. **Operator note:** OTLP/HTTP export to an
+  `https://` collector is unchanged; certificate verification uses the webpki root store.
 - **Both device-grant endpoints now authenticate the client (audit 2026-08-28 §4.19#4, §4.22#6)** —
   `POST /device_authorization` and the `urn:ietf:params:oauth:grant-type:device_code` arm of
   `POST /token` read only `client_id`, so a party without the client secret could run the whole
