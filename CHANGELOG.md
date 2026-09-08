@@ -77,6 +77,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A deeply nested SCIM filter no longer aborts the process (audit 2026-08-28 §4.6#1)** — the
+  SCIM filter parser recursed once per `(` with no bound. A single authenticated `GET
+  /scim/v2/Users?filter=...` or `/scim/v2/Groups?filter=...` of about 6 KB overflowed the stack
+  and killed the whole multi-tenant server, not only the calling realm. The parser now refuses a
+  filter longer than **4096 bytes**, and parentheses nested deeper than **20 levels**, with
+  `400 Bad Request` and `scimType: invalidFilter`. Filters emitted by Okta and Azure AD are far
+  inside both limits.
 - **A multi-byte character in audit metadata no longer aborts the process (audit 2026-08-28 §4.4#1,
   §4.10#3)** — the admin audit viewer truncated inline metadata pills on a byte offset. Audit
   metadata carries attacker-supplied values, notably the SAML `NameID` recorded on every SAML
