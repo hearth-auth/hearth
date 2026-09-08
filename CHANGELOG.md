@@ -77,6 +77,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A `hearth.yaml` with no `security:` block no longer disables JWKS and OIDC discovery
+  (audit 2026-08-28 §4.2#2, §4.13#1, §4.22#2, §4.25#2)** — `SecurityYaml` derived its `Default`
+  impl, which zeroes every field instead of running each field's documented default. That only
+  showed up when the whole `security:` block was absent from the config file: `jwks_rps_limit`
+  silently became `0`, so every unauthenticated `/jwks`, `/certs`, and
+  `/.well-known/openid-configuration` request answered **429 Too Many Requests** from the very
+  first request, with nothing logged at boot. `reserved_slugs` and `slug_cooldown_days` degraded
+  the same way. All three now keep their documented defaults (60 requests/sec, the built-in
+  reserved-slug list, 30 days) whether `security:` is omitted entirely or present but partial.
+  No config change needed — this restores the previously-documented behaviour.
 - **A password-reset link now dies when something supersedes it (audit 2026-08-28 §4.24#1)** —
   the stored reset record carried only a `used` flag and a timestamp, so a link stayed live after
   the account's email changed, after an admin or the user changed the password out of band, and

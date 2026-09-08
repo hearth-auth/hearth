@@ -2156,6 +2156,35 @@ mod tests {
     }
 
     #[test]
+    fn omitted_security_block_keeps_documented_defaults() {
+        // HEA control-liveness: `SecurityYaml` derived `Default`, which zeroes
+        // every field instead of running each field's `#[serde(default = "fn")]`.
+        // That default is only invoked by serde when the `security:` key itself
+        // is present. A config file with NO `security:` block at all — the
+        // common case — silently set `jwks_rps_limit` to 0, so every JWKS and
+        // discovery request answered 429 from the first request with nothing in
+        // the boot log. `reserved_slugs` and `slug_cooldown_days` degraded the
+        // same way.
+        let config = Config::from_yaml_str_unchecked(
+            "storage:\n  data_dir: \"/tmp/hea-omitted-security\"\n",
+        )
+        .expect("config with no security: block parses");
+        assert_eq!(
+            config.security.jwks_rps_limit, 60,
+            "JWKS/discovery rate limit must default to 60 rps, not 0, \
+             when security: is absent"
+        );
+        assert!(
+            config.security.reserved_slugs.iter().any(|s| s == "admin"),
+            "reserved_slugs must keep its documented default list"
+        );
+        assert_eq!(
+            config.security.slug_cooldown_days, 30,
+            "slug_cooldown_days must default to 30"
+        );
+    }
+
+    #[test]
     fn from_file_as_dev_preserves_configured_data_dir() {
         // HEA-1805 regression: `--dev` (from_file_as_dev) previously blanked
         // storage.data_dir to String::new(), so a configured cold-tier data

@@ -859,8 +859,14 @@ pub struct TokenYamlConfig {
 ///
 /// `Debug` is hand-written (not derived) so the secret fields
 /// `dpop_nonce_secret` and `key_encryption_key` are redacted — see the
-/// `impl Debug` below. Any new secret field MUST be redacted there too.
-#[derive(Clone, Default, Deserialize)]
+/// `impl Debug` below.  `Default` is also hand-written (not derived): several
+/// fields carry a non-zero `#[serde(default = "fn")]` value, which serde only
+/// consults while deserializing an explicit `security:` block. A derived
+/// `Default` bypasses those functions and zeroes/empties the fields instead,
+/// which is what a config file with no `security:` block at all gets — see
+/// `omitted_security_block_keeps_documented_defaults` in `config::validate`.
+/// Any new secret field MUST be redacted in `impl Debug` too.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityYaml {
     /// Global rate-limiting thresholds (overrides compiled-in defaults).
@@ -1156,6 +1162,35 @@ impl std::fmt::Debug for PepperYaml {
                 &self.previous_key_hex.as_ref().map(|_| "[REDACTED]"),
             )
             .finish()
+    }
+}
+
+/// Mirrors serde's per-field `#[serde(default = "fn")]` values so a config
+/// file with no `security:` block at all gets the same documented defaults
+/// as one with an empty `security: {}` block. See the type-level doc comment
+/// on why this cannot be `#[derive(Default)]`.
+impl Default for SecurityYaml {
+    fn default() -> Self {
+        Self {
+            rate_limiting: None,
+            dpop_nonce_secret: None,
+            allowed_hosts: Vec::new(),
+            http2: Http2SecurityYaml::default(),
+            request_shaper: None,
+            load_test_unthrottled: None,
+            allowed_return_to_origins: Vec::new(),
+            ip_reputation: IpReputationYaml::default(),
+            captcha: None,
+            grpc: GrpcSecurityYaml::default(),
+            tls: TlsSecurityYaml::default(),
+            backup: BackupSecurityYaml::default(),
+            reserved_slugs: Self::default_reserved_slugs(),
+            slug_cooldown_days: Self::default_slug_cooldown_days(),
+            jwks_rps_limit: Self::default_jwks_rps_limit(),
+            key_encryption_key: None,
+            password: PasswordSecurityYaml::default(),
+            dev_csp_form_action_origins: Self::default_dev_csp_form_action_origins(),
+        }
     }
 }
 
