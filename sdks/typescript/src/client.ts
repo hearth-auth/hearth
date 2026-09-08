@@ -8,6 +8,7 @@ import type {
   MePermissionsResponse,
   RegisterClientParams,
   OAuthClient,
+  StepUpProof,
   TokenExchangeParams,
   TokenResponse,
   UserInfoResponse,
@@ -245,11 +246,16 @@ export class HearthApiClient {
    * Returns `PublicKeyCredentialCreationOptions` for
    * `navigator.credentials.create()`. `accessToken` is the authenticated
    * user's bearer token so the server knows who is registering the credential.
+   *
+   * `stepUp` proves possession of a credential the account already holds — the
+   * password, a current authenticator code, or an assertion from an enrolled
+   * passkey. The server answers `403 step_up_required` without it.
    */
   async startWebAuthnRegistration(
     accessToken: string,
+    stepUp: StepUpProof,
   ): Promise<WebAuthnRegistrationBeginResponse> {
-    return this.post("/webauthn/register/begin", {}, accessToken);
+    return this.post("/webauthn/register/begin", stepUp, accessToken);
   }
 
   /**

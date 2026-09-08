@@ -33,6 +33,7 @@ pub mod search;
 pub mod session_version;
 pub mod sessions;
 pub mod sms;
+pub mod step_up;
 pub mod tokens;
 pub mod tool_permissions;
 pub(crate) mod totp;
@@ -101,6 +102,9 @@ pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, Sv
 pub use sms::{
     LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
     StubSmsHttpTransport, TwilioSmsSender,
+};
+pub use step_up::{
+    has_step_up_credential, verify_step_up, StepUpAssertion, StepUpError, StepUpProof,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
@@ -448,6 +452,23 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
         password: &CleartextPassword,
+    ) -> Result<bool, IdentityError>;
+
+    /// Returns whether the account holds a password credential that the realm
+    /// still accepts.
+    ///
+    /// Answers `Ok(false)` when the realm's `allowed_auth_methods` excludes
+    /// `password`, because such a credential can no longer be presented. Used
+    /// by [`crate::identity::step_up`] to decide whether a step-up proof can
+    /// be demanded at all. Performs no hashing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the credential record cannot be read.
+    fn has_password_credential(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
     ) -> Result<bool, IdentityError>;
 
     /// Runs a dummy Argon2id hash of `password` and discards the result.

@@ -31,7 +31,11 @@ use qrcode::render::svg;
 use qrcode::QrCode;
 
 use crate::core::{SessionId, Timestamp};
-use crate::identity::{CleartextPassword, IdentityError, RegistrationOptions};
+use crate::identity::{
+    verify_step_up, AuthenticationOptions, CleartextPassword, IdentityError, RegistrationOptions,
+    StepUpError,
+};
+use crate::protocol::step_up::StepUpProofBody;
 
 use super::auth::{clearing_cookies, verify_csrf_form_field, CsrfToken, UiSession};
 use super::handlers::append_cookie;
@@ -939,12 +943,107 @@ fn load_passkey_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<PasskeyR
         .collect()
 }
 
-/// `GET /ui/account/passkeys/register-begin` — starts a `WebAuthn`
-/// registration ceremony and returns the challenge as JSON.
+/// Maps a failed step-up to its JSON wire response.
+///
+/// `403 step_up_required` when the proof is absent or wrong. `503` with
+/// `Retry-After` when the KDF admission gate shed the password verification —
+/// the caller may retry, so it MUST NOT read as a credential failure.
+fn step_up_error_response(error: &StepUpError) -> Response {
+    use axum::Json;
+    match error {
+        StepUpError::Overloaded { retry_after } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(
+                axum::http::header::RETRY_AFTER,
+                retry_after.as_secs().to_string(),
+            )],
+            Json(serde_json::json!({
+                "error": "temporarily_unavailable",
+                "error_description": "step-up verification is shedding load; retry shortly",
+            })),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "step_up_required",
+                "error_description":
+                    "supply the account password, a current TOTP code, or an assertion from an \
+                     enrolled passkey to enrol a passkey",
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /ui/account/passkeys/step-up-begin` — mints an authentication
+/// challenge for the signed-in user so an already-enrolled passkey can serve
+/// as the step-up proof on `register-begin`.
+///
+/// Returns the challenge and the account's credential IDs. It issues no
+/// session and enrols nothing; the assertion it leads to is only ever read as
+/// a step-up proof.
+pub async fn passkey_step_up_begin(
+    State(state): State<Arc<WebState>>,
+    session: UiSession,
+    _csrf: CsrfToken,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use axum::Json;
+    use base64::Engine as _;
+
+    let origin = state.public_origin_str(&headers);
+    let rp_id = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(':')
+        .next()
+        .unwrap_or("localhost")
+        .to_string();
+
+    let challenge = match state.identity.start_webauthn_authentication(
+        &session.realm_id,
+        Some(&session.user_id),
+        &AuthenticationOptions {
+            rp_id: rp_id.clone(),
+        },
+    ) {
+        Ok(c) => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&c),
+        Err(e) => {
+            tracing::warn!(error = %e, "passkey step-up begin failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Step-up unavailable").into_response();
+        }
+    };
+
+    let allow_credentials: Vec<serde_json::Value> = load_passkey_rows(&state, &session)
+        .into_iter()
+        .map(|row| serde_json::json!({ "type": "public-key", "id": row.id_b64url }))
+        .collect();
+
+    Json(serde_json::json!({
+        "challenge": challenge,
+        "rpId": rp_id,
+        "allowCredentials": allow_credentials,
+        "userVerification": "preferred",
+        "timeout": 300_000,
+    }))
+    .into_response()
+}
+
+/// `POST /ui/account/passkeys/register-begin` — verifies the step-up proof,
+/// then starts a `WebAuthn` registration ceremony and returns the challenge
+/// as JSON.
+///
+/// The session cookie alone is one factor. Enrolling a passkey with it would
+/// turn a stolen session into a permanent credential, so the body MUST carry a
+/// step-up proof (audit 2026-08-28 §4.18#2). See
+/// [`crate::identity::step_up`] for the accepted proofs.
 pub async fn passkey_register_begin(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    _csrf: CsrfToken,
     headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<StepUpProofBody>,
 ) -> Response {
     use axum::http::StatusCode;
     use axum::Json;
@@ -959,6 +1058,17 @@ pub async fn passkey_register_begin(
         .next()
         .unwrap_or("localhost")
         .to_string();
+
+    if let Err(e) = verify_step_up(
+        &state.identity,
+        &session.realm_id,
+        &session.user_id,
+        body.into_proof(&origin),
+    )
+    .await
+    {
+        return step_up_error_response(&e);
+    }
 
     // Read per-realm WebAuthn policy (fall back to safe defaults).
     let (resident_key, user_verification) = state

@@ -406,7 +406,8 @@ Content-Type: application/json
 **Request body:**
 ```json
 {
-  "discoverable": true
+  "discoverable": true,
+  "password": "<the account's current password>"
 }
 ```
 
@@ -414,6 +415,37 @@ Content-Type: application/json
 |-------|------|----------|-------|
 | `discoverable` | bool | No | Whether to request a discoverable (resident-key) credential. Default: `true`. |
 | `rp_id` | string | No | Accepted but ignored. Server pins RP ID from `oidc.issuer`. |
+| `password` | string | See below | Step-up proof — the account's current password. |
+| `totp_code` | string | See below | Step-up proof — a current authenticator code. |
+| `assertion` | object | See below | Step-up proof — an assertion from an already-enrolled passkey. |
+
+**Step-up is required.** An access token alone is one factor. Enrolling with it
+would turn a stolen token into a permanent credential, so the request must carry
+exactly one of `password`, `totp_code`, or `assertion`. An account that holds no
+password, no TOTP factor and no passkey has nothing to prove and needs no field.
+
+The `assertion` object carries the result of a `navigator.credentials.get()`
+ceremony started at `POST /webauthn/auth/begin`. All fields are base64url, no
+padding:
+
+```json
+{
+  "assertion": {
+    "credential_id": "…",
+    "client_data_json": "…",
+    "authenticator_data": "…",
+    "signature": "…",
+    "user_handle": "…"
+  }
+}
+```
+
+**Response `403 Forbidden`:** `{"error": "step_up_required"}` — no proof was
+supplied, or the proof did not verify.
+
+**Response `503 Service Unavailable`:** `{"error": "temporarily_unavailable"}`
+with a `Retry-After` header — the KDF admission gate shed the password
+verification. Retry; this is not a credential failure.
 
 **Response `200 OK`:**
 ```json

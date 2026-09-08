@@ -428,3 +428,64 @@ pub struct SvSnapshotResponse {
     /// Opaque cursor to use for subsequent delta polls.
     pub cursor: String,
 }
+
+/// An assertion from an already-enrolled passkey, offered as a step-up proof.
+///
+/// Every field is base64url without padding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepUpAssertion {
+    /// Credential ID the assertion was produced with.
+    pub credential_id: String,
+    /// `clientDataJSON` from the authenticator.
+    pub client_data_json: String,
+    /// Authenticator data bytes.
+    pub authenticator_data: String,
+    /// Signature bytes.
+    pub signature: String,
+    /// User handle, for discoverable credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_handle: Option<String>,
+}
+
+/// Proof that the caller holds a credential the account already has.
+///
+/// Passkey enrolment refuses a request that carries no proof: an access token
+/// alone is one factor, and enrolling with it would turn a stolen token into a
+/// permanent credential.
+#[derive(Debug, Clone)]
+pub enum StepUpProof {
+    /// The account's current password.
+    Password(String),
+    /// A current code from the account's enrolled authenticator.
+    TotpCode(String),
+    /// An assertion from an already-enrolled passkey.
+    Assertion(Box<StepUpAssertion>),
+}
+
+impl StepUpProof {
+    /// Writes the proof's field into a JSON request body.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `body` is not a JSON object.
+    pub fn merge_into(&self, body: &mut serde_json::Value) {
+        let object = body
+            .as_object_mut()
+            .expect("step-up proof merges into a JSON object");
+        match self {
+            Self::Password(password) => {
+                object.insert("password".to_string(), serde_json::json!(password));
+            }
+            Self::TotpCode(code) => {
+                object.insert("totp_code".to_string(), serde_json::json!(code));
+            }
+            Self::Assertion(assertion) => {
+                object.insert(
+                    "assertion".to_string(),
+                    serde_json::to_value(assertion.as_ref())
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+    }
+}

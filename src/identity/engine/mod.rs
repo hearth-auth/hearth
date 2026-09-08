@@ -6366,6 +6366,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(matches)
     }
 
+    fn has_password_credential(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        // A credential the realm no longer accepts cannot be presented, so it
+        // is not a step-up credential (audit 2026-08-28 §4.18#2).
+        if self
+            .check_allowed_auth_method(realm_id, "password")
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let cred_key = keys::encode_credential_key(user_id);
+        Ok(self
+            .storage
+            .get(realm_id, &cred_key)
+            .map_err(Self::storage_err)?
+            .is_some())
+    }
+
     fn change_password(
         &self,
         realm_id: &RealmId,

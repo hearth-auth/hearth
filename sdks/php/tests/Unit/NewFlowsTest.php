@@ -486,7 +486,7 @@ final class NewFlowsTest extends TestCase
             ])),
         ]);
 
-        $result = $client->startWebAuthnRegistration('access-tok');
+        $result = $client->startWebAuthnRegistration('access-tok', ['password' => 'correct-horse-battery-staple']);
 
         self::assertInstanceOf(WebAuthnOptions::class, $result);
         self::assertArrayHasKey('challenge', $result->options);

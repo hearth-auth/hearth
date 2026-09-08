@@ -77,6 +77,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Passkey enrolment now requires a step-up authentication (audit 2026-08-28 §4.18#2)** —
+  `POST /webauthn/register/begin` and the browser's passkey card both enrolled a new
+  credential on the session or access token alone. A stolen session therefore minted a
+  permanent, MFA-free credential the account owner never saw. Both surfaces now demand a
+  step-up proof and refuse without one: **`403 step_up_required`**. Three proofs are
+  accepted — `password`, `totp_code`, or `assertion` (an assertion from an already-enrolled
+  passkey, obtained from `POST /webauthn/auth/begin`). An account that holds no password,
+  no TOTP factor and no passkey has nothing to prove, so its enrolment still proceeds. The
+  password proof runs inside the shared KDF admission gate and answers `503` with
+  `Retry-After` when that gate sheds. **Breaking for API callers:** a `register/begin`
+  request with no proof now fails; the Go, Kotlin, PHP, Rust, and TypeScript SDKs gained a
+  required step-up parameter on `startWebAuthnRegistration`, and the Python SDK gained
+  `password` / `totp_code` / `assertion` keyword arguments. **Breaking for the browser
+  route:** `/ui/account/passkeys/register-begin` is now `POST`, not `GET`, and a new
+  `POST /ui/account/passkeys/step-up-begin` mints the assertion challenge.
 - **The federation confirm-link password verify now shares the KDF admission gate (audit
   2026-08-28 §4.17#2 class)** — `POST /ui/federation/confirm-link` ran its Argon2id
   `verify_password` outside the shared bounded gate, the last such ungated caller; it now routes

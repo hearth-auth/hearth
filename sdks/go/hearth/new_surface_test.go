@@ -916,7 +916,11 @@ func TestStartWebAuthnRegistration_ReturnsOptions(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClient(srv.URL, "realm-1")
-	opts, err := client.StartWebAuthnRegistration(context.Background(), "bearer-token")
+	opts, err := client.StartWebAuthnRegistration(
+		context.Background(),
+		"bearer-token",
+		StepUpWithPassword("correct-horse-battery-staple"),
+	)
 	if err != nil {
 		t.Fatalf("StartWebAuthnRegistration: %v", err)
 	}

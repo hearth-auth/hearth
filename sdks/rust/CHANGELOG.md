@@ -4,6 +4,13 @@ All notable changes to `hearth-rust` are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **`webauthn_register_begin` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
+  the server refuses passkey enrolment carried by an access token alone with
+  `403 step_up_required`, because a stolen token would otherwise mint a permanent
+  credential. The method takes a new `&StepUpProof` argument: `StepUpProof::Password`,
+  `StepUpProof::TotpCode`, or `StepUpProof::Assertion`.
+
 ### Removed
 - **`AdminClient::create_realm` and `CreateRealmRequest`** — realms are provisioned
   via `hearth.yaml` and reconciled at startup, not through the admin API. The

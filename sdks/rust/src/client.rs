@@ -928,20 +928,33 @@ impl HearthClient {
     // WebAuthn
     // ------------------------------------------------------------------
 
+    /// Begins a `WebAuthn` passkey registration ceremony.
+    ///
+    /// `step_up` proves possession of a credential the account already holds —
+    /// the password, a current authenticator code, or an assertion from an
+    /// enrolled passkey. The server answers `403 step_up_required` without it:
+    /// an access token alone is one factor and does not enrol a credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or the server rejects it.
     pub async fn webauthn_register_begin(
         &self,
         access_token: &str,
         rp_id: &str,
         discoverable: bool,
+        step_up: &StepUpProof,
     ) -> Result<Value, HearthError> {
+        let mut body = serde_json::json!({
+            "rp_id": rp_id,
+            "discoverable": discoverable,
+        });
+        step_up.merge_into(&mut body);
         let resp = self
             .http
             .post(format!("{}/webauthn/register/begin", self.base_url))
             .bearer_auth(access_token)
-            .json(&serde_json::json!({
-                "rp_id": rp_id,
-                "discoverable": discoverable,
-            }))
+            .json(&body)
             .send()
             .await?;
         Self::check(&resp)?;

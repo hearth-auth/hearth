@@ -13,5 +13,6 @@ pub mod http;
 pub mod proto;
 pub mod redact;
 pub mod scim;
+pub mod step_up;
 pub mod tls;
 pub mod web;

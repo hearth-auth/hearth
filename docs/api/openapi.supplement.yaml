@@ -268,13 +268,66 @@ paths:
   /webauthn/register/begin:
     post:
       summary: Begin WebAuthn credential registration
+      description: >
+        Requires a step-up proof. An access token alone is one factor, so
+        enrolling with it would turn a stolen token into a permanent
+        credential. Supply exactly one of `password`, `totp_code`, or
+        `assertion`. An account that holds none of those credentials needs no
+        proof.
       operationId: webauthnRegisterBegin
       tags: [Auth]
       security:
         - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rp_id:
+                  type: string
+                  description: Accepted but ignored; the RP ID is pinned server-side.
+                discoverable:
+                  type: boolean
+                password:
+                  type: string
+                  description: Step-up proof — the account's current password.
+                totp_code:
+                  type: string
+                  description: Step-up proof — a current authenticator code.
+                assertion:
+                  type: object
+                  description: >
+                    Step-up proof — an assertion from an already-enrolled
+                    passkey. All fields are base64url without padding.
+                  required:
+                    - credential_id
+                    - client_data_json
+                    - authenticator_data
+                    - signature
+                  properties:
+                    credential_id:
+                      type: string
+                    client_data_json:
+                      type: string
+                    authenticator_data:
+                      type: string
+                    signature:
+                      type: string
+                    user_handle:
+                      type: string
       responses:
         "200":
           description: PublicKeyCredentialCreationOptions JSON
+        "403":
+          description: >
+            `step_up_required` — no step-up proof was supplied, or it did not
+            verify.
+        "503":
+          description: >
+            `temporarily_unavailable` — the KDF admission gate shed the
+            password verification. Retry after the `Retry-After` hint.
 
   /webauthn/register/complete:
     post:

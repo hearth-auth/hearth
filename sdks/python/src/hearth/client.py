@@ -385,10 +385,31 @@ class HearthClient:
     # ------------------------------------------------------------------
 
     def webauthn_register_begin(
-        self, rp_id: str = "", discoverable: bool = True
+        self,
+        rp_id: str = "",
+        discoverable: bool = True,
+        *,
+        password: Optional[str] = None,
+        totp_code: Optional[str] = None,
+        assertion: Optional[Dict[str, Any]] = None,
     ) -> dict:
-        """Start a WebAuthn registration ceremony."""
-        body = {"rp_id": rp_id, "discoverable": discoverable}
+        """Start a WebAuthn registration ceremony.
+
+        Supply exactly one step-up proof: ``password``, ``totp_code``, or
+        ``assertion`` (an assertion from an already-enrolled passkey, with
+        base64url ``credential_id``, ``client_data_json``,
+        ``authenticator_data`` and ``signature`` fields).
+
+        The server answers ``403 step_up_required`` without one: an access
+        token alone is one factor and does not enrol a credential.
+        """
+        body: Dict[str, Any] = {"rp_id": rp_id, "discoverable": discoverable}
+        if password is not None:
+            body["password"] = password
+        if totp_code is not None:
+            body["totp_code"] = totp_code
+        if assertion is not None:
+            body["assertion"] = assertion
         resp = self._http.post(f"{self._base}/webauthn/register/begin", json=body)
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)

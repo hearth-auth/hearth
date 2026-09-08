@@ -307,6 +307,45 @@ data class CheckPermissionResponse(
 
 // ── WebAuthn ──────────────────────────────────────────────────────────────────
 
+/**
+ * An assertion from an already-enrolled passkey, offered as a step-up proof.
+ * Every field is base64url without padding.
+ */
+@Serializable
+data class StepUpAssertion(
+    @SerialName("credential_id") val credentialId: String,
+    @SerialName("client_data_json") val clientDataJson: String,
+    @SerialName("authenticator_data") val authenticatorData: String,
+    val signature: String,
+    @SerialName("user_handle") val userHandle: String? = null,
+)
+
+/**
+ * Proof that the caller holds a credential the account already has.
+ *
+ * Passkey enrolment refuses a request that carries no proof: an access token
+ * alone is one factor, and enrolling with it would turn a stolen token into a
+ * permanent credential. Build one with [password], [totpCode] or [assertion].
+ */
+@Serializable
+data class StepUpProof(
+    val password: String? = null,
+    @SerialName("totp_code") val totpCode: String? = null,
+    val assertion: StepUpAssertion? = null,
+) {
+    companion object {
+        /** Proves the step-up with the account password. */
+        fun password(password: String): StepUpProof = StepUpProof(password = password)
+
+        /** Proves the step-up with a current authenticator code. */
+        fun totpCode(code: String): StepUpProof = StepUpProof(totpCode = code)
+
+        /** Proves the step-up with an already-enrolled passkey. */
+        fun assertion(assertion: StepUpAssertion): StepUpProof =
+            StepUpProof(assertion = assertion)
+    }
+}
+
 /** Server-issued `PublicKeyCredentialCreationOptions` for passkey registration. */
 @Serializable
 data class WebAuthnRegistrationBeginResponse(

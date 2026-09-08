@@ -965,8 +965,12 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(account::totp_regenerate_codes),
         )
         .route(
+            "/account/passkeys/step-up-begin",
+            axum::routing::post(account::passkey_step_up_begin),
+        )
+        .route(
             "/account/passkeys/register-begin",
-            axum::routing::get(account::passkey_register_begin),
+            axum::routing::post(account::passkey_register_begin),
         )
         .route(
             "/account/passkeys/register-complete",

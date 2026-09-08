@@ -13,12 +13,17 @@ import (
 // navigator.credentials.create() call. The caller supplies accessToken —
 // the authenticated user's bearer token — so the server can identify who is
 // registering the credential.
+//
+// stepUp proves possession of a credential the account already holds: the
+// password, a current authenticator code, or an assertion from an enrolled
+// passkey. The server answers 403 step_up_required without it.
 func (c *Client) StartWebAuthnRegistration(
 	ctx context.Context,
 	accessToken string,
+	stepUp StepUpProof,
 ) (*WebAuthnRegistrationBeginResponse, error) {
 	var result WebAuthnRegistrationBeginResponse
-	if err := c.postJSON(ctx, "/webauthn/register/begin", accessToken, map[string]any{}, &result); err != nil {
+	if err := c.postJSON(ctx, "/webauthn/register/begin", accessToken, stepUp, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

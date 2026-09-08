@@ -74,6 +74,30 @@ export interface WebAuthnAllowCredential {
   type: string;
 }
 
+/**
+ * An assertion from an already-enrolled passkey, offered as a step-up proof.
+ * Every field is base64url without padding.
+ */
+export interface StepUpAssertion {
+  credential_id: string;
+  client_data_json: string;
+  authenticator_data: string;
+  signature: string;
+  user_handle?: string | null;
+}
+
+/**
+ * Proof that the caller holds a credential the account already has.
+ *
+ * Passkey enrolment refuses a request that carries no proof: an access token
+ * alone is one factor, and enrolling with it would turn a stolen token into a
+ * permanent credential. Supply exactly one field.
+ */
+export type StepUpProof =
+  | { password: string }
+  | { totp_code: string }
+  | { assertion: StepUpAssertion };
+
 /** `PublicKeyCredentialCreationOptions` returned by `/webauthn/register/begin`. */
 export interface WebAuthnRegistrationBeginResponse {
   challenge: string;

@@ -178,6 +178,22 @@
     var spinner  = document.getElementById('passkey-register-spinner');
     var labelEl  = document.getElementById('passkey-register-label');
     var errorEl  = document.getElementById('passkey-register-error');
+    var secretEl = document.getElementById('passkey-step-up-secret');
+    var existingBtn = document.getElementById('passkey-step-up-existing');
+
+    // An assertion from an already-enrolled passkey is a step-up proof, so
+    // offer it only when the account has one.
+    var hasPasskey = document.querySelectorAll('tr[data-passkey-row]').length > 0;
+    if (existingBtn) existingBtn.hidden = !hasPasskey;
+
+    // Which proof the next enrolment sends. The button flips it to 'assertion'.
+    var proofMode = 'secret';
+    if (existingBtn) {
+      existingBtn.addEventListener('click', function () {
+        proofMode = 'assertion';
+        if (btn) btn.click();
+      });
+    }
 
     function setRegistering(v) {
       if (btn)     btn.disabled = v;
@@ -191,15 +207,91 @@
       errorEl.hidden = false;
     }
 
+    // Builds the step-up body. A 6-digit value is an authenticator code: the
+    // password floor is 12 characters, so the two can never collide.
+    function secretProof() {
+      var value = secretEl ? secretEl.value.trim() : '';
+      if (!value) return null;
+      if (/^[0-9]{6}$/.test(value)) return { totp_code: value };
+      return { password: value };
+    }
+
+    // Runs a WebAuthn assertion with an existing passkey and returns it as a
+    // step-up proof. Mints no session \u2014 the server reads it as proof only.
+    function assertionProof() {
+      return fetch('/ui/account/passkeys/step-up-begin', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': csrfToken() },
+      })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error('Could not start the passkey check');
+          return resp.json();
+        })
+        .then(function (opts) {
+          var request = {
+            challenge: b64urlDecode(opts.challenge),
+            rpId: opts.rpId,
+            userVerification: opts.userVerification,
+            timeout: opts.timeout,
+            allowCredentials: (opts.allowCredentials || []).map(function (c) {
+              return { type: 'public-key', id: b64urlDecode(c.id) };
+            }),
+          };
+          return navigator.credentials.get({ publicKey: request });
+        })
+        .then(function (cred) {
+          if (!cred) throw new Error('Passkey check cancelled');
+          return {
+            assertion: {
+              credential_id: b64urlEncode(cred.rawId),
+              client_data_json: b64urlEncode(cred.response.clientDataJSON),
+              authenticator_data: b64urlEncode(cred.response.authenticatorData),
+              signature: b64urlEncode(cred.response.signature),
+              user_handle: cred.response.userHandle
+                ? b64urlEncode(cred.response.userHandle)
+                : null,
+            },
+          };
+        });
+    }
+
     if (!btn) return;
     btn.addEventListener('click', function () {
       if (btn.disabled) return;
+      var mode = proofMode;
+      proofMode = 'secret';
+
+      if (mode === 'secret' && !secretProof()) {
+        showError('Enter your password or your 6-digit authenticator code first.');
+        return;
+      }
+
       setRegistering(true);
       if (errorEl) errorEl.hidden = true;
 
-      fetch('/ui/account/passkeys/register-begin', { credentials: 'same-origin' })
+      var proof = mode === 'assertion'
+        ? assertionProof()
+        : Promise.resolve(secretProof());
+
+      proof
+        .then(function (body) {
+          return fetch('/ui/account/passkeys/register-begin', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': csrfToken(),
+            },
+            body: JSON.stringify(body),
+          });
+        })
         .then(function (resp) {
+          if (resp.status === 403) {
+            throw new Error('That did not match. Check your password or code and try again.');
+          }
           if (!resp.ok) throw new Error('Failed to start registration');
+          if (secretEl) secretEl.value = '';
           return resp.json();
         })
         .then(function (opts) {

@@ -70,6 +70,43 @@ type WebAuthnAllowCredential struct {
 	Type string `json:"type"`
 }
 
+// StepUpAssertion is an assertion from an already-enrolled passkey, offered as
+// a step-up proof. Every field is base64url without padding.
+type StepUpAssertion struct {
+	CredentialID      string `json:"credential_id"`
+	ClientDataJSON    string `json:"client_data_json"`
+	AuthenticatorData string `json:"authenticator_data"`
+	Signature         string `json:"signature"`
+	UserHandle        string `json:"user_handle,omitempty"`
+}
+
+// StepUpProof proves possession of a credential the account already holds.
+//
+// Passkey enrolment refuses a request that carries no proof: an access token
+// alone is one factor, and enrolling with it would turn a stolen token into a
+// permanent credential. Build one with StepUpWithPassword, StepUpWithTOTPCode
+// or StepUpWithAssertion.
+type StepUpProof struct {
+	Password  string           `json:"password,omitempty"`
+	TOTPCode  string           `json:"totp_code,omitempty"`
+	Assertion *StepUpAssertion `json:"assertion,omitempty"`
+}
+
+// StepUpWithPassword proves the step-up with the account password.
+func StepUpWithPassword(password string) StepUpProof {
+	return StepUpProof{Password: password}
+}
+
+// StepUpWithTOTPCode proves the step-up with a current authenticator code.
+func StepUpWithTOTPCode(code string) StepUpProof {
+	return StepUpProof{TOTPCode: code}
+}
+
+// StepUpWithAssertion proves the step-up with an already-enrolled passkey.
+func StepUpWithAssertion(assertion StepUpAssertion) StepUpProof {
+	return StepUpProof{Assertion: &assertion}
+}
+
 // WebAuthnRegistrationBeginResponse holds PublicKeyCredentialCreationOptions from the server.
 type WebAuthnRegistrationBeginResponse struct {
 	Challenge       string `json:"challenge"`
