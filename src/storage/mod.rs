@@ -317,6 +317,12 @@ pub trait StorageEngine: Send + Sync {
     /// in-memory `known_realms` set is empty would skip Phase 1 entirely and
     /// leave stale on-disk data in place (HEA-2131).
     ///
+    /// The cluster snapshot **build** path enumerates realms through this same
+    /// call.  Build and install must agree on which realms exist: install
+    /// clears every realm this call reports and then replays only the realms
+    /// the payload carries, so a realm the build path omits is deleted from
+    /// every follower (audit 2026-08-28 §4.9#3).
+    ///
     /// Implementors that do not support multi-realm enumeration (e.g. test
     /// doubles) should return `Ok(vec![])` explicitly.  There is no silent
     /// default: a missing override that returns empty would silently skip the

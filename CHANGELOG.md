@@ -97,6 +97,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **A Raft snapshot no longer deletes realms from every follower (audit 2026-08-28 §4.9#3)** —
+  cluster mode built a snapshot from an in-memory realm set that only applied log entries filled,
+  while installing one cleared every realm the storage engine reports on disk. The set is never
+  persisted, so a leader that restarted and then built a snapshot before applying a new entry
+  produced a payload naming no realms at all. Installing that payload wiped every realm from
+  every follower. Snapshot build now enumerates realms with the same `list_realms()` call the
+  install path already used, so the two can never disagree. Single-node deployments are
+  unaffected — they build no snapshots.
 - **CLI subcommands now open a production data directory with the production storage config
   (audit 2026-08-28 §4.11#13)** — `hearth backup create`, `hearth backup restore`, both migration
   importers (`hearth migrate keycloak`, `hearth migrate auth0`), `hearth migrate rotate-pepper`

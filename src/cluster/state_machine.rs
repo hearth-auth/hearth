@@ -12,7 +12,6 @@
 //! `flate2` (gzip).  CBOR is chosen because it encodes `Vec<u8>` as compact
 //! byte strings, not arrays of integers, keeping snapshot sizes small.
 
-use std::collections::BTreeSet;
 use std::io::{Cursor, Read as _, Write as _};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -82,14 +81,20 @@ struct StoredSnapshot {
 
 // ── HearthSnapshotBuilder ─────────────────────────────────────────────────────
 
-/// Builds a snapshot by scanning the full key-space of each known realm.
+/// Builds a snapshot by scanning the full key-space of every realm on disk.
 ///
 /// Returned by [`HearthStateMachine::get_snapshot_builder`].  The builder
 /// holds its own `Arc` to the engine so snapshot creation doesn't block
 /// the state machine from continuing to apply entries concurrently.
+///
+/// Realms are enumerated with [`StorageEngine::list_realms`] — the same source
+/// [`restore_snapshot_in_place`] uses for its Phase 1 clear (audit 2026-08-28
+/// §4.9#3).  An earlier version enumerated an in-memory `known_realms` set that
+/// only `apply` ever filled.  That set is never persisted, so a restarted
+/// leader built a snapshot omitting every realm on its own disk, and installing
+/// it deleted those realms from every follower.
 pub struct HearthSnapshotBuilder {
     engine: Arc<dyn StorageEngine>,
-    known_realms: BTreeSet<RealmId>,
     last_applied: Option<LogId<u64>>,
     last_membership: StoredMembership<u64, HearthNode>,
 }
@@ -98,7 +103,6 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
     #[instrument(skip(self), name = "snapshot_build")]
     async fn build_snapshot(&mut self) -> Result<Snapshot<HearthRaftConfig>, StorageError<u64>> {
         let engine = Arc::clone(&self.engine);
-        let realms = self.known_realms.iter().cloned().collect::<Vec<_>>();
         let last_applied = self.last_applied;
         let last_membership = self.last_membership.clone();
 
@@ -108,9 +112,10 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
             uuid::Uuid::new_v4()
         );
 
-        // Scan the full key-space of every known realm inside spawn_blocking —
-        // StorageEngine::scan is a synchronous call.
+        // Enumerate and scan every realm on disk inside spawn_blocking —
+        // StorageEngine::list_realms and ::scan are synchronous calls.
         let payload: SnapshotPayload = spawn_blocking(move || {
+            let realms = engine.list_realms().map_err(io_read_err)?;
             let mut realm_data_vec = Vec::with_capacity(realms.len());
             for realm_id in &realms {
                 let entries = engine
@@ -158,8 +163,10 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
 
 /// Applies committed Raft entries to [`EmbeddedStorageEngine`].
 ///
-/// Tracks which realms have received writes so snapshot creation can scan
-/// every live realm without a separate realm-registry call.
+/// The state machine keeps no realm registry of its own.  Both snapshot build
+/// and snapshot install enumerate realms with [`StorageEngine::list_realms`],
+/// so the two paths can never disagree about which realms exist
+/// (audit 2026-08-28 §4.9#3).
 pub struct HearthStateMachine {
     /// The underlying storage engine.  Shared with the server — never swapped.
     ///
@@ -167,8 +174,6 @@ pub struct HearthStateMachine {
     /// applies data in-place so the server's `inner` handle always reads
     /// current state without any `Arc` swap (HEA-2126).
     engine: Arc<dyn StorageEngine>,
-    /// Set of realms that have had at least one write applied.
-    known_realms: BTreeSet<RealmId>,
     /// Last applied log id (updated after every `apply` call).
     last_applied: Option<LogId<u64>>,
     /// Last applied membership config.
@@ -202,7 +207,6 @@ impl HearthStateMachine {
     ) -> Self {
         Self {
             engine,
-            known_realms: BTreeSet::new(),
             last_applied: None,
             last_membership: StoredMembership::default(),
             current_snapshot: None,
@@ -268,7 +272,6 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         HearthSnapshotBuilder {
             engine: Arc::clone(&self.engine),
-            known_realms: self.known_realms.clone(),
             last_applied: self.last_applied,
             last_membership: self.last_membership.clone(),
         }
@@ -291,9 +294,8 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // Decompress and deserialise the payload.
         let payload = decompress_payload(&compressed)?;
 
-        // Extract realm IDs before moving payload into spawn_blocking.
-        let realm_ids: BTreeSet<RealmId> =
-            payload.realms.iter().map(|r| r.realm_id.clone()).collect();
+        // Count the realms before moving payload into spawn_blocking.
+        let realm_count = payload.realms.len();
 
         let engine = Arc::clone(&self.engine);
         let snapshot_id = meta.snapshot_id.clone();
@@ -320,9 +322,6 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
                 .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))?;
         }
 
-        // Rebuild known_realms from the snapshot.
-        self.known_realms = realm_ids;
-
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
 
@@ -333,7 +332,7 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
 
         info!(
             snapshot_id = %meta.snapshot_id,
-            realms = self.known_realms.len(),
+            realms = realm_count,
             "snapshot installed"
         );
 
@@ -374,7 +373,6 @@ impl HearthStateMachine {
                 key,
                 value,
             } => {
-                self.known_realms.insert(realm.clone());
                 let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
                 spawn_blocking(move || {
                     engine.put(&e_realm, &e_key, &e_value).map_err(to_write_err)
@@ -391,7 +389,6 @@ impl HearthStateMachine {
                 realm,
                 key,
             } => {
-                self.known_realms.insert(realm.clone());
                 let (e_realm, e_key) = (realm.clone(), key.clone());
                 spawn_blocking(move || engine.delete(&e_realm, &e_key).map_err(to_write_err))
                     .await
@@ -406,7 +403,6 @@ impl HearthStateMachine {
                 realm,
                 entries,
             } => {
-                self.known_realms.insert(realm.clone());
                 let (e_realm, e_entries) = (realm.clone(), entries.clone());
                 spawn_blocking(move || {
                     engine.put_batch(&e_realm, &e_entries).map_err(to_write_err)
@@ -426,7 +422,6 @@ impl HearthStateMachine {
                 key,
                 value,
             } => {
-                self.known_realms.insert(realm.clone());
                 // State machine entries are applied sequentially — no concurrent
                 // apply can interleave between the get and the put here, so the
                 // check-and-write is atomically serialised by Raft ordering.
@@ -484,10 +479,13 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 /// no pointer swap required.
 ///
 /// Phase 1 uses [`StorageEngine::list_realms`] to discover on-disk realms
-/// rather than the state machine's in-memory `known_realms` set.  This fixes
-/// the HEA-2131 regression: a restarted follower's `known_realms` is always
-/// empty (the set is never persisted), so the previous approach left stale
-/// keys from realms the leader deleted during the follower's downtime.
+/// rather than an in-memory set the state machine fills as it applies.  This
+/// fixes the HEA-2131 regression: such a set is never persisted, so a restarted
+/// follower's was always empty and the previous approach left stale keys from
+/// realms the leader deleted during the follower's downtime.
+///
+/// [`HearthSnapshotBuilder`] enumerates from the same call, so build and
+/// install always agree on which realms exist (audit 2026-08-28 §4.9#3).
 ///
 /// The process-local `OPEN_DIRS` guard and the OS-level advisory `LOCK` file
 /// remain continuous across the install, so the exclusive lock is never
@@ -525,10 +523,9 @@ fn restore_snapshot_in_place(
 
     // Phase 1: delete all live keys for every realm currently on disk.
     //
-    // `list_realms` enumerates from the live engine (memtable + SST files),
-    // not from the state machine's in-memory `known_realms` set, so it
-    // correctly clears stale data on a restarted follower whose `known_realms`
-    // is empty (HEA-2131).
+    // `list_realms` enumerates from the live engine (memtable + SST files), so
+    // it correctly clears stale data on a restarted follower (HEA-2131).  The
+    // snapshot builder enumerates from the same call (audit §4.9#3).
     let on_disk_realms = engine.list_realms().map_err(to_write_err)?;
     for realm_id in &on_disk_realms {
         let keys = engine
@@ -750,9 +747,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Snapshot correctness: same known realms and same entries for each realm.
-        assert_eq!(sm_b.known_realms.len(), 1);
-        let realm_id = sm_b.known_realms.iter().next().unwrap().clone();
+        // Snapshot correctness: same realms on disk and same entries for each realm.
+        let installed_realms = sm_b.engine.list_realms().unwrap();
+        assert_eq!(installed_realms.len(), 1);
+        let realm_id = installed_realms[0].clone();
 
         let check_pairs: &[(&[u8], &[u8])] = &[
             (b"foo", b"bar"),
@@ -830,16 +828,58 @@ mod tests {
 
     // ── HEA-2131 regression pins ──────────────────────────────────────────────
 
-    /// Regression pin for HEA-2131 (restart path): a follower that restarts and
-    /// then receives a snapshot must clear on-disk data for realms absent from the
-    /// snapshot, even though `known_realms` is empty on fresh construction.
+    /// Audit 2026-08-28 §4.9#3: snapshot build and snapshot install must
+    /// enumerate realms from the same source.
     ///
-    /// Before the fix, Phase 1 of `restore_snapshot_in_place` iterated
-    /// `known_realms` (empty after restart), skipped the delete loop entirely,
-    /// and left stale keys permanently on disk.
+    /// Install clears every realm `list_realms()` reports on disk, then replays
+    /// only the realms the payload carries.  While build enumerated the
+    /// in-memory `known_realms` set, a leader that restarted — the set is never
+    /// persisted — built a snapshot that omitted every realm on its own disk.
+    /// Installing that snapshot deleted those realms from every follower.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    async fn snapshot_install_clears_ondisk_realms_absent_from_known_realms() {
+    async fn snapshot_build_includes_realm_this_node_never_applied() {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let realm = make_realm();
+
+        // Restarted leader: the realm's data is already on disk, but the freshly
+        // constructed state machine has applied nothing, so `known_realms` is empty.
+        let config = StorageConfig::dev(dir_a.path().join("data"));
+        let leader_engine: Arc<EmbeddedStorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
+        leader_engine.put(&realm, b"survives", b"restart").unwrap();
+
+        let mut sm_a =
+            HearthStateMachine::new(Arc::clone(&leader_engine) as Arc<dyn StorageEngine>);
+
+        let mut builder = sm_a.get_snapshot_builder().await;
+        let snapshot = builder.build_snapshot().await.unwrap();
+
+        // Follower: install that snapshot and check the realm reached it.
+        let mut sm_b = open_sm(dir_b.path().join("data").as_path());
+        sm_b.install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sm_b.engine.get(&realm, b"survives").unwrap(),
+            Some(b"restart".to_vec()),
+            "a realm on the leader's disk must reach the follower; a build that \
+             enumerates known_realms omits it and install then deletes it everywhere"
+        );
+    }
+
+    /// Regression pin for HEA-2131 (restart path): a follower that restarts and
+    /// then receives a snapshot must clear on-disk data for realms absent from the
+    /// snapshot, even though the fresh state machine has applied nothing.
+    ///
+    /// Before the fix, Phase 1 of `restore_snapshot_in_place` iterated an
+    /// in-memory realm set (empty after restart), skipped the delete loop
+    /// entirely, and left stale keys permanently on disk.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_install_clears_ondisk_realms_absent_from_snapshot() {
         let dir = tempdir().unwrap();
         let data_dir = dir.path().join("data");
         let realm = make_realm();
@@ -861,16 +901,21 @@ mod tests {
         };
 
         // Restarted follower: data already on disk, freshly constructed state
-        // machine, so known_realms is empty.
+        // machine, so it has applied nothing.
         let config = StorageConfig::dev(data_dir.clone());
         let inner: Arc<EmbeddedStorageEngine> =
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         inner.put(&realm, b"stale", b"stale_val").unwrap();
 
         let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>);
-        assert!(
-            sm.known_realms.is_empty(),
-            "precondition: fresh state machine has no known realms"
+        assert_eq!(
+            sm.last_applied, None,
+            "precondition: fresh state machine has applied nothing"
+        );
+        assert_eq!(
+            inner.get(&realm, b"stale").unwrap(),
+            Some(b"stale_val".to_vec()),
+            "precondition: the stale key is on disk before the install"
         );
 
         sm.install_snapshot(&snap.meta, snap.snapshot)
@@ -891,12 +936,12 @@ mod tests {
     }
 
     /// Regression pin for HEA-2131 (no-restart path): a realm written directly to
-    /// the engine (bypassing `apply`, so never in `known_realms`) must be cleared
-    /// when a snapshot that omits that realm is installed.
+    /// the engine, bypassing `apply`, must be cleared when a snapshot that omits
+    /// that realm is installed.
     ///
     /// This covers the same root cause as the restart pin above but without a
-    /// process restart: `known_realms` is empty because `apply` was never called
-    /// for the stale realm, not because the state machine was freshly constructed.
+    /// process restart: `apply` was never called for the stale realm, rather than
+    /// the state machine having been freshly constructed.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     async fn snapshot_install_clears_realm_never_applied_by_this_node() {
@@ -922,17 +967,16 @@ mod tests {
         };
 
         // Fresh state machine whose engine already has data for realm_stale written
-        // directly (not via apply), so known_realms is empty and the stale realm is
-        // not tracked.
+        // directly (not via apply), so this node never saw the stale realm.
         let config = StorageConfig::dev(data_dir.clone());
         let inner: Arc<EmbeddedStorageEngine> =
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         inner.put(&realm_stale, b"stale_key", b"stale_val").unwrap();
 
         let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>);
-        assert!(
-            sm.known_realms.is_empty(),
-            "precondition: no prior applies, known_realms is empty"
+        assert_eq!(
+            sm.last_applied, None,
+            "precondition: no prior applies on this state machine"
         );
 
         sm.install_snapshot(&snap.meta, snap.snapshot)

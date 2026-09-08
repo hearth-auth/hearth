@@ -135,7 +135,7 @@ found it, the audit piece, and the report's severity.
 
 ## 15. Wave 3 — Deletion integrity
 
-- [ ] 15.1 Enumerate realms from the same source in snapshot build and snapshot install; build uses `known_realms` and install uses `list_realms()`, so a realm the leader has forgotten is deleted from every follower (§4.9#3 · MEDIUM)
+- [x] 15.1 Enumerate realms from the same source in snapshot build and snapshot install; build uses `known_realms` and install uses `list_realms()`, so a realm the leader has forgotten is deleted from every follower (§4.9#3 · MEDIUM)
 - [ ] 15.2 Add a realm dimension to hot-tier eviction and promotion counters and to `TieredConfig` (§4.9#6 · Informational)
 - [ ] 15.3 Stop realm deletion choosing between two divergent cascades by realm size; each path skips key families the other deletes (§4.20#2 · MEDIUM)
 - [ ] 15.4 Make a realm wedged in `DeletingInProgress` deletable again; the admin API refuses it and startup reconciliation aborts (§4.20#3 · MEDIUM)
