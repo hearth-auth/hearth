@@ -3684,7 +3684,7 @@ fn run_migrate_keycloak(
         "--data-dir is required for a real migration (use --dry-run to validate without writing)",
     )?;
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, rbac) = build_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, false)?;
     let importer = KeycloakImporter::new(identity, rbac);
@@ -3739,7 +3739,7 @@ fn run_migrate_auth0(
         "--data-dir is required for a real migration (use --dry-run to validate without writing)",
     )?;
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, rbac) = build_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, false)?;
     let importer = Auth0Importer::new(identity, rbac);
@@ -3772,7 +3772,7 @@ fn run_migrate_rotate_pepper(
 
     use hearth::storage::StorageEngine as _;
 
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = EmbeddedStorageEngine::open(storage_config)?;
 
     // List realms stored under the system realm.
@@ -3873,6 +3873,33 @@ fn run_migrate_rotate_pepper(
 /// Opens the storage engine, exports all (or a filtered) set of realms into a
 /// zstd-compressed `.hearth-backup` archive, and prints a per-realm entity count
 /// summary.  Exit code 0 on full success, 2 on any fatal error.
+/// Builds the storage configuration a CLI subcommand opens a **production**
+/// data directory with.
+///
+/// Every such subcommand used `StorageConfig::dev`, which sets
+/// `SyncMode::None` and `dev_mode: true`. `hearth backup restore` and both
+/// migration importers therefore printed success for writes that no `fsync`
+/// had covered, and a power loss right after lost them silently
+/// (audit 2026-08-28 §4.11#13).
+///
+/// Tuning comes from the `[storage]` defaults, so a CLI run behaves like a
+/// default-configured server. A migration importer's throwaway temp directory
+/// keeps the dev config on purpose: nothing in it outlives the command.
+fn cli_storage_config(data_dir: &std::path::Path) -> StorageConfig {
+    let defaults = StorageSection::default();
+    let hot_tier_capacity = defaults.hot_tier_capacity.unwrap_or_else(|| {
+        hearth::storage::auto_size::auto_size_hot_tier_capacity(defaults.hot_tier_max_memory)
+    });
+    let mut config = StorageConfig::production(
+        data_dir.to_path_buf(),
+        defaults.wal_max_size_bytes,
+        defaults.memtable_flush_bytes,
+        hot_tier_capacity,
+    );
+    config.block_cache_bytes = defaults.block_cache_bytes;
+    config
+}
+
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn run_backup_create(
     output: Option<&std::path::Path>,
@@ -3886,7 +3913,7 @@ fn run_backup_create(
     use uuid::Uuid;
 
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, audit, rbac) =
         build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
@@ -4039,7 +4066,7 @@ fn run_backup_restore(
     let reader = BackupArchive::open(input)?;
 
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, audit, rbac) =
         build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
@@ -4565,7 +4592,7 @@ fn run_rbac_orphans_list(
     use hearth::storage::StorageEngine as _;
 
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
 
     // `rba:user_perm:` is the key prefix for user extra-permission grants.
@@ -4600,7 +4627,7 @@ fn run_rbac_orphans_purge(
     use hearth::storage::StorageEngine as _;
 
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
 
     let scan_start: &[u8] = b"rba:user_perm:";
@@ -4740,6 +4767,43 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── CLI storage config (audit 2026-08-28 §4.11#13) ────────────────────
+
+    /// Every CLI subcommand that opens a production data directory must open it
+    /// with the production storage configuration.
+    ///
+    /// They all used `StorageConfig::dev`, which sets `SyncMode::None` and
+    /// `dev_mode: true`. `hearth backup restore` and both migration importers
+    /// therefore reported success for writes no `fsync` had covered: a power
+    /// loss straight after a restore lost it, silently.
+    #[test]
+    fn cli_storage_config_is_a_production_config() {
+        use hearth::storage::wal::SyncMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cli_storage_config(dir.path());
+
+        assert_eq!(
+            cfg.wal_config.sync_mode,
+            SyncMode::EveryWrite,
+            "a CLI subcommand must not acknowledge a write no fsync covered"
+        );
+        assert!(
+            !cfg.dev_mode,
+            "a CLI subcommand must not open a production data directory in dev mode"
+        );
+        assert_eq!(
+            cfg.data_dir,
+            dir.path(),
+            "the config must open the directory it was given"
+        );
+
+        // Tuning must match a default-configured server, not dev defaults.
+        let defaults = StorageSection::default();
+        assert_eq!(cfg.wal_config.max_size, defaults.wal_max_size_bytes);
+        assert_eq!(cfg.block_cache_bytes, defaults.block_cache_bytes);
+    }
 
     // ── init_cli_tracing (HEA-2143 silent-CLI gate) ───────────────────────
 

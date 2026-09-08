@@ -97,6 +97,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **CLI subcommands now open a production data directory with the production storage config
+  (audit 2026-08-28 §4.11#13)** — `hearth backup create`, `hearth backup restore`, both migration
+  importers (`hearth migrate keycloak`, `hearth migrate auth0`), `hearth migrate rotate-pepper`
+  and `hearth rbac orphans list|purge` all opened the directory with the **dev** storage config:
+  `SyncMode::None` and `dev_mode: true`. Each reported success for writes that no `fsync` had
+  covered, so a power loss right after a restore or a migration lost them silently. They now use
+  `SyncMode::EveryWrite` and the `[storage]` defaults, matching a default-configured server. A
+  `--dry-run` migration still uses a throwaway temp directory, which nothing outlives.
 - **The TLS server now drains in-flight requests on `SIGTERM` (audit 2026-08-28 §4.11#9)** — the
   HTTPS listener runs its own accept loop, and on a shutdown signal it stopped accepting and
   returned immediately, abandoning every connection it had spawned. An in-flight request was cut

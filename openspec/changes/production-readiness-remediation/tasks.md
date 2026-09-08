@@ -131,7 +131,7 @@ found it, the audit piece, and the report's severity.
 - [x] 14.4 Log, meter and surface the WAL write fence in `/readyz`; it is permanent, unlogged and invisible today (§4.11#8 · MEDIUM)
 - [x] 14.5 Drain in-flight requests on `SIGTERM` in the TLS-terminating server, which drops the accept loop, returns, and exits 0 (§4.11#9 · MEDIUM)
 - [x] 14.6 Add coverage for the two real SIGTERM defects the red drain test appears to cover but does not (§4.11#10, §4.12#11 · MEDIUM)
-- [ ] 14.7 Open production data directories with the production storage config in every CLI subcommand; `hearth backup restore` and both migration importers acknowledge success with `SyncMode::None` and `dev_mode: true` (§4.11#13 · MEDIUM)
+- [x] 14.7 Open production data directories with the production storage config in every CLI subcommand; `hearth backup restore` and both migration importers acknowledge success with `SyncMode::None` and `dev_mode: true` (§4.11#13 · MEDIUM)
 
 ## 15. Wave 3 — Deletion integrity
 
