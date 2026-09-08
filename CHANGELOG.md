@@ -77,6 +77,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A reversed audit time window no longer aborts the process (audit 2026-08-28 §4.9#7)** — `GET
+  /admin/audit?start_time=…&end_time=…` with `start_time` after `end_time` built a reversed storage
+  scan window, which indexed a legacy SST body out of order and killed the whole multi-tenant
+  server; one authenticated request did it in 6 of 6 runs. The REST route now answers
+  **400 Bad Request**, the audit engine refuses the query on every transport (REST, gRPC and the
+  admin UI), and `StorageEngine::scan`/`scan_keys` refuse a reversed window with a new
+  `StorageError::InvalidRange`. Equal bounds select an empty window and remain legal.
 - **A deeply nested SCIM filter no longer aborts the process (audit 2026-08-28 §4.6#1)** — the
   SCIM filter parser recursed once per `(` with no bound. A single authenticated `GET
   /scim/v2/Users?filter=...` or `/scim/v2/Groups?filter=...` of about 6 KB overflowed the stack

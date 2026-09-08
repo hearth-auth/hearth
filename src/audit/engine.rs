@@ -685,6 +685,18 @@ impl AuditEngine for EmbeddedAuditEngine {
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
+        // A reversed time window builds a reversed storage scan window, which
+        // used to abort the whole process (audit §4.9#7). Refuse it here so
+        // every caller — REST, gRPC and the admin UI — gets the same answer.
+        // Equal bounds are legal and select nothing.
+        if let (Some(start), Some(end)) = (query.start_time, query.end_time) {
+            if start > end {
+                return Err(AuditError::InvalidQuery {
+                    reason: "start_time must not be greater than end_time".to_string(),
+                });
+            }
+        }
+
         // Determine if we're scanning by actor, action, or just time range
         if let Some(ref actor) = query.actor {
             let mut events = self.query_by_actor(query, actor)?;

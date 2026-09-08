@@ -1907,6 +1907,12 @@ impl StorageEngine for EmbeddedStorageEngine {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, StorageError> {
+        // `[start, end)` is only meaningful when `start <= end`. A reversed
+        // window reaching an SST body panics and aborts the process
+        // (audit §4.9#7), so refuse it at the boundary.
+        if start > end {
+            return Err(StorageError::InvalidRange);
+        }
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["scan"])
@@ -1959,6 +1965,10 @@ impl StorageEngine for EmbeddedStorageEngine {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<Vec<u8>>, crate::storage::StorageError> {
+        // Same reversed-window guard as `scan` (audit §4.9#7).
+        if start > end {
+            return Err(StorageError::InvalidRange);
+        }
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["scan_keys"])
@@ -4324,6 +4334,37 @@ mod tests {
                 "rot-key-{i:04} must survive WAL rotation + reopen (flushed, not truncated away)"
             );
         }
+    }
+
+    /// Audit §4.9#7: a reversed window must be refused at the engine boundary,
+    /// so it never reaches an SST body. `[start, end)` is only meaningful when
+    /// `start <= end`; equal bounds stay legal and return nothing.
+    #[test]
+    fn scan_refuses_a_reversed_window() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"usr:alice", b"a").expect("put");
+        engine.put(&realm, b"usr:bob", b"b").expect("put");
+
+        let err = engine
+            .scan(&realm, b"usr:z", b"usr:a")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+        let err = engine
+            .scan_keys(&realm, b"usr:z", b"usr:a")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+
+        assert!(engine
+            .scan(&realm, b"usr:a", b"usr:a")
+            .expect("equal bounds are legal")
+            .is_empty());
     }
 
     // ===== scan_keys tests (HEA-1622) =====

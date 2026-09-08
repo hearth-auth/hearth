@@ -103,6 +103,16 @@ pub enum StorageError {
         /// The snapshot ID from the interrupted install (from the marker file).
         snapshot_id: String,
     },
+
+    /// A range scan was requested with `start > end`.
+    ///
+    /// The half-open interval `[start, end)` is only meaningful when
+    /// `start <= end`; equal bounds are legal and select nothing. A reversed
+    /// window used to index a legacy eager SST body as `entries[lo..hi]` with
+    /// `lo > hi`, which panics — and aborts the whole multi-tenant process
+    /// under the release profile's `panic=abort`. Callers that take either
+    /// bound from a request MUST validate it themselves as well.
+    InvalidRange,
 }
 
 impl fmt::Display for StorageError {
@@ -122,6 +132,10 @@ impl fmt::Display for StorageError {
                 write!(f, "invalid SST format: {reason}")
             }
             Self::HotTierFull => write!(f, "hot tier is full and eviction could not free space"),
+            Self::InvalidRange => write!(
+                f,
+                "invalid scan range: the start key is greater than the end key"
+            ),
             Self::Crypto { reason } => {
                 write!(f, "cryptographic operation failed: {reason}")
             }
@@ -202,6 +216,7 @@ impl std::error::Error for StorageError {
             | Self::HostKeyMismatch { .. }
             | Self::CorruptedKeks { .. }
             | Self::AlreadyLocked { .. }
+            | Self::InvalidRange
             | Self::TornSnapshotRestore { .. }
             | Self::WalMidSegmentCorruption { .. } => None,
         }

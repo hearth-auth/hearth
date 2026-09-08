@@ -1319,6 +1319,13 @@ impl SstReader {
         end_key: &[u8],
         project: impl Fn(&MemtableValue) -> T,
     ) -> Result<Vec<(Vec<u8>, T)>, StorageError> {
+        // A reversed window would index the eager body as `entries[lo..hi]`
+        // with `lo > hi`, which panics and — under `panic=abort` — takes the
+        // whole multi-tenant process down (audit §4.9#7). Refuse it here as
+        // well as at the engine boundary: this is the layer that would crash.
+        if start_key > end_key {
+            return Err(StorageError::InvalidRange);
+        }
         // O(1) range prune: skip SSTs disjoint from the scan window (HEA-1773).
         if !self.overlaps_range(realm_id, start_key, end_key) {
             return Ok(Vec::new());
@@ -3092,6 +3099,48 @@ mod tests {
                 if reason.contains("entry count mismatch")),
             "expected a clean count-mismatch error, got: {err:?}"
         );
+    }
+
+    /// Audit §4.9#7: a reversed scan window (`start > end`) indexed a legacy
+    /// eager body as `entries[lo..hi]` with `lo > hi`, panicking inside
+    /// `range_scan_inner`. Under the release profile's `panic=abort` that
+    /// killed the whole multi-tenant process; one `GET /admin/audit` did it in
+    /// 6 of 6 runs. Both projections must refuse it cleanly instead.
+    ///
+    /// Under nextest (one process per test) the pre-fix code fails this test
+    /// by panicking; post-fix it returns `Err`.
+    #[test]
+    fn reversed_scan_window_on_a_legacy_eager_sst_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("reversed_v2.sst");
+        let realm = RealmId::generate();
+        let entries = fixed_entries(&realm, 200);
+        let (dek, enc) = test_encryption_context();
+        write_v2_manual(&sst_path, &entries, 7, &dek, &enc);
+        let reader = SstReader::open(&sst_path, 7, &dek).expect("open");
+
+        // Both bounds sit inside the SST's key range, so the O(1) range prune
+        // does not filter this window out.
+        let err = reader
+            .range_scan(&realm, b"k000150", b"k000050")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+        let err = reader
+            .range_scan_keys(&realm, b"k000150", b"k000050")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+
+        // An empty-but-ordered window is not reversed, and stays legal.
+        assert!(reader
+            .range_scan(&realm, b"k000050", b"k000050")
+            .expect("equal bounds are legal")
+            .is_empty());
     }
 
     #[test]

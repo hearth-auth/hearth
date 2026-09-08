@@ -291,6 +291,10 @@ pub fn audit_error_to_status(err: AuditError) -> Status {
         AuditError::IntegrityViolation { .. } => {
             Status::new(Code::DataLoss, "audit chain integrity violation")
         }
+        AuditError::InvalidQuery { ref reason } => Status::new(
+            Code::InvalidArgument,
+            format!("invalid audit query: {reason}"),
+        ),
         AuditError::Storage(_)
         | AuditError::Serialization { .. }
         | AuditError::MergedAppendNotSupported => {

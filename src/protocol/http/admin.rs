@@ -2435,6 +2435,22 @@ async fn admin_list_audit(
         return e.into_response();
     }
 
+    // A reversed window (`start_time > end_time`) builds a reversed storage
+    // scan window, which used to abort the whole process (audit §4.9#7).
+    // Refuse it here so the caller learns why. Equal bounds are legal and
+    // select nothing.
+    if let (Some(start), Some(end)) = (params.start_time, params.end_time) {
+        if start > end {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "start_time must not be greater than end_time"
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let action = params
         .action
         .as_deref()
