@@ -4586,48 +4586,23 @@ impl EmbeddedIdentityEngine {
 
 // Private cascade helpers — not part of the IdentityEngine trait.
 impl EmbeddedIdentityEngine {
-    /// Counts the total number of data keys across all cascade prefixes for a realm.
-    /// Used to decide whether to background the delete_realm cascade.
+    /// Counts every key in a realm's key space. Used to decide whether to
+    /// background the `delete_realm` cascade.
+    ///
+    /// Counts the same full enumeration [`Self::sweep_realm_key_space`]
+    /// deletes, so the size decision is made over the work that will actually
+    /// be done. The hand-written prefix list this replaced knew nothing of
+    /// `cred:history:` or the `audit:*` families, so a realm whose bulk sat in
+    /// those families was sized at near zero and took the inline path
+    /// (audit 2026-08-28 §4.20#2).
+    ///
+    /// A scan failure counts as zero: the size decision is an optimisation,
+    /// and the cascade itself propagates the error.
     fn estimate_cascade_count(&self, realm_id: &RealmId) -> usize {
-        let prefixes: &[&[u8]] = &[
-            b"usr:id:",
-            b"usr:email:",
-            b"cred:user:",
-            b"ses:id:",
-            b"ses:user:",
-            b"mfa:totp:",
-            b"webauthn:cred:",
-            b"webauthn:disc:",
-            b"magic:link:",
-            b"email:verify:",
-            b"email:change:",
-            b"email:reserved:",
-            b"rst:token:",
-            b"dfp:user:",
-            b"org:id:",
-            b"org:slug:",
-            b"slug:org:",
-            b"orgm:org:",
-            b"orgm:user:",
-            b"orgi:id:",
-            b"orgi:token:",
-            b"orgi:org:",
-            b"orgi:list:",
-            b"oauth:client:",
-            b"rel:",
-            b"oauth:code:",
-            b"oauth:revjti:",
-            b"oauth:ucode:",
-            b"rba:",
-        ];
-        prefixes.iter().fold(0usize, |acc, prefix| {
-            let end = keys::prefix_end(prefix);
-            acc + self
-                .storage
-                .scan(realm_id, prefix, &end)
-                .map(|e| e.len())
-                .unwrap_or(0)
-        })
+        self.storage
+            .scan(realm_id, &[], &[0xFF; 256])
+            .map(|entries| entries.len())
+            .unwrap_or(0)
     }
 
     /// Runs the full cascade deletion for a realm in chunks of `chunk_size` keys.
@@ -4668,15 +4643,53 @@ impl EmbeddedIdentityEngine {
         Ok(deleted)
     }
 
-    fn do_cascade_chunked(
-        &self,
+    /// Runs the whole realm cascade and returns whether it deleted anything.
+    ///
+    /// This is the **only** cascade. `delete_realm` decides by realm size
+    /// whether to run it inline or on a spawned task, but both branches call
+    /// this one routine, so the size branch chooses *where* the cascade runs
+    /// and never *what* it does. The two hand-written cascades this replaced
+    /// disagreed — the backgrounded one never wrote the post-delete slug
+    /// cooldown, so a large realm's name could be re-claimed immediately while
+    /// a small realm's could not (audit 2026-08-28 §4.20#2).
+    ///
+    /// `existing_realm` is the realm record read before the cascade started.
+    /// `None` means a previous cascade already removed it and this call is a
+    /// retry converging on the residue.
+    ///
+    /// Takes `storage` and `clock` values by argument rather than `&self` so
+    /// the backgrounded cascade — which owns only a cloned storage handle —
+    /// calls exactly the same code.
+    ///
+    /// Errors propagate. A fault mid-cascade leaves residue that the next
+    /// `delete_realm` converges on; the cascade is idempotent.
+    fn run_realm_cascade(
+        storage: &Arc<dyn StorageEngine>,
         realm_id: &RealmId,
+        existing_realm: Option<&Realm>,
         chunk_size: usize,
+        now_micros: i64,
+        slug_cooldown_secs: u64,
     ) -> Result<bool, IdentityError> {
         let sys_realm = keys::system_realm_id();
         let mut cascade_work_done = false;
 
-        // 1. Sweep the realm's ENTIRE key space — the same full enumeration
+        // 1. Delete the realm record and its name index. Ordering matters: if
+        //    a fault lands mid-cascade the observable partial state is "realm
+        //    already gone, some cascade residue remains" — never the reverse
+        //    ("realm alive but signing key missing"), which would make
+        //    `realm_jwks()` fail for a realm the API still reports as live.
+        if let Some(realm) = existing_realm {
+            cascade_work_done = true;
+            storage
+                .delete(&sys_realm, &keys::encode_realm_id(realm_id))
+                .map_err(Self::storage_err)?;
+            // Best-effort: a stale name index entry blocks nothing but the
+            // name, and the cooldown tombstone below holds that anyway.
+            let _ = storage.delete(&sys_realm, &keys::encode_realm_name(realm.name()));
+        }
+
+        // 2. Sweep the realm's ENTIRE key space — the same full enumeration
         //    the cluster snapshot path uses. The hand-written prefix
         //    allowlists this replaces missed `cred:history:` (Argon2id
         //    hashes) and every `audit:*` family, and shipped read paths
@@ -4685,47 +4698,61 @@ impl EmbeddedIdentityEngine {
         //    `delete_user` calls is what the background cascade always did;
         //    every per-user side effect (email tombstones, indexes, audit
         //    rows) is a realm-scoped key this sweep removes anyway.
-        if Self::sweep_realm_key_space(self.storage.as_ref(), realm_id, chunk_size)
+        if Self::sweep_realm_key_space(storage.as_ref(), realm_id, chunk_size)
             .map_err(Self::storage_err)?
             > 0
         {
             cascade_work_done = true;
         }
 
-        // 2. SAML per-realm RSA signing key (under system realm scope).
+        // 3. SAML per-realm RSA signing key (under system realm scope).
         let saml_key_storage_key = keys::encode_realm_saml_key(realm_id);
-        if self
-            .storage
+        if storage
             .get(&sys_realm, &saml_key_storage_key)
             .map_err(Self::storage_err)?
             .is_some()
         {
             cascade_work_done = true;
-            self.storage
+            storage
                 .delete(&sys_realm, &saml_key_storage_key)
                 .map_err(Self::storage_err)?;
         }
 
-        // 3. Delete realm signing key (check existence first so we can attribute
+        // 4. Delete realm signing key (check existence first so we can attribute
         //    cascade work even when only the signing key survives a prior crash).
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
-        if self
-            .storage
+        if storage
             .get(&sys_realm, &key_storage_key)
             .map_err(Self::storage_err)?
             .is_some()
         {
             cascade_work_done = true;
-            self.storage
+            storage
                 .delete(&sys_realm, &key_storage_key)
                 .map_err(Self::storage_err)?;
         }
 
-        // 4. Delete every retiring signing key. Like the active key above these
+        // 5. Delete every retiring signing key. Like the active key above these
         //    are wrapped private keys (plaintext when no KEK is configured) and
         //    must not outlive the realm (HEA-2093).
-        if Self::purge_realm_retiring_keys(&self.storage, realm_id, None) > 0 {
+        if Self::purge_realm_retiring_keys(storage, realm_id, None) > 0 {
             cascade_work_done = true;
+        }
+
+        // 6. A-5: write a post-delete realm name cooldown tombstone so the
+        //    freed name cannot be immediately re-claimed. Best-effort: a write
+        //    failure here is not fatal for the delete. Only written when the
+        //    realm existed.
+        if let Some(realm) = existing_realm {
+            let cooldown_micros = slug_cooldown_secs as i64 * 1_000_000;
+            let reservation = StoredSlugReservation {
+                slug: realm.name().to_string(),
+                expires_at_micros: now_micros + cooldown_micros,
+            };
+            if let Ok(bytes) = serde_json::to_vec(&reservation) {
+                let res_key = keys::encode_realm_slug_reservation(realm.name());
+                let _ = storage.put(&sys_realm, &res_key, &bytes);
+            }
         }
 
         Ok(cascade_work_done)
@@ -5548,9 +5575,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.purge_realm_caches(realm_id);
 
         // Estimate the size of the cascade to decide whether to background it.
+        // The decision is *where* the cascade runs. Both branches call
+        // `run_realm_cascade`, so it is never a decision about what the
+        // cascade does (audit 2026-08-28 §4.20#2).
         let cascade_count = self.estimate_cascade_count(realm_id);
         let chunk_size = self.config.cascade_chunk_size;
         let background_threshold = self.config.cascade_background_threshold;
+        let now_micros = self.clock.now().as_micros();
+        let slug_cooldown_secs = self.config.slug_cooldown_secs;
 
         if cascade_count > background_threshold {
             // Large realm: spawn a background task and return immediately.
@@ -5572,57 +5604,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         "delete_realm: backgrounding large cascade"
                     );
 
-                    // Build a minimal engine wrapper to reuse do_cascade_chunked.
-                    // We need an engine with the same storage — the cheapest
-                    // approach is to run the cascade inline on the storage.
+                    // The one cascade, run here instead of inline. A failure
+                    // leaves residue that a `delete_realm` retry converges on;
+                    // nothing can be propagated out of a spawned task, so it
+                    // is logged instead (audit 2026-08-28 §4.20#2).
                     let sys = keys::system_realm_id();
-                    let realm_key_bg = keys::encode_realm_id(&realm_id_bg);
-
-                    // Delete the realm record from the system realm.
-                    if realm_exists {
-                        if let Err(e) = storage.delete(&sys, &realm_key_bg) {
-                            tracing::info!(
-                                realm_id = %realm_id_bg.as_uuid(),
-                                error = %e,
-                                "delete_realm background: failed to delete realm record"
-                            );
-                        }
-                        // Clean up the name index (best-effort).
-                        if let Some(ref t) = existing_realm_bg {
-                            let name_key = keys::encode_realm_name(t.name());
-                            let _ = storage.delete(&sys, &name_key);
-                        }
-                    }
-
-                    // Sweep the realm's ENTIRE key space — never a prefix
-                    // allowlist (audit 2026-08-28 §4.9#1); the same helper
-                    // the synchronous cascade uses. A failure leaves residue
-                    // that a `delete_realm` retry converges on.
-                    let deleted_total = match Self::sweep_realm_key_space(
-                        storage.as_ref(),
+                    if let Err(e) = Self::run_realm_cascade(
+                        &storage,
                         &realm_id_bg,
+                        existing_realm_bg.as_ref(),
                         chunk_size,
+                        now_micros,
+                        slug_cooldown_secs,
                     ) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            tracing::warn!(
-                                realm_id = %realm_id_bg.as_uuid(),
-                                error = %e,
-                                "delete_realm background: key-space sweep failed; \
-                                 retry delete_realm to converge"
-                            );
-                            0
-                        }
-                    };
-
-                    // System-realm keys: SAML key + active signing key + every
-                    // retiring signing key. All are (wrapped) private key
-                    // material and must not outlive the realm (HEA-2093).
-                    let saml_key = keys::encode_realm_saml_key(&realm_id_bg);
-                    let _ = storage.delete(&sys, &saml_key);
-                    let signing_key_key = keys::encode_realm_signing_key(&realm_id_bg);
-                    let _ = storage.delete(&sys, &signing_key_key);
-                    Self::purge_realm_retiring_keys(&storage, &realm_id_bg, None);
+                        tracing::warn!(
+                            realm_id = %realm_id_bg.as_uuid(),
+                            error = %e,
+                            "delete_realm background: cascade failed; \
+                             retry delete_realm to converge"
+                        );
+                    }
 
                     // Emit audit event (best-effort; no ? propagation in async
                     // task). Scoped to the SYSTEM realm: the deleted realm's
@@ -5651,7 +5652,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
                     tracing::info!(
                         realm_id = %realm_id_bg.as_uuid(),
-                        deleted_total,
                         "delete_realm: background cascade complete"
                     );
                 });
@@ -5662,19 +5662,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // No Tokio runtime available — fall through to synchronous cascade.
         }
 
-        // Synchronous cascade path (small realm, or no runtime for background).
-        if realm_exists {
-            self.storage
-                .delete(&sys_realm, &realm_key)
-                .map_err(Self::storage_err)?;
-            // Clean up the name index (best-effort)
-            if let Some(ref t) = existing_realm {
-                let name_key = keys::encode_realm_name(t.name());
-                let _ = self.storage.delete(&sys_realm, &name_key);
-            }
-        }
-
-        let cascade_work_done = self.do_cascade_chunked(realm_id, chunk_size)?;
+        // Inline cascade path (small realm, or no runtime for background). The
+        // same routine the backgrounded branch above runs.
+        let cascade_work_done = Self::run_realm_cascade(
+            &self.storage,
+            realm_id,
+            existing_realm.as_ref(),
+            chunk_size,
+            now_micros,
+            slug_cooldown_secs,
+        )?;
 
         // Remove from in-memory caches. Durable deletion already
         // happened above; this drops the cached Arc and status entry.
@@ -5701,21 +5698,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::RealmNotFound);
         }
 
-        // A-5: write a post-delete realm name cooldown tombstone so the freed
-        // name cannot be immediately re-claimed. Best-effort: a write failure
-        // here is not fatal for the delete. Only written when the realm existed.
-        if let Some(ref t) = existing_realm {
-            let cooldown_micros = self.config.slug_cooldown_secs as i64 * 1_000_000;
-            let now_micros = self.clock.now().as_micros();
-            let reservation = StoredSlugReservation {
-                slug: t.name().to_string(),
-                expires_at_micros: now_micros + cooldown_micros,
-            };
-            if let Ok(bytes) = serde_json::to_vec(&reservation) {
-                let res_key = keys::encode_realm_slug_reservation(t.name());
-                let _ = self.storage.put(&sys_realm, &res_key, &bytes);
-            }
-        }
+        // The A-5 post-delete slug cooldown tombstone is written inside
+        // `run_realm_cascade`, so both branches write it.
 
         // Deletion evidence is scoped to the SYSTEM realm: the deleted
         // realm's own audit log was just swept, and appending under the
@@ -18553,6 +18537,100 @@ mod tests {
             names.is_empty(),
             "{} key(s) survived realm deletion: {names:?}",
             names.len()
+        );
+    }
+
+    /// Creates one realm with a user and a password, deletes it, and returns
+    /// every key left in the system realm afterwards, with the realm's UUID
+    /// replaced by `<realm>` so two runs are comparable.
+    ///
+    /// `background_threshold` picks the cascade branch: `usize::MAX` forces the
+    /// synchronous path, `0` forces the backgrounded one.
+    ///
+    /// `audit:` keys are excluded — both paths write a `RealmDeleted` row, but
+    /// the row's key carries a per-event identifier that differs between runs.
+    async fn system_realm_keys_after_realm_delete(background_threshold: usize) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let storage =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            cascade_background_threshold: background_threshold,
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation");
+
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "cascade-corp".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+        let realm_id = realm.id().clone();
+
+        let user = engine
+            .create_user(
+                &realm_id,
+                &CreateUserRequest {
+                    email: "cascade@example.com".to_string(),
+                    display_name: "Cascade".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+        let pw = CleartextPassword::from_string("valid-password123".to_string());
+        engine
+            .set_password(&realm_id, user.id(), &pw)
+            .expect("set password");
+
+        engine.delete_realm(&realm_id).expect("delete realm");
+
+        // The backgrounded cascade is a spawned task whose body has no `.await`
+        // in it, so one yield on the current-thread test runtime runs it to
+        // completion. Yield several times so the test does not rest on that.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        let uuid = realm_id.as_uuid().to_string();
+        let mut survivors: Vec<String> = storage
+            .scan(&keys::system_realm_id(), &[], &[0xFF; 256])
+            .expect("system realm scan")
+            .iter()
+            .map(|e| String::from_utf8_lossy(&e.key).replace(&uuid, "<realm>"))
+            .filter(|k| !k.starts_with("audit:"))
+            .collect();
+        survivors.sort();
+        survivors
+    }
+
+    /// Audit 2026-08-28 §4.20#2: realm deletion chose between two cascade
+    /// implementations by realm size, and the two did not do the same work.
+    ///
+    /// The size branch may decide *where* a cascade runs. It must never decide
+    /// *what* the cascade does, or deletion completeness depends on how big a
+    /// tenant happens to be.
+    #[tokio::test]
+    async fn both_cascade_branches_leave_the_same_system_realm_state() {
+        let synchronous = system_realm_keys_after_realm_delete(usize::MAX).await;
+        let backgrounded = system_realm_keys_after_realm_delete(0).await;
+
+        assert_eq!(
+            synchronous, backgrounded,
+            "the backgrounded cascade must leave the same system-realm state as \
+             the synchronous one; deletion completeness must not depend on realm size"
         );
     }
 

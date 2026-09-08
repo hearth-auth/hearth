@@ -107,6 +107,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Realm deletion no longer does different work depending on realm size (audit 2026-08-28
+  §4.20#2)** — `delete_realm` chose between two hand-written cascades by how big the realm was,
+  and the two disagreed. The backgrounded one, taken for large realms, never wrote the post-delete
+  name cooldown tombstone, so a large realm's name could be re-claimed immediately while a small
+  realm's was held for `security.slug_cooldown_days`. Both branches now call one cascade routine,
+  so the size check decides only *where* the cascade runs. Two further consequences: the
+  backgrounded cascade now reports a failure as one `WARN` naming the whole cascade rather than
+  per-step, and the size estimate now counts the realm's entire key space instead of a
+  hand-written prefix list that knew nothing of `cred:history:` or the `audit:*` families. A realm
+  whose bulk sits in those families is therefore sized correctly and may now take the backgrounded
+  path where it previously ran inline — the API still answers `204` either way, but the cascade
+  completes shortly after the response rather than before it.
 - **A Raft snapshot no longer deletes realms from every follower (audit 2026-08-28 §4.9#3)** —
   cluster mode built a snapshot from an in-memory realm set that only applied log entries filled,
   while installing one cleared every realm the storage engine reports on disk. The set is never
