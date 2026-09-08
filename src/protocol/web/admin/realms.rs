@@ -2114,6 +2114,23 @@ pub async fn admin_config_editor_visual_validate(
         }
     };
 
+    // HEA control-liveness 10.2: dev_mode must only be set via the `--dev`
+    // CLI flag, never by a config file — including one an admin submits
+    // through this editor. `from_yaml_str_unchecked` deliberately still
+    // honours `dev_mode: true` for internal test fixtures, so this endpoint
+    // guards itself rather than relying on `validate_all()`, which cannot
+    // distinguish an editor submission from a legitimate `--dev` boot.
+    if crate::config::validate::yaml_declares_dev_mode(&new_yaml) {
+        return axum::response::Json(serde_json::json!({
+            "valid": false,
+            "errors": [{
+                "field": "dev_mode",
+                "reason": "cannot be set from the config editor; use `hearth serve --dev` instead",
+            }],
+        }))
+        .into_response();
+    }
+
     let config = match Config::from_yaml_str_unchecked(&new_yaml) {
         Ok(c) => c,
         Err(e) => {
@@ -2158,6 +2175,22 @@ pub async fn admin_config_editor_visual_apply(
             .into_response();
         }
     };
+
+    // HEA control-liveness 10.2: never write a config file to disk that
+    // arms dev_mode — see the matching guard in
+    // admin_config_editor_visual_validate for why this cannot be left to
+    // validate_all().
+    if crate::config::validate::yaml_declares_dev_mode(&new_yaml) {
+        return axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "dev_mode cannot be set from the config editor",
+            "errors": [{
+                "field": "dev_mode",
+                "reason": "cannot be set from the config editor; use `hearth serve --dev` instead",
+            }],
+        }))
+        .into_response();
+    }
 
     // Parse without validation so we can run validate_all()
     let config = match Config::from_yaml_str_unchecked(&new_yaml) {

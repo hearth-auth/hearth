@@ -77,6 +77,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **`dev_mode: true` can no longer be set from a config file (audit 2026-08-28 §4.7#1)** —
+  a single line in `hearth.yaml` armed the entire development perimeter on a release binary:
+  weakened Argon2 parameters, the CSRF skip, the plaintext setup token, and every production
+  fail-closed gate (required KEK, required TLS, demo-seeding refusal) turned off at once. The
+  only hard guard refused `dev_mode` on a non-loopback bind, which does not fire for the most
+  common production topology — a reverse proxy terminating TLS in front of a server bound to
+  `127.0.0.1`. Hearth now **refuses to start** when a config file declares `dev_mode: true`,
+  naming the key and pointing at `hearth serve --dev`. The same refusal applies to config
+  submitted through the admin visual editor
+  (`POST /ui/admin/settings/editor/visual/{preview,validate,apply}`), which could otherwise
+  write the line into `hearth.yaml` on disk. **Operator action:** if you set `dev_mode: true`
+  in a config file, remove it and pass `--dev` on the command line instead; `dev_mode: false`
+  and configs without the key are unaffected. The non-loopback bind rule still applies to
+  `hearth serve --dev`.
 - **A `hearth.yaml` with no `security:` block no longer disables JWKS and OIDC discovery
   (audit 2026-08-28 §4.2#2, §4.13#1, §4.22#2, §4.25#2)** — `SecurityYaml` derived its `Default`
   impl, which zeroes every field instead of running each field's documented default. That only

@@ -34,6 +34,21 @@ struct DevModeYaml {
     dev_mode: bool,
 }
 
+/// Returns `true` when raw YAML declares `dev_mode: true` at the top level.
+///
+/// Used to refuse a config file that tries to arm dev mode (HEA
+/// control-liveness 10.2): `dev_mode` MUST only be set via the `--dev` CLI
+/// flag (`Config::dev()` / `Config::from_file_as_dev()`), never by file
+/// content — a release binary bound to a loopback address behind a reverse
+/// proxy is still internet-reachable, and dev mode bypasses every
+/// production fail-closed gate. Invalid YAML is treated as `false` here;
+/// the caller's own parse will surface the real error.
+pub(crate) fn yaml_declares_dev_mode(yaml: &str) -> bool {
+    serde_norway::from_str::<DevModeYaml>(yaml)
+        .map(|dm| dm.dev_mode)
+        .unwrap_or(false)
+}
+
 /// Valid UI theme names — must match `protocol::web::themes::VALID_THEMES`.
 pub(super) const VALID_UI_THEMES: &[&str] =
     &["ember", "ocean", "midnight", "forest", "cloud", "slate"];
@@ -99,15 +114,22 @@ impl Config {
     /// Returns an error for invalid YAML or values that fail validation.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
+        // HEA control-liveness 10.2: `dev_mode` is #[serde(skip)] and must
+        // stay unreachable through this, the checked/production loader
+        // (`Config::from_file` uses it for every non `--dev` boot). A
+        // release binary that loads a file declaring `dev_mode: true`
+        // refuses to start rather than silently arming the whole dev
+        // perimeter — see `dev_mode_true_in_config_file_is_refused`.
+        if yaml_declares_dev_mode(&substituted) {
+            return Err(ConfigError::ValidationError {
+                field: "dev_mode".to_string(),
+                reason: "cannot be set in a config file; use `hearth serve --dev` instead"
+                    .to_string(),
+            });
+        }
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
-        // `dev_mode` is #[serde(skip)] so serde never sets it from YAML.
-        // Extract it separately so YAML callers that embed `dev_mode: true`
-        // (tests, `hearth serve --dev` paths) still get the relaxed validation.
-        if let Ok(dm) = serde_norway::from_str::<DevModeYaml>(&substituted) {
-            config.dev_mode = dm.dev_mode;
-        }
         config.validate()?;
         Ok(config)
     }
@@ -2148,6 +2170,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dev_mode_true_in_config_file_is_refused() {
+        // HEA control-liveness 10.2: a release binary loading a config file
+        // (Config::from_file -> from_yaml_str, no --dev flag) that declares
+        // dev_mode: true must refuse to start. The one existing hard guard
+        // (dev_mode + non-loopback bind = refused) does not cover the common
+        // reverse-proxy deployment, where the server legitimately binds
+        // 127.0.0.1 but is still internet-reachable through the proxy.
+        let yaml = "dev_mode: true\nstorage:\n  data_dir: \"/tmp/hea-10-2\"\n";
+        let err = Config::from_yaml_str(yaml)
+            .expect_err("dev_mode: true in a config file must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dev_mode"),
+            "error must name the key; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn yaml_declares_dev_mode_true_only_on_explicit_true() {
+        // dev_mode: false matches the default and must not trip the refusal
+        // in from_yaml_str; neither must an absent dev_mode key.
+        assert!(super::yaml_declares_dev_mode("dev_mode: true\n"));
+        assert!(!super::yaml_declares_dev_mode("dev_mode: false\n"));
+        assert!(!super::yaml_declares_dev_mode(
+            "storage:\n  data_dir: \"/tmp/x\"\n"
+        ));
+    }
+
     fn sms_log() -> SmsConfig {
         SmsConfig {
             transport: SmsTransport::Log,
@@ -2897,17 +2948,27 @@ mod tests {
     fn config_from_yaml_parses_and_validates_pepper() {
         // End-to-end: an operator YAML snippet parses, validates, and yields a
         // resolvable pepper. A bad key is rejected at Config::validate time.
+        //
+        // Uses from_yaml_str_unchecked + a manual dev_mode override (the
+        // legitimate --dev construction, per HEA control-liveness 10.2)
+        // rather than from_yaml_str, which now refuses dev_mode: true in the
+        // YAML text outright — this test is about pepper resolution, not
+        // dev_mode itself.
         let ok_yaml = format!(
-            "dev_mode: true\nsecurity:\n  password:\n    pepper:\n      version: 7\n      key_hex: \"{PEPPER_HEX}\"\n"
+            "security:\n  password:\n    pepper:\n      version: 7\n      key_hex: \"{PEPPER_HEX}\"\n"
         );
-        let cfg = Config::from_yaml_str(&ok_yaml).expect("valid pepper config parses");
+        let mut cfg = Config::from_yaml_str_unchecked(&ok_yaml).expect("parse");
+        cfg.dev_mode = true;
+        cfg.validate().expect("valid pepper config validates");
         let resolved = cfg.security.resolve_pepper().expect("valid").expect("some");
         assert_eq!(resolved.active_version, 7);
 
         let bad_yaml =
-            "dev_mode: true\nsecurity:\n  password:\n    pepper:\n      version: 1\n      key_hex: \"0000000000000000000000000000000000000000000000000000000000000000\"\n";
+            "security:\n  password:\n    pepper:\n      version: 1\n      key_hex: \"0000000000000000000000000000000000000000000000000000000000000000\"\n";
+        let mut bad_cfg = Config::from_yaml_str_unchecked(bad_yaml).expect("parse");
+        bad_cfg.dev_mode = true;
         assert!(
-            Config::from_yaml_str(bad_yaml).is_err(),
+            bad_cfg.validate().is_err(),
             "zero-key pepper must be rejected at Config::validate"
         );
     }

@@ -528,10 +528,21 @@ fn a36_agent_auth_capabilities_advanced_passes_with_identity() {
 
 /// `dev_mode = true` with a non-loopback bind address must be rejected by
 /// `Config::validate` with a `server.bind_address` field error.
+///
+/// HEA control-liveness 10.2 made `Config::from_yaml_str` (the checked,
+/// production loader) refuse `dev_mode: true` outright, so this rule is now
+/// exercised the way the legitimate `--dev` CLI flag reaches it:
+/// `from_yaml_str_unchecked` (no dev_mode refusal) followed by the same
+/// `dev_mode = true` override `Config::from_file_as_dev` applies, then a
+/// direct call to `validate()`.
 #[test]
 fn sec10_dev_mode_with_public_bind_fails_validate() {
-    let yaml = "dev_mode: true\nserver:\n  bind_address: \"0.0.0.0\"\n";
-    let err = Config::from_yaml_str(yaml).expect_err("non-loopback dev_mode must be rejected");
+    let yaml = "server:\n  bind_address: \"0.0.0.0\"\n";
+    let mut config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    config.dev_mode = true;
+    let err = config
+        .validate()
+        .expect_err("non-loopback dev_mode must be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("server.bind_address"),
@@ -565,15 +576,33 @@ fn sec10_dev_mode_with_public_bind_flagged_by_validate_all() {
     );
 }
 
-/// `dev_mode = true` with `127.0.0.1` (loopback) must pass validation.
-/// This is the intended dev workflow — confirm no regression.
+/// `dev_mode = true` with `127.0.0.1` (loopback) via the legitimate `--dev`
+/// construction path must pass validation — the intended dev workflow.
+/// Confirm no regression from HEA control-liveness 10.2.
 #[test]
 fn sec10_dev_mode_with_loopback_bind_passes_validate() {
-    // Config::dev() uses 127.0.0.1; calling validate via from_yaml_str must pass.
-    let yaml = "dev_mode: true\nserver:\n  bind_address: \"127.0.0.1\"\n";
-    let cfg = Config::from_yaml_str(yaml);
+    let yaml = "server:\n  bind_address: \"127.0.0.1\"\n";
+    let mut config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    config.dev_mode = true;
     assert!(
-        cfg.is_ok(),
-        "dev_mode with loopback bind must be valid, got: {cfg:?}"
+        config.validate().is_ok(),
+        "dev_mode with loopback bind must be valid"
+    );
+}
+
+/// HEA control-liveness 10.2: `dev_mode: true` written directly into a
+/// config file (the checked, production loader — no `--dev` flag involved)
+/// must be refused outright, even with a loopback bind. The one existing
+/// hard guard (dev_mode + non-loopback bind) does not cover the common
+/// reverse-proxy deployment, where the server legitimately binds
+/// `127.0.0.1` but is still internet-reachable through the proxy.
+#[test]
+fn sec10_dev_mode_true_in_file_is_refused_even_on_loopback() {
+    let yaml = "dev_mode: true\nserver:\n  bind_address: \"127.0.0.1\"\n";
+    let err = Config::from_yaml_str(yaml)
+        .expect_err("dev_mode: true in a config file must be refused outright");
+    assert!(
+        err.to_string().contains("dev_mode"),
+        "error must name the key; got: {err}"
     );
 }

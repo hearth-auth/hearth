@@ -174,8 +174,14 @@ fn hearth_bin() -> std::path::PathBuf {
 #[test]
 fn dev_mode_retains_permissive_behaviour_for_all_three() {
     std::env::remove_var("HEARTH_KEK");
-    let yaml = "dev_mode: true\ndemo:\n  enabled: true\n";
-    Config::from_yaml_str(yaml)
+    // dev_mode arrives via the `--dev` construction, not a YAML line: the
+    // checked loader now refuses `dev_mode: true` in config text
+    // (production-readiness task 10.2).
+    let yaml = "demo:\n  enabled: true\n";
+    let mut config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    config.dev_mode = true;
+    config
+        .validate()
         .expect("dev mode must allow missing KEK, missing TLS, and demo.enabled");
 }
 

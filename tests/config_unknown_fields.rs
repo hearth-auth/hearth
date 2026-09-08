@@ -18,7 +18,6 @@ use hearth::config::Config;
 #[test]
 fn unknown_top_level_key_is_rejected() {
     let yaml = r#"
-dev_mode: true
 server:
   bind_address: "127.0.0.1"
   port: 8420
@@ -36,7 +35,6 @@ this_key_does_not_exist: "operator typo"
 #[test]
 fn unknown_nested_key_is_rejected() {
     let yaml = r#"
-dev_mode: true
 server:
   bind_address: "127.0.0.1"
   port: 8420
@@ -56,7 +54,6 @@ server:
 #[test]
 fn auth_audit_log_retention_is_rejected() {
     let yaml = r#"
-dev_mode: true
 auth:
   audit_log_retention: "90d"
 "#;
@@ -76,7 +73,6 @@ auth:
 #[test]
 fn security_bearer_token_is_rejected() {
     let yaml = r#"
-dev_mode: true
 security:
   bearer_token: "believed-to-protect-metrics"
 "#;
@@ -95,7 +91,6 @@ security:
 #[test]
 fn pepper_active_version_is_rejected() {
     let yaml = r#"
-dev_mode: true
 security:
   password:
     pepper:
@@ -116,7 +111,6 @@ security:
 #[test]
 fn pepper_active_hex_is_rejected() {
     let yaml = r#"
-dev_mode: true
 security:
   password:
     pepper:
@@ -136,14 +130,16 @@ security:
 #[test]
 fn correct_pepper_keys_are_accepted() {
     let yaml = r#"
-dev_mode: true
 security:
   password:
     pepper:
       version: 1
       key_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 "#;
-    Config::from_yaml_str(yaml).expect("correct pepper key names must parse successfully");
+    // Parse only — this test is about the pepper key *names*, not the
+    // production fail-closed gates the checked loader also runs.
+    Config::from_yaml_str_unchecked(yaml)
+        .expect("correct pepper key names must parse successfully");
 }
 
 // ── branding / email.branding key round-trip guards (HEA-2155) ──────────────
@@ -161,14 +157,13 @@ security:
 #[test]
 fn branding_documented_keys_round_trip() {
     let yaml = r#"
-dev_mode: true
 branding:
   product_name: "Acme Auth"
   logo_url: "https://cdn.example.com/logo.svg"
   theme: ocean
 "#;
-    let cfg = Config::from_yaml_str(yaml)
-        .expect("all documented branding keys must parse and validate without error");
+    let cfg = Config::from_yaml_str_unchecked(yaml)
+        .expect("all documented branding keys must parse without error");
     assert_eq!(
         cfg.branding.product_name.as_deref(),
         Some("Acme Auth"),
@@ -193,12 +188,17 @@ branding:
 #[test]
 fn branding_custom_css_key_is_wired() {
     let yaml = r#"
-dev_mode: true
 branding:
   custom_css: "/does/not/exist/brand.css"
 "#;
-    let err =
-        Config::from_yaml_str(yaml).expect_err("non-existent custom_css path must fail validation");
+    // dev_mode via the legitimate `--dev` construction, not a YAML line —
+    // the checked loader now refuses `dev_mode: true` in config text
+    // (production-readiness task 10.2).
+    let mut cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    cfg.dev_mode = true;
+    let err = cfg
+        .validate()
+        .expect_err("non-existent custom_css path must fail validation");
     let display = format!("{err}");
     assert!(
         !display.contains("unknown field"),
@@ -222,7 +222,6 @@ fn branding_phantom_key_is_rejected() {
     // NOTE: `r##"..."##` — a hex colour contains `"#`, which closes an `r#"..."#`
     // literal early and does not compile.
     let yaml = r##"
-dev_mode: true
 branding:
   accent_color: "#E85D04"
 "##;
@@ -245,14 +244,13 @@ branding:
 fn email_branding_documented_keys_round_trip() {
     // NOTE: `r##"..."##` — see `branding_phantom_key_is_rejected`.
     let yaml = r##"
-dev_mode: true
 email:
   branding:
     accent_color: "#4F46E5"
     support_email: "support@example.com"
     custom_footer_text: "2026 Acme Corp. All rights reserved."
 "##;
-    let cfg = Config::from_yaml_str(yaml)
+    let cfg = Config::from_yaml_str_unchecked(yaml)
         .expect("all documented email.branding keys must parse without error");
     let branding = cfg
         .email
