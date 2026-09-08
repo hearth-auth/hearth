@@ -335,6 +335,19 @@ jobs:
       - name: Scanner coverage — guard self-test
         run: bash scripts/tests/check-scanner-coverage.test.sh
 
+      # Audit §4.8#17: deploy/docker-compose.yml sourced the repository-root
+      # `.env` into the container. Compose injects every key of an env_file into
+      # the runtime environment, so unrelated developer credentials reached the
+      # server process, and a stray HEARTH_* key silently overrode the
+      # bind-mounted hearth.yaml. This guard holds the env_file scope.
+      - name: Compose env scope (check-compose-env-scope.sh)
+        run: bash scripts/check-compose-env-scope.sh
+
+      # Proof the guard can go red: it must reject the audited `../.env` line in
+      # both compose spellings, and an example declaring an out-of-scope key.
+      - name: Compose env scope — guard self-test
+        run: bash scripts/tests/check-compose-env-scope.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and

@@ -256,6 +256,12 @@ scanner-coverage-check: ## Assert every scanner gate and suppression is live
 	@bash scripts/check-scanner-coverage.sh
 	@bash scripts/tests/check-scanner-coverage.test.sh
 
+## Guard: a shipped compose file must not source an env file this repo does not
+## define the scope of (audit 2026-08-28 §4.8#17). Runs in ci.yml's filter job.
+compose-env-check: ## Assert shipped compose files source only scoped env files
+	@bash scripts/check-compose-env-scope.sh
+	@bash scripts/tests/check-compose-env-scope.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

@@ -94,3 +94,6 @@ build
 __pycache__
 
 nextest-*
+
+# Local compose overrides for deploy/docker-compose.yml (audit §4.8#17).
+deploy/hearth.env

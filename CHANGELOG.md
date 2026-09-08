@@ -145,6 +145,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Security
+- **The Docker Compose stack no longer injects the repository-root `.env` into the container
+  (audit 2026-08-28 §4.8#17)** — `deploy/docker-compose.yml` carried
+  `env_file: [{ path: ../.env }]`, and Compose injects *every* key of an `env_file` into the
+  container's runtime environment. Two consequences, both silent: unrelated credentials a
+  developer kept in that gitignored file were handed to the server process and readable via
+  `docker inspect`, and because Hearth reads `HEARTH_*` variables as configuration, a stray key
+  there silently overrode the `hearth.yaml` bind-mounted beside it — so the server did not run
+  the configuration the operator was reading. The stack now sources `deploy/hearth.env`
+  (gitignored, `required: false`, so nothing breaks if it is absent), whose scope is documented
+  in the new `deploy/hearth.env.example`. **Operator action:** if you relied on the old
+  behaviour, move the Hearth-specific keys from your root `.env` into `deploy/hearth.env`;
+  leave everything else where it is. `scripts/check-compose-env-scope.sh` holds the scope.
 - **The published container image is now scanned, and the scanners that report on it can fail
   a build (audit 2026-08-28 §4.8#16, §4.12#15)** — nothing had ever inspected the image layers
   operators pull: the only Trivy job was a filesystem scan of the source checkout, and it
