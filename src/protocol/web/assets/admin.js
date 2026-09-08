@@ -1086,8 +1086,15 @@ class ConfigEditor {
       const el = document.getElementById('diff-output');
       if (el) el.innerHTML = await resp.text();
     } else {
-      htmx.ajax('POST', '/ui/admin/settings/editor/preview',
-        { target: '#diff-output', values: { yaml: document.getElementById('yaml-editor').value } });
+      htmx.ajax('POST', '/ui/admin/settings/editor/preview', {
+        target: '#diff-output',
+        values: {
+          yaml: document.getElementById('yaml-editor').value,
+          // The handler verifies the double-submit token as a form field,
+          // so htmx.ajax must carry it in the body, not only as a header.
+          _csrf: this.csrf,
+        },
+      });
     }
   }
 

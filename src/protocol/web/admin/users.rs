@@ -955,7 +955,12 @@ pub async fn admin_user_send_reset(
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
     htmx: super::templates::IsHtmx,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
         Err(_) => return super::handlers_common::not_found("User not found"),
@@ -1012,7 +1017,12 @@ pub async fn admin_user_disable_mfa(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
         Err(_) => return super::handlers_common::not_found("User not found"),
@@ -1129,7 +1139,12 @@ pub async fn admin_user_reset_mfa_codes(
     RequireAdmin(admin_session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&admin_session, &form.csrf) {
+        return resp;
+    }
+
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
         Err(_) => return super::handlers_common::not_found("User not found"),
@@ -1193,7 +1208,12 @@ pub async fn admin_user_revoke_session(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id, session_id)): AxumPath<(String, String, String)>,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     let sid = match session_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::SessionId::new(u),
         Err(_) => return super::handlers_common::not_found("Session not found"),
@@ -1221,7 +1241,12 @@ pub async fn admin_user_revoke_webauthn(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id, cred_id_b64)): AxumPath<(String, String, String)>,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
         Err(_) => return super::handlers_common::not_found("User not found"),

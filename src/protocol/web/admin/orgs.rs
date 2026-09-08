@@ -1971,6 +1971,7 @@ pub async fn admin_api_nav_realms(
 pub async fn admin_api_config_reload(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
 ) -> Response {
     if let Some(notify) = &state.reload_notify {
         notify.notify_one();

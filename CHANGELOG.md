@@ -77,6 +77,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Nine `/ui/admin` mutations now verify a CSRF token (audit 2026-08-28 §4.23#1a)** — password-reset
+  send, MFA teardown (disable MFA, reset recovery codes), session revocation, passkey revocation,
+  audit-log integrity verify, audit-log prune, config reload, and the config-editor diff preview
+  accepted the admin session cookie alone. A top-level form POST from a sibling host on the same
+  registrable domain could drive any of them. The seven form-bodied routes now require the `_csrf`
+  field the admin console already submits; `POST /ui/admin/api/realms/{realm}/audit/prune` and
+  `POST /ui/admin/api/config/reload` carry no body and now require a matching `X-CSRF-Token` header.
+  The check runs before any lookup or mutation. **Integrator action:** a script calling those two
+  API routes with a session cookie must send `X-CSRF-Token` set to the `hearth_ui_csrf` cookie
+  value; Bearer-token callers on `/admin` are unaffected.
 - **Claim release gates are no longer silently discarded, and Tier-3 custom claims default to
   `first_party_only: true` (audit 2026-08-28 §4.13#3)** — a misspelled gate under
   `realms.<name>.claims.mappings[]` (`first_party_onlyy`, `required_scope`, `allowed_client`) was

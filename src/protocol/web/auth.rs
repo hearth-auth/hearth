@@ -956,6 +956,44 @@ where
     }
 }
 
+/// Extractor that requires a matching `X-CSRF-Token` header on every
+/// mutation request (POST/PUT/DELETE/PATCH). GET and HEAD are pass-through.
+///
+/// Unlike [`CsrfToken`], an absent header is a failure, not a pass-through.
+/// Use this on bodyless or JSON `/ui` mutations, which have no `_csrf` form
+/// field to check. A cross-site top-level form POST cannot set a custom
+/// header, so requiring one is a complete CSRF defence for those routes.
+/// The admin console supplies the header from the `<meta name="csrf">` tag
+/// (`admin.js`, `passkey.js`) and from the layout's `hx-headers` attribute.
+#[derive(Debug)]
+pub struct RequireCsrf;
+
+impl<S> FromRequestParts<S> for RequireCsrf
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        if !method_mutates(&parts.method) {
+            return Ok(RequireCsrf);
+        }
+
+        let Some(cookie) = cookie_value(parts, CSRF_COOKIE) else {
+            return Err(csrf_failure_response());
+        };
+        let header_val = parts
+            .headers
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok());
+
+        match header_val {
+            Some(h) if ct_eq_str(h, cookie) => Ok(RequireCsrf),
+            _ => Err(csrf_failure_response()),
+        }
+    }
+}
+
 /// Confirms that a form-submitted `_csrf` field equals the cookie
 /// value stored on the extracted session. Returns `Ok(())` on match,
 /// `Err(Response)` with a 403 body otherwise.

@@ -1227,7 +1227,12 @@ pub async fn admin_audit_verify_integrity(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
+    FriendlyForm(form): FriendlyForm<super::users::CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     match state.audit.verify_integrity(target.id(), None, None) {
         Ok(true) => render(&AuditListTemplate {
             events: Vec::new(),
@@ -1533,6 +1538,7 @@ pub async fn admin_api_audit_config_put(
 pub async fn admin_api_audit_prune(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
 ) -> Response {
@@ -1825,9 +1831,13 @@ pub async fn admin_config_editor(
 /// `POST /ui/admin/settings/editor/preview` — HTMX diff preview.
 pub async fn admin_config_editor_preview(
     State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
+    RequireAdmin(session): RequireAdmin,
     FriendlyForm(form): FriendlyForm<ConfigEditorForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     let new_yaml = form.yaml;
 
     // Validate the new config

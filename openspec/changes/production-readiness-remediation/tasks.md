@@ -91,7 +91,7 @@ found it, the audit piece, and the report's severity.
 
 ## 11. Wave 2 (HIGH) — Web UI and browser security
 
-- [ ] 11.1 Add CSRF tokens to the nine authenticated `/ui/admin` mutations that accept the session cookie without one — MFA teardown, session and passkey revocation, audit-log prune — drivable by a top-level form POST from a same-registrable-domain sibling (§4.23#1a · P22 · HIGH)
+- [x] 11.1 Add CSRF tokens to the nine authenticated `/ui/admin` mutations that accept the session cookie without one — MFA teardown, session and passkey revocation, audit-log prune — drivable by a top-level form POST from a same-registrable-domain sibling (§4.23#1a · P22 · HIGH)
 
 ## 12. Wave 2 (HIGH) — Protocol surface hardening
 
