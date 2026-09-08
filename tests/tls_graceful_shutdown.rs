@@ -24,7 +24,7 @@ use hearth::protocol::http;
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify};
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -88,16 +88,23 @@ fn build_test_connector(ca_pem: &[u8]) -> tokio_rustls::TlsConnector {
     tokio_rustls::TlsConnector::from(Arc::new(client_config))
 }
 
-/// A router whose only route reports when it starts, then sleeps `work` before
-/// answering. The report is what makes the shutdown deterministic: the test
-/// signals only once the request is provably in flight.
-fn slow_router(started: mpsc::Sender<()>, work: Duration) -> axum::Router {
+/// A router whose only route reports when it starts, then waits for `release`
+/// before answering.
+///
+/// Both ends are signals rather than sleeps, so neither test has a wall-clock
+/// race: `started` proves the request is in flight before the test triggers the
+/// shutdown, and `release` decides exactly when the handler finishes.
+fn held_router(started: mpsc::Sender<()>, release: Arc<Notify>) -> axum::Router {
     axum::Router::new().route(
         "/slow",
-        axum::routing::get(move || async move {
-            let _ = started.send(()).await;
-            tokio::time::sleep(work).await;
-            "done"
+        axum::routing::get(move || {
+            let started = started.clone();
+            let release = Arc::clone(&release);
+            async move {
+                let _ = started.send(()).await;
+                release.notified().await;
+                "done"
+            }
         }),
     )
 }
@@ -141,7 +148,8 @@ async fn tls_server_drains_inflight_request_on_shutdown() {
     let connector = build_test_connector(&ca_pem);
 
     let (started_tx, mut started_rx) = mpsc::channel::<()>(1);
-    let app = slow_router(started_tx, Duration::from_millis(750));
+    let release = Arc::new(Notify::new());
+    let app = held_router(started_tx, Arc::clone(&release));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -167,6 +175,10 @@ async fn tls_server_drains_inflight_request_on_shutdown() {
     started_rx.recv().await.expect("handler must start");
 
     shutdown_tx.send(()).expect("signal shutdown");
+
+    // Let the handler finish only after the shutdown is under way, so the
+    // response can only arrive if the drain waited for it.
+    release.notify_one();
 
     let mut response = Vec::new();
     tls.read_to_end(&mut response)
@@ -207,8 +219,9 @@ async fn tls_server_reports_a_drain_that_did_not_complete() {
     let connector = build_test_connector(&ca_pem);
 
     let (started_tx, mut started_rx) = mpsc::channel::<()>(1);
-    // The handler outlasts the drain deadline by a wide margin.
-    let app = slow_router(started_tx, Duration::from_secs(30));
+    // Never released, so the handler outlasts the drain deadline.
+    let release = Arc::new(Notify::new());
+    let app = held_router(started_tx, release);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
