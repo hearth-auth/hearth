@@ -8,19 +8,32 @@
 # (musl-dev, cc-variants, `cargo build --target`) isn't worth the ~10 MB image
 # savings for local dev.
 #
-# Stage 2 ("runtime"): copy the static-ish binary onto a minimal
-# `debian:bookworm-slim` base, drop privileges to UID 10001, and run
-# `hearth serve -c /etc/hearth/hearth.yaml`.
+# Stage 2 ("runtime"): copy the binary onto a minimal `debian:bookworm-slim`
+# base, drop privileges to UID 10001, and run
+# `hearth serve -c /etc/hearth/hearth.yaml` under tini.
 #
-# Build context is trimmed by `.dockerignore` (sibling file) to keep the
-# streaming phase under a couple of megabytes.
+# The binary is dynamically linked against glibc — that is why the runtime base
+# is Debian and not `scratch`, and it is the same reason stage 1 gives for
+# choosing Debian over Alpine two lines above.
+#
+# Build context is trimmed by `.dockerignore` (sibling file), which excludes
+# target/, .git/, docs/ (bar the two OpenAPI files the build copies), the SDK
+# node_modules trees and the local data directory.
+#
+# Expect roughly 22 MB from a clean checkout. A working tree streams an order
+# of magnitude more, because .dockerignore does not exclude ui/tailwindcss,
+# sdks/python/.venv or sdks/php/vendor.
 
 # -----------------------------------------------------------------------------
 # Stage 1: builder
 # -----------------------------------------------------------------------------
-# Pinned to 1.89 — the repo's declared `rust-version = "1.75"` is aspirational;
-# transitive deps (e.g. ureq-proto 0.6) require edition 2024, which stabilized
-# in Rust 1.85. Bump in lockstep with the host toolchain when deps move.
+# Pinned to 1.89. The MSRV is whatever Cargo.toml's `rust-version` says, and it
+# is enforced, not aspirational: ci.yml's `msrv` job builds the whole workspace
+# at exactly that toolchain on every PR. This image is newer than the MSRV
+# because transitive deps (e.g. ureq-proto) require edition 2024, stabilized in
+# Rust 1.85. Bump this tag in lockstep with the host toolchain when deps move.
+# scripts/check-dockerfile-claims.sh fails if this stage drops below the MSRV,
+# or if a comment here quotes an MSRV that is not the declared one (§4.8#15).
 #
 # Supply-chain hardening: pinned by both tag and digest.
 # To re-pin after a base-image upgrade:
@@ -38,7 +51,11 @@ FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f05
 #     together. `build.rs` looks for WKTs in /usr/include as a fallback when
 #     the buf module cache is absent (which it always is inside Docker).
 #   - pkg-config: cargo convention for native-dep crates even though we avoid
-#     the big ones (no libssl-dev: Hearth uses ring + rustls, pure-Rust TLS).
+#     the big ones. No libssl-dev: TLS is rustls with the `ring` provider, so
+#     OpenSSL is never linked. The crypto is not all Rust, though — `ring`
+#     bundles C and assembly, and `aws-lc-rs` compiles AWS-LC (C) for rcgen's
+#     RSA key generation. Both build from vendored source using the toolchain
+#     already in this image, so no system crypto package is needed.
 #   - ca-certificates: so cargo can fetch from crates.io over HTTPS.
 #   - git: a handful of crates pull git metadata during `build.rs`.
 RUN apt-get update \

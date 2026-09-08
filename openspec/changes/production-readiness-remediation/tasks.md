@@ -112,7 +112,7 @@ found it, the audit piece, and the report's severity.
 - [x] 13.6 Fix the two failing commands in the release-verification guide, and make the README's headline install step verify something an attacker could not forge (§4.8#12 · MEDIUM)
 - [x] 13.7 Pin the third-party reusable workflow holding `contents: write` + `id-token: write` to a commit SHA and correct its justification (§4.8#13 · MEDIUM)
 - [x] 13.8 Make the systemd crash-loop limiter take effect; it is silently ignored (§4.8#14 · LOW)
-- [ ] 13.9 Correct the three false statements the Dockerfile makes about the build it defines (§4.8#15 · Informational)
+- [x] 13.9 Correct the three false statements the Dockerfile makes about the build it defines (§4.8#15 · Informational)
 - [ ] 13.10 Fix scanner configuration that overstates coverage: fifteen dead schedule conditions, advisory-only scanners, an unscanned image, and suppressions for packages absent from the tree they name (§4.8#16, §4.12#15 · Informational/LOW)
 - [ ] 13.11 Stop the shipped Docker Compose file sourcing the repository-root `.env` into the container's runtime environment (§4.8#17 · LOW)
 - [ ] 13.12 Relabel published container images `Apache-2.0`; every image is labelled `AGPL-3.0-only` and the project relicensed three months ago (§4.12#7 · MEDIUM)

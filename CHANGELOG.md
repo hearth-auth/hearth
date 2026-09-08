@@ -77,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Dockerfile comments corrected (audit 2026-08-28 §4.8#15)** — the Dockerfile described a build
+  other than the one it defines: it named `rust-version = "1.75"` as an aspirational MSRV (the repo
+  declares `1.88.0` and CI's `msrv` job enforces it), called the binary "static-ish" (it is
+  dynamically linked against glibc, which is why the runtime base is Debian and not `scratch`),
+  called the TLS stack "pure-Rust" (`ring` bundles C and assembly, and `aws-lc-rs` compiles AWS-LC
+  for rcgen's RSA key generation), and put the build context "under a couple of megabytes" (a clean
+  checkout streams roughly 22 MB). Comments only — no behaviour change.
+  `scripts/check-dockerfile-claims.sh` gates the MSRV and linkage claims in CI.
 - **The systemd crash-loop limiter now takes effect (audit 2026-08-28 §4.8#14)** —
   `deploy/systemd/hearth.service` set `StartLimitBurst=3` and `StartLimitIntervalSec=60` in
   `[Service]`. systemd reads both in `[Unit]` only and logs "Unknown key ... ignoring", so the

@@ -299,6 +299,19 @@ jobs:
       - name: systemd units — guard self-test
         run: bash scripts/tests/check-systemd-units.test.sh
 
+      # Audit §4.8#15: the Dockerfile described a build other than the one it
+      # defines — a stale, "aspirational" MSRV, a "static-ish" binary on a
+      # Debian runtime, "pure-Rust" TLS, and a build context an order of
+      # magnitude smaller than the real one. This guard holds the two claims
+      # that rot silently: the MSRV and the static/dynamic linkage.
+      - name: Dockerfile claims (check-dockerfile-claims.sh)
+        run: bash scripts/check-dockerfile-claims.sh
+
+      # Proof the guard can go red: it must reject the pre-fix MSRV and static
+      # claims, and a builder older than the declared MSRV.
+      - name: Dockerfile claims — guard self-test
+        run: bash scripts/tests/check-dockerfile-claims.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and
