@@ -203,6 +203,13 @@ publish-gate-check: ## Assert no release channel publishes ahead of its verdict
 	@bash scripts/tests/check-publish-gating.test.sh
 	@bash scripts/tests/await-green-commit.test.sh
 
+## Guard: the release-validation summary must report what the suite actually
+## did (audit 2026-08-28 §4.8#6 and §4.12#9). The old inline parser could not
+## read nextest's coloured output, so a completed 4-failure suite was reported
+## as "suite did not complete". Runs in ci.yml's filter job.
+validation-summary-check: ## Assert the release-validation summary parser is honest
+	@bash scripts/tests/summarize-nextest.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

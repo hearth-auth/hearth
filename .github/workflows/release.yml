@@ -200,7 +200,11 @@ jobs:
           PROTOC: protoc
         run: |
           set -o pipefail
-          cargo nextest run --workspace --no-fail-fast 2>&1 | tee nextest.log
+          # --color never: taiki-e/install-action exports CARGO_TERM_COLOR=always,
+          # which nextest inherits, and the coloured summary line defeated the
+          # summary parser below (audit §4.8#6, §4.12#9). The parser strips ANSI
+          # anyway; this removes the cause as well as the symptom.
+          cargo nextest run --workspace --no-fail-fast --color never 2>&1 | tee nextest.log
 
       - name: "Step 2 — Test quality gate (make test-quality)"
         id: test_quality
@@ -253,12 +257,26 @@ jobs:
           BENCH: ${{ steps.bench.outcome }}
         run: |
           verdict() { [ "$1" = "success" ] && echo "PASS" || echo "FAIL"; }
-          TESTS_LINE=$(grep -oE '[0-9]+ tests run: .*' nextest.log 2>/dev/null | tail -1)
-          [ -n "$TESTS_LINE" ] || TESTS_LINE="test summary unavailable (suite did not complete)"
+
+          # Audit §4.8#6 / §4.12#9: the inline `grep -oE '[0-9]+ tests run: .*'`
+          # that used to live here cannot read nextest's coloured summary line,
+          # so a suite that completed with four named failures was reported as
+          # one that never ran. scripts/summarize-nextest.sh strips ANSI, anchors
+          # on nextest's own Summary line, and says "did not complete" only when
+          # there is genuinely no summary. It has its own test suite:
+          # scripts/tests/summarize-nextest.test.sh (run by `make validation-summary-check`).
+          # `|| true`: --line exits 1 when the suite genuinely did not complete,
+          # and this step runs under `bash -e`. The message is still on stdout,
+          # and the hard-gate verdict comes from steps.nextest.outcome, not here.
+          TESTS_LINE=$(bash scripts/summarize-nextest.sh nextest.log --line) || true
+          FAILED_TESTS=$(bash scripts/summarize-nextest.sh nextest.log --failures) || true
 
           # Capture first, then test for emptiness: `grep ... | head || echo` can
           # never reach the fallback, because the pipeline exits with head's 0.
-          BENCH_LINES=$(grep -E 'change:|time:' bench.log 2>/dev/null | head -40)
+          # Criterion colours its output too, so strip ANSI before matching.
+          ESC=$(printf '\033')
+          BENCH_LINES=$(sed -E "s/${ESC}\[[0-9;?]*[a-zA-Z]//g" bench.log 2>/dev/null \
+            | grep -E 'change:|time:' | head -40)
           [ -n "$BENCH_LINES" ] || BENCH_LINES="  (no benchmark output captured)"
 
           {
@@ -269,6 +287,10 @@ jobs:
             echo ""
             echo "Hard gates (a FAIL here blocks publishing):"
             echo "  $(verdict "$NEXTEST")  Step 1 — Full workspace test suite — ${TESTS_LINE}"
+            if [ -n "$FAILED_TESTS" ]; then
+              echo "        Failing tests:"
+              echo "$FAILED_TESTS" | sed 's/^/          /'
+            fi
             echo "  $(verdict "$TEST_QUALITY")  Step 2 — Test quality gate (false-confidence patterns)"
             echo "  $(verdict "$ABUSE")  Step 3 — Abuse coverage gate (§3.41 adversarial matrix)"
             echo "  $(verdict "$SECURITY")  Step 9 — ROPC password-grant ban gate"

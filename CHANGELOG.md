@@ -77,6 +77,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **`validation-summary.txt` reports the test suite honestly (audit 2026-08-28 §4.8#6, §4.12#9)** —
+  the release-validation summary said `suite did not complete` for a suite that ran to completion
+  with four failures. Its parser could not read nextest's ANSI-coloured output, so a red suite
+  looked like broken infrastructure. The summary now names every failing test, and
+  `suite did not complete` appears only when `nextest.log` genuinely holds no summary line —
+  a cancelled, timed-out, or unbuilt run. Parsing moved to `scripts/summarize-nextest.sh`, which
+  has its own test suite in CI.
 - **`helm install` can pull an image again (audit 2026-08-28 §4.8#4, §4.12#6)** — the chart's default
   image tag was the bare `appVersion` (`ghcr.io/hearth-auth/hearth:1.6.8`), but the Docker workflow
   publishes only v-prefixed semver tags, so a default install pulled a tag that does not exist. The

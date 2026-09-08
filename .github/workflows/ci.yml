@@ -306,6 +306,15 @@ jobs:
       - name: Chart image tag — guard self-test
         run: bash scripts/tests/check-chart-image-tag.test.sh
 
+      # Audit §4.8#6 / §4.12#9: release.yml's inline summary parser could not
+      # read nextest's ANSI-coloured output, so a suite that completed with
+      # four named failures was reported to the release engineer as one that
+      # never ran. The parser now lives in scripts/summarize-nextest.sh; this
+      # self-test proves the old regex is red on the coloured fixture and the
+      # new parser reports a completed suite and names every failure.
+      - name: Release-validation summary parser — self-test
+        run: bash scripts/tests/summarize-nextest.test.sh
+
       # Audit §4.8#11 / §4.12#5: release SBOMs described a stale version
       # because cargo-cyclonedx reads Cargo.toml. release.yml and docker.yml
       # stamp the tag's version with scripts/stamp-version.sh first; this

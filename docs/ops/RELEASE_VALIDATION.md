@@ -236,6 +236,20 @@ signature and no SLSA provenance (audit §4.8#2).
 `validation-summary.txt` to the GitHub Release and appends a **Validation** section to
 the release notes linking to it.
 
+**Reading the Step 1 line.** `scripts/summarize-nextest.sh` parses `nextest.log`. It
+prints the run's own `Summary` line, and every failing test by name underneath:
+
+```
+  FAIL  Step 1 — Full workspace test suite — 846 tests run: 842 passed, 4 failed, 0 skipped
+        Failing tests:
+          hearth::backup_http backup_restore_dry_run_returns_counts
+```
+
+`suite did not complete` means exactly that: `nextest.log` holds no `Summary` line, so
+the run was cancelled, timed out, or failed to build. It is never printed for a suite
+that ran and failed (audit §4.8#6, §4.12#9). `scripts/tests/summarize-nextest.test.sh`
+guards both readings, and CI runs it on every PR.
+
 **Steps you must still run manually** before tagging: 5, 6, and 8 (and 4 if you are
 tagging a commit that never went through PR CI). The manual summary in Step 10 remains
 useful for recording those.
