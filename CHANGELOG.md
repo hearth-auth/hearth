@@ -77,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Generated SDK types can no longer drift from `proto/` past the PR gate (audit 2026-08-28
+  §4.8#8)** — `make proto-check` was the last step of CI's `quality` job, which is gated on the
+  `rust` paths filter. That filter names codegen's inputs (`proto/**`) but never its outputs, so a
+  PR touching only `sdks/typescript/src/generated` or `sdks/go/generated` ran no freshness check at
+  all; and because the step followed `make check`, any clippy or test failure meant no freshness
+  verdict was produced. The check now runs in its own required `proto-freshness` job, gated on a
+  filter covering both the inputs and the two generated directories, and needing only `buf`.
+  `scripts/check-proto-freshness-gate.sh` fails CI if that coverage is ever lost.
 - **`validation-summary.txt` reports the test suite honestly (audit 2026-08-28 §4.8#6, §4.12#9)** —
   the release-validation summary said `suite did not complete` for a suite that ran to completion
   with four failures. Its parser could not read nextest's ANSI-coloured output, so a red suite

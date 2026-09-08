@@ -106,7 +106,7 @@ found it, the audit piece, and the report's severity.
 
 - [x] 13.1 Make the Helm chart's default image tag one the Docker workflow publishes; a default `helm install` cannot pull an image (§4.8#4, §4.12#6 · MEDIUM)
 - [x] 13.2 Fix the release-validation parser so a completed 4-failure suite is not reported as "suite did not complete"; ANSI-coloured nextest output from a pinned third-party action defeats it (§4.8#6, §4.12#9 · MEDIUM)
-- [ ] 13.3 Run the generated-SDK freshness check where the paths filter reaches, so TS and Go types cannot drift from `proto/` past the PR gate (§4.8#8 · MEDIUM)
+- [x] 13.3 Run the generated-SDK freshness check where the paths filter reaches, so TS and Go types cannot drift from `proto/` past the PR gate (§4.8#8 · MEDIUM)
 - [x] 13.4 Encode the crypto-backend and HTTP-client bans in `deny.toml`; a third crypto backend and a policy-banned HTTP client are linked into the published binary (§4.8#9 · MEDIUM)
 - [ ] 13.5 Stop the attribution freshness key hashing the whole `Cargo.lock` including the workspace's own version, which trips a legal-attribution gate with nothing to attribute (§4.8#10 · LOW)
 - [ ] 13.6 Fix the two failing commands in the release-verification guide, and make the README's headline install step verify something an attacker could not forge (§4.8#12 · MEDIUM)

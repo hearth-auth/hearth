@@ -210,6 +210,14 @@ publish-gate-check: ## Assert no release channel publishes ahead of its verdict
 validation-summary-check: ## Assert the release-validation summary parser is honest
 	@bash scripts/tests/summarize-nextest.test.sh
 
+## Guard: the generated-SDK freshness check must be reachable from every path
+## that can cause drift (audit 2026-08-28 §4.8#8). It used to sit behind
+## `make check` in a job gated on the `rust` filter, which names codegen's
+## inputs but not its outputs. Runs in ci.yml's proto-freshness job.
+proto-freshness-check: ## Assert nothing can drift generated SDK types past the PR gate
+	@bash scripts/check-proto-freshness-gate.sh
+	@bash scripts/tests/check-proto-freshness-gate.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

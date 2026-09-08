@@ -4,9 +4,10 @@ name: CI
 #
 # Architecture (post-HEA-680 mega-consolidation):
 #
-#   filter ─┬─> quality       (Rust changes)
-#           ├─> ui            (UI changes — replaces ui-tests + ui-tests-exploratory)
-#           ├─> sdk-node      (sdks/node changes — folded from node-sdk-ci.yml)
+#   filter ─┬─> quality        (Rust changes)
+#           ├─> proto-freshness (proto/ or generated SDK types — audit §4.8#8)
+#           ├─> ui             (UI changes — replaces ui-tests + ui-tests-exploratory)
+#           ├─> sdk-node       (sdks/node changes — folded from node-sdk-ci.yml)
 #           └─> sdk-conformance (any SDK / spec / script change — folded from sdk-conformance.yml)
 #
 # Downstream jobs gate on the `filter` job's outputs so doc-only PRs run
@@ -152,10 +153,22 @@ jobs:
               - 'scripts/check-sdk-conformance.sh'
               - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
+            # Gates the proto-freshness job. Audit §4.8#8: generated SDK types
+            # could drift from proto/ past the PR gate, because the only
+            # freshness check lived in `quality` — gated on the `rust` filter,
+            # which names codegen's INPUTS (proto/**) but not its OUTPUTS. A PR
+            # that edited only sdks/*/generated (a hand-edit, a bad merge
+            # resolution, a revert) ran no freshness check at all. Both the
+            # inputs and the outputs are listed here, and
+            # scripts/check-proto-freshness-gate.sh fails CI if either is lost.
             proto:
+              # Inputs: buf.yaml, buf.gen.yaml and buf.lock all live under proto/.
               - 'proto/**'
-              - 'buf.yaml'
-              - 'buf.gen.yaml'
+              # Outputs: the two directories `make proto-check` diffs.
+              - 'sdks/typescript/src/generated/**'
+              - 'sdks/go/generated/**'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
             fuzz-targets:
               - 'fuzz/**'
               - 'src/**'
@@ -325,7 +338,7 @@ jobs:
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:
-    name: quality (clippy + fmt + nextest + css/proto check)
+    name: quality (clippy + fmt + nextest + css check)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` so a filter-job
     # failure causes downstream jobs to FAIL (not silently SKIP). Without the
@@ -387,8 +400,12 @@ jobs:
       - name: make css-check (rebuild Tailwind and fail if app.css drifts)
         run: make css-check
 
-      - name: make proto-check (regenerate SDKs and fail if generated code drifts)
-        run: make proto-check
+      # `make proto-check` deliberately does NOT run here. Audit §4.8#8: it sat
+      # after `make check` in this job, so a clippy or test failure meant the
+      # freshness verdict was never produced — and this job is gated on the
+      # `rust` filter, which does not name the generated directories at all.
+      # It now runs in the dedicated `proto-freshness` job below, gated on the
+      # `proto` filter and independent of the Rust toolchain.
 
       - name: Install PyYAML (needed by make openapi-check)
         # Use the distro package manager instead of an unpinned pip install —
@@ -404,6 +421,51 @@ jobs:
       # `make notice` whenever Cargo.lock changes and commit the updated file.
       - name: make notice-check (fail if THIRD_PARTY_LICENSES is stale — HEA-1268)
         run: make notice-check
+
+  # ── Generated-SDK freshness (audit 2026-08-28 §4.8#8) ──────────────────────
+  #
+  # `make proto-check` regenerates the TypeScript and Go types from proto/ and
+  # fails if the committed output differs. It used to be the last step of the
+  # `quality` job, which gave it two ways to miss drift:
+  #
+  #   1. `quality` is gated on the `rust` filter, which lists codegen's inputs
+  #      (proto/**) but never its outputs. A PR touching only
+  #      sdks/typescript/src/generated or sdks/go/generated skipped the job.
+  #   2. The step ran after `make check`. Any clippy or test failure ended the
+  #      job first, so the freshness verdict was never produced.
+  #
+  # This job removes both. It is gated on the `proto` filter (inputs AND
+  # outputs), needs only buf — no Rust toolchain — and nothing runs ahead of it.
+  proto-freshness:
+    name: proto-freshness (generated SDK types match proto/)
+    needs: filter
+    # Same HEA-685 shape as `quality`: a filter-job failure must FAIL this job,
+    # not silently skip it, because branch protection treats `skipped` as pass.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.proto == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+        with:
+          github_token: ${{ github.token }}
+
+      # Proof the gate cannot silently lose coverage: the `proto` filter must
+      # keep naming every codegen input and both generated output directories.
+      - name: Freshness-gate coverage — guard self-test
+        run: bash scripts/tests/check-proto-freshness-gate.test.sh
+
+      - name: Freshness-gate coverage (check-proto-freshness-gate.sh)
+        run: bash scripts/check-proto-freshness-gate.sh
+
+      - name: make proto-check (regenerate SDKs and fail if generated code drifts)
+        run: make proto-check
 
   # ── UI tests — merged smoke/regression/accessibility + exploratory ──────────
   #
@@ -1080,7 +1142,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv]
+    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1089,6 +1151,7 @@ jobs:
         env:
           FILTER: ${{ needs.filter.result }}
           QUALITY: ${{ needs.quality.result }}
+          PROTO_FRESHNESS: ${{ needs.proto-freshness.result }}
           UI: ${{ needs.ui.result }}
           SDK_NODE: ${{ needs.sdk-node.result }}
           SDK_RUST: ${{ needs.sdk-rust.result }}
@@ -1101,8 +1164,8 @@ jobs:
           CARGO_DENY: ${{ needs.cargo-deny.result }}
           MSRV: ${{ needs.msrv.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV"
-          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV"; do
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV"
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "A required job failed or was cancelled."
               exit 1
