@@ -2,13 +2,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ConnectInfo;
 use axum::http::StatusCode;
 use axum::Router;
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use super::state::AppState;
 use super::{HTTP2_MAX_CONCURRENT_STREAMS, HTTP2_MAX_PENDING_RESET_STREAMS};
@@ -61,8 +62,16 @@ pub async fn serve_tls(
     state: Arc<AppState>,
     tls_acceptor: tokio_rustls::TlsAcceptor,
     shutdown: tokio::sync::watch::Receiver<()>,
+    drain_timeout: Duration,
 ) -> Result<(), std::io::Error> {
-    serve_tls_router(listener, super::router(state), tls_acceptor, shutdown).await
+    serve_tls_router(
+        listener,
+        super::router(state),
+        tls_acceptor,
+        shutdown,
+        drain_timeout,
+    )
+    .await
 }
 
 /// Starts the HTTPS server with a pre-built router.
@@ -71,18 +80,37 @@ pub async fn serve_tls(
 /// [`Router`] so callers can merge in additional routers (e.g. the web
 /// UI adapter under `/ui/*`) before handing the final tree to axum.
 ///
+/// # Shutdown
+///
+/// On the shutdown signal the accept loop stops taking new connections and
+/// then **drains**: every connection already accepted is told to finish its
+/// current exchange and close, and this function waits for all of them.
+///
+/// It used to `break` and return `Ok(())` on the signal instead, abandoning
+/// every spawned connection task. An in-flight request was cut off mid-response
+/// and the process still exited 0 (audit 2026-08-28 §4.11#9). The plaintext
+/// path never had this defect: `axum::serve` drains for it.
+///
 /// # Errors
 ///
-/// Returns the same errors as [`serve_tls`].
+/// Returns [`std::io::ErrorKind::TimedOut`] when connections are still open
+/// after `drain_timeout`, so the caller can exit non-zero rather than report a
+/// truncated shutdown as a clean one. Otherwise returns the same errors as
+/// [`serve_tls`].
 pub async fn serve_tls_router(
     listener: TcpListener,
     app: Router,
     tls_acceptor: tokio_rustls::TlsAcceptor,
     shutdown: tokio::sync::watch::Receiver<()>,
+    drain_timeout: Duration,
 ) -> Result<(), std::io::Error> {
     let local_addr = listener.local_addr()?;
 
     info!(%local_addr, "HTTPS server listening");
+
+    // Watches every accepted connection so the drain below can both signal
+    // them to finish and wait for them.
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
 
     let mut shutdown_rx = shutdown;
     loop {
@@ -98,6 +126,10 @@ pub async fn serve_tls_router(
 
                 let acceptor = tls_acceptor.clone();
                 let app = app.clone();
+                // A watcher, not the whole handle: the TLS handshake happens
+                // inside the spawned task, and a handshake that never completes
+                // must not hold the drain open.
+                let watcher = graceful.watcher();
 
                 tokio::spawn(async move {
                     let tls_stream = match acceptor.accept(stream).await {
@@ -132,19 +164,39 @@ pub async fn serve_tls_router(
                             HTTP2_MAX_PENDING_RESET_STREAMS,
                         ));
 
-                    if let Err(e) = builder.serve_connection(io, service).await {
+                    let conn = builder.serve_connection(io, service).into_owned();
+                    if let Err(e) = watcher.watch(conn).await {
                         debug!(peer = %peer_addr, error = %e, "connection error");
                     }
                 });
             }
             _ = shutdown_rx.changed() => {
-                info!("HTTPS server shutting down");
+                info!(
+                    drain_deadline_secs = drain_timeout.as_secs(),
+                    "HTTPS server shutting down, draining in-flight requests"
+                );
                 break;
             }
         }
     }
 
-    Ok(())
+    // Signal every watched connection to finish, then wait for them.
+    tokio::select! {
+        () = graceful.shutdown() => {
+            info!("HTTPS server drained all in-flight requests");
+            Ok(())
+        }
+        () = tokio::time::sleep(drain_timeout) => {
+            warn!(
+                drain_deadline_secs = drain_timeout.as_secs(),
+                "HTTPS graceful drain deadline exceeded, forcing shutdown"
+            );
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "HTTPS graceful drain did not complete within the shutdown timeout",
+            ))
+        }
+    }
 }
 
 /// Starts an HTTP server that redirects all requests to HTTPS via 301.

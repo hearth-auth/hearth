@@ -321,9 +321,15 @@ async fn tls_peer_ip_appears_in_session_not_fallback() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(());
     let app = rig.app.clone();
     tokio::spawn(async move {
-        http::serve_tls_router(listener, app, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls_router");
+        http::serve_tls_router(
+            listener,
+            app,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls_router");
     });
 
     // Log in from two genuinely different peer IPs.
@@ -421,9 +427,15 @@ async fn tls_independent_rate_limit_buckets_per_ip() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(());
     let app = rig.app.clone();
     tokio::spawn(async move {
-        http::serve_tls_router(listener, app, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls_router");
+        http::serve_tls_router(
+            listener,
+            app,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls_router");
     });
 
     // Step 1 — IP A sends one wrong-password attempt. This increments

@@ -2697,11 +2697,15 @@ async fn run_serve(
         );
     }
 
+    // Set when a graceful drain runs out of deadline with requests still in
+    // flight. Reported at the very end so every cleanup step still runs.
+    let mut drain_incomplete = false;
+
     // Check for TLS configuration
     if let (Some(cert_path), Some(key_path)) =
         (&config.server.tls_cert_path, &config.server.tls_key_path)
     {
-        run_serve_tls(
+        let tls_drain_incomplete = run_serve_tls(
             addr,
             &config,
             app_router,
@@ -2715,6 +2719,7 @@ async fn run_serve(
             Arc::clone(&reload_notify),
         )
         .await?;
+        drain_incomplete = tls_drain_incomplete;
     } else {
         // Non-TLS: register SIGHUP handler for config hot-reload.
         #[cfg(unix)]
@@ -2774,6 +2779,7 @@ async fn run_serve(
                     drain_deadline_secs = drain_secs,
                     "graceful drain deadline exceeded, forcing shutdown"
                 );
+                drain_incomplete = true;
             }
         }
     }
@@ -2789,6 +2795,7 @@ async fn run_serve(
                     drain_deadline_secs = drain_secs,
                     "gRPC graceful drain deadline exceeded, forcing shutdown"
                 );
+                drain_incomplete = true;
             }
         }
     }
@@ -2813,6 +2820,16 @@ async fn run_serve(
 
     // Clean up PID file on exit.
     let _ = std::fs::remove_file(&pid_file_path);
+
+    // A drain that ran out of deadline cut requests off mid-flight. Reporting
+    // that as a clean exit lets an orchestrator record a rollout as successful
+    // when it dropped traffic (audit 2026-08-28 §4.11#10). Every cleanup step
+    // above still ran, so the failure is reported only here, at the end.
+    if drain_incomplete {
+        error!("Hearth server stopped with an incomplete drain");
+        return Err("graceful drain did not complete within the shutdown timeout".into());
+    }
+
     info!("Hearth server stopped");
     Ok(())
 }
@@ -3212,6 +3229,11 @@ async fn wait_for_shutdown_signal() {
 }
 
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
+///
+/// Returns `true` when the graceful drain ran out of deadline with requests
+/// still in flight. The caller reports that after its own cleanup, so a
+/// truncated shutdown exits non-zero without skipping the memtable flush
+/// (audit 2026-08-28 §4.11#10).
 /// Registry type alias used for hot-swap on SIGHUP.
 type RegistrySwap = Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>>;
 
@@ -3228,7 +3250,7 @@ async fn run_serve_tls(
     reload_config_path: Option<PathBuf>,
     dev: bool,
     reload_notify: Arc<Notify>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
         .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
 
@@ -3319,25 +3341,31 @@ async fn run_serve_tls(
         drop(shutdown_tx);
     });
 
-    // Start HTTPS server with drain deadline.
+    // Start the HTTPS server. It owns the drain and its deadline: an outer
+    // `select!` here would win the race the instant the accept loop returned,
+    // which is exactly how a drain that never happened looked clean
+    // (audit 2026-08-28 §4.11#9). `drain_start_rx` is no longer needed.
+    drop(drain_start_rx);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tokio::select! {
-        result = http::serve_tls_router(listener, app_router, acceptor, shutdown_rx) => {
-            result?;
-        }
-        _ = async {
-            let _ = drain_start_rx.await;
-            tokio::time::sleep(Duration::from_secs(drain_secs)).await;
-        } => {
-            warn!(
-                drain_deadline_secs = drain_secs,
-                "graceful drain deadline exceeded, forcing shutdown"
-            );
-        }
-    }
+    let drain_outcome = http::serve_tls_router(
+        listener,
+        app_router,
+        acceptor,
+        shutdown_rx,
+        Duration::from_secs(drain_secs),
+    )
+    .await;
 
     let _ = redirect_handle.await;
-    Ok(())
+
+    // A drain that did not complete is not a clean shutdown. Report it to the
+    // caller rather than returning early: the caller still has a memtable to
+    // flush and a PID file to remove.
+    match drain_outcome {
+        Ok(()) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(true),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Loads configuration from file, dev mode, or defaults.

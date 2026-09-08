@@ -97,6 +97,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **The TLS server now drains in-flight requests on `SIGTERM` (audit 2026-08-28 §4.11#9)** — the
+  HTTPS listener runs its own accept loop, and on a shutdown signal it stopped accepting and
+  returned immediately, abandoning every connection it had spawned. An in-flight request was cut
+  off mid-response and the process still exited 0. It now stops accepting, tells each open
+  connection to finish, and waits for them within `operational.shutdown_timeout_secs` (default
+  10 s). The plaintext listener always drained; only HTTPS was affected.
+- **A graceful drain that runs out of deadline now exits non-zero (audit 2026-08-28 §4.11#10)** —
+  when in-flight requests were still running at the end of `operational.shutdown_timeout_secs`,
+  Hearth logged a warning and exited **0**, so an orchestrator recorded a rollout that dropped
+  traffic as successful. It now exits non-zero and logs `Hearth server stopped with an incomplete
+  drain`. This covers the HTTP, HTTPS, and gRPC drains. Every shutdown step — the memtable flush,
+  the PID-file removal — still runs before the process exits.
 - **A failed WAL open no longer rewrites the segment (audit 2026-08-28 §4.11#7)** — a segment that
   does not start with the `HWAL` magic is read as a legacy v0 segment, and the v0→v1 migration
   prepends a 6-byte header. That migration was written straight back over the live file, before

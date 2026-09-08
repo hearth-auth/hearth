@@ -146,9 +146,15 @@ async fn https_endpoint_serves_valid_tls() {
 
     // Spawn the HTTPS server
     let server_handle = tokio::spawn(async move {
-        http::serve_tls(listener, state, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls");
+        http::serve_tls(
+            listener,
+            state,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls");
     });
 
     // Build a reqwest client trusting our test CA
@@ -266,9 +272,15 @@ async fn mtls_valid_client_cert_succeeds() {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
     let server_handle = tokio::spawn(async move {
-        http::serve_tls(listener, state, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls");
+        http::serve_tls(
+            listener,
+            state,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls");
     });
 
     // Build reqwest client with CA trust + client cert
@@ -327,9 +339,15 @@ async fn mtls_missing_client_cert_rejected() {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
     let server_handle = tokio::spawn(async move {
-        http::serve_tls(listener, state, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls");
+        http::serve_tls(
+            listener,
+            state,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls");
     });
 
     // Build reqwest client with CA trust but NO client cert
@@ -392,9 +410,15 @@ async fn tls_downgrade_prevention_rejects_tls10() {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
 
     let server_handle = tokio::spawn(async move {
-        http::serve_tls(listener, state, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls");
+        http::serve_tls(
+            listener,
+            state,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls");
     });
 
     // Use a rustls ClientConfig that only supports TLS 1.2 with a cipher
@@ -492,9 +516,15 @@ async fn tls13_only_rejects_tls12_client() {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let server_handle = tokio::spawn(async move {
-        http::serve_tls(listener, state, acceptor, shutdown_rx)
-            .await
-            .expect("serve_tls");
+        http::serve_tls(
+            listener,
+            state,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls");
     });
 
     // Build a rustls client restricted to TLS 1.2 only.

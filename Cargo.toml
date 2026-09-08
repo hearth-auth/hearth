@@ -43,7 +43,10 @@ data-encoding = "2"
 flate2 = "1"
 fs2 = "0.4"
 hyper = "1"
-hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto"] }
+# `server-graceful` supplies the connection watcher the TLS accept loop uses to
+# drain in-flight requests on SIGTERM (audit 2026-08-28 §4.11#9). It pulls in no
+# new crate — the feature only enables `tokio/sync`.
+hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto", "server-graceful"] }
 # HTTPS connector for the OTLP/HTTP exporter. Ring provider only — the OTLP
 # HTTP client moved off `reqwest` (audit 2026-08-28 §4.8#9) and hyper's default
 # connector is plaintext-only, which would break an https:// collector.
