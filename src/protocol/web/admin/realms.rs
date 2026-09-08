@@ -788,25 +788,34 @@ fn pill_display_value(key: &str, v: &serde_json::Value) -> String {
 }
 
 /// Truncates a metadata value for inline pill rendering — strings cap at
-/// 24 chars, other types stringify and cap at 20 chars.
+/// 24 characters, other types stringify and cap at 20 characters.
+///
+/// The cap counts **characters, not bytes**. Audit metadata carries
+/// attacker-supplied values — a SAML `NameID`, a SCIM field, an upstream
+/// `sub` — so a byte-offset slice landing inside a multi-byte character
+/// panicked, and under `panic=abort` that took the whole multi-tenant process
+/// down (audit §4.4#1, §4.10#3).
 fn truncate_pill_value(v: &serde_json::Value) -> String {
     match v {
-        serde_json::Value::String(s) => {
-            if s.len() > 24 {
-                format!("{}…", &s[..24])
-            } else {
-                s.clone()
-            }
-        }
-        other => {
-            let s = other.to_string();
-            if s.len() > 20 {
-                format!("{}…", &s[..20])
-            } else {
-                s
-            }
-        }
+        serde_json::Value::String(s) => truncate_chars(s, 24),
+        other => truncate_chars(&other.to_string(), 20),
     }
+}
+
+/// Returns `s` unchanged when it is at most `max_chars` characters long, and
+/// otherwise its first `max_chars` characters followed by an ellipsis.
+///
+/// Never slices on a byte offset, so it cannot panic on any input.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(max_chars * 4 + 3));
+    for (i, c) in s.chars().enumerate() {
+        if i == max_chars {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Resolves an audit-event actor string (typically a user UUID) to a
@@ -2694,9 +2703,53 @@ pub async fn admin_api_realm_config_patch(
 
 #[cfg(test)]
 mod metadata_pill_tests {
-    use super::build_metadata_pills;
+    use super::{build_metadata_pills, truncate_pill_value};
     use crate::audit::AuditAction;
     use serde_json::json;
+
+    /// A SAML `NameID` is attacker-supplied and lands in audit metadata, so a
+    /// multi-byte character sitting on the truncation offset used to slice
+    /// mid-character and abort the whole process (audit §4.4#1, §4.10#3).
+    #[test]
+    fn pill_truncation_survives_a_multibyte_char_on_the_offset() {
+        // 'é' is two bytes. 23 ASCII bytes then 'é' puts the char boundary
+        // across byte offset 24 — the old `&s[..24]` panicked here.
+        let value = format!("{}é{}", "a".repeat(23), "b".repeat(40));
+        let out = truncate_pill_value(&json!(value));
+        assert!(out.ends_with('…'), "long value must be marked truncated");
+        assert!(
+            out.chars().count() <= 25,
+            "expected 24 characters plus the ellipsis, got {}",
+            out.chars().count()
+        );
+    }
+
+    /// The same offset hazard on the non-string arm, which caps at 20 bytes.
+    #[test]
+    fn non_string_pill_truncation_survives_a_multibyte_char() {
+        let value = json!({ "k": format!("{}é{}", "a".repeat(16), "b".repeat(40)) });
+        let out = truncate_pill_value(&value);
+        assert!(out.ends_with('…'), "long value must be marked truncated");
+    }
+
+    /// Every character length around both offsets must be safe, including
+    /// 4-byte characters that no single offset lands inside cleanly.
+    #[test]
+    fn pill_truncation_never_panics_on_any_offset() {
+        for filler in 0..40 {
+            for ch in ['é', '☃', '🔥'] {
+                let s = format!("{}{ch}{}", "a".repeat(filler), "b".repeat(40));
+                let _ = truncate_pill_value(&json!(s.clone()));
+                let _ = truncate_pill_value(&json!({ "k": s }));
+            }
+        }
+    }
+
+    /// A short value is returned unchanged — the fix must not truncate more.
+    #[test]
+    fn short_values_are_returned_verbatim() {
+        assert_eq!(truncate_pill_value(&json!("héllo")), "héllo");
+    }
 
     fn keys(pills: &[(String, String)]) -> Vec<&str> {
         pills.iter().map(|(k, _)| k.as_str()).collect()

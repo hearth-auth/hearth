@@ -633,3 +633,46 @@ async fn audit_list_renders_category_and_severity_indicators() {
         "expected category name to appear in row title attribute",
     );
 }
+
+/// A SAML `NameID` reaches audit metadata verbatim, and the audit viewer
+/// truncates metadata for its inline pills. A multi-byte character sitting on
+/// the truncation offset used to slice mid-character and abort the whole
+/// process under `panic=abort` (audit §4.4#1, §4.10#3). The page must render.
+#[tokio::test]
+async fn audit_list_renders_a_multibyte_name_id_without_crashing() {
+    let rig = build_rig();
+    // 23 ASCII bytes then a 2-byte 'é' straddles byte offset 24; the 4-byte
+    // '🔥' at offset 17 straddles the 20-byte cap on the non-string arm.
+    let name_id = format!("{}é{}🔥{}", "a".repeat(23), "b".repeat(10), "c".repeat(30));
+    rig.audit
+        .append(&CreateAuditEvent {
+            realm_id: rig.tenant_realm_id.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".to_string(),
+            resource_id: "00000000-0000-0000-0000-000000000009".to_string(),
+            metadata: Some(serde_json::json!({
+                "sp": "acme-sp",
+                "name_id": name_id,
+                "nested": { "name_id": name_id.clone() },
+            })),
+        })
+        .expect("seed multi-byte audit event");
+
+    let realm = rig.tenant_realm_name.clone();
+    let cookie = admin_cookie(&rig, "csrf-multibyte");
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/admin/realms/{realm}/audit"))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}

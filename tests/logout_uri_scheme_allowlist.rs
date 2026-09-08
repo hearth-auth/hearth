@@ -4,8 +4,8 @@
 //! `frontchannel_logout_uri` is rendered into an `<iframe src>` on the Hearth
 //! origin by `GET /end_session`. A `javascript:` URI there executes script on
 //! the identity-provider origin, so the value must never reach the page.
-//! `backchannel_logout_uri` is dereferenced server-side, so it is held to the
-//! same scheme rules.
+//! `backchannel_logout_uri` is dereferenced server-side, so it is held to a
+//! stricter rule still: https only, no loopback (task 12.2).
 //!
 //! The threat model is an untrusted tenant admin: whoever can update a client
 //! must not be able to choose the scheme Hearth emits or fetches.

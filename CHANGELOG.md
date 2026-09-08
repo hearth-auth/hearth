@@ -77,6 +77,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **A multi-byte character in audit metadata no longer aborts the process (audit 2026-08-28 §4.4#1,
+  §4.10#3)** — the admin audit viewer truncated inline metadata pills on a byte offset. Audit
+  metadata carries attacker-supplied values, notably the SAML `NameID` recorded on every SAML
+  login, so a character straddling the 24- or 20-byte cap panicked. Under the release profile's
+  `panic=abort` that killed the whole multi-tenant process — `/health` went to connection-refused
+  for every realm, not only the one under attack. Truncation now counts characters.
 - **Back-channel logout delivery is behind the SSRF guard (audit 2026-08-28 §4.3#2)** — the
   `backchannel_logout_uri` POST that `GET /end_session` fans out used a bare `ureq` client, so a
   tenant admin could aim it at an RFC 1918 host, loopback, or the cloud instance-metadata address
