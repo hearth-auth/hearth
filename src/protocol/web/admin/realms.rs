@@ -258,26 +258,28 @@ pub async fn admin_realm_delete(
 
     let realm_id = target.id().clone();
 
-    // Only allow permanent deletion of Archived realms.
+    // The archival gate lives in `delete_realm`, so every adapter gets it
+    // (audit 2026-08-28 §4.20#10). This handler renders the refusal; it does
+    // not decide it. Deciding it here is what left the `/ui` copy of the gate
+    // without the `DeletingInProgress` case, so the UI could not recover a
+    // realm wedged mid-cascade (§4.20#3).
     match state.identity.get_realm(&realm_id) {
-        Ok(Some(realm)) if realm.status() == RealmStatus::Archived => {
-            match state.identity.delete_realm(&realm_id) {
-                Ok(()) => {
-                    audit_realm_event(&state, &session, &realm_id, "delete");
-                    Redirect::to("/ui/admin/realms").into_response()
-                }
-                Err(IdentityError::RealmNotFound) => {
-                    super::handlers_common::not_found("Realm not found")
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "delete_realm failed");
-                    super::handlers_common::server_error()
-                }
+        Ok(Some(_)) => match state.identity.delete_realm(&realm_id) {
+            Ok(()) => {
+                audit_realm_event(&state, &session, &realm_id, "delete");
+                Redirect::to("/ui/admin/realms").into_response()
             }
-        }
-        Ok(Some(_)) => super::handlers_common::bad_request(
-            "Only archived realms can be permanently deleted. Remove the realm from hearth.yaml and restart to archive it first.",
-        ),
+            Err(IdentityError::RealmNotFound) => {
+                super::handlers_common::not_found("Realm not found")
+            }
+            Err(e @ IdentityError::RealmNotArchived) => {
+                super::handlers_common::bad_request(&e.to_string())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "delete_realm failed");
+                super::handlers_common::server_error()
+            }
+        },
         Ok(None) => super::handlers_common::not_found("Realm not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");

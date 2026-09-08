@@ -160,6 +160,7 @@ async fn realm_deletion_removes_every_rbac_family() {
         );
     }
 
+    h.archive_realm(&fixture.realm_id);
     h.identity()
         .delete_realm(&fixture.realm_id)
         .expect("delete realm");
@@ -179,6 +180,7 @@ async fn a_reimported_user_inherits_no_grant_from_the_deleted_realm() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let fixture = build_realm_with_every_rbac_family(&h, "reimport");
 
+    h.archive_realm(&fixture.realm_id);
     h.identity()
         .delete_realm(&fixture.realm_id)
         .expect("delete realm");

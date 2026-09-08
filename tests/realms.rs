@@ -76,6 +76,7 @@ async fn full_realm_lifecycle() {
         .expect("create session");
 
     // 5. Delete realm
+    harness.archive_realm(realm.id());
     identity.delete_realm(realm.id()).expect("delete realm");
 
     // 6. Verify cleanup

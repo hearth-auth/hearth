@@ -5541,6 +5541,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let existing_realm = self.get_realm(realm_id)?;
         let realm_exists = existing_realm.is_some();
 
+        // The archival gate, enforced here rather than in each protocol
+        // adapter. REST and the `/ui` tree each carried their own copy and
+        // gRPC `DeleteRealm` carried none, so a gRPC admin could destroy a live
+        // tenant that REST would have refused (audit 2026-08-28 §4.20#10).
+        //
+        // `DeletingInProgress` passes: that realm's deletion was authorised on
+        // an earlier call that did not finish, and the retry is what converges
+        // the cascade (§4.20#3). A realm with no record passes too, for the
+        // same reason — the gate must never block a retry.
+        if let Some(ref realm) = existing_realm {
+            if !matches!(
+                realm.status(),
+                RealmStatus::Archived | RealmStatus::DeletingInProgress
+            ) {
+                return Err(IdentityError::RealmNotArchived);
+            }
+        }
+
         // 0. Delete the realm record FIRST. Ordering matters: if a fault
         //    lands mid-cascade, the observable partial state is "realm
         //    already gone, some cascade residue remains" — never the
@@ -9872,6 +9890,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+
+        // The YAML-managed gate, enforced here rather than in each protocol
+        // adapter. Only the `/ui` tree checked it; REST and gRPC application
+        // delete did not, so either could remove an application that the next
+        // startup's reconcile would put straight back (audit 2026-08-28
+        // §4.20#10).
+        if let Some(client) = self.get_client(realm_id, client_id)? {
+            if client.is_yaml_managed() {
+                return Err(IdentityError::YamlManagedResource {
+                    kind: "application",
+                });
+            }
+        }
+
         self.delete_client_inner(realm_id, client_id)
     }
 
@@ -16209,6 +16241,23 @@ mod tests {
             .clone()
     }
 
+    /// Retires `realm` so `delete_realm` will accept it.
+    ///
+    /// The archival gate lives in `delete_realm` rather than in each protocol
+    /// adapter (audit 2026-08-28 §4.20#10), so a test that deletes a realm it
+    /// just created must archive it first, exactly as an operator would.
+    fn archive_test_realm(engine: &EmbeddedIdentityEngine, realm_id: &RealmId) {
+        engine
+            .update_realm(
+                realm_id,
+                &UpdateRealmRequest {
+                    status: Some(RealmStatus::Archived),
+                    ..Default::default()
+                },
+            )
+            .expect("archive realm");
+    }
+
     #[test]
     fn set_and_verify_password_correct() {
         let (_dir, engine, _clock) = setup_engine();
@@ -18542,6 +18591,7 @@ mod tests {
         // The operations above also wrote `audit:*` rows — the other
         // surviving family — into the realm's key space.
 
+        archive_test_realm(&engine, &realm_id);
         engine.delete_realm(&realm_id).expect("delete realm");
 
         let survivors = storage
@@ -18613,6 +18663,7 @@ mod tests {
             .set_password(&realm_id, user.id(), &pw)
             .expect("set password");
 
+        archive_test_realm(&engine, &realm_id);
         engine.delete_realm(&realm_id).expect("delete realm");
 
         // The backgrounded cascade is a spawned task whose body has no `.await`
@@ -18798,6 +18849,7 @@ mod tests {
             .expect("create session");
 
         // Delete realm
+        archive_test_realm(&engine, realm.id());
         engine.delete_realm(realm.id()).expect("delete realm");
 
         // Realm record should be gone
@@ -18921,6 +18973,7 @@ mod tests {
             "realm must be in cache after create"
         );
 
+        archive_test_realm(&engine, &realm_id);
         engine.delete_realm(&realm_id).expect("delete realm");
 
         // Must be gone from cache.
@@ -19982,6 +20035,7 @@ mod tests {
                     .collect();
 
                 for realm_id in &to_delete {
+                    archive_test_realm(&engine, realm_id);
                     engine.delete_realm(realm_id).expect("delete");
                 }
 
@@ -22163,6 +22217,7 @@ mod tests {
             .get_realm_dpop_nonce_secret(&realm)
             .expect("load nonce secret");
 
+        archive_test_realm(&engine, &realm);
         engine.delete_realm(&realm).expect("delete realm");
 
         assert!(

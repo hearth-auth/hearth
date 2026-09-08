@@ -90,6 +90,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 | Code | Meaning |
 |------|---------|
 | `HEARTH_REALM_SUSPENDED` | Realm is suspended; all operations are denied. |
+| `HEARTH_REALM_NOT_ARCHIVED` | Permanent deletion was requested for a realm that is not archived. Remove it from `hearth.yaml` and restart to archive it first. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 
 ### Input Validation
 
@@ -103,6 +104,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 |------|---------|
 | `HEARTH_DUPLICATE_EMAIL` | A user with this email already exists in the realm. |
 | `HEARTH_DUPLICATE_REALM_NAME` | A realm with this name already exists. |
+| `HEARTH_YAML_MANAGED_RESOURCE` | The resource is declared in `hearth.yaml` and cannot be deleted at runtime; the next startup would re-create it. Remove the declaration and restart. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 
 ### Organizations
 

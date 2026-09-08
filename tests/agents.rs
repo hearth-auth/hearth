@@ -360,6 +360,7 @@ async fn agent_cascade_delete_on_realm_deletion() {
     );
 
     // Delete the realm — cascade must sweep the agent key-space.
+    harness.archive_realm(&realm_id);
     identity.delete_realm(&realm_id).expect("delete realm");
 
     // Storage-layer assertion: no orphaned agent key survives the cascade.

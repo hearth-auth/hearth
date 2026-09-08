@@ -539,6 +539,14 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::NOT_FOUND, "not found")
         }
         IdentityError::RealmSuspended => (StatusCode::FORBIDDEN, "realm suspended"),
+        IdentityError::RealmNotArchived => (
+            StatusCode::CONFLICT,
+            "only archived realms can be permanently deleted",
+        ),
+        IdentityError::YamlManagedResource { .. } => (
+            StatusCode::CONFLICT,
+            "this resource is managed by hearth.yaml and cannot be deleted at runtime",
+        ),
         IdentityError::DuplicateRealmName => (StatusCode::CONFLICT, "duplicate realm name"),
         IdentityError::DuplicateEmail => (StatusCode::CONFLICT, "duplicate email"),
         IdentityError::InvalidInput { .. } => (StatusCode::BAD_REQUEST, "invalid input"),

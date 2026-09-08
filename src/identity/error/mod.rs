@@ -194,6 +194,22 @@ pub enum IdentityError {
         /// The operation that was attempted (e.g. `"create_realm"`).
         operation: &'static str,
     },
+    /// Permanent deletion was requested for a realm that is not archived.
+    ///
+    /// Archival is the retirement step: it freezes the realm and gives the
+    /// operator a window to change their mind. Permanent deletion is only
+    /// available afterwards, or on a realm whose cascade already started
+    /// (audit 2026-08-28 §4.20#10).
+    RealmNotArchived,
+    /// A runtime mutation targeted a resource that `hearth.yaml` owns.
+    ///
+    /// Config-managed resources are reconciled from YAML at every startup, so
+    /// a runtime delete would be undone on the next boot. The operator removes
+    /// the declaration and restarts instead (audit 2026-08-28 §4.20#10).
+    YamlManagedResource {
+        /// The kind of resource that was targeted (e.g. `"application"`).
+        kind: &'static str,
+    },
     /// Self-service registration is disabled for this realm.
     RegistrationDisabled,
     /// Self-service registration is enabled but the email's domain is not

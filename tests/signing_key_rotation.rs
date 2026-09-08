@@ -18,7 +18,7 @@ use hearth::core::{Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::reconcile::{apply_diff, save_snapshot};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
-    IdentityConfig, IdentityEngine, RealmConfig, SessionContext,
+    IdentityConfig, IdentityEngine, RealmConfig, RealmStatus, SessionContext, UpdateRealmRequest,
 };
 use hearth::rbac::EmbeddedRbacEngine;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -535,6 +535,7 @@ fn realm_delete_purges_retiring_keys_sync_path() {
     engine.rotate_realm_signing_key(realm.id(), 86_400).unwrap();
     assert_eq!(retiring_key_blobs(&storage, realm.id()).len(), 1);
 
+    archive_realm(&engine, realm.id());
     engine.delete_realm(realm.id()).unwrap();
 
     assert!(
@@ -559,6 +560,7 @@ async fn realm_delete_purges_retiring_keys_background_path() {
     engine.rotate_realm_signing_key(&realm, 86_400).unwrap();
     assert_eq!(retiring_key_blobs(&storage, &realm).len(), 1);
 
+    archive_realm(&engine, &realm);
     engine.delete_realm(&realm).unwrap();
 
     // The cascade runs on a spawned task; poll for completion.
@@ -767,4 +769,21 @@ fn revoking_rotation_purges_an_earlier_rotations_live_retiring_key() {
         matches!(err, hearth::identity::IdentityError::InvalidToken),
         "expected InvalidToken after a revoking rotation, got {err:?}"
     );
+}
+
+/// Retires `realm_id` so `delete_realm` will accept it.
+///
+/// The archival gate lives in `delete_realm` rather than in each protocol
+/// adapter (audit 2026-08-28 §4.20#10), so a test that deletes a realm it just
+/// created must archive it first, exactly as an operator would.
+fn archive_realm(engine: &EmbeddedIdentityEngine, realm_id: &RealmId) {
+    engine
+        .update_realm(
+            realm_id,
+            &UpdateRealmRequest {
+                status: Some(RealmStatus::Archived),
+                ..Default::default()
+            },
+        )
+        .expect("archive realm");
 }

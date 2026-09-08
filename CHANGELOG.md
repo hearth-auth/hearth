@@ -107,6 +107,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Delete preconditions are enforced in one place, so gRPC can no longer destroy a live tenant
+  (audit 2026-08-28 §4.20#10)** — two gates guard permanent deletion, and each protocol adapter
+  hand-rolled its own copy. The **archival gate** (a realm must be archived first) was checked by
+  REST and the `/ui` tree but *not* by gRPC `DeleteRealm`, so a gRPC admin could permanently delete
+  a live realm that REST would have refused; the `/ui` copy was also missing the
+  `DeletingInProgress` case, so the UI could not recover a realm wedged mid-cascade. The
+  **YAML-managed gate** (a `hearth.yaml`-declared application is config-managed) was checked only
+  by the `/ui` tree, so REST and gRPC application delete could remove an application the next
+  startup's reconcile would put straight back. Both gates now live in the identity engine, and
+  every adapter renders the refusal rather than deciding it. Two new error codes:
+  `HEARTH_REALM_NOT_ARCHIVED` and `HEARTH_YAML_MANAGED_RESOURCE`, both `409` over REST and
+  `FAILED_PRECONDITION` over gRPC, documented in
+  [`docs/guides/error-codes.md`](docs/guides/error-codes.md). **Breaking for gRPC and REST
+  application-delete callers** that relied on the missing gates.
 - **A realm wedged mid-delete is recoverable, and no longer stops the server booting (audit
   2026-08-28 §4.20#3)** — `delete_realm` stamps `DeletingInProgress` on a realm before it starts
   the cascade, so a process death between the `204` and the end of the cascade left the realm in

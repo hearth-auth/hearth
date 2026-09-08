@@ -113,7 +113,9 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::DeviceCodeDenied
         | IdentityError::TokenRevoked
         | IdentityError::PasswordExpired
-        | IdentityError::PasswordReused => (Code::FailedPrecondition, err.to_string()),
+        | IdentityError::PasswordReused
+        | IdentityError::RealmNotArchived
+        | IdentityError::YamlManagedResource { .. } => (Code::FailedPrecondition, err.to_string()),
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached
         | IdentityError::TokenTooLarge { .. } => (Code::ResourceExhausted, err.to_string()),

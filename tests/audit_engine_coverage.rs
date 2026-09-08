@@ -143,6 +143,7 @@ async fn test_delete_realm_cascading_one_event() {
         )
         .expect("create user B");
 
+    harness.archive_realm(&realm_id);
     harness
         .identity()
         .delete_realm(&realm_id)

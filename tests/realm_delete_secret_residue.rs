@@ -167,6 +167,7 @@ async fn realm_deletion_removes_every_named_secret_family() {
         );
     }
 
+    h.archive_realm(&realm_id);
     h.identity().delete_realm(&realm_id).expect("delete realm");
 
     let after = realm_keys(&h, &realm_id);

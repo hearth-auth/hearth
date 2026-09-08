@@ -575,6 +575,7 @@ async fn multi_realm_isolation_roundtrip() {
     }
 
     // --- Isolation assertion 4: deleting realm A leaves realm B intact. ---
+    harness.archive_realm(&a);
     harness.identity().delete_realm(&a).expect("delete A");
 
     // Realm A data is gone.

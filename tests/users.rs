@@ -499,6 +499,7 @@ async fn delete_realm_leaves_no_residual_pii() {
     );
 
     // Delete the realm — cascade must clean up the tombstone too.
+    harness.archive_realm(&realm_id);
     identity.delete_realm(&realm_id).expect("delete realm");
 
     // Helper: assert a prefix is empty in the (now-deleted) realm's namespace.

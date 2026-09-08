@@ -353,6 +353,7 @@ async fn a33_delete_realm_rejects_new_operations_after_completion() {
         .expect("create org before deletion");
 
     // Delete the realm.
+    harness.archive_realm(&realm_id);
     identity.delete_realm(&realm_id).expect("delete realm");
 
     // Realm record must be gone.
@@ -489,6 +490,7 @@ async fn a33_chunked_cascade_leaves_no_orphans() {
     assert_eq!(pre_orgs.items.len(), 1, "expect 1 org before deletion");
 
     // Delete the realm.
+    harness.archive_realm(&realm_id);
     identity.delete_realm(&realm_id).expect("delete realm");
 
     // --- Scan for orphans using key prefix ranges ---

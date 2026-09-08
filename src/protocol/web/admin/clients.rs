@@ -806,20 +806,9 @@ pub async fn admin_app_delete(
 
     let realm_name = target.0.name().to_string();
 
-    if let Ok(Some(existing)) = state.identity.get_client(target.id(), &client_id) {
-        if existing.is_yaml_managed() {
-            return super::templates::redirect_with_flash(
-                &format!(
-                    "/ui/admin/realms/{}/applications/{}",
-                    realm_name,
-                    client_id.as_uuid()
-                ),
-                "This application is managed by hearth.yaml and cannot be deleted via the UI.",
-                "error",
-            );
-        }
-    }
-
+    // The YAML-managed gate lives in `delete_client`, so every adapter gets it
+    // (audit 2026-08-28 §4.20#10). This handler renders the refusal as a flash
+    // message; it does not decide it.
     match state.identity.delete_client(target.id(), &client_id) {
         Ok(()) => {
             audit_app_event(&state, &session, &target.0, &client_id, "delete");
@@ -828,6 +817,15 @@ pub async fn admin_app_delete(
         Err(IdentityError::InvalidClient) => {
             super::handlers_common::not_found("Application not found")
         }
+        Err(IdentityError::YamlManagedResource { .. }) => super::templates::redirect_with_flash(
+            &format!(
+                "/ui/admin/realms/{}/applications/{}",
+                realm_name,
+                client_id.as_uuid()
+            ),
+            "This application is managed by hearth.yaml and cannot be deleted via the UI.",
+            "error",
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "delete_client failed");
             super::handlers_common::server_error()

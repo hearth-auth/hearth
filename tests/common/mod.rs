@@ -520,6 +520,23 @@ impl TestHarness {
             .clone()
     }
 
+    /// Retires a realm so `delete_realm` will accept it.
+    ///
+    /// The archival gate lives in `delete_realm` rather than in each protocol
+    /// adapter (audit 2026-08-28 §4.20#10), so a test that deletes a realm it
+    /// just created must archive it first, exactly as an operator would.
+    pub fn archive_realm(&self, realm_id: &hearth::core::RealmId) {
+        self.identity()
+            .update_realm(
+                realm_id,
+                &hearth::identity::UpdateRealmRequest {
+                    status: Some(hearth::identity::RealmStatus::Archived),
+                    ..Default::default()
+                },
+            )
+            .expect("archive test realm");
+    }
+
     /// Returns the base URL for server mode, or `None` for embedded mode.
     ///
     /// Use this to construct HTTP requests in dual-mode tests:

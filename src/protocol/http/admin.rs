@@ -1257,20 +1257,12 @@ async fn admin_delete_realm(
         Err(e) => return e,
     };
 
-    // Check realm status. Only an archived realm can be permanently deleted —
-    // plus one already stamped `DeletingInProgress`, whose deletion was
-    // authorised on an earlier call that did not finish. The cascade is
-    // idempotent and converges on retry, so refusing that status leaves the
-    // realm undeletable for the life of the deployment (audit 2026-08-28
-    // §4.20#3).
+    // The archival gate lives in `delete_realm`, so every adapter gets it
+    // (audit 2026-08-28 §4.20#10). This handler only distinguishes "no such
+    // realm" from a realm it may not delete, and lets the engine decide the
+    // latter.
     match state.identity.get_realm(&tid) {
-        Ok(Some(realm))
-            if matches!(
-                realm.status(),
-                crate::identity::RealmStatus::Archived
-                    | crate::identity::RealmStatus::DeletingInProgress
-            ) =>
-        {
+        Ok(Some(_)) => {
             match state.identity.delete_realm(&tid) {
                 Ok(()) => {
                     // Scoped to the SYSTEM realm: appending under the realm
@@ -1289,14 +1281,6 @@ async fn admin_delete_realm(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
-        Ok(Some(_)) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "conflict",
-                "message": "Only archived realms can be permanently deleted. Remove the realm from hearth.yaml and restart to archive it first."
-            })),
-        )
-            .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),

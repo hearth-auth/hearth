@@ -328,6 +328,7 @@ async fn realm_name_index_cleaned_on_delete() {
         })
         .expect("create");
 
+    harness.archive_realm(realm.id());
     identity.delete_realm(realm.id()).expect("delete");
 
     // Name should not resolve after deletion

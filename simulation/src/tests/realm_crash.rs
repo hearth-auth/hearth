@@ -22,7 +22,7 @@ use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SystemClock};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
-    IdentityError,
+    IdentityError, RealmStatus, UpdateRealmRequest,
 };
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -224,6 +224,20 @@ fn simulation_crash_mid_cascade_record_intact() {
     let realm_id = {
         let (storage, identity, authz) = open_engines(dir.path());
         let tid = seed_realm(&identity, &authz);
+
+        // `delete_realm` stamps `DeletingInProgress` before it starts the
+        // cascade, so that is the status a real crash mid-cascade leaves
+        // behind. It is also the status the archival gate admits for a retry
+        // (audit 2026-08-28 §4.20#3, §4.20#10).
+        identity
+            .update_realm(
+                &tid,
+                &UpdateRealmRequest {
+                    status: Some(RealmStatus::DeletingInProgress),
+                    ..Default::default()
+                },
+            )
+            .expect("stamp DeletingInProgress");
 
         // Simulate a crash after deleting SOME but not all users — the oauth
         // clients, tuples, and remaining users still exist. Here we walk the

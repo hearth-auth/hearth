@@ -84,6 +84,16 @@ impl fmt::Display for IdentityError {
                 f,
                 "operation not permitted on the system realm: {operation}"
             ),
+            Self::RealmNotArchived => write!(
+                f,
+                "only archived realms can be permanently deleted; remove the realm \
+                 from hearth.yaml and restart to archive it first"
+            ),
+            Self::YamlManagedResource { kind } => write!(
+                f,
+                "this {kind} is managed by hearth.yaml and cannot be deleted at \
+                 runtime; remove its declaration and restart"
+            ),
             Self::RegistrationDisabled => write!(f, "self-service registration is disabled"),
             Self::RegistrationDomainNotAllowed { domain } => write!(
                 f,
