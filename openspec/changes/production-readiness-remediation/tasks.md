@@ -125,7 +125,7 @@ found it, the audit piece, and the report's severity.
 
 ## 14. Wave 3 — Storage durability
 
-- [ ] 14.1 Stop one failed WAL write on the `SyncMode::None` path burning a record number and making the whole segment permanently unopenable (§4.11#5 · MEDIUM)
+- [x] 14.1 Stop one failed WAL write on the `SyncMode::None` path burning a record number and making the whole segment permanently unopenable (§4.11#5 · MEDIUM)
 - [ ] 14.2 Handle a write fault during WAL rotation that leaves a 1–81-byte header the engine refuses to open, and document the repair (§4.11#6 · MEDIUM)
 - [ ] 14.3 Stop a failed open rewriting the segment in place after a one-byte corruption of the WAL magic (§4.11#7 · MEDIUM)
 - [ ] 14.4 Log, meter and surface the WAL write fence in `/readyz`; it is permanent, unlogged and invisible today (§4.11#8 · MEDIUM)

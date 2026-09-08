@@ -87,6 +87,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **One failed WAL write no longer makes the whole segment permanently unopenable (audit
+  2026-08-28 §4.11#5)** — on the `SyncMode::None` write path, used by `--dev` and by the CLI
+  subcommands that open a data directory, a failed write still consumed the record number it had
+  reserved. Replay derives each record's nonce and AAD from a counter that starts at zero and
+  advances one per record, so the gap made every following record fail its AEAD check: after one
+  transient `ENOSPC`, every later start failed with `data decryption failed — wrong DEK or
+  corrupted data`, and no repair path existed. A failed write now truncates the segment back to
+  its pre-write length and releases the record number, so the next write succeeds and the segment
+  stays readable. If that rollback truncation itself fails, the WAL fences — the same fail-closed
+  response the `SyncMode::EveryWrite` path already gave a torn write.
 - **`PATCH /admin/applications/{id}`, not `PUT` — corrected everywhere it was documented (audit
   2026-08-28 §4.12#19)** — the route has always been registered as `PATCH`; `PUT` on that path
   returns **405 Method Not Allowed**. Four places said otherwise: `docs/guides/admin-api.md` and

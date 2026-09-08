@@ -1307,6 +1307,18 @@ impl Wal {
     /// Writes one entry directly to the file without fsync (`SyncMode::None`).
     ///
     /// The file mutex is held for the whole operation to preserve nonce ordering.
+    ///
+    /// A failed write must not consume the record number it reserved
+    /// (audit 2026-08-28 §4.11#5).  Replay derives each record's nonce and AAD
+    /// from a counter that starts at zero and advances one per record, so a gap
+    /// makes every following record fail its AEAD open — `Wal::open_with_fs`
+    /// then returns `Err` on every subsequent start, for the life of the
+    /// segment.  One transient `ENOSPC` used to be enough.
+    ///
+    /// The recovery is therefore: truncate the segment back to the length it
+    /// had before the attempt, then release the record number.  If the
+    /// truncation itself fails the file length is unknown, so the WAL fences
+    /// exactly as [`Self::commit_batch`] does after a torn write.
     fn write_entry_no_sync<F>(&self, plaintext: Vec<u8>, pre_rotate: F) -> Result<(), StorageError>
     where
         F: FnOnce() -> Result<(), StorageError>,
@@ -1319,12 +1331,28 @@ impl Wal {
         let file_size = file.seek(SeekFrom::End(0))?;
         #[allow(clippy::cast_possible_truncation)]
         let approx_record_size = 4 + plaintext.len() as u64 + encryption::TAG_SIZE as u64 + 4;
-        if self.config.max_size > 0 && file_size + approx_record_size > self.config.max_size {
-            pre_rotate()?;
-            self.rotate_locked(&mut **file)?;
-        }
+        let rotated =
+            if self.config.max_size > 0 && file_size + approx_record_size > self.config.max_size {
+                pre_rotate()?;
+                self.rotate_locked(&mut **file)?;
+                true
+            } else {
+                false
+            };
 
-        let (nonce, aad, dek) = {
+        // Length this record appends at.  Rotation truncates the segment, so
+        // re-measure after it rather than reusing the pre-rotation size.
+        let base_len = if rotated {
+            file.seek(SeekFrom::End(0))?
+        } else {
+            file_size
+        };
+
+        // INVARIANT: every mutation of `rotation.record_counter` — here, in
+        // `commit_batch`, and in `rotate_locked` — happens while this same file
+        // mutex is held.  No other writer can take a record number between the
+        // reservation below and the rollback, so releasing it is race-free.
+        let (record_num, nonce, aad, dek) = {
             let mut rot = self
                 .rotation
                 .lock()
@@ -1335,17 +1363,59 @@ impl Wal {
             let aad = record_num.to_le_bytes();
             let mut dek_bytes = [0u8; 32];
             dek_bytes.copy_from_slice(rot.dek.as_bytes());
-            (nonce, aad, DataEncryptionKey::from_bytes(dek_bytes))
+            (
+                record_num,
+                nonce,
+                aad,
+                DataEncryptionKey::from_bytes(dek_bytes),
+            )
         };
 
-        let ciphertext = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
-        let crc = crc32fast::hash(&ciphertext);
+        let write_result: Result<(), StorageError> = (|| {
+            let ciphertext = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
+            let crc = crc32fast::hash(&ciphertext);
 
-        #[allow(clippy::cast_possible_truncation)]
-        let payload_len = ciphertext.len() as u32;
-        file.write_all(&payload_len.to_le_bytes())?;
-        file.write_all(&ciphertext)?;
-        file.write_all(&crc.to_le_bytes())?;
+            // One `write_all` for the whole record.  Three partial writes gave
+            // three chances to tear a record; one gives one.
+            #[allow(clippy::cast_possible_truncation)]
+            let payload_len = ciphertext.len() as u32;
+            let mut buf = Vec::with_capacity(4 + ciphertext.len() + 4);
+            buf.extend_from_slice(&payload_len.to_le_bytes());
+            buf.extend_from_slice(&ciphertext);
+            buf.extend_from_slice(&crc.to_le_bytes());
+            file.write_all(&buf)?;
+            Ok(())
+        })();
+
+        if let Err(err) = write_result {
+            // Roll the segment back to its pre-write length, so no partial
+            // record survives, then release the reserved record number.
+            match file.set_len(base_len) {
+                Ok(()) => {
+                    if let Ok(mut rot) = self.rotation.lock() {
+                        rot.record_counter = record_num;
+                    } else {
+                        // Rotation mutex poisoned: the counter cannot be
+                        // released, so the next record would open a gap.
+                        self.fenced.store(true, Ordering::Release);
+                    }
+                    // Restore the append cursor; `set_len` leaves it past EOF.
+                    file.seek(SeekFrom::End(0))?;
+                }
+                Err(truncate_err) => {
+                    // The on-disk length is now unknown.  Fence rather than
+                    // ack any later write that replay would discard.
+                    self.fenced.store(true, Ordering::Release);
+                    tracing::error!(
+                        error = %truncate_err,
+                        base_len,
+                        record_num,
+                        "WAL write fault: rollback truncation failed — WAL fenced"
+                    );
+                }
+            }
+            return Err(err);
+        }
 
         // Intentionally no fsync — this path is SyncMode::None (dev/test only).
         Ok(())

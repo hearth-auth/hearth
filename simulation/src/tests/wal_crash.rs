@@ -465,3 +465,116 @@ fn simulation_aead_detects_tampered_ciphertext_with_valid_crc() {
         "a failed open must not rewrite or truncate the segment"
     );
 }
+
+/// One failed WAL write on the `SyncMode::None` path must not burn a record
+/// number (audit 2026-08-28 §4.11#5).
+///
+/// `write_entry_no_sync` reserved a record number before it wrote. When the
+/// write failed, the number stayed consumed, so the next append landed at
+/// offset 0 carrying record number 1. Replay derives the nonce and AAD from a
+/// counter that starts at 0, so the AEAD open failed on the very first record
+/// and `Wal::open_with_fs` returned `Err` forever: one transient `ENOSPC` made
+/// the whole segment permanently unopenable.
+///
+/// The record number must be released, and the segment must stay openable.
+#[test]
+fn simulation_none_sync_write_fault_does_not_burn_record_number() {
+    let seed = 48u64;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("test.wal");
+    let config = WalConfig {
+        max_size: u64::MAX,
+        sync_mode: SyncMode::None,
+    };
+
+    let doomed = make_entry(b"doomed", b"never-lands");
+    let survivor = make_entry(b"survivor", b"must-replay");
+
+    let (kek, kek_id) = test_kek();
+    let fs = Arc::new(FaultFs::new());
+    {
+        let wal = Wal::open_with_fs(
+            &wal_path,
+            config.clone(),
+            Arc::<FaultFs>::clone(&fs) as Arc<dyn hearth::storage::fs::Fs>,
+            &kek,
+            kek_id,
+        )
+        .expect("open wal");
+
+        fs.config.arm_write_failure();
+        wal.append(&doomed)
+            .expect_err("an injected write fault must surface to the caller");
+
+        wal.append(&survivor)
+            .expect("a healthy append after one failed write must succeed");
+    }
+
+    // Reopen through the real filesystem: the segment must still be readable.
+    let wal = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id)
+        .expect("one failed write must not make the segment permanently unopenable");
+
+    let entries = wal.read_all().expect("read after reopen");
+    assert_eq!(
+        entries,
+        vec![survivor],
+        "the failed write must leave nothing behind, and the next write must \
+         replay (seed={seed})"
+    );
+}
+
+/// A torn write on the `SyncMode::None` path must leave an openable segment
+/// (audit 2026-08-28 §4.11#5).
+///
+/// `FaultFs::fail_write_after(0)` writes half the buffer and then errors, which
+/// is the shape of a real short write. The rollback must remove the half
+/// record as well as release its record number; otherwise the next append
+/// lands behind a torn prefix and replay stops before it.
+#[test]
+fn simulation_none_sync_torn_write_leaves_segment_openable() {
+    let seed = 49u64;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("test.wal");
+    let config = WalConfig {
+        max_size: u64::MAX,
+        sync_mode: SyncMode::None,
+    };
+
+    let torn = make_entry(b"torn", b"half-written");
+    let survivor = make_entry(b"survivor", b"must-replay");
+
+    let (kek, kek_id) = test_kek();
+    let fs = Arc::new(FaultFs::new());
+    {
+        let wal = Wal::open_with_fs(
+            &wal_path,
+            config.clone(),
+            Arc::<FaultFs>::clone(&fs) as Arc<dyn hearth::storage::fs::Fs>,
+            &kek,
+            kek_id,
+        )
+        .expect("open wal");
+
+        fs.config.fail_write_after(0);
+        wal.append(&torn)
+            .expect_err("an injected partial write must surface to the caller");
+
+        // Disarm, then write a record that must survive.
+        fs.config.fail_write_after(u64::MAX);
+        wal.append(&survivor)
+            .expect("a healthy append after a torn write must succeed");
+    }
+
+    let wal = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id)
+        .expect("a torn write must not make the segment permanently unopenable");
+
+    let entries = wal.read_all().expect("read after reopen");
+    assert_eq!(
+        entries,
+        vec![survivor],
+        "the torn record must be rolled back, and the next write must replay \
+         (seed={seed})"
+    );
+}
