@@ -2061,12 +2061,74 @@ pub struct ProtectedResourceYamlConfig {
     pub scopes: Vec<ScopeBundleYamlConfig>,
 }
 
+/// YAML for a single claim mapping.
+///
+/// Distinct from the domain [`ClaimMapping`] for two reasons, both from audit
+/// 2026-08-28 §4.13#3:
+///
+/// * `deny_unknown_fields` — a misspelled release gate (`first_party_onlyy`,
+///   `required_scope`) used to be discarded in silence, leaving the mapping on
+///   the permissive struct default and emitting the claim to every client.
+///   A typo is now a boot-time error naming the key.
+/// * `Option<bool>` gates — the Tier-3 default needs to tell "the operator
+///   omitted this gate" from "the operator set it to false". The domain type
+///   cannot: both read as `false`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimMappingYaml {
+    /// Target JWT claim name.
+    pub claim: String,
+    /// How the claim's value is produced.
+    pub source: crate::identity::claims_config::ClaimSource,
+    /// Emit in access tokens. Defaults to `true`.
+    #[serde(default)]
+    pub include_in_access_token: Option<bool>,
+    /// Emit in ID tokens. Defaults to `true`.
+    #[serde(default)]
+    pub include_in_id_token: Option<bool>,
+    /// Emit from `/userinfo`. Defaults to `false`.
+    #[serde(default)]
+    pub include_in_userinfo: Option<bool>,
+    /// Release gate: emit only to first-party clients.
+    ///
+    /// When omitted, see
+    /// [`default_first_party_only_for`](crate::identity::claims_config::default_first_party_only_for).
+    #[serde(default)]
+    pub first_party_only: Option<bool>,
+    /// Release gate: at least one of these scopes must be granted.
+    #[serde(default)]
+    pub required_scopes: Option<Vec<String>>,
+    /// Release gate: the requesting client's slug must appear here.
+    #[serde(default)]
+    pub allowed_clients: Option<Vec<String>>,
+}
+
+impl ClaimMappingYaml {
+    /// Resolves the YAML mapping into the domain mapping, applying every
+    /// documented default.
+    #[must_use]
+    pub fn to_domain(&self) -> ClaimMapping {
+        ClaimMapping {
+            claim: self.claim.clone(),
+            source: self.source.clone(),
+            include_in_access_token: self.include_in_access_token.unwrap_or(true),
+            include_in_id_token: self.include_in_id_token.unwrap_or(true),
+            include_in_userinfo: self.include_in_userinfo.unwrap_or(false),
+            first_party_only: self.first_party_only.unwrap_or_else(|| {
+                crate::identity::claims_config::default_first_party_only_for(&self.claim)
+            }),
+            required_scopes: self.required_scopes.clone(),
+            allowed_clients: self.allowed_clients.clone(),
+        }
+    }
+}
+
 /// YAML claim-profile wrapper.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimsYamlConfig {
     #[serde(default)]
-    pub mappings: Vec<ClaimMapping>,
+    pub mappings: Vec<ClaimMappingYaml>,
 }
 
 /// Per-realm email branding overrides in YAML.
@@ -3008,7 +3070,11 @@ impl RealmYamlConfig {
             self.claims
                 .clone()
                 .map(|claims| crate::identity::claims_config::ClaimProfile {
-                    mappings: claims.mappings,
+                    mappings: claims
+                        .mappings
+                        .iter()
+                        .map(ClaimMappingYaml::to_domain)
+                        .collect(),
                     updated_at: None,
                 });
 

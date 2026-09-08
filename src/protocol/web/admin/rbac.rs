@@ -1536,14 +1536,21 @@ pub async fn admin_realm_claims(
             profile
                 .mappings
                 .iter()
-                .map(|m| ClaimMappingRow {
-                    claim: m.claim.clone(),
-                    source: claim_source_label(&m.source),
-                    include_in_access_token: m.include_in_access_token,
-                    include_in_id_token: m.include_in_id_token,
-                    include_in_userinfo: m.include_in_userinfo,
-                    first_party_only: m.first_party_only,
-                    required_scopes: m.required_scopes.clone().unwrap_or_default(),
+                // Show the *effective* mapping, not the raw YAML. A gate the
+                // operator omitted still has a value at issuance time — the
+                // viewer must show the one the token issuer will use
+                // (audit 2026-08-28 §4.13#3).
+                .map(|m| {
+                    let m = m.to_domain();
+                    ClaimMappingRow {
+                        claim: m.claim.clone(),
+                        source: claim_source_label(&m.source),
+                        include_in_access_token: m.include_in_access_token,
+                        include_in_id_token: m.include_in_id_token,
+                        include_in_userinfo: m.include_in_userinfo,
+                        first_party_only: m.first_party_only,
+                        required_scopes: m.required_scopes.clone().unwrap_or_default(),
+                    }
                 })
                 .collect::<Vec<_>>()
         })

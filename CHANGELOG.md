@@ -77,6 +77,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Claim release gates are no longer silently discarded, and Tier-3 custom claims default to
+  `first_party_only: true` (audit 2026-08-28 §4.13#3)** — a misspelled gate under
+  `realms.<name>.claims.mappings[]` (`first_party_onlyy`, `required_scope`, `allowed_client`) was
+  dropped by the deserializer. The mapping kept the permissive struct default and the claim was
+  emitted to every client, including third-party ones. Hearth now refuses to start and names the
+  unknown key.
+  - The documented Tier-3 default is now implemented: a mapping for a claim the built-in profile
+    does not ship, declared with no `first_party_only`, resolves to `true`. Over-disclosure of a
+    custom claim is opt-in — set `first_party_only: false` explicitly to release it.
+  - A mapping that overrides a built-in claim inherits that claim's built-in gate instead, so
+    overriding `email` keeps it released and overriding `roles` keeps it withheld.
+  - **Operator action:** a config with a typo in a claim mapping now fails to boot. Fix the key
+    the error names. Review any custom claim you relied on reaching a third-party client — it now
+    needs `first_party_only: false`.
+  - `GET /ui/admin/realms/{realm}/claims` shows the effective gate values rather than the raw YAML.
 - **`want_authn_requests_signed` is now enforced (audit 2026-08-28 §4.10#4)** — the documented
   SAML SP flag parsed, reached the SP record, and changed nothing. The IdP SSO endpoint
   (`/ui/realms/{realm}/saml/sso`) is a signing oracle: it mints a realm-key-signed assertion.

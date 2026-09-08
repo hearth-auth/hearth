@@ -1055,6 +1055,7 @@ Scope:
 - [x] `allowed_clients` gate via slug string match in `gates_pass()`
 - [x] Tier 2/3 claim name validation in registry validator
 - [x] YAML schema: `realms.<id>.claims.mappings:` block wired through `to_realm_config`
+- [x] Tier 3 `first_party_only: true` default injected at config load, and unknown keys under a mapping refused instead of discarded (audit 2026-08-28 §4.13#3)
 - [x] `issue_tokens_with_context` implementation; existing `issue_tokens` becomes thin wrapper
 - [x] Admin UI: `/ui/admin/realms/:id/claims` read-only viewer
 - [x] Debug page enhancement: new "Token preview" tab (Alpine.js fetch to `/ui/admin/rbac/token-preview`)

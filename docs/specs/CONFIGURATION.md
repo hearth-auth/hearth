@@ -1375,6 +1375,8 @@ Declarative role, permission, group, and scope setup for the realm's RBAC model.
 | `claims.mappings[].first_party_only` | bool | `true` for Tier 3 (custom) claims; default of the overridden mapping otherwise | Release gate: emit only when `client.trust_level == FirstParty`. Tier 3 custom claims default to `true` (over-disclosure is opt-in). |
 | `claims.mappings[].required_scopes` | array of strings | — | Release gate: if set, the **granted** scope set (post-resolution, not raw request) must include ≥1 of these for the claim to emit. |
 | `claims.mappings[].allowed_clients` | array of strings | — | Release gate: if set, the requesting client's slug must be in this list. **Managed-client slugs only** — DCR-registered slugs are rejected at config load. |
+
+> **Unknown keys under a mapping are refused at boot.** A misspelled release gate (`first_party_onlyy`, `required_scope`) used to be discarded in silence, leaving the claim on the permissive default and emitting it to every client. The server now refuses to start and names the offending key.
 | `protected_resources` | array of resource | `[]` | OPTIONAL RFC 8707 protected-resource registrations (e.g., MCP tool servers). Each resource owns its own scope namespace; scopes declared here are NOT realm-global and apply only when a token is issued with `aud` set to this resource's URI. See `AUTHZ_EXPANSION.md` §"Architectural Model" and `AGENT_AUTH.md` §2.5. |
 | `protected_resources[].resource_uri` | string | *required* | Canonical URI of the protected resource (becomes the token `aud` claim). |
 | `protected_resources[].display_name` | string | *required* | Shown on consent screens. |
@@ -1434,8 +1436,16 @@ realms:
     claims:
       # OPTIONAL — omit for default shape
       mappings:
-        - { claim: groups,     source: omit }
-        - { claim: department, source: user_attribute, attribute: dept }
+        - claim: groups
+          source:
+            source: omit
+        - claim: department
+          source:
+            source: user_attribute
+            attribute: dept
+          # `first_party_only` omitted -> defaults to true for this custom
+          # (Tier 3) claim. Set it to false explicitly to release the claim
+          # to third-party clients.
 ```
 
 The first user created in a realm is automatically assigned the seed `realm.admin` role (not configurable). All other role assignments happen at runtime via the admin API.

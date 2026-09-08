@@ -331,6 +331,27 @@ pub fn default_claim_profile() -> Vec<ClaimMapping> {
     ]
 }
 
+/// The `first_party_only` value a YAML mapping inherits when the operator
+/// declares no release gate for it.
+///
+/// Two rules, from `AUTHZ_EXPANSION.md` § "Safe defaults for Tier 3 custom
+/// claims" and the `claims.mappings[].first_party_only` row in
+/// `CONFIGURATION.md`:
+///
+/// * A mapping that **overrides a built-in claim** inherits that claim's
+///   built-in gate. Overriding `email` keeps it released to third-party
+///   clients; overriding `roles` keeps it withheld.
+/// * A mapping for **any other claim** — a Tier 3 custom claim — defaults to
+///   `true`. Over-disclosure of a claim Hearth knows nothing about is opt-in
+///   (audit 2026-08-28 §4.13#3).
+#[must_use]
+pub fn default_first_party_only_for(claim: &str) -> bool {
+    default_claim_profile()
+        .iter()
+        .find(|m| m.claim == claim)
+        .map_or(true, |m| m.first_party_only)
+}
+
 /// Merges defaults and overrides using the layered fallback model.
 pub fn resolve_claims_for_target(
     target: ClaimTarget,

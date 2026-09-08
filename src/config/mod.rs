@@ -16,10 +16,10 @@ pub use types::parse_duration_to_micros;
 pub use types::ClusterConfig;
 pub use types::{
     AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
-    CaptchaYaml, ClaimsYamlConfig, CompactionSection, DemoConfig, EmailConfig, EmailTransport,
-    FederationProviderYaml, FederationYamlConfig, GlobalRateLimitYaml, GroupYamlConfig,
-    IpRateLimitYaml, LinkModeYaml, MailgunConfig, MailgunRegion, MailtrapConfig, MetricsConfig,
-    MigrateConflictPolicy, ObservabilityConfig, OidcYamlConfig, OnboardingConfig,
+    CaptchaYaml, ClaimMappingYaml, ClaimsYamlConfig, CompactionSection, DemoConfig, EmailConfig,
+    EmailTransport, FederationProviderYaml, FederationYamlConfig, GlobalRateLimitYaml,
+    GroupYamlConfig, IpRateLimitYaml, LinkModeYaml, MailgunConfig, MailgunRegion, MailtrapConfig,
+    MetricsConfig, MigrateConflictPolicy, ObservabilityConfig, OidcYamlConfig, OnboardingConfig,
     OperationalConfig, OrgConfigYaml, OrganizationYamlConfig, OtlpConfig, OtlpProtocol,
     PasswordPolicyYaml, PasswordSecurityYaml, PepperYaml, PermissionYamlConfig, PostmarkConfig,
     ProtectedResourceYamlConfig, RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml,
