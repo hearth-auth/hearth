@@ -293,6 +293,19 @@ jobs:
       - name: Advisory gates — guard self-test
         run: bash scripts/tests/check-advisory-gates.test.sh
 
+      # Audit §4.8#4 / §4.12#6: the Helm chart's default image tag was the bare
+      # appVersion (`hearth:1.6.8`), but the Docker workflow publishes only
+      # v-prefixed semver tags, so a default `helm install` could not pull an
+      # image. This guard refuses a chart whose default tag names something the
+      # image workflow never pushes, or whose appVersion is stale.
+      - name: Chart image tag (check-chart-image-tag.sh)
+        run: bash scripts/check-chart-image-tag.sh
+
+      # Proof the guard can go red: it must reject the pre-fix bare-appVersion
+      # default and a stale appVersion.
+      - name: Chart image tag — guard self-test
+        run: bash scripts/tests/check-chart-image-tag.test.sh
+
       # Audit §4.8#11 / §4.12#5: release SBOMs described a stale version
       # because cargo-cyclonedx reads Cargo.toml. release.yml and docker.yml
       # stamp the tag's version with scripts/stamp-version.sh first; this

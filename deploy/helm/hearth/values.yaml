@@ -6,7 +6,7 @@
 image:
   repository: ghcr.io/hearth-auth/hearth
   pullPolicy: IfNotPresent
-  # Defaults to appVersion from Chart.yaml
+  # Defaults to v<appVersion> from Chart.yaml — the form the registry holds.
   tag: ""
 
 imagePullSecrets: []

@@ -61,10 +61,14 @@ ServiceAccount name.
 {{- end }}
 
 {{/*
-Image tag — falls back to appVersion.
+Image tag — falls back to v<appVersion>.
+
+The registry only holds v-prefixed semver tags (the Docker workflow publishes
+`type=semver,pattern=v{{version}}`), so a bare appVersion cannot be pulled
+(audit 2026-08-28 §4.8#4). Guarded by scripts/check-chart-image-tag.sh.
 */}}
 {{- define "hearth.imageTag" -}}
-{{- .Values.image.tag | default .Chart.AppVersion }}
+{{- .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}
 {{- end }}
 
 {{/*

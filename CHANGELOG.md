@@ -76,6 +76,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   including that it forbids two nodes sharing a directory or a `ReadWriteMany` mount.  **The
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
+### Fixed
+- **`helm install` can pull an image again (audit 2026-08-28 §4.8#4, §4.12#6)** — the chart's default
+  image tag was the bare `appVersion` (`ghcr.io/hearth-auth/hearth:1.6.8`), but the Docker workflow
+  publishes only v-prefixed semver tags, so a default install pulled a tag that does not exist. The
+  chart now defaults to `v<appVersion>`, its in-repo version tracks the crate version, and
+  `scripts/check-chart-image-tag.sh` fails CI if either drifts again. Override `image.tag` as before
+  to pin a different image.
+
 ### Security
 - **Both device-grant endpoints now authenticate the client (audit 2026-08-28 §4.19#4, §4.22#6)** —
   `POST /device_authorization` and the `urn:ietf:params:oauth:grant-type:device_code` arm of
