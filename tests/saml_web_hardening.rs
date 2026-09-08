@@ -400,3 +400,279 @@ fn urlencoding_lite(s: &str) -> String {
     }
     out
 }
+
+// ============================================================================
+// §4.10#4 — `want_authn_requests_signed` must not be a silent no-op.
+//
+// The flag parsed, reached the SP record, and changed nothing: an SP that
+// asked Hearth to require signed `<AuthnRequest>`s got the same unverified
+// signing oracle as an SP that did not. These tests pin the enforcement in
+// both directions — an unsigned request is refused, a signed one is honored.
+// ============================================================================
+
+/// Seeds an active user and returns a cookie header that authenticates it.
+fn authenticated_cookie(
+    identity: &dyn IdentityEngine,
+    realm_id: &hearth::core::RealmId,
+    email: &str,
+) -> String {
+    use hearth::identity::{CreateUserRequest, SessionContext, UpdateUserRequest, UserStatus};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let user = identity
+        .create_user(
+            realm_id,
+            &CreateUserRequest {
+                email: email.to_string(),
+                display_name: "SSO User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    identity
+        .update_user(
+            realm_id,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate user");
+    let session = identity
+        .create_session(realm_id, user.id(), &SessionContext::default())
+        .expect("create session");
+
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&COOKIE_SECRET).expect("hmac key");
+    mac.update(session.id().as_uuid().as_bytes());
+    mac.update(b"|");
+    mac.update(realm_id.as_uuid().as_bytes());
+    let tag = data_encoding::BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+    format!(
+        "hearth_ui_session={}.{}.{}",
+        session.id().as_uuid(),
+        realm_id.as_uuid(),
+        tag,
+    )
+}
+
+/// Registers an SP that demands signed AuthnRequests, with `cert_pem` as the
+/// registered verification certificate.
+fn register_signing_sp(
+    identity: &dyn IdentityEngine,
+    realm_id: &hearth::core::RealmId,
+    sp_key: &str,
+    entity_id: &str,
+    cert_pem: Option<String>,
+) {
+    identity
+        .register_saml_sp(
+            realm_id,
+            &SamlServiceProvider {
+                sp_key: sp_key.to_string(),
+                entity_id: entity_id.to_string(),
+                acs_url: format!("{entity_id}/acs"),
+                slo_url: None,
+                sp_certificate_pem: cert_pem,
+                sign_assertions: true,
+                sign_responses: true,
+                want_authn_requests_signed: true,
+                nameid_format: SamlNameIdFormat::EmailAddress,
+                attribute_map: BTreeMap::new(),
+            },
+        )
+        .expect("register sp");
+}
+
+fn authn_request_xml(id: &str, issuer: &str) -> String {
+    use hearth::core::Timestamp;
+    use hearth::identity::federation::saml::{build_authn_request_xml, BuildAuthnRequestParams};
+    build_authn_request_xml(&BuildAuthnRequestParams {
+        id,
+        destination: "https://hearth.example/ui/realms/demo/saml/sso",
+        issuer,
+        acs_url: &format!("{issuer}/acs"),
+        issue_instant: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        nameid_format: None,
+        force_authn: false,
+    })
+}
+
+fn post_sso(app: &axum::Router, cookie: &str, saml_request_b64: &str) -> (u16, String) {
+    let form = format!("SAMLRequest={}", urlencoding_lite(saml_request_b64));
+    let resp = send(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/ui/realms/demo/saml/sso")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", cookie)
+            .body(Body::from(form))
+            .unwrap(),
+    );
+    let status = resp.status().as_u16();
+    (status, body_string(resp))
+}
+
+/// An SP with `want_authn_requests_signed: true` must not receive an
+/// assertion for an *unsigned* AuthnRequest.
+#[test]
+fn idp_sso_refuses_unsigned_request_when_sp_wants_signed() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::identity::tokens::RsaSigningKey;
+
+    let (app, identity, realm_id) = build_app_full();
+    let sp_key = RsaSigningKey::generate("wants-signed-sp", 365).expect("sp key");
+    register_signing_sp(
+        identity.as_ref(),
+        &realm_id,
+        "wants-signed",
+        "https://wants-signed.example",
+        Some(cert_der_to_pem(sp_key.cert_der())),
+    );
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, "sso-a@demo.test");
+
+    let xml = authn_request_xml("_ar_unsigned", "https://wants-signed.example");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(xml.as_bytes()));
+
+    assert!(
+        !body.contains("SAMLResponse"),
+        "an unsigned AuthnRequest must not mint an assertion for an SP that \
+         requires signing (§4.10#4); got status {status}, body: {body}"
+    );
+    assert_eq!(
+        status, 403,
+        "an unsigned AuthnRequest must be refused with 403, got {status}"
+    );
+}
+
+/// The same SP, sending a *signed* AuthnRequest, must still be served —
+/// the gate is a signature check, not a blanket denial.
+#[test]
+fn idp_sso_honors_signed_request_when_sp_wants_signed() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::identity::federation::saml::sign_element;
+    use hearth::identity::tokens::RsaSigningKey;
+
+    let (app, identity, realm_id) = build_app_full();
+    let sp_key = RsaSigningKey::generate("wants-signed-sp", 365).expect("sp key");
+    register_signing_sp(
+        identity.as_ref(),
+        &realm_id,
+        "wants-signed",
+        "https://wants-signed.example",
+        Some(cert_der_to_pem(sp_key.cert_der())),
+    );
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, "sso-b@demo.test");
+
+    let xml = authn_request_xml("_ar_signed", "https://wants-signed.example");
+    let signed = sign_element(xml.as_bytes(), "_ar_signed", &sp_key).expect("sign request");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(&signed));
+
+    assert_eq!(
+        status, 200,
+        "a signature-verified AuthnRequest must be honored, got {status}: {body}"
+    );
+    assert!(
+        body.contains("SAMLResponse"),
+        "a signature-verified AuthnRequest must receive a signed SAMLResponse"
+    );
+}
+
+/// `want_authn_requests_signed: true` with no registered certificate has
+/// nothing to verify against. It must fail closed, not fall through to the
+/// unverified path.
+#[test]
+fn idp_sso_fails_closed_when_sp_wants_signed_without_certificate() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let (app, identity, realm_id) = build_app_full();
+    register_signing_sp(
+        identity.as_ref(),
+        &realm_id,
+        "no-cert",
+        "https://no-cert.example",
+        None,
+    );
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, "sso-c@demo.test");
+
+    let xml = authn_request_xml("_ar_nocert", "https://no-cert.example");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(xml.as_bytes()));
+
+    assert!(
+        !body.contains("SAMLResponse"),
+        "an SP that requires signing but registered no certificate must not \
+         receive an assertion; got status {status}, body: {body}"
+    );
+    assert_eq!(status, 403, "expected 403, got {status}");
+}
+
+/// An SP that leaves the flag at its `false` default keeps working — the
+/// enforcement must be scoped to the SPs that asked for it.
+#[test]
+fn idp_sso_still_serves_sp_that_does_not_want_signed_requests() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let (app, identity, realm_id) = build_app_full();
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, "sso-d@demo.test");
+
+    // `crm` is registered by `build_app_full` with the flag left false.
+    let xml = authn_request_xml("_ar_plain", "https://crm.example");
+    let (status, body) = post_sso(&app, &cookie, &B64.encode(xml.as_bytes()));
+
+    assert_eq!(
+        status, 200,
+        "an SP with want_authn_requests_signed: false must still be served, got {status}: {body}"
+    );
+    assert!(body.contains("SAMLResponse"));
+}
+
+/// The IdP metadata must tell SPs what the server actually enforces. With a
+/// realm SP requiring signed AuthnRequests, `WantAuthnRequestsSigned` must
+/// read `true` — otherwise an SP configures itself from metadata, does not
+/// sign, and is refused.
+#[test]
+fn idp_metadata_advertises_want_authn_requests_signed() {
+    let (app, identity, realm_id) = build_app_full();
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .uri("/ui/realms/demo/saml/metadata")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let body = body_string(resp);
+    assert!(
+        body.contains(r#"WantAuthnRequestsSigned="false""#),
+        "with no SP requiring signing, metadata must advertise false: {body}"
+    );
+
+    register_signing_sp(
+        identity.as_ref(),
+        &realm_id,
+        "wants-signed",
+        "https://wants-signed.example",
+        Some("-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n".to_string()),
+    );
+
+    let resp = send(
+        &app,
+        Request::builder()
+            .uri("/ui/realms/demo/saml/metadata")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let body = body_string(resp);
+    assert!(
+        body.contains(r#"WantAuthnRequestsSigned="true""#),
+        "once an SP requires signed AuthnRequests the metadata must say so: {body}"
+    );
+}

@@ -360,11 +360,24 @@ pub async fn idp_metadata(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "no key").into_response(),
     };
 
+    // Advertise what the SSO endpoint enforces (§4.10#4). SAML metadata
+    // carries one `WantAuthnRequestsSigned` per IdP, but the requirement is
+    // per SP. Advertise `true` as soon as any registered SP requires signing:
+    // an SP that signs when it need not is served normally, while an SP that
+    // does not sign when it must is refused — so erring towards `true` is the
+    // safe direction.
+    let want_signed = state
+        .identity
+        .list_saml_sps(&realm)
+        .map(|sps| sps.iter().any(|sp| sp.want_authn_requests_signed))
+        .unwrap_or(false);
+
     let xml = build_idp_metadata(&IdpMetadataParams {
         entity_id: &entity_id,
         sso_url: &sso_url,
         slo_url: Some(&slo_service_url),
         signing_cert_der: key.cert_der(),
+        want_authn_requests_signed: want_signed,
     });
 
     Response::builder()
@@ -453,6 +466,32 @@ async fn idp_complete_sso(
     let Ok(Some(sp)) = state.identity.get_saml_sp_by_entity_id(&realm, &req.issuer) else {
         return (StatusCode::NOT_FOUND, "unknown SP").into_response();
     };
+
+    // `want_authn_requests_signed` used to parse, reach this record, and
+    // change nothing — a documented security flag that was a silent no-op
+    // (audit 2026-08-28 §4.10#4). This endpoint is a signing oracle, so an SP
+    // that asked for the check gets the check. Fail closed when the SP has no
+    // certificate registered: there is nothing to verify against.
+    //
+    // The HTTP-Redirect binding carries its signature as query parameters,
+    // not inside the XML, so an SP that requires signing must use the
+    // HTTP-POST binding — same constraint as the IdP-side SLO endpoint.
+    if sp.want_authn_requests_signed {
+        let Some(sp_cert) = sp.sp_certificate_pem.as_deref() else {
+            return (
+                StatusCode::FORBIDDEN,
+                "SP requires signed AuthnRequests but has no certificate registered",
+            )
+                .into_response();
+        };
+        if verify_signed_element(&xml, "AuthnRequest", sp_cert).is_err() {
+            return (
+                StatusCode::FORBIDDEN,
+                "AuthnRequest signature did not verify",
+            )
+                .into_response();
+        }
+    }
 
     // Audit receipt.
     let _ = state.audit.append(&CreateAuditEvent {

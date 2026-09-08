@@ -291,6 +291,21 @@ fn extract_attr_of_child(
     Err(parse_err(format!("{child_local}@{attr_name} not found")))
 }
 
+/// Checks that `pem` is a PEM certificate whose RSA public key Hearth can
+/// actually use to verify a SAML signature.
+///
+/// Used at config-validation time so a malformed `sp_certificate_pem` is
+/// refused at boot rather than at the first login attempt (audit 2026-08-28
+/// §4.10#4).
+///
+/// # Errors
+///
+/// Returns `Err` when the PEM armor is unreadable or the certificate does
+/// not carry an RSA public key.
+pub fn validate_signing_cert_pem(pem: &str) -> Result<(), IdentityError> {
+    parse_cert_public_key(pem).map(|_| ())
+}
+
 /// Parses a PEM certificate and extracts the RSA public key components
 /// suitable for `ring::signature` verification.
 fn parse_cert_public_key(pem: &str) -> Result<RsaPublicKeyComponents<Vec<u8>>, IdentityError> {

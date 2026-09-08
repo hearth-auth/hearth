@@ -77,6 +77,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **`want_authn_requests_signed` is now enforced (audit 2026-08-28 §4.10#4)** — the documented
+  SAML SP flag parsed, reached the SP record, and changed nothing. The IdP SSO endpoint
+  (`/ui/realms/{realm}/saml/sso`) is a signing oracle: it mints a realm-key-signed assertion.
+  It now verifies the inbound `<AuthnRequest>` signature against the SP's `sp_certificate_pem`
+  whenever that SP sets `want_authn_requests_signed: true`, and answers **403** when the
+  signature is absent or does not verify. An SP that requires signing but has no certificate
+  registered fails closed with 403 rather than falling through to the unverified path. SPs that
+  leave the flag at its `false` default are unaffected.
+  - **Operator action:** an SP that requires signing must use the **HTTP-POST** binding. The
+    HTTP-Redirect binding carries its signature in query parameters, not in the XML, so a
+    redirect-binding request from such an SP is refused.
+  - Config validation now refuses `want_authn_requests_signed: true` without
+    `sp_certificate_pem`, and refuses an `sp_certificate_pem` that does not parse as an RSA
+    certificate. Both were previously accepted and silently unenforceable.
+  - The realm's IdP metadata now advertises `WantAuthnRequestsSigned="true"` when any
+    registered SP requires signing, so an SP configuring itself from metadata signs its
+    requests instead of being refused.
 - **`dev_mode: true` can no longer be set from a config file (audit 2026-08-28 §4.7#1)** —
   a single line in `hearth.yaml` armed the entire development perimeter on a release binary:
   weakened Argon2 parameters, the CSRF skip, the plaintext setup token, and every production

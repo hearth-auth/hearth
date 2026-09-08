@@ -43,7 +43,9 @@ pub mod sp;
 pub mod types;
 pub mod xml;
 
-pub use authn_request::{build_authn_request_xml, parse_authn_request, AuthnRequest};
+pub use authn_request::{
+    build_authn_request_xml, parse_authn_request, AuthnRequest, BuildAuthnRequestParams,
+};
 pub use binding::{
     build_post_form_html, build_redirect_url, decode_redirect_request, parse_post_form_saml,
 };
@@ -62,7 +64,9 @@ pub use response::{
     build_response_xml, extract_and_validate_assertion, parse_response, Assertion, ResponseBuilder,
     SamlResponse,
 };
-pub use signature::{sign_element, verify_signed_element, SignedElement};
+pub use signature::{
+    sign_element, validate_signing_cert_pem, verify_signed_element, SignedElement,
+};
 pub use sp::{SamlSpOutcome, SamlSpService};
 pub use types::{
     AttributeMap, SamlIdpConfig, SamlNameIdFormat, SamlServiceProvider, SamlSessionRegistration,

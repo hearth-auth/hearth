@@ -96,14 +96,23 @@ pub struct SamlServiceProvider {
     pub acs_url: String,
     /// SP's SingleLogoutService URL (optional).
     pub slo_url: Option<String>,
-    /// SP's signing certificate PEM (for validating signed AuthnRequests).
-    /// Optional — if absent, AuthnRequests are not validated.
+    /// SP's signing certificate PEM. Verifies signed `<AuthnRequest>`s and
+    /// `<LogoutRequest>`s from this SP.
+    ///
+    /// Required when `want_authn_requests_signed` is true — config validation
+    /// refuses the pairing without it, and the SSO endpoint fails closed if a
+    /// runtime registration reaches that state anyway.
     pub sp_certificate_pem: Option<String>,
     /// Sign individual `<Assertion>` elements.
     pub sign_assertions: bool,
     /// Sign the outer `<Response>` envelope.
     pub sign_responses: bool,
-    /// If true, reject incoming `<AuthnRequest>`s that are not signed.
+    /// If true, reject incoming `<AuthnRequest>`s that do not carry a
+    /// signature verifiable against `sp_certificate_pem`.
+    ///
+    /// The HTTP-Redirect binding carries its signature in query parameters,
+    /// not in the XML, so an SP with this flag set must use the HTTP-POST
+    /// binding.
     pub want_authn_requests_signed: bool,
     /// NameID format to use in issued assertions.
     pub nameid_format: SamlNameIdFormat,
