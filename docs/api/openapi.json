@@ -190,7 +190,7 @@
           }
         }
       },
-      "put": {
+      "patch": {
         "operationId": "ApplicationAdminService_UpdateApplication",
         "tags": [
           "ApplicationAdminService"

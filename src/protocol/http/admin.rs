@@ -2228,7 +2228,7 @@ async fn admin_get_client(
     }
 }
 
-/// JSON body for `PUT /admin/applications/{id}`.
+/// JSON body for `PATCH /admin/applications/{id}`.
 ///
 /// Extends the proto `UpdateClientRequest` with logout URI fields that are
 /// not (yet) in the proto schema.

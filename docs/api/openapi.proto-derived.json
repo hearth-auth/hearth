@@ -130,7 +130,7 @@
           "ApplicationAdminService"
         ]
       },
-      "put": {
+      "patch": {
         "operationId": "ApplicationAdminService_UpdateApplication",
         "responses": {
           "200": {

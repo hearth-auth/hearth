@@ -87,6 +87,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **`PATCH /admin/applications/{id}`, not `PUT` — corrected everywhere it was documented (audit
+  2026-08-28 §4.12#19)** — the route has always been registered as `PATCH`; `PUT` on that path
+  returns **405 Method Not Allowed**. Four places said otherwise: `docs/guides/admin-api.md` and
+  `docs/guides/rbac.mdx` (including a runnable `curl -X PUT` example), the published OpenAPI
+  specs, and the handler's own doc comment. The proto has always declared `patch`, so the
+  checked-in `docs/api/openapi.proto-derived.json` had drifted from it. The UI suite's global
+  setup was the concrete casualty: it sent `PUT` to enable `require_consent` and the
+  `device_code` grant on the seeded test app, got 405 on every run, and never checked the
+  response — so the consent and device-authorization flow specs ran against an app with neither,
+  and the run exited 0. The setup now sends `PATCH` and throws on a non-2xx response, because a
+  setup step that cannot build its fixture must stop the run rather than hand the suite a broken
+  one.
 - **CI now runs the test suite under the profile written for it (audit 2026-08-28 §4.12#18)** —
   `.config/nextest.toml` declared `[profile.ci]` with `retries = 2` and `fail-fast = false`, and
   nothing anywhere selected it. Every run used `[profile.default]` instead: `retries = 0`,
