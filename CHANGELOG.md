@@ -15,13 +15,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (`getRealm`, `listRealms`) are unaffected. All seven SDK test suites now run in CI.
 
 ### Added
-- **Releases now ship a validation summary and are gated on the test suite (HEA-1264)** —
-  every GitHub Release carries a new `validation-summary.txt` asset recording the per-gate
-  verdicts, test counts, and benchmark deltas from the tagged commit, and the release notes
-  link to it under a **Validation** heading. The publish job is gated on that validation run,
-  so a release whose test suite, test-quality gate, abuse-coverage gate, or ROPC ban gate
-  fails is never published. The manual procedure is documented in
+- **Releases now ship a validation summary, and the binary channel is gated on the test suite
+  (HEA-1264)** — every GitHub Release carries a new `validation-summary.txt` asset recording the
+  per-gate verdicts, test counts, and benchmark deltas from the tagged commit, and the release
+  notes link to it under a **Validation** heading. The GitHub Release binary job waits for that
+  validation run, so a *binary* release whose test suite, test-quality gate, abuse-coverage gate,
+  or ROPC ban gate fails is not published. The manual procedure is documented in
   [`docs/ops/RELEASE_VALIDATION.md`](docs/ops/RELEASE_VALIDATION.md).
+
+  **Correction (audit 2026-08-28 §4.12#14).** This entry first said "a release … is never
+  published", without qualification. That was not true when it was written: HEA-1264 gated only
+  the GitHub Release binary channel. The container image, the Helm chart and the SDK packages had
+  no such wait, and v1.6.11 published all of them from a commit whose suite failed four tests —
+  the image and chart 37 minutes *before* the validation job wrote "Release is NOT cleared to
+  publish". The unqualified claim is corrected above rather than deleted, because it was the
+  sentence an operator would have relied on. Every channel does wait now; see "Every release
+  channel now waits for a green verdict before it publishes" below for what closed the gap and
+  which two channels still alarm rather than block.
 - **Release validation now verifies the documented install paths work anonymously (audit
   2026-08-28 §4.8#5, §4.12#4)** — the README's `docker pull` and `helm install` commands failed
   at the first request because both GHCR packages are private. `scripts/check-install-paths.sh`
