@@ -87,6 +87,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **A write fault during WAL rotation no longer leaves an unopenable data directory (audit
+  2026-08-28 §4.11#6)** — a WAL segment opens with an 82-byte header. A fault while that header
+  was being written left 1–81 bytes on disk, which `open()` refused with `WAL file too small for
+  headers: N bytes` on every later start, with no documented repair. Startup now re-initialises a
+  segment that short: the record region begins at byte 82 and the shortest record is 24 bytes, so
+  those bytes can hold no acknowledged record and nothing is lost. A rotation that fails after it
+  truncated the segment also fences the WAL, because the in-memory rotation state still names the
+  previous key — before, every later write was acknowledged and encrypted under a key the on-disk
+  header no longer carried. Both cases are logged, and the repair is documented in
+  [`docs/guides/disaster-recovery.md`](docs/guides/disaster-recovery.md) under **Partial WAL
+  header**.
 - **One failed WAL write no longer makes the whole segment permanently unopenable (audit
   2026-08-28 §4.11#5)** — on the `SyncMode::None` write path, used by `--dev` and by the CLI
   subcommands that open a data directory, a failed write still consumed the record number it had

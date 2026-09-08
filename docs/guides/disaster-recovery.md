@@ -199,6 +199,45 @@ intervene for the normal torn-write case.
   Raft log replay supersedes the local WAL in that case — no operator
   action needed.
 
+### Partial WAL header
+
+A WAL segment starts with an 82-byte header: a 4-byte `HWAL` magic, a 2-byte
+format version, and a 76-byte encryption header. Hearth writes it in one call,
+when it creates a segment and again each time it rotates one. A write fault at
+that moment (a full disk, a failing device) can still leave the header short.
+
+You see this at startup:
+
+```
+WARN storage: WAL recovery: header is shorter than one complete header
+              (write fault during segment creation or rotation) —
+              re-initialising an empty segment; no record can be lost
+              because the record region starts at byte 82
+```
+
+This is **handled automatically**, and it loses nothing. Records begin at byte
+82, and the shortest record is 24 bytes, so a segment of 81 bytes or fewer holds
+no record at all. Hearth re-initialises it as an empty segment and starts.
+
+If the fault happened during a *rotation*, the writes that segment held were
+already flushed to an SST before the truncation, so they are still on disk.
+Hearth also fences the WAL at that point, so every write after the fault is
+refused rather than acknowledged:
+
+```
+ERROR storage: WAL rotation failed after the segment was truncated —
+               WAL fenced; the next start re-initialises the segment
+```
+
+**A fence is permanent for the life of the process.** Restart Hearth to clear
+it.
+
+**When operator action is required.** If the warning returns on every restart,
+the device is rejecting writes. Stop writing to it, copy the data directory to
+known-good storage, and restart there. There is no manual repair command: do
+**not** hand-edit or delete a WAL segment that is 82 bytes or longer, because
+that one does hold records.
+
 ---
 
 ## Data directory already locked

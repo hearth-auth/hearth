@@ -190,3 +190,87 @@ fn simulation_concurrent_writer_ack_survives_wal_rotation() {
         "a write acknowledged before a concurrent rotation must survive it"
     );
 }
+
+/// A write fault during WAL rotation must fence the WAL and leave a segment the
+/// next start can open (audit 2026-08-28 §4.11#6).
+///
+/// `rotate_locked` truncates the segment and then writes a fresh 82-byte
+/// header. A fault between those two steps left a 1-81-byte header that `open()`
+/// refused, while the in-memory rotation state still held the *old* DEK and
+/// record counter — so every later append encrypted under a key the header no
+/// longer named. Neither the refusal nor the mismatch was reported.
+#[test]
+fn simulation_write_fault_during_rotation_fences_and_leaves_openable_segment() {
+    use std::sync::Arc;
+
+    use hearth::core::Timestamp;
+    use hearth::storage::encryption;
+    use hearth::storage::fs::RealFs;
+    use hearth::storage::wal::{Wal, WalEntry, WalOperation};
+
+    use crate::FaultFs;
+
+    let mut kek_bytes = [0u8; 32];
+    for (i, b) in kek_bytes.iter_mut().enumerate() {
+        *b = (i * 13 + 7) as u8;
+    }
+    let kek = encryption::KeyEncryptionKey::from_bytes(kek_bytes);
+    let kek_id = [0x42u8; encryption::KEK_ID_SIZE];
+
+    let entry = |key: &[u8]| WalEntry {
+        timestamp: Timestamp::from_micros(1_700_000_000_000_000),
+        realm_id: RealmId::generate(),
+        operation: WalOperation::Put,
+        key: key.to_vec(),
+        value: b"value".to_vec(),
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_path = dir.path().join("test.wal");
+    // Small enough that the second append must rotate.
+    let config = WalConfig {
+        max_size: 200,
+        sync_mode: SyncMode::None,
+    };
+
+    let fs = Arc::new(FaultFs::new());
+    {
+        let wal = Wal::open_with_fs(
+            &wal_path,
+            config.clone(),
+            Arc::<FaultFs>::clone(&fs) as Arc<dyn hearth::storage::fs::Fs>,
+            &kek,
+            kek_id,
+        )
+        .expect("open wal");
+
+        wal.append(&entry(b"before-rotation"))
+            .expect("first append");
+
+        // Fail every write from here on, half-written — the shape of a real
+        // short write. The next one is the rotation header.
+        fs.config.fail_write_after(0);
+        wal.append(&entry(b"triggers-rotation"))
+            .expect_err("a write fault during rotation must surface");
+
+        // Disarm, so the next append fails only if the WAL is genuinely
+        // fenced rather than because its own write was injected-to-fail.
+        fs.config.fail_write_after(u64::MAX);
+        wal.append(&entry(b"after-the-fault"))
+            .expect_err("the WAL must be fenced after a failed rotation");
+    }
+
+    let header_bytes = std::fs::metadata(&wal_path).expect("stat wal").len();
+    assert!(
+        header_bytes < 82,
+        "the fault must leave a short header for the repair path to handle, got {header_bytes} bytes"
+    );
+
+    let wal = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id)
+        .expect("a failed rotation must not make the data directory unopenable");
+    assert_eq!(
+        wal.read_all().expect("read after repair"),
+        vec![],
+        "rotation truncated the segment, so it must reopen empty"
+    );
+}

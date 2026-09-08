@@ -921,6 +921,53 @@ fn rebuild_truncated_segment(
     Ok((new_dek, new_header))
 }
 
+/// Re-initialises a WAL segment whose header is shorter than one complete
+/// header, and returns the size to continue the open with.
+///
+/// A write fault during segment creation or rotation can leave a header of
+/// 1-81 bytes for v1, or 1-75 bytes for v0. `open()` used to refuse every such
+/// file, and no repair was documented, so one short write left the data
+/// directory permanently unopenable (audit 2026-08-28 §4.11#6).
+///
+/// No acknowledged record can be in those bytes: the v1 record region starts at
+/// byte 82 and the v0 region at byte 76, and the shortest record is 24 bytes.
+/// Re-initialising therefore discards nothing, and it is the only outcome that
+/// lets the process start.
+fn repair_partial_header(
+    path: &Path,
+    file: &mut dyn FsFile,
+    file_size: u64,
+) -> Result<u64, StorageError> {
+    if file_size == 0 || file_size >= V1_RECORD_OFFSET {
+        return Ok(file_size);
+    }
+
+    let mut head = Vec::new();
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_end(&mut head)?;
+
+    let partial_v1 = head.starts_with(&WAL_MAGIC);
+    let partial_v0 = !partial_v1 && head.len() < ENCRYPTION_HEADER_SIZE;
+    if !(partial_v1 || partial_v0) {
+        // A complete v0 header with no records: the legacy migration path
+        // handles it.
+        file.seek(SeekFrom::Start(0))?;
+        return Ok(file_size);
+    }
+
+    tracing::warn!(
+        path = %path.display(),
+        header_bytes = file_size,
+        "WAL recovery: header is shorter than one complete header (write fault \
+         during segment creation or rotation) — re-initialising an empty \
+         segment; no record can be lost because the record region starts at \
+         byte 82"
+    );
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(0)
+}
+
 impl Wal {
     /// Opens or creates a WAL file at the given path using a custom filesystem.
     ///
@@ -934,6 +981,8 @@ impl Wal {
     ) -> Result<Self, StorageError> {
         let mut file = fs.open_append(path)?;
         let file_size = file.seek(SeekFrom::End(0))?;
+
+        let file_size = repair_partial_header(path, &mut *file, file_size)?;
 
         let (dek, enc_header, record_count) = if file_size == 0 {
             // New file: write version header then encryption header.
@@ -1753,14 +1802,37 @@ impl Wal {
             flush()?;
         }
 
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&WAL_MAGIC)?;
-        file.write_all(&WAL_VERSION_CURRENT.to_le_bytes())?;
-        file.write_all(&new_enc_header.to_bytes())?;
+        // Everything from here on is past the point of no return: the segment
+        // has been truncated. A failure now leaves a header shorter than 82
+        // bytes while `self.rotation` still names the OLD DEK and record
+        // counter, so any later append would encrypt under a key the on-disk
+        // header no longer carries. Fence instead (audit 2026-08-28 §4.11#6).
+        let rotate_result: Result<(), StorageError> = (|| {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
 
-        if self.config.sync_mode == SyncMode::EveryWrite {
-            file.sync_all()?;
+            // One `write_all` for the whole header: three gave three chances to
+            // leave a stub the next start had to repair.
+            let mut header = Vec::with_capacity(V1_RECORD_OFFSET as usize);
+            header.extend_from_slice(&WAL_MAGIC);
+            header.extend_from_slice(&WAL_VERSION_CURRENT.to_le_bytes());
+            header.extend_from_slice(&new_enc_header.to_bytes());
+            file.write_all(&header)?;
+
+            if self.config.sync_mode == SyncMode::EveryWrite {
+                file.sync_all()?;
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = rotate_result {
+            self.fenced.store(true, Ordering::Release);
+            tracing::error!(
+                error = %err,
+                "WAL rotation failed after the segment was truncated — WAL fenced; \
+                 the next start re-initialises the segment"
+            );
+            return Err(err);
         }
 
         // Swap DEK, enc header, and nonce counter atomically under one mutex
@@ -1865,6 +1937,60 @@ mod tests {
             "new empty WAL should be exactly {} bytes",
             V1_RECORD_OFFSET
         );
+    }
+
+    /// A write fault during segment creation or rotation can leave a header
+    /// shorter than the 82-byte v1 header. `open()` refused every such file
+    /// with `WAL file too small for headers`, and no repair was documented, so
+    /// one short write left the data directory permanently unopenable
+    /// (audit 2026-08-28 §4.11#6).
+    ///
+    /// No record can live in those bytes — the v1 record region starts at byte
+    /// 82 — so the segment is re-initialised instead.
+    #[test]
+    fn partial_wal_header_reinitialised_rather_than_refused() {
+        for truncate_to in [1u64, 3, 5, 40, 81] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wal_path = dir.path().join("test.wal");
+            let config = WalConfig {
+                max_size: 0,
+                sync_mode: SyncMode::None,
+            };
+
+            let entry = make_entry(b"after-repair", b"value", WalOperation::Put);
+
+            // Create a healthy segment, then cut its header short.
+            {
+                let wal = open_test_wal(&wal_path, config.clone());
+                drop(wal);
+            }
+            {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&wal_path)
+                    .expect("open for truncation");
+                file.set_len(truncate_to).expect("truncate header");
+            }
+
+            // Reopen: must succeed and present an empty, appendable segment.
+            {
+                let wal = open_test_wal(&wal_path, config.clone());
+                assert_eq!(
+                    wal.read_all().expect("read after repair"),
+                    vec![],
+                    "a {truncate_to}-byte header holds no record"
+                );
+                wal.append(&entry).expect("append after repair");
+            }
+
+            // And the repaired segment survives another restart.
+            let wal = open_test_wal(&wal_path, config);
+            assert_eq!(
+                wal.read_all().expect("read after restart"),
+                vec![entry],
+                "the record written after repair must replay (truncate_to={truncate_to})"
+            );
+        }
     }
 
     #[test]
