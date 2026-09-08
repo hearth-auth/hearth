@@ -522,7 +522,13 @@ checks run identically on both paths. Any other content type is rejected with
 | Pushed Authorization Request (PAR) | `POST /as/par` | `POST /realms/{realm}/as/par` | RFC 9126 §2.1 |
 
 Client credentials carried in the request body (`client_id` / `client_secret`, RFC 6749 §2.3.1)
-are honoured on the form path as well as the header path. Dynamic client registration
+are honoured on the form path as well as the header path.
+
+A **confidential** client MUST authenticate on both device-grant endpoints — the device
+authorization request (RFC 8628 §3.1) and the device access token request (RFC 8628 §3.4) — with
+the same rule the `authorization_code` arm applies. HTTP Basic Auth takes precedence; body
+`client_secret` is the `client_secret_post` fallback. A missing or wrong secret returns `401`
+`invalid_client`. Public clients carry no secret and are unaffected. Dynamic client registration
 (`POST /register`, RFC 7591) and the JSON permission-decision endpoint remain JSON-only by design.
 
 ---
@@ -538,6 +544,7 @@ are honoured on the form path as well as the header path. Dynamic client registr
 | `tests/private_key_jwt.rs` | `private_key_jwt` client authentication |
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
+| `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 

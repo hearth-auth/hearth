@@ -1677,6 +1677,19 @@ async fn token_exchange_impl(
             }
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
+            // RFC 8628 §3.4: the device access token request authenticates the
+            // client exactly as the `authorization_code` arm does
+            // (audit §4.19#4, §4.22#6).
+            if let Err(resp) = enforce_confidential_client_auth(
+                &state,
+                &realm_id,
+                &headers,
+                &body.client_id,
+                body.client_secret.as_deref(),
+            ) {
+                return resp;
+            }
+
             let Some(device_code) = body.device_code else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -2111,6 +2124,20 @@ async fn device_authorization(
         }
     };
     if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
+    }
+
+    // RFC 8628 §3.1: a confidential client authenticates here exactly as it
+    // does at the token endpoint. Without this, a party holding only the
+    // client identifier ran the whole flow under that client's identity
+    // (audit §4.19#4, §4.22#6). Public clients pass through unchanged.
+    if let Err(resp) = enforce_confidential_client_auth(
+        &state,
+        &realm_id,
+        &headers,
+        &body.client_id,
+        body.client_secret.as_deref(),
+    ) {
         return resp;
     }
 
@@ -2705,6 +2732,18 @@ async fn realm_token_exchange(
             }
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
+            // RFC 8628 §3.4 — same rule as the header-routed twin
+            // (audit §4.19#4, §4.22#6).
+            if let Err(resp) = enforce_confidential_client_auth(
+                &state,
+                &realm_id,
+                &headers,
+                &body.client_id,
+                body.client_secret.as_deref(),
+            ) {
+                return resp;
+            }
+
             let Some(device_code) = body.device_code else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -3071,6 +3110,7 @@ async fn realm_userinfo(
 async fn realm_device_authorization(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
@@ -3098,6 +3138,17 @@ async fn realm_device_authorization(
         }
     };
     if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
+    }
+    // RFC 8628 §3.1 — same confidential-client rule as the header-routed twin
+    // (audit §4.19#4, §4.22#6).
+    if let Err(resp) = enforce_confidential_client_auth(
+        &state,
+        &realm_id,
+        &headers,
+        &client_id_str,
+        body.get("client_secret").and_then(|v| v.as_str()),
+    ) {
         return resp;
     }
     let request = crate::identity::DeviceAuthorizationRequest {

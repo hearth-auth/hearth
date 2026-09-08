@@ -77,6 +77,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **Both device-grant endpoints now authenticate the client (audit 2026-08-28 §4.19#4, §4.22#6)** —
+  `POST /device_authorization` and the `urn:ietf:params:oauth:grant-type:device_code` arm of
+  `POST /token` read only `client_id`, so a party without the client secret could run the whole
+  RFC 8628 flow under a confidential client's identity. Both endpoints — and both realm-scoped
+  twins — now require a **confidential** client to authenticate, as RFC 8628 §3.1 and §3.4
+  mandate: HTTP Basic Auth takes precedence, body `client_secret` is the `client_secret_post`
+  fallback, and a missing or wrong secret returns **401 `invalid_client`**. Public clients carry
+  no secret and are unaffected. **Integrator action:** a confidential device client must now send
+  its secret to both endpoints. `DeviceAuthorizationRequest` gains an optional `client_secret`
+  field (proto field 3), so regenerate SDK types if you pin them.
 - **A reversed audit time window no longer aborts the process (audit 2026-08-28 §4.9#7)** — `GET
   /admin/audit?start_time=…&end_time=…` with `start_time` after `end_time` built a reversed storage
   scan window, which indexed a legacy SST body out of order and killed the whole multi-tenant

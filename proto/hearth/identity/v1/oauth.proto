@@ -128,6 +128,10 @@ message ClientCredentialsResponse {
 message DeviceAuthorizationRequest {
   string client_id = 1;
   optional string scope = 2;
+  // Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth
+  // is preferred and takes precedence; this is the client_secret_post
+  // fallback. Public clients omit it.
+  optional string client_secret = 3;
 }
 
 // Response from a device authorization request (RFC 8628 s3.2).

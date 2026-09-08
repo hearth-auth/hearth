@@ -100,7 +100,7 @@ found it, the audit piece, and the report's severity.
 - [x] 12.3 Truncate on character boundaries in the audit-log pill and the SAML `NameID` sink; byte-offset slicing crashes the whole process under `panic=abort`, reproduced at `realms.rs:787:34` with `/health` going to connection-refused (§4.4#1, §4.10#3 · P25/P23 · HIGH)
 - [x] 12.4 Bound SCIM filter recursion; a ~6 KB authenticated request overflows the stack and aborts the multi-tenant process on both `/Users` and `/Groups` (§4.6#1 · P24 · HIGH)
 - [x] 12.5 Reject a reversed scan window (`start > end`) before `range_scan_inner`; one `GET /admin/audit` killed the process with SIGABRT in 6 of 6 runs (§4.9#7 · P12 · HIGH)
-- [ ] 12.6 Authenticate the client on both device-grant endpoints per RFC 8628 §3.4; a party without the client secret runs the whole flow under a confidential client's identity (§4.19#4, §4.22#6 · P05/P10 · HIGH)
+- [x] 12.6 Authenticate the client on both device-grant endpoints per RFC 8628 §3.4; a party without the client secret runs the whole flow under a confidential client's identity (§4.19#4, §4.22#6 · P05/P10 · HIGH)
 
 ## 13. Wave 3 — Build and release integrity
 
