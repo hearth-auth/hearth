@@ -117,7 +117,7 @@ found it, the audit piece, and the report's severity.
 - [x] 13.11 Stop the shipped Docker Compose file sourcing the repository-root `.env` into the container's runtime environment (§4.8#17 · LOW)
 - [x] 13.12 Relabel published container images `Apache-2.0`; every image is labelled `AGPL-3.0-only` and the project relicensed three months ago (§4.12#7 · MEDIUM)
 - [x] 13.13 Make three `ci.yml` SDK jobs and every job in five other workflows able to fail the required check (§4.12#12 · MEDIUM)
-- [ ] 13.14 Fix `make sdk-smoke-local`, which fails on any checkout with the documented `hearth.yaml` because it boots `--dev` from the repo root with no `--config` (§4.12#13 · MEDIUM)
+- [x] 13.14 Fix `make sdk-smoke-local`, which fails on any checkout with the documented `hearth.yaml` because it boots `--dev` from the repo root with no `--config` (§4.12#13 · MEDIUM)
 - [ ] 13.15 Correct the CHANGELOG claim that a release whose test suite fails "is never published" (§4.12#14 · CLAIM-DEFECT)
 - [ ] 13.16 Add `protoc` to the README prerequisites and correct the walkthrough's client secret and four JWT claims the server does not return (§4.12#16 · LOW)
 - [ ] 13.17 Make `[profile.ci]` live so a red suite does not under-report by a third and a real flake can be retried; every run is currently fail-fast (§4.12#18 · Informational)

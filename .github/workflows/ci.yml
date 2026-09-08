@@ -369,6 +369,19 @@ jobs:
       - name: Required-check coverage — guard self-test
         run: bash scripts/tests/check-required-summary-coverage.test.sh
 
+      # Audit §4.12#13: `make sdk-smoke-local` booted `serve --dev` from the
+      # repo root with no --config. That auto-detects ./hearth.yaml, which
+      # CLAUDE.md tells every contributor to create, so the smoke ran against
+      # the contributor's config — issuer https://auth.example.com, not the
+      # local port. CI never saw it: hearth.yaml is gitignored.
+      - name: Dev-server config isolation (check-dev-server-config-isolation.sh)
+        run: bash scripts/check-dev-server-config-isolation.sh
+
+      # Proof the guard can go red: it must reject the pre-fix bare launch and a
+      # cd into a directory the script did not create.
+      - name: Dev-server config isolation — guard self-test
+        run: bash scripts/tests/check-dev-server-config-isolation.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and

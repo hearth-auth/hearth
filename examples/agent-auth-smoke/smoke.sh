@@ -73,8 +73,15 @@ PORT=$(free_port)
 DATA_DIR="$(mktemp -d -t hearth-agent-auth-XXXXXX)"
 BASE="http://127.0.0.1:${PORT}"
 
-echo "==> Starting hearth serve --dev (port ${PORT})"
-"$BIN" serve --dev --port "$PORT" >"$DATA_DIR/hearth.log" 2>&1 &
+# Audit 2026-08-28 §4.12#13: launch from an empty directory. `serve --dev` with
+# no `--config` auto-detects a `hearth.yaml` in the working directory, and
+# CLAUDE.md tells every contributor to `cp hearth.example.yaml hearth.yaml`. The
+# example sets `oidc.issuer: https://auth.example.com`, so the minted tokens
+# carry `iss=https://auth.example.com/realms/dev-realm` instead of the local
+# port — and any client that fetches JWKS from the issuer fails. CI never saw it
+# because hearth.yaml is gitignored and absent there.
+echo "==> Starting hearth serve --dev (port ${PORT}, cwd ${DATA_DIR})"
+( cd "$DATA_DIR" && exec "$BIN" serve --dev --port "$PORT" ) >"$DATA_DIR/hearth.log" 2>&1 &
 HEARTH_PID=$!
 
 for _ in $(seq 1 60); do

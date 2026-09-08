@@ -13,12 +13,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HEARTH_PID=""
 GIN_PID=""
 DEMO_PID=""
+HEARTH_CWD=""
 
 cleanup() {
     [ -n "$DEMO_PID" ]   && kill "$DEMO_PID"   2>/dev/null || true
     [ -n "$GIN_PID" ]    && kill "$GIN_PID"    2>/dev/null || true
     [ -n "$HEARTH_PID" ] && kill "$HEARTH_PID" 2>/dev/null || true
     [ -n "$HEARTH_PID" ] && wait "$HEARTH_PID" 2>/dev/null || true
+    [ -n "$HEARTH_CWD" ] && rm -rf "$HEARTH_CWD" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -38,8 +40,22 @@ HEARTH_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 HEARTH_BIN="$HEARTH_TARGET_DIR/debug/hearth"
 
 # ── 2. Start hearth --dev ─────────────────────────────────────────────────────
-echo "==> Starting hearth serve --dev on port ${HEARTH_PORT}"
-"$HEARTH_BIN" serve --dev --port "$HEARTH_PORT" &
+#
+# Audit 2026-08-28 §4.12#13: this used to launch from $REPO_ROOT. `serve --dev`
+# with no `--config` auto-detects a `hearth.yaml` in the working directory
+# (`load_config` in src/main.rs), and CLAUDE.md tells every contributor to run
+# `cp hearth.example.yaml hearth.yaml` as a first step. So on any checkout set
+# up as documented, this script booted the contributor's own config instead of
+# the dev preset and the smoke failed — while CI passed, because hearth.yaml is
+# gitignored and therefore absent there.
+#
+# Launching from an empty directory is what makes this script the "host-side
+# reproduction of the SDK smoke CI jobs" its header claims to be: no config file
+# to detect, so `Config::dev()` is used, exactly as in CI. `--dev` keeps storage
+# in memory, so the directory stays empty and is removed by cleanup().
+HEARTH_CWD="$(mktemp -d)"
+echo "==> Starting hearth serve --dev on port ${HEARTH_PORT} (cwd ${HEARTH_CWD})"
+( cd "$HEARTH_CWD" && exec "$HEARTH_BIN" serve --dev --port "$HEARTH_PORT" ) &
 HEARTH_PID=$!
 
 echo "==> Waiting for /health"

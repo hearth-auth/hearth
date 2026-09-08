@@ -77,6 +77,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Local smoke scripts no longer boot against your own `hearth.yaml` (audit 2026-08-28 §4.12#13)** —
+  `make sdk-smoke-local` launched `hearth serve --dev` from the repository root with no `--config`.
+  That auto-detects a `hearth.yaml` in the working directory, and `CLAUDE.md` tells every
+  contributor to run `cp hearth.example.yaml hearth.yaml`. Measured against the same binary,
+  changing only the working directory: from an empty directory the minted tokens carry
+  `iss=http://127.0.0.1:<port>/realms/dev-realm`; from a directory holding the shipped example they
+  carry `iss=https://auth.example.com/realms/dev-realm`, so every JWKS lookup left the machine. CI
+  never saw it, because `hearth.yaml` is gitignored and absent on a fresh checkout. Five launchers
+  had the same shape and all now run from a directory they create themselves:
+  `scripts/sdk-smoke-local.sh`, `scripts/check-cluster-routes.sh`, `sdks/start-server.sh`,
+  `examples/agent-auth-smoke/smoke.sh` and `examples/rbac-smoke-test/smoke.sh`.
+  `sdks/start-server.sh` now also prints `data_dir=` — the caller should `rm -rf` it after
+  `kill $pid`. `scripts/check-dev-server-config-isolation.sh` holds the rule.
 - **CI jobs that could not fail a merge now can (audit 2026-08-28 §4.12#12)** — `required-summary`
   in `ci.yml` is the only required status check on `main`, so a job blocks a merge exactly when it
   reaches that job. Three did not: the `sdk-kotlin`, `sdk-go` and `sdk-typescript` jobs ran, went

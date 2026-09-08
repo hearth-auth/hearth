@@ -268,6 +268,12 @@ required-summary-check: ## Assert every CI job can fail the required check
 	@bash scripts/check-required-summary-coverage.sh
 	@bash scripts/tests/check-required-summary-coverage.test.sh
 
+## Guard: a script that boots `serve --dev` must control which config the
+## server reads (audit 2026-08-28 §4.12#13). Runs in ci.yml's filter job.
+dev-config-isolation-check: ## Assert every serve --dev launch is config-isolated
+	@bash scripts/check-dev-server-config-isolation.sh
+	@bash scripts/tests/check-dev-server-config-isolation.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).
