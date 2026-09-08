@@ -223,6 +223,13 @@ proto-freshness-check: ## Assert nothing can drift generated SDK types past the 
 attribution-key-check: ## Assert the THIRD_PARTY_LICENSES freshness key is honest
 	@bash scripts/tests/attribution-key.test.sh
 
+## Guard: every command in the release-verification guide must execute, and the
+## README's install step must verify something an attacker cannot forge
+## (audit 2026-08-28 §4.8#12). Runs in ci.yml's filter job.
+verify-docs-check: ## Assert the documented release-verification path works
+	@bash scripts/check-release-verification-docs.sh
+	@bash scripts/tests/check-release-verification-docs.test.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).

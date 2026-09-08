@@ -109,7 +109,7 @@ found it, the audit piece, and the report's severity.
 - [x] 13.3 Run the generated-SDK freshness check where the paths filter reaches, so TS and Go types cannot drift from `proto/` past the PR gate (§4.8#8 · MEDIUM)
 - [x] 13.4 Encode the crypto-backend and HTTP-client bans in `deny.toml`; a third crypto backend and a policy-banned HTTP client are linked into the published binary (§4.8#9 · MEDIUM)
 - [x] 13.5 Stop the attribution freshness key hashing the whole `Cargo.lock` including the workspace's own version, which trips a legal-attribution gate with nothing to attribute (§4.8#10 · LOW)
-- [ ] 13.6 Fix the two failing commands in the release-verification guide, and make the README's headline install step verify something an attacker could not forge (§4.8#12 · MEDIUM)
+- [x] 13.6 Fix the two failing commands in the release-verification guide, and make the README's headline install step verify something an attacker could not forge (§4.8#12 · MEDIUM)
 - [ ] 13.7 Pin the third-party reusable workflow holding `contents: write` + `id-token: write` to a commit SHA and correct its justification (§4.8#13 · MEDIUM)
 - [ ] 13.8 Make the systemd crash-loop limiter take effect; it is silently ignored (§4.8#14 · LOW)
 - [ ] 13.9 Correct the three false statements the Dockerfile makes about the build it defines (§4.8#15 · Informational)

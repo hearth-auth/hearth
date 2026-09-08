@@ -77,6 +77,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **The documented release verification now proves something an attacker cannot forge (audit
+  2026-08-28 §4.8#12)** — the README's headline install step downloaded the binary and `SHA256SUMS`
+  from the same release page and ran `sha256sum -c`. Anyone able to replace the binary can replace
+  the manifest beside it, so the check proved nothing. Both install blocks now verify `SHA256SUMS`
+  with `cosign verify-blob` against the pinned release-workflow identity and OIDC issuer **before**
+  comparing against it. Two commands in `docs/guides/verify-release.md` that could not execute are
+  replaced: `cosign triangulate --type=blob` (triangulate takes an image reference, not a detached
+  blob signature — use `rekor-cli search --artifact`) and `brew install slsa-verifier` (no such
+  formula — install with `go install`). The guide's `SHA256SUMS` row no longer claims the manifest
+  contains its own checksum, and the macOS `shasum -a 256 -c` alternative is documented.
+  `scripts/check-release-verification-docs.sh` gates all of this in CI.
 - **The legal-attribution gate no longer trips with nothing to attribute (audit 2026-08-28
   §4.8#10)** — `make notice` stored a whole-file SHA-256 of `Cargo.lock`, and `make notice-check`
   compared against it. The workspace's own packages are entries in that file, so every release

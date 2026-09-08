@@ -257,6 +257,22 @@ jobs:
       - name: README version drift — guard self-test
         run: bash scripts/tests/check-readme-version.test.sh
 
+      # Audit §4.8#12: the verification guide told the reader to run two
+      # commands that cannot execute (`cosign triangulate` on a detached blob
+      # signature, and `brew install slsa-verifier`, which has no formula), and
+      # the README's headline install step downloaded the binary and SHA256SUMS
+      # from the same release page and ran `sha256sum -c` — a check anyone who
+      # can replace the binary can also pass. This guard refuses a doc that
+      # names an unpublished asset, tells the reader to run either dead command,
+      # or trusts SHA256SUMS without a pinned cosign verification first.
+      - name: Release-verification docs (check-release-verification-docs.sh)
+        run: bash scripts/check-release-verification-docs.sh
+
+      # Proof the guard can go red: it must reject both dead commands and the
+      # pre-fix forgeable install step.
+      - name: Release-verification docs — guard self-test
+        run: bash scripts/tests/check-release-verification-docs.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and

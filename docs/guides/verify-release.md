@@ -1,6 +1,6 @@
 # Verifying a Hearth Release
 
-Every Hearth release ships four artefacts per platform plus a CycloneDX SBOM:
+Every Hearth release ships three artefacts per platform — the binary, its signature and its certificate — plus a CycloneDX SBOM, a signed checksum manifest, and one SLSA provenance document:
 
 | File | Description |
 |------|-------------|
@@ -10,7 +10,7 @@ Every Hearth release ships four artefacts per platform plus a CycloneDX SBOM:
 | `hearth-sbom.cdx.json` | CycloneDX SBOM (JSON) |
 | `hearth-sbom.cdx.json.sig` | cosign signature for the SBOM |
 | `hearth-sbom.cdx.json.pem` | Certificate for the SBOM signature |
-| `SHA256SUMS` | SHA-256 checksums for all binaries, the SBOM, and the manifest itself |
+| `SHA256SUMS` | SHA-256 checksums for all five binaries and the SBOM. It does not, and cannot, contain its own checksum — its integrity comes from `SHA256SUMS.sig` |
 | `SHA256SUMS.sig` | cosign detached signature for SHA256SUMS |
 | `SHA256SUMS.pem` | Certificate for the SHA256SUMS signature |
 | `multiple.intoto.jsonl` | SLSA L1 provenance document (covers all binaries and the SBOM) |
@@ -29,11 +29,19 @@ brew install cosign
 # and verify the cosign binary itself using its own certificate.
 ```
 
-Install `slsa-verifier` (for SLSA provenance):
+Install `slsa-verifier` (for SLSA provenance). There is no Homebrew formula —
+install it with Go, or download a release binary from
+[slsa-framework/slsa-verifier](https://github.com/slsa-framework/slsa-verifier/releases):
 
 ```bash
-brew install slsa-verifier
-# Or: go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
+go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
+```
+
+Install `rekor-cli` if you want to inspect transparency-log entries (optional):
+
+```bash
+brew install rekor-cli
+# Or: go install github.com/sigstore/rekor/cmd/rekor-cli@latest
 ```
 
 ## Verify a binary with cosign
@@ -81,7 +89,14 @@ Once verified, check your binary or SBOM against it:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
+
+# macOS has no sha256sum:
+# shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
+
+Verify the manifest **before** checking against it. A checksum taken from an
+unverified manifest proves only that two files you downloaded from the same
+place agree with each other.
 
 ## Verify the SBOM
 
@@ -127,11 +142,22 @@ URI:https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tag
 
 ## Inspect the transparency log entry
 
-cosign logs every signing event to Rekor. To retrieve the log entry:
+cosign logs every signing event to Rekor. `cosign triangulate` does **not** work
+here — it derives the signature tag of a container image, and these are detached
+blob signatures. Two ways to reach the entry:
+
+`cosign verify-blob` prints the entry index on success:
+
+```
+tlog entry verified with uuid: <uuid> index: <n>
+```
+
+Or search Rekor for the artefact directly, with `rekor-cli`:
 
 ```bash
-cosign triangulate --type=blob "${ARTIFACT}"
-# Returns a Rekor entry URL — open it in a browser for the full audit record.
+rekor-cli search --artifact "${ARTIFACT}"
+# Then, for the full audit record:
+rekor-cli get --uuid <uuid-from-the-search>
 ```
 
 ## Inspect the SBOM

@@ -28,15 +28,38 @@ Download pre-built v1.6.10 artifacts from the [Releases page](https://github.com
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/${ARTIFACT}"
-curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS
+BASE=https://github.com/hearth-auth/hearth/releases/download/v1.6.10
 
-# Verify the checksum
+curl -LO "${BASE}/${ARTIFACT}"
+curl -LO "${BASE}/SHA256SUMS"
+curl -LO "${BASE}/SHA256SUMS.sig"
+curl -LO "${BASE}/SHA256SUMS.pem"
+
+# 1. Verify the checksum manifest itself. Requires cosign v2+
+#    (brew install cosign). Without this step the checksum below proves
+#    nothing: anyone who can replace the binary can replace SHA256SUMS
+#    beside it. The signature is bound to Hearth's release workflow and
+#    logged to Sigstore's public transparency log, so it cannot be forged.
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature   SHA256SUMS.sig \
+  --certificate-identity-regexp \
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+# 2. Check the binary against the now-trusted manifest.
+#    macOS has no sha256sum — use: shasum -a 256 -c SHA256SUMS --ignore-missing
 sha256sum -c SHA256SUMS --ignore-missing
 
 chmod +x "${ARTIFACT}"
 "./${ARTIFACT}" --version
 ```
+
+> Run step 1. On its own, `sha256sum -c` only proves the file you downloaded matches
+> the manifest you downloaded from the same place. See
+> [docs/guides/verify-release.md](docs/guides/verify-release.md) for per-binary signature
+> and SLSA provenance verification.
 
 ### Released binary — Windows
 
@@ -44,11 +67,23 @@ chmod +x "${ARTIFACT}"
 Invoke-WebRequest `
   -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
-Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS" `
-  -OutFile SHA256SUMS
+foreach ($f in 'SHA256SUMS','SHA256SUMS.sig','SHA256SUMS.pem') {
+  Invoke-WebRequest `
+    -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/$f" `
+    -OutFile $f
+}
 
-# Verify the checksum
+# 1. Verify the checksum manifest itself (cosign v2+). Without this the
+#    checksum below proves nothing — see the note under the Linux/macOS block.
+cosign verify-blob `
+  --certificate SHA256SUMS.pem `
+  --signature   SHA256SUMS.sig `
+  --certificate-identity-regexp `
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+  SHA256SUMS
+
+# 2. Check the binary against the now-trusted manifest.
 $expected = (Select-String 'hearth-windows-amd64.exe' SHA256SUMS).Line.Split(' ')[0]
 $actual   = (Get-FileHash hearth-windows-amd64.exe -Algorithm SHA256).Hash.ToLower()
 if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
