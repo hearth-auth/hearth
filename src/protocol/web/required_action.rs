@@ -271,10 +271,15 @@ pub fn resume_browser_flow(
     };
     let user_id = UserId::new(user_uuid);
 
-    let session = match state
-        .identity
-        .create_session(realm, &user_id, &SessionContext::default())
-    {
+    // The MFA proof is inherited: the RA session cookie backing this call is
+    // only minted by `required_action_check_browser`, which the login and MFA
+    // challenge handlers call *after* the realm's `mfa_required` gate has been
+    // satisfied (audit 2026-08-28 §4.18#3).
+    let ctx = SessionContext {
+        mfa_proof: crate::identity::MfaProof::Inherited,
+        ..SessionContext::default()
+    };
+    let session = match state.identity.create_session(realm, &user_id, &ctx) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "resume_browser_flow: create_session failed");

@@ -26,7 +26,7 @@ fn plain_session_context() -> SessionContext {
         ip_address: None,
         user_agent_raw: None,
         device_label: None,
-        satisfies_mfa_via_passkey: false,
+        mfa_proof: hearth::identity::MfaProof::None,
     }
 }
 

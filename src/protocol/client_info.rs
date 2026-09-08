@@ -158,7 +158,9 @@ pub fn build_session_context(
         ip_address,
         user_agent_raw: ua_raw,
         device_label,
-        satisfies_mfa_via_passkey: false,
+        // Request metadata proves nothing about a second factor. The caller
+        // raises this once its ceremony has verified one.
+        mfa_proof: crate::identity::MfaProof::None,
     }
 }
 

@@ -483,6 +483,84 @@ fn callback_auto_links_existing_user_on_verified_email() {
     );
 }
 
+/// A realm that sets `mfa_required` demands a second factor on the federation
+/// path too (audit 2026-08-28 §4.18#3, task 9.6). The upstream IdP asserts a
+/// first factor only, so the callback must hand the browser to Hearth's own
+/// MFA step instead of issuing a session cookie.
+#[test]
+fn callback_demands_mfa_when_the_realm_requires_it() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    set_link_mode(&rig, LinkMode::Auto);
+    rig.identity
+        .update_realm(
+            &rig.realm_id,
+            &UpdateRealmRequest {
+                name: None,
+                status: None,
+                config: Some(RealmConfig {
+                    federation_link_mode: Some(LinkMode::Auto),
+                    mfa_required: Some(true),
+                    ..RealmConfig::default()
+                }),
+            },
+        )
+        .expect("update realm");
+    rig.identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: "alice@example.com".to_string(),
+                display_name: "Alice Local".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create local user");
+    seed_state(&rig, "state-mfa", "nonce-mfa");
+    stub_successful_oidc_callback(
+        &stub,
+        "code-mfa",
+        "nonce-mfa",
+        "ext-mfa-1",
+        "alice@example.com",
+        true,
+    );
+
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .header("cookie", fed_bind_cookie("state-mfa"))
+            .uri("/ui/realms/demo/federation/callback?state=state-mfa&code=code-mfa")
+            .body(Body::empty())
+            .unwrap(),
+    );
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    // No TOTP is enrolled, so the user is sent to forced enrolment.
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/ui/mfa-enroll-required"
+    );
+    let cookies: Vec<&str> = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("hearth_ui_session=")),
+        "no session cookie may be issued before the second factor: {cookies:?}"
+    );
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("hearth_ui_mfa_pending=")),
+        "the MFA pending cookie must carry the proven identity: {cookies:?}"
+    );
+}
+
 #[test]
 fn callback_confirm_mode_redirects_to_confirm_link_for_existing_user() {
     let stub = Arc::new(StubFederationTransport::new());

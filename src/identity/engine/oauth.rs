@@ -956,9 +956,18 @@ impl EmbeddedIdentityEngine {
 
         // 9. (Code already consumed atomically in step 3 — no further write needed.)
 
-        // 10. Create a session for the user (OAuth code exchange — no browser context)
-        let session =
-            self.create_session(realm_id, &stored_code.user_id, &SessionContext::default())?;
+        // 10. Create a session for the user (OAuth code exchange — no browser context).
+        //     The MFA proof is inherited: an authorization code is only minted by
+        //     `/authorize`, which requires a live UI session, and that session
+        //     passed the same `mfa_required` gate at login.
+        let session = self.create_session(
+            realm_id,
+            &stored_code.user_id,
+            &SessionContext {
+                mfa_proof: crate::identity::MfaProof::Inherited,
+                ..Default::default()
+            },
+        )?;
 
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
@@ -1216,6 +1225,24 @@ impl EmbeddedIdentityEngine {
             });
         }
 
+        // 3a-bis. Realm-wide `mfa_required` (audit 2026-08-28 §4.18#3).
+        //    ROPC proves the password and nothing else, so it can never satisfy
+        //    a second-factor policy on its own. Send the caller to the step-up
+        //    MFA grant when a factor exists, and to enrolment when none does.
+        //    Without this the request would reach `create_session` and fail with
+        //    a bare `MfaRequired`, which tells the client nothing about what to
+        //    do next.
+        if self
+            .get_realm(realm_id)?
+            .is_some_and(|r| r.config().mfa_required.unwrap_or(false))
+        {
+            return if self.has_second_factor(realm_id, user.id())? {
+                Err(IdentityError::StepUpChallengeRequired)
+            } else {
+                Err(IdentityError::EnrollMfaRequired)
+            };
+        }
+
         // 3b. Adaptive step-up MFA check (HEA-836).
         //    Only runs when the request carries IP/UA context (ROPC via HTTP).
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
@@ -1259,7 +1286,9 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 4. Create session and issue token pair
+        // 4. Create session and issue token pair. Step 3a-bis has already
+        //    refused this path on an `mfa_required` realm, so the default
+        //    (unproven) context is correct here.
         let session = self.create_session(
             realm_id,
             user.id(),
@@ -1323,11 +1352,15 @@ impl EmbeddedIdentityEngine {
             return Err(e);
         }
 
-        // 4. Create session and issue token pair.
+        // 4. Create session and issue token pair. Step 3 verified a TOTP or a
+        //    recovery code, so this ceremony proved a second factor.
         let session = self.create_session(
             realm_id,
             user.id(),
-            &crate::identity::SessionContext::default(),
+            &crate::identity::SessionContext {
+                mfa_proof: crate::identity::MfaProof::Proved,
+                ..Default::default()
+            },
         )?;
         let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
 
@@ -2289,8 +2322,18 @@ impl EmbeddedIdentityEngine {
             DeviceCodeStatus::Denied => Err(IdentityError::DeviceCodeDenied),
             DeviceCodeStatus::Expired => Err(IdentityError::DeviceCodeExpired),
             DeviceCodeStatus::Approved { user_id } => {
-                // Issue tokens like exchange_authorization_code (device flow — no browser context)
-                let session = self.create_session(realm_id, user_id, &SessionContext::default())?;
+                // Issue tokens like exchange_authorization_code (device flow — no browser context).
+                // The MFA proof is inherited: the device code reached `Approved`
+                // only because a browser user approved it from a live session,
+                // and that session passed the same `mfa_required` gate at login.
+                let session = self.create_session(
+                    realm_id,
+                    user_id,
+                    &SessionContext {
+                        mfa_proof: crate::identity::MfaProof::Inherited,
+                        ..Default::default()
+                    },
+                )?;
                 let token_pair = self.issue_tokens(realm_id, user_id, session.id())?;
 
                 // Issue ID token

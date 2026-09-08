@@ -77,6 +77,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Security
+- **`mfa_required` now gates factor use, not factor enrolment (audit 2026-08-28 §4.18#3)** —
+  the engine asked whether the user *had* a second factor enrolled, so any login path that
+  never ran a challenge issued a session on the strength of that enrolment alone. A user with
+  TOTP enrolled could sign in through federation, the ROPC password grant, or the device grant
+  and receive a full session without ever entering a code. `create_session` now refuses unless
+  the authentication itself proved a factor. **Operator-visible changes:** a federation callback
+  into an `mfa_required` realm redirects to `/ui/mfa-challenge` (or `/ui/mfa-enroll-required`
+  when the user has no factor Hearth can challenge) instead of setting a session cookie; the
+  ROPC grant on such a realm now fails with `mfa_required` — clients must use the step-up MFA
+  grant (`urn:hearth:params:grant-type:step-up-mfa`) — or with `enroll_mfa_required` when the
+  user holds no factor. The authorization-code, device-code and required-action flows are
+  unchanged: they inherit the proof from the browser authentication that minted their artefact.
+  **Known limit:** the direct browser login can only render the TOTP/recovery challenge, so a
+  user whose sole factor is SMS or email OTP is sent to TOTP enrolment on that path; the OIDC
+  authorize flow still challenges them by SMS.
 - **Passkey enrolment now requires a step-up authentication (audit 2026-08-28 §4.18#2)** —
   `POST /webauthn/register/begin` and the browser's passkey card both enrolled a new
   credential on the session or access token alone. A stolen session therefore minted a

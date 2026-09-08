@@ -118,7 +118,7 @@ pub use types::{
     ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
     CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
     DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MfaFactorExport, MigrationReport, Organization, OrganizationConfig,
+    InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
     OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
     PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
     RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
@@ -527,6 +527,11 @@ pub trait IdentityEngine: Send + Sync {
     /// `context` carries optional device and network metadata (IP, User-Agent)
     /// captured at the point of authentication. Pass `&SessionContext::default()`
     /// for API-originated or test sessions without browser context.
+    ///
+    /// When the realm sets `mfa_required`, the call is refused with
+    /// `IdentityError::MfaRequired` unless `context.mfa_proof` says a second
+    /// factor was used in this authentication. Enrolment alone does not pass
+    /// the gate (audit 2026-08-28 §4.18#3).
     fn create_session(
         &self,
         realm_id: &RealmId,
@@ -958,7 +963,24 @@ pub trait IdentityEngine: Send + Sync {
     fn disable_mfa(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError>;
 
     /// Returns whether MFA is currently enabled for a user.
+    ///
+    /// This is TOTP only. For "does this user hold any usable second factor?"
+    /// call [`IdentityEngine::has_second_factor`].
     fn mfa_enabled(&self, realm_id: &RealmId, user_id: &UserId) -> Result<bool, IdentityError>;
+
+    /// Returns whether the user holds a second factor this realm can challenge.
+    ///
+    /// True for an enabled TOTP enrolment, for a verified phone number when the
+    /// realm offers `sms`, and for an email-OTP enrolment when the realm offers
+    /// `email_otp`. Login paths use it to choose between a challenge and forced
+    /// enrolment. It MUST NOT be used to decide whether the `mfa_required`
+    /// policy is met — that gate reads factor use, not enrolment
+    /// (audit 2026-08-28 §4.18#3).
+    fn has_second_factor(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError>;
 
     /// Records a burned MFA pending cookie nonce in WAL storage.
     ///

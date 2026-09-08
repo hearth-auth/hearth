@@ -4,6 +4,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{SessionId, Timestamp, UserId};
 
+/// What the authentication behind a session can say about a second factor.
+///
+/// A realm's `mfa_required` policy gates factor **use**, not factor enrolment
+/// (audit 2026-08-28 §4.18#3). The caller states what happened in this
+/// ceremony; the engine decides. `MfaProof::None` is the default, so a login
+/// path that says nothing is refused on an MFA-required realm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MfaProof {
+    /// No second factor was proved in this authentication.
+    #[default]
+    None,
+    /// A second factor was proved in this authentication: a TOTP code, a
+    /// recovery code, an SMS or email OTP, or a WebAuthn (passkey) ceremony
+    /// **that proved user verification** — the authenticator collected a PIN,
+    /// a biometric, or an equivalent local check and set the UV flag.
+    ///
+    /// A passkey ceremony that proved user *presence* only is a touch:
+    /// possession alone, one factor, and it must not set this
+    /// (audit 2026-08-28 B10).
+    Proved,
+    /// This session derives from an earlier authentication that already passed
+    /// the realm's MFA gate: an authorization code, an approved device code, or
+    /// a completed required-action flow. Those artefacts can only be minted for
+    /// a principal who already holds a session, and a session can only be
+    /// created by a path that satisfied this same gate.
+    ///
+    /// Use it only where that upstream gate can be named in a comment.
+    Inherited,
+}
+
+impl MfaProof {
+    /// Returns whether this proof satisfies a realm's `mfa_required` policy.
+    pub fn satisfies_mfa_required(self) -> bool {
+        matches!(self, Self::Proved | Self::Inherited)
+    }
+}
+
 /// Device and network context captured at session creation time.
 ///
 /// All fields are optional — API-originated sessions (no browser) or
@@ -16,16 +53,9 @@ pub struct SessionContext {
     pub user_agent_raw: Option<String>,
     /// Pre-parsed device label, e.g. `"Chrome, Mac OSX"`.
     pub device_label: Option<String>,
-    /// Set to `true` only when the session originates from a WebAuthn
-    /// (passkey) ceremony **that proved user verification** — the
-    /// authenticator collected a PIN, a biometric, or an equivalent local
-    /// check and set the UV flag.
-    ///
-    /// Such a ceremony is two factors (possession + the local check) and so
-    /// satisfies a realm's `mfa_required` policy. A ceremony that proved user
-    /// *presence* only is a touch: possession alone, one factor, and it must
-    /// not set this (audit 2026-08-28 B10).
-    pub satisfies_mfa_via_passkey: bool,
+    /// What this authentication can prove about a second factor. Read by the
+    /// `mfa_required` gate in `create_session`.
+    pub mfa_proof: MfaProof,
 }
 
 /// An authentication session bound to a user.

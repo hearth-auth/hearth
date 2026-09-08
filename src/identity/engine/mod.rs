@@ -5797,10 +5797,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // All actions complete — create a session and issue a full-access token.
+        // The MFA proof is inherited: a required-action token is only minted for
+        // a user who already authenticated, and that authentication passed the
+        // same `mfa_required` gate.
         let session = self.create_session(
             realm_id,
             &user_id,
-            &crate::identity::types::SessionContext::default(),
+            &crate::identity::types::SessionContext {
+                mfa_proof: crate::identity::types::MfaProof::Inherited,
+                ..Default::default()
+            },
         )?;
         let token_pair = self.issue_tokens(realm_id, &user_id, session.id())?;
 
@@ -6442,9 +6448,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // Enforce mfa_required policy unless the session originates from a
-        // passkey ceremony (passkeys are inherently multi-factor).
-        if !context.satisfies_mfa_via_passkey {
+        // Enforce the mfa_required policy on factor **use** (audit 2026-08-28
+        // §4.18#3). The old gate asked whether the user had a factor enrolled,
+        // so federation, the ROPC grant and the device grant — none of which
+        // run a challenge — issued sessions to MFA-required users on the
+        // strength of the enrolment alone. The caller now states what this
+        // ceremony proved; `MfaProof::None` is the default, so a path that says
+        // nothing is refused.
+        if !context.mfa_proof.satisfies_mfa_required() {
             if let Ok(Some(realm)) = self.get_realm(realm_id) {
                 // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
                 // enable it explicitly via `mfa_required: true` in hearth.yaml after
@@ -6455,10 +6466,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 // warning nudges operators who leave it `null` to enable it once enrolled.
                 let mfa_default = false;
                 if realm.config().mfa_required.unwrap_or(mfa_default) {
-                    let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false);
-                    if !has_mfa {
-                        return Err(IdentityError::MfaRequired);
-                    }
+                    return Err(IdentityError::MfaRequired);
                 }
             }
         }
@@ -8026,6 +8034,36 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             Some(state) => Ok(state.enabled),
             None => Ok(false),
         }
+    }
+
+    fn has_second_factor(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        if self.mfa_enabled(realm_id, user_id)? {
+            return Ok(true);
+        }
+        // SMS and email OTP are only usable as a factor when the realm offers
+        // the method, because the challenge is what makes them a factor
+        // (audit 2026-08-28 §4.18#3).
+        let Some(realm) = self.get_realm(realm_id)? else {
+            return Ok(false);
+        };
+        let methods = realm.config().mfa_methods.clone().unwrap_or_default();
+        if methods.is_empty() {
+            return Ok(false);
+        }
+        let Some(user) = self.get_user(realm_id, user_id)? else {
+            return Ok(false);
+        };
+        if methods.iter().any(|m| m == "sms") && user.phone_verified() {
+            return Ok(true);
+        }
+        if methods.iter().any(|m| m == "email_otp") && user.email_otp_enabled() {
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn burn_mfa_nonce(
@@ -16219,7 +16257,7 @@ mod tests {
             ip_address: Some("203.0.113.42".to_string()),
             user_agent_raw: Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string()),
             device_label: Some("Chrome, Mac OSX".to_string()),
-            satisfies_mfa_via_passkey: false,
+            mfa_proof: crate::identity::types::MfaProof::None,
         };
 
         let session = engine

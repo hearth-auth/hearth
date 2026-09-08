@@ -688,9 +688,53 @@ fn complete_login(
     user_id: &UserId,
     return_to: &str,
 ) -> Response {
+    let secure = state.is_secure_request(headers);
+
+    // A realm that sets `mfa_required` demands a second factor on every login
+    // path, federation included (audit 2026-08-28 §4.18#3). The upstream IdP
+    // asserts a first factor only, so hand the browser to Hearth's own
+    // challenge — or to forced enrolment when the user has no factor Hearth can
+    // challenge. The MFA pending cookie carries the proven identity across the
+    // hop, exactly as the direct login does.
+    let realm_requires_mfa = state
+        .identity
+        .get_realm(realm_id)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().mfa_required)
+        .unwrap_or(false);
+    if realm_requires_mfa {
+        let cookie = auth::issue_mfa_pending_cookie(
+            &state.cookie_secret,
+            realm_id,
+            user_id,
+            Some(return_to),
+            secure,
+        );
+        let target = if state
+            .identity
+            .mfa_enabled(realm_id, user_id)
+            .unwrap_or(false)
+        {
+            "/ui/mfa-challenge"
+        } else {
+            "/ui/mfa-enroll-required"
+        };
+        state.set_current_realm(realm_id.clone());
+        let mut response = Redirect::to(target).into_response();
+        super::handlers::append_cookie(&mut response, &cookie);
+        // A-48: clear the binding cookie — the federation hop is complete.
+        super::handlers::append_cookie(
+            &mut response,
+            &format!("{FED_BIND_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"),
+        );
+        return response;
+    }
+
     // Build a minimal session. The browser context is populated from
     // request headers in the standard login flow; for federation we
-    // record what we can.
+    // record what we can. The realm asks for no second factor here, so the
+    // default (unproven) MFA context is correct.
     let ctx = SessionContext::default();
     let session = match state.identity.create_session(realm_id, user_id, &ctx) {
         Ok(s) => s,
@@ -699,7 +743,6 @@ fn complete_login(
             return handlers_common::server_error();
         }
     };
-    let secure = state.is_secure_request(headers);
     let auth::IssuedCookies {
         session_cookie,
         csrf_cookie,

@@ -422,8 +422,12 @@ async fn mfa_required_blocks_session_when_user_has_no_mfa() {
     );
 }
 
+/// The gate reads factor **use**, not factor enrolment (audit 2026-08-28
+/// §4.18#3). An enrolled TOTP secret that this authentication never exercised
+/// must not open a session: that is how federation and the ROPC grant used to
+/// walk past an `mfa_required` realm.
 #[tokio::test]
-async fn mfa_required_allows_session_when_user_has_mfa() {
+async fn mfa_required_blocks_session_when_the_enrolled_factor_was_not_used() {
     let harness = common::TestHarness::embedded().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
@@ -435,10 +439,37 @@ async fn mfa_required_allows_session_when_user_has_mfa() {
     let user = create_user(&harness, realm.id());
     enroll_mfa(&harness, realm.id(), user.id());
 
-    let session = harness
+    let err = harness
         .identity()
         .create_session(realm.id(), user.id(), &SessionContext::default())
-        .expect("create_session should succeed: user has MFA enrolled");
+        .expect_err("an unused factor must not satisfy mfa_required");
+    assert!(
+        matches!(err, IdentityError::MfaRequired),
+        "expected MfaRequired, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mfa_required_allows_session_when_the_factor_was_used() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm_with_config(
+        &harness,
+        RealmConfig {
+            mfa_required: Some(true),
+            ..RealmConfig::default()
+        },
+    );
+    let user = create_user(&harness, realm.id());
+    enroll_mfa(&harness, realm.id(), user.id());
+
+    let ctx = SessionContext {
+        mfa_proof: hearth::identity::MfaProof::Proved,
+        ..SessionContext::default()
+    };
+    let session = harness
+        .identity()
+        .create_session(realm.id(), user.id(), &ctx)
+        .expect("create_session should succeed: the second factor was used");
     assert_eq!(
         session.user_id(),
         user.id(),
@@ -451,8 +482,8 @@ async fn mfa_required_passkey_satisfies_policy() {
     // A passkey ceremony that proved user verification (possession + PIN or
     // biometric) is two factors, so it must bypass the TOTP enrollment gate
     // even when the realm sets mfa_required = true. The web handler sets
-    // `satisfies_mfa_via_passkey` only for such a ceremony (audit B10); this
-    // test exercises the engine gate with that flag already established.
+    // `mfa_proof: Proved` only for such a ceremony (audit B10); this test
+    // exercises the engine gate with that proof already established.
     let harness = common::TestHarness::embedded().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
@@ -464,7 +495,7 @@ async fn mfa_required_passkey_satisfies_policy() {
     let user = create_user(&harness, realm.id());
 
     let ctx = SessionContext {
-        satisfies_mfa_via_passkey: true,
+        mfa_proof: hearth::identity::MfaProof::Proved,
         ..SessionContext::default()
     };
     let session = harness

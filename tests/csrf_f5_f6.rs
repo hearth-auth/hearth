@@ -172,7 +172,7 @@ fn make_session_cookie_header(state: &WebState) -> String {
                 ip_address: None,
                 user_agent_raw: None,
                 device_label: None,
-                satisfies_mfa_via_passkey: false,
+                mfa_proof: hearth::identity::MfaProof::None,
             },
         )
         .expect("create session");

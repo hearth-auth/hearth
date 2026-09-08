@@ -44,7 +44,7 @@ use serde::Deserialize;
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
-    IdentityError, KdfGateError, SessionContext,
+    IdentityError, KdfGateError, MfaProof, SessionContext,
 };
 use crate::protocol::client_info::{build_session_context, PeerAddr};
 
@@ -1353,6 +1353,11 @@ fn login_finish(
     }
 
     // --- MFA gate ---
+    // `mfa_enabled` (TOTP) rather than `has_second_factor` because the only
+    // challenge this page can render is the TOTP/recovery form. A user whose
+    // sole factor is SMS or email OTP therefore takes the enrolment branch
+    // below. Neither branch decides whether the policy is met: the engine gate
+    // reads factor use from `SessionContext::mfa_proof` (audit §4.18#3).
     let mfa_on = state
         .identity
         .mfa_enabled(realm.id(), user.id())
@@ -1644,11 +1649,11 @@ fn passkey_login_complete_impl(
     peer_addr: SocketAddr,
 ) -> Response {
     use base64::Engine as _;
-    // `satisfies_mfa_via_passkey` is deliberately left false here. Only the
-    // completed ceremony knows whether the authenticator proved user
-    // verification, so `passkey_complete_for_user` sets it from the result
-    // (audit 2026-08-28 B10). Setting it up front asserted a second factor
-    // before anything had been verified.
+    // `mfa_proof` is deliberately left at `None` here. Only the completed
+    // ceremony knows whether the authenticator proved user verification, so
+    // `passkey_complete_for_user` sets it from the result (audit 2026-08-28
+    // B10). Setting it up front asserted a second factor before anything had
+    // been verified.
     let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
 
     let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1852,10 +1857,14 @@ fn passkey_complete_for_user(
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
-    // The engine's own `mfa_required` gate reads this flag, so it must carry
+    // The engine's own `mfa_required` gate reads this proof, so it must carry
     // what the ceremony proved rather than an assumption made before it ran.
     let mut session_ctx = session_ctx.clone();
-    session_ctx.satisfies_mfa_via_passkey = user_verified;
+    session_ctx.mfa_proof = if user_verified {
+        crate::identity::MfaProof::Proved
+    } else {
+        crate::identity::MfaProof::None
+    };
 
     match state
         .identity
@@ -2099,6 +2108,14 @@ pub async fn mfa_challenge_submit(
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
 
+    // The challenge above verified a TOTP or a recovery code, so this
+    // authentication proved a second factor. The realm's `mfa_required` gate
+    // reads exactly this (audit 2026-08-28 §4.18#3).
+    let session_ctx = SessionContext {
+        mfa_proof: MfaProof::Proved,
+        ..session_ctx
+    };
+
     match state
         .identity
         .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
@@ -2318,6 +2335,13 @@ pub async fn mfa_enroll_required_submit(
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+
+    // Forced enrolment ends with the user submitting a live TOTP code, which
+    // `verify_totp_enrollment` checked above. That is a proved second factor.
+    let session_ctx = SessionContext {
+        mfa_proof: MfaProof::Proved,
+        ..session_ctx
+    };
 
     match state
         .identity
