@@ -77,6 +77,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **Published container images now state the correct licence (audit 2026-08-28 §4.12#7)** —
+  every image carried `org.opencontainers.image.licenses="AGPL-3.0-only"`, three months after
+  Hearth relicensed to Apache-2.0. A redistributor reads the licence off the image, so the label
+  was the one place stating terms that no longer applied. It is now `Apache-2.0`, and
+  `scripts/check-dockerfile-claims.sh` fails the build whenever the label and the `license`
+  field in `Cargo.toml` disagree.
 - **Dockerfile comments corrected (audit 2026-08-28 §4.8#15)** — the Dockerfile described a build
   other than the one it defines: it named `rust-version = "1.75"` as an aspirational MSRV (the repo
   declares `1.88.0` and CI's `msrv` job enforces it), called the binary "static-ish" (it is

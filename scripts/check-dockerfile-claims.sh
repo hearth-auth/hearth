@@ -23,6 +23,14 @@
 # drifts from Cargo.toml, and a "static" claim about a dynamically linked build.
 # It also checks the documented run command against the real CMD/ENTRYPOINT.
 #
+# Audit 2026-08-28 finding §4.12#7 (MEDIUM) is a fifth statement of the same
+# kind, so it lives here too:
+#
+#   5. `org.opencontainers.image.licenses="AGPL-3.0-only"` — the project
+#      relicensed to Apache-2.0 three months earlier. A redistributor reads the
+#      licence off the image, so the label must track Cargo.toml's `license`
+#      field rather than be typed a second time and left to rot.
+#
 # Usage:  bash scripts/check-dockerfile-claims.sh
 # Env:    DOCKERFILE  (default Dockerfile)
 #         CARGO_TOML  (default Cargo.toml)
@@ -83,9 +91,29 @@ else
     fi
 fi
 
+# ── 4. The OCI licences label must be the project's licence ──────────────────
+# Audit 2026-08-28 §4.12#7 (MEDIUM): every published image carried
+# org.opencontainers.image.licenses="AGPL-3.0-only" for three months after the
+# project relicensed to Apache-2.0. The label is what a redistributor reads
+# from the image itself, so it must track Cargo.toml rather than be typed twice.
+project_license="$(grep -m1 '^license[[:space:]]*=' "$CARGO_TOML" | sed -E 's/.*"([^"]+)".*/\1/')"
+if [[ -z "$project_license" ]]; then
+    fail "${CARGO_TOML} declares no license."
+else
+    labelled="$(grep -oE 'org\.opencontainers\.image\.licenses="[^"]*"' "$DOCKERFILE" \
+        | head -1 | sed -E 's/.*"([^"]*)"/\1/')"
+    if [[ -z "$labelled" ]]; then
+        fail "${DOCKERFILE} sets no org.opencontainers.image.licenses label." \
+            $'\n      A redistributor reads the licence off the image (§4.12#7).'
+    elif [[ "$labelled" != "$project_license" ]]; then
+        fail "${DOCKERFILE} labels the image '${labelled}'; ${CARGO_TOML} declares" \
+            $'\n      \''"${project_license}"$'\'. Published images state the wrong licence (§4.12#7).'
+    fi
+fi
+
 if [[ "$failures" -gt 0 ]]; then
     echo
-    echo "${failures} false statement(s) in ${DOCKERFILE} (audit §4.8#15)."
+    echo "${failures} false statement(s) in ${DOCKERFILE} (audit §4.8#15, §4.12#7)."
     exit 1
 fi
 

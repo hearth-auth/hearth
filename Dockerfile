@@ -157,7 +157,7 @@ ARG BUILD_VERSION=dev
 ARG BUILD_REVISION=unknown
 LABEL org.opencontainers.image.title="Hearth" \
       org.opencontainers.image.description="Purpose-built identity database: authentication, authorization, and session management" \
-      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${BUILD_REVISION}"
 

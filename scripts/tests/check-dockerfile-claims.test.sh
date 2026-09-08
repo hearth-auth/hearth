@@ -29,11 +29,12 @@ cat > "${TMP}/Cargo.toml" <<'EOF'
 name = "hearth"
 version = "1.6.11"
 rust-version = "1.88.0"
+license = "Apache-2.0"
 EOF
 
 # make_dockerfile <path> <header-comment> [builder-version]
 make_dockerfile() {
-    local path="$1" header="$2" ver="${3:-1.89}"
+    local path="$1" header="$2" ver="${3:-1.89}" lic="${4:-Apache-2.0}"
     {
         printf '%s\n' "$header"
         cat <<EOF
@@ -41,6 +42,7 @@ FROM rust:${ver}-slim-bookworm@sha256:deadbeef AS builder
 RUN cargo build --release
 
 FROM debian:bookworm-slim@sha256:cafebabe AS runtime
+LABEL org.opencontainers.image.licenses="${lic}"
 USER 10001:10001
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hearth"]
 CMD ["serve", "-c", "/etc/hearth/hearth.yaml"]
@@ -101,9 +103,26 @@ cat > "${TMP}/scratch" <<'EOF'
 FROM rust:1.89-slim-bookworm AS builder
 RUN cargo build --release
 FROM scratch AS runtime
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 CMD ["serve", "-c", "/etc/hearth/hearth.yaml"]
 EOF
 run_case "a scratch-based runtime" 0 "${TMP}/scratch" "OK:"
+
+echo "== THE REGRESSION (§4.12#7): a licence label that is not the project licence =="
+make_dockerfile "${TMP}/agpl" '# Builder.' "1.89" "AGPL-3.0-only"
+run_case "the audited AGPL-3.0-only label under an Apache-2.0 project" \
+    1 "${TMP}/agpl" "labels the image 'AGPL-3.0-only'"
+
+echo "== an image with no licence label at all is refused =="
+cat > "${TMP}/nolabel" <<'EOF'
+# Builder.
+FROM rust:1.89-slim-bookworm AS builder
+RUN cargo build --release
+FROM debian:bookworm-slim AS runtime
+CMD ["serve", "-c", "/etc/hearth/hearth.yaml"]
+EOF
+run_case "no org.opencontainers.image.licenses label" \
+    1 "${TMP}/nolabel" "sets no org.opencontainers.image.licenses label"
 
 echo "== the checked-in Dockerfile passes =="
 out="$(cd "$REPO_ROOT" && bash "$CHECK" 2>&1)"; rc=$?
