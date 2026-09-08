@@ -87,6 +87,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **A failed WAL open no longer rewrites the segment (audit 2026-08-28 §4.11#7)** — a segment that
+  does not start with the `HWAL` magic is read as a legacy v0 segment, and the v0→v1 migration
+  prepends a 6-byte header. That migration was written straight back over the live file, before
+  anything had validated it. A v1 segment whose magic lost a single byte is indistinguishable from
+  a v0 segment by shape, so one flipped bit shifted every record six bytes and destroyed the
+  original in place — and the open still failed, because the encryption header no longer
+  unwrapped. The migration is now applied in memory and written back only after it has proven it
+  unwraps its key and scans its records, so a failed open leaves the segment byte-identical for
+  the operator to copy or repair.
 - **A write fault during WAL rotation no longer leaves an unopenable data directory (audit
   2026-08-28 §4.11#6)** — a WAL segment opens with an 82-byte header. A fault while that header
   was being written left 1–81 bytes on disk, which `open()` refused with `WAL file too small for

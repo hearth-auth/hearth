@@ -921,6 +921,38 @@ fn rebuild_truncated_segment(
     Ok((new_dek, new_header))
 }
 
+/// Writes a fresh 82-byte header to an empty WAL segment and returns its DEK.
+///
+/// The header goes out in one `write_all`, so a short write has one chance to
+/// leave a stub rather than three; [`repair_partial_header`] handles the stub
+/// that a fault can still leave.
+fn write_fresh_header(
+    path: &Path,
+    file: &mut dyn FsFile,
+    fs: &dyn Fs,
+    kek: &encryption::KeyEncryptionKey,
+    kek_id: KekId,
+) -> Result<(DataEncryptionKey, EncryptionHeader), StorageError> {
+    let dek = encryption::generate_dek()?;
+    let enc_header = encryption::wrap_dek(&dek, kek, kek_id)?;
+
+    let mut header = Vec::with_capacity(V1_RECORD_OFFSET as usize);
+    header.extend_from_slice(&WAL_MAGIC);
+    header.extend_from_slice(&WAL_VERSION_CURRENT.to_le_bytes());
+    header.extend_from_slice(&enc_header.to_bytes());
+    file.write_all(&header)?;
+    file.sync_all()?;
+
+    // Fsync the parent directory so the freshly created segment's directory
+    // entry is durable; otherwise a power loss before the dir update commits
+    // can make the whole file vanish on restart (HEA-1855).
+    if let Some(parent) = path.parent() {
+        fs.sync_dir(parent)?;
+    }
+
+    Ok((dek, enc_header))
+}
+
 /// Re-initialises a WAL segment whose header is shorter than one complete
 /// header, and returns the size to continue the open with.
 ///
@@ -985,20 +1017,7 @@ impl Wal {
         let file_size = repair_partial_header(path, &mut *file, file_size)?;
 
         let (dek, enc_header, record_count) = if file_size == 0 {
-            // New file: write version header then encryption header.
-            let dek = encryption::generate_dek()?;
-            let enc_header = encryption::wrap_dek(&dek, kek, kek_id)?;
-            file.write_all(&WAL_MAGIC)?;
-            file.write_all(&WAL_VERSION_CURRENT.to_le_bytes())?;
-            file.write_all(&enc_header.to_bytes())?;
-            file.sync_all()?;
-            // Fsync the parent directory so the freshly created segment's
-            // directory entry is durable; otherwise a power loss before the dir
-            // update commits can make the whole file vanish on restart
-            // (HEA-1855).
-            if let Some(parent) = path.parent() {
-                fs.sync_dir(parent)?;
-            }
+            let (dek, enc_header) = write_fresh_header(path, &mut *file, fs.as_ref(), kek, kek_id)?;
             (dek, enc_header, 0u64)
         } else {
             // Existing file: read all bytes, detect format version, migrate if needed.
@@ -1007,7 +1026,17 @@ impl Wal {
             file.read_to_end(&mut all_data)?;
 
             // Detect v0 (no magic) vs v1+ (starts with HWAL).
-            let all_data = if all_data.starts_with(&WAL_MAGIC) {
+            //
+            // The migration is applied in memory only. It used to be written
+            // back before anything had validated it, with `set_len(0)` +
+            // `write_all` on the live file. A v1 segment whose magic lost a
+            // single byte is indistinguishable from a v0 segment by shape, so
+            // that path shifted every record six bytes and destroyed the
+            // original in place — and the open still failed afterwards, because
+            // the encryption header no longer unwrapped (audit 2026-08-28
+            // §4.11#7). The rewrite now waits until the migrated form has
+            // proven it unwraps its DEK and scans its records.
+            let (all_data, persist_migration) = if all_data.starts_with(&WAL_MAGIC) {
                 // Versioned file — validate version.
                 if all_data.len() < WAL_VERSION_HEADER_SIZE {
                     return Err(StorageError::Crypto {
@@ -1018,14 +1047,11 @@ impl Wal {
                 if version > WAL_VERSION_CURRENT {
                     return Err(StorageError::UnsupportedWalVersion { found: version });
                 }
-                all_data
+                (all_data, false)
             } else {
-                // Legacy v0 file — migrate to current version in-place.
+                // Legacy v0 file — migrate to the current version in memory.
                 let migrated = migrations::apply_migrations(&all_data, 0, WAL_VERSION_CURRENT)?;
-                file.set_len(0)?;
-                file.write_all(&migrated)?;
-                file.sync_all()?;
-                migrated
+                (migrated, true)
             };
 
             // After detection/migration, layout is: [6B ver][76B enc][records...].
@@ -1054,11 +1080,21 @@ impl Wal {
             let scan = scan_records(record_data, &dek)?;
 
             if scan.valid_len == record_data.len() {
+                if persist_migration {
+                    // The migrated form unwrapped its DEK and scanned clean, so
+                    // it is safe to make it the on-disk form.
+                    file.set_len(0)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.write_all(&all_data)?;
+                    file.sync_all()?;
+                }
                 file.seek(SeekFrom::End(0))?;
                 (dek, enc_header, scan.count)
             } else {
                 // Corrupt or torn tail (HEA-1853) — rebuild the segment from
-                // the surviving prefix. See `rebuild_truncated_segment`.
+                // the surviving prefix. See `rebuild_truncated_segment`. It
+                // writes a complete v1 segment via a staging file and a rename,
+                // so it persists a pending v0 migration too.
                 tracing::warn!(
                     discarded_bytes = record_data.len() - scan.valid_len,
                     recovered_records = scan.count,
@@ -1936,6 +1972,103 @@ mod tests {
             V1_RECORD_OFFSET as usize,
             "new empty WAL should be exactly {} bytes",
             V1_RECORD_OFFSET
+        );
+    }
+
+    /// The v0 -> v1 migration is now written back only after the migrated form
+    /// has proven it unwraps and scans (audit 2026-08-28 §4.11#7). A v0 segment
+    /// that holds records must still be migrated, persisted, and readable.
+    #[test]
+    fn legacy_v0_wal_with_records_migrated_and_persisted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("legacy-records.wal");
+        let config = WalConfig {
+            max_size: 0,
+            sync_mode: SyncMode::None,
+        };
+
+        let entry1 = make_entry(b"v0-key-1", b"v0-val-1", WalOperation::Put);
+        let entry2 = make_entry(b"v0-key-2", b"v0-val-2", WalOperation::Put);
+
+        // Build a v1 segment, then strip its 6-byte version header. What is
+        // left is exactly a v0 segment: [76B enc header][records].
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            wal.append(&entry1).expect("append 1");
+            wal.append(&entry2).expect("append 2");
+        }
+        let v1_bytes = std::fs::read(&wal_path).expect("read v1");
+        std::fs::write(&wal_path, &v1_bytes[WAL_VERSION_HEADER_SIZE..]).expect("write v0");
+
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            assert_eq!(
+                wal.read_all().expect("read migrated"),
+                vec![entry1.clone(), entry2.clone()],
+                "a v0 segment's records must survive the migration"
+            );
+        }
+
+        // The migration must be on disk, not only in memory.
+        let migrated = std::fs::read(&wal_path).expect("re-read");
+        assert_eq!(
+            migrated, v1_bytes,
+            "the migrated form must be written back to disk"
+        );
+
+        // And it must still read after a restart that takes the v1 path.
+        let wal = open_test_wal(&wal_path, config);
+        assert_eq!(
+            wal.read_all().expect("read after restart"),
+            vec![entry1, entry2],
+            "the persisted migration must reopen as a v1 segment"
+        );
+    }
+
+    /// A one-byte corruption of the WAL magic must not rewrite the segment
+    /// (audit 2026-08-28 §4.11#7).
+    ///
+    /// A file that does not start with `HWAL` is treated as a legacy v0
+    /// segment, and the v0 -> v1 migration prepends a 6-byte header and writes
+    /// the result back with `set_len(0)` + `write_all`. For a v1 segment whose
+    /// magic lost one byte, that shifted every record by six bytes and
+    /// destroyed the original in place — and the open still failed afterwards,
+    /// because the encryption header no longer unwrapped. The operator was left
+    /// with an unopenable segment that no longer held what it had held.
+    #[test]
+    fn corrupt_magic_does_not_rewrite_the_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+        let config = WalConfig {
+            max_size: 0,
+            sync_mode: SyncMode::None,
+        };
+
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            wal.append(&make_entry(b"key-1", b"value-1", WalOperation::Put))
+                .expect("append 1");
+            wal.append(&make_entry(b"key-2", b"value-2", WalOperation::Put))
+                .expect("append 2");
+        }
+
+        // Flip one byte of the magic: 'H' -> 'X'.
+        let mut bytes = std::fs::read(&wal_path).expect("read wal");
+        bytes[0] = b'X';
+        std::fs::write(&wal_path, &bytes).expect("write corrupted wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id);
+        assert!(
+            result.is_err(),
+            "a corrupt magic must not open as a legacy v0 segment"
+        );
+
+        assert_eq!(
+            std::fs::read(&wal_path).expect("re-read wal"),
+            bytes,
+            "a failed open must leave the segment byte-identical, so the \
+             operator can still repair or copy it"
         );
     }
 

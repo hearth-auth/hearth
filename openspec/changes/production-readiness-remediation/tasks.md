@@ -127,7 +127,7 @@ found it, the audit piece, and the report's severity.
 
 - [x] 14.1 Stop one failed WAL write on the `SyncMode::None` path burning a record number and making the whole segment permanently unopenable (§4.11#5 · MEDIUM)
 - [x] 14.2 Handle a write fault during WAL rotation that leaves a 1–81-byte header the engine refuses to open, and document the repair (§4.11#6 · MEDIUM)
-- [ ] 14.3 Stop a failed open rewriting the segment in place after a one-byte corruption of the WAL magic (§4.11#7 · MEDIUM)
+- [x] 14.3 Stop a failed open rewriting the segment in place after a one-byte corruption of the WAL magic (§4.11#7 · MEDIUM)
 - [ ] 14.4 Log, meter and surface the WAL write fence in `/readyz`; it is permanent, unlogged and invisible today (§4.11#8 · MEDIUM)
 - [ ] 14.5 Drain in-flight requests on `SIGTERM` in the TLS-terminating server, which drops the accept loop, returns, and exits 0 (§4.11#9 · MEDIUM)
 - [ ] 14.6 Add coverage for the two real SIGTERM defects the red drain test appears to cover but does not (§4.11#10, §4.12#11 · MEDIUM)
