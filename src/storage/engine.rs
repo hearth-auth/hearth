@@ -244,6 +244,7 @@ impl StorageConfig {
                 // Bound promote-path write-lock/clone churn under cold-read load
                 // in production (HEA-1775). Dev/embedded keeps rate=1.
                 promote_sample_rate: PRODUCTION_PROMOTE_SAMPLE_RATE,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -264,6 +265,20 @@ impl StorageConfig {
     /// [`StorageConfig::production`] instead.
     pub fn set_hot_tier_capacity(&mut self, capacity: usize) {
         self.tiered_config.hot_tier_capacity = capacity;
+    }
+
+    /// Turns the `realm`-labelled hot-tier counters on or off.
+    ///
+    /// The hot tier is one cache shared by every tenant, so the unlabelled
+    /// eviction and promotion totals cannot say which realm the tier is
+    /// holding or which realm is evicting the others (audit 2026-08-28
+    /// §4.9#6). On (the default) each eviction and admitted promotion also
+    /// increments `hearth_storage_hot_tier_evictions_by_realm_total` /
+    /// `hearth_storage_hot_tier_promotions_by_realm_total`. The cardinality is
+    /// one series per realm; `storage.hot_tier_per_realm_metrics: false` turns
+    /// it off on a deployment with too many realms to pay for it.
+    pub fn set_hot_tier_per_realm_metrics(&mut self, enabled: bool) {
+        self.tiered_config.per_realm_metrics = enabled;
     }
 
     /// Overrides the memtable flush threshold (bytes) on an already-built config.
@@ -293,6 +308,7 @@ impl StorageConfig {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig {
@@ -2494,6 +2510,7 @@ mod tests {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -2555,6 +2572,7 @@ mod tests {
                 hot_tier_capacity: 64,
                 eviction_batch_size: 8,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -2626,6 +2644,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -2656,6 +2675,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -2843,6 +2863,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -2903,6 +2924,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -4269,6 +4291,7 @@ mod tests {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         });
         let realm = RealmId::generate();
         tier.promote_now(&realm, b"key", b"data");

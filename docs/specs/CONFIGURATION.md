@@ -103,6 +103,7 @@ Embedded storage engine tuning. These control WAL, memtable, and hot tier behavi
 | `memtable_flush_bytes` | integer | `67108864` (64 MiB) | Memtable size threshold before flushing to an SST file. |
 | `hot_tier_capacity` | integer | auto | When set, uses this exact number of hot tier entries. When omitted, auto-sizes from system memory (or `hot_tier_max_memory` if set). |
 | `hot_tier_max_memory` | integer | none | Maximum bytes to allocate for the hot tier. Overrides system memory detection during auto-sizing. Ignored when `hot_tier_capacity` is explicitly set. |
+| `hot_tier_per_realm_metrics` | bool | `true` | Export `hearth_storage_hot_tier_evictions_by_realm_total` and `hearth_storage_hot_tier_promotions_by_realm_total` with a `realm` label. The hot tier is one cache shared by every tenant, so the unlabelled totals cannot name the realm whose working set the tier holds, nor the realm evicting the others. Costs one Prometheus series per realm on each of the two counters; set `false` when the realm count makes that too expensive. The unlabelled totals are kept either way. |
 | `fsync` | bool | `true` | Whether to `fsync` WAL writes. **MUST be `true` in production.** Dev mode disables this for faster iteration. |
 | `block_cache_bytes` | integer | `268435456` (256 MiB) | Process-wide byte budget for the decrypted SST block cache (HEA-1914). All v3 SST readers share a single cache bounded to this size, keeping cold-tier resident memory independent of corpus size. This is a real resident-memory commitment — budget for it alongside `hot_tier_max_memory`. Tune down on memory-constrained hosts; tune up when the cold-read working set exceeds the hot tier. |
 
@@ -258,6 +259,10 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_tokens_issued_total` | counter | `realm`, `grant_type` | Tokens issued by OAuth 2.0 grant type |
 | `hearth_active_sessions` | gauge | — | Current active session count across all realms |
 | `hearth_storage_operation_duration_seconds` | histogram | `operation` | Storage write/scan latency |
+| `hearth_storage_hot_tier_evictions_total` | counter | — | Hot-tier evictions (clock-sweep and capacity-driven) |
+| `hearth_storage_hot_tier_promotions_total` | counter | — | Hot-tier promotions admitted (write lock taken and entry inserted) |
+| `hearth_storage_hot_tier_evictions_by_realm_total` | counter | `realm` | Hot-tier evictions by the realm that owned the evicted key. Present only while `storage.hot_tier_per_realm_metrics` is `true` |
+| `hearth_storage_hot_tier_promotions_by_realm_total` | counter | `realm` | Hot-tier promotions admitted, by realm. Present only while `storage.hot_tier_per_realm_metrics` is `true` |
 | `hearth_kdf_in_flight` | gauge | — | Argon2id operations currently executing (holding an admission permit) |
 | `hearth_kdf_permits` | gauge | — | Configured max concurrent Argon2id operations (`security.password.kdf.max_in_flight`) |
 | `hearth_kdf_admin_permits` | gauge | — | Configured max concurrent Argon2id operations reserved for admin login (`security.password.kdf.admin_max_in_flight`) |

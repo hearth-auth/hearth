@@ -116,6 +116,12 @@ storage:
   memtable_flush_bytes: 67108864          # 64 MiB  — memtable→SST flush threshold
   hot_tier_capacity: 10000                # entries cached in the hot tier
   fsync: true                             # MUST be true in production; dev mode disables this
+  # hot_tier_per_realm_metrics: true      # label hot-tier eviction/promotion counters by realm.
+  #                                       # The hot tier is one cache shared by every tenant, so
+  #                                       # without this the totals cannot name the realm the tier
+  #                                       # holds or the realm evicting the others. Costs one
+  #                                       # Prometheus series per realm on each of two counters —
+  #                                       # set false when the realm count makes that too dear.
   # block_cache_bytes: 268435456          # 256 MiB — process-wide decrypted SST block cache
   #                                       # (HEA-1914). Shared by all v3 SST readers. Caps
   #                                       # cold-tier resident memory independent of corpus

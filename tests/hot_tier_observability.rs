@@ -144,3 +144,101 @@ fn get_tier_outcomes_and_fanout_are_observable() {
         "live SST file gauge must be positive after flushes, got {sst_files}, render:\n{render}"
     );
 }
+
+/// Storage engine with a one-entry hot tier, so the second distinct promotion
+/// evicts the first. `per_realm_metrics` follows `TieredConfig::default()`
+/// unless the caller turns it off.
+fn engine_forcing_evictions(per_realm_metrics: bool) -> (tempfile::TempDir, EmbeddedStorageEngine) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = StorageConfig::dev(dir.path().to_path_buf());
+    config.set_memtable_flush_bytes(128);
+    config.set_hot_tier_capacity(1);
+    config.set_hot_tier_per_realm_metrics(per_realm_metrics);
+    let engine = EmbeddedStorageEngine::open(config).expect("open");
+    (dir, engine)
+}
+
+/// Prometheus series names for one realm's hot-tier counters.
+fn by_realm_series(realm: &RealmId) -> (String, String) {
+    let uuid = realm.as_uuid();
+    (
+        format!("hearth_storage_hot_tier_promotions_by_realm_total{{realm=\"{uuid}\"}}"),
+        format!("hearth_storage_hot_tier_evictions_by_realm_total{{realm=\"{uuid}\"}}"),
+    )
+}
+
+/// Drives `count` distinct cold reads, each of which promotes into the hot
+/// tier and — past the first — evicts the entry before it.
+fn drive_promotions_and_evictions(engine: &EmbeddedStorageEngine, realm: &RealmId, count: u32) {
+    for i in 0..count {
+        let key = format!("k{i}");
+        engine.put(realm, key.as_bytes(), b"v").expect("put");
+        let _ = engine.get(realm, key.as_bytes()).expect("get");
+    }
+}
+
+/// Audit 2026-08-28 §4.9#6: the hot tier is one cache shared by every tenant,
+/// so the unlabelled eviction and promotion totals cannot name the realm whose
+/// working set the tier is holding, nor the realm evicting the others.
+#[test]
+fn hot_tier_promotions_and_evictions_are_labelled_by_realm() {
+    let (_dir, engine) = engine_forcing_evictions(true);
+    let realm = RealmId::generate();
+    let (promo_series, evict_series) = by_realm_series(&realm);
+
+    drive_promotions_and_evictions(&engine, &realm, 8);
+
+    let render = metrics().render();
+    let promotions = sample_value(&render, &promo_series);
+    let evictions = sample_value(&render, &evict_series);
+
+    assert!(
+        promotions >= 1.0,
+        "promotions must be counted under the promoting realm's label \
+         ({promo_series} = {promotions}), render:\n{render}"
+    );
+    assert!(
+        evictions >= 1.0,
+        "evictions must be counted under the evicted key's realm label \
+         ({evict_series} = {evictions}), render:\n{render}"
+    );
+}
+
+/// The `realm` label costs one series per realm on each counter, so
+/// `storage.hot_tier_per_realm_metrics: false` must remove it while leaving
+/// the unlabelled totals intact (audit 2026-08-28 §4.9#6).
+#[test]
+fn hot_tier_per_realm_metrics_can_be_switched_off() {
+    let (_dir, engine) = engine_forcing_evictions(false);
+    let realm = RealmId::generate();
+    let (promo_series, evict_series) = by_realm_series(&realm);
+
+    let before = metrics().render();
+    let promo_total_before = sample_value(&before, "hearth_storage_hot_tier_promotions_total");
+    let evict_total_before = sample_value(&before, "hearth_storage_hot_tier_evictions_total");
+
+    drive_promotions_and_evictions(&engine, &realm, 8);
+
+    let render = metrics().render();
+    assert!(
+        !render.contains(&promo_series),
+        "no per-realm promotion series may exist when the knob is off, render:\n{render}"
+    );
+    assert!(
+        !render.contains(&evict_series),
+        "no per-realm eviction series may exist when the knob is off, render:\n{render}"
+    );
+
+    let promo_total_after = sample_value(&render, "hearth_storage_hot_tier_promotions_total");
+    let evict_total_after = sample_value(&render, "hearth_storage_hot_tier_evictions_total");
+    assert!(
+        promo_total_after >= promo_total_before + 1.0,
+        "the unlabelled promotion total must still count \
+         ({promo_total_before} -> {promo_total_after})"
+    );
+    assert!(
+        evict_total_after >= evict_total_before + 1.0,
+        "the unlabelled eviction total must still count \
+         ({evict_total_before} -> {evict_total_after})"
+    );
+}

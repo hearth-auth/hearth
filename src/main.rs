@@ -998,6 +998,7 @@ async fn run_serve(
             merge_min: config.storage.compaction.merge_min,
         };
         storage_config.block_cache_bytes = config.storage.block_cache_bytes;
+        storage_config.set_hot_tier_per_realm_metrics(config.storage.hot_tier_per_realm_metrics);
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     } else {
@@ -1033,6 +1034,7 @@ async fn run_serve(
             merge_min: config.storage.compaction.merge_min,
         };
         storage_config.block_cache_bytes = config.storage.block_cache_bytes;
+        storage_config.set_hot_tier_per_realm_metrics(config.storage.hot_tier_per_realm_metrics);
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     };
@@ -3897,6 +3899,7 @@ fn cli_storage_config(data_dir: &std::path::Path) -> StorageConfig {
         hot_tier_capacity,
     );
     config.block_cache_bytes = defaults.block_cache_bytes;
+    config.set_hot_tier_per_realm_metrics(defaults.hot_tier_per_realm_metrics);
     config
 }
 

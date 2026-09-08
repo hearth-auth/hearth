@@ -204,6 +204,15 @@ pub struct StorageSection {
     /// Ignored when `hot_tier_capacity` is `Some(n)`.
     #[serde(default)]
     pub hot_tier_max_memory: Option<usize>,
+    /// Export hot-tier eviction and promotion counters with a `realm` label.
+    ///
+    /// The hot tier is one cache shared by every tenant, so the unlabelled
+    /// totals cannot say which realm the tier is holding or which realm is
+    /// evicting the others (audit 2026-08-28 §4.9#6). Costs one Prometheus
+    /// series per realm on each of two counters; set `false` when the realm
+    /// count makes that too expensive.
+    #[serde(default = "StorageSection::default_hot_tier_per_realm_metrics")]
+    pub hot_tier_per_realm_metrics: bool,
     /// Whether to fsync WAL writes. MUST be true in production.
     #[serde(default = "StorageSection::default_fsync")]
     pub fsync: bool,
@@ -242,6 +251,10 @@ impl StorageSection {
     const fn default_block_cache_bytes() -> usize {
         256 * 1024 * 1024 // 256 MiB
     }
+
+    const fn default_hot_tier_per_realm_metrics() -> bool {
+        true
+    }
 }
 
 impl Default for StorageSection {
@@ -252,6 +265,7 @@ impl Default for StorageSection {
             memtable_flush_bytes: Self::default_memtable_flush_bytes(),
             hot_tier_capacity: None,
             hot_tier_max_memory: None,
+            hot_tier_per_realm_metrics: Self::default_hot_tier_per_realm_metrics(),
             fsync: Self::default_fsync(),
             block_cache_bytes: Self::default_block_cache_bytes(),
             compaction: CompactionSection::default(),

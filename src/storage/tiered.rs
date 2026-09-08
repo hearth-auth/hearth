@@ -94,6 +94,20 @@ pub(crate) struct TieredConfig {
     /// A value `> 1` amortizes that churn; `1` admits every promotion
     /// (immediate, deterministic caching).
     pub promote_sample_rate: u32,
+    /// Break hot-tier eviction and promotion counters down by realm.
+    ///
+    /// The hot tier is one cache shared by every tenant, so without this the
+    /// counters cannot say which realm the tier is holding or which realm is
+    /// evicting the others (audit 2026-08-28 §4.9#6). When `true`, every
+    /// admitted promotion and every eviction also increments
+    /// `hearth_storage_hot_tier_promotions_by_realm_total` /
+    /// `hearth_storage_hot_tier_evictions_by_realm_total` under a `realm`
+    /// label. The unlabelled totals are always kept.
+    ///
+    /// One series per realm, so the cardinality is the realm count — the same
+    /// dimension `hearth_auth_attempts_total` already carries. Set `false` on
+    /// a deployment with too many realms to pay for it.
+    pub per_realm_metrics: bool,
 }
 
 impl Default for TieredConfig {
@@ -105,6 +119,7 @@ impl Default for TieredConfig {
             // dev/embedded use. Production opts into sampling explicitly via
             // `PRODUCTION_PROMOTE_SAMPLE_RATE`.
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         }
     }
 }
@@ -318,6 +333,12 @@ impl HotTier {
         crate::metrics::metrics()
             .storage_hot_tier_promotions_total
             .inc();
+        if self.config.per_realm_metrics {
+            count_by_realm(
+                &crate::metrics::metrics().storage_hot_tier_promotions_by_realm_total,
+                realm_id,
+            );
+        }
 
         let current = shard.data.load_full();
 
@@ -332,7 +353,7 @@ impl HotTier {
         // Evict if the shard is at its share of the capacity
         let mut new_map = (*current).clone();
         if new_map.len() >= self.shard_capacity {
-            evict_locked(shard, &mut new_map);
+            evict_locked(shard, &mut new_map, self.config.per_realm_metrics);
         }
 
         new_map.insert(composite, HotEntry::new(Arc::from(value)));
@@ -417,6 +438,12 @@ impl HotTier {
                     crate::metrics::metrics()
                         .storage_hot_tier_evictions_total
                         .inc();
+                    if self.config.per_realm_metrics {
+                        count_by_realm(
+                            &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
+                            evicted_key.realm_id(),
+                        );
+                    }
                     hand = (hand + 1) % len;
                     shard.clock_hand.store(hand, Ordering::Relaxed);
                     return Some(evicted_key);
@@ -491,7 +518,10 @@ impl HotTier {
 /// First pass: scan all entries, clear ref bits, evict first unreferenced.
 /// Second pass (if first pass only cleared bits): scan again to evict.
 /// Force-evict at hand position if both passes fail (guarantees progress).
-fn evict_locked(shard: &Shard, map: &mut HashMap<CompositeKey, HotEntry>) {
+///
+/// `per_realm_metrics` carries [`TieredConfig::per_realm_metrics`] in, because
+/// this is a free function with no handle on the tier's config.
+fn evict_locked(shard: &Shard, map: &mut HashMap<CompositeKey, HotEntry>, per_realm_metrics: bool) {
     if map.is_empty() {
         return;
     }
@@ -513,6 +543,12 @@ fn evict_locked(shard: &Shard, map: &mut HashMap<CompositeKey, HotEntry>) {
                 crate::metrics::metrics()
                     .storage_hot_tier_evictions_total
                     .inc();
+                if per_realm_metrics {
+                    count_by_realm(
+                        &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
+                        evicted.realm_id(),
+                    );
+                }
                 hand = (hand + 1) % len;
                 shard.clock_hand.store(hand, Ordering::Relaxed);
                 return;
@@ -531,6 +567,23 @@ fn evict_locked(shard: &Shard, map: &mut HashMap<CompositeKey, HotEntry>) {
     map.remove(&key);
     crate::metrics::metrics()
         .storage_hot_tier_evictions_total
+        .inc();
+    if per_realm_metrics {
+        count_by_realm(
+            &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
+            key.realm_id(),
+        );
+    }
+}
+
+/// Increments `vec`'s `realm`-labelled series for `realm_id`.
+///
+/// Off the read path — every caller already holds a shard write lock and has
+/// cloned that shard's map, so the label-map read lock `with_label_values`
+/// takes and the UUID `String` this formats are both proportionate
+/// (audit 2026-08-28 §4.9#6).
+fn count_by_realm(vec: &prometheus::CounterVec, realm_id: &RealmId) {
+    vec.with_label_values(&[realm_id.as_uuid().to_string().as_str()])
         .inc();
 }
 
@@ -560,6 +613,7 @@ mod tests {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         };
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
@@ -601,6 +655,7 @@ mod tests {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         };
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
@@ -630,6 +685,7 @@ mod tests {
             hot_tier_capacity: 3,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         };
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
@@ -683,6 +739,7 @@ mod tests {
             hot_tier_capacity: 500_000,
             eviction_batch_size: 128,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         };
         let tier = HotTier::new(config);
         assert_eq!(tier.capacity, 500_000);
@@ -696,6 +753,7 @@ mod tests {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         };
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
@@ -714,6 +772,7 @@ mod tests {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         };
         let tier = HotTier::new(config);
         let realm = RealmId::generate();
@@ -806,6 +865,7 @@ mod tests {
                 hot_tier_capacity: small_capacity,
                 eviction_batch_size: 10,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             });
             assert_eq!(
                 small.shard_count(),
@@ -875,6 +935,7 @@ mod tests {
             hot_tier_capacity: capacity,
             eviction_batch_size: 64,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         });
         assert_eq!(tier.shard_count(), 4, "4096/1024 must give 4 shards");
         let realm = RealmId::generate();
@@ -948,6 +1009,7 @@ mod tests {
             hot_tier_capacity: 100_000,
             eviction_batch_size: 64,
             promote_sample_rate,
+            per_realm_metrics: true,
         }
     }
 
@@ -1072,6 +1134,7 @@ mod tests {
                 hot_tier_capacity: 20,
                 eviction_batch_size: 5,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             };
             let tier = HotTier::new(config);
             let realm = RealmId::generate();
@@ -1136,6 +1199,7 @@ mod tests {
                 hot_tier_capacity: CAPACITY,
                 eviction_batch_size: 5,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             };
             let tier = HotTier::new(config);
             let realm = RealmId::generate();

@@ -241,6 +241,24 @@ pub struct Metrics {
     /// promotion attempts, so it tracks real map-clone churn.
     pub storage_hot_tier_promotions_total: Counter,
 
+    /// Hot-tier evictions broken down by the realm that owned the evicted key.
+    ///
+    /// Labels: `realm` (the realm's UUID). The hot tier is one shared cache
+    /// across every tenant, so the unlabelled total above cannot say which
+    /// realm is being evicted or which realm is doing the evicting
+    /// (audit 2026-08-28 §4.9#6). Series appear only while
+    /// `storage.hot_tier_per_realm_metrics` is on; turn it off on deployments
+    /// where the realm count makes the label's cardinality too expensive.
+    pub storage_hot_tier_evictions_by_realm_total: CounterVec,
+
+    /// Hot-tier promotions **admitted**, broken down by realm.
+    ///
+    /// Labels: `realm` (the realm's UUID). Pairs with
+    /// `storage_hot_tier_evictions_by_realm_total`: together they show which
+    /// tenant's working set the shared hot tier is actually holding
+    /// (audit 2026-08-28 §4.9#6). Gated by the same config knob.
+    pub storage_hot_tier_promotions_by_realm_total: CounterVec,
+
     /// Hot-tier fills discarded because an invalidation raced the fill.
     ///
     /// Incremented when a cold read's promote is dropped because a delete or
@@ -547,6 +565,30 @@ impl Metrics {
             .register(Box::new(storage_hot_tier_promotions_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_hot_tier_evictions_by_realm_total = CounterVec::new(
+            Opts::new(
+                "hearth_storage_hot_tier_evictions_by_realm_total",
+                "Hot-tier evictions, labelled by the realm that owned the evicted key",
+            ),
+            &["realm"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_hot_tier_evictions_by_realm_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let storage_hot_tier_promotions_by_realm_total = CounterVec::new(
+            Opts::new(
+                "hearth_storage_hot_tier_promotions_by_realm_total",
+                "Hot-tier promotions admitted, labelled by realm",
+            ),
+            &["realm"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_hot_tier_promotions_by_realm_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let storage_hot_tier_stale_fills_discarded_total = Counter::new(
             "hearth_storage_hot_tier_stale_fills_discarded_total",
             "Hot-tier fills discarded because a delete or update invalidated \
@@ -669,6 +711,8 @@ impl Metrics {
             storage_get_ssts_probed,
             storage_hot_tier_evictions_total,
             storage_hot_tier_promotions_total,
+            storage_hot_tier_evictions_by_realm_total,
+            storage_hot_tier_promotions_by_realm_total,
             storage_hot_tier_stale_fills_discarded_total,
             storage_sst_files,
             kdf_in_flight,

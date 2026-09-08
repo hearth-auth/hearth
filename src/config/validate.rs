@@ -178,6 +178,7 @@ impl Config {
                 memtable_flush_bytes: 16 * 1024 * 1024,
                 hot_tier_capacity: Some(1_000),
                 hot_tier_max_memory: None,
+                hot_tier_per_realm_metrics: true,
                 fsync: false,
                 block_cache_bytes: 4 * 1024 * 1024,
                 compaction: CompactionSection::default(),
