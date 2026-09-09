@@ -841,7 +841,7 @@ device-fingerprint step-up.
 | `NewDevice` | 0.3 | Device-fingerprint miss (`src/identity/device_fp`) |
 | `NewCountry` | 0.4 | GeoIP lookup (stub — absent until P-2 ships) |
 | `PasswordAge { days }` | 0.2 (if `days >= threshold`) | `user.created_at()` (approximation) |
-| `BreachCorpusHit` | 1.0 (forces step-up) | HIBP / offline corpus |
+| `BreachCorpusHit` | 1.0 (forces step-up) | HIBP k-anonymity |
 | `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh (A-49) |
 
 ### Config (`security.risk_scorer` in `hearth.yaml`)
@@ -1366,7 +1366,7 @@ Operators who need vendor risk models or custom ML pipelines implement the
 | `NewDevice` | 0.3 | Device-fingerprint miss (`(user_id, ip/24, UA)` not seen before) |
 | `NewCountry` | 0.4 | GeoIP country change (stub — absent until P-2 ships) |
 | `PasswordAge { days }` | 0.2 | Credential `created_at` ≥ `password_age_days_threshold` |
-| `BreachCorpusHit` | 1.0 | HIBP k-anonymity / offline corpus match |
+| `BreachCorpusHit` | 1.0 | HIBP k-anonymity match |
 | `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh exchange (A-49) |
 
 Weights sum additively; the total is clamped to `1.0` before the threshold
