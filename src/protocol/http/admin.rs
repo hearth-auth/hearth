@@ -228,6 +228,31 @@ fn require_realm(state: &AppState, realm_id: &RealmId) -> Result<crate::identity
     }
 }
 
+/// Refuses a write aimed at the reserved system realm.
+///
+/// The README states the system realm is read-only through public APIs, and
+/// `create_realm`, `register_user`, `register_client` and `create_organization`
+/// enforce that in the identity engine. RBAC role and group writes carried no
+/// such gate, so a `system_access_token` mutated the operators' own realm
+/// through `/admin/*` (audit 2026-08-28 §4.1#7).
+///
+/// The gate sits here rather than in the RBAC engine on purpose: the operator
+/// console at `/ui/admin/admin-users` legitimately creates system-realm role
+/// assignments, and it calls the engine directly rather than through this API.
+fn reject_system_realm_write(auth: &AdminAuth) -> Result<(), Response> {
+    if crate::identity::keys::is_system_realm(&auth.realm_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "system_realm_protected",
+                "message": "the reserved system realm is read-only through this API"
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 /// Enforces realm-level object authorization (BOLA guard).
 ///
 /// Returns `path_realm_id` when access is permitted:
@@ -3479,6 +3504,9 @@ async fn admin_create_role(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let permissions = match permissions_from_strings(body.permissions) {
         Ok(p) => p,
         Err(e) => return rbac_error_to_response(&e).into_response(),
@@ -3545,6 +3573,9 @@ async fn admin_update_role(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
@@ -3596,6 +3627,9 @@ async fn admin_delete_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
@@ -3656,6 +3690,9 @@ async fn admin_create_group(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     match state.rbac.create_group(
         &auth.realm_id,
         &CreateGroupRequest {
@@ -3711,6 +3748,9 @@ async fn admin_update_group(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3740,6 +3780,9 @@ async fn admin_delete_group(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
@@ -3801,6 +3844,9 @@ async fn admin_add_group_member(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3843,6 +3889,9 @@ async fn admin_remove_group_member(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
@@ -3909,6 +3958,9 @@ async fn admin_assign_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let user_id = match parse_user_id_path(&id) {
         Ok(u) => u,
@@ -3992,6 +4044,9 @@ async fn admin_unassign_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let aid = match parse_assignment_id(&id) {
         Ok(a) => a,

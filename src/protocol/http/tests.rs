@@ -1696,3 +1696,82 @@ async fn every_realm_scoped_admin_route_refuses_a_peer_realms_admin() {
         );
     }
 }
+
+/// Every RBAC write on the public admin API, as `(method, path, body)`.
+/// Paths carry placeholder object ids: the system-realm gate must fire before
+/// the handler ever looks the object up, so a non-existent id still yields 403.
+const RBAC_WRITE_ROUTES: &[(&str, &str, &str)] = &[
+    ("POST", "/admin/roles", r#"{"name":"r","description":"","permissions":[],"parent_roles":[]}"#),
+    ("PATCH", "/admin/roles/role_00000000-0000-0000-0000-000000000001", r#"{"description":"x"}"#),
+    ("DELETE", "/admin/roles/role_00000000-0000-0000-0000-000000000001", ""),
+    ("POST", "/admin/groups", r#"{"name":"g","slug":"g"}"#),
+    ("PATCH", "/admin/groups/group_00000000-0000-0000-0000-000000000001", r#"{"description":"x"}"#),
+    ("DELETE", "/admin/groups/group_00000000-0000-0000-0000-000000000001", ""),
+    ("POST", "/admin/groups/group_00000000-0000-0000-0000-000000000001/members", r#"{"type":"user","id":"00000000-0000-0000-0000-000000000002"}"#),
+    ("DELETE", "/admin/groups/group_00000000-0000-0000-0000-000000000001/members/user_00000000-0000-0000-0000-000000000002", ""),
+    ("POST", "/admin/users/user_00000000-0000-0000-0000-000000000002/roles", r#"{"role_id":"role_00000000-0000-0000-0000-000000000001"}"#),
+    ("DELETE", "/admin/assignments/assign_00000000-0000-0000-0000-000000000003", ""),
+];
+
+/// Audit 2026-08-28 §4.1#7 — the README states the reserved system realm is
+/// read-only through public APIs, and names `create_realm`, `delete_realm`,
+/// `register_user`, `register_client` and `create_organization` as rejecting it.
+/// Role and group writes carried no such gate, so a `system_access_token`
+/// mutated the operators' own realm through `/admin/*`.
+///
+/// The gate sits at the protocol edge, not in the RBAC engine: the operator
+/// console at `/ui/admin/admin-users` legitimately writes system-realm roles
+/// and calls the engine directly.
+#[tokio::test]
+async fn public_rbac_writes_reject_the_system_realm() {
+    let f = cross_realm_fixture("system-rbac-gate").await;
+
+    for (method, uri, body) in RBAC_WRITE_ROUTES {
+        let resp = router(Arc::clone(&f.state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(*method)
+                    .uri(*uri)
+                    .header("Authorization", format!("Bearer {}", f.system_token))
+                    .header("X-Realm-ID", &f.system_realm_id)
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(*body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must refuse a write aimed at the reserved system realm"
+        );
+    }
+}
+
+/// The same routes must stay open to a tenant realm's admin — the gate must
+/// refuse the system realm only, not RBAC writes in general.
+#[tokio::test]
+async fn public_rbac_writes_still_serve_a_tenant_realm() {
+    let f = cross_realm_fixture("tenant-rbac-open").await;
+
+    let resp = router(Arc::clone(&f.state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/roles")
+                .header("Authorization", format!("Bearer {}", f.dev_token))
+                .header("X-Realm-ID", &f.dev_realm_id)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"name":"tenant-role","description":"","permissions":[],"parent_roles":[]}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tenant realm admin must still be able to create a role"
+    );
+}

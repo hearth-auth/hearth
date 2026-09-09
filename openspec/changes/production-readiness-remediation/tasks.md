@@ -163,7 +163,7 @@ found it, the audit piece, and the report's severity.
 - [x] 17.1 Include `active` on the negative `/realms/{name}/introspect` response, per RFC 7662 §2.2 (§4.1#4 · MEDIUM)
 - [x] 17.2 Stop the pre-shared SCIM bearer token reading a suspended or archived realm's user directory (§4.1#5 · MEDIUM)
 - [x] 17.3 Fix the four handlers that bypass the `scoped_realm` BOLA guard — two permissively, two so strictly the system operator is locked out (§4.1#6 · LOW)
-- [ ] 17.4 Make the reserved system realm reject role and group writes through public APIs, as the README states (§4.1#7 · CLAIM-DEFECT)
+- [x] 17.4 Make the reserved system realm reject role and group writes through public APIs, as the README states (§4.1#7 · CLAIM-DEFECT)
 - [ ] 17.5 Give `check_cross_realm_policy` a production caller; cross-realm trust policies are stored and audited but never consulted (§4.1#8 · CLAIM-DEFECT)
 - [ ] 17.6 Add per-handler permission gates to the eight authenticated admin handlers that carry none, so any sub-admin reaches them (§4.1#9 · LOW)
 - [ ] 17.7 Answer `404` instead of `200` in the five admin handlers that serve an object absent from the caller's realm (§4.1#10 · LOW)

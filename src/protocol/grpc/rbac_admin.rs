@@ -48,6 +48,21 @@ fn parse_realm_id(raw: &str) -> Result<RealmId, Status> {
         .map_err(|_| Status::invalid_argument("invalid realm_id"))
 }
 
+/// Refuses a write aimed at the reserved system realm.
+///
+/// The REST twin carries the same gate; see `reject_system_realm_write` in
+/// `protocol::http::admin` for why it sits at the protocol edge rather than in
+/// the RBAC engine (audit 2026-08-28 §4.1#7).
+fn reject_system_realm_write(auth_realm: &RealmId) -> Result<(), Status> {
+    if crate::identity::keys::is_system_realm(auth_realm) {
+        return Err(Status::new(
+            Code::PermissionDenied,
+            "the reserved system realm is read-only through this API",
+        ));
+    }
+    Ok(())
+}
+
 /// Asserts that the optional body `realm_id` field matches the authenticated
 /// realm.  If the body supplies a non-empty value that differs from the
 /// `x-realm-id` header used for authentication, the call is rejected with
@@ -324,6 +339,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id.clone();
         let permissions = permissions_from_strings(&inner.permissions)?;
         // Privilege-ceiling check (HEA-1734): sub-admins must not define a role
@@ -386,6 +402,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id.clone();
         let role_id = parse_role_id(&inner.role_id)?;
         // The proto uses "empty string = unchanged" semantics for name/description
@@ -438,6 +455,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let role_id = parse_role_id(&inner.role_id)?;
         self.state
@@ -488,6 +506,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let description = if inner.description.is_empty() {
             None
@@ -538,6 +557,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let name = if inner.name.is_empty() {
@@ -579,6 +599,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         self.state
@@ -622,6 +643,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let member_proto = inner
@@ -653,6 +675,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let member_proto = inner
@@ -674,6 +697,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id.clone();
         let user_id = parse_user_id(&inner.user_id)?;
         let role_id = parse_role_id(&inner.role_id)?;
@@ -704,6 +728,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let aid = parse_assignment_id(&inner.assignment_id)?;
         self.state
@@ -741,6 +766,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id.clone();
         let group_id = parse_group_id(&inner.group_id)?;
         let role_id = parse_role_id(&inner.role_id)?;
@@ -771,6 +797,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let aid = parse_assignment_id(&inner.assignment_id)?;
         self.state
@@ -830,6 +857,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id.clone();
         let user_id = parse_user_id(&inner.user_id)?;
         let permission = Permission::new(inner.permission.clone())
@@ -875,6 +903,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let permission = Permission::new(inner.permission.clone())
@@ -944,6 +973,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id.clone();
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
@@ -985,6 +1015,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
@@ -1155,6 +1186,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.users.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        reject_system_realm_write(&auth.realm_id)?;
         let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let client_uuid = uuid::Uuid::parse_str(&inner.client_id)

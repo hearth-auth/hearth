@@ -384,6 +384,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   reporting `404`.
 
 ### Security
+- **The reserved system realm is read-only for RBAC writes on the public APIs (audit 2026-08-28
+  §4.1#7)** — the README states the system realm is read-only through public APIs, and
+  `create_realm`, `register_user`, `register_client` and `create_organization` enforce it. Role,
+  group, membership, assignment and permission-grant writes did not: a `system_access_token`
+  created roles and groups **inside the operators' own realm** through `/admin/*` and the gRPC
+  `RbacAdmin` service. All ten REST routes and seventeen gRPC write RPCs now answer `403` /
+  `PERMISSION_DENIED` for the reserved realm. Tenant-realm RBAC writes are unchanged, and the
+  operator console at `/ui/admin/admin-users` still manages operators — it calls the engine
+  directly, not these APIs.
 - **SCIM refuses a suspended or archived realm (audit 2026-08-28 §4.1#5)** — suspending or
   archiving a realm is the incident-response freeze control, but the SCIM plane never consulted
   realm status. A pre-shared SCIM bearer token kept reading the frozen realm's user directory and
