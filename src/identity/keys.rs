@@ -369,6 +369,13 @@ pub(crate) fn encode_user_email(email: &str) -> Vec<u8> {
     format!("{USER_EMAIL_PREFIX}{email}").into_bytes()
 }
 
+/// Returns the scan prefix for every user email-index entry in a realm.
+///
+/// Format: `usr:email:`
+pub(crate) fn user_email_scan_prefix() -> Vec<u8> {
+    USER_EMAIL_PREFIX.as_bytes().to_vec()
+}
+
 /// Encodes the *value* stored under an email-index key: 16 raw UUID bytes.
 ///
 /// This is the single canonical writer for the `usr:email:` index value.

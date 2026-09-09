@@ -339,6 +339,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `scripts/check-chart-image-tag.sh` fails CI if either drifts again. Override `image.tag` as before
   to pin a different image.
 
+### Fixed
+- **`delete_user` is retryable after a fault mid-cascade (audit 2026-08-28 §4.20#8)** — the cascade
+  deleted the user's primary record first, so a fault anywhere in the remaining steps left the
+  credential, sessions, memberships, consents, federation and SCIM links, RBAC rows and owned
+  agents on disk with nothing able to address them: `GET /admin/users/{id}` answered `404` and a
+  retried `DELETE` answered `404` without removing anything. The primary record and its email
+  index are now removed last, in one atomic batch, so a fault leaves the user still deletable. A
+  retry against a user already orphaned by an earlier release now sweeps those rows before
+  reporting `404`.
+
 ### Security
 - **Rate-limit counters no longer store the subject's email address (audit 2026-08-28 §4.20#7)** —
   the magic-link, password-reset and self-registration counters were keyed on the plaintext

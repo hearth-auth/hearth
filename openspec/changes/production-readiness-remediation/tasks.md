@@ -143,7 +143,7 @@ found it, the audit piece, and the report's severity.
 - [x] 15.6 Sweep password history, webhook secrets, org-owned agent credentials, the per-realm MFA DEK and the DPoP nonce key, which neither cascade removes (§4.20#6 · MEDIUM)
 - [x] 15.7 Move delete preconditions out of the protocol adapters; gRPC `DeleteRealm` has no archival gate and REST/gRPC application delete has no YAML-managed gate (§4.20#10 · MEDIUM)
 - [x] 15.8 Stop three rate-limit counters carrying the subject's plaintext email address in the storage key, where it outlives both the user and the realm (§4.20#7 · LOW)
-- [ ] 15.9 Make `delete_user` retryable; it deletes the primary record first and then refuses to retry, so a fault mid-cascade orphans the user permanently (§4.20#8 · LOW)
+- [x] 15.9 Make `delete_user` retryable; it deletes the primary record first and then refuses to retry, so a fault mid-cascade orphans the user permanently (§4.20#8 · LOW)
 - [ ] 15.10 Correct the four published statements about cascade completeness and crash recovery, and fix the simulation test that is blind to the difference (§4.20#9 · CLAIM-DEFECT)
 - [ ] 15.11 Stop every memtable flush re-reading every byte of every live SST to fetch a 60-byte header (§4.21#5 · MEDIUM)
 - [ ] 15.12 Reconcile the SST mmap `SAFETY:` comment with `compact_partial`, which violates the invariant it states, and fix the contradicted crash-safety doc on `compact_ssts` (§4.21#6 · CLAIM-DEFECT)

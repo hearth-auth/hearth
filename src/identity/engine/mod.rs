@@ -4987,36 +4987,98 @@ impl EmbeddedIdentityEngine {
         user_id: &UserId,
         audit_ctx: Option<&AuditContext>,
     ) -> Result<(), IdentityError> {
-        // 1. Load user to get email for index cleanup
-        let user = self
-            .get_user(realm_id, user_id)?
-            .ok_or(IdentityError::UserNotFound)?;
+        // The primary record is the only handle on every row the cascade below
+        // removes, so it is deleted LAST — atomically with its email index.  The
+        // previous order deleted it first, which meant a fault anywhere in the
+        // cascade left the remaining rows unaddressable: `get_user` returned None
+        // and the retry refused with `UserNotFound` (audit 2026-08-28 §4.20#8).
+        let Some(user) = self.get_user(realm_id, user_id)? else {
+            // Retry of a delete that faulted under the old order.  The user is
+            // gone, but its rows are not — sweep them so the retry is not a
+            // no-op, then report the user as absent as any caller expects.
+            if self.cascade_user_rows(realm_id, user_id)? {
+                self.sweep_orphaned_email_index(realm_id, user_id)?;
+            }
+            return Err(IdentityError::UserNotFound);
+        };
 
-        // 2. Delete primary record
-        let id_key = keys::encode_user_id(user_id);
-        self.storage
-            .delete(realm_id, &id_key)
-            .map_err(Self::storage_err)?;
+        self.cascade_user_rows(realm_id, user_id)?;
 
-        // 3. Delete email index
-        let email_key = keys::encode_user_email(user.email());
-        self.storage
-            .delete(realm_id, &email_key)
-            .map_err(Self::storage_err)?;
-
-        // A-20: write a 90-day reservation tombstone so the deleted email
-        // cannot be immediately re-registered by another actor.
+        // A-20: write a 90-day reservation tombstone so the deleted email cannot
+        // be immediately re-registered by another actor.  Record, index and
+        // tombstone move in one atomic batch: no crash may leave an email index
+        // pointing at a record that is gone.
         let now_micros = self.clock.now().as_micros();
         let reservation = StoredEmailReservation {
             reserved_at_micros: now_micros,
         };
-        if let Ok(bytes) = serde_json::to_vec(&reservation) {
-            let reserved_key = keys::encode_email_reserved(user.email());
-            let _ = self.storage.put(realm_id, &reserved_key, &bytes);
-        }
+        let reserved_bytes =
+            serde_json::to_vec(&reservation).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .write_batch(
+                realm_id,
+                &[(keys::encode_email_reserved(user.email()), reserved_bytes)],
+                &[
+                    keys::encode_user_id(user_id),
+                    keys::encode_user_email(user.email()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            audit_ctx,
+            AuditAction::UserDeleted,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        Ok(())
+    }
+
+    /// Deletes every row keyed by `user_id`, leaving the primary record and the
+    /// email index to the caller.
+    ///
+    /// Returns `true` when at least one row was found, which is how the retry
+    /// path tells an orphaned user apart from a `user_id` that never existed —
+    /// a distinction that keeps `sweep_orphaned_email_index` off the path a
+    /// caller can drive with an arbitrary UUID.
+    ///
+    /// Every step is idempotent: a second run over a swept user deletes nothing
+    /// and returns `false`.
+    fn cascade_user_rows(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        let mut found_any = self.cascade_user_credentials(realm_id, user_id)?;
+        found_any |= self.cascade_user_sessions_and_memberships(realm_id, user_id)?;
+        found_any |= self.cascade_user_links(realm_id, user_id)?;
+        Ok(found_any)
+    }
+
+    /// Removes the user's password credential, TOTP state and WebAuthn keys.
+    ///
+    /// Part of [`cascade_user_rows`]; see it for the `bool` contract.
+    fn cascade_user_credentials(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        let mut found_any = false;
 
         // 4. Delete credential (if any — best effort, ignore not-found)
         let cred_key = keys::encode_credential_key(user_id);
+        if self
+            .storage
+            .get(realm_id, &cred_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            found_any = true;
+        }
         self.storage
             .delete(realm_id, &cred_key)
             .map_err(Self::storage_err)?;
@@ -5035,6 +5097,7 @@ impl EmbeddedIdentityEngine {
             .scan(realm_id, &webauthn_prefix, &webauthn_end)
             .map_err(Self::storage_err)?;
 
+        found_any |= !webauthn_entries.is_empty();
         for entry in &webauthn_entries {
             // If discoverable, delete the discoverable index entry
             if let Ok(stored) = serde_json::from_slice::<StoredWebAuthnCredential>(&entry.value) {
@@ -5051,6 +5114,19 @@ impl EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        Ok(found_any)
+    }
+
+    /// Removes the user's sessions, organization memberships and OAuth consents.
+    ///
+    /// Part of [`cascade_user_rows`]; see it for the `bool` contract.
+    fn cascade_user_sessions_and_memberships(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        let mut found_any = false;
+
         // 5. Delete all sessions for this user
         let session_prefix = keys::encode_user_sessions_prefix(user_id);
         let session_end = keys::prefix_end(&session_prefix);
@@ -5059,6 +5135,7 @@ impl EmbeddedIdentityEngine {
             .scan(realm_id, &session_prefix, &session_end)
             .map_err(Self::storage_err)?;
 
+        found_any |= !session_entries.is_empty();
         for entry in &session_entries {
             // Extract session UUID from the user-session index key
             // Key format: "ses:user:{user_uuid}:{session_uuid}"
@@ -5094,6 +5171,7 @@ impl EmbeddedIdentityEngine {
             .scan(realm_id, &org_membership_prefix, &org_membership_end)
             .map_err(Self::storage_err)?;
 
+        found_any |= !org_memberships.is_empty();
         for entry in &org_memberships {
             if let Ok(membership) = serde_json::from_slice::<OrganizationMembership>(&entry.value) {
                 // Delete forward index (org → user)
@@ -5115,11 +5193,26 @@ impl EmbeddedIdentityEngine {
             .storage
             .scan(realm_id, &consent_prefix, &consent_end)
             .map_err(Self::storage_err)?;
+        found_any |= !consent_entries.is_empty();
         for entry in &consent_entries {
             self.storage
                 .delete(realm_id, &entry.key)
                 .map_err(Self::storage_err)?;
         }
+
+        Ok(found_any)
+    }
+
+    /// Removes the user's federation and SCIM links, device fingerprints, RBAC
+    /// rows and owned agents.
+    ///
+    /// Part of [`cascade_user_rows`]; see it for the `bool` contract.
+    fn cascade_user_links(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        let mut found_any = false;
 
         // 8. Cascade: scrub all federated external-identity links for
         //    this user. Each forward index entry holds the external_sub
@@ -5134,6 +5227,7 @@ impl EmbeddedIdentityEngine {
             .storage
             .scan(realm_id, &fed_fwd_prefix, &fed_fwd_end)
             .map_err(Self::storage_err)?;
+        found_any |= !fed_fwd_entries.is_empty();
         for entry in &fed_fwd_entries {
             // Key format: fed:ext_fwd:{user_uuid}:{idp_uuid}
             let key_str = std::str::from_utf8(&entry.key).unwrap_or("");
@@ -5164,6 +5258,7 @@ impl EmbeddedIdentityEngine {
             .get(realm_id, &scim_fwd_key)
             .map_err(Self::storage_err)?
         {
+            found_any = true;
             if let Ok(ext_str) = std::str::from_utf8(&ext_bytes) {
                 let reverse_key = keys::encode_scim_ext_user_key(ext_str);
                 self.storage
@@ -5194,6 +5289,7 @@ impl EmbeddedIdentityEngine {
             let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
             let end = keys::prefix_end(&prefix);
             if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                found_any |= !entries.is_empty();
                 for entry in &entries {
                     if let Ok(key_str) = std::str::from_utf8(&entry.key) {
                         if let Some(uuid_str) = key_str.rsplit(':').next() {
@@ -5209,14 +5305,40 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        self.record_audit(
-            realm_id,
-            audit_ctx,
-            AuditAction::UserDeleted,
-            "user",
-            &user_id.as_uuid().to_string(),
-        )?;
+        Ok(found_any)
+    }
 
+    /// Deletes any email-index entry still pointing at `user_id`.
+    ///
+    /// The index is keyed by address, so a user whose primary record is already
+    /// gone cannot be found through it by key — only by value.  This walks the
+    /// realm's index once, which is why the caller runs it only after
+    /// `cascade_user_rows` has proved the user left rows behind (§4.20#8).
+    ///
+    /// Both index value encodings are matched: 16 raw UUID bytes (current) and
+    /// the 36-character hyphenated string three older writers emitted (HEA-1902).
+    fn sweep_orphaned_email_index(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        let prefix = keys::user_email_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let raw = keys::encode_user_id_value(user_id);
+        let legacy = user_id.as_uuid().to_string();
+        for entry in &entries {
+            let matches =
+                entry.value == raw || std::str::from_utf8(&entry.value).is_ok_and(|v| v == legacy);
+            if matches {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
         Ok(())
     }
 }
@@ -16422,6 +16544,97 @@ mod tests {
     }
 
     // ===== Delete cascades to credentials =====
+
+    #[test]
+    fn delete_user_sweeps_rows_orphaned_by_a_fault_mid_cascade() {
+        // §4.20#8: the cascade deleted the primary record first, so a fault partway
+        // through left every remaining row unaddressable — `get_user` returned None
+        // and `delete_user` then refused with `UserNotFound`. Reproduce that state
+        // and require the retry to clear it.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let user_id = user.id().clone();
+
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
+        engine
+            .set_password(&realm, &user_id, &pw)
+            .expect("set password");
+
+        // Simulate the old order's fault window: primary record gone, cascade rows left.
+        engine
+            .storage
+            .delete(&realm, &keys::encode_user_id(&user_id))
+            .expect("delete primary record");
+
+        let err = engine
+            .delete_user(&realm, &user_id)
+            .expect_err("the primary record is already gone");
+        assert!(
+            matches!(err, IdentityError::UserNotFound),
+            "the user is absent, so the call still reports UserNotFound"
+        );
+
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_credential_key(&user_id))
+                .expect("get credential")
+                .is_none(),
+            "the credential must not stay orphaned"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_user_email(user.email()))
+                .expect("get email index")
+                .is_none(),
+            "the email index must not stay orphaned"
+        );
+    }
+
+    #[test]
+    fn delete_user_keeps_the_primary_record_until_the_cascade_finishes() {
+        // §4.20#8: the primary record is the only handle on the remaining rows, so
+        // it must be removed last — atomically with its email index.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let user_id = user.id().clone();
+
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
+        engine
+            .set_password(&realm, &user_id, &pw)
+            .expect("set password");
+
+        engine.delete_user(&realm, &user_id).expect("delete");
+
+        // Both halves land together: neither the record nor its index survives.
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_user_id(&user_id))
+                .expect("get primary")
+                .is_none(),
+            "primary record must be gone"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_user_email(user.email()))
+                .expect("get email index")
+                .is_none(),
+            "email index must be gone"
+        );
+        // A second call is a clean no-op, not a wedge.
+        assert!(
+            matches!(
+                engine.delete_user(&realm, &user_id),
+                Err(IdentityError::UserNotFound)
+            ),
+            "a repeat delete reports the user absent"
+        );
+    }
 
     #[test]
     fn delete_user_cascades_credential() {
