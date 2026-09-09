@@ -508,7 +508,7 @@ All `AdminClient` implementations must provide at minimum:
 |--------|-----------------|
 | `createUser(params)` | `POST /admin/users` |
 | `getUser(id)` | `GET /admin/users/{id}` |
-| `updateUser(id, params)` | `PUT /admin/users/{id}` |
+| `updateUser(id, params)` | `PATCH /admin/users/{id}` |
 | `deleteUser(id)` | `DELETE /admin/users/{id}` |
 | `listUsers(options)` | `GET /admin/users?limit=N&cursor=C` |
 

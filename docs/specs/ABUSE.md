@@ -1932,7 +1932,7 @@ after a prune operation. This is the same design as the existing `prune_before`.
 ### Configuration surface
 
 ```yaml
-# Set via API: PUT /admin/realms/{id}/audit/retention
+# Set via API: PUT /admin/api/realms/{realm}/audit/config
 # Body:
 {
   "retention_days": 90,
