@@ -54,6 +54,19 @@ pub struct RealmManifest {
     pub slug: String,
     /// Record counts per entity type for this realm.
     pub record_counts: RecordCounts,
+    /// Whether `audit_chain.json` accompanies `audit.ndjson` for this realm.
+    ///
+    /// Restore re-signs every imported audit event under the destination
+    /// realm's key, so the source hashes are only checked when the source
+    /// chain material travels with them. Recording the fact here — inside the
+    /// checksum-covered, optionally signed manifest — stops an attacker
+    /// deleting the chain file to reach the unverified path
+    /// (audit 2026-08-28 §4.14#5).
+    ///
+    /// Absent in archives written before this field existed, which restore
+    /// treats as "unverifiable" and reports rather than refuses.
+    #[serde(default)]
+    pub audit_chain_included: bool,
 }
 
 /// Argon2id parameters used to derive a passphrase-based wrapping key for the DEK.
@@ -220,6 +233,7 @@ mod tests {
                     users: 5,
                     ..Default::default()
                 },
+                audit_chain_included: false,
             }],
             checksums: [("realms/acme/users.ndjson".to_string(), "abc123".to_string())]
                 .into_iter()

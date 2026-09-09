@@ -341,7 +341,11 @@ impl EmbeddedAuditEngine {
     /// The keyed MAC prevents a storage-layer attacker from recomputing a valid
     /// chain after deleting or modifying events — they would need the per-realm
     /// HMAC key (KEK-protected when configured) to forge a tag.
-    fn compute_hmac_hash(hmac_key_bytes: &[u8], prev_hash: &str, event: &AuditEvent) -> String {
+    pub(crate) fn compute_hmac_hash(
+        hmac_key_bytes: &[u8],
+        prev_hash: &str,
+        event: &AuditEvent,
+    ) -> String {
         let hashable = serde_json::json!({
             "id": event.id,
             "realm_id": event.realm_id,
@@ -689,6 +693,23 @@ impl AuditEngine for EmbeddedAuditEngine {
             on_failure,
             on_success,
         })
+    }
+
+    fn export_chain_material(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<super::AuditChainMaterial>, AuditError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let Some(key) = self.peek_realm_hmac_key(realm_id)? else {
+            return Ok(None);
+        };
+        let anchor = self
+            .load_head(realm_id, &key)?
+            .map_or_else(|| GENESIS_HASH.to_string(), |h| h.anchor);
+        Ok(Some(super::AuditChainMaterial {
+            chain_key_b64: STANDARD.encode(key),
+            anchor,
+        }))
     }
 
     fn import_event(&self, source: &AuditEvent) -> Result<(), AuditError> {
@@ -1194,6 +1215,25 @@ impl EmbeddedAuditEngine {
     pub fn decode_for_test(bytes: &[u8]) -> Result<AuditEvent, AuditError> {
         decode_event(bytes)
     }
+}
+
+/// Verifies that `events` form an intact HMAC chain from `anchor` under `key`.
+///
+/// The events must be in the order they were written — which is the order a
+/// realm export writes them. Returns the index of the first event whose stored
+/// `integrity_hash` does not match, or `None` when the whole run checks out.
+///
+/// Used by restore, which otherwise discards every source hash and re-signs the
+/// events under the destination realm's key (audit 2026-08-28 §4.14#5).
+pub fn first_broken_link(events: &[AuditEvent], key: &[u8], anchor: &str) -> Option<usize> {
+    let mut prev = anchor.to_string();
+    for (i, event) in events.iter().enumerate() {
+        if event.integrity_hash != EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event) {
+            return Some(i);
+        }
+        prev.clone_from(&event.integrity_hash);
+    }
+    None
 }
 
 /// Encodes bytes as lowercase hexadecimal.

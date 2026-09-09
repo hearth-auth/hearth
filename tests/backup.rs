@@ -68,6 +68,53 @@ fn import_opts_with_passphrase() -> ImportOptions {
 }
 
 /// Exports a single realm to a temp file and returns the temp file.
+/// Rewrites `src` as a new archive with one member removed, leaving every
+/// other entry — `manifest.json` included — byte-for-byte identical.
+///
+/// This is what an attacker stripping a file out of an archive would do.
+fn strip_member(src: &std::path::Path, drop_path: &str) -> NamedTempFile {
+    use std::io::Read as _;
+
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    {
+        let file = std::fs::File::open(src).expect("open source archive");
+        let decoder = zstd::Decoder::new(file).expect("zstd decoder");
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let path = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read entry");
+            if path != drop_path {
+                entries.push((path, bytes));
+            }
+        }
+    }
+    assert!(
+        entries.iter().all(|(p, _)| p != drop_path),
+        "member '{drop_path}' must be gone"
+    );
+
+    let out = NamedTempFile::new().expect("tempfile");
+    {
+        let file = std::fs::File::create(out.path()).expect("create stripped archive");
+        let encoder = zstd::Encoder::new(file, 0).expect("zstd encoder");
+        let mut builder = tar::Builder::new(encoder);
+        for (path, bytes) in &entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes.as_slice())
+                .expect("append entry");
+        }
+        let encoder = builder.into_inner().expect("finish tar");
+        encoder.finish().expect("finish zstd");
+    }
+    out
+}
+
 fn export_realm_to_file(
     h: &common::TestHarness,
     realm: &hearth::core::RealmId,
@@ -1039,6 +1086,56 @@ async fn audit_events_restored_when_included() {
             .verify_integrity(&restored_realm, None, None)
             .expect("verify integrity"),
         "restored audit chain must verify under the destination realm key"
+    );
+
+    // §4.14#5: re-chaining discards the source hashes, so the restore must
+    // have checked them against the archive's own chain material first —
+    // otherwise the destination chain attests only to the restore.
+    assert!(
+        reader.realms()[0].audit_chain_included,
+        "an export with audit events must carry its chain material"
+    );
+    assert!(
+        report.audit_chain_verified,
+        "restore must verify the archive's audit hashes before re-signing them"
+    );
+}
+
+/// §4.14#5 downgrade guard: the manifest is checksum-covered and optionally
+/// signed, so it — not the presence of the file — decides whether the chain
+/// material was written. Deleting `audit_chain.json` to reach the unverified
+/// path must fail the restore.
+#[tokio::test]
+async fn restore_refuses_an_archive_whose_declared_chain_material_is_missing() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let tmp = export_realm_to_file(
+        &src,
+        &realm,
+        &ExportOptions {
+            include_audit: true,
+            ..Default::default()
+        },
+    );
+    let slug = realm_slug(&src, &realm);
+
+    // Rebuild the archive without `audit_chain.json`, keeping the manifest —
+    // which still declares it — byte-for-byte.
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let stripped = strip_member(tmp.path(), &format!("realms/{slug}/audit_chain.json"));
+
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let stripped_reader = BackupArchive::open(stripped.path()).expect("open stripped");
+    assert!(
+        reader.realms()[0].audit_chain_included,
+        "the manifest must still declare the chain material"
+    );
+    let err = make_importer(&dst)
+        .import_realm(&slug, &stripped_reader, &import_opts_with_passphrase())
+        .expect_err("a declared-but-missing chain file must fail the restore");
+    assert!(
+        format!("{err}").contains("audit_chain.json"),
+        "the error must name the missing member; got: {err}"
     );
 }
 

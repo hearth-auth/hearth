@@ -204,6 +204,14 @@ async fn test_destructive_delete_fails_when_audit_down() {
                 reason: "simulated".to_string(),
             })
         }
+        fn export_chain_material(
+            &self,
+            _realm_id: &hearth::core::RealmId,
+        ) -> Result<Option<hearth::audit::AuditChainMaterial>, hearth::audit::AuditError> {
+            Err(hearth::audit::AuditError::IntegrityViolation {
+                reason: "simulated".to_string(),
+            })
+        }
         fn import_event(
             &self,
             _event: &hearth::audit::AuditEvent,

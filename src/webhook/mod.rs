@@ -101,6 +101,13 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         Ok(result)
     }
 
+    fn export_chain_material(
+        &self,
+        realm_id: &crate::core::RealmId,
+    ) -> Result<Option<crate::audit::AuditChainMaterial>, crate::audit::AuditError> {
+        self.inner.export_chain_material(realm_id)
+    }
+
     fn import_event(
         &self,
         event: &crate::audit::AuditEvent,

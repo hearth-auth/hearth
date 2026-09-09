@@ -23,8 +23,28 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/organizations.ndjson` | Organization records |
 | `realms/<slug>/signing_key.json` | Realm signing key (AES-256-GCM encrypted with the DEK) |
 | `realms/<slug>/audit.ndjson` | Audit events (**only when `--include-audit` is passed**) |
+| `realms/<slug>/audit_chain.json` | The audit chain key and anchor for those events (AES-256-GCM encrypted with the DEK) |
 
 The NDJSON format (one JSON object per line) enables streaming reads during large restores without loading the full file into memory.
+
+### Audit chain verification
+
+Restore re-signs every imported audit event under the **destination** realm's
+HMAC key, because the source realm's key is not the destination's. That means
+the hashes the archive carries are replaced, so restore checks them first:
+`audit_chain.json` holds the source realm's chain key and anchor, and the
+restore walks the exported events against them before importing any of them. A
+chain that does not match its own hashes aborts the restore with the index of
+the first broken link.
+
+The manifest records whether the chain material was written
+(`audit_chain_included`). Because the manifest is checksum-covered — and signed
+when `security.backup.verify_key` is configured — deleting `audit_chain.json`
+to reach the unverified path fails the restore rather than skipping the check.
+
+Archives written before this member existed carry audit events with no chain
+material. Those still restore, with a warning: their restored chain attests to
+the restore, not to the source. Re-export to get a verifiable audit section.
 
 ### Signing key encryption
 

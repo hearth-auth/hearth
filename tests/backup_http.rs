@@ -585,6 +585,7 @@ fn make_test_archive(harness: &common::TestHarness, realm_id: &RealmId) -> Vec<u
         realm_id: format!("realm_{}", realm_id.as_uuid()),
         slug: realm_slug.clone(),
         record_counts: RecordCounts::default(),
+        audit_chain_included: false,
     }]);
     writer.finish(manifest).expect("finish archive");
 

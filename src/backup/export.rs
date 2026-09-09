@@ -399,7 +399,9 @@ impl BackupExporter {
         let encrypted = encrypt_bytes(&pkcs8, dek)?;
         writer.add_file(&format!("{prefix}/signing_key.json"), &encrypted)?;
 
-        // audit.ndjson (optional)
+        // audit.ndjson (optional), plus the chain material a restore needs to
+        // check the exported hashes instead of discarding them (§4.14#5).
+        let mut audit_chain_included = false;
         if opts.include_audit {
             let events = self
                 .audit
@@ -410,6 +412,22 @@ impl BackupExporter {
                 let data = to_ndjson(&events)?;
                 let encrypted = encrypt_bytes(&data, dek)?;
                 writer.add_file(&format!("{prefix}/audit.ndjson"), &encrypted)?;
+
+                let material = self
+                    .audit
+                    .export_chain_material(realm_id)
+                    .map_err(|e| BackupError::Engine(e.to_string()))?
+                    .ok_or_else(|| {
+                        BackupError::Engine(
+                            "realm has audit events but no chain material; refusing to write an \
+                             archive whose audit log cannot be verified on restore"
+                                .to_string(),
+                        )
+                    })?;
+                let chain_json = serde_json::to_vec(&material)?;
+                let encrypted_chain = encrypt_bytes(&chain_json, dek)?;
+                writer.add_file(&format!("{prefix}/audit_chain.json"), &encrypted_chain)?;
+                audit_chain_included = true;
             }
         }
 
@@ -417,6 +435,7 @@ impl BackupExporter {
             realm_id: format!("realm_{}", realm_id.as_uuid()),
             slug,
             record_counts: counts,
+            audit_chain_included,
         })
     }
 

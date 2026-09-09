@@ -321,6 +321,7 @@ mod tests {
                     users: 2,
                     ..Default::default()
                 },
+                audit_chain_included: false,
             }],
             checksums: HashMap::new(),
             sections_encrypted: false,

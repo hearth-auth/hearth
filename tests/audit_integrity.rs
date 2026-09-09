@@ -8,6 +8,7 @@
 //! 3. `verify_integrity` fails after a storage-layer SHA-256 forgery attack
 //!    (keyed HMAC chain cannot be forged without the per-realm key).
 
+use base64::Engine as _;
 use hearth::audit::{AuditAction, AuditEngine, AuditQuery, CreateAuditEvent, EmbeddedAuditEngine};
 use hearth::core::{Clock, FakeClock, RealmId, Timestamp};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -362,4 +363,76 @@ fn verify_integrity_alarms_on_undecodable_record() {
         "audit_integrity_failures_total must increment on undecodable record \
          (before={failures_before}, after={failures_after})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §4.14#5: a restore must check the archive's hashes, not discard them
+// ---------------------------------------------------------------------------
+
+/// `import_event` re-signs every event under the destination realm's key, so
+/// the source hashes are only meaningful if something checks them first. The
+/// chain material an export now carries is what makes that possible.
+#[test]
+fn exported_chain_material_verifies_the_exported_events() {
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let (engine, _storage, _dir) = make_engine(Arc::clone(&clock) as Arc<dyn Clock>);
+    let realm = RealmId::generate();
+
+    for i in 0..4 {
+        append(
+            &*engine,
+            &realm,
+            &format!("actor_{i}"),
+            AuditAction::UserCreated,
+            &format!("u{i}"),
+        );
+        clock.advance(1_000_000);
+    }
+
+    let events = engine
+        .query(&AuditQuery::for_realm(realm.clone()))
+        .expect("query");
+    let material = engine
+        .export_chain_material(&realm)
+        .expect("export chain material")
+        .expect("a realm with events has chain material");
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(&material.chain_key_b64)
+        .expect("chain key is base64");
+
+    assert_eq!(
+        hearth::audit::first_broken_link(&events, &key, &material.anchor),
+        None,
+        "an untouched export must chain cleanly under its own material"
+    );
+
+    // Tamper with the third event exactly as an attacker editing audit.ndjson
+    // would: change the content, leave the hash.
+    let mut tampered = events.clone();
+    tampered[2].actor = "attacker".to_string();
+    assert_eq!(
+        hearth::audit::first_broken_link(&tampered, &key, &material.anchor),
+        Some(2),
+        "an edited event must break the chain at its own index"
+    );
+
+    // Deleting an event from the middle breaks the link that followed it.
+    let mut truncated = events.clone();
+    truncated.remove(1);
+    assert!(
+        hearth::audit::first_broken_link(&truncated, &key, &material.anchor).is_some(),
+        "a removed event must break the chain"
+    );
+}
+
+/// A realm that has never written an audit event has no chain to export.
+#[test]
+fn a_realm_with_no_audit_chain_exports_no_material() {
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let (engine, _storage, _dir) = make_engine(Arc::clone(&clock) as Arc<dyn Clock>);
+
+    assert!(engine
+        .export_chain_material(&RealmId::generate())
+        .expect("export chain material")
+        .is_none());
 }

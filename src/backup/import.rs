@@ -42,6 +42,7 @@ const RECOGNIZED_MEMBERS: &[&str] = &[
     "organizations.ndjson",
     "signing_key.json",
     "audit.ndjson",
+    "audit_chain.json",
 ];
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -154,6 +155,14 @@ pub struct ImportReport {
     pub organizations: EntityCounts,
     /// Outcome counts for restored audit events.
     pub audit_events: EntityCounts,
+    /// Whether the archive's audit hashes were checked against the source
+    /// chain before being re-signed under the destination realm's key.
+    ///
+    /// `false` when the realm carried no audit events, or when the archive
+    /// predates `audit_chain.json` — in which case the restore logs a warning
+    /// and the restored chain attests only to the restore, not to the source
+    /// (audit 2026-08-28 §4.14#5).
+    pub audit_chain_verified: bool,
     /// Conflicts encountered — populated in Skip / Merge mode only.
     pub conflicts: Vec<Conflict>,
 }
@@ -386,17 +395,70 @@ impl BackupImporter {
         let audit_key = format!("realms/{realm_slug}/audit.ndjson");
         if let Some(raw) = files.get(&audit_key) {
             let decrypted = try_decrypt(raw)?;
+            let mut events: Vec<AuditEvent> = Vec::new();
             for line in decrypted.split(|&b| b == b'\n') {
                 let line = trim_bytes(line);
                 if line.is_empty() {
                     continue;
                 }
-                let event: AuditEvent = serde_json::from_slice(line)?;
+                events.push(serde_json::from_slice(line)?);
+            }
+
+            // Check the source hashes BEFORE re-signing them. Re-chaining under
+            // the destination key discards whatever the archive said, so a
+            // tampered audit log used to restore into a chain that verifies
+            // clean — a false attestation (audit 2026-08-28 §4.14#5).
+            let chain_declared = reader
+                .realms()
+                .iter()
+                .find(|r| r.slug == realm_slug)
+                .is_some_and(|r| r.audit_chain_included);
+            let chain_key = format!("realms/{realm_slug}/audit_chain.json");
+            match files.get(&chain_key) {
+                Some(raw_chain) => {
+                    let material: crate::audit::AuditChainMaterial =
+                        serde_json::from_slice(&try_decrypt(raw_chain)?)?;
+                    use base64::Engine as _;
+                    let key = base64::engine::general_purpose::STANDARD
+                        .decode(&material.chain_key_b64)
+                        .map_err(|e| {
+                            BackupError::Crypto(format!("audit chain key is not base64: {e}"))
+                        })?;
+                    if let Some(idx) =
+                        crate::audit::first_broken_link(&events, &key, &material.anchor)
+                    {
+                        return Err(BackupError::Engine(format!(
+                            "audit chain in archive is broken at event {} of {}; refusing to                              restore an audit log that does not match its own hashes",
+                            idx + 1,
+                            events.len()
+                        )));
+                    }
+                    report.audit_chain_verified = true;
+                }
+                None if chain_declared => {
+                    // The manifest says the file was written. Its absence is
+                    // tampering, not an old archive.
+                    return Err(BackupError::Engine(format!(
+                        "manifest declares audit chain material for realm '{realm_slug}' but                          audit_chain.json is missing from the archive"
+                    )));
+                }
+                None => {
+                    warn!(
+                        realm = %realm_slug,
+                        events = events.len(),
+                        "archive carries audit events with no chain material; their source \
+                         hashes cannot be checked. Re-export with a current Hearth to get a \
+                         verifiable audit section."
+                    );
+                }
+            }
+
+            for event in &events {
                 if opts.dry_run {
                     report.audit_events.created += 1;
                     continue;
                 }
-                match self.audit.import_event(&event) {
+                match self.audit.import_event(event) {
                     Ok(()) => report.audit_events.created += 1,
                     Err(e) => {
                         warn!(err = %e, "import audit event failed");
@@ -1070,6 +1132,7 @@ mod tests {
                     users: 2,
                     ..Default::default()
                 },
+                audit_chain_included: false,
             }],
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,
@@ -1377,6 +1440,7 @@ mod tests {
                 realm_id: format!("realm_{realm_uuid}"),
                 slug: slug.to_string(),
                 record_counts: RecordCounts::default(),
+                audit_chain_included: false,
             }],
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,
@@ -1462,6 +1526,7 @@ mod tests {
                 realm_id: format!("realm_{realm_uuid}"),
                 slug: slug.to_string(),
                 record_counts: RecordCounts::default(),
+                audit_chain_included: false,
             }],
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,

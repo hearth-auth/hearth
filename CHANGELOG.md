@@ -377,6 +377,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   reporting `404`.
 
 ### Security
+- **Restore verifies an archive's audit hashes before re-signing them (audit 2026-08-28
+  §4.14#5)** — restore re-chains every imported audit event under the destination realm's HMAC
+  key, and discarded the hashes the archive carried without looking at them, so an edited
+  `audit.ndjson` restored into a chain that then verified clean. An export with audit events now
+  also writes `realms/<slug>/audit_chain.json` — the source realm's chain key and anchor,
+  encrypted with the archive DEK like `signing_key.json` — and restore walks the exported events
+  against it first, aborting with the index of the first broken link. The manifest records that
+  the member was written, so deleting it to reach the unverified path fails the restore. Archives
+  written before this member still restore, with a warning that their audit section is
+  unverifiable; re-export to get a verifiable one.
 - **An erased audit log no longer verifies clean (audit 2026-08-28 §4.14#4)** — the tail-truncation
   check ran only when a signed chain head was present, so deleting the head along with the events
   skipped it and `POST /admin/audit/verify` (and the gRPC `VerifyIntegrity`) answered `valid`. A
