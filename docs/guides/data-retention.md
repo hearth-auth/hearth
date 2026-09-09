@@ -191,7 +191,21 @@ curl -X DELETE https://auth.example.com/admin/api/realms/{realm}/users/{user_id}
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-This cascades to all associated data: the credential record, credential history, MFA secrets, WebAuthn credentials, sessions, device fingerprints, and organization memberships.
+This cascades to every row keyed by the user: the credential record, credential
+history, the password-reset watermark, MFA secrets, WebAuthn credentials and
+their discoverable index, sessions and the session index, organization
+memberships (both directions), OAuth consent records, federated identity links
+(both directions), the SCIM `externalId` mapping (both directions), device
+fingerprints, RBAC role assignments and group memberships, and any agent the
+user owns.
+
+The cascade is not one atomic transaction. Only its last step is: the primary
+record, the email index and the 90-day email tombstone (§5) are written
+together, so no crash can leave an email index pointing at a record that is
+gone. Every earlier step is a separate durable write, so a crash part-way
+through leaves some rows behind — the primary record survives that window, so
+repeating the `DELETE` completes the cascade. A `DELETE` that answers `404`
+after an interrupted delete has still swept the rows it found.
 
 ### GDPR right to erasure (Art. 17)
 

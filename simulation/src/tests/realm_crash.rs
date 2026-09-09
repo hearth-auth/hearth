@@ -4,11 +4,17 @@
 //! "Crash during cascading realm deletion — recovery completes deletion or
 //!  fully rolls back."
 //!
-//! Hearth's `delete_realm` does not transactionally group the 11-step
-//! cascade, so the invariant we can reasonably enforce is the stronger of the
-//! two: a subsequent call MUST converge to "no residue anywhere" even when a
-//! prior invocation crashed mid-way. This is the contract the idempotency
-//! changes in `identity::engine::delete_realm` were introduced to maintain.
+//! Hearth's `delete_realm` does not transactionally group its cascade, so the
+//! invariant we can reasonably enforce is the stronger of the two: a subsequent
+//! call MUST converge to "no residue anywhere" even when a prior invocation
+//! crashed mid-way. This is the contract the idempotency changes in
+//! `identity::engine::delete_realm` were introduced to maintain.
+//!
+//! "No residue anywhere" is measured against the realm's WHOLE key space. It
+//! used to be measured against a hand-written list of 16 prefixes that named
+//! none of the families the 2026-08-28 audit found surviving a cascade, so the
+//! claim above went unchecked for everything the audit was looking at
+//! (§4.20#9).
 //!
 //! Rather than wiring fault injection into a custom `StorageEngine`, we
 //! simulate the post-crash state directly: after seeding data we drop the
@@ -37,28 +43,32 @@ fn realm_record_key(realm_id: &RealmId) -> Vec<u8> {
     format!("realm:id:{}", realm_id.as_uuid()).into_bytes()
 }
 
-/// Cascade key prefixes — every byte sequence that should be empty for a
-/// fully-deleted realm. Mirrors the exact strings declared in
-/// `src/identity/keys.rs`; a future addition there that forgets to wire a new
-/// prefix into `delete_realm` will leak residue and fail this test.
-const CASCADE_PREFIXES: &[&[u8]] = &[
-    b"usr:id:",
-    b"usr:email:",
-    b"ses:id:",
-    b"ses:user:",
-    b"cred:user:",
-    b"oauth:client:",
-    b"oauth:code:",
-    b"oauth:family:",
-    b"oauth:device:",
-    b"oauth:ucode:",
-    b"oauth:revjti:",
-    b"rel:",
-    b"mfa:totp:",
-    b"webauthn:cred:",
-    b"webauthn:disc:",
-    b"magic:link:",
-];
+/// Counts every key still present in the realm's namespace.
+///
+/// This deliberately scans the WHOLE key space rather than a hand-written list
+/// of prefixes. The list this replaces held 16 entries and named none of the
+/// families the 2026-08-28 audit found surviving a cascade — RBAC rows,
+/// consents, agents, webhook secrets, credential history, rate-limit counters —
+/// so it reported "zero residue" over a realm that still held data, and the
+/// module's own "no residue anywhere" claim went unchecked (§4.20#9).
+fn count_residual_keys(storage: &dyn StorageEngine, realm_id: &RealmId) -> usize {
+    // `0xff` sorts above every key Hearth writes: all prefixes are ASCII.
+    storage
+        .scan(realm_id, b"", &[0xffu8])
+        .expect("scan realm key space")
+        .len()
+}
+
+/// End-of-range sentinel for a prefix scan. Matches `identity::keys::prefix_end`
+/// by incrementing the final byte, which gives the exclusive upper bound used
+/// by the production cascade.
+fn prefix_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    if let Some(last) = end.last_mut() {
+        *last = last.saturating_add(1);
+    }
+    end
+}
 
 /// Builds a fresh identity + authz engine pair backed by shared storage on
 /// the given directory. Reopen semantics: a second call on the same dir
@@ -134,31 +144,6 @@ fn seed_realm(identity: &EmbeddedIdentityEngine, authz: &EmbeddedRbacEngine) -> 
     }
 
     realm_id
-}
-
-/// Counts every residual key for `realm_id` across all cascade prefixes.
-/// A completed deletion leaves this at zero.
-fn count_residual_keys(storage: &dyn StorageEngine, realm_id: &RealmId) -> usize {
-    let mut total = 0usize;
-    for prefix in CASCADE_PREFIXES {
-        let end = prefix_end(prefix);
-        let entries = storage
-            .scan(realm_id, prefix, &end)
-            .expect("scan cascade prefix");
-        total += entries.len();
-    }
-    total
-}
-
-/// End-of-range sentinel for a prefix scan. Matches `identity::keys::prefix_end`
-/// by incrementing the final byte, which gives the exclusive upper bound used
-/// by the production cascade.
-fn prefix_end(prefix: &[u8]) -> Vec<u8> {
-    let mut end = prefix.to_vec();
-    if let Some(last) = end.last_mut() {
-        *last = last.saturating_add(1);
-    }
-    end
 }
 
 /// Crash AFTER realm-record deletion but BEFORE cascade cleanup completes.

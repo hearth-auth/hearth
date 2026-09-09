@@ -340,6 +340,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Fixed
+- **`delete_user` removes password history and the password-reset watermark (audit 2026-08-28
+  §4.20#9)** — `cred:history:{user}` (Argon2id hashes of the user's previous passwords, written
+  when the realm's password policy sets `history_depth`) and `rst:wm:{user}` survived user
+  deletion. Both are now swept. `docs/guides/data-retention.md` claimed the cascade already
+  covered credential history; it now lists every family the cascade removes, and states plainly
+  that only the last step — primary record, email index and email tombstone — is atomic.
+  `docs/guides/privacy.md` no longer describes the realm sweep as an "atomic sequence" and names
+  the tests that actually check it.
 - **`delete_user` is retryable after a fault mid-cascade (audit 2026-08-28 §4.20#8)** — the cascade
   deleted the user's primary record first, so a fault anywhere in the remaining steps left the
   credential, sessions, memberships, consents, federation and SCIM links, RBAC rows and owned

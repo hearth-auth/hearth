@@ -5083,6 +5083,27 @@ impl EmbeddedIdentityEngine {
             .delete(realm_id, &cred_key)
             .map_err(Self::storage_err)?;
 
+        // 4a. Delete the password history and the password-reset watermark.
+        //     Both are keyed by user UUID and were swept by neither cascade, so
+        //     a deleted user left Argon2id hashes of its old passwords on disk
+        //     (audit 2026-08-28 §4.20#9).
+        for key in [
+            keys::encode_credential_history_key(user_id),
+            keys::encode_password_reset_watermark(user_id),
+        ] {
+            if self
+                .storage
+                .get(realm_id, &key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                found_any = true;
+            }
+            self.storage
+                .delete(realm_id, &key)
+                .map_err(Self::storage_err)?;
+        }
+
         // 4b. Delete MFA state (if any — best effort)
         let mfa_key = keys::encode_mfa_totp_key(user_id);
         self.storage

@@ -535,3 +535,100 @@ async fn delete_realm_leaves_no_residual_pii() {
     assert_empty("oauth:client:", "OAuth clients");
     assert_empty("rel:", "RBAC relation tuples");
 }
+
+// ===== §4.20#9: the user cascade against the realm's whole key space =====
+
+/// After `delete_user`, no key in the realm may still name the user.
+///
+/// The allowlist assertions in `delete_user_leaves_no_residual_pii` above check
+/// fourteen named prefixes. They named no family the 2026-08-28 audit found
+/// surviving, and the user they delete has no password, so `cred:history:` — a
+/// family of Argon2id hashes — never exists to be missed. This test seeds the
+/// families the audit named and then scans the realm's whole key space, so a
+/// new key family that forgets the cascade fails here rather than shipping.
+#[tokio::test]
+async fn delete_user_leaves_no_key_naming_the_user() {
+    use hearth::identity::{CleartextPassword, CreateRealmRequest, PasswordPolicy, RealmConfig};
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+
+    // `cred:history:` is written only when the realm's password policy keeps a
+    // history, so the realm has to declare one for the family to exist at all.
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: "user-residue".to_string(),
+            config: Some(RealmConfig {
+                password_policy: Some(PasswordPolicy {
+                    history_depth: Some(2),
+                    ..PasswordPolicy::default()
+                }),
+                ..RealmConfig::default()
+            }),
+        })
+        .expect("create realm");
+    let realm_id = realm.id().clone();
+    harness.rbac().seed_realm(&realm_id).expect("seed rbac");
+
+    let user = harness
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: "residue@user-residue.test".to_string(),
+                display_name: "Residue".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_id = user.id().clone();
+    let user_uuid = user_id.as_uuid().to_string();
+    let user_email = user.email().to_string();
+
+    // The second write pushes the first password into `cred:history:`.
+    for secret in ["valid-password123", "valid-password456"] {
+        harness
+            .identity()
+            .set_password(
+                &realm_id,
+                &user_id,
+                &CleartextPassword::from_string(secret.to_string()),
+            )
+            .expect("set password");
+    }
+
+    harness
+        .identity()
+        .delete_user(&realm_id, &user_id)
+        .expect("delete user");
+
+    let keys: Vec<String> = harness
+        .storage()
+        .scan(&realm_id, &[], &[0xFF; 256])
+        .expect("full key-space scan")
+        .iter()
+        .map(|e| String::from_utf8_lossy(&e.key).into_owned())
+        .collect();
+
+    // The A-20 tombstone is the one key that MUST name the deleted address: it
+    // is what blocks re-registration for 90 days.
+    let tombstone = format!("email:reserved:{user_email}");
+    assert!(
+        keys.iter().any(|k| k == &tombstone),
+        "the A-20 tombstone must survive delete_user"
+    );
+
+    let residue: Vec<&String> = keys
+        .iter()
+        .filter(|k| *k != &tombstone)
+        .filter(|k| k.contains(&user_uuid) || k.contains(&user_email))
+        .collect();
+    assert!(
+        residue.is_empty(),
+        "keys still naming the deleted user: {residue:?}"
+    );
+}
