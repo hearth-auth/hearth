@@ -543,6 +543,12 @@ async fn main() {
             }
         },
         Commands::Backup { action } => {
+            // Without this every `tracing::error!` below — and every info the
+            // export, restore and verify paths emit — is written to a
+            // dispatcher that does not exist. A failed `verify` exited 3 with
+            // an empty stderr, and a `create` that lost the data-directory lock
+            // said nothing at all (audit 2026-08-28 §4.9#8, §4.14#6).
+            let _tracing_guard = init_cli_tracing();
             let code = match action {
                 BackupAction::Create {
                     output,

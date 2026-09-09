@@ -340,6 +340,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Fixed
+- **`hearth backup` says what happened (audit 2026-08-28 §4.9#8, §4.14#6)** — `create`, `restore`,
+  `verify` and `inspect` installed no tracing subscriber, so every diagnostic those paths emit was
+  written to a dispatcher that did not exist. A failed `verify` exited `3` with no output at all,
+  and a `create` that lost the data-directory lock to a running server exited non-zero in silence.
+  All four now log like `hearth migrate` does — to stdout, at `info`, with the pretty formatter.
 - **The backup consistency barrier now works on the handle `serve` installs (audit 2026-08-28
   §4.9#4)** — `serve` always wraps storage in a `ClusterStorageAdapter`, single-node deployments
   included. The adapter reported no consistency barrier, so `POST /admin/backup` took none and

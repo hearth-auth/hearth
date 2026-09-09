@@ -475,3 +475,81 @@ fn cli_config_validate_rejects_invalid_file() {
         "failure output must explain the validation error; got:\n{stderr}"
     );
 }
+
+// ===== §4.9#8, §4.14#6: the backup CLI family must say what happened =====
+
+/// `hearth backup <verb>` installs no tracing subscriber, so every
+/// `tracing::error!` on those paths was written to a dispatcher that does not
+/// exist. A failed `verify` exited 3 with an empty stderr — the operator saw a
+/// number and no reason. Same for `create` failing on the data-directory lock.
+#[test]
+fn backup_verify_failure_reports_the_reason() {
+    let missing = std::env::temp_dir().join("hearth-no-such-archive-4f2a.tar.gz");
+    let _ = std::fs::remove_file(&missing);
+
+    let out = Command::new(hearth_bin())
+        .args(["backup", "verify", "--input"])
+        .arg(&missing)
+        .output()
+        .expect("run hearth backup verify");
+
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a failed verify exits 3; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // CLI diagnostics follow the same convention as `serve`: the tracing fmt
+    // layer writes to stdout. `examples/auth0-migration/run.sh` parses the
+    // migration summary off stdout, so the stream must not move.
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        output.contains("integrity failure"),
+        "the failure reason must be emitted, got: {output:?}"
+    );
+}
+
+/// `hearth backup create` against a data directory another process holds fails
+/// on the flock. That failure was also silent.
+#[test]
+fn backup_create_lock_failure_reports_the_reason() {
+    use fs2::FileExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Hold the same exclusive flock `EmbeddedStorageEngine::open` takes, so the
+    // child fails on the lock rather than on a missing directory.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data_dir.join("LOCK"))
+        .expect("open LOCK");
+    lock_file.try_lock_exclusive().expect("hold the lock");
+
+    let out = Command::new(hearth_bin())
+        .args(["backup", "create", "--data-dir"])
+        .arg(&data_dir)
+        .arg("--output")
+        .arg(dir.path().join("archive.tar.gz"))
+        .output()
+        .expect("run hearth backup create");
+
+    assert_ne!(out.status.code(), Some(0), "create must fail on the lock");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        output.contains("locked"),
+        "a lock failure must name the lock, got: {output:?}"
+    );
+}
