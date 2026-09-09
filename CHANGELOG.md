@@ -340,6 +340,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Fixed
+- **The backup consistency barrier now works on the handle `serve` installs (audit 2026-08-28
+  §4.9#4)** — `serve` always wraps storage in a `ClusterStorageAdapter`, single-node deployments
+  included. The adapter reported no consistency barrier, so `POST /admin/backup` took none and
+  every mutating write ran straight through the export's read pass: an archive could hold a record
+  written after the export started and miss its index, or the reverse. The adapter now exposes the
+  storage engine's barrier, so an export blocks writes for its read pass as documented. The same
+  adapter also inherited a non-atomic `write_batch` — the primitive callers use when a record and
+  the removal of its old index must land together — and now applies it as one operation
+  (in cluster mode, one Raft log entry).
 - **A memtable flush no longer re-reads every byte of every live SST (audit 2026-08-28 §4.21#5)** —
   every flush rebuilds the SST reader set, and each rebuild read a whole SST file to take its
   88-byte encryption header off the front. On a node holding N live SSTs of size S, one flush read

@@ -515,6 +515,46 @@ impl ClusterEngine {
             .map_err(ClusterError::Storage)
     }
 
+    /// Atomically apply a mix of writes and removals for a single realm.
+    ///
+    /// In cluster mode proposes one `RaftCommand::WriteBatch`, so followers
+    /// apply the puts and the deletes together. In single-node mode delegates
+    /// to the inner engine's atomic `write_batch` (audit 2026-08-28 §4.9#4).
+    pub async fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), ClusterError> {
+        if self.raft.is_some() {
+            return self
+                .propose(RaftCommand::WriteBatch {
+                    leader_timestamp: Self::leader_timestamp_now(),
+                    realm: realm_id.clone(),
+                    puts: puts.to_vec(),
+                    deletes: deletes.to_vec(),
+                })
+                .await;
+        }
+        let inner = Arc::clone(&self.inner);
+        let realm_id = realm_id.clone();
+        let puts = puts.to_vec();
+        let deletes = deletes.to_vec();
+        spawn_blocking(move || inner.write_batch(&realm_id, &puts, &deletes))
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?
+            .map_err(ClusterError::Storage)
+    }
+
+    /// The inner engine's backup consistency barrier.
+    ///
+    /// `serve` installs a [`ClusterStorageAdapter`] as the app-layer storage
+    /// handle in every topology, so the barrier has to reach through both
+    /// wrappers or a backup export takes no barrier at all (§4.9#4).
+    pub fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+        self.inner.backup_barrier()
+    }
+
     /// Conditionally insert a key-value pair only if the key is absent.
     ///
     /// In cluster mode proposes `RaftCommand::PutIfAbsent` through Raft,
@@ -695,6 +735,9 @@ fn check_clock_skew(payload: &[u8]) -> Option<u64> {
                 | RaftCommand::Batch {
                     leader_timestamp, ..
                 }
+                | RaftCommand::WriteBatch {
+                    leader_timestamp, ..
+                }
                 | RaftCommand::PutIfAbsent {
                     leader_timestamp, ..
                 } => *leader_timestamp,
@@ -840,6 +883,27 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), crate::storage::StorageError> {
+        let engine = Arc::clone(&self.engine);
+        let realm_id = realm_id.clone();
+        let puts = puts.to_vec();
+        let deletes = deletes.to_vec();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { engine.write_batch(&realm_id, &puts, &deletes).await })
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+        self.engine.backup_barrier()
+    }
+
     fn put_if_absent(
         &self,
         realm_id: &RealmId,
@@ -919,6 +983,55 @@ mod tests {
             membership_config: Arc::new(StoredMembership::default()),
             replication: None,
         }
+    }
+
+    // ── §4.9#4: the app-layer storage handle ──────────────────────────────────
+
+    /// `serve` always installs a `ClusterStorageAdapter`, single-node included.
+    /// The adapter answered `None` for the backup consistency barrier, so the
+    /// export took no barrier and every mutating write ran straight through it.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_exposes_the_inner_backup_barrier() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let inner_barrier = inner
+            .backup_barrier()
+            .expect("embedded engine has a barrier");
+        let adapter = ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(inner)));
+
+        let adapter_barrier = adapter
+            .backup_barrier()
+            .expect("the adapter must expose the barrier, not swallow it");
+        assert!(
+            Arc::ptr_eq(&inner_barrier, &adapter_barrier),
+            "the adapter must expose the SAME barrier the export blocks on"
+        );
+    }
+
+    /// The adapter inherited the default `write_batch`, which is a sequential
+    /// `put`/`delete` loop with no atomicity — so the one primitive callers use
+    /// when a record and its index must land together silently lost it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_write_batch_applies_puts_and_deletes() {
+        let dir = tempdir().unwrap();
+        let adapter = ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(
+            open_engine(dir.path().join("data").as_path()),
+        )));
+        let realm = make_realm();
+
+        adapter.put(&realm, b"stale", b"v").unwrap();
+        adapter
+            .write_batch(
+                &realm,
+                &[(b"fresh".to_vec(), b"v2".to_vec())],
+                &[b"stale".to_vec()],
+            )
+            .unwrap();
+
+        assert_eq!(adapter.get(&realm, b"fresh").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(adapter.get(&realm, b"stale").unwrap(), None);
     }
 
     // ── Single-node passthrough ───────────────────────────────────────────────

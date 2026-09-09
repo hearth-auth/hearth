@@ -416,6 +416,30 @@ impl HearthStateMachine {
                 }
             }
 
+            RaftCommand::WriteBatch {
+                leader_timestamp: _,
+                realm,
+                puts,
+                deletes,
+            } => {
+                let (e_realm, e_puts, e_deletes) = (realm.clone(), puts.clone(), deletes.clone());
+                spawn_blocking(move || {
+                    engine
+                        .write_batch(&e_realm, &e_puts, &e_deletes)
+                        .map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    for (key, value) in &puts {
+                        obs.on_replicated_put(&realm, key, value);
+                    }
+                    for key in &deletes {
+                        obs.on_replicated_delete(&realm, key);
+                    }
+                }
+            }
+
             RaftCommand::PutIfAbsent {
                 leader_timestamp: _,
                 realm,
@@ -618,6 +642,23 @@ mod tests {
         }
     }
 
+    fn make_write_batch_entry(
+        index: u64,
+        realm: RealmId,
+        puts: Vec<(Vec<u8>, Vec<u8>)>,
+        deletes: Vec<Vec<u8>>,
+    ) -> Entry<HearthRaftConfig> {
+        Entry {
+            log_id: make_log_id(index),
+            payload: EntryPayload::Normal(RaftCommand::WriteBatch {
+                leader_timestamp: 0,
+                realm,
+                puts,
+                deletes,
+            }),
+        }
+    }
+
     fn open_sm(dir: &std::path::Path) -> HearthStateMachine {
         let config = StorageConfig::dev(dir.to_path_buf());
         let engine = EmbeddedStorageEngine::open(config).expect("open engine");
@@ -625,6 +666,36 @@ mod tests {
     }
 
     // ── Put / Delete / Batch ──────────────────────────────────────────────────
+
+    /// §4.9#4: a record and the removal of its old index must reach every node
+    /// in ONE log entry, or a follower can apply half of them.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn write_batch_command_applies_puts_and_deletes_together() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(dir.path().join("data").as_path());
+        let realm = make_realm();
+
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"old".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        sm.apply([make_write_batch_entry(
+            2,
+            realm.clone(),
+            vec![(b"new".to_vec(), b"v2".to_vec())],
+            vec![b"old".to_vec()],
+        )])
+        .await
+        .unwrap();
+
+        assert_eq!(sm.engine.get(&realm, b"new").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(sm.engine.get(&realm, b"old").unwrap(), None);
+    }
 
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
