@@ -1327,15 +1327,14 @@ async fn admin_patch_user_required_actions(
                 .into_response()
         }
     };
-    let realm_id = RealmId::new(realm_uuid);
-
-    if auth.realm_id != realm_id {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "forbidden"})),
-        )
-            .into_response();
-    }
+    // Route through the shared BOLA guard rather than a hand-rolled equality
+    // check. The hand-rolled copy that stood here omitted `scoped_realm`'s
+    // nil-UUID branch, so the system operator was refused an operation every
+    // other `/admin/realms/{id}/*` handler grants them (audit 2026-08-28 §4.1#6).
+    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     let user_uuid: uuid::Uuid = match user_id_str.parse() {
         Ok(u) => u,
@@ -1488,15 +1487,12 @@ async fn admin_patch_realm_config(
                 .into_response()
         }
     };
-    let realm_id = RealmId::new(realm_uuid);
-
-    if auth.realm_id != realm_id {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "forbidden"})),
-        )
-            .into_response();
-    }
+    // Same shared BOLA guard as every other `/admin/realms/{id}/*` handler; see
+    // the note on `admin_patch_user_required_actions` (audit 2026-08-28 §4.1#6).
+    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     let action_strs = body["default_required_actions"]
         .as_array()

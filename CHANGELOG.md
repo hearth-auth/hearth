@@ -107,6 +107,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
 
 ### Fixed
+- **The system operator reaches realm config and required-actions cross-realm (audit 2026-08-28
+  §4.1#6)** — `PATCH /admin/realms/{realm_id}/config` and
+  `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions` each hand-rolled their own
+  realm check instead of using the shared `scoped_realm` guard, and the copy left out the
+  nil-UUID system-realm branch. A `system_access_token` was answered `403` on both, though every
+  other `/admin/realms/{id}/*` handler grants it. Both now use the shared guard. A realm-scoped
+  token is still refused on a peer realm, unchanged.
 - **Delete preconditions are enforced in one place, so gRPC can no longer destroy a live tenant
   (audit 2026-08-28 §4.20#10)** — two gates guard permanent deletion, and each protocol adapter
   hand-rolled its own copy. The **archival gate** (a realm must be archived first) was checked by

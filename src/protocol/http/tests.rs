@@ -1478,3 +1478,156 @@ async fn patch_client_trust_level_roundtrip() {
         "trust_level must be ThirdParty after PATCH with trust_level=third_party"
     );
 }
+
+/// The cross-realm fixture for the §4.1#6 BOLA-guard tests: a bootstrapped
+/// deployment plus one peer realm holding a single user.
+struct CrossRealmFixture {
+    state: Arc<AppState>,
+    dev_token: String,
+    dev_realm_id: String,
+    system_token: String,
+    system_realm_id: String,
+    peer_realm_id: String,
+    peer_user_id: String,
+    _dir: tempfile::TempDir,
+}
+
+/// Bootstraps a deployment and creates a peer realm with one user in it.
+async fn cross_realm_fixture(peer_name: &str) -> CrossRealmFixture {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(dir.path());
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    let peer = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: peer_name.to_string(),
+            config: None,
+        })
+        .expect("create peer realm");
+    let peer_user = state
+        .identity
+        .create_user(
+            peer.id(),
+            &crate::identity::CreateUserRequest {
+                email: format!("{peer_name}@example.com"),
+                display_name: "Peer User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect("create peer user");
+
+    CrossRealmFixture {
+        dev_token: json["access_token"].as_str().expect("access_token").into(),
+        dev_realm_id: json["realm_id"].as_str().expect("realm_id").into(),
+        system_token: json["system_access_token"]
+            .as_str()
+            .expect("system_access_token")
+            .into(),
+        system_realm_id: json["system_realm_id"]
+            .as_str()
+            .expect("system_realm_id")
+            .into(),
+        peer_realm_id: peer.id().as_uuid().to_string(),
+        peer_user_id: peer_user.id().as_uuid().to_string(),
+        state,
+        _dir: dir,
+    }
+}
+
+/// Sends one authenticated admin `PATCH` and returns only its status code.
+async fn admin_patch_status(
+    state: &Arc<AppState>,
+    uri: &str,
+    token: &str,
+    realm_header: &str,
+    body: &'static str,
+) -> StatusCode {
+    router(Arc::clone(state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_header)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// Audit 2026-08-28 §4.1#6 — `admin_patch_realm_config` hand-rolled
+/// `auth.realm_id != realm_id` instead of calling `scoped_realm`. The
+/// hand-rolled copy drops the nil-UUID system-realm branch, so the system
+/// operator was locked out of an operation every other `/admin/realms/{id}/*`
+/// handler grants them. A peer realm's admin must still be refused.
+#[tokio::test]
+async fn system_token_patches_another_realms_config() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("bola-peer-config").await;
+    let uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+
+    let status =
+        admin_patch_status(&f.state, &uri, &f.system_token, &f.system_realm_id, BODY).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "system token must be able to patch another realm's config"
+    );
+
+    let status = admin_patch_status(&f.state, &uri, &f.dev_token, &f.dev_realm_id, BODY).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a realm-scoped token must NOT patch another realm's config"
+    );
+}
+
+/// Audit 2026-08-28 §4.1#6 — the same defect and the same fix in
+/// `admin_patch_user_required_actions`.
+#[tokio::test]
+async fn system_token_patches_another_realms_user_required_actions() {
+    const BODY: &str = r#"{"add":["VERIFY_EMAIL"],"remove":[]}"#;
+
+    let f = cross_realm_fixture("bola-peer-actions").await;
+    let uri = format!(
+        "/admin/realms/{}/users/{}/required-actions",
+        f.peer_realm_id, f.peer_user_id
+    );
+
+    let status =
+        admin_patch_status(&f.state, &uri, &f.system_token, &f.system_realm_id, BODY).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "system token must be able to patch another realm's user required-actions"
+    );
+
+    let status = admin_patch_status(&f.state, &uri, &f.dev_token, &f.dev_realm_id, BODY).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a realm-scoped token must NOT patch another realm's user required-actions"
+    );
+}
