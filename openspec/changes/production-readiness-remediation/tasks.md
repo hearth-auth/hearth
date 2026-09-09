@@ -291,7 +291,7 @@ found it, the audit piece, and the report's severity.
 - [ ] 23.1 Re-run P21, cluster-mode GA-readiness, to a passing critic: systematic cache enumeration, failover and split-brain test count, operator-documentation walkthrough (§7.2, §8.1 item 1)
 - [ ] 23.2 Re-run P30, public claim verification and performance methodology; 413 distinct citation pairs resolved cleanly, and it failed on one non-reproducing repro and two false negative results (§7.2, §8.1 item 2)
 - [ ] 23.3 Re-run P29, test-suite quality and the mutation spot-check; we cannot currently say whether this test suite can fail (§7.2, §8.1 item 3)
-- [ ] 23.4 Re-run P28, the seven SDKs: produce the per-SDK verify-or-decode-and-trust matrix; an SDK that decodes without verifying would be a critical finding (§7.2, §8.1 item 4)
+- [x] 23.4 Re-run P28, the seven SDKs: produce the per-SDK verify-or-decode-and-trust matrix; an SDK that decodes without verifying would be a critical finding (§7.2, §8.1 item 4)
 - [ ] 23.5 Re-run P20, backup round-trip and on-disk format versioning: round-trip diff, restore into a different version, truncated and corrupted backups (§7.2, §8.1 item 5)
 - [ ] 23.6 Re-run P31, day-2 upgrade and the cold first-run; whether v1.6.x data can be read by the current build is unknown (§7.2, §8.1 item 6)
 - [ ] 23.7 Re-run P11, device grant, DCR, introspection and permission modes; whether DCR is open to the internet by default is unanswered (§7.2, §8.1 item 7)
@@ -304,7 +304,7 @@ found it, the audit piece, and the report's severity.
 - [ ] 23.14 Audit the load-test harness (§7.3)
 - [ ] 23.15 Run the mutation spot-check against a green baseline — §8.3's highest-value action (§8.3)
 - [ ] 23.16 Stand up a three-node cluster and enumerate every cache the state machine bypasses (§8.3)
-- [ ] 23.17 Produce the per-SDK verify/decode matrix (§8.3)
+- [x] 23.17 Produce the per-SDK verify/decode matrix (§8.3)
 - [ ] 23.18 Run one official conformance suite — OIDC, SCIM or SAML (§8.3)
 - [ ] 23.19 Do the cold first-run with a transcript; the brief calls it "the single most informative hour in the whole audit" (§8.3)
 
@@ -316,3 +316,9 @@ found it, the audit piece, and the report's severity.
 - [ ] 24.4 Make the merge gate refuse a regression test committed red; two data-integrity regression tests were committed red and stayed red (§9 item 3)
 - [ ] 24.5 Run a documentation-truth sweep driven by §6, which has more FALSE rows than TRUE, covering the README, `docs/STATUS.md` and the normative specs (§9 item 4)
 - [ ] 24.6 Enumerate every security-relevant control the Raft state machine bypasses on a follower; two accepted pieces found four, including two kill-switches and key rotation, against a known-defects list naming two caches (§4.1 objection, §4.15#6, §4.16#5, §4.19#12, §9 item 5)
+
+## 25. Findings raised by the Wave 4 re-runs
+
+- [ ] 25.1 Make every SDK's embedded authorization gate verify the token before reading its claims; five of seven decode-and-trust, and in go, python and rust that gate is the shipped HTTP middleware (23.4 · CRITICAL)
+- [ ] 25.2 Validate `nbf` in the go, php, python and rust SDKs, which never check it (23.4 · HIGH)
+- [ ] 25.3 Pin `iss` and `aud` in the TypeScript SDK's exported `JwksClient.verify`, which gives a signature-only check when called without options (23.4 · MEDIUM)
