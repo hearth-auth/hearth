@@ -231,13 +231,24 @@ fn verify_integrity_rejects_sha256_forgery() {
     );
 
     // ---- Attacker's forgery ----
-    // Build the storage key for e2 (same encoding used by keys::encode_event_key).
-    let e2_key: Vec<u8> = format!(
-        "audit:evt:{:019}:{}",
-        e2.timestamp.as_micros(),
-        e2.id.as_uuid()
-    )
-    .into_bytes();
+    // Read e2's own storage key back off storage rather than rebuilding it from
+    // a format string. The engine's key encoding changed to packed binary
+    // (HEA-1899), so the old `audit:evt:{ts:019}:{uuid}` string wrote a NEW junk
+    // key inside the scan range instead of overwriting e2 — the assertion below
+    // then passed on a decode failure, not on forgery detection
+    // (audit 2026-08-28 §4.14#10).
+    let stored = storage
+        .scan(&realm, b"audit:evt:", b"audit:evt;")
+        .expect("scan audit event keys");
+    assert_eq!(stored.len(), 3, "three events are stored");
+    let e2_key: Vec<u8> = stored
+        .iter()
+        .find(|entry| {
+            EmbeddedAuditEngine::decode_for_test(&entry.value).is_ok_and(|ev| ev.id == e2.id)
+        })
+        .expect("e2 must be in storage")
+        .key
+        .clone();
 
     // Modify e2: change actor to "attacker".
     let mut tampered = e2.clone();
@@ -273,6 +284,16 @@ fn verify_integrity_rejects_sha256_forgery() {
     storage
         .put(&realm, &e2_key, &forged_bytes)
         .expect("put forged event");
+
+    // The forgery must REPLACE e2, not add a key beside it.
+    let after = storage
+        .scan(&realm, b"audit:evt:", b"audit:evt;")
+        .expect("rescan audit event keys");
+    assert_eq!(
+        after.len(),
+        3,
+        "the forgery must overwrite e2, not add a key next to it"
+    );
 
     // The HMAC chain must detect the forgery.
     let valid = engine

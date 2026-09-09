@@ -298,7 +298,9 @@ async fn metrics_audit_integrity_failure_increments() {
     // Tamper: scan raw storage to find the event entry, then overwrite its
     // `integrity_hash` with a bogus value.
     //
-    // Key format: `audit:evt:{timestamp_19d}:{uuid}`
+    // The event's own key is reused from the scan — never rebuilt from a format
+    // string, which is how two sibling tests came to write junk keys after the
+    // encoding moved to packed binary (HEA-1899, audit 2026-08-28 §4.14#10).
     // ';' (0x3B) is one byte past ':' (0x3A), bounding the scan to this prefix.
     let entries = h
         .storage()
