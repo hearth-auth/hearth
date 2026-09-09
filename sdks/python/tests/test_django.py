@@ -33,11 +33,17 @@ from hearth.django import HearthDjangoMiddleware, require_permission
 # Helpers shared across tests
 # ---------------------------------------------------------------------------
 
+from .signing import install_test_key, sign_jwt, unsigned_jwt
+
+
 def _make_jwt(payload: dict) -> str:
-    """Build a minimal unsigned JWT for testing local-decode paths."""
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
-    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
-    return f"{header}.{body}."
+    """Build a JWT signed with the suite's test key.
+
+    The embedded-mode gates verify before reading claims, so a token that is
+    meant to be accepted must be signed. Use ``unsigned_jwt`` for the forgery
+    side of a test.
+    """
+    return sign_jwt(payload)
 
 
 def _make_required_action_jwt() -> str:
@@ -59,6 +65,13 @@ def _ok_response(_request):
     return HttpResponse("ok", status=200)
 
 
+def _verifying_client():
+    """A HearthClient that will verify tokens minted by ``sign_jwt``."""
+    from hearth.client import HearthClient
+
+    return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
+
+
 def _mock_settings(
     *,
     client=None,
@@ -67,9 +80,14 @@ def _mock_settings(
     client_id: str = "",
     client_secret: str = "",
 ):
-    """Return a context manager that patches hearth.django.django_settings."""
+    """Return a context manager that patches hearth.django.django_settings.
+
+    When no *client* is supplied the settings carry a real HearthClient seeded
+    with the suite's test signing key: embedded mode verifies the token before
+    reading its claims, so it needs one in every mode.
+    """
     mock = MagicMock()
-    mock.HEARTH_CLIENT = client
+    mock.HEARTH_CLIENT = client if client is not None else _verifying_client()
     mock.HEARTH_MODE = mode
     mock.HEARTH_PERMISSION = permission
     mock.HEARTH_CLIENT_ID = client_id
@@ -278,7 +296,7 @@ class TestRequirePermissionEmbedded:
         req = _make_request(token)
 
         with _mock_settings():
-            @require_permission("docs.write")
+            @require_permission("docs.write", client=_verifying_client())
             def view(request):
                 return HttpResponse("view response")
 
@@ -327,7 +345,7 @@ class TestRequirePermissionEmbedded:
         req.hearth_token = token  # but middleware already extracted it
 
         with _mock_settings():
-            @require_permission("docs.write")
+            @require_permission("docs.write", client=_verifying_client())
             def view(request):
                 return HttpResponse("ok")
 
@@ -340,7 +358,7 @@ class TestRequirePermissionEmbedded:
         captured = {}
 
         with _mock_settings():
-            @require_permission("docs.write")
+            @require_permission("docs.write", client=_verifying_client())
             def view(request, pk, extra=None):
                 captured["pk"] = pk
                 captured["extra"] = extra
@@ -426,7 +444,7 @@ class TestMiddlewareAndDecoratorIntegration:
         with _mock_settings():
             mw = HearthDjangoMiddleware(None)  # get_response will be replaced
 
-            @require_permission("reports.read")
+            @require_permission("reports.read", client=_verifying_client())
             def protected_view(request):
                 return HttpResponse("report data")
 

@@ -31,8 +31,9 @@ func applyMiddleware(t *testing.T, c *Client, permission string, cfg MiddlewareC
 // ─── ModeEmbedded ────────────────────────────────────────────────────────────
 
 func TestMiddlewareEmbeddedAllowed(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
 	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -40,8 +41,9 @@ func TestMiddlewareEmbeddedAllowed(t *testing.T) {
 }
 
 func TestMiddlewareEmbeddedDenied(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.view"}})
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, token)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", rr.Code)
@@ -57,23 +59,25 @@ func TestMiddlewareEmbeddedMissingToken(t *testing.T) {
 }
 
 func TestMiddlewareEmbeddedNeverFallsBackToNetwork(t *testing.T) {
-	// Token has NO permissions claim. Embedded mode must deny without a network call.
-	// We point at a server that always returns 500 to prove no request is made.
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		callCount++
+	// Token verifies but has NO permissions claim. Embedded mode must deny
+	// locally and must never reach for /introspect or /oauth/authorize to
+	// second-guess the answer. Discovery and JWKS are expected traffic — they
+	// are how the signature gets checked — so only other paths are counted.
+	ti := newTestIssuer(t)
+	authzCalls := 0
+	ti.handle("/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		authzCalls++
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
 
-	c := NewClient(srv.URL, "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"}) // no permissions claim
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"}) // no permissions claim
 	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, token)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", rr.Code)
 	}
-	if callCount != 0 {
-		t.Fatalf("embedded mode must not make network calls, but made %d", callCount)
+	if authzCalls != 0 {
+		t.Fatalf("embedded mode must not fall back to a network authorization call, but made %d", authzCalls)
 	}
 }
 

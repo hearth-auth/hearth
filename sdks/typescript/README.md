@@ -490,20 +490,31 @@ registering the OAuth client; the SDK validates you stay consistent.
 
 ### Embedded (default)
 
-RBAC claims (`permissions`, `roles`, `groups`) are embedded in the JWT at issuance. Zero
-network traffic on every request — stateless and fastest.
+RBAC claims (`permissions`, `roles`, `groups`) are embedded in the JWT at issuance. The
+checker verifies the token first — EdDSA signature against the realm's JWKS, plus `exp`,
+`nbf`, `iss` and (when `clientId` is set) `aud` — and only then reads the claim. The JWKS
+is cached, so after the first request there is no network traffic per check.
+
+A token that does not verify returns `false`; the checker never trusts an unverified
+payload.
 
 ```typescript
-import { requirePermission } from "@hearth-auth/sdk";
+import { HearthClient, requirePermission } from "@hearth-auth/sdk";
 
-const check = requirePermission("docs.write", {
-  mode: "embedded",
-  client: new HearthClient({ issuerUrl: "https://auth.example.com" }),
+const client = new HearthClient({
+  issuerUrl: "https://auth.example.com",
+  clientId: "<your-client-id>", // enables `aud` pinning
 });
 
-// returns true/false synchronously from the JWT; no network call
+const check = requirePermission("docs.write", { mode: "embedded", client });
+
+// Verifies the token, then reads its permissions claim.
 const allowed = await check(accessToken);
 ```
+
+> **Security note.** Before v1.1 this checker called `decodeJwt` and trusted whatever the
+> payload said, so an `alg: none` token carrying `permissions: ["admin.write"]` was
+> accepted. If you pinned an older version, upgrade.
 
 ### Decision (per-request server check)
 

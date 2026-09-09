@@ -1,8 +1,18 @@
 package io.hearth.sdk
 
+import com.nimbusds.jose.JWSAlgorithm
+import com.nimbusds.jose.JWSHeader
+import com.nimbusds.jose.crypto.Ed25519Signer
+import com.nimbusds.jose.jwk.Curve
+import com.nimbusds.jose.jwk.JWKSet
+import com.nimbusds.jose.jwk.OctetKeyPair
+import com.nimbusds.jose.jwk.gen.OctetKeyPairGenerator
+import com.nimbusds.jwt.JWTClaimsSet
+import com.nimbusds.jwt.SignedJWT
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import java.util.Date
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -26,7 +36,11 @@ class MiddlewareTest {
         server.shutdown()
     }
 
-    /** Builds a minimal JWT with the given JSON payload (signature not verified locally). */
+    /**
+     * Builds a minimal JWT with the given JSON payload and a garbage signature.
+     * Models an attacker's token — the EMBEDDED checker verifies, so this is only
+     * ever acceptable to modes that do not read the payload themselves.
+     */
     private fun makeToken(payload: String): String {
         val enc = java.util.Base64.getUrlEncoder().withoutPadding()
         val header = enc.encodeToString("""{"alg":"EdDSA","kid":"test"}""".toByteArray())
@@ -36,6 +50,50 @@ class MiddlewareTest {
 
     private val tokenWithPerms = makeToken("""{"permissions":["docs.read"],"sub":"u1"}""")
     private val tokenNoPerms   = makeToken("""{"sub":"u1"}""")
+
+    // ── Real signing key, for the EMBEDDED tests that must be admitted ────────
+
+    private val keyPair: OctetKeyPair = OctetKeyPairGenerator(Curve.Ed25519)
+        .keyID("hearth-ed-1")
+        .generate()
+
+    private fun issuerUrl(): String = server.url("/").toString().trimEnd('/')
+
+    /** Queue enough discovery + JWKS responses for [checks] verifications. */
+    private fun enqueueIssuerResponses(checks: Int = 4) {
+        repeat(checks) {
+            server.enqueue(
+                MockResponse()
+                    .setBody("""{"issuer":"${issuerUrl()}","jwks_uri":"${issuerUrl()}/jwks"}""")
+                    .setResponseCode(200),
+            )
+            server.enqueue(
+                MockResponse().setBody(JWKSet(keyPair.toPublicJWK()).toString()).setResponseCode(200),
+            )
+        }
+    }
+
+    /** Mints a properly signed token carrying [permissions] (null omits the claim). */
+    private fun signedToken(permissions: List<String>?): String {
+        val now = System.currentTimeMillis()
+        val claims = JWTClaimsSet.Builder()
+            .subject("u1")
+            .issuer(issuerUrl())
+            .issueTime(Date(now))
+            .expirationTime(Date(now + 300_000L))
+            .apply { permissions?.let { claim("permissions", it) } }
+            .build()
+        val jwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.EdDSA).keyID("hearth-ed-1").build(),
+            claims,
+        )
+        jwt.sign(Ed25519Signer(keyPair))
+        return jwt.serialize()
+    }
+
+    /** Paths the server was asked for, drained from the MockWebServer queue. */
+    private fun requestedPaths(): List<String> =
+        (0 until server.requestCount).mapNotNull { server.takeRequest().path }
 
     private fun makeClient(
         clientId: String? = null,
@@ -53,52 +111,63 @@ class MiddlewareTest {
 
     @Test
     fun `embedded - returns true when permissions claim contains permission`() = runTest {
+        enqueueIssuerResponses()
         val checker = requirePermission(
             "docs.read",
             RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
         )
-        assertTrue(checker.check(tokenWithPerms))
+        assertTrue(checker.check(signedToken(listOf("docs.read"))))
     }
 
     @Test
     fun `embedded - returns false when permission not in claim`() = runTest {
+        enqueueIssuerResponses()
         val checker = requirePermission(
             "docs.write",
             RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
         )
-        assertFalse(checker.check(tokenWithPerms))
+        assertFalse(checker.check(signedToken(listOf("docs.read"))))
     }
 
     @Test
     fun `embedded - returns false when permissions claim absent`() = runTest {
+        enqueueIssuerResponses()
         val checker = requirePermission(
             "docs.read",
             RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
         )
-        assertFalse(checker.check(tokenNoPerms))
+        assertFalse(checker.check(signedToken(null)))
     }
 
     @Test
-    fun `embedded - makes no network calls`() = runTest {
+    fun `embedded - refuses a token whose signature does not verify`() = runTest {
+        enqueueIssuerResponses()
         val checker = requirePermission(
             "docs.read",
             RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
         )
-        checker.check(tokenWithPerms)
-        checker.check(tokenNoPerms)
-        assertEquals(0, server.requestCount)
+        assertFalse(
+            checker.check(tokenWithPerms),
+            "EMBEDDED checker admitted a token with a garbage signature",
+        )
     }
 
     @Test
-    fun `embedded - does not fall back to network when claim absent`() = runTest {
-        // Even if we could call /oauth/authorize, embedded mode must NOT do so.
+    fun `embedded - does not fall back to a network authorization call`() = runTest {
+        // Discovery and JWKS are expected traffic — they are how the signature gets
+        // checked. Reaching for /oauth/authorize or /introspect would be the fallback
+        // this design constraint forbids.
+        enqueueIssuerResponses()
         val checker = requirePermission(
             "docs.read",
             RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
         )
-        // token has no permissions claim — must return false, not hit the server
-        assertFalse(checker.check(tokenNoPerms))
-        assertEquals(0, server.requestCount)
+        assertFalse(checker.check(signedToken(null)))
+
+        val authzCalls = requestedPaths().filter {
+            it.contains("/oauth/authorize") || it.contains("/introspect")
+        }
+        assertEquals(emptyList(), authzCalls)
     }
 
     // ── DECISION mode ─────────────────────────────────────────────────────────

@@ -182,6 +182,10 @@ export class HearthClient {
     const doc = await this.discover();
     this._jwksClient = new JwksClient({
       jwksUri: doc.jwks_uri,
+      // Pin iss/aud on the client itself, so a caller who reaches for the
+      // exported JwksClient still gets them checked.
+      issuer: this.issuerUrl,
+      audience: this.clientId,
       ttl: this.jwksTtl,
       httpTimeout: this.httpTimeout,
     });
@@ -299,12 +303,13 @@ export class HearthClient {
   /**
    * Verify a JWT using JWKS-backed EdDSA/Ed25519 local signature verification (spec §2).
    *
-   * Performs all five mandatory validation steps in order:
+   * Performs all mandatory validation steps in order:
    * 1. Signature against the JWKS endpoint (EdDSA/OKP/Ed25519 required; RS256/ES256 accepted).
    * 2. `exp` claim (rejects expired tokens).
-   * 3. `iss` claim (must match configured `issuerUrl`).
-   * 4. `aud` claim (validated when `clientId` is set in config).
-   * 5. `iat` claim (within 60-second clock skew tolerance).
+   * 3. `nbf` claim (rejects post-dated tokens).
+   * 4. `iss` claim (must match configured `issuerUrl`).
+   * 5. `aud` claim (validated when `clientId` is set in config).
+   * 6. `iat` claim (within 60-second clock skew tolerance).
    *
    * @throws {@link TokenExpiredError} — token is expired.
    * @throws {@link TokenInvalidError} — signature invalid or JWT malformed.

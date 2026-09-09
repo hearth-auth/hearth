@@ -1,4 +1,3 @@
-import { decodeJwt } from "jose";
 import { AuthorizationModeMismatchError } from "./errors.js";
 import type { HearthClient } from "./hearth-client.js";
 import type { AccessTokenAuthorizationMode, AuthorizePermissionOptions } from "./types.js";
@@ -27,9 +26,12 @@ export type PermissionChecker = (token: string) => Promise<boolean>;
  * Returns a mode-aware permission checker for the given `permission`.
  *
  * Behaviour by mode:
- * - **embedded** — decodes the JWT locally and checks the `permissions` claim.
- *   No network traffic. Returns `false` when the claim is absent; DOES NOT
- *   fall back to network (design constraint: absence of claims ≠ switch mode).
+ * - **embedded** — verifies the JWT with `client.verifyToken()` (EdDSA signature
+ *   against the realm's cached JWKS, plus `exp`, `nbf`, `iss` and `aud`) and only
+ *   then checks the `permissions` claim. No per-request network traffic once the
+ *   JWKS is warm. Returns `false` when the token does not verify or the claim is
+ *   absent; DOES NOT fall back to network (design constraint: absence of claims ≠
+ *   switch mode).
  * - **decision** — calls `client.authorize(token, permission, opts)` which
  *   POSTs to `POST /oauth/authorize`. Fail-closed on network/server errors.
  * - **introspection** — calls `client.introspectionClient().introspect(token)`,
@@ -49,14 +51,13 @@ export function requirePermission(
   switch (mode) {
     case "embedded":
       return async (token: string): Promise<boolean> => {
-        let claims: Record<string, unknown> | null = null;
+        // Verify BEFORE reading a claim. Decoding without verifying would let
+        // anyone mint `{"alg":"none"}` with any permission they liked.
         try {
-          claims = decodeJwt(token) as Record<string, unknown>;
+          return (await client.verifyToken(token)).hasPermission(permission);
         } catch {
           return false;
         }
-        const perms = claims["permissions"];
-        return Array.isArray(perms) && perms.includes(permission);
       };
 
     case "decision":

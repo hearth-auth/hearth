@@ -99,44 +99,54 @@ func main() {
 
 ## RBAC capabilities
 
-All synchronous helpers decode the JWT **locally** — no network call, no lock, no cache. They return `false` for an empty or malformed token.
+Every helper below **verifies the token before reading any claim**: the EdDSA
+signature against the realm's JWKS, plus `exp`, `nbf` and `iss`. They return
+`false` for an empty, malformed, expired, foreign or unverifiable token. The
+JWKS is cached, so the first call costs one HTTP round trip and later calls are
+CPU-only.
 
-### `HasPermission(token, permission string) bool`
+> **Breaking change (security).** These four helpers gained a leading
+> `ctx context.Context` parameter and now verify. Earlier releases decoded the
+> JWT without checking its signature, so an `alg: none` forgery carrying
+> `permissions: ["admin.write"]` was accepted. Pass your request context:
+> `client.HasPermission(r.Context(), token, "…")`.
 
-Returns `true` iff the JWT `permissions` claim contains `permission`.
+### `HasPermission(ctx, token, permission string) bool`
+
+Returns `true` iff the token verifies and its `permissions` claim contains `permission`.
 
 ```go
-if client.HasPermission(accessToken, "docs.versions.read") {
+if client.HasPermission(r.Context(), accessToken, "docs.versions.read") {
     renderVersionHistory()
 }
 ```
 
-### `HasRole(token, role string) bool`
+### `HasRole(ctx, token, role string) bool`
 
-Returns `true` iff the JWT `roles` claim contains `role`. Useful for UI personalization and coarse-grained access.
+Returns `true` iff the token verifies and its `roles` claim contains `role`.
 
 ```go
-if client.HasRole(accessToken, "billing-admin") {
+if client.HasRole(r.Context(), accessToken, "billing-admin") {
     renderBillingPanel()
 }
 ```
 
-### `InGroup(token, groupSlug string) bool`
+### `InGroup(ctx, token, groupSlug string) bool`
 
-Returns `true` iff the JWT `groups` claim contains the group slug.
+Returns `true` iff the token verifies and its `groups` claim contains the group slug.
 
 ```go
-if client.InGroup(accessToken, "engineering") {
+if client.InGroup(r.Context(), accessToken, "engineering") {
     renderInternalToolingLink()
 }
 ```
 
-### `InOrg(token, orgID string) bool`
+### `InOrg(ctx, token, orgID string) bool`
 
-Returns `true` iff the JWT `oid` claim equals the given org ID.
+Returns `true` iff the token verifies and its `oid` claim equals the given org ID.
 
 ```go
-if client.InOrg(accessToken, "org_acme") {
+if client.InOrg(r.Context(), accessToken, "org_acme") {
     renderAcmeContent()
 }
 ```
@@ -408,8 +418,10 @@ always rejected, never silently downgraded.
 
 ### `ModeEmbedded` (default)
 
-Permissions are baked into the JWT at issuance. The middleware decodes
-claims locally with zero network overhead.
+Permissions are baked into the JWT at issuance. The middleware verifies the
+token's signature against the cached JWKS and then reads the claims locally —
+no per-request network call. A token that fails verification is rejected with
+HTTP 401 before any permission is read.
 
 ```go
 mw := hearth.RequirePermission(client, "docs.edit", hearth.MiddlewareConfig{

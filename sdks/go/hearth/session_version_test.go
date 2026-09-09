@@ -283,10 +283,10 @@ func TestMiddlewareEmbeddedSvRevokedReturns401(t *testing.T) {
 }
 
 func TestMiddlewareEmbeddedSvValidPasses(t *testing.T) {
-	snapshotSrv := httptest.NewServer(snapshotHandler(map[string]uint64{"sess_V": 3}, 1))
-	defer snapshotSrv.Close()
+	ti := newTestIssuer(t)
+	ti.handle("/", snapshotHandler(map[string]uint64{"sess_V": 3}, 1))
 
-	c := NewClient(snapshotSrv.URL, "r1",
+	c := NewClient(ti.URL(), "r1",
 		WithSessionVersions(SessionVersionConfig{
 			Enabled:          true,
 			PollIntervalMs:   50,
@@ -299,7 +299,7 @@ func TestMiddlewareEmbeddedSvValidPasses(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// sv=5 ≥ minSV=3 → ok.
-	token := forgeJWT(t, map[string]any{
+	token := ti.sign(t, map[string]any{
 		"permissions": []string{"docs.edit"},
 		"sv":          float64(5),
 		"sid":         "sess_V",
@@ -312,8 +312,9 @@ func TestMiddlewareEmbeddedSvValidPasses(t *testing.T) {
 
 func TestMiddlewareEmbeddedNoSvClaimPasses(t *testing.T) {
 	// No sv feature configured — backward compat.
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
 	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 when no sv claim, got %d", rr.Code)

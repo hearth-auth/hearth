@@ -14,6 +14,8 @@ import httpx
 import pytest
 
 from hearth.client import HearthClient
+
+from .signing import install_test_key, sign_jwt, unsigned_jwt
 from hearth.errors import AuthorizationModeMismatchError, HearthError
 from hearth.types import (
     AccessTokenAuthorizationMode,
@@ -27,12 +29,13 @@ from hearth.types import (
 # ---------------------------------------------------------------------------
 
 def _make_jwt(payload: dict) -> str:
-    """Build a minimal unsigned JWT for testing local-decode paths."""
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
-    body = base64.urlsafe_b64encode(
-        json.dumps(payload).encode()
-    ).rstrip(b"=").decode()
-    return f"{header}.{body}."
+    """Build a JWT signed with the suite's test key.
+
+    The embedded-mode gates verify before reading claims, so a token that is
+    meant to be accepted must be signed. Use ``unsigned_jwt`` for the forgery
+    side of a test.
+    """
+    return sign_jwt(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +44,7 @@ def _make_jwt(payload: dict) -> str:
 
 class TestCheckPermission:
     def _client(self) -> HearthClient:
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def test_allowed_true_when_server_returns_allowed(self, respx_mock):
         respx_mock.post("http://localhost:8420/oauth/authorize").mock(
@@ -106,7 +109,7 @@ class TestCheckPermission:
 
 class TestIntrospect:
     def _client(self) -> HearthClient:
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def test_active_token(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/introspect").mock(
@@ -149,7 +152,7 @@ class TestWsgiMiddleware:
     """Tests for WsgiPermissionMiddleware."""
 
     def _client(self) -> HearthClient:
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def _environ(self, token: Optional[str] = None) -> dict:
         environ = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/data"}
@@ -316,7 +319,7 @@ class TestAsgiMiddleware:
     """Tests for RequirePermissionMiddleware (ASGI)."""
 
     def _client(self) -> HearthClient:
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def _scope(self, token: Optional[str] = None) -> dict:
         headers = []

@@ -149,9 +149,14 @@ class TokenVerifierTest {
 
         val token = mintJwt()
         val parts = token.split(".")
-        // Corrupt the last character of the signature segment.
+        // Corrupt a character in the MIDDLE of the signature segment. The last
+        // base64url character of a 64-byte Ed25519 signature carries only four
+        // significant bits, so substituting it decodes to the same bytes often
+        // enough that a last-character tamper is a coin flip, not a test.
         val sig = parts[2]
-        val corruptedSig = sig.dropLast(1) + if (sig.last() == 'A') 'B' else 'A'
+        val i = sig.length / 2
+        val corruptedSig = sig.substring(0, i) + (if (sig[i] == 'A') 'B' else 'A') + sig.substring(i + 1)
+        check(corruptedSig != sig) { "tamper produced an identical signature segment" }
         val tampered = "${parts[0]}.${parts[1]}.$corruptedSig"
 
         assertFailsWith<TokenInvalidError> { verifier().verify(tampered) }

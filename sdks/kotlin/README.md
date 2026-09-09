@@ -73,7 +73,7 @@ the SDK never silently falls back from one mode to another based on claim presen
 
 | Mode | Strategy | Network calls |
 |------|----------|---------------|
-| `EMBEDDED` | Decode `permissions` claim locally from JWT | None |
+| `EMBEDDED` | Verify the JWT against the cached JWKS, then read its `permissions` claim | JWKS fetch only (cached) |
 | `INTROSPECTION` | Call `POST /introspect`; server re-resolves live RBAC | 1 per request |
 | `DECISION` | Call `POST /oauth/authorize`; server returns `allowed` | 1 per request |
 

@@ -1,4 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
+import { generateKeyPair, exportJWK, SignJWT } from "jose";
+import type { KeyLike } from "jose";
 import { HearthClient } from "../src/hearth-client.js";
 import {
   ConfigurationError,
@@ -10,6 +12,11 @@ import { requirePermission } from "../src/middleware.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * An attacker's token: well-formed, but the signature segment is garbage.
+ * Every authorization gate must refuse it. Use `signJwt` for a token a gate
+ * should accept.
+ */
 function forgeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(
     JSON.stringify({ alg: "EdDSA", typ: "JWT" }),
@@ -215,33 +222,91 @@ describe("HearthClient.introspect()", () => {
 // ---------------------------------------------------------------------------
 
 describe("requirePermission() — embedded mode", () => {
-  const client = new HearthClient({ issuerUrl: "https://auth.example.com" });
+  const ISSUER = "https://auth.example.com";
+  const KID = "key-1";
+  let privateKey: KeyLike;
+  let jwks: unknown;
+
+  beforeAll(async () => {
+    const kp = await generateKeyPair("EdDSA", { crv: "Ed25519" });
+    privateKey = kp.privateKey as KeyLike;
+    const jwk = await exportJWK(kp.publicKey as KeyLike);
+    jwks = { keys: [{ ...jwk, kid: KID, use: "sig", alg: "EdDSA" }] };
+  });
+
+  /** Track every URL the SDK fetches so a test can assert what it did NOT call. */
+  let fetched: string[] = [];
+
+  beforeEach(() => {
+    fetched = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        fetched.push(String(url));
+        const body = String(url).includes("openid-configuration")
+          ? { issuer: ISSUER, jwks_uri: `${ISSUER}/jwks` }
+          : jwks;
+        return Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function newClient(): HearthClient {
+    return new HearthClient({ issuerUrl: ISSUER });
+  }
+
+  async function signJwt(claims: Record<string, unknown>): Promise<string> {
+    return new SignJWT({ sub: "user_1", ...claims })
+      .setProtectedHeader({ alg: "EdDSA", kid: KID })
+      .setIssuedAt()
+      .setIssuer(ISSUER)
+      .setExpirationTime("1h")
+      .sign(privateKey);
+  }
 
   it("returns true when JWT permissions claim contains the permission", async () => {
-    const token = forgeJwt({ permissions: ["docs.read", "docs.write"] });
-    const check = requirePermission("docs.read", { mode: "embedded", client });
+    const token = await signJwt({ permissions: ["docs.read", "docs.write"] });
+    const check = requirePermission("docs.read", { mode: "embedded", client: newClient() });
     expect(await check(token)).toBe(true);
   });
 
   it("returns false when permission is absent from claims", async () => {
-    const token = forgeJwt({ permissions: ["docs.write"] });
-    const check = requirePermission("docs.read", { mode: "embedded", client });
+    const token = await signJwt({ permissions: ["docs.write"] });
+    const check = requirePermission("docs.read", { mode: "embedded", client: newClient() });
     expect(await check(token)).toBe(false);
   });
 
   it("returns false when the permissions claim is missing entirely", async () => {
-    const token = forgeJwt({ sub: "user_1" });
-    const check = requirePermission("docs.read", { mode: "embedded", client });
+    const token = await signJwt({});
+    const check = requirePermission("docs.read", { mode: "embedded", client: newClient() });
     expect(await check(token)).toBe(false);
   });
 
-  it("does NOT fall back to network when permissions claim is absent (design constraint)", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const token = forgeJwt({ sub: "user_1" }); // no permissions claim
-    const check = requirePermission("docs.read", { mode: "embedded", client });
+  it("refuses a token whose signature does not verify", async () => {
+    const token = forgeJwt({ permissions: ["docs.read"] });
+    const check = requirePermission("docs.read", { mode: "embedded", client: newClient() });
+    expect(await check(token)).toBe(false);
+  });
+
+  it("does NOT fall back to network authorization when permissions claim is absent (design constraint)", async () => {
+    const token = await signJwt({}); // no permissions claim
+    const check = requirePermission("docs.read", { mode: "embedded", client: newClient() });
     await check(token);
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
+    // Discovery and JWKS are expected traffic — they are how the signature gets
+    // checked. Reaching for /oauth/authorize or /introspect would be the fallback
+    // this constraint forbids.
+    const authzCalls = fetched.filter(
+      (u) => u.includes("/oauth/authorize") || u.includes("/introspect"),
+    );
+    expect(authzCalls).toEqual([]);
   });
 });
 

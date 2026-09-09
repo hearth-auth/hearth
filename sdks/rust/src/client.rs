@@ -267,12 +267,13 @@ impl HearthClient {
 
     /// Verify a JWT against Hearth's JWKS and return typed claims (spec §2).
     ///
-    /// Executes the five validation steps required by spec §2:
+    /// Executes the validation steps required by spec §2:
     /// 1. Verify Ed25519/EdDSA signature against cached JWKS (re-fetches on miss).
     /// 2. Verify `exp` is not in the past (5 s clock skew allowed).
-    /// 3. Verify `iss` matches the configured issuer URL.
-    /// 4. Verify `aud` contains `client_id` when configured.
-    /// 5. Verify `iat` is not more than 5 s in the future.
+    /// 3. Verify `nbf` is not in the future (5 s clock skew allowed).
+    /// 4. Verify `iss` matches the configured issuer URL.
+    /// 5. Verify `aud` contains `client_id` when configured.
+    /// 6. Verify `iat` is not more than 5 s in the future.
     ///
     /// Returns [`HearthError::RequiredActionError`] when `token_type == "required_action"`.
     pub async fn verify_token(&self, token: &str) -> Result<Claims, HearthError> {
@@ -298,9 +299,12 @@ impl HearthClient {
             reason: format!("invalid JWK for kid '{kid}': {e}"),
         })?;
 
-        // Steps 2–4: build validation parameters.
+        // Steps 2–5: build validation parameters.
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.leeway = 5; // 5 s clock skew
+        // RFC 7519 §4.1.5 — a post-dated token must not be accepted before its
+        // `nbf`. `jsonwebtoken` leaves this off by default.
+        validation.validate_nbf = true;
 
         let issuer = self.issuer_url.as_deref().unwrap_or(&self.base_url);
         validation.set_issuer(&[issuer]);
@@ -311,13 +315,13 @@ impl HearthClient {
             validation.validate_aud = false;
         }
 
-        // Steps 1–4: signature + exp + iss + aud (jsonwebtoken handles all four).
+        // Steps 1–5: signature + exp + nbf + iss + aud (jsonwebtoken handles all five).
         let token_data = jsonwebtoken::decode::<Value>(token, &decoding_key, &validation)
             .map_err(|e| map_jwt_error(e, issuer, self.client_id.as_deref()))?;
 
         let claims = Claims::from_value(token_data.claims);
 
-        // Step 5: iat not in the future (5 s skew).
+        // Step 6: iat not in the future (5 s skew).
         if let Some(iat) = claims.issuedAt() {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -778,7 +782,8 @@ impl HearthClient {
 
     /// Mode-aware permission check (spec §3.5).
     ///
-    /// - `Embedded` — decodes JWT locally; checks `permissions[]`. No network call.
+    /// - `Embedded` — verifies the JWT against the cached JWKS, then checks
+    ///   `permissions[]`. No per-request network call once the JWKS is warm.
     /// - `Introspection` — calls `POST /introspect`; validates echoed mode; checks live perms.
     /// - `Decision` — calls `POST /oauth/authorize` per request. Fail-closed on errors.
     pub async fn check_permission(
@@ -789,7 +794,7 @@ impl HearthClient {
         opts: CheckPermissionOpts,
     ) -> Result<bool, HearthError> {
         match mode {
-            AccessTokenAuthorization::Embedded => Self::has_permission(token, permission),
+            AccessTokenAuthorization::Embedded => self.has_permission(token, permission).await,
             AccessTokenAuthorization::Introspection => {
                 let (cid, csec) =
                     opts.client_credentials
@@ -862,42 +867,77 @@ impl HearthClient {
     }
 
     // ------------------------------------------------------------------
-    // RBAC predicates (local, no network call)
+    // RBAC predicates
     // ------------------------------------------------------------------
+    //
+    // Each predicate verifies the token through [`HearthClient::verify_token`]
+    // before reading a single claim: EdDSA signature against the realm's JWKS,
+    // plus `exp`, `nbf`, `iss` and (when a `client_id` is configured) `aud`.
+    // The JWKS is cached, so the steady-state cost is one local signature
+    // check and no network round trip.
 
-    pub fn has_permission(token: &str, permission: &str) -> Result<bool, HearthError> {
-        let claims = Self::decode_claims(token)?;
-        let perms: Vec<String> = claims
-            .get("permissions")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
-        Ok(perms.iter().any(|p| p == permission))
+    /// Returns `true` when the token verifies and its `permissions` claim
+    /// contains `permission`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`HearthError`] from verification when the token is
+    /// malformed, unsigned, signed by an unknown key, expired, not yet valid,
+    /// or issued by a different issuer.
+    pub async fn has_permission(&self, token: &str, permission: &str) -> Result<bool, HearthError> {
+        let claims = self.verified_claims(token).await?;
+        Ok(Self::claim_list(&claims, "permissions").iter().any(|p| p == permission))
     }
 
-    pub fn has_role(token: &str, role: &str) -> Result<bool, HearthError> {
-        let claims = Self::decode_claims(token)?;
-        let roles: Vec<String> = claims
-            .get("roles")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
-        Ok(roles.iter().any(|r| r == role))
+    /// Returns `true` when the token verifies and its `roles` claim contains `role`.
+    ///
+    /// # Errors
+    ///
+    /// See [`HearthClient::has_permission`].
+    pub async fn has_role(&self, token: &str, role: &str) -> Result<bool, HearthError> {
+        let claims = self.verified_claims(token).await?;
+        Ok(Self::claim_list(&claims, "roles").iter().any(|r| r == role))
     }
 
-    pub fn in_group(token: &str, group_slug: &str) -> Result<bool, HearthError> {
-        let claims = Self::decode_claims(token)?;
-        let groups: Vec<String> = claims
-            .get("groups")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-            .unwrap_or_default();
-        Ok(groups.iter().any(|g| g == group_slug))
+    /// Returns `true` when the token verifies and its `groups` claim contains
+    /// `group_slug`.
+    ///
+    /// # Errors
+    ///
+    /// See [`HearthClient::has_permission`].
+    pub async fn in_group(&self, token: &str, group_slug: &str) -> Result<bool, HearthError> {
+        let claims = self.verified_claims(token).await?;
+        Ok(Self::claim_list(&claims, "groups").iter().any(|g| g == group_slug))
     }
 
-    pub fn in_org(token: &str, org_id: &str) -> Result<bool, HearthError> {
-        let claims = Self::decode_claims(token)?;
+    /// Returns `true` when the token verifies and its `oid` claim equals `org_id`.
+    ///
+    /// # Errors
+    ///
+    /// See [`HearthClient::has_permission`].
+    pub async fn in_org(&self, token: &str, org_id: &str) -> Result<bool, HearthError> {
+        let claims = self.verified_claims(token).await?;
         Ok(claims.get("oid").and_then(|v| v.as_str()) == Some(org_id))
+    }
+
+    /// Verify `token` and return its payload as JSON.
+    ///
+    /// The bytes returned are authenticated: the signature over them was
+    /// checked against the realm's JWKS, so reading a claim out of them is a
+    /// sound basis for an authorization decision.
+    async fn verified_claims(&self, token: &str) -> Result<Value, HearthError> {
+        self.verify_token(token).await?;
+        Self::decode_claims(token)
+    }
+
+    /// Read a claim as a list of strings, defaulting to empty when absent or
+    /// not an array of strings.
+    fn claim_list(claims: &Value, key: &str) -> Vec<String> {
+        claims
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
     }
 
     fn generate_state() -> String {
@@ -911,6 +951,11 @@ impl HearthClient {
         URL_SAFE_NO_PAD.encode(bytes)
     }
 
+    /// Decode a JWT's payload **without verifying its signature**.
+    ///
+    /// Private on purpose: nothing outside this module may base an
+    /// authorization decision on it. Every gate goes through
+    /// [`HearthClient::verified_claims`].
     fn decode_claims(token: &str) -> Result<Value, HearthError> {
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() < 2 {
@@ -1569,5 +1614,180 @@ mod tests {
         );
         assert!(body.contains("token=magic-token-xyz"), "missing token: {body}");
         assert!(body.contains("client_id=cid"), "missing client_id: {body}");
+    }
+
+    // ── 25.1 — the embedded authorization gate must verify before it trusts ──
+
+    /// An `alg: none` forgery claiming `admin.write`. Costs the attacker no key
+    /// material and no interaction with Hearth.
+    fn unsigned_admin_token() -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let now = now_secs();
+        let body = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "sub": "attacker",
+                "iss": "https://auth.example.com",
+                "exp": now + 3600,
+                "iat": now,
+                "permissions": ["admin.write"],
+                "roles": ["admin"],
+                "groups": ["engineering"],
+                "oid": "org_42",
+            }))
+            .unwrap(),
+        );
+        format!("{header}.{body}.")
+    }
+
+    async fn client_for_gate_tests() -> (HearthClient, Vec<u8>, &'static str) {
+        let (pkcs8_der, pub_key) = make_ed25519_pkcs8();
+        let kid = "gate-key-1";
+        let jwk = make_jwk(kid, &pub_key);
+        (client_with_cached_jwk(kid, jwk, None).await, pkcs8_der, kid)
+    }
+
+    #[tokio::test]
+    async fn has_permission_rejects_unsigned_token() {
+        let (client, _, _) = client_for_gate_tests().await;
+        let token = unsigned_admin_token();
+
+        assert!(
+            !client.has_permission(&token, "admin.write").await.unwrap_or(false),
+            "has_permission accepted an alg:none forgery claiming admin.write"
+        );
+        assert!(!client.has_role(&token, "admin").await.unwrap_or(false));
+        assert!(!client.in_group(&token, "engineering").await.unwrap_or(false));
+        assert!(!client.in_org(&token, "org_42").await.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn has_permission_rejects_token_signed_by_a_foreign_key() {
+        let (client, _, kid) = client_for_gate_tests().await;
+        // A different key pair — its public half is not in the cached JWKS.
+        let (other_pkcs8, _other_pub) = make_ed25519_pkcs8();
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({
+                "sub": "attacker",
+                "iss": "https://auth.example.com",
+                "exp": now + 3600,
+                "iat": now,
+                "permissions": ["admin.write"],
+            }),
+            &other_pkcs8,
+            kid,
+        );
+
+        assert!(
+            !client.has_permission(&token, "admin.write").await.unwrap_or(false),
+            "has_permission accepted a token signed by a key outside the JWKS"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_permission_rejects_expired_token() {
+        let (client, pkcs8, kid) = client_for_gate_tests().await;
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({
+                "sub": "u",
+                "iss": "https://auth.example.com",
+                "exp": now - 3600,
+                "iat": now - 7200,
+                "permissions": ["admin.write"],
+            }),
+            &pkcs8,
+            kid,
+        );
+
+        assert!(
+            !client.has_permission(&token, "admin.write").await.unwrap_or(false),
+            "has_permission accepted an expired token"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_permission_accepts_properly_signed_token() {
+        let (client, pkcs8, kid) = client_for_gate_tests().await;
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({
+                "sub": "u",
+                "iss": "https://auth.example.com",
+                "exp": now + 3600,
+                "iat": now,
+                "permissions": ["admin.write"],
+                "roles": ["admin"],
+                "groups": ["engineering"],
+                "oid": "org_42",
+            }),
+            &pkcs8,
+            kid,
+        );
+
+        assert!(client.has_permission(&token, "admin.write").await.unwrap());
+        assert!(!client.has_permission(&token, "admin.delete").await.unwrap());
+        assert!(client.has_role(&token, "admin").await.unwrap());
+        assert!(client.in_group(&token, "engineering").await.unwrap());
+        assert!(client.in_org(&token, "org_42").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_permission_embedded_rejects_unsigned_token() {
+        let (client, _, _) = client_for_gate_tests().await;
+        let allowed = client
+            .check_permission(
+                &unsigned_admin_token(),
+                "admin.write",
+                AccessTokenAuthorization::Embedded,
+                CheckPermissionOpts::default(),
+            )
+            .await
+            .unwrap_or(false);
+        assert!(!allowed, "embedded check_permission admitted an alg:none forgery");
+    }
+
+    // ── 25.2 — nbf must be validated ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn verify_token_rejects_not_yet_valid_token() {
+        let (client, pkcs8, kid) = client_for_gate_tests().await;
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({
+                "sub": "u",
+                "iss": "https://auth.example.com",
+                "exp": now + 7200,
+                "iat": now,
+                "nbf": now + 3600,
+            }),
+            &pkcs8,
+            kid,
+        );
+
+        let err = client.verify_token(&token).await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenNotYetValidError { .. }),
+            "expected TokenNotYetValidError for an nbf an hour in the future, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_accepts_past_nbf() {
+        let (client, pkcs8, kid) = client_for_gate_tests().await;
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({
+                "sub": "u",
+                "iss": "https://auth.example.com",
+                "exp": now + 3600,
+                "iat": now,
+                "nbf": now - 3600,
+            }),
+            &pkcs8,
+            kid,
+        );
+
+        assert_eq!(client.verify_token(&token).await.unwrap().subject(), "u");
     }
 }

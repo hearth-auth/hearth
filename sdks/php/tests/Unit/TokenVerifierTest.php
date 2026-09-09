@@ -10,6 +10,7 @@ use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
 use Hearth\Exceptions\TokenIssuerException;
+use Hearth\Exceptions\TokenNotYetValidException;
 use Hearth\Exceptions\TokenInvalidException;
 use Hearth\TokenVerifier;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -105,6 +106,23 @@ final class TokenVerifierTest extends TestCase
 
         $this->expectException(TokenInvalidException::class);
         $this->verifier->verify($this->makeToken($this->validClaims()));
+    }
+
+    public function testVerifyThrowsWhenNbfIsInTheFuture(): void
+    {
+        $this->setUpJwksForKey();
+        $token = $this->makeToken($this->validClaims(['nbf' => time() + 3600]));
+
+        $this->expectException(TokenNotYetValidException::class);
+        $this->verifier->verify($token);
+    }
+
+    public function testVerifyAcceptsTokenWhoseNbfHasPassed(): void
+    {
+        $this->setUpJwksForKey();
+        $token  = $this->makeToken($this->validClaims(['nbf' => time() - 3600]));
+        $claims = $this->verifier->verify($token);
+        self::assertSame('usr_abc', $claims->subject());
     }
 
     public function testVerifyThrowsOnExpiredToken(): void

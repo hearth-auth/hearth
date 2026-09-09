@@ -15,9 +15,10 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-// forgeJWT builds a syntactically valid three-segment JWT with the given claim
-// body. The signature segment is a constant stub — the SDK's HasPermission
-// decodes claims locally without verifying the signature.
+// forgeJWT builds a syntactically valid three-segment JWT with a garbage
+// signature segment. It models an attacker's token: HearthMiddleware verifies
+// every bearer token against the realm's JWKS, so this must always be refused.
+// Use testIssuer.sign for a token the middleware should accept.
 func forgeJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	header := map[string]string{"alg": "EdDSA", "typ": "JWT"}
@@ -58,8 +59,9 @@ func serve(router *gin.Engine, token string) *httptest.ResponseRecorder {
 // ─── HearthMiddleware ────────────────────────────────────────────────────────
 
 func TestHearthMiddlewareAllowsValidToken(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
 	rr := serve(newRouter(client), token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -67,7 +69,8 @@ func TestHearthMiddlewareAllowsValidToken(t *testing.T) {
 }
 
 func TestHearthMiddlewareMissingTokenReturns401(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
+	ti := newTestIssuer(t)
+	client := ti.client()
 	rr := serve(newRouter(client), "")
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for missing token, got %d", rr.Code)
@@ -75,8 +78,9 @@ func TestHearthMiddlewareMissingTokenReturns401(t *testing.T) {
 }
 
 func TestHearthMiddlewareStoresTokenInContext(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
 
 	r := gin.New()
 	r.Use(HearthMiddleware(client))
@@ -97,8 +101,9 @@ func TestHearthMiddlewareStoresTokenInContext(t *testing.T) {
 }
 
 func TestHearthMiddlewareCustomExtractor(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
 
 	// Extract from X-Auth-Token header instead of Authorization.
 	extractor := func(c *gin.Context) string {
@@ -120,7 +125,8 @@ func TestHearthMiddlewareCustomExtractor(t *testing.T) {
 }
 
 func TestHearthMiddlewareCustomUnauthorizedHandler(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
+	ti := newTestIssuer(t)
+	client := ti.client()
 
 	customHandler := func(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "no token"})
@@ -159,8 +165,9 @@ func TestGetTokenReturnsEmptyWhenNotSet(t *testing.T) {
 // ─── RequirePermission ───────────────────────────────────────────────────────
 
 func TestRequirePermissionAllowed(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
 
 	r := gin.New()
 	r.Use(HearthMiddleware(client))
@@ -174,8 +181,9 @@ func TestRequirePermissionAllowed(t *testing.T) {
 }
 
 func TestRequirePermissionDenied(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.view"}})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 
 	r := gin.New()
 	r.Use(HearthMiddleware(client))
@@ -194,7 +202,8 @@ func TestRequirePermissionNoToken(t *testing.T) {
 	// handler runs, and a valid token carrying the permission must pass through
 	// and reach the handler. The previous version built a client and discarded
 	// it (`_ = client`), never exercising the middleware's use of it.
-	client := hearth.NewClient("http://localhost", "r1")
+	ti := newTestIssuer(t)
+	client := ti.client()
 
 	handlerCalled := false
 	r := gin.New()
@@ -215,7 +224,7 @@ func TestRequirePermissionNoToken(t *testing.T) {
 	}
 
 	// Valid token carrying docs.edit → 200, handler runs.
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
 	rr = serve(r, token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for permitted token, got %d", rr.Code)
@@ -247,9 +256,10 @@ func TestRequirePermissionNoClientInContext(t *testing.T) {
 // ─── Integration: route-level protection via router.Use ─────────────────────
 
 func TestRouteGroupProtection(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	editToken := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
-	viewToken := forgeJWT(t, map[string]any{"permissions": []string{"docs.view"}})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	editToken := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
+	viewToken := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 
 	r := gin.New()
 	r.Use(HearthMiddleware(client))

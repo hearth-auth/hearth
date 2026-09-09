@@ -37,6 +37,12 @@ const (
 	// ClientContextKey is the gin.Context key under which HearthMiddleware stores the
 	// *hearth.Client. Used internally by RequirePermission.
 	ClientContextKey = "hearth_client"
+
+	// ClaimsContextKey is the gin.Context key under which HearthMiddleware stores
+	// the *hearth.Claims it obtained by verifying the bearer token. Retrieve it
+	// with GetClaims. RequirePermission reads only from here, so an unverified
+	// token can never reach a permission decision.
+	ClaimsContextKey = "hearth_claims"
 )
 
 // MiddlewareOption is a functional option for HearthMiddleware.
@@ -79,13 +85,20 @@ func defaultUnauthorized(c *gin.Context) {
 }
 
 // HearthMiddleware returns a gin.HandlerFunc that extracts the bearer token from
-// the Authorization header and stores it in the Gin context under TokenContextKey
-// ("hearth_token"). The Hearth client is stored under ClientContextKey
-// ("hearth_client") so that downstream middleware (e.g. RequirePermission) can
-// access it without requiring the caller to close over the variable manually.
+// the Authorization header, VERIFIES it against the realm's JWKS (EdDSA
+// signature plus exp, nbf and iss), and stores it in the Gin context under
+// TokenContextKey ("hearth_token"). The verified claims are stored under
+// ClaimsContextKey ("hearth_claims") and the Hearth client under
+// ClientContextKey ("hearth_client") so that downstream middleware (e.g.
+// RequirePermission) can access them without requiring the caller to close over
+// the variable manually.
 //
-// If no token is present the request is aborted. The default abort handler
-// writes HTTP 401; override it with WithOnUnauthorized.
+// If no token is present, or the token does not verify, the request is aborted.
+// The default abort handler writes HTTP 401; override it with
+// WithOnUnauthorized.
+//
+// The JWKS is cached by the client, so verification costs one HTTP round trip
+// on the first request and is CPU-only thereafter.
 //
 // Mount at the router or group level with router.Use:
 //
@@ -105,10 +118,27 @@ func HearthMiddleware(client *hearth.Client, opts ...MiddlewareOption) gin.Handl
 			cfg.onUnauthorized(c)
 			return
 		}
+		claims, err := client.VerifyToken(c.Request.Context(), token)
+		if err != nil {
+			cfg.onUnauthorized(c)
+			return
+		}
 		c.Set(TokenContextKey, token)
+		c.Set(ClaimsContextKey, claims)
 		c.Set(ClientContextKey, client)
 		c.Next()
 	}
+}
+
+// GetClaims retrieves the verified Hearth claims stored in the Gin context by
+// HearthMiddleware. Returns nil when HearthMiddleware has not run.
+func GetClaims(c *gin.Context) *hearth.Claims {
+	val, exists := c.Get(ClaimsContextKey)
+	if !exists {
+		return nil
+	}
+	claims, _ := val.(*hearth.Claims)
+	return claims
 }
 
 // GetToken retrieves the Hearth bearer token stored in the Gin context by
@@ -124,14 +154,18 @@ func GetToken(c *gin.Context) string {
 }
 
 // RequirePermission returns a gin.HandlerFunc that enforces an embedded-mode
-// permission check against the token stored in context. JWT claims are decoded
-// locally — no network call is made.
+// permission check against the VERIFIED claims stored in context by
+// HearthMiddleware. No network call is made here — HearthMiddleware already
+// verified the signature and populated the claims.
 //
 // HearthMiddleware must appear before RequirePermission in the middleware chain;
-// it sets both the token and the client in the Gin context.
+// it sets the token, the verified claims and the client in the Gin context.
+// RequirePermission never reads the raw token, so there is no wiring in which
+// an unverified token can reach the permission decision.
 //
-// Aborts with HTTP 401 when no token is present (HearthMiddleware not wired),
-// HTTP 403 when the token lacks the required permission.
+// Aborts with HTTP 401 when no verified claims are present (HearthMiddleware not
+// wired, or the token did not verify), HTTP 403 when the token lacks the
+// required permission.
 //
 // Mount at a group level to guard a set of routes:
 //
@@ -139,8 +173,7 @@ func GetToken(c *gin.Context) string {
 //	admin.Use(hearthgin.RequirePermission("admin.write"))
 func RequirePermission(permission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := GetToken(c)
-		if token == "" {
+		if GetToken(c) == "" {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
@@ -149,12 +182,20 @@ func RequirePermission(permission string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusInternalServerError)
 			return
 		}
-		client, ok := clientVal.(*hearth.Client)
-		if !ok {
+		if _, ok := clientVal.(*hearth.Client); !ok {
 			c.AbortWithStatus(http.StatusInternalServerError)
 			return
 		}
-		if !client.HasPermission(token, permission) {
+		// A token was stashed but nothing verified it — refuse. This is the
+		// only place the raw token is consulted, and only to decide whether to
+		// return 401 or 500; the permission decision below reads exclusively
+		// from the verified claims.
+		claims := GetClaims(c)
+		if claims == nil {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		if !claims.HasPermission(permission) {
 			c.AbortWithStatus(http.StatusForbidden)
 			return
 		}

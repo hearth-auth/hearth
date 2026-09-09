@@ -20,13 +20,17 @@ from hearth.claims import Claims
 # Helpers
 # ---------------------------------------------------------------------------
 
+from .signing import install_test_key, sign_jwt, unsigned_jwt
+
+
 def _make_jwt(payload: dict) -> str:
-    """Build a minimal unsigned JWT for testing local-decode paths."""
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
-    body = base64.urlsafe_b64encode(
-        json.dumps(payload).encode()
-    ).rstrip(b"=").decode()
-    return f"{header}.{body}."
+    """Build a JWT signed with the suite's test key.
+
+    The embedded-mode gates verify before reading claims, so a token that is
+    meant to be accepted must be signed. Use ``unsigned_jwt`` for the forgery
+    side of a test.
+    """
+    return sign_jwt(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +162,7 @@ class TestWsgiRequiredAction:
 
     def _client(self):
         from hearth.client import HearthClient
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def _environ(self, token: Optional[str] = None) -> dict:
         environ = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/data"}
@@ -212,7 +216,7 @@ class TestAsgiRequiredAction:
 
     def _client(self):
         from hearth.client import HearthClient
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def _scope(self, token: Optional[str] = None) -> dict:
         headers = []
