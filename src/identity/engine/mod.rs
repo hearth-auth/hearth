@@ -4751,6 +4751,24 @@ impl EmbeddedIdentityEngine {
             cascade_work_done = true;
         }
 
+        // 2b. The realm's audit-chain anchor (system realm scope). It records
+        //     that the realm once had an audit chain, so a missing chain reads
+        //     as an erasure rather than a fresh realm (audit 2026-08-28
+        //     §4.14#4). A deleted realm has no chain by design, so the anchor
+        //     must go with it — otherwise `verify_integrity` would report a
+        //     re-imported realm holding the same ID as tampered.
+        let anchor_key = crate::audit::keys::chain_anchor_key(realm_id);
+        if storage
+            .get(&sys_realm, &anchor_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            cascade_work_done = true;
+            storage
+                .delete(&sys_realm, &anchor_key)
+                .map_err(Self::storage_err)?;
+        }
+
         // 3. SAML per-realm RSA signing key (under system realm scope).
         let saml_key_storage_key = keys::encode_realm_saml_key(realm_id);
         if storage

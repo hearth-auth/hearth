@@ -377,6 +377,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   reporting `404`.
 
 ### Security
+- **An erased audit log no longer verifies clean (audit 2026-08-28 §4.14#4)** — the tail-truncation
+  check ran only when a signed chain head was present, so deleting the head along with the events
+  skipped it and `POST /admin/audit/verify` (and the gRPC `VerifyIntegrity`) answered `valid`. A
+  realm's first audit event now also records an anchor in the system realm, which a wipe of that
+  realm's `audit:` prefix cannot reach: a chain that once existed and no longer has a head is
+  reported invalid. A realm that has never written an audit event still verifies clean, and
+  verification no longer mints a chain key as a side effect of checking an empty log.
 - **`security.backup.verify_key` now actually verifies restore archives (audit 2026-08-28
   §4.13#5)** — the key was parsed and documented as fail-closed, but nothing ever placed it on the
   server's request state, so the restore handler's Ed25519 signature check could not fire on any

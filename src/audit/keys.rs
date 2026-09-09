@@ -57,6 +57,9 @@ const AUDIT_HMAC_KEY: &str = "audit:hmac:key";
 /// tail truncation and survive retention pruning (HEA-1756 U2/U3).
 const AUDIT_CHAIN_HEAD_KEY: &str = "audit:chain:head";
 
+/// Prefix for per-realm audit-chain anchors, held in the system realm.
+const AUDIT_CHAIN_ANCHOR_PREFIX: &str = "audit:anchor:";
+
 /// Encodes a timestamp as 8 big-endian bytes.
 ///
 /// Real timestamps are microseconds since the Unix epoch (always non-negative),
@@ -169,6 +172,17 @@ pub(crate) fn retention_config_key() -> Vec<u8> {
 /// Returns the storage key for the realm's per-realm audit HMAC chain key.
 pub(crate) fn audit_hmac_key() -> Vec<u8> {
     AUDIT_HMAC_KEY.as_bytes().to_vec()
+}
+
+/// Returns the storage key for a realm's audit-chain anchor.
+///
+/// Format: `audit:anchor:{realm_uuid}`, stored in the **system** realm — the
+/// one namespace a wipe of the target realm's `audit:` prefix cannot reach.
+/// Its presence means "this realm has written at least one audit event", which
+/// is what tells an erased log apart from a realm that never had one
+/// (audit 2026-08-28 §4.14#4).
+pub(crate) fn chain_anchor_key(realm_id: &crate::core::RealmId) -> Vec<u8> {
+    format!("{AUDIT_CHAIN_ANCHOR_PREFIX}{}", realm_id.as_uuid()).into_bytes()
 }
 
 /// Returns the storage key for the realm's signed audit chain head.
