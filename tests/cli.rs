@@ -553,3 +553,65 @@ fn backup_create_lock_failure_reports_the_reason() {
         "a lock failure must name the lock, got: {output:?}"
     );
 }
+
+// ===== §4.13#5: security.backup.verify_key must reach the server =====
+
+/// `security.backup.verify_key` was parsed and then dropped: nothing ever put
+/// it on `AppState`, so the restore handler's signature check could not fire on
+/// any deployment. This guards the config → server link that was missing; the
+/// check itself is covered in `tests/backup_http.rs`.
+#[test]
+fn configured_backup_verify_key_reaches_the_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = find_available_port();
+    let config_path = dir.path().join("hearth.yaml");
+    let data_dir = dir.path().join("data");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+server:
+  port: {port}
+  bind_address: "127.0.0.1"
+dev_mode: true
+storage:
+  data_dir: "{}"
+oidc:
+  issuer: "http://127.0.0.1:{port}"
+email:
+  transport: log
+security:
+  backup:
+    verify_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+"#,
+            data_dir.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut child = Command::new(hearth_bin())
+        .args(["serve", "--dev", "-c"])
+        .arg(&config_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hearth server");
+
+    let up = wait_for_server(port, Duration::from_secs(30));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("collect server output");
+
+    assert!(
+        up,
+        "the server must start with a backup verify key configured"
+    );
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        logs.contains("backup restore signature verification ENABLED"),
+        "the configured verify key must reach the server; logs: {logs}"
+    );
+}

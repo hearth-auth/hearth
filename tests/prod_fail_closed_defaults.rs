@@ -208,3 +208,95 @@ fn validate_all_surfaces_all_three_gates() {
         "validate_all must flag demo mode; got fields: {fields:?}"
     );
 }
+
+// ===== §4.13#5: security.backup.verify_key must reach the restore handler =====
+
+/// Base YAML that validates cleanly, with an optional `security.backup` block.
+fn backup_verify_yaml(verify_key: Option<&str>) -> String {
+    let mut yaml = String::from(
+        r#"
+server:
+  port: 8420
+  bind_address: "127.0.0.1"
+  trust_forwarded_proto: true
+storage:
+  data_dir: "/tmp/hearth-hea-verify-key-test"
+oidc:
+  issuer: "https://auth.example.com"
+email:
+  transport: log
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+"#,
+    );
+    if let Some(key) = verify_key {
+        yaml.push_str(&format!("  backup:\n    verify_key: \"{key}\"\n"));
+    }
+    yaml
+}
+
+/// A `verify_key` that is not a 32-byte base64url Ed25519 public key can never
+/// verify anything. Accepting it leaves the operator believing archives are
+/// checked while the check is impossible, so it must refuse to start.
+#[test]
+fn malformed_backup_verify_key_is_a_hard_validation_error() {
+    std::env::remove_var("HEARTH_KEK");
+    let yaml = backup_verify_yaml(Some("not-a-valid-base64url-key!!"));
+    let err = Config::from_yaml_str(&yaml)
+        .expect_err("a malformed backup verify key must refuse to start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("security.backup.verify_key"),
+        "error must identify the offending field; got: {msg}"
+    );
+}
+
+/// A well-formed key of the wrong length is equally unusable.
+#[test]
+fn short_backup_verify_key_is_a_hard_validation_error() {
+    std::env::remove_var("HEARTH_KEK");
+    // 16 bytes, correctly base64url-encoded — decodes, but is not an Ed25519 key.
+    let yaml = backup_verify_yaml(Some("AAAAAAAAAAAAAAAAAAAAAA"));
+    let err =
+        Config::from_yaml_str(&yaml).expect_err("a 16-byte backup verify key must refuse to start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("security.backup.verify_key"),
+        "error must identify the offending field; got: {msg}"
+    );
+    assert!(
+        msg.contains("32"),
+        "error must state the required length; got: {msg}"
+    );
+}
+
+/// A valid key must validate AND decode to the 32 bytes the restore handler
+/// needs — the value the server had no way to reach at all (§4.13#5).
+#[test]
+fn valid_backup_verify_key_decodes_to_32_bytes() {
+    std::env::remove_var("HEARTH_KEK");
+    // 32 zero bytes, base64url no-pad.
+    let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let config = Config::from_yaml_str(&backup_verify_yaml(Some(key))).expect("valid config");
+    let bytes = config
+        .security
+        .backup
+        .verify_key_bytes()
+        .expect("a validated key decodes")
+        .expect("the key is configured");
+    assert_eq!(bytes, [0u8; 32]);
+}
+
+/// No key configured is the documented default: signature verification is
+/// skipped, and nothing fails.
+#[test]
+fn absent_backup_verify_key_decodes_to_none() {
+    std::env::remove_var("HEARTH_KEK");
+    let config = Config::from_yaml_str(&backup_verify_yaml(None)).expect("valid config");
+    assert!(config
+        .security
+        .backup
+        .verify_key_bytes()
+        .expect("no key decodes cleanly")
+        .is_none());
+}

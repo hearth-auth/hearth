@@ -377,6 +377,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   reporting `404`.
 
 ### Security
+- **`security.backup.verify_key` now actually verifies restore archives (audit 2026-08-28
+  §4.13#5)** — the key was parsed and documented as fail-closed, but nothing ever placed it on the
+  server's request state, so the restore handler's Ed25519 signature check could not fire on any
+  deployment: an operator who set the key still accepted unsigned archives. The key now reaches
+  the handler, and the server logs `backup restore signature verification ENABLED` at startup when
+  it is set. A `verify_key` that does not decode to exactly 32 bytes of base64url is now a startup
+  error rather than a silently ignored value.
 - **Rate-limit counters no longer store the subject's email address (audit 2026-08-28 §4.20#7)** —
   the magic-link, password-reset and self-registration counters were keyed on the plaintext
   address (`rl:rml:{email}`, `rl:rpwreset:{email}`, `rl:rreg-email:{email}`). The maintenance

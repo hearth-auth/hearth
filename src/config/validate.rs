@@ -309,6 +309,13 @@ impl Config {
             });
         }
 
+        if let Err(reason) = self.security.backup.verify_key_bytes() {
+            issues.push(ValidationIssue {
+                field: "security.backup.verify_key".to_string(),
+                reason,
+            });
+        }
+
         // HEA-2166: mirror the fail-closed production gates from `validate`
         // so the admin config-check panel surfaces all three in one pass.
         if !self.dev_mode {
@@ -439,6 +446,16 @@ impl Config {
             return Err(ConfigError::ValidationError {
                 field: "server.port".to_string(),
                 reason: "must be between 1 and 65535".to_string(),
+            });
+        }
+
+        // A backup verify key that cannot decode can never verify an archive.
+        // Refuse to start rather than run with a check the operator believes is
+        // on (audit 2026-08-28 §4.13#5).
+        if let Err(reason) = self.security.backup.verify_key_bytes() {
+            return Err(ConfigError::ValidationError {
+                field: "security.backup.verify_key".to_string(),
+                reason,
             });
         }
 

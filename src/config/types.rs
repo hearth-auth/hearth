@@ -1338,6 +1338,30 @@ pub struct BackupSecurityYaml {
     pub export_rate_limit: Option<u32>,
 }
 
+impl BackupSecurityYaml {
+    /// Decodes [`Self::verify_key`] into the 32 raw Ed25519 public-key bytes.
+    ///
+    /// Returns `Ok(None)` when no key is configured — the documented default,
+    /// under which signature verification is skipped. Returns `Err` with a
+    /// reason when a key is present but is not 32 bytes of base64url (no pad);
+    /// such a key can never verify anything, so startup refuses it rather than
+    /// leaving the operator believing archives are checked (audit 2026-08-28
+    /// §4.13#5).
+    pub fn verify_key_bytes(&self) -> Result<Option<[u8; 32]>, String> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let Some(encoded) = self.verify_key.as_ref() else {
+            return Ok(None);
+        };
+        let raw = URL_SAFE_NO_PAD
+            .decode(encoded.trim())
+            .map_err(|e| format!("must be base64url (URL-safe, no padding); decode failed: {e}"))?;
+        let len = raw.len();
+        <[u8; 32]>::try_from(raw.as_slice()).map(Some).map_err(|_| {
+            format!("must decode to exactly 32 bytes (an Ed25519 public key), got {len}")
+        })
+    }
+}
+
 /// `security.ip_reputation` — IP reputation policy and provider config (P-2).
 ///
 /// Example:

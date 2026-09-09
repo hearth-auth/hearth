@@ -153,7 +153,7 @@ found it, the audit piece, and the report's severity.
 
 - [x] 16.1 Make the backup consistency barrier effective on the storage handle `serve` installs, and give `ClusterStorageAdapter` an atomic `write_batch` (§4.9#4 · MEDIUM)
 - [x] 16.2 Install a `tracing` subscriber for the whole `hearth backup` CLI family; `create`, `restore`, `verify` and `inspect` emit zero bytes, including when `create` fails on the data-directory lock (§4.9#8, §4.14#6 · MEDIUM)
-- [ ] 16.3 Wire `security.backup.verify_key` into the restore handler; it is parsed, validated and documented as fail-closed, and the signature check can never fire (§4.13#5 · MEDIUM)
+- [x] 16.3 Wire `security.backup.verify_key` into the restore handler; it is parsed, validated and documented as fail-closed, and the signature check can never fire (§4.13#5 · MEDIUM)
 - [ ] 16.4 Make `verify_integrity` report a truncated or fully erased audit log as invalid; it reports valid when the chain-head record is deleted with the rest (§4.14#4 · MEDIUM)
 - [ ] 16.5 Verify an imported audit event's integrity hash on restore instead of discarding and re-signing it (§4.14#5 · MEDIUM)
 - [ ] 16.6 Rewrite the two "tamper the middle audit record" tests, which write to a key format the engine abandoned (§4.14#10 · LOW)

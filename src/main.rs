@@ -2322,6 +2322,22 @@ async fn run_serve(
         info!(count = allowed_hosts.len(), "loaded allowed_hosts");
     }
 
+    // §4.13#5: the restore handler reads this off `AppState`, and nothing ever
+    // put it there — the signature check could not fire on any deployment.
+    // `Config::validate` has already refused a key that cannot decode, so an
+    // error here would be a bug, not operator input; refuse to start either way
+    // rather than fall back to "no verification".
+    let backup_verify_key = match config.security.backup.verify_key_bytes() {
+        Ok(k) => k,
+        Err(reason) => {
+            report_startup_fatal(&format!("security.backup.verify_key: {reason}"));
+            return Err(reason.into());
+        }
+    };
+    if backup_verify_key.is_some() {
+        info!("backup restore signature verification ENABLED (security.backup.verify_key)");
+    }
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -2339,6 +2355,7 @@ async fn run_serve(
             .with_request_shaper(Arc::clone(&request_shaper))
             .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
+            .with_backup_verify_key(backup_verify_key)
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
             // without manually setting every capability flag.
@@ -2363,6 +2380,7 @@ async fn run_serve(
             .with_request_shaper(Arc::clone(&request_shaper))
             .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
+            .with_backup_verify_key(backup_verify_key)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced),

@@ -660,7 +660,7 @@ Backup and restore hardening (A-30). When `verify_key` is set, the restore endpo
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, all restore uploads must carry a matching `detached_signature_b64` in their manifest or they are rejected. |
+| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, all restore uploads must carry a matching `detached_signature_b64` in their manifest or they are rejected. A value that does not decode to exactly 32 bytes is a startup error — a key that cannot verify is refused rather than silently ignored. |
 | `export_rate_limit` | integer | `10` | Maximum backup/export calls per admin user per hour. Set to `0` to disable per-export rate limiting. |
 
 ```yaml
