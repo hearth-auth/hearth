@@ -340,6 +340,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Fixed
+- **A memtable flush no longer re-reads every byte of every live SST (audit 2026-08-28 §4.21#5)** —
+  every flush rebuilds the SST reader set, and each rebuild read a whole SST file to take its
+  88-byte encryption header off the front. On a node holding N live SSTs of size S, one flush read
+  N×S bytes of disk to obtain N×88 bytes of header, on a path any write volume drives. The header
+  read is now bounded to the header.
 - **`delete_user` removes password history and the password-reset watermark (audit 2026-08-28
   §4.20#9)** — `cred:history:{user}` (Argon2id hashes of the user's previous passwords, written
   when the realm's password policy sets `history_depth`) and `rst:wm:{user}` survived user

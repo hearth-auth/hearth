@@ -1852,7 +1852,10 @@ pub(crate) fn read_encryption_header(
     path: &Path,
     fs: &dyn Fs,
 ) -> Result<(KekId, EncryptionHeader), StorageError> {
-    let data = fs.read(path)?;
+    // Bounded read: `reload_sst_readers` calls this once per live SST on every
+    // memtable flush, so reading the whole file here made one flush re-read
+    // every byte of every live SST (audit 2026-08-28 §4.21#5).
+    let data = fs.read_prefix(path, TOTAL_HEADER_SIZE)?;
     if data.len() < TOTAL_HEADER_SIZE {
         return Err(StorageError::InvalidSstFormat {
             reason: format!("file too small for header: {} bytes", data.len()),
@@ -2804,6 +2807,109 @@ mod tests {
 
         let realm_entries = reader.iter_realm(&realm).expect("iter_realm");
         assert_eq!(realm_entries.len(), 6);
+    }
+
+    /// Counts every byte handed back by the filesystem, per call site.
+    struct ByteCountingFs {
+        inner: crate::storage::fs::RealFs,
+        whole_file_bytes: std::sync::atomic::AtomicUsize,
+        prefix_bytes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ByteCountingFs {
+        fn new() -> Self {
+            Self {
+                inner: crate::storage::fs::RealFs,
+                whole_file_bytes: std::sync::atomic::AtomicUsize::new(0),
+                prefix_bytes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Fs for ByteCountingFs {
+        fn open_append(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_append(path)
+        }
+        fn create(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.create(path)
+        }
+        fn open_read(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            let data = self.inner.read(path)?;
+            self.whole_file_bytes
+                .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(data)
+        }
+        fn read_prefix(&self, path: &Path, len: usize) -> std::io::Result<Vec<u8>> {
+            let data = self.inner.read_prefix(path, len)?;
+            self.prefix_bytes
+                .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(data)
+        }
+        fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    #[test]
+    fn read_encryption_header_reads_only_the_header() {
+        // §4.21#5: `reload_sst_readers` calls this once per live SST on EVERY
+        // memtable flush.  It read the whole file to take 60 bytes off the
+        // front, so one flush re-read every byte of every live SST.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("big.sst");
+
+        let realm = RealmId::generate();
+        let value = vec![b'v'; 4096];
+        let entries: Vec<_> = (0..256)
+            .map(|i| {
+                (
+                    CompositeKey::new(realm.clone(), format!("key{i:04}").into_bytes()),
+                    MemtableValue::Data(value.clone()),
+                )
+            })
+            .collect();
+        let (dek, enc_header) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc_header).expect("write_sst");
+
+        let file_len = std::fs::metadata(&sst_path).expect("metadata").len() as usize;
+        assert!(
+            file_len > 512 * 1024,
+            "the fixture must be large enough for the difference to matter, got {file_len} bytes"
+        );
+
+        let fs = ByteCountingFs::new();
+        let (_kek_id, _hdr) = read_encryption_header(&sst_path, &fs).expect("read header");
+
+        let whole = fs
+            .whole_file_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let prefix = fs.prefix_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            whole, 0,
+            "reading a {TOTAL_HEADER_SIZE}-byte header must not read the whole file"
+        );
+        assert!(
+            prefix <= 4096,
+            "header read took {prefix} bytes; it needs {TOTAL_HEADER_SIZE}"
+        );
     }
 
     #[test]

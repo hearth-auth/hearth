@@ -93,6 +93,22 @@ pub trait Fs: Send + Sync {
     /// Reads the entire contents of a file into a byte vector.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
 
+    /// Reads at most the first `len` bytes of a file.
+    ///
+    /// Returns fewer bytes only when the file is shorter than `len`; callers
+    /// validate the length they need.
+    ///
+    /// The default implementation reads the whole file and truncates, which is
+    /// correct for any filesystem but costs the whole file. [`RealFs`]
+    /// overrides it with a bounded read, which is what keeps a memtable flush
+    /// from re-reading every byte of every live SST to fetch a 60-byte header
+    /// (audit 2026-08-28 §4.21#5).
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        let mut data = self.read(path)?;
+        data.truncate(len);
+        Ok(data)
+    }
+
     /// Maps a file read-only for random access without decrypting it eagerly.
     ///
     /// The default implementation reads the whole file into a heap buffer,
@@ -189,6 +205,14 @@ impl Fs for RealFs {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let file = std::fs::File::open(path)?;
+        let mut buf = Vec::with_capacity(len);
+        file.take(len as u64).read_to_end(&mut buf)?;
+        Ok(buf)
     }
 
     #[cfg(unix)]
