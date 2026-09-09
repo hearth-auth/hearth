@@ -1075,11 +1075,24 @@ impl EmbeddedStorageEngine {
     /// # Crash Safety
     ///
     /// The compacted SST is written to a `.sst.tmp` path and atomically
-    /// renamed to `{num:06}.sst`. If the process crashes **after** the
-    /// rename but **before** old SST files are deleted, both old and new
-    /// SSTs coexist on disk. Recovery handles this correctly — the newer
-    /// SST (higher number) takes priority for duplicate keys. The leaked
-    /// old files are harmless orphans cleaned up by the next compaction.
+    /// renamed to `{num:06}.sst`. A crash **before** the rename leaves the
+    /// inputs intact and costs only the temp file.
+    ///
+    /// A crash **after** the rename but **before** the inputs are unlinked
+    /// leaves old and new SSTs coexisting. For a key the output still carries,
+    /// recovery resolves this correctly: the newer SST (higher number) wins.
+    /// For a **deleted** key it does not. This is a full merge, so the output
+    /// drops every tombstone; a surviving input still holds the pre-delete
+    /// value, and no tombstone shadows it any more, so the delete is undone
+    /// (§4.21#6). The inputs are therefore unlinked oldest-first — see the
+    /// commit phase — so any partial prefix of unlinks leaves more tombstones
+    /// than values, never a value ahead of its shadowing tombstone. A runtime
+    /// unlink failure aborts the commit. A crash landing mid-unlink is bounded
+    /// by the same ordering; closing that window durably needs a compaction
+    /// manifest (HEA-1857).
+    ///
+    /// Leaked old files are otherwise harmless orphans, cleaned up by the next
+    /// compaction.
     pub fn compact_ssts(&self, min_sst_count: usize) -> Result<usize, StorageError> {
         // Serialize against other compactions for the whole operation, but hold
         // `flush_lock` only for two brief phases — the snapshot+number allocation
