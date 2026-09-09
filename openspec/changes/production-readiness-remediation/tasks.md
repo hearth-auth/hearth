@@ -161,7 +161,7 @@ found it, the audit piece, and the report's severity.
 ## 17. Wave 3 — Tenant isolation
 
 - [x] 17.1 Include `active` on the negative `/realms/{name}/introspect` response, per RFC 7662 §2.2 (§4.1#4 · MEDIUM)
-- [ ] 17.2 Stop the pre-shared SCIM bearer token reading a suspended or archived realm's user directory (§4.1#5 · MEDIUM)
+- [x] 17.2 Stop the pre-shared SCIM bearer token reading a suspended or archived realm's user directory (§4.1#5 · MEDIUM)
 - [ ] 17.3 Fix the four handlers that bypass the `scoped_realm` BOLA guard — two permissively, two so strictly the system operator is locked out (§4.1#6 · LOW)
 - [ ] 17.4 Make the reserved system realm reject role and group writes through public APIs, as the README states (§4.1#7 · CLAIM-DEFECT)
 - [ ] 17.5 Give `check_cross_realm_policy` a production caller; cross-realm trust policies are stored and audited but never consulted (§4.1#8 · CLAIM-DEFECT)

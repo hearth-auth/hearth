@@ -377,6 +377,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   reporting `404`.
 
 ### Security
+- **SCIM refuses a suspended or archived realm (audit 2026-08-28 §4.1#5)** — suspending or
+  archiving a realm is the incident-response freeze control, but the SCIM plane never consulted
+  realm status. A pre-shared SCIM bearer token kept reading the frozen realm's user directory and
+  kept provisioning into it, and the admin-JWT fallback path carried the same gap. Every
+  `/scim/v2/*` request against a realm that is not `Active` now returns `403` with the SCIM error
+  envelope `{"detail":"realm unavailable"}`, before either credential is examined. Operators who
+  suspend a realm to contain an incident no longer have to also rotate its SCIM token.
 - **Restore verifies an archive's audit hashes before re-signing them (audit 2026-08-28
   §4.14#5)** — restore re-chains every imported audit event under the destination realm's HMAC
   key, and discarded the hashes the archive carried without looking at them, so an edited

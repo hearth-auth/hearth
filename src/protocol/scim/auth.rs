@@ -14,12 +14,16 @@
 //!
 //! Operators who set `scim_bearer_token_hash` in realm config can be
 //! confident that SCIM endpoints are isolated from the admin JWT path.
+//!
+//! Both paths are gated on realm status first: a realm that is not `Active` is
+//! refused with `403` before either credential is examined.
 
 use axum::http::{HeaderMap, StatusCode};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::core::{RealmId, UserId};
+use crate::identity::RealmStatus;
 use crate::protocol::admin_auth::RateLimitOutcome;
 use crate::protocol::http::{extract_admin_auth, AppState};
 use crate::protocol::scim::error::ScimError;
@@ -60,6 +64,19 @@ pub fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<ScimAuth, S
             ScimError::internal()
         })?
         .ok_or_else(|| ScimError::forbidden("realm unavailable"))?;
+
+    // Realm status is the incident-response freeze control, and it has to hold
+    // on the SCIM plane as well as on the token and admin planes. Without this,
+    // a pre-shared SCIM bearer token kept reading — and writing — a suspended or
+    // archived realm's user directory (audit 2026-08-28 §4.1#5).
+    //
+    // The gate sits here, before either credential path, so both the bearer
+    // token and the admin-JWT fallback are refused identically. It leaks no new
+    // information: the realm lookup above already answers `403` pre-auth for a
+    // realm that does not exist.
+    if realm.status() != RealmStatus::Active {
+        return Err(ScimError::forbidden("realm unavailable"));
+    }
 
     if let Some(expected_hash) = realm.config().scim_bearer_token_hash.as_deref() {
         // Realm-scoped SCIM bearer token path: only accept the pre-shared token.
