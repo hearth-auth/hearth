@@ -447,7 +447,7 @@ Secrets are supplied through the environment rather than the YAML file so they n
 | Variable | Required? | Format | Generate | Purpose |
 |---|---|---|---|---|
 | `HEARTH_MASTER_KEY` | Recommended | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup fails** (auto-generation happens only under `--dev`). Set it so the key is not stored beside the data. |
-| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so existing realm KEKs can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
+| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so the existing KEKs in `hearth.keys` can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
 | `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
 | `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). Under the `log` transport (dev or production) it is optional and a deterministic dev key is substituted. |
 | `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
@@ -805,7 +805,16 @@ That's enough. Restart Hearth and the realm's login page shows a "Sign in with G
 |---|---|---|
 | `disabled` | Never link. Always JIT-provision a new user per external identity. | Safest against IdP email spoofing; duplicate accounts are visible and expected |
 | `confirm` *(default)* | Redirect to `/ui/federation/confirm-link`; user must authenticate to the local account (password or passkey) before the link attaches. | Matches Keycloak's default First Broker Login flow |
-| `auto` | Silent link on `email_verified=true` email match. | Trusts the IdP entirely — only use when the realm federates to a single high-trust provider |
+| `auto` | Silent link on `email_verified=true` email match. | **Account-takeover risk** — trusts the IdP entirely; only use when the realm federates to a single high-trust provider |
+
+> ⚠️ **`auto` can hand an existing account to an upstream provider.** Hearth attaches the
+> upstream identity to whatever local account holds that email address, with no local
+> re-authentication, so every local account is only as safe as the weakest connector in the
+> realm. An IdP that does not verify email — GitHub's public profile email, or any generic
+> `type: oidc` IdP that can be made to assert `email_verified: true` — lets an attacker
+> register upstream with a victim's address and sign straight into the victim's Hearth
+> account with its roles and permissions. Keep `confirm` unless the realm federates to
+> exactly one IdP that verifies email addresses.
 
 Users can list and unlink their external identities at `/ui/account/linked-accounts`.
 
@@ -846,20 +855,20 @@ For the full feature spec see [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITEC
 | Admin | `POST` | `/admin/users/bulk` | Bulk user creation (max 10,000 users per request) |
 | Admin | `POST` | `/admin/users/import` | Import users from JSON (max 10,000 users per request) |
 | Admin | `GET` | `/admin/users/export` | Export users as JSON |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/users/{id}` | CRUD a user |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/users/{id}` | Read / partially update / delete a user |
 | Admin | `GET`/`POST` | `/admin/users/{id}/roles` | List / assign roles to a user |
 | Admin | `GET` | `/admin/users/{id}/consents` | List a user's active OAuth consents |
 | Admin | `DELETE` | `/admin/users/{id}/consents/{client_id}` | Revoke a user's consent for a client |
 | Admin | `GET` | `/admin/users/{id}/effective-permissions` | Resolved permission set for a user |
 | Admin | `DELETE` | `/admin/assignments/{id}` | Remove a role assignment |
-| Admin | `GET`/`POST` | `/admin/realms` | List / create realms |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/realms/{id}` | CRUD a realm |
+| Admin | `GET` | `/admin/realms` | List realms (`POST` answers `405` — realms are declared in `hearth.yaml`) |
+| Admin | `GET`/`DELETE` | `/admin/realms/{id}` | Read a realm; delete one that is already `Archived` (`PATCH` answers `405` — realms are declared in `hearth.yaml`) |
 | Admin | `GET`/`POST` | `/admin/applications` | List / register OAuth clients |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/applications/{id}` | CRUD a client |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/applications/{id}` | Read / partially update / delete a client |
 | Admin | `GET`/`POST` | `/admin/roles` | List / create RBAC roles |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/roles/{id}` | CRUD a role |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/roles/{id}` | Read / partially update / delete a role |
 | Admin | `GET`/`POST` | `/admin/groups` | List / create groups |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/groups/{id}` | CRUD a group |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/groups/{id}` | Read / partially update / delete a group |
 | Admin | `GET`/`POST` | `/admin/groups/{id}/members` | List / add group members |
 | Admin | `DELETE` | `/admin/groups/{id}/members/{member_id}` | Remove a group member |
 | Admin | `GET` | `/admin/audit` | Query the audit log |

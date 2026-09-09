@@ -119,8 +119,10 @@ exact endpoint URL.
 
 ### Host key
 
-The host key (`HEARTH_MASTER_KEY`) encrypts all realm Key Encryption Keys (KEKs) at rest. It
-is the most sensitive secret in a Hearth deployment.
+The host key (`HEARTH_MASTER_KEY`) encrypts the Key Encryption Keys (KEKs) held in
+`hearth.keys` at rest. It is the most sensitive secret in a Hearth deployment. Note that the
+registry currently holds a **single** KEK — the system realm's — and that one KEK wraps the
+data key of every WAL segment and SST for every realm.
 
 > **Production requirement (HEA-1368):** In production mode (any startup without `--dev`),
 > Hearth **refuses to start** if `HEARTH_MASTER_KEY` is unset and no `hearth.host_key` file
@@ -133,8 +135,8 @@ is the most sensitive secret in a Hearth deployment.
 - If you previously ran Hearth without `HEARTH_MASTER_KEY` set, Hearth auto-generated and
   persisted the key to `<data-dir>/hearth.host_key` (mode 0600). You can export it:
   `export HEARTH_MASTER_KEY=$(xxd -p -c 32 /path/to/hearth.host_key | tr -d '\n')`
-- Rotate it by re-wrapping all realm KEKs (Hearth supports O(n files) rotation — only DEK
-  headers are re-wrapped, not bulk data).
+- Rotate it by re-wrapping the KEKs in `hearth.keys` (Hearth supports O(n files) rotation —
+  only DEK headers are re-wrapped, not bulk data).
 
 ### OAuth client secrets
 

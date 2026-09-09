@@ -104,10 +104,15 @@ Hearth uses envelope encryption:
 
 ```
 HEARTH_MASTER_KEY
-  └─ encrypts per-realm KEKs  (hearth.keys)
+  └─ encrypts the KEKs in hearth.keys
        └─ encrypts per-file DEKs
             └─ encrypts file data
 ```
+
+> `hearth.keys` is a realm-keyed map, but the storage engine provisions and uses only the
+> **system realm's** KEK. In a shipped deployment that map holds one entry, and that one KEK
+> wraps every file DEK for every realm. Rotation below iterates the map, so it is correct
+> either way — but do not read "per-realm KEKs" as a per-tenant blast-radius boundary.
 
 To rotate the master key without downtime:
 

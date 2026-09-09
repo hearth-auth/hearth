@@ -214,7 +214,7 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 - **Crash safety**: every committed write survives a power failure. The WAL is fsync'd before acknowledgment.
 - **Consistency**: within a cluster, reads reflect the most recent committed write. No eventually-consistent session stores that lead to "phantom logout" bugs.
 - **Auditability**: every mutation to identity data is logged in an append-only audit log. Compliance teams can reconstruct the state of any identity at any point in time.
-- **Encryption at rest**: credentials and sensitive fields are encrypted with per-realm keys. Compromising the storage layer does not compromise credentials.
+- **Encryption at rest**: credentials and sensitive fields are encrypted with AES-256-GCM envelope encryption — a per-file data key wrapped by a key-encryption key that is itself wrapped by the host key. Compromising the storage layer alone does not compromise credentials. The key-encryption key is currently deployment-wide, not per realm, so it is not a tenant-isolation boundary.
 
 ### 5.5 Migration Is a First-Class Feature
 

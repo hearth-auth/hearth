@@ -246,7 +246,15 @@ incompatible, startup MUST fail with a clear error directing the operator to re-
 
 ### 6.3 Encryption at Rest
 
-- Credentials and sensitive fields MUST be encrypted at rest using per-realm keys.
+- Credentials and sensitive fields MUST be encrypted at rest.
+- **Blast radius (as implemented):** the key-encryption key is **not** per realm. `KeyRegistry`
+  is a realm-keyed map, but the storage engine only ever provisions and uses the **system
+  realm's** KEK (`RealmId::nil()`) to wrap every WAL-segment and SST data-encryption key
+  (`src/storage/engine.rs` — `ensure_kek_for_realm(&system_realm)` at open, and
+  `get_kek_for_realm(&self.system_realm)` on the flush and both compaction paths). Recovering
+  that one KEK unwraps every realm's on-disk data. Operators MUST size key-compromise blast
+  radius against a single KEK, not against one KEK per tenant. Per-realm KEK provisioning is a
+  future change; it is not shipped.
 - Encryption keys MUST NOT appear in log output, error messages, or debug dumps.
 - The storage engine MUST support key rotation without downtime.
 
@@ -256,7 +264,7 @@ incompatible, startup MUST fail with a clear error directing the operator to re-
 
 **Key rotation**: Key rotation MUST re-wrap DEKs with the new KEK. Data sections MUST NOT be re-encrypted during rotation — only the wrapped DEK in each file header changes. This makes rotation O(number of files), not O(data size).
 
-**WAL encryption**: The WAL MUST use the same envelope encryption pattern, with a per-segment DEK. Each WAL segment has its own random DEK, wrapped by the realm's KEK.
+**WAL encryption**: The WAL MUST use the same envelope encryption pattern, with a per-segment DEK. Each WAL segment has its own random DEK, wrapped by the same single system-realm KEK described above (the WAL is a shared, cross-realm log — it has no single owning realm).
 
 ### 6.4 Format Versioning
 
