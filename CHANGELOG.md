@@ -340,6 +340,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   to pin a different image.
 
 ### Security
+- **Rate-limit counters no longer store the subject's email address (audit 2026-08-28 §4.20#7)** —
+  the magic-link, password-reset and self-registration counters were keyed on the plaintext
+  address (`rl:rml:{email}`, `rl:rpwreset:{email}`, `rl:rreg-email:{email}`). The maintenance
+  sweep that prunes them only reaches a live realm, so a counter written shortly before the user
+  or the realm was deleted kept that address on disk indefinitely. The three key families now
+  carry `sha256_hex(email)` instead. Counters are unaffected in behaviour, but the rename resets
+  any in-flight bucket once, on the first start after upgrade; the old plaintext rows are pruned
+  by the existing sweep after twice their window (1 h for magic-link and registration, 15 min for
+  password reset) and need no operator action.
 - **A deleted realm's cached key material is dropped from memory (audit 2026-08-28 §4.20#6)** —
   the realm's DPoP nonce HMAC secret is cached on first use. The delete cascade sweeps its storage
   key with the rest of the realm's key space, but the cached copy was never dropped, so the secret

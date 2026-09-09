@@ -1440,10 +1440,10 @@ impl EmbeddedIdentityEngine {
                         if entry.key.len() <= prefix.len() {
                             continue;
                         }
-                        let Ok(email) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                        let Ok(email_hash) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
                             continue;
                         };
-                        let mem_key = Self::magic_link_tracker_key(realm_id, email);
+                        let mem_key = Self::magic_link_tracker_key_hashed(realm_id, email_hash);
                         map.insert(
                             mem_key,
                             AttemptTracker {
@@ -1477,10 +1477,10 @@ impl EmbeddedIdentityEngine {
                         if entry.key.len() <= prefix.len() {
                             continue;
                         }
-                        let Ok(email) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                        let Ok(email_hash) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
                             continue;
                         };
-                        let mem_key = Self::password_reset_tracker_key(realm_id, email);
+                        let mem_key = Self::password_reset_tracker_key_hashed(realm_id, email_hash);
                         map.insert(
                             mem_key,
                             AttemptTracker {
@@ -1514,10 +1514,11 @@ impl EmbeddedIdentityEngine {
                         if entry.key.len() <= prefix.len() {
                             continue;
                         }
-                        let Ok(email) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                        let Ok(email_hash) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
                             continue;
                         };
-                        let mem_key = Self::registration_email_tracker_key(realm_id, email);
+                        let mem_key =
+                            Self::registration_email_tracker_key_hashed(realm_id, email_hash);
                         map.insert(
                             mem_key,
                             AttemptTracker {
@@ -2355,8 +2356,19 @@ impl EmbeddedIdentityEngine {
     const MAGIC_LINK_RATE_WINDOW_MICROS: i64 = 60 * 60 * 1_000_000;
 
     /// Builds a magic link rate tracker key from realm and email.
+    ///
+    /// The email is hashed, so the in-memory key matches the persisted one and
+    /// carries no address (§4.20#7).
     fn magic_link_tracker_key(realm_id: &RealmId, email: &str) -> String {
-        format!("magic:{}:{email}", realm_id.as_uuid())
+        Self::magic_link_tracker_key_hashed(realm_id, &keys::hash_rate_limit_email(email))
+    }
+
+    /// Builds a magic link rate tracker key from an already-hashed email.
+    ///
+    /// Used by `rehydrate_rate_trackers`, which reads the digest back off the
+    /// persisted key and never sees the address.
+    fn magic_link_tracker_key_hashed(realm_id: &RealmId, email_hash: &str) -> String {
+        format!("magic:{}:{email_hash}", realm_id.as_uuid())
     }
 
     /// Checks whether magic link requests for this email are rate-limited.
@@ -2417,8 +2429,16 @@ impl EmbeddedIdentityEngine {
     const PASSWORD_RESET_RATE_WINDOW_MICROS: i64 = 15 * 60 * 1_000_000;
 
     /// Builds a password reset rate tracker key from realm and email.
+    ///
+    /// The email is hashed, so the in-memory key matches the persisted one and
+    /// carries no address (§4.20#7).
     fn password_reset_tracker_key(realm_id: &RealmId, email: &str) -> String {
-        format!("reset:{}:{email}", realm_id.as_uuid())
+        Self::password_reset_tracker_key_hashed(realm_id, &keys::hash_rate_limit_email(email))
+    }
+
+    /// Builds a password reset rate tracker key from an already-hashed email.
+    fn password_reset_tracker_key_hashed(realm_id: &RealmId, email_hash: &str) -> String {
+        format!("reset:{}:{email_hash}", realm_id.as_uuid())
     }
 
     /// Checks whether password reset requests for this email are rate-limited.
@@ -2481,8 +2501,16 @@ impl EmbeddedIdentityEngine {
     const REGISTRATION_RATE_WINDOW_MICROS: i64 = 60 * 60 * 1_000_000;
 
     /// Builds a registration email rate tracker key from realm and email.
+    ///
+    /// The email is hashed, so the in-memory key matches the persisted one and
+    /// carries no address (§4.20#7).
     fn registration_email_tracker_key(realm_id: &RealmId, email: &str) -> String {
-        format!("reg-email:{}:{email}", realm_id.as_uuid())
+        Self::registration_email_tracker_key_hashed(realm_id, &keys::hash_rate_limit_email(email))
+    }
+
+    /// Builds a registration email rate tracker key from an already-hashed email.
+    fn registration_email_tracker_key_hashed(realm_id: &RealmId, email_hash: &str) -> String {
+        format!("reg-email:{}:{email_hash}", realm_id.as_uuid())
     }
 
     /// Checks per-email and per-IP rate limits for a registration attempt.
@@ -17807,6 +17835,41 @@ mod tests {
                 .is_empty(),
             "registration_ip_rate_trackers are in-memory only — should not survive restart"
         );
+    }
+
+    #[test]
+    fn wal_rate_limit_keys_do_not_carry_the_plaintext_email() {
+        // §4.20#7: the three per-email rate-limit counters outlive both the user and
+        // the realm — the maintenance sweep only reaches a live realm — so the key
+        // itself must not carry the subject's address.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = open_engine_at(&dir, 3, 60_000_000, Arc::clone(&clock));
+        let realm = create_test_realm(&engine);
+        let test_email = "addr@example.com";
+
+        engine.record_magic_link_request(&realm, test_email);
+        engine.record_password_reset_request(&realm, test_email);
+        engine.record_registration_attempt(&realm, test_email, None);
+
+        for prefix in [
+            keys::magic_link_rl_scan_prefix(),
+            keys::password_reset_rl_scan_prefix(),
+            keys::registration_email_rl_scan_prefix(),
+        ] {
+            let end = keys::prefix_end(&prefix);
+            let entries = engine.storage.scan(&realm, &prefix, &end).expect("scan");
+            assert_eq!(entries.len(), 1, "exactly one counter per tracker family");
+            let key = String::from_utf8_lossy(&entries[0].key).into_owned();
+            assert!(
+                !key.contains(test_email),
+                "rate-limit key must not carry the plaintext email: {key}"
+            );
+            assert!(
+                !key.contains("addr") && !key.contains("example.com"),
+                "rate-limit key must not carry any part of the address: {key}"
+            );
+        }
     }
 
     #[test]

@@ -224,17 +224,17 @@ const MFA_TRACKER_PREFIX: &str = "rl:mfa:";
 
 /// Prefix for WAL-persisted per-email magic-link request rate-limit counters.
 ///
-/// Format: `rl:rml:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rml:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 const MAGIC_LINK_RL_PREFIX: &str = "rl:rml:";
 
 /// Prefix for WAL-persisted per-email password-reset request rate-limit counters.
 ///
-/// Format: `rl:rpwreset:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rpwreset:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 const PASSWORD_RESET_RL_PREFIX: &str = "rl:rpwreset:";
 
 /// Prefix for WAL-persisted per-email registration rate-limit counters.
 ///
-/// Format: `rl:rreg-email:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rreg-email:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 const REGISTRATION_EMAIL_RL_PREFIX: &str = "rl:rreg-email:";
 
 /// Prefix for `prompt=none` silent-auth probe counters (A-37).
@@ -1810,11 +1810,30 @@ pub(crate) fn mfa_tracker_scan_prefix() -> Vec<u8> {
     MFA_TRACKER_PREFIX.as_bytes().to_vec()
 }
 
+/// Hashes an email address into a stable rate-limit bucket identifier.
+///
+/// Returns the lowercase hex of `SHA-256(email)`. The caller MUST pass the
+/// normalized address, so that two spellings of one address share a bucket.
+///
+/// A rate-limit counter outlives its subject: the maintenance sweep only
+/// reaches a live realm, so a counter written shortly before the user or the
+/// realm is deleted stays on disk. Hashing keeps the bucket stable while
+/// keeping the address out of the key space (§4.20#7).
+///
+/// The digest is unkeyed. It stops an address being read out of residue; it
+/// does not stop a holder of the data confirming an address they already
+/// guessed. A keyed digest would need a realm secret at
+/// `rehydrate_rate_trackers` time, before the realm's key material is loaded.
+pub(crate) fn hash_rate_limit_email(email: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(email.as_bytes()))
+}
+
 /// Encodes the WAL storage key for a per-email magic-link rate-limit counter.
 ///
-/// Format: `rl:rml:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rml:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 pub(crate) fn encode_magic_link_rl_tracker(email: &str) -> Vec<u8> {
-    format!("{MAGIC_LINK_RL_PREFIX}{email}").into_bytes()
+    format!("{MAGIC_LINK_RL_PREFIX}{}", hash_rate_limit_email(email)).into_bytes()
 }
 
 /// Returns the scan prefix for all persisted magic-link rate-limit trackers.
@@ -1826,9 +1845,9 @@ pub(crate) fn magic_link_rl_scan_prefix() -> Vec<u8> {
 
 /// Encodes the WAL storage key for a per-email password-reset rate-limit counter.
 ///
-/// Format: `rl:rpwreset:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rpwreset:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 pub(crate) fn encode_password_reset_rl_tracker(email: &str) -> Vec<u8> {
-    format!("{PASSWORD_RESET_RL_PREFIX}{email}").into_bytes()
+    format!("{PASSWORD_RESET_RL_PREFIX}{}", hash_rate_limit_email(email)).into_bytes()
 }
 
 /// Returns the scan prefix for all persisted password-reset rate-limit trackers.
@@ -1840,9 +1859,13 @@ pub(crate) fn password_reset_rl_scan_prefix() -> Vec<u8> {
 
 /// Encodes the WAL storage key for a per-email registration rate-limit counter.
 ///
-/// Format: `rl:rreg-email:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rreg-email:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 pub(crate) fn encode_registration_email_rl_tracker(email: &str) -> Vec<u8> {
-    format!("{REGISTRATION_EMAIL_RL_PREFIX}{email}").into_bytes()
+    format!(
+        "{REGISTRATION_EMAIL_RL_PREFIX}{}",
+        hash_rate_limit_email(email)
+    )
+    .into_bytes()
 }
 
 /// Returns the scan prefix for all persisted registration email rate-limit trackers.
@@ -2357,6 +2380,41 @@ mod tests {
         let key1 = encode_user_email("alice@example.com");
         let key2 = encode_user_email("bob@example.com");
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn rate_limit_email_keys_are_hashed_and_distinct() {
+        // §4.20#7: the three per-email rate-limit key families must carry a digest,
+        // not the address, and must still separate two addresses.
+        let alice = "alice@example.com";
+        let bob = "bob@example.com";
+        for (a, b) in [
+            (
+                encode_magic_link_rl_tracker(alice),
+                encode_magic_link_rl_tracker(bob),
+            ),
+            (
+                encode_password_reset_rl_tracker(alice),
+                encode_password_reset_rl_tracker(bob),
+            ),
+            (
+                encode_registration_email_rl_tracker(alice),
+                encode_registration_email_rl_tracker(bob),
+            ),
+        ] {
+            let a_str = std::str::from_utf8(&a).expect("utf8");
+            assert!(!a_str.contains(alice), "key carries the address: {a_str}");
+            assert!(
+                !a_str.contains("alice"),
+                "key carries the local part: {a_str}"
+            );
+            assert_ne!(a, b, "two addresses must not share a bucket");
+        }
+        assert_eq!(
+            encode_magic_link_rl_tracker(alice),
+            encode_magic_link_rl_tracker(alice),
+            "the digest must be stable across calls"
+        );
     }
 
     #[test]
