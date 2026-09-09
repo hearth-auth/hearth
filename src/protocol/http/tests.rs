@@ -1631,3 +1631,68 @@ async fn system_token_patches_another_realms_user_required_actions() {
         "a realm-scoped token must NOT patch another realm's user required-actions"
     );
 }
+
+/// Every `/admin/realms/{id}/*` route, as `(method, path suffix, body)`.
+/// The suffix is appended to `/admin/realms/{realm_id}`; `{user}` is replaced
+/// with the peer realm's user id.
+const REALM_SCOPED_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "", ""),
+    ("DELETE", "", ""),
+    ("POST", "/rotate-signing-key", ""),
+    ("GET", "/branding", ""),
+    ("PATCH", "/branding", "{}"),
+    ("GET", "/email-templates", ""),
+    ("GET", "/email-templates/verify_email", ""),
+    (
+        "PUT",
+        "/email-templates/verify_email",
+        r#"{"subject":"s","body":"b"}"#,
+    ),
+    ("DELETE", "/email-templates/verify_email", ""),
+    ("PATCH", "/config", r#"{"default_required_actions":[]}"#),
+    (
+        "PATCH",
+        "/users/{user}/required-actions",
+        r#"{"add":[],"remove":[]}"#,
+    ),
+    ("POST", "/sv-bump-all", ""),
+];
+
+/// Audit 2026-08-28 §4.1#6 — the BOLA regression guard for the whole
+/// realm-scoped admin surface.
+///
+/// A handler that reads `{realm_id}` from the path and acts on it without
+/// `scoped_realm` is a permissive BOLA bypass: a tenant admin reaches a peer
+/// realm's object. Rather than trusting a reading of each handler, this walks
+/// every such route with a realm-scoped token aimed at a peer realm and
+/// requires `403` from all of them.
+#[tokio::test]
+async fn every_realm_scoped_admin_route_refuses_a_peer_realms_admin() {
+    let f = cross_realm_fixture("bola-parity-peer").await;
+
+    for (method, suffix, body) in REALM_SCOPED_ADMIN_ROUTES {
+        let uri = format!(
+            "/admin/realms/{}{}",
+            f.peer_realm_id,
+            suffix.replace("{user}", &f.peer_user_id)
+        );
+        let resp = router(Arc::clone(&f.state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(*method)
+                    .uri(&uri)
+                    .header("Authorization", format!("Bearer {}", f.dev_token))
+                    .header("X-Realm-ID", &f.dev_realm_id)
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(*body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must refuse a realm-scoped token aimed at a peer realm"
+        );
+    }
+}
