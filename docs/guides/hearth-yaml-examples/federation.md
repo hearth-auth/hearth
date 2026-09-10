@@ -194,7 +194,9 @@ oidc:
 realms:
   default:
     federation:
-      link_existing_accounts: auto    # link on verified email match without re-auth prompt
+      # link on verified email match without a re-auth prompt.
+      # ACCOUNT-TAKEOVER RISK — see the warning below this block.
+      link_existing_accounts: auto
       providers:
         google:
           type: google
@@ -214,5 +216,14 @@ realms:
   Microsoft do; GitHub does not verify by default).
 - `auto` removes the phishing-protection gate. A compromised upstream account can silently
   access the linked local account.
+
+> ⚠️ **`auto` is an account-takeover risk.** It attaches the upstream identity to whatever
+> local account already holds that email address, with no local re-authentication. If any
+> connector in the realm can assert an address it has not verified — GitHub's public profile
+> email, or a generic `type: oidc` IdP that can be made to send `email_verified: true` — an
+> attacker registers upstream with a victim's address and signs straight into the victim's
+> existing Hearth account, inheriting its roles, groups and permissions. The setting is
+> realm-wide, so one low-trust connector weakens every account in the realm. Use `auto` only
+> with exactly one high-trust, email-verifying IdP; otherwise keep the `confirm` default.
 
 ---

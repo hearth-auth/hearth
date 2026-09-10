@@ -74,11 +74,23 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
   (`http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`) only.
 - **Digest algorithm:** SHA-256 (`http://www.w3.org/2001/04/xmlenc#sha256`) only.
 - **Canonicalization:** Exclusive C14N (`http://www.w3.org/2001/10/xml-exc-c14n#`)
-  only. Inclusive C14N is rejected.
-- **Reference transforms:** `enveloped-signature` + `exc-c14n` only.
-- **Algorithm downgrade is rejected.** SHA-1 digests, RSA-SHA1 signatures, and
-  inclusive C14N MUST all produce `SamlError::UnsupportedAlgorithm` /
-  `SamlError::Signature`. There is no negotiation and no "legacy" opt-in.
+  is the only form Hearth computes. It is applied **unconditionally** — the
+  declared `<ds:CanonicalizationMethod Algorithm>` is not read.
+- **Reference transforms:** Hearth signs with `enveloped-signature` + `exc-c14n`.
+  On the verify path the `<ds:Transforms>` list is **not** parsed or checked.
+- **Algorithm downgrade is rejected — for the signature and digest algorithms
+  only.** `verify_signed_element` rejects a `SignedInfo` containing the SHA-1 or
+  RSA-SHA1 algorithm identifiers, and requires it to name both RSA-SHA256 and
+  SHA-256, with `SamlError::UnsupportedAlgorithm`. There is no negotiation and
+  no "legacy" opt-in.
+- **Not enforced: canonicalization and transform downgrade.** A document
+  declaring inclusive C14N or an unexpected `<ds:Transform>` produces no
+  `UnsupportedAlgorithm` rejection. Because Hearth canonicalizes exclusively
+  regardless of what the document declares, such a document is very likely to
+  fail the digest or signature comparison — but that is a byte-comparison
+  side effect, not an algorithm check, and it MUST NOT be relied on as one.
+  Closing this is a code change, tracked separately; this section describes
+  what ships today.
 - **Signing key:** the IdP's registered certificate (PEM, RSA public key). No
   key material is trusted from the assertion itself (no inline cert trust).
 
@@ -87,10 +99,14 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
 XSW attacks move or duplicate a signed element so a validator checks one node
 but consumes another. Hearth defends structurally:
 
-- **Single assertion only.** A `<Response>` carrying more than one
-  `<Assertion>` MUST be rejected as `SamlError::Parse` (reason names the
-  multiple-assertion condition). This kills the "inject a second unsigned
-  assertion" class outright.
+- **Single assertion only, counted over the whole document.** Before any
+  signature work, `sp.rs::complete_inner` counts every `<saml:Assertion>`
+  element at any depth and rejects the document as `SamlError::Signature`
+  unless the count is exactly one. This kills the "inject a second unsigned
+  assertion" class outright, at every placement rather than only as a direct
+  child of `<Response>`. `extract_and_validate_assertion` keeps an independent
+  `SamlError::Parse` rejection for a multi-assertion `<Response>`, but on the SP
+  path the `Signature` rejection fires first.
   (Test: `a29c_saml_multiple_assertions_rejected`.)
 - **Reference-URI ↔ element-ID binding.** `verify_signed_element` extracts the
   signed element's `ID`, builds the expected `#<id>` URI, and requires the
@@ -98,6 +114,12 @@ but consumes another. Hearth defends structurally:
   a non-existent range and MUST fail with `SamlError::Signature`.
   (Tests: `a29c_saml_find_element_range_nonexistent_id_returns_none`,
   `a29c_saml_find_element_range_finds_correct_assertion`.)
+- **Verified element ↔ consumed element binding.** When an assertion-level
+  signature was verified, `complete_inner` requires the `ID` of the assertion
+  that `extract_and_validate_assertion` returns to equal the `ID` of the element
+  whose signature was verified; a mismatch MUST fail with
+  `SamlError::Signature`. `verify_signed_element` alone does **not** provide
+  this — it only binds the Reference URI to the ID of the element it verified.
 - **`WantAssertionsSigned`.** When the IdP registration sets
   `want_assertions_signed`, an assertion-level signature is **required**; a
   Response-level-only signature MUST be rejected. When it is unset, Hearth falls
@@ -115,8 +137,12 @@ order (all rejections use the listed `SamlError` variant):
    SP ACS URL; else `DestinationMismatch` (cookie-less CSRF defense).
 4. **Issuer** — the assertion/Response issuer MUST equal the registered IdP
    entity ID; else `IssuerMismatch`.
-5. **Audience** — `AudienceRestriction` MUST include this SP's entity ID; else
-   `AudienceMismatch`.
+5. **Audience** — the parsed `AudienceRestriction/Audience` value MUST equal
+   this SP's entity ID; else `AudienceMismatch`. A single audience value is
+   parsed, so this is an equality check, not a membership test over a list.
+   The SP entity ID it is compared against is derived from `onboarding.base_url`
+   when configured, and otherwise from the request's `X-Forwarded-Host` / `Host`
+   headers — see the caveat on `trusted_base_url` in `src/protocol/web/saml.rs`.
 6. **Validity window** — see §6.
 7. **InResponseTo** — see §6.2.
 
@@ -173,7 +199,8 @@ All SAML failures map to `SamlError` (`saml/error.rs`), converted to
 
 | Condition | Variant | Wire code |
 |-----------|---------|-----------|
-| Parse / DOCTYPE / event-cap / multi-assertion | `Parse` | `HEARTH_SAML_INVALID` |
+| Parse / DOCTYPE / event-cap | `Parse` | `HEARTH_SAML_INVALID` |
+| Multi-assertion document (SP path) | `Signature` | `HEARTH_SAML_INVALID` |
 | Bad/missing/wrapped signature, algorithm downgrade | `Signature`, `UnsupportedAlgorithm` | `HEARTH_SAML_INVALID` |
 | Outside validity window / missing `NotOnOrAfter` | `Expired` | `HEARTH_SAML_INVALID` |
 | Replayed assertion ID | `Replay` | `HEARTH_SAML_INVALID` |
@@ -189,9 +216,12 @@ All SAML failures map to `SamlError` (`saml/error.rs`), converted to
 ## 9. Security invariants (summary — all MUST)
 
 1. No DTD/DOCTYPE, no entity expansion, ≤ 10 000 XML events.
-2. Ed25519-independent: signatures are RSA-SHA256 + exc-C14N only; SHA-1 and
-   inclusive C14N are rejected.
-3. Exactly one assertion; Reference URI bound to the signed element ID.
+2. Ed25519-independent: signatures MUST be RSA-SHA256 with SHA-256 digests;
+   SHA-1 and RSA-SHA1 are rejected. Canonicalization is always exclusive C14N,
+   but the declared canonicalization and transform algorithms are not checked
+   — inclusive C14N is not rejected as such (§4).
+3. Exactly one `<Assertion>` in the whole document; Reference URI bound to the
+   signed element ID; the consumed assertion's ID bound to the verified one.
 4. Mandatory `NotOnOrAfter`; 60 s skew; inclusive upper-edge rejection.
 5. Audience, Issuer, Destination, and (solicited) InResponseTo all checked.
 6. Assertion-ID replay rejected at the ACS handler.

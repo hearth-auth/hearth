@@ -34,6 +34,12 @@ oidc:
 realms:
   demo:
     federation:
+      # WARNING: `auto` is an account-takeover risk — it links an upstream
+      # identity to whatever local account already holds that email address with
+      # no local re-auth, so an IdP that does not verify email can hand an
+      # attacker a victim's existing Hearth account, roles included. Keep
+      # `confirm` unless the realm federates to one high-trust, email-verifying
+      # IdP.
       link_existing_accounts: confirm
       providers:
         # SP-side: Hearth consumes assertions from this upstream IdP.

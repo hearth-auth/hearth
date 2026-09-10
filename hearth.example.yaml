@@ -114,7 +114,10 @@ storage:
   data_dir: "./data"                      # WAL + SST files live here
   wal_max_size_bytes: 268435456           # 256 MiB — WAL rotation threshold
   memtable_flush_bytes: 67108864          # 64 MiB  — memtable→SST flush threshold
-  hot_tier_capacity: 10000                # entries cached in the hot tier
+  # hot_tier_capacity: 10000              # OPTIONAL. Leave unset (the default) to auto-size the
+  #                                       # hot tier from system memory. Setting it pins an exact
+  #                                       # entry count and disables auto-sizing — 10000 is far
+  #                                       # below what most hosts can afford.
   fsync: true                             # MUST be true in production; dev mode disables this
   # hot_tier_per_realm_metrics: true      # label hot-tier eviction/promotion counters by realm.
   #                                       # The hot tier is one cache shared by every tenant, so
@@ -763,12 +766,25 @@ oidc:
 #
 # Setting `rotate_signing_key: true` on a realm triggers a new Ed25519 key to
 # be generated at next startup. The old key is kept in JWKS during a grace
-# period so existing tokens remain valid. The flag is automatically cleared
-# from the stored config snapshot once rotation completes.
+# period so existing tokens remain valid, and the rotation is written to the
+# realm's audit log.
+#
+# The grace period comes from `token.signing_key_rotation_grace_period`. Left
+# unset it defaults to the longest refresh-token lifetime this config can issue
+# (the greater of token.refresh_token_ttl and any per-realm override), so a
+# planned rotation does not sign out sessions whose refresh tokens are still
+# valid.
+#
+# The flag is NOT cleared from the stored snapshot — it is left matching the
+# YAML, so the next boot sees true -> true, which is not a transition and does
+# not re-rotate. Remove it from this file once the rotation has been applied.
+#
+# For a COMPROMISED key use POST /admin/realms/{id}/rotate-signing-key instead:
+# it revokes the retired key rather than granting it a window.
 #
 # realms:
 #   production:
-#     rotate_signing_key: true       # auto-cleared after rotation
+#     rotate_signing_key: true       # remove after the boot that applies it
 #
 # ── Host-key (master key) rotation ──────────────────────────────────────────
 #

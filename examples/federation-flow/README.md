@@ -34,7 +34,8 @@ You'll run three processes:
   that requires local re-authentication before attaching the identity.
   Matches Keycloak's default First Broker Login flow.
 - **Auto-link mode.** Flip `link_existing_accounts: auto` in `hearth.yaml`
-  and restart to see silent linking on email match.
+  and restart to see silent linking on email match. Demo only — `auto` is
+  an account-takeover risk in production; see Scenario 4.
 - **Disabled mode.** Flip to `disabled` — every external login
   JIT-provisions a fresh user, never linking.
 - **Self-service unlinking** at `/ui/account/linked-accounts`.
@@ -214,6 +215,18 @@ Restart Hearth (Ctrl-C then the same cargo command). Now repeat
 scenario 3 with a fresh local-password user — Hearth attaches the
 external identity silently, no confirmation step. `metadata.mode = "auto"`
 in the audit log.
+
+> ⚠️ **Do not carry `auto` into production without reading this.** The silent
+> link you just watched is exactly the account-takeover path: Hearth attached
+> the upstream identity to whatever local account held that email address, with
+> no local re-authentication. If the upstream IdP does not verify email — GitHub
+> does not verify its public profile email, and any generic `type: oidc` IdP can
+> be configured to assert `email_verified: true` — an attacker registers upstream
+> with a victim's address and signs into the victim's Hearth account with its
+> roles, groups and permissions. The setting is realm-wide, so one low-trust
+> connector weakens every account in the realm. Use `auto` only when the realm
+> federates to exactly one high-trust, email-verifying IdP; otherwise keep
+> `confirm`.
 
 #### Scenario 5 — disabled mode (duplicates by design)
 

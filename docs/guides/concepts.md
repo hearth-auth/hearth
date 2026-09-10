@@ -218,7 +218,7 @@ When a federated login arrives with an email that matches an existing local acco
 | Value | Behavior |
 |---|---|
 | `confirm` (default) | User must re-authenticate with their local credential before the external identity is linked. Safe default — prevents account takeover via email spoofing. |
-| `auto` | External identity is linked immediately on verified-email match. Suitable when the upstream IdP verifies emails. |
+| `auto` | External identity is linked immediately on verified-email match. **Account-takeover risk:** an upstream IdP that does not verify email (GitHub, or a generic OIDC IdP that can assert `email_verified: true`) lets an attacker register with a victim's address and sign into the victim's existing Hearth account with its roles and permissions. Use only when the realm federates to exactly one high-trust, email-verifying IdP. |
 | `disabled` | Always JIT-provision a new account; never link to an existing one. |
 
 → See [Federation examples](hearth-yaml-examples/federation.md) for YAML configuration for each provider type.

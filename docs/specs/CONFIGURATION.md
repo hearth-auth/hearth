@@ -7,10 +7,41 @@ Hearth is configured via a single YAML file. Every field is optional — an empt
 Hearth looks for configuration in this order:
 
 1. `--config` / `-c` CLI flag: `hearth serve -c /etc/hearth/config.yaml`
-2. `HEARTH_CONFIG` environment variable: `HEARTH_CONFIG=/etc/hearth/config.yaml hearth serve`
-3. `hearth.yaml` in the current working directory (auto-detected)
+2. `hearth.yaml` in the current working directory (auto-detected)
 
-If no config file is found, all defaults apply.
+If no config file is found, all defaults apply — and in production those defaults
+are still run through `validate()`, so a bare `hearth serve` with no config file
+fails closed on the requirements in [Mandatory in Production](#mandatory-in-production)
+below rather than booting an unprotected server.
+
+> There is **no `HEARTH_CONFIG` environment variable.** Earlier revisions of this
+> reference listed one; the binary has never read it. Use `-c`, or put `hearth.yaml`
+> in the working directory.
+
+`hearth config validate [FILE]` takes the path as a **positional argument**
+(default `hearth.yaml`), not a flag. Its only option is `--help`.
+
+## Mandatory in Production
+
+Outside `--dev`, `Config::validate()` refuses to start unless **all** of the
+following hold. These are hard startup errors, not warnings.
+
+| Requirement | How to satisfy it | Why |
+|-------------|-------------------|-----|
+| **Key-encryption key** | `HEARTH_KEK` env var (recommended) **or** `security.key_encryption_key`, either one a random 64-lowercase-hex-character value (`openssl rand -hex 32`) | Without it, realm signing keys (Ed25519 private keys) are written to storage **in plaintext**. |
+| **HTTPS** | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` behind a TLS-terminating proxy | Without it, session cookies are issued without the `Secure` attribute and can be intercepted over plain HTTP. |
+| **No demo seeder** | Omit the `demo:` block, or set `demo.enabled: false` | `demo.enabled: true` mass-seeds accounts that all share a well-known default password. |
+
+Two further pieces of key material are read from the environment only — they have
+no YAML key:
+
+| Env var | Required? | Purpose |
+|---------|-----------|---------|
+| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. When unset, production startup fails rather than auto-generating a world-readable `hearth.host_key` file. |
+| `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
+
+> `dev_mode` is **not** a config-file key. A YAML file containing `dev_mode: true` is
+> rejected at startup — dev mode is armed only by `hearth serve --dev`.
 
 ## Environment Variable Expansion
 
@@ -19,12 +50,16 @@ Any string value in the YAML supports `${VAR_NAME}` substitution:
 ```yaml
 email:
   smtp:
+    host: "smtp.example.com"
+    port: 587
     password: "${SMTP_PASSWORD}"
 
 realms:
   prod:
     applications:
       api:
+        name: "API"
+        confidential: true
         client_secret: "${API_CLIENT_SECRET}"
 ```
 
@@ -244,10 +279,12 @@ Prometheus metrics endpoint configuration.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Expose the `GET /metrics` Prometheus scrape endpoint. Set to `false` when metrics are collected via a sidecar agent instead of a direct scrape. |
+| `bearer_token` | string | — | Bearer token required to access the `/metrics` scrape endpoint (A-26). Requests without a matching `Authorization: Bearer <token>` header receive HTTP 401. Comparison is constant-time. When absent, the endpoint is unauthenticated — firewall it at the network layer instead. |
 
 ```yaml
 metrics:
   enabled: true
+  bearer_token: "${HEARTH_METRICS_TOKEN}"
 ```
 
 The `/metrics` endpoint returns metrics in Prometheus text exposition format (`text/plain; version=0.0.4`). It includes the following metric families:
@@ -498,6 +535,7 @@ JWT issuance parameters.
 | `audience` | string | `oidc.issuer` | The `aud` claim value. Defaults to `oidc.issuer` when omitted. Override only if your resource server expects a different audience (e.g. a separate API gateway URL). |
 | `access_token_ttl` | duration | `"15m"` | Access token lifetime. |
 | `refresh_token_ttl` | duration | `"7d"` | Refresh token lifetime. |
+| `signing_key_rotation_grace_period` | duration | longest refresh-token TTL in the config (`"7d"` unless overridden) | How long a **config-driven** rotation (`realms.<name>.rotate_signing_key: true`, applied at startup) keeps the outgoing Ed25519 key in JWKS and accepts tokens signed with it. Defaulting to the refresh-token lifetime stops a planned rotation invalidating refresh tokens that have not reached their own `exp`; a shorter explicit value is honoured but logs a startup warning. Maximum `30d`. Does **not** apply to `POST /admin/realms/{id}/rotate-signing-key`, whose default is `0` — a revoking rotation, the remedy for a leaked key. |
 | `claims_cache_max` | integer | `65536` | Maximum entries in the in-process token-claims cache on the `validate_token` hot path. A cache hit skips the Ed25519 verify + JSON parse. The cache is TTL-aware and evicts expired, then soonest-to-expire, entries once full (rather than refusing inserts), so the fast path stays reachable in steady state. Size this to the expected number of distinct access tokens validated concurrently; values are clamped to at least `1`. |
 
 ```yaml
@@ -552,12 +590,12 @@ Global security hardening options.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dpop_nonce_secret` | string | `"auto"` | 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449). Absent or `"auto"`: a fresh random key is generated at each startup — safe for single-node deployments but invalidates all outstanding DPoP proofs on restart. A 64-character lowercase hex string is decoded to 32 bytes and used verbatim; use a stable hex key to keep nonces valid across rolling restarts or in multi-node deployments where all nodes must share the same secret. **Never use the all-zero key (`0000…`) in production** — the server rejects it at startup. Set via `HEARTH_DPOP_NONCE_SECRET` env var to avoid storing secrets in the YAML file. |
-| `bearer_token` | string | — | Bearer token required to access the `/metrics` scrape endpoint (A-26). Requests without a matching `Authorization: Bearer <token>` header receive HTTP 401. Comparison is constant-time. When absent, the endpoint is unauthenticated — firewall it at the network layer instead. |
 | `allowed_hosts` | list of strings | `[]` (any) | Allowlist of `Host` header values the server will accept (A-40). Requests with a `Host` not in this list are rejected with `400 Bad Request`. Include the port for non-standard ports (e.g. `"localhost:8420"`). Empty list = accept any host (backward-compatible default). |
 | `allowed_return_to_origins` | list of strings | `[]` | Absolute origins permitted as `return_to` redirect targets (A-52). Relative paths (`/ui/…`) are always accepted. Absolute URLs are only accepted when their `scheme://host[:port]` matches an entry here. |
 | `jwks_rps_limit` | integer | `60` | Maximum JWKS / discovery requests per source IP per second (A-10). Applies to all unauthenticated key-discovery endpoints. Requests beyond this limit receive `429 Too Many Requests`. |
 | `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
 | `slug_cooldown_days` | integer | `30` | Days a slug is held in reserve after its realm or organization is deleted, before it may be reused. |
+| `key_encryption_key` | string | — | **Required in production** (see [Mandatory in Production](#mandatory-in-production)). 64-character lowercase hex string (32 bytes, `openssl rand -hex 32`) used to encrypt realm signing keys at rest. Prefer the `HEARTH_KEK` environment variable — either one satisfies the gate; setting neither is a hard startup error outside `--dev`. Without it, Ed25519 realm signing keys are stored in plaintext. |
 | `load_test_unthrottled` | bool | `false` | Load-test escape hatch — disables **all** request-rate limiters when `true`. Requires `--dev` mode **and** every bind address must be loopback; refused otherwise. Never enable in production. See [`security.load_test_unthrottled`](#securityload_test_unthrottled). |
 
 ```yaml
@@ -1069,6 +1107,13 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 
 #### `realms.<name>.auth.adaptive_mfa`
 
+> **Not settable in `hearth.yaml`, and not settable via the admin API.** The realm
+> YAML schema has no `adaptive_mfa` key — a config file containing one is rejected at
+> startup by `deny_unknown_fields`. The feature is real and enforced at runtime, but the
+> only way to populate it today is programmatically, by constructing `RealmConfig`
+> in-process (embedded use and tests). The YAML block below is **illustrative of the
+> shape only**. See `tests/docs_config_snippets.rs`.
+
 When enabled, Hearth computes a per-device fingerprint from `{user_id, ip_/24, user_agent_normalized}` using HMAC-SHA256. Devices that have not been seen within `recognition_window_days` trigger an additional MFA challenge — a step-up — regardless of the realm's base `mfa_required` setting.
 
 | Field | Type | Default | Description |
@@ -1164,6 +1209,13 @@ realms:
 
 ### `realms.<name>.breach_check`
 
+> **Not settable in `hearth.yaml`, and not settable via the admin API.** The realm
+> YAML schema has no `breach_check` key — a config file containing one is rejected at
+> startup by `deny_unknown_fields`. The feature is real and enforced at runtime, but the
+> only way to populate it today is programmatically, by constructing `RealmConfig`
+> in-process (embedded use and tests). The YAML block below is **illustrative of the
+> shape only**. See `tests/docs_config_snippets.rs`.
+
 HIBP Pwned Passwords k-anonymity breach-check configuration. When enabled, every password-set or password-change call queries the [HIBP Range API](https://haveibeenpwned.com/API/v3#PwnedPasswords) before accepting the new credential. Only the first 5 hex characters of the SHA-1 hash are transmitted — no plaintext password or full hash leaves the process.
 
 On API timeout or network error the check **fails open**: the password is accepted and a `breach_check_unavailable` audit event is emitted. This prevents a third-party API outage from locking out all password changes.
@@ -1199,7 +1251,7 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `grant_types` | list | `["authorization_code"]` | Allowed grant types: `authorization_code`, `client_credentials`, `refresh_token`, `device_code`. |
 | `confidential` | bool | `false` | Whether this is a confidential client (has a client secret). |
 | `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage. |
-| `access_token_authorization` | string | `embedded` | Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
+| `access_token_authorization` | *not a YAML key* | `embedded` | **Admin API / admin UI only — not settable in `hearth.yaml`.** Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. Set it via `POST`/`PATCH /admin/clients` or the client edit form. Putting it under `applications.<slug>` in a config file is rejected at startup by `deny_unknown_fields`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
 | `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
 | `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"`. Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256) regardless of the realm-level `fapi_profile`. |
 
@@ -1225,7 +1277,7 @@ realms:
         client_secret: "${API_CLIENT_SECRET}"
         grant_types:
           - client_credentials
-        access_token_authorization: embedded    # embedded (default) | introspection | decision
+        # `access_token_authorization` is NOT a YAML key — set it via the admin API.
 ```
 
 ### `realms.<name>.organizations`
@@ -1262,8 +1314,20 @@ Declarative external IdP connector configuration. Reconciled with storage at sta
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `link_existing_accounts` | string | `"confirm"` | How to handle an external identity that matches an existing local user by email. One of: `disabled` (always JIT-provision a new account), `confirm` (require local-credential re-auth before linking — Keycloak-equivalent default), `auto` (auto-link on verified email match). |
+| `link_existing_accounts` | string | `"confirm"` | How to handle an external identity that matches an existing local user by email. One of: `disabled` (always JIT-provision a new account), `confirm` (require local-credential re-auth before linking — Keycloak-equivalent default), `auto` (auto-link on verified email match — **account-takeover risk, see the warning below**). |
 | `providers` | map | `{}` | Connector definitions keyed by a slug used as the `?idp=<slug>` query parameter on the login page. |
+
+> ⚠️ **`link_existing_accounts: auto` is an account-takeover risk.** In `auto` mode Hearth
+> attaches an upstream identity to whatever local account already holds that email address,
+> with no local re-authentication. The security of every local account therefore rests on the
+> upstream IdP verifying email addresses. If any connector in the realm lets a user set or
+> claim an unverified address — GitHub does not verify the public profile email, and most
+> self-hosted or generic `type: oidc` IdPs can be configured to assert an arbitrary
+> `email_verified: true` — an attacker registers upstream with a victim's address and takes
+> over the victim's existing Hearth account, including its roles, groups and permissions.
+> The setting is realm-wide, so a single low-trust connector weakens every account in the
+> realm. Use `auto` only when the realm federates to exactly one high-trust IdP that verifies
+> email addresses (Google, Microsoft Entra ID). Otherwise keep the `confirm` default.
 
 #### `realms.<name>.federation.providers.<idp>`
 
@@ -1321,7 +1385,7 @@ Each entry configures one SP:
 
 ```yaml
 realms:
-  - name: corp
+  corp:
     saml_service_providers:
       salesforce:
         entity_id: "https://myorg.my.salesforce.com"
@@ -1343,7 +1407,11 @@ GET /realms/{realm-name}/saml/idp-metadata.xml
 
 ---
 
-### `realms.<name>.rbac`
+### `realms.<name>` RBAC blocks (`permissions`, `roles`, `groups`, `scopes`)
+
+> There is **no** `rbac:` nesting level. `permissions`, `roles`, `groups` and `scopes`
+> are declared directly under `realms.<name>`. A config file that wraps them in `rbac:`
+> is rejected at startup by `deny_unknown_fields`.
 
 Declarative role, permission, group, and scope setup for the realm's RBAC model. See [`AUTHORIZATION.md`](./AUTHORIZATION.md) for the semantic model and [`AUTHZ_EXPANSION.md`](./AUTHZ_EXPANSION.md) for the full registry, scope-bundle, and claim-profile surfaces.
 
@@ -1362,9 +1430,10 @@ Declarative role, permission, group, and scope setup for the realm's RBAC model.
 | `roles[].permissions` | array of strings | `[]` | Permission names granted by this role. All must be declared in the realm's `permissions` list. |
 | `roles[].parents` | array of strings | `[]` | Parent role names. Resolution unions parent permissions (composition depth capped at 10, cycle-detected). |
 | `roles[].description` | string | — | Optional description for admin UI display. |
-| `groups` | map of group | `{}` | Groups keyed by slug. Group memberships are runtime data (admin-UI-managed). |
-| `groups.<slug>.name` | string | *required* | Human-readable name. |
-| `groups.<slug>.description` | string | — | Optional description. |
+| `groups` | array of group | `[]` | Group definitions. **A list, not a map.** Group memberships are runtime data (admin-UI-managed). |
+| `groups[].name` | string | *required* | Human-readable name. |
+| `groups[].slug` | string | derived from `name` | Optional realm-unique handle. |
+| `groups[].description` | string | — | Optional description. |
 | `scopes` | array of scope bundle | `[]` | OPTIONAL coarse-grained consent bundles. When a token request specifies `scope=<name>`, the user's effective permissions are intersected with the bundle's permissions (per AUTHZ_EXPANSION). A client may also request individual permission names directly as scopes without needing a bundle. |
 | `scopes[].name` | string | *required* | Bundle identifier. Must contain `:`, must not contain `.`. Pattern: `^[A-Za-z0-9_\-]+(:[A-Za-z0-9_\-]+)+$`. ≤128 chars. Single-word names rejected. |
 | `scopes[].display_name` | string | *required* | Shown on consent screens. |
@@ -1393,50 +1462,49 @@ Declarative role, permission, group, and scope setup for the realm's RBAC model.
 ```yaml
 realms:
   prod:
-    rbac:
-      permissions:
-        - { name: docs.view,       display_name: "View documents",   category: Documents }
-        - { name: docs.edit,       display_name: "Edit documents",   category: Documents }
-        - { name: docs.delete,     display_name: "Delete documents", category: Documents }
-        - { name: billing.view,    display_name: "View billing",     category: Billing }
-        - { name: billing.write,   display_name: "Manage billing",   category: Billing }
-        - { name: system.admin,    display_name: "System administrator", category: System }
+    permissions:
+      - { name: docs.view,       display_name: "View documents",   category: Documents }
+      - { name: docs.edit,       display_name: "Edit documents",   category: Documents }
+      - { name: docs.delete,     display_name: "Delete documents", category: Documents }
+      - { name: billing.view,    display_name: "View billing",     category: Billing }
+      - { name: billing.write,   display_name: "Manage billing",   category: Billing }
+      - { name: system.admin,    display_name: "System administrator", category: System }
 
-      roles:
-        - name: docs.viewer
-          scope_kind: realm
-          permissions: [docs.view]
-          description: "Read-only access to docs"
-        - name: docs.editor
-          scope_kind: realm
-          permissions: [docs.view, docs.edit]
-          parents: [docs.viewer]
-        - name: docs.admin
-          scope_kind: realm
-          permissions: [docs.delete]
-          parents: [docs.editor]
-          description: "Full docs administration"
-        - name: billing.admin
-          scope_kind: organization
-          permissions: [billing.view, billing.write]
+    roles:
+      - name: docs.viewer
+        scope_kind: realm
+        permissions: [docs.view]
+        description: "Read-only access to docs"
+      - name: docs.editor
+        scope_kind: realm
+        permissions: [docs.view, docs.edit]
+        parents: [docs.viewer]
+      - name: docs.admin
+        scope_kind: realm
+        permissions: [docs.delete]
+        parents: [docs.editor]
+        description: "Full docs administration"
+      - name: billing.admin
+        scope_kind: organization
+        permissions: [billing.view, billing.write]
 
-      groups:
-        engineering:
-          name: "Engineering"
-          description: "All engineers"
-        leads:
-          name: "Engineering Leads"
+    groups:
+      - slug: engineering
+        name: "Engineering"
+        description: "All engineers"
+      - slug: leads
+        name: "Engineering Leads"
 
-      scopes:
-        # OPTIONAL — only define when you want coarse-grained consent bundling
-        - name: read:docs
-          display_name: "Read your documents"
-          description: "View documents you own or have been shared with you."
-          permissions: [docs.view]
-        - name: manage:billing
-          display_name: "Manage your billing"
-          description: "View and update billing settings."
-          permissions: [billing.view, billing.write]
+    scopes:
+      # OPTIONAL — only define when you want coarse-grained consent bundling
+      - name: read:docs
+        display_name: "Read your documents"
+        description: "View documents you own or have been shared with you."
+        permissions: [docs.view]
+      - name: manage:billing
+        display_name: "Manage your billing"
+        description: "View and update billing settings."
+        permissions: [billing.view, billing.write]
 
     claims:
       # OPTIONAL — omit for default shape
@@ -1499,12 +1567,12 @@ Each entry in the list is a `SeedUserYamlConfig`:
 | `email` | string | — | Email address, unique within the realm. **Required.** |
 | `display_name` | string | — | Human-readable display name. **Required.** |
 | `password` | string | — | Initial plaintext password. Hashed with Argon2id at startup before storage. **Required.** Use `${ENV_VAR}` substitution to avoid committing passwords. |
-| `roles` | string[] | `[]` | Role names to assign at creation time. Must match roles declared under `realms.<name>.rbac.roles` or the built-in RBAC seed roles for this realm. |
+| `roles` | string[] | `[]` | Role names to assign at creation time. Must match roles declared under `realms.<name>.roles` or the built-in RBAC seed roles for this realm. |
 | `email_verified` | bool | `true` | When `true`, the account is activated immediately with no email verification step. Set to `false` to leave the account in `PendingVerification`. |
 
 ```yaml
 realms:
-  - name: my-app
+  my-app:
     seed_users:
       - email: "admin@example.com"
         display_name: "Admin User"
@@ -1564,6 +1632,7 @@ Three fields trigger one-shot realm data migrations during startup reconciliatio
 | `migrate_from` | string | Slug of the source realm to migrate from. After migration, the source is **archived** (orphan-detection treats the slug as resolved). Use when decommissioning the source realm. |
 | `copy_from` | string | Like `migrate_from` but with copy semantics — the source realm is **left intact** after users are copied to the destination. Use when duplicating a realm for staging or A/B purposes. |
 | `migrate` | object | Fine-grained migration options. Only meaningful when `migrate_from` or `copy_from` is set. All fields have defaults and the block may be omitted entirely. |
+| `rotate_signing_key` | bool | `false` | Rotate this realm's Ed25519 signing key on the next boot. The outgoing key stays in JWKS for `token.signing_key_rotation_grace_period`, and the rotation is written to the realm's audit log. This flag is **not** cleared from the stored snapshot: it is left matching the YAML so the next boot sees `true → true`, which is not a transition and does not re-rotate. Remove the key from `hearth.yaml` once applied. For a *compromised* key use `POST /admin/realms/{id}/rotate-signing-key`, which revokes the old key instead of granting it a window. |
 
 #### `realms.<name>.migrate`
 
@@ -1576,7 +1645,7 @@ Three fields trigger one-shot realm data migrations during startup reconciliatio
 
 ```yaml
 realms:
-  - name: production
+  production:
     migrate_from: staging      # "staging" will be archived after migration
     migrate:
       users: true
@@ -1608,7 +1677,7 @@ Each list entry declares one attribute:
 
 ```yaml
 realms:
-  - name: corp
+  corp:
     attribute_definitions:
       users:
         - key: employee_id
@@ -1632,6 +1701,13 @@ realms:
 
 ### `realms.<name>.pre_token_webhook`
 
+> **Not settable in `hearth.yaml`, and not settable via the admin API.** The realm
+> YAML schema has no `pre_token_webhook` key — a config file containing one is rejected
+> at startup by `deny_unknown_fields`. The feature is real and enforced at runtime, but
+> the only way to populate it today is programmatically, by constructing `RealmConfig`
+> in-process (embedded use and tests). The YAML block below is **illustrative of the
+> shape only**. See `tests/docs_config_snippets.rs`.
+
 Call an external HTTP endpoint immediately before issuing an access token. The endpoint
 receives user and session context and may return `extra_claims` that are merged into the
 token. This is the minimal escape hatch for claim-enrichment logic that must run outside
@@ -1653,7 +1729,7 @@ Hearth (equivalent to Auth0 Actions / Keycloak Token Mappers via HTTP).
 
 ```yaml
 realms:
-  - name: corp
+  corp:
     pre_token_webhook:
       url: "https://claims.internal.example.com/enrich"
       timeout_ms: 500
@@ -1771,8 +1847,11 @@ auth:
 onboarding:
   base_url: "https://auth.example.com"
 
-security:
+metrics:
+  enabled: true
   bearer_token: "${HEARTH_METRICS_TOKEN}"
+
+security:
   allowed_hosts:
     - "auth.example.com"
   dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"
@@ -1855,8 +1934,8 @@ Every field's default value at a glance.
 | `storage` | `data_dir` | `"./data"` |
 | `storage` | `wal_max_size_bytes` | `268435456` (256 MiB) |
 | `storage` | `memtable_flush_bytes` | `67108864` (64 MiB) |
-| `storage` | `hot_tier_capacity` | `10000` |
-| `storage` | `fsync` | `true` |
+| `storage` | `hot_tier_capacity` | *(unset)* — auto-sized from system memory, or from `hot_tier_max_memory` when set |
+| `storage` | `fsync` | *(unset)* — resolves to `true` in production, `false` under `--dev`. `false` outside dev mode is a hard startup error |
 | `observability` | `log_level` | `"info"` |
 | `observability` | `log_format` | `"text"` |
 | `operational` | `request_timeout_secs` | `30` |
@@ -1869,6 +1948,12 @@ Every field's default value at a glance.
 | `email.smtp` | `encryption` | `"starttls"` |
 | `email.mailgun` | `region` | `"us"` |
 | `oidc` | `issuer` | required (no default) |
+| `metrics` | `enabled` | `true` |
+| `metrics` | `bearer_token` | — (endpoint unauthenticated when absent) |
+| `security` | `key_encryption_key` | — (**required in production**; or `HEARTH_KEK`) |
+| `server` | `tls_cert_path` / `tls_key_path` | — (**one of TLS or `trust_forwarded_proto` required in production**) |
+| `storage` | `block_cache_bytes` | `268435456` (256 MiB) |
+| `storage` | `hot_tier_per_realm_metrics` | `true` |
 | `oidc` | `authorization_code_ttl` | `"10m"` |
 | `oidc` | `enforce_nonces` | `true` |
 | `oidc` | `require_pkce_for_confidential_clients` | `true` |

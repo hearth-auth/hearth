@@ -426,13 +426,16 @@ compiled-in defaults without running validation at all. The defaults now pass th
 gates, so a bare `hearth serve` refuses to start until a config satisfying the production
 checklist is provided (or `--dev` is passed for local development).
 
-**Key-encryption caveat:** setting `HEARTH_KEK` for the first time on an existing data directory
-is safe — legacy plaintext key records remain readable and are flagged with a startup warning.
-Keys written after the change are encrypted. To supersede the plaintext copies, rotate each
-realm's signing key after the upgrade (`POST /admin/realms/{id}/rotate-signing-key`). That endpoint
-revokes the retired key, so every token signed with it stops validating at once. This is a planned
-rotation, not an incident: add `?grace_period_secs=3600` (or your slowest relying party's JWKS cache
-TTL plus a margin) to keep existing sessions working while clients re-fetch the key.
+**Key encryption:** setting `HEARTH_KEK` for the first time on an existing data directory is safe.
+The first KEK-configured start re-encrypts every signing key already on disk — the server-wide key,
+every realm's active key, and every retiring key — logs how many it re-wrapped, and marks the store
+enrolled. From then on an unenveloped signing key is **refused**, not silently accepted, so an
+attacker who strips the envelope cannot downgrade the deployment. No rotation is needed to supersede
+the plaintext copies, and no tokens are invalidated. Take a backup before the first KEK-enabled boot,
+as with any in-place key migration.
+
+Earlier releases encrypted only *subsequent* writes and accepted unenveloped keys indefinitely; the
+previous advice here — rotate every realm's key after the upgrade — is no longer necessary.
 
 ### v1.6.x → later
 

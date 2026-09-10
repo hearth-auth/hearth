@@ -603,8 +603,20 @@ tokens fail. Never use a window after a compromise.
 
    `token.signing_key_rotation_grace_period` in `hearth.yaml` sets the
    window for the config-driven rotation (`rotate_signing_key: true` on a
-   realm, applied at startup). It does **not** change this endpoint,
-   which revokes unless the request says otherwise.
+   realm, applied at startup). Left unset it defaults to the longest
+   refresh-token lifetime the config can issue, so a planned rotation does
+   not sign out sessions whose refresh tokens are still valid. It does
+   **not** change this endpoint, which revokes unless the request says
+   otherwise.
+
+   Both paths write a `realm_updated` audit event carrying
+   `metadata.action = "rotate_signing_key"`; the config-driven one adds
+   `metadata.source = "config"` and an actor of `system`.
+
+   In a cluster, rotation is visible to every node: the rotation epoch is
+   persisted alongside the key material and replicated, and each node drops
+   its local signing-key and token-claims caches when it sees the epoch
+   move. You do not need to restart the other nodes.
 
 2. **Force re-issuance of all in-flight tokens.** Existing access tokens
    stay valid until they hit `exp`. To invalidate all active sessions

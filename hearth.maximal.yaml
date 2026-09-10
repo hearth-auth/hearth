@@ -198,10 +198,14 @@ realms:
       rate_limit:
         max_failed_logins: 5
         lockout_duration: "15m"
-      adaptive_mfa:
-        enabled: true
-        recognition_window_days: 30
-        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
+      # `adaptive_mfa` is NOT a hearth.yaml key. The feature exists and is enforced
+      # at runtime, but there is no YAML (or admin API) surface for it — a config
+      # file containing this block is rejected at startup by deny_unknown_fields.
+      # See docs/specs/CONFIGURATION.md § realms.<name>.auth.adaptive_mfa.
+      #   adaptive_mfa:
+      #     enabled: true
+      #     recognition_window_days: 30
+      #     fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
     scim:
       bearer_token: "${SCIM_BEARER_CUSTOMER}"
     attribute_definitions:
@@ -323,7 +327,13 @@ realms:
       - { name: "All Customers",  slug: customers,  description: "All customer users" }
       - { name: "Beta Program",   slug: beta,       description: "Beta opt-in users" }
     federation:
-      link_existing_accounts: confirm       # disabled | confirm | auto
+      # disabled | confirm | auto
+      # WARNING: `auto` links an upstream identity to whatever local account already
+      # holds that email address, with NO local re-auth. An IdP that does not verify
+      # email (GitHub, or any generic OIDC IdP that can assert email_verified: true)
+      # can then take over an existing Hearth account and inherit its roles. Use
+      # `auto` only for a single high-trust IdP; `confirm` is the safe default.
+      link_existing_accounts: confirm
       providers:
         google:
           type: google
@@ -402,10 +412,12 @@ realms:
       rate_limit:
         max_failed_logins: 3
         lockout_duration: "30m"
-      adaptive_mfa:
-        enabled: true
-        recognition_window_days: 14
-        fingerprint_hmac_secret: "${HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET}"
+      # `adaptive_mfa` is NOT a hearth.yaml key — see the note on the
+      # customer-portal realm above and docs/specs/CONFIGURATION.md.
+      #   adaptive_mfa:
+      #     enabled: true
+      #     recognition_window_days: 14
+      #     fingerprint_hmac_secret: "${HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET}"
     organizations:
       platform-team:
         name: "Platform Team"
@@ -463,7 +475,13 @@ realms:
       - { name: SRE,          slug: sre,         description: "Oncall rotation" }
       - { name: Leadership,   slug: leadership }
     federation:
-      link_existing_accounts: auto          # auto-link on verified email
+      # auto-link on verified email — ACCOUNT-TAKEOVER RISK.
+      # Safe here ONLY because this realm federates to exactly one corporate IdP that
+      # verifies email addresses. Adding a second connector that does not verify email
+      # (GitHub, a generic OIDC IdP that can assert email_verified: true) would let an
+      # attacker register upstream with a victim's address and take over the victim's
+      # existing Hearth account, roles and permissions. Prefer `confirm` otherwise.
+      link_existing_accounts: auto
       providers:
         corp-oidc:
           type: oidc

@@ -87,14 +87,34 @@ Setting `rotate_signing_key: true` on a realm generates a new Ed25519 signing ke
 ```yaml
 realms:
   production:
-    rotate_signing_key: true     # auto-cleared after rotation completes
+    rotate_signing_key: true     # consumed on the boot that applies it
 ```
 
 1. A new key is generated and stored.
-2. Both the old key and the new key are served in the JWKS endpoint for a configurable grace period (default: 1 h) so existing tokens remain valid.
+2. Both the old key and the new key are served in the JWKS endpoint for a grace period set by `token.signing_key_rotation_grace_period`, so existing tokens remain valid.
 3. New tokens are signed with the new key immediately.
 4. After the grace period the old key is retired from JWKS.
-5. The `rotate_signing_key` flag is removed from the stored config snapshot so it does not trigger again on the next boot.
+5. The rotation is recorded in the realm's audit log as a `realm_updated` event with `metadata.action = "rotate_signing_key"` and `metadata.source = "config"`.
+
+**The default grace period is the longest refresh-token lifetime the config can
+issue** — the greater of `token.refresh_token_ttl` (default `7d`) and any
+per-realm `auth.token.refresh_token_ttl`. A planned rotation should not
+invalidate refresh tokens that have not reached their own `exp`. Set
+`token.signing_key_rotation_grace_period` to override; a value shorter than the
+refresh-token TTL is honoured verbatim but logs a startup warning, because it
+signs out every session holding a longer-lived refresh token.
+
+For a **compromised** key, do not use this path: call
+`POST /admin/realms/{id}/rotate-signing-key`, which revokes the retired key
+immediately unless the request asks for a window. See the
+[Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation).
+
+> **The flag is not cleared from the snapshot.** The saved config snapshot keeps
+> `rotate_signing_key: true`, matching the YAML: the next boot then sees
+> `true → true`, which is not a transition and does not re-rotate. Clearing it
+> to `false` would make the *following* boot see `false → true` again and rotate
+> a second time. Remove the key from `hearth.yaml` once the rotation has been
+> applied.
 
 ---
 
@@ -218,7 +238,7 @@ On the next boot the diff engine compares the new config against the snapshot an
 | Realm slug removed | Archive realm (soft-delete) |
 | `migrate_from` declared | Run cross-realm user migration |
 | `copy_from` declared | Run cross-realm copy |
-| `rotate_signing_key: true` | Generate new Ed25519 key, enter grace period |
+| `rotate_signing_key: true` | Generate new Ed25519 key, enter grace period, write an audit event |
 | `password_memory_cost` changed | Mark realm for lazy rehash |
 | `archive_drop: true` set | Hard-delete instead of archive on slug removal |
 

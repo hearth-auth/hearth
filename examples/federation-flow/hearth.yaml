@@ -37,6 +37,14 @@ realms:
       # The safest default — on email match, force local re-auth
       # before linking. Flip to `auto` to demo silent linking, or
       # `disabled` to demo JIT-only behavior.
+      #
+      # WARNING: `auto` is an account-takeover risk in production. It attaches
+      # the upstream identity to whatever local account already holds that email
+      # address, with no local re-auth, so an IdP that does not verify email
+      # (GitHub, or any generic OIDC IdP that can assert email_verified: true)
+      # lets an attacker claim a victim's address upstream and inherit the
+      # victim's Hearth account, roles and permissions. Only use `auto` with a
+      # single high-trust, email-verifying IdP.
       link_existing_accounts: confirm
       providers:
         # A generic OIDC connector pointing at the local upstream.

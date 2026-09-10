@@ -425,12 +425,20 @@ realms:
 |---|---|---|
 | `disabled` | Never link — always JIT-provision a new account, even if the email matches | Strict isolation; users get separate accounts per IdP |
 | `confirm` | Prompt the user to authenticate with their local password or passkey before linking **(default; Keycloak-equivalent safety posture)** | Any public-facing realm |
-| `auto` | Silently link on verified email match — no re-auth step | Single high-trust IdP where the IdP verifies email (Google, Microsoft) |
+| `auto` | Silently link on verified email match — no re-auth step | Single high-trust IdP where the IdP verifies email (Google, Microsoft) — **account-takeover risk otherwise** |
 
-> **`auto` security note:** `auto` removes the phishing-protection gate. A compromised
-> upstream account can silently access the linked local Hearth account. Only use `auto` when:
-> (1) the upstream IdP verifies email addresses, and (2) your realm federates to exactly one
-> IdP. Google and Microsoft verify email; GitHub does **not** by default.
+> ⚠️ **`auto` is an account-takeover risk.** It removes the phishing-protection gate: Hearth
+> attaches the upstream identity to whatever local account already holds that email address,
+> with no local re-authentication. The security of every local account in the realm therefore
+> rests entirely on the upstream IdP verifying email addresses. If any connector can assert an
+> address it has not verified — GitHub does **not** verify its public profile email, and a
+> generic `type: oidc` IdP can be configured to send `email_verified: true` for anything — an
+> attacker registers upstream with a victim's address and signs straight into the victim's
+> existing Hearth account, inheriting its roles, groups and permissions without ever knowing
+> the victim's password. A compromised upstream account gives the same access. The setting is
+> realm-wide, so a single low-trust connector weakens every account in the realm. Only use
+> `auto` when: (1) the upstream IdP verifies email addresses, and (2) your realm federates to
+> exactly one IdP. Google and Microsoft verify email; GitHub does **not** by default.
 
 > **Keycloak equivalent:** Keycloak's **First Broker Login** authentication flow with the
 > "Detect Existing Account" and "Confirm Link Existing Account" steps maps to Hearth's
@@ -488,7 +496,7 @@ Common remappings:
 | **Issuer / validateSignature** | `issuer` / `jwks_uri` | Hearth always validates signatures |
 | **First Broker Login → "Detect Existing Account"** | `link_existing_accounts: confirm` | Keycloak's default; Hearth's default |
 | **First Broker Login → no detection** | `link_existing_accounts: disabled` | JIT-provision only |
-| **Trust Email** (First Broker Login) | `link_existing_accounts: auto` | Auto-link on verified email match |
+| **Trust Email** (First Broker Login) | `link_existing_accounts: auto` | Auto-link on verified email match — **account-takeover risk**, see [Account-linking policy](#account-linking-policy) |
 | **Identity Provider Mapper: Hardcoded Role** | Hearth RBAC role assignment on first JIT-provision | Configure in `realms.<name>.roles` |
 | **Identity Provider Mapper: Attribute Importer** | `claim_mappings` (OIDC) or `attribute_map` (SAML) | |
 | **SAML → Mapper: User Attribute** | `attribute_map: { <hearth-field>: "<saml-uri>" }` | |
@@ -513,7 +521,7 @@ Common remappings:
 | **Client ID / Client Secret** | `client_id` / `client_secret` | |
 | **Scope** | `scopes` list | |
 | **Attribute Mapping** | `claim_mappings` (OIDC) or `attribute_map` (SAML) | |
-| **Default action: link accounts** | `link_existing_accounts: auto` | Only for high-trust IdPs |
+| **Default action: link accounts** | `link_existing_accounts: auto` | Only for high-trust IdPs — **account-takeover risk**, see [Account-linking policy](#account-linking-policy) |
 | **Default action: always create new user** | `link_existing_accounts: disabled` | |
 | **Require identifier re-login before linking** | `link_existing_accounts: confirm` (default) | |
 | **SAML → IdP URL** | `sso_url` | |
