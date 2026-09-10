@@ -254,7 +254,14 @@ async fn snapshot_rotate_flag_cleared_after_apply_diff() {
     );
 
     // Apply diffs — rotation handler fires and returns consumed realm names.
-    let consumed = apply_diff(&diffs, &config, harness.identity(), harness.rbac()).unwrap();
+    let consumed = apply_diff(
+        &diffs,
+        &config,
+        harness.identity(),
+        harness.rbac(),
+        harness.audit(),
+    )
+    .unwrap();
     assert!(
         consumed.contains(&"tenant".to_string()),
         "tenant should be in consumed_rotations"

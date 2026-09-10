@@ -120,6 +120,33 @@ pub struct SamlServiceProvider {
     pub attribute_map: AttributeMap,
 }
 
+/// How long an SP-side SAML request-state bag stays valid, in seconds.
+///
+/// A browser round-trip to the IdP and back; ten minutes is generous. The
+/// read path refuses an older bag and the periodic cleanup sweeper deletes it
+/// (audit 2026-08-28 §4.10#9).
+pub const SAML_STATE_TTL_SECS: i64 = 600;
+
+/// Hard cap on live `saml:state:` rows in one realm.
+///
+/// `GET …/federation/saml/begin` is unauthenticated, so without a ceiling the
+/// key space is an anonymous write amplifier: one row per request, reclaimed
+/// only by a matching ACS POST that an attacker never sends. Writes past this
+/// cap are refused with [`crate::identity::IdentityError::RateLimited`] once
+/// the expired rows have been purged.
+///
+/// Ten thousand concurrent in-flight logins per realm is far above any real
+/// browser-driven rate and far below anything that threatens the store.
+pub const SAML_STATE_MAX_PER_REALM: usize = 10_000;
+
+/// Extra seconds a SAML assertion replay sentinel outlives the assertion's own
+/// `NotOnOrAfter`.
+///
+/// The sentinel only has to cover the window in which the assertion would
+/// still validate. Matching the SP's clock-skew tolerance keeps it correct
+/// without keeping it forever (audit 2026-08-28 §4.10#9).
+pub const SAML_ASSERTION_SENTINEL_SKEW_SECS: i64 = 300;
+
 /// Short-lived state bag persisted while an SP-initiated login is in
 /// flight. Echoed as `RelayState` on the callback.
 #[derive(Debug, Clone, Serialize, Deserialize)]

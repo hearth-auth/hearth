@@ -55,14 +55,56 @@ pub trait FederationHttpTransport: Send + Sync {
 /// executor thread.
 pub struct UreqFederationTransport;
 
+/// Connect timeout for one federation upstream fetch.
+const FED_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Total timeout for one federation upstream fetch, connect included.
+const FED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Builds the `ureq` configuration every federation upstream fetch uses.
+///
+/// `jwks_uri`, `token_endpoint` and `userinfo_endpoint` all come from realm
+/// configuration a tenant admin controls and are dereferenced server-side, so
+/// they are SSRF sinks and carry the same hardening as webhook egress
+/// (audit §4.6#2):
+///
+/// - redirects capped at the shared `webhook::ssrf::MAX_WEBHOOK_REDIRECTS` — a
+///   `3xx` from an SSRF-checked public host must not walk the request to an
+///   unchecked internal one;
+/// - `https_only`, so a plaintext upstream never reaches the network;
+/// - a bounded connect *and* total time, so an upstream that never responds
+///   cannot pin a blocking thread indefinitely.
+fn federation_agent_config() -> ureq::config::Config {
+    ureq::config::Config::builder()
+        .timeout_connect(Some(FED_CONNECT_TIMEOUT))
+        .timeout_global(Some(FED_REQUEST_TIMEOUT))
+        .https_only(true)
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build()
+}
+
 impl FederationHttpTransport for UreqFederationTransport {
     fn send(&self, request: &FedHttpRequest) -> Result<FedHttpResponse, IdentityError> {
+        // Pre-flight: refuse a non-https scheme and any host that resolves into
+        // a private, loopback, link-local or cloud-metadata range before a
+        // socket is opened.
+        crate::webhook::ssrf::check_webhook_url(&request.url).map_err(|e| {
+            IdentityError::FederationUpstreamError {
+                provider: "transport".to_string(),
+                reason: format!("SSRF guard blocked federation upstream fetch: {e}"),
+            }
+        })?;
+
+        // `ssrf_agent` re-checks the addresses ureq is about to connect to,
+        // collapsing the pre-flight and the connect lookup into one and closing
+        // the DNS-rebinding race the pre-flight alone leaves open.
+        let agent = crate::webhook::ssrf::ssrf_agent(federation_agent_config());
+
         // ureq 3.x distinguishes WithBody vs WithoutBody at the type
         // level, so we branch at the top and build each call path
         // independently.
         let response = match request.method {
             "GET" => {
-                let mut req = ureq::get(&request.url);
+                let mut req = agent.get(&request.url);
                 for (name, value) in &request.headers {
                     req = req.header(name.as_str(), value.as_str());
                 }
@@ -73,7 +115,7 @@ impl FederationHttpTransport for UreqFederationTransport {
                     })?
             }
             "POST" => {
-                let mut req = ureq::post(&request.url);
+                let mut req = agent.post(&request.url);
                 for (name, value) in &request.headers {
                     req = req.header(name.as_str(), value.as_str());
                 }
@@ -284,5 +326,40 @@ mod tests {
         .expect("spawn_blocking completed — transport is sync and panic-free");
         // Connection refused is the expected outcome; what matters is no panic.
         assert!(result.is_err(), "port 1 should refuse the connection");
+    }
+
+    // ── Egress hardening on the federation transport (audit §4.6#2) ───────
+
+    // The SSRF-refusal behaviour of `UreqFederationTransport` itself is pinned
+    // in `tests/federation_ssrf_guard.rs`, which exercises the public
+    // transport. This unit test covers the half that is private to this
+    // module: the agent configuration those refusals ride on.
+
+    /// The transport must cap redirects so a `3xx` cannot walk an
+    /// SSRF-checked public host to an unchecked internal one, and must bound
+    /// both connect and total time.
+    #[test]
+    fn federation_agent_config_caps_redirects_and_sets_timeouts() {
+        let config = federation_agent_config();
+        assert_eq!(
+            config.max_redirects(),
+            crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS,
+            "federation egress must use the shared redirect cap"
+        );
+        let timeouts = config.timeouts();
+        assert_eq!(
+            timeouts.connect,
+            Some(FED_CONNECT_TIMEOUT),
+            "federation egress must bound connect time"
+        );
+        assert_eq!(
+            timeouts.global,
+            Some(FED_REQUEST_TIMEOUT),
+            "federation egress must bound total request time"
+        );
+        assert!(
+            config.https_only(),
+            "federation egress must refuse plaintext"
+        );
     }
 }

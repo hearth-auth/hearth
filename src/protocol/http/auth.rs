@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::core::{ClientId, RealmId, UserId};
 use crate::protocol::admin_auth::{
-    ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome,
+    ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::rbac::RbacError;
 use base64::Engine as _;
@@ -136,14 +136,29 @@ pub(crate) fn extract_admin_auth(
 
 /// Extracts and validates admin authentication for cluster-level operations.
 ///
-/// Identical to [`extract_admin_auth`] but additionally asserts that the
-/// `X-Realm-ID` header identifies the **system realm** (nil UUID). Cluster
-/// operations are node-wide, not realm-scoped; accepting a tenant-realm token
-/// would allow a tenant admin to transfer Raft leadership or bootstrap the
-/// cluster — a privilege-escalation vector (HEA-763).
+/// Identical to [`extract_admin_auth`] but additionally asserts **both** of:
 ///
-/// Returns `403 Forbidden` with `"cluster admin requires system realm"` if the
-/// realm is non-nil, even when the bearer token is otherwise valid.
+/// 1. The `X-Realm-ID` header identifies the **system realm** (nil UUID).
+///    Cluster operations are node-wide, not realm-scoped; accepting a
+///    tenant-realm token would allow a tenant admin to transfer Raft leadership
+///    or bootstrap the cluster — a privilege-escalation vector (HEA-763).
+/// 2. The caller holds `hearth.admin`. `extract_admin_auth` deliberately admits
+///    every `hearth.*.admin` sub-admin, so condition (1) alone let a system-realm
+///    operator delegated only `hearth.users.admin` bootstrap Raft membership or
+///    transfer leadership — the two most destructive operations in the product.
+///    There is no narrower permission for the cluster plane and inventing one
+///    would be a delegation boundary nobody asked for, so the gate is the
+///    superuser permission itself.
+///
+/// Returns `403 Forbidden` in both cases, even when the bearer token is
+/// otherwise valid.
+///
+/// The permission gate lives **here** rather than in each handler on purpose:
+/// all three cluster handlers call this function first, before any
+/// cluster-availability check, so a single-node deployment answers `403` to an
+/// unauthorized caller rather than disclosing `503 not in cluster mode` — and a
+/// future fourth cluster handler cannot forget the gate, which is exactly the
+/// defect this closes.
 ///
 /// **Future note:** if `extract_admin_auth` is ever changed to support
 /// non-realm-scoped tokens (e.g. a static allowlist), this function still
@@ -157,6 +172,15 @@ pub(crate) fn extract_cluster_admin_auth(
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "cluster admin requires system realm"})),
+        ));
+    }
+    if !auth.permissions.iter().any(|p| p == "hearth.admin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "hearth.admin permission required for cluster operations"
+            })),
         ));
     }
     Ok(auth)
@@ -436,16 +460,39 @@ pub(crate) fn check_token_rate_limit(
     realm_id: &RealmId,
     client_id: &ClientId,
 ) -> Result<(), Response> {
-    #[allow(clippy::cast_possible_truncation)]
-    let now_micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64;
+    token_rate_limit_outcome(
+        state
+            .token_rate_limiter
+            .check(realm_id, client_id, now_micros()),
+    )
+}
 
-    match state
-        .token_rate_limiter
-        .check(realm_id, client_id, now_micros)
-    {
+/// Checks the token endpoint rate limit for a request that carries **no**
+/// client identity, bucketing it by client IP instead.
+///
+/// A `grant_type=refresh_token` exchange with no `client_id` and no Basic
+/// auth (Hearth's clientless session refresh) never reaches
+/// [`check_token_rate_limit`], because there is no `ClientId` to key on. That
+/// left the endpoint's only unauthenticated shape completely unbucketed
+/// (audit 2026-08-28 §4.16#8). `client_ip` must come from
+/// `client_info::extract_client_ip`, which is trusted-proxy aware — a raw
+/// `X-Forwarded-For` would let the flooder pick its own bucket.
+pub(crate) fn check_anonymous_token_rate_limit(
+    state: &AppState,
+    realm_id: &RealmId,
+    client_ip: &str,
+) -> Result<(), Response> {
+    let bucket = TokenRateLimiter::anonymous_ip_bucket(client_ip);
+    token_rate_limit_outcome(
+        state
+            .token_rate_limiter
+            .check_bucket(realm_id, &bucket, now_micros()),
+    )
+}
+
+/// Maps a [`TokenRateLimitOutcome`] onto the shared 429 response shape.
+fn token_rate_limit_outcome(outcome: TokenRateLimitOutcome) -> Result<(), Response> {
+    match outcome {
         TokenRateLimitOutcome::Allowed => Ok(()),
         TokenRateLimitOutcome::Exceeded { retry_after_secs } => {
             let retry_str = retry_after_secs.to_string();

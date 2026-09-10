@@ -22,12 +22,18 @@ use crate::identity::credentials::{PepperConfig, PepperKey};
 
 /// Minimal helper for extracting `dev_mode` from raw YAML before `Config` is fully parsed.
 ///
-/// `Config.dev_mode` is `#[serde(skip)]` because it is set programmatically via
-/// `Config::dev()` / `Config::from_file_as_dev()`, never by the operator through
-/// YAML. However, tests (and the `hearth serve --dev` CLI path) embed
-/// `dev_mode: true` at the top of a YAML string and expect `from_yaml_str` to
-/// honour it. This thin struct captures only that one field so we can read it
-/// out of the raw YAML and apply it after the main `serde` pass.
+/// `Config.dev_mode` is `#[serde(default)]`, **not** `#[serde(skip)]` — serde will
+/// happily populate it from a `dev_mode: true` line in any YAML document. Nothing
+/// in the type makes the key unreachable; the explicit refusal in
+/// [`Config::from_yaml_str`] below is the only thing that does (audit §4.7#3,
+/// §4.13#10). Two comments here used to claim the `#[serde(skip)]` attribute was
+/// the guard, which is why a config file arming the whole dev perimeter went
+/// unnoticed: the claimed mechanism did not exist.
+///
+/// The unchecked loaders (`Config::from_yaml_str_unchecked`, `from_file_as_dev`)
+/// deliberately still honour `dev_mode: true` in YAML — test harnesses and the
+/// `hearth serve --dev` path embed it in inline config strings. This thin struct
+/// reads that one field out of raw YAML so the checked loader can refuse it.
 #[derive(serde::Deserialize)]
 struct DevModeYaml {
     #[serde(default)]
@@ -43,7 +49,7 @@ struct DevModeYaml {
 /// proxy is still internet-reachable, and dev mode bypasses every
 /// production fail-closed gate. Invalid YAML is treated as `false` here;
 /// the caller's own parse will surface the real error.
-pub(crate) fn yaml_declares_dev_mode(yaml: &str) -> bool {
+pub fn yaml_declares_dev_mode(yaml: &str) -> bool {
     serde_norway::from_str::<DevModeYaml>(yaml)
         .map(|dm| dm.dev_mode)
         .unwrap_or(false)
@@ -99,6 +105,30 @@ fn invalid(field: &str, reason: impl Into<String>) -> ConfigError {
     }
 }
 
+/// Flattens a [`ConfigError`] into a [`ValidationIssue`] so a short-circuiting
+/// sub-validator can contribute to the all-collecting pass.
+fn config_error_to_issue(err: &ConfigError) -> ValidationIssue {
+    match err {
+        ConfigError::ValidationError { field, reason } => ValidationIssue {
+            field: field.clone(),
+            reason: reason.clone(),
+        },
+        other => ValidationIssue {
+            field: "config".to_string(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+/// Collects the start-up key-liveness and empty-secret issues for the raw
+/// post-substitution YAML (audit §1A item 5, §4.13#4 — see
+/// [`super::security_keys`]).
+fn security_key_issues(substituted_yaml: &str) -> Vec<ValidationIssue> {
+    let mut issues = super::security_keys::liveness_issues(substituted_yaml);
+    issues.extend(super::security_keys::empty_secret_issues(substituted_yaml));
+    issues
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Config constructors and validators
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,8 +144,10 @@ impl Config {
     /// Returns an error for invalid YAML or values that fail validation.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
-        // HEA control-liveness 10.2: `dev_mode` is #[serde(skip)] and must
-        // stay unreachable through this, the checked/production loader
+        // HEA control-liveness 10.2 / audit §4.7#3: `dev_mode` is
+        // #[serde(default)], so serde WOULD accept it here. This explicit
+        // refusal — not any serde attribute — is what keeps it unreachable
+        // through the checked/production loader
         // (`Config::from_file` uses it for every non `--dev` boot). A
         // release binary that loads a file declaring `dev_mode: true`
         // refuses to start rather than silently arming the whole dev
@@ -130,6 +162,7 @@ impl Config {
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
+        config.key_liveness_issues = security_key_issues(&substituted);
         config.validate()?;
         Ok(config)
     }
@@ -179,7 +212,7 @@ impl Config {
                 hot_tier_capacity: Some(1_000),
                 hot_tier_max_memory: None,
                 hot_tier_per_realm_metrics: true,
-                fsync: false,
+                fsync: Some(false),
                 block_cache_bytes: 4 * 1024 * 1024,
                 compaction: CompactionSection::default(),
             },
@@ -205,6 +238,7 @@ impl Config {
             demo: DemoConfig::default(),
             dev_mode: true,
             config_warnings: Vec::new(),
+            key_liveness_issues: Vec::new(),
         }
     }
 
@@ -223,8 +257,8 @@ impl Config {
     }
 
     /// Loads a file in dev mode: parses without validation, applies dev
-    /// settings (`dev_mode = true`, `fsync = false`), then validates with the
-    /// relaxed dev-mode rules.
+    /// settings (`dev_mode = true`), then validates with the relaxed dev-mode
+    /// rules.
     ///
     /// A configured `storage.data_dir` is preserved so `--dev` can persist the
     /// WAL/SSTs to a real directory (HEA-1805); the dev-mode wiring in
@@ -234,7 +268,10 @@ impl Config {
     pub fn from_file_as_dev(path: &Path) -> Result<Self, ConfigError> {
         let mut config = Self::from_file_unchecked(path)?;
         config.dev_mode = true;
-        config.storage.fsync = false;
+        // `storage.fsync` is deliberately NOT forced to `false` here any more.
+        // Absent resolves to off in dev via `StorageSection::fsync_enabled`;
+        // an operator who wrote `fsync: true` wants the real group-commit path
+        // and used to have that silently discarded (audit §4.11#12).
         config.validate()?;
         Ok(config)
     }
@@ -250,6 +287,7 @@ impl Config {
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
+        config.key_liveness_issues = security_key_issues(&substituted);
         if let Ok(dm) = serde_norway::from_str::<DevModeYaml>(&substituted) {
             config.dev_mode = dm.dev_mode;
         }
@@ -433,210 +471,114 @@ impl Config {
 
         validate_trusted_proxies(&self.server, &mut issues);
 
-        issues
-    }
-
-    /// Validates configuration values.
-    ///
-    /// Called automatically by [`from_yaml_str`] and [`from_file`].
-    /// Dev-mode configs skip certain checks (e.g., empty `data_dir`).
-    #[allow(clippy::too_many_lines)]
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.server.port == 0 {
-            return Err(ConfigError::ValidationError {
-                field: "server.port".to_string(),
-                reason: "must be between 1 and 65535".to_string(),
-            });
+        // ── Checks that used to live only in `validate` (audit §4.13#8) ─────
+        //
+        // `hearth config validate` and the admin config editor run
+        // `validate_all`; `serve` runs `validate`. They were two hand-written
+        // bodies, so the CLI printed "✓ Configuration valid" for configs the
+        // server refuses to start with — and the admin visual editor, a raw
+        // JSON→YAML passthrough that writes `hearth.yaml`, wrote them to disk
+        // behind the weaker one. `validate` now delegates to this function, so
+        // every rule MUST live here.
+        if let Err(e) = self.security.resolve_pepper() {
+            issues.push(config_error_to_issue(&e));
+        }
+        if let Err(e) = self.security.validate_kdf_admission() {
+            issues.push(config_error_to_issue(&e));
         }
 
-        // A backup verify key that cannot decode can never verify an archive.
-        // Refuse to start rather than run with a check the operator believes is
-        // on (audit 2026-08-28 §4.13#5).
-        if let Err(reason) = self.security.backup.verify_key_bytes() {
-            return Err(ConfigError::ValidationError {
-                field: "security.backup.verify_key".to_string(),
-                reason,
-            });
-        }
-
-        // Dev mode must not be used with a non-loopback bind address — doing
-        // so exposes all security bypasses (weak Argon2, CSRF skip, plaintext
-        // setup token) to the network.
-        if self.dev_mode && !is_loopback_str(&self.server.bind_address) {
-            return Err(ConfigError::ValidationError {
-                field: "server.bind_address".to_string(),
-                reason: format!(
-                    "dev_mode = true is only permitted with a loopback bind address; \
-                     '{}' is not loopback. Use 127.0.0.1 or ::1, or disable dev_mode.",
-                    self.server.bind_address
-                ),
-            });
-        }
-
-        match (&self.server.tls_cert_path, &self.server.tls_key_path) {
-            (Some(_), None) => {
-                return Err(ConfigError::ValidationError {
-                    field: "server.tls_key_path".to_string(),
-                    reason: "tls_key_path is required when tls_cert_path is set".to_string(),
-                });
-            }
-            (None, Some(_)) => {
-                return Err(ConfigError::ValidationError {
-                    field: "server.tls_cert_path".to_string(),
-                    reason: "tls_cert_path is required when tls_key_path is set".to_string(),
-                });
-            }
-            _ => {}
-        }
-
-        if self.server.tls_require_client_cert && self.server.tls_client_ca_path.is_none() {
-            return Err(ConfigError::ValidationError {
-                field: "server.tls_client_ca_path".to_string(),
-                reason: "tls_client_ca_path is required when tls_require_client_cert is true"
+        // §4.11#12 / §6: `storage.fsync` was accepted, warned about, and then
+        // ignored — production always built `SyncMode::EveryWrite`. Refuse the
+        // value instead of pretending to honour it.
+        if !self.dev_mode && self.storage.fsync == Some(false) {
+            issues.push(ValidationIssue {
+                field: "storage.fsync".to_string(),
+                reason: "must not be false outside dev mode — WAL durability is not optional, \
+                         and this key was previously accepted and then ignored. Remove the key \
+                         to keep fsync on, or run with `--dev` if you genuinely want it off."
                     .to_string(),
             });
         }
 
-        if !self.dev_mode && self.storage.data_dir.is_empty() {
-            return Err(ConfigError::ValidationError {
-                field: "storage.data_dir".to_string(),
-                reason: "must not be empty".to_string(),
-            });
-        }
-
-        // HEA-2166: three production paths that previously degraded silently
-        // to insecure are hard startup errors outside dev mode. Fail closed:
-        // a misconfigured production instance refuses to start rather than
-        // running insecurely with only a log line as the signal. The KEK
-        // check consults the HEARTH_KEK env var because env takes precedence
-        // over YAML at resolution time (see `serve` in main.rs) and is the
-        // recommended way to keep the key out of config files.
+        // §4.13#4: a `${VAR}` reference with no `:-default` that resolved to
+        // the empty string. In production this is a hard error, not a warning:
+        // an empty expected credential compares equal to a caller who supplied
+        // none. `${VAR:-}` is the documented way to say "empty on purpose" and
+        // records no warning, so the escape hatch survives.
         if !self.dev_mode {
-            if self.security.key_encryption_key.is_none()
-                && std::env::var_os("HEARTH_KEK").is_none()
-            {
-                return Err(ConfigError::ValidationError {
-                    field: "security.key_encryption_key".to_string(),
-                    reason: KEK_REQUIRED_IN_PROD.to_string(),
+            let mut env_issues = Vec::new();
+            for warning in &self.config_warnings {
+                env_issues.push(ValidationIssue {
+                    field: format!("${{{}}}", warning.var_name),
+                    reason: format!(
+                        "environment variable {} is {} — the reference was substituted with \
+                         the empty string. An empty value is accepted as a credential by the \
+                         /metrics guard and by client_secret_basic, so this fails closed. Set \
+                         the variable, or write ${{{}:-}} to declare the empty value \
+                         intentional.",
+                        warning.var_name,
+                        warning.kind_label(),
+                        warning.var_name,
+                    ),
                 });
             }
-            if self.server.tls_cert_path.is_none() && !self.server.trust_forwarded_proto {
-                return Err(ConfigError::ValidationError {
-                    field: "server.tls_cert_path".to_string(),
-                    reason: TLS_REQUIRED_IN_PROD.to_string(),
-                });
-            }
-            if self.demo.enabled {
-                return Err(ConfigError::ValidationError {
-                    field: "demo.enabled".to_string(),
-                    reason: DEMO_FORBIDDEN_IN_PROD.to_string(),
-                });
-            }
+            // An unset variable is the root cause of every empty-value
+            // complaint downstream, and it names the thing the operator must
+            // actually change. Report it before the symptom, so the first
+            // error the operator reads is the useful one.
+            issues.splice(0..0, env_issues);
         }
 
-        if !ObservabilityConfig::VALID_LOG_LEVELS.contains(&self.observability.log_level.as_str()) {
-            return Err(ConfigError::ValidationError {
-                field: "observability.log_level".to_string(),
-                reason: format!(
-                    "must be one of: {}",
-                    ObservabilityConfig::VALID_LOG_LEVELS.join(", ")
-                ),
-            });
+        // §1A item 5: security keys the operator set that no consumer reads,
+        // and secret keys that resolved to the empty string. Computed at parse
+        // time because only the raw YAML distinguishes an operator-set key from
+        // a compiled-in default.
+        issues.extend(self.key_liveness_issues.iter().cloned());
+
+        issues
+    }
+
+    /// Whether WAL writes are `fsync`'d under this config's run mode.
+    ///
+    /// The single resolution point for `storage.fsync` (audit §4.11#12): the
+    /// raw field is an `Option<bool>` where absent means "mode default", and
+    /// reading it directly is how the knob came to be ignored in the first
+    /// place. Also used by the admin system-info page so the operator sees the
+    /// effective value rather than the literal YAML.
+    #[must_use]
+    pub const fn fsync_effective(&self) -> bool {
+        self.storage.fsync_enabled(self.dev_mode)
+    }
+
+    /// Validates configuration values, returning the first problem found.
+    ///
+    /// Called automatically by [`from_yaml_str`] and [`from_file`].
+    /// Dev-mode configs skip certain checks (e.g., empty `data_dir`).
+    ///
+    /// # One validator, two presentations
+    ///
+    /// This delegates to [`Self::validate_all`] rather than re-stating the
+    /// rules. They used to be two independently maintained bodies and had
+    /// drifted: `hearth config validate` and the admin config editor (which
+    /// writes `hearth.yaml`) ran `validate_all`, `serve` ran this — so the CLI
+    /// printed "✓ Configuration valid" for a `security.password.kdf` bound of
+    /// `0` and a malformed pepper key, both of which the server refuses to
+    /// start with (audit §4.13#8). Delegation makes that divergence
+    /// unrepresentable. Add new rules to `validate_all`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ConfigError::ValidationError`] `validate_all`
+    /// reports. Callers that want every problem at once should call
+    /// `validate_all` directly.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.validate_all().into_iter().next() {
+            Some(issue) => Err(ConfigError::ValidationError {
+                field: issue.field,
+                reason: issue.reason,
+            }),
+            None => Ok(()),
         }
-
-        if !ObservabilityConfig::VALID_LOG_FORMATS.contains(&self.observability.log_format.as_str())
-        {
-            return Err(ConfigError::ValidationError {
-                field: "observability.log_format".to_string(),
-                reason: format!(
-                    "must be one of: {}",
-                    ObservabilityConfig::VALID_LOG_FORMATS.join(", ")
-                ),
-            });
-        }
-
-        if self.operational.request_timeout_secs == 0 {
-            return Err(ConfigError::ValidationError {
-                field: "operational.request_timeout_secs".to_string(),
-                reason: "must be greater than 0".to_string(),
-            });
-        }
-
-        if self.operational.shutdown_timeout_secs == 0 {
-            return Err(ConfigError::ValidationError {
-                field: "operational.shutdown_timeout_secs".to_string(),
-                reason: "must be greater than 0".to_string(),
-            });
-        }
-
-        if self.operational.max_connections == 0 {
-            return Err(ConfigError::ValidationError {
-                field: "operational.max_connections".to_string(),
-                reason: "must be greater than 0".to_string(),
-            });
-        }
-
-        if self.operational.queue_depth == 0 {
-            return Err(ConfigError::ValidationError {
-                field: "operational.queue_depth".to_string(),
-                reason: "must be greater than 0".to_string(),
-            });
-        }
-
-        validate_oidc(&self.oidc, self.dev_mode)?;
-        validate_token(&self.token)?;
-        validate_email(&self.email)?;
-        validate_sms(&self.sms)?;
-        validate_branding(&self.branding)?;
-        validate_realm_names(self.realms.as_ref())?;
-        validate_realm_web_configs(self.realms.as_ref())?;
-        validate_realm_auth_configs(self.realms.as_ref(), &self.sms)?;
-        validate_realm_applications(self.realms.as_ref())?;
-        validate_realm_organizations(self.realms.as_ref())?;
-        validate_realm_saml_sps(self.realms.as_ref())?;
-
-        // HSEC-010: In production mode, the log email transport silently
-        // discards all messages. This is a hard error when any realm has
-        // features that depend on email delivery (magic_link auth or any form
-        // of self-registration). Operators must configure a real transport.
-        if !self.dev_mode && self.email.transport == EmailTransport::Log {
-            validate_email_transport_log_prod(self.realms.as_ref())?;
-        }
-
-        if let Some(addr) = &self.onboarding.notification_email {
-            addr.parse::<lettre::message::Mailbox>().map_err(|e| {
-                invalid(
-                    "onboarding.notification_email",
-                    format!("could not parse as an RFC 5322 mailbox: {e}"),
-                )
-            })?;
-        }
-
-        if self.onboarding.notification_email.is_some() && self.onboarding.base_url.is_none() {
-            return Err(invalid(
-                "onboarding.base_url",
-                "onboarding.base_url is required when onboarding.notification_email is set; \
-                 without it the emailed setup URL uses the bind address which may not be \
-                 reachable from outside the server",
-            ));
-        }
-
-        let mut tp_issues = Vec::new();
-        validate_trusted_proxies(&self.server, &mut tp_issues);
-        if let Some(issue) = tp_issues.into_iter().next() {
-            return Err(invalid(&issue.field, issue.reason));
-        }
-
-        // Fail fast on a malformed `security.password.pepper` so the operator
-        // sees the error at config-load time rather than silently running
-        // without a pepper.
-        self.security.resolve_pepper()?;
-
-        // Fail fast on a nonsensical `security.password.kdf` bound — a gate that
-        // can never admit is a self-inflicted outage on the auth path.
-        self.security.validate_kdf_admission()?;
-
-        Ok(())
     }
 }
 
@@ -880,156 +822,76 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
     }
 }
 
-/// HSEC-010: Returns an error when `email.transport = log` in production and
-/// at least one realm relies on email delivery (magic_link auth or any
-/// self-registration mode other than `disabled`).
+/// Returns `Some(reason)` when a realm needs a working email transport.
 ///
-/// Called only when `!config.dev_mode && config.email.transport == Log`.
-fn validate_email_transport_log_prod(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else {
-        return Ok(());
-    };
-    for (name, realm) in realms {
-        let auth = realm.auth.as_ref();
+/// Three features make email load-bearing:
+///
+/// * `magic_link` in `allowed_auth_methods` — the link *is* the credential;
+/// * self-registration in any mode but `disabled` — the verification mail;
+/// * **password authentication** — the forgot-password / reset link is the
+///   only self-service recovery path a password realm has. This third case
+///   was missing, so a password-only realm could be configured, validated and
+///   started in a state where every reset email is silently discarded
+///   (audit 2026-08-28 §4.24#9).
+///
+/// Password auth counts when `allowed_auth_methods` is unset (unrestricted,
+/// so password is available) or explicitly lists `password`.
+fn realm_requires_email_delivery(realm: &RealmYamlConfig) -> Option<&'static str> {
+    let auth = realm.auth.as_ref();
 
-        let has_magic_link = auth
-            .and_then(|a| a.allowed_auth_methods.as_ref())
-            .map(|methods| methods.iter().any(|m| m == "magic_link"))
-            .unwrap_or(false);
-
-        let has_self_reg = auth
-            .and_then(|a| a.registration.as_ref())
-            .map(|r| !matches!(r.mode, RegistrationModeYaml::Disabled))
-            .unwrap_or(false);
-
-        if has_magic_link || has_self_reg {
-            return Err(invalid(
-                "email.transport",
-                format!(
-                    "realm '{name}' requires email delivery \
-                     (magic_link auth or self-registration is enabled) but \
-                     email.transport = log — no emails will be delivered in \
-                     production. Configure a real transport: smtp, sendgrid, \
-                     postmark, mailgun, or mailtrap."
-                ),
-            ));
-        }
+    let has_magic_link = auth
+        .and_then(|a| a.allowed_auth_methods.as_ref())
+        .map(|methods| methods.iter().any(|m| m == "magic_link"))
+        .unwrap_or(false);
+    if has_magic_link {
+        return Some("magic_link auth is enabled");
     }
-    Ok(())
+
+    let has_self_reg = auth
+        .and_then(|a| a.registration.as_ref())
+        .map(|r| !matches!(r.mode, RegistrationModeYaml::Disabled))
+        .unwrap_or(false);
+    if has_self_reg {
+        return Some("self-registration is enabled");
+    }
+
+    let has_password = auth
+        .and_then(|a| a.allowed_auth_methods.as_ref())
+        .map_or(true, |methods| methods.iter().any(|m| m == "password"));
+    if has_password {
+        return Some("password authentication is enabled, so password reset needs email");
+    }
+
+    None
 }
 
-/// Accumulating variant of [`validate_email_transport_log_prod`] for
-/// [`Config::validate_all`].
+/// Builds the operator-facing message for a realm that needs email delivery
+/// while `email.transport = log`.
+fn email_transport_log_reason(realm_name: &str, why: &str) -> String {
+    format!(
+        "realm '{realm_name}' requires email delivery ({why}) but \
+         email.transport = log — no emails will be delivered in production. \
+         Configure a real transport: smtp, sendgrid, postmark, mailgun, or \
+         mailtrap."
+    )
+}
+
+/// Reports every realm that needs email delivery while `email.transport = log`
+/// in production. The only variant: `Config::validate` delegates to
+/// `validate_all`, so there is no short-circuiting twin to drift from.
 fn validate_email_transport_log_prod_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(realms) = realms else { return };
     for (name, realm) in realms {
-        let auth = realm.auth.as_ref();
-
-        let has_magic_link = auth
-            .and_then(|a| a.allowed_auth_methods.as_ref())
-            .map(|methods| methods.iter().any(|m| m == "magic_link"))
-            .unwrap_or(false);
-
-        let has_self_reg = auth
-            .and_then(|a| a.registration.as_ref())
-            .map(|r| !matches!(r.mode, RegistrationModeYaml::Disabled))
-            .unwrap_or(false);
-
-        if has_magic_link || has_self_reg {
+        if let Some(why) = realm_requires_email_delivery(realm) {
             issues.push(ValidationIssue {
                 field: "email.transport".to_string(),
-                reason: format!(
-                    "realm '{name}' requires email delivery \
-                     (magic_link auth or self-registration is enabled) but \
-                     email.transport = log — no emails will be delivered in \
-                     production. Configure a real transport: smtp, sendgrid, \
-                     postmark, mailgun, or mailtrap."
-                ),
+                reason: email_transport_log_reason(name, why),
             });
         }
     }
-}
-
-fn validate_realm_names(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else { return Ok(()) };
-    if realms.contains_key("system") {
-        return Err(invalid(
-            "realms.system",
-            "\"system\" is a reserved realm name; it is managed by Hearth and cannot be declared in YAML",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_branding(branding: &BrandingConfig) -> Result<(), ConfigError> {
-    if let Some(theme) = &branding.theme {
-        let lower = theme.to_ascii_lowercase();
-        if !VALID_UI_THEMES.contains(&lower.as_str()) {
-            return Err(invalid(
-                "branding.theme",
-                format!(
-                    "unknown theme '{}'; valid themes are: {}",
-                    theme,
-                    VALID_UI_THEMES.join(", ")
-                ),
-            ));
-        }
-    }
-    if let Some(path) = &branding.custom_css {
-        if !std::fs::metadata(path)
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-        {
-            return Err(invalid(
-                "branding.custom_css",
-                format!("file not found or not readable: {path}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_realm_web_configs(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else {
-        return Ok(());
-    };
-    for (name, cfg) in realms {
-        let Some(web) = &cfg.web else { continue };
-        if let Some(theme) = &web.theme {
-            let lower = theme.to_ascii_lowercase();
-            if !VALID_UI_THEMES.contains(&lower.as_str()) {
-                return Err(invalid(
-                    &format!("realms.{name}.web.theme"),
-                    format!(
-                        "unknown theme '{}'; valid themes are: {}",
-                        theme,
-                        VALID_UI_THEMES.join(", ")
-                    ),
-                ));
-            }
-        }
-        if let Some(path) = &web.custom_css {
-            if !std::fs::metadata(path)
-                .map(|m| m.is_file())
-                .unwrap_or(false)
-            {
-                return Err(invalid(
-                    &format!("realms.{name}.web.custom_css"),
-                    format!("file not found or not readable: {path}"),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Checks one SAML SP registration's signing-verification pairing.
@@ -1065,25 +927,6 @@ fn saml_sp_signing_problem(
     None
 }
 
-fn validate_realm_saml_sps(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else {
-        return Ok(());
-    };
-    for (name, cfg) in realms {
-        let Some(sps) = &cfg.saml_service_providers else {
-            continue;
-        };
-        for (sp_key, sp) in sps {
-            if let Some((field, reason)) = saml_sp_signing_problem(name, sp_key, sp) {
-                return Err(invalid(&field, reason));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn validate_realm_saml_sps_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,
@@ -1101,296 +944,6 @@ fn validate_realm_saml_sps_all(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn validate_realm_auth_configs(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-    sms: &SmsConfig,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else {
-        return Ok(());
-    };
-    for (name, cfg) in realms {
-        if let Some(scim) = &cfg.scim {
-            if let Some(token) = &scim.bearer_token {
-                if token.trim().is_empty() {
-                    return Err(invalid(
-                        &format!("realms.{name}.scim.bearer_token"),
-                        "must not be empty when SCIM is configured",
-                    ));
-                }
-            }
-        }
-        let Some(auth) = &cfg.auth else { continue };
-        if let Some(methods) = &auth.mfa_methods {
-            for m in methods {
-                if !VALID_MFA_METHODS.contains(&m.as_str()) {
-                    return Err(invalid(
-                        &format!("realms.{name}.auth.mfa_methods"),
-                        format!(
-                            "unknown MFA method '{}'; valid methods are: {}",
-                            m,
-                            VALID_MFA_METHODS.join(", ")
-                        ),
-                    ));
-                }
-            }
-            if methods.iter().any(|m| m == "sms") && sms.transport == SmsTransport::Log {
-                return Err(invalid(
-                    &format!("realms.{name}.auth.mfa_methods"),
-                    "'sms' is listed as an MFA method but sms.transport is 'log'; \
-                     configure a real SMS transport (twilio or awssns) to deliver OTP codes",
-                ));
-            }
-        }
-        if let Some(methods) = &auth.allowed_auth_methods {
-            for m in methods {
-                if !VALID_AUTH_METHODS.contains(&m.as_str()) {
-                    return Err(invalid(
-                        &format!("realms.{name}.auth.allowed_auth_methods"),
-                        format!(
-                            "unknown auth method '{}'; valid methods are: {}",
-                            m,
-                            VALID_AUTH_METHODS.join(", ")
-                        ),
-                    ));
-                }
-            }
-        }
-        if let Some(pp) = &auth.password_policy {
-            if let Some(len) = pp.min_length {
-                if len == 0 {
-                    return Err(invalid(
-                        &format!("realms.{name}.auth.password_policy.min_length"),
-                        "must be >= 1",
-                    ));
-                }
-            }
-        }
-        if let Some(token) = &auth.token {
-            if let Some(ttl) = &token.access_token_ttl {
-                let micros = parse_duration_to_micros(ttl).map_err(|e| {
-                    invalid(
-                        &format!("realms.{name}.auth.token.access_token_ttl"),
-                        format!("invalid duration: {e}"),
-                    )
-                })?;
-                if micros > ACCESS_TOKEN_TTL_MAX_MICROS {
-                    return Err(invalid(
-                        &format!("realms.{name}.auth.token.access_token_ttl"),
-                        "access token TTL must not exceed 1 hour (HEA-SEC-27)",
-                    ));
-                }
-                if micros > ACCESS_TOKEN_TTL_WARN_MICROS {
-                    tracing::warn!(
-                        field = format!("realms.{name}.auth.token.access_token_ttl"),
-                        "access token TTL exceeds 15 minutes (HEA-SEC-27)"
-                    );
-                }
-            }
-            if let Some(ttl) = &token.refresh_token_ttl {
-                let micros = parse_duration_to_micros(ttl).map_err(|e| {
-                    invalid(
-                        &format!("realms.{name}.auth.token.refresh_token_ttl"),
-                        format!("invalid duration: {e}"),
-                    )
-                })?;
-                if micros > REFRESH_TOKEN_TTL_MAX_MICROS {
-                    return Err(invalid(
-                        &format!("realms.{name}.auth.token.refresh_token_ttl"),
-                        "refresh token TTL must not exceed 30 days (HEA-SEC-27)",
-                    ));
-                }
-                if micros > REFRESH_TOKEN_TTL_WARN_MICROS {
-                    tracing::warn!(
-                        field = format!("realms.{name}.auth.token.refresh_token_ttl"),
-                        "refresh token TTL exceeds 24 hours (HEA-SEC-27)"
-                    );
-                }
-            }
-        }
-        if let Some(rl) = &auth.rate_limit {
-            if let Some(dur) = &rl.lockout_duration {
-                parse_duration_to_micros(dur).map_err(|e| {
-                    invalid(
-                        &format!("realms.{name}.auth.rate_limit.lockout_duration"),
-                        format!("invalid duration: {e}"),
-                    )
-                })?;
-            }
-        }
-        if let Some(reg) = &auth.registration {
-            if matches!(
-                reg.mode,
-                super::types::RegistrationModeYaml::DomainRestricted
-            ) {
-                let missing = reg
-                    .allowed_domains
-                    .as_ref()
-                    .map_or(true, std::vec::Vec::is_empty);
-                if missing {
-                    return Err(invalid(
-                        &format!("realms.{name}.auth.registration.allowed_domains"),
-                        "mode = domain_restricted requires a non-empty allowed_domains list",
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_realm_organizations(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else {
-        return Ok(());
-    };
-    for (realm_name, cfg) in realms {
-        let Some(orgs) = &cfg.organizations else {
-            continue;
-        };
-        for (slug, org) in orgs {
-            let prefix = format!("realms.{realm_name}.organizations.{slug}");
-            if org.name.trim().is_empty() {
-                return Err(invalid(&format!("{prefix}.name"), "must not be empty"));
-            }
-            if slug.len() < 3 || slug.len() > 63 {
-                return Err(invalid(
-                    &prefix,
-                    format!("slug '{slug}' must be 3-63 characters"),
-                ));
-            }
-            if !slug
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            {
-                return Err(invalid(
-                    &prefix,
-                    format!(
-                        "slug '{slug}' must contain only lowercase letters, digits, and hyphens"
-                    ),
-                ));
-            }
-            if slug.starts_with('-') || slug.ends_with('-') {
-                return Err(invalid(
-                    &prefix,
-                    format!("slug '{slug}' must not start or end with a hyphen"),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_realm_applications(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-) -> Result<(), ConfigError> {
-    let Some(realms) = realms else {
-        return Ok(());
-    };
-    for (realm_name, cfg) in realms {
-        let Some(apps) = cfg.oauth_clients.as_ref().or(cfg.applications.as_ref()) else {
-            continue;
-        };
-        for (app_key, app) in apps {
-            let prefix = format!("realms.{realm_name}.applications.{app_key}");
-            if app.name.trim().is_empty() {
-                return Err(invalid(&format!("{prefix}.name"), "must not be empty"));
-            }
-            if let Some(grant_types) = &app.grant_types {
-                for gt in grant_types {
-                    if !VALID_GRANT_TYPES.contains(&gt.as_str()) {
-                        return Err(invalid(
-                            &format!("{prefix}.grant_types"),
-                            format!(
-                                "unknown grant type '{}'; valid types are: {}",
-                                gt,
-                                VALID_GRANT_TYPES.join(", ")
-                            ),
-                        ));
-                    }
-                }
-            }
-            if let Some(uris) = &app.redirect_uris {
-                for uri in uris {
-                    if uri.is_empty() {
-                        return Err(invalid(
-                            &format!("{prefix}.redirect_uris"),
-                            "redirect URIs must not be empty strings",
-                        ));
-                    }
-                }
-            }
-            let is_confidential = app.confidential.unwrap_or(false);
-            if is_confidential && app.client_secret.is_none() {
-                return Err(invalid(
-                    &format!("{prefix}.client_secret"),
-                    "client_secret is required when confidential is true",
-                ));
-            }
-            if !is_confidential && app.client_secret.is_some() {
-                return Err(invalid(
-                    &format!("{prefix}.confidential"),
-                    "confidential must be true when client_secret is provided",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_oidc(oidc: &OidcYamlConfig, dev_mode: bool) -> Result<(), ConfigError> {
-    if oidc.issuer.is_none() && !dev_mode {
-        return Err(invalid(
-            "oidc.issuer",
-            "required for production; set it to your public HTTPS URL \
-             (e.g. https://auth.example.com). Use --dev to skip this check \
-             in local development.",
-        ));
-    }
-    if let Some(issuer) = &oidc.issuer {
-        if issuer.is_empty() {
-            return Err(invalid("oidc.issuer", "must not be empty"));
-        }
-        if !issuer.starts_with("https://") && !issuer.starts_with("http://") {
-            return Err(invalid(
-                "oidc.issuer",
-                "must be a URL starting with https:// or http://",
-            ));
-        }
-        if issuer.contains(".local") {
-            return Err(invalid(
-                "oidc.issuer",
-                "uses a .local hostname which is not publicly reachable; \
-                 set it to your public HTTPS URL (e.g. https://auth.example.com)",
-            ));
-        }
-    }
-    if let Some(ttl) = &oidc.authorization_code_ttl {
-        parse_duration_to_micros(ttl).map_err(|e| {
-            invalid(
-                "oidc.authorization_code_ttl",
-                format!("invalid duration: {e}"),
-            )
-        })?;
-    }
-    if oidc.enforce_nonces == Some(false) {
-        return Err(invalid(
-            "oidc.enforce_nonces",
-            "this opt-out has been removed (HEA-SEC-29). Nonce replay protection is \
-             now unconditional per OIDC Core §3.1.2.1. Remove the key from your config.",
-        ));
-    }
-    if oidc.require_pkce_for_confidential_clients == Some(false) {
-        return Err(invalid(
-            "oidc.require_pkce_for_confidential_clients",
-            "this opt-out has been removed (HEA-SEC-29). PKCE is now unconditional \
-             for all clients per RFC 9700 §2.1.1. Remove the key from your config.",
-        ));
-    }
-    Ok(())
-}
-
 /// Hard cap: access token TTL must not exceed 1 hour (HEA-SEC-27).
 const ACCESS_TOKEN_TTL_MAX_MICROS: i64 = 3_600 * 1_000_000;
 /// Hard cap: refresh token TTL must not exceed 30 days (HEA-SEC-27).
@@ -1399,188 +952,6 @@ const REFRESH_TOKEN_TTL_MAX_MICROS: i64 = 30 * 86_400 * 1_000_000;
 const ACCESS_TOKEN_TTL_WARN_MICROS: i64 = 900 * 1_000_000;
 /// Warning threshold: refresh token TTL > 24 hours warrants an operator alert.
 const REFRESH_TOKEN_TTL_WARN_MICROS: i64 = 86_400 * 1_000_000;
-
-fn validate_token(token: &TokenYamlConfig) -> Result<(), ConfigError> {
-    if let Some(issuer) = &token.issuer {
-        if issuer.is_empty() {
-            return Err(invalid("token.issuer", "must not be empty"));
-        }
-    }
-    if let Some(ttl) = &token.access_token_ttl {
-        let micros = parse_duration_to_micros(ttl)
-            .map_err(|e| invalid("token.access_token_ttl", format!("invalid duration: {e}")))?;
-        if micros > ACCESS_TOKEN_TTL_MAX_MICROS {
-            return Err(invalid(
-                "token.access_token_ttl",
-                "access token TTL must not exceed 1 hour (HEA-SEC-27); \
-                 long-lived access tokens significantly widen the stolen-token window",
-            ));
-        }
-        if micros > ACCESS_TOKEN_TTL_WARN_MICROS {
-            tracing::warn!(
-                field = "token.access_token_ttl",
-                "access token TTL exceeds 15 minutes; consider reducing it to limit \
-                 the window for stolen tokens (HEA-SEC-27)"
-            );
-        }
-    }
-    if let Some(ttl) = &token.refresh_token_ttl {
-        let micros = parse_duration_to_micros(ttl)
-            .map_err(|e| invalid("token.refresh_token_ttl", format!("invalid duration: {e}")))?;
-        if micros > REFRESH_TOKEN_TTL_MAX_MICROS {
-            return Err(invalid(
-                "token.refresh_token_ttl",
-                "refresh token TTL must not exceed 30 days (HEA-SEC-27)",
-            ));
-        }
-        if micros > REFRESH_TOKEN_TTL_WARN_MICROS {
-            tracing::warn!(
-                field = "token.refresh_token_ttl",
-                "refresh token TTL exceeds 24 hours; consider reducing it or enabling \
-                 refresh token rotation to limit the stolen-token blast radius (HEA-SEC-27)"
-            );
-        }
-    }
-    // The rotation grace period was applied through a silent `if let Ok(..)`
-    // at startup: a malformed value fell back to the 24h default, and a
-    // negative value wrapped through an `as u64` cast into an effectively
-    // infinite window (audit 2026-08-28 §4.15#2). Validate it here so a bad
-    // value fails boot and names the key.
-    if let Some(grace) = &token.signing_key_rotation_grace_period {
-        let micros = parse_duration_to_micros(grace).map_err(|e| {
-            invalid(
-                "token.signing_key_rotation_grace_period",
-                format!("invalid duration: {e}"),
-            )
-        })?;
-        if micros < 0 {
-            return Err(invalid(
-                "token.signing_key_rotation_grace_period",
-                "signing-key rotation grace period must not be negative; \
-                 a negative window is applied as an effectively infinite grace \
-                 (audit 2026-08-28 §4.15#2)",
-            ));
-        }
-        if micros > REFRESH_TOKEN_TTL_MAX_MICROS {
-            return Err(invalid(
-                "token.signing_key_rotation_grace_period",
-                "signing-key rotation grace period must not exceed 30 days; \
-                 the retired key stays trusted for the whole window",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_email(email: &EmailConfig) -> Result<(), ConfigError> {
-    match email.transport {
-        EmailTransport::Log => return Ok(()),
-        EmailTransport::Smtp => validate_email_smtp(email)?,
-        EmailTransport::Sendgrid => validate_email_sendgrid(email)?,
-        EmailTransport::Postmark => validate_email_postmark(email)?,
-        EmailTransport::Mailgun => validate_email_mailgun(email)?,
-        EmailTransport::Mailtrap => validate_email_mailtrap(email)?,
-        EmailTransport::Mailcatcher => return Ok(()),
-    }
-    Ok(())
-}
-
-fn validate_email_smtp(email: &EmailConfig) -> Result<(), ConfigError> {
-    let smtp = email.smtp.as_ref().ok_or_else(|| {
-        invalid(
-            "email.smtp",
-            "smtp block is required when email.transport is smtp",
-        )
-    })?;
-
-    validate_from_address(email)?;
-
-    match (&smtp.username, &smtp.password) {
-        (Some(u), _) if u.is_empty() => {
-            return Err(invalid("email.smtp.username", "must not be empty"));
-        }
-        (Some(_), None) => {
-            return Err(invalid(
-                "email.smtp.password",
-                "password is required when username is set",
-            ));
-        }
-        (None, Some(_)) => {
-            return Err(invalid(
-                "email.smtp.username",
-                "username is required when password is set",
-            ));
-        }
-        _ => {}
-    }
-
-    if smtp.host.is_empty() {
-        return Err(invalid("email.smtp.host", "must not be empty"));
-    }
-    if smtp.port == 0 {
-        return Err(invalid("email.smtp.port", "must be between 1 and 65535"));
-    }
-    Ok(())
-}
-
-fn validate_email_sendgrid(email: &EmailConfig) -> Result<(), ConfigError> {
-    let sg = email.sendgrid.as_ref().ok_or_else(|| {
-        invalid(
-            "email.sendgrid",
-            "sendgrid block is required when email.transport is sendgrid",
-        )
-    })?;
-    validate_from_address(email)?;
-    if sg.api_key.is_empty() {
-        return Err(invalid("email.sendgrid.api_key", "must not be empty"));
-    }
-    Ok(())
-}
-
-fn validate_email_postmark(email: &EmailConfig) -> Result<(), ConfigError> {
-    let pm = email.postmark.as_ref().ok_or_else(|| {
-        invalid(
-            "email.postmark",
-            "postmark block is required when email.transport is postmark",
-        )
-    })?;
-    validate_from_address(email)?;
-    if pm.server_token.is_empty() {
-        return Err(invalid("email.postmark.server_token", "must not be empty"));
-    }
-    Ok(())
-}
-
-fn validate_email_mailgun(email: &EmailConfig) -> Result<(), ConfigError> {
-    let mg = email.mailgun.as_ref().ok_or_else(|| {
-        invalid(
-            "email.mailgun",
-            "mailgun block is required when email.transport is mailgun",
-        )
-    })?;
-    validate_from_address(email)?;
-    if mg.api_key.is_empty() {
-        return Err(invalid("email.mailgun.api_key", "must not be empty"));
-    }
-    if mg.domain.is_empty() {
-        return Err(invalid("email.mailgun.domain", "must not be empty"));
-    }
-    Ok(())
-}
-
-fn validate_email_mailtrap(email: &EmailConfig) -> Result<(), ConfigError> {
-    let mt = email.mailtrap.as_ref().ok_or_else(|| {
-        invalid(
-            "email.mailtrap",
-            "mailtrap block is required when email.transport is mailtrap",
-        )
-    })?;
-    validate_from_address(email)?;
-    if mt.api_key.is_empty() {
-        return Err(invalid("email.mailtrap.api_key", "must not be empty"));
-    }
-    Ok(())
-}
 
 fn validate_sms(sms: &SmsConfig) -> Result<(), ConfigError> {
     match sms.transport {
@@ -1653,25 +1024,6 @@ fn validate_sms_all(sms: &SmsConfig, issues: &mut Vec<ValidationIssue>) {
         }
         Err(_) => {}
     }
-}
-
-fn validate_from_address(email: &EmailConfig) -> Result<(), ConfigError> {
-    let from = email.from.as_ref().ok_or_else(|| {
-        invalid(
-            "email.from",
-            format!(
-                "from address is required when email.transport is {:?}",
-                email.transport
-            ),
-        )
-    })?;
-    from.parse::<lettre::message::Mailbox>().map_err(|e| {
-        invalid(
-            "email.from",
-            format!("could not parse as an RFC 5322 mailbox: {e}"),
-        )
-    })?;
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1782,11 +1134,54 @@ fn validate_token_all(token: &TokenYamlConfig, issues: &mut Vec<ValidationIssue>
             Ok(_) => {}
         }
     }
+    // The rotation grace period was applied through a silent `if let Ok(..)`
+    // at startup: a malformed value fell back to the 24h default, and a
+    // negative value wrapped through an `as u64` cast into an effectively
+    // infinite window (audit §4.15#2).
+    //
+    // This rule used to live only in the short-circuiting `validate_token`, so
+    // `hearth config validate` — and the admin config editor, which writes
+    // `hearth.yaml` — reported "✓ Configuration valid" for a grace period of
+    // `-1h` that `serve` refuses to boot with (audit §4.13#8). Every rule
+    // belongs in the `_all` variant now; `Config::validate` reads its first
+    // issue.
+    if let Some(grace) = &token.signing_key_rotation_grace_period {
+        match parse_duration_to_micros(grace) {
+            Err(e) => issues.push(ValidationIssue {
+                field: "token.signing_key_rotation_grace_period".to_string(),
+                reason: format!("invalid duration: {e}"),
+            }),
+            Ok(micros) if micros < 0 => issues.push(ValidationIssue {
+                field: "token.signing_key_rotation_grace_period".to_string(),
+                reason: "signing-key rotation grace period must not be negative; \
+                         a negative window is applied as an effectively infinite grace \
+                         (audit 2026-08-28 §4.15#2)"
+                    .to_string(),
+            }),
+            Ok(micros) if micros > REFRESH_TOKEN_TTL_MAX_MICROS => issues.push(ValidationIssue {
+                field: "token.signing_key_rotation_grace_period".to_string(),
+                reason: "signing-key rotation grace period must not exceed 30 days; \
+                         the retired key stays trusted for the whole window"
+                    .to_string(),
+            }),
+            Ok(_) => {}
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 fn validate_email_all(email: &EmailConfig, issues: &mut Vec<ValidationIssue>) {
-    if matches!(email.transport, EmailTransport::Log) {
+    // `log` discards the message and `mailcatcher` is the in-process dev
+    // inbox at `/dev/mail`; neither puts a message on the wire, and neither
+    // required a from address before the short-circuiting and all-collecting
+    // validators were unified (task 20.9). Unifying them must not make the
+    // rules STRICTER than the server enforced, or `hearth config validate`
+    // refuses a config that boots — the same divergence in the other
+    // direction. The shipped dev examples set no from address.
+    if matches!(
+        email.transport,
+        EmailTransport::Log | EmailTransport::Mailcatcher
+    ) {
         return;
     }
 
@@ -1822,6 +1217,31 @@ fn validate_email_all(email: &EmailConfig, issues: &mut Vec<ValidationIssue>) {
                         field: "email.smtp.port".to_string(),
                         reason: "must be between 1 and 65535".to_string(),
                     });
+                }
+                // SMTP credentials come as a pair. Half a pair is always a
+                // mistake, and it fails at the first send rather than at boot.
+                // These three rules predate the all-collecting validator and
+                // must survive it.
+                match (&smtp.username, &smtp.password) {
+                    (Some(u), _) if u.is_empty() => {
+                        issues.push(ValidationIssue {
+                            field: "email.smtp.username".to_string(),
+                            reason: "must not be empty".to_string(),
+                        });
+                    }
+                    (Some(_), None) => {
+                        issues.push(ValidationIssue {
+                            field: "email.smtp.password".to_string(),
+                            reason: "password is required when username is set".to_string(),
+                        });
+                    }
+                    (None, Some(_)) => {
+                        issues.push(ValidationIssue {
+                            field: "email.smtp.username".to_string(),
+                            reason: "username is required when password is set".to_string(),
+                        });
+                    }
+                    _ => {}
                 }
             } else {
                 issues.push(ValidationIssue {
@@ -2127,7 +1547,12 @@ fn validate_realm_applications_all(
 ) {
     let Some(realms) = realms else { return };
     for (realm_name, cfg) in realms {
-        let Some(apps) = &cfg.applications else {
+        // `oauth_clients` is the documented alias for `applications`. This
+        // all-collecting validator only ever looked at `applications`, so
+        // `hearth config validate` and the admin config editor reported a clean
+        // bill of health for a client declaring the ROPC `password` grant under
+        // `oauth_clients` — which `serve` refuses (audit §4.13#8).
+        let Some(apps) = cfg.oauth_clients.as_ref().or(cfg.applications.as_ref()) else {
             continue;
         };
         for (app_key, app) in apps {
@@ -2152,19 +1577,57 @@ fn validate_realm_applications_all(
                     }
                 }
             }
+            // A confidential client whose `client_secret` is present but empty
+            // authenticates with `Authorization: Basic base64("<client_id>:")`,
+            // which any caller who knows the client id can send. The `is_none()`
+            // check upstream is satisfied by `Some("")`, so the empty string
+            // slipped through as a credential (audit 2026-08-28 §4.13#4). An
+            // unset `${VAR}` reaches this same state, and is refused earlier by
+            // the substitution guard; this arm closes the literal case.
+            if app.confidential == Some(true) {
+                if let Some(secret) = &app.client_secret {
+                    if secret.trim().is_empty() {
+                        issues.push(ValidationIssue {
+                            field: format!("{prefix}.client_secret"),
+                            reason: "must not be empty on a confidential client. An empty \
+                                     secret is accepted by `client_secret_basic` as \
+                                     `Basic base64(\"<client_id>:\")`, so anyone who knows \
+                                     the client id can authenticate as it. Set a real \
+                                     secret, or set `confidential: false`."
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+            // A redirect URI is only meaningful for a browser-redirect grant.
+            // A `client_credentials`-only (machine-to-machine) client has
+            // nowhere to redirect to, and the short-circuiting validator the
+            // server ran never demanded one — only this all-collecting twin
+            // did, so `hearth config validate` and the admin config editor
+            // refused a config `serve` accepts (audit §4.13#8, the same
+            // divergence in the other direction).
+            let needs_redirect_uri = app.grant_types.as_ref().is_none_or(|gts| {
+                gts.iter()
+                    .any(|gt| gt == "authorization_code" || gt == "implicit")
+            });
             match &app.redirect_uris {
-                None => {
+                None if needs_redirect_uri => {
                     issues.push(ValidationIssue {
                         field: format!("{prefix}.redirect_uris"),
-                        reason: "at least one redirect URI is required".to_string(),
+                        reason: "at least one redirect URI is required for a client that uses \
+                                 the authorization_code grant"
+                            .to_string(),
                     });
                 }
-                Some(uris) if uris.is_empty() => {
+                Some(uris) if uris.is_empty() && needs_redirect_uri => {
                     issues.push(ValidationIssue {
                         field: format!("{prefix}.redirect_uris"),
-                        reason: "at least one redirect URI is required".to_string(),
+                        reason: "at least one redirect URI is required for a client that uses \
+                                 the authorization_code grant"
+                            .to_string(),
                     });
                 }
+                None => {}
                 Some(uris) => {
                     for uri in uris {
                         if uri.is_empty() {
@@ -2243,6 +1706,42 @@ fn validate_realm_organizations_all(
 
 #[cfg(test)]
 mod tests {
+
+    /// Test-only shims for the short-circuiting validators that were removed
+    /// when `Config::validate` became a thin wrapper over `validate_all`
+    /// (audit §4.13#8). The rules now live only in the `_all` variants; these
+    /// keep the existing unit tests exercising them through the same
+    /// `Result`-shaped surface they were written against.
+    fn validate_oidc(oidc: &OidcYamlConfig, dev_mode: bool) -> Result<(), ConfigError> {
+        let mut issues = Vec::new();
+        super::validate_oidc_all(oidc, dev_mode, &mut issues);
+        first_error(issues)
+    }
+
+    fn validate_token(token: &TokenYamlConfig) -> Result<(), ConfigError> {
+        let mut issues = Vec::new();
+        super::validate_token_all(token, &mut issues);
+        first_error(issues)
+    }
+
+    fn validate_realm_auth_configs(
+        realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+        sms: &SmsConfig,
+    ) -> Result<(), ConfigError> {
+        let mut issues = Vec::new();
+        super::validate_realm_auth_configs_all(realms, sms, &mut issues);
+        first_error(issues)
+    }
+
+    fn first_error(issues: Vec<ValidationIssue>) -> Result<(), ConfigError> {
+        match issues.into_iter().next() {
+            Some(i) => Err(ConfigError::ValidationError {
+                field: i.field,
+                reason: i.reason,
+            }),
+            None => Ok(()),
+        }
+    }
     use super::*;
     use crate::config::types::{
         PasswordSecurityYaml, PepperYaml, RealmAuthYaml, RealmYamlConfig, SmsConfig, SmsTransport,
@@ -2339,7 +1838,10 @@ mod tests {
         .expect("write config");
         let config = Config::from_file_as_dev(f.path()).expect("dev config loads");
         assert!(config.dev_mode);
-        assert!(!config.storage.fsync, "dev mode disables fsync");
+        assert!(
+            !config.storage.fsync_enabled(true),
+            "dev mode defaults fsync off"
+        );
         assert_eq!(
             config.storage.data_dir, "/tmp/hea1805-regression",
             "configured data_dir must be preserved in dev mode"
@@ -3119,6 +2621,12 @@ server:
   trust_forwarded_proto: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
 realms:
   myrealm:
     oauth_clients:
@@ -3150,6 +2658,12 @@ server:
   trust_forwarded_proto: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
 realms:
   myrealm:
     applications:
@@ -3178,6 +2692,12 @@ server:
   trust_forwarded_proto: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
 realms:
   acme:
     saml_service_providers:
@@ -3205,6 +2725,12 @@ server:
   trust_forwarded_proto: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
 realms:
   acme:
     saml_service_providers:
@@ -3226,6 +2752,12 @@ server:
   trust_forwarded_proto: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
 realms:
   acme:
     saml_service_providers:

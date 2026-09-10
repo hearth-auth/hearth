@@ -2,6 +2,94 @@
 
 use super::*;
 
+/// Minimal HTML-entity escape for text interpolated into a hand-built
+/// HTMX fragment (the surrounding templates are Askama and escape for
+/// themselves; these two fragments are not).
+fn html_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Mints a password-reset token for `email` in `realm` **and delivers it**.
+///
+/// The admin "send reset" actions used to mint a token, drop it on the floor
+/// and still report "Reset email sent" (audit 2026-08-28 §4.24#10). Every
+/// caller now goes through this helper, which returns `Err(reason)` when the
+/// link could not be delivered so the caller can say so instead of claiming
+/// success.
+///
+/// `reason` is operator-facing text only — it never carries the token.
+fn deliver_password_reset(
+    state: &WebState,
+    realm_id: &crate::core::RealmId,
+    email: &str,
+) -> Result<(), String> {
+    let Some(email_service) = state.email.as_ref() else {
+        return Err(
+            "No email transport is configured, so no reset link could be sent.".to_string(),
+        );
+    };
+
+    let realm = match state.identity.get_realm(realm_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err("Realm not found.".to_string()),
+        Err(e) => {
+            tracing::warn!(error = %e, "deliver_password_reset: realm lookup failed");
+            return Err("Could not load the realm.".to_string());
+        }
+    };
+
+    let token = match state.identity.request_password_reset(realm_id, email) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            // The address is not registered in this realm. The caller only
+            // ever passes an address it just read off a user record, so this
+            // is a genuine inconsistency, not enumeration resistance.
+            return Err("No account with that address exists in this realm.".to_string());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "deliver_password_reset: request_password_reset failed");
+            return Err(format!("Could not create a reset link: {e}"));
+        }
+    };
+
+    let base = state
+        .config
+        .as_ref()
+        .and_then(|c| c.onboarding.base_url.as_deref())
+        .map_or_else(
+            || state.fallback_base_url(),
+            |b| b.trim_end_matches('/').to_string(),
+        );
+    let reset_url = format!(
+        "{base}/ui/realms/{}/reset-password?token={token}",
+        form_urlencoded::byte_serialize(realm.name().as_bytes()).collect::<String>()
+    );
+
+    let branding = realm.config().email_branding.clone();
+    let stored = realm
+        .config()
+        .email_templates
+        .get("password_reset")
+        .cloned();
+    email_service
+        .send_password_reset_email(email, &reset_url, branding.as_ref(), stored.as_ref(), None)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "deliver_password_reset: transport rejected the message");
+            format!("The reset email could not be delivered: {e}")
+        })
+}
+
 // ---------------------------------------------------------------------------
 // User list
 // ---------------------------------------------------------------------------
@@ -806,7 +894,12 @@ pub async fn admin_user_detail(
 
     // Map flash query param to human-readable message
     let flash_message = params.flash.as_deref().map(|f| match f {
-        "reset_sent" => "Password reset email requested.".to_string(),
+        "reset_sent" => "Password reset email sent.".to_string(),
+        "reset_send_failed" => {
+            "Password reset email could NOT be sent — check the email transport configuration \
+             and the server log."
+                .to_string()
+        }
         "mfa_disabled" => "MFA has been disabled for this user.".to_string(),
         "session_revoked" => "Session revoked.".to_string(),
         "webauthn_revoked" => "WebAuthn credential revoked.".to_string(),
@@ -976,36 +1069,54 @@ pub async fn admin_user_send_reset(
     };
 
     let user_email = user.email().to_string();
-    match state
-        .identity
-        .request_password_reset(target.id(), &user_email)
-    {
-        Ok(Some(_token)) => {
+    // The action reports "Reset email sent" — so it must actually send one,
+    // and say so plainly when it cannot (audit 2026-08-28 §4.24#10).
+    let delivery = deliver_password_reset(&state, target.id(), &user_email);
+    match &delivery {
+        Ok(()) => {
             tracing::info!(user_id = %uid, admin = %session.user_email, "admin triggered password reset");
         }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "request_password_reset failed");
+        Err(reason) => {
+            tracing::warn!(user_id = %uid, reason = %reason, "admin password reset was not delivered");
         }
     }
 
     if htmx.0 {
-        // Return an inline success badge that swaps in place of the form.
-        let fragment = format!(
-            r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-success/[0.12] text-success-fg">
+        let fragment = match &delivery {
+            Ok(()) => format!(
+                r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-success/[0.12] text-success-fg">
               <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-              Reset email sent to {user_email}
-            </span>"#
-        );
+              Reset email sent to {}
+            </span>"#,
+                html_escape(&user_email)
+            ),
+            Err(reason) => format!(
+                r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-danger/[0.12] text-danger-fg">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              Reset email NOT sent — {}
+            </span>"#,
+                html_escape(reason)
+            ),
+        };
+        let status = if delivery.is_ok() {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        };
         return axum::response::Response::builder()
-            .status(axum::http::StatusCode::OK)
+            .status(status)
             .header("Content-Type", "text/html; charset=utf-8")
             .body(axum::body::Body::from(fragment))
             .unwrap_or_else(|_| super::handlers_common::server_error());
     }
 
+    let flash = if delivery.is_ok() {
+        "reset_sent"
+    } else {
+        "reset_send_failed"
+    };
     Redirect::to(&format!(
-        "/ui/admin/realms/{}/users/{user_id}?flash=reset_sent",
+        "/ui/admin/realms/{}/users/{user_id}?flash={flash}",
         target.0.name()
     ))
     .into_response()
@@ -2731,6 +2842,7 @@ pub struct BulkActionForm {
 }
 
 /// `POST /ui/admin/realms/{realm}/users/bulk-action`
+#[allow(clippy::too_many_lines)]
 pub async fn admin_users_bulk_action(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -2782,24 +2894,35 @@ pub async fn admin_users_bulk_action(
             .into_response()
         }
         "send_invite" => {
+            // Mint AND deliver. Reporting "invited" for a token that was
+            // dropped on the floor is the §4.24#10 defect.
+            let mut failed = 0usize;
             for uid in &user_ids {
                 match state.identity.get_user(target.id(), uid) {
                     Ok(Some(user)) => {
-                        if let Err(e) = state
-                            .identity
-                            .request_password_reset(target.id(), user.email())
+                        if let Err(reason) =
+                            deliver_password_reset(&state, target.id(), user.email())
                         {
-                            tracing::warn!(error = %e, user_id = %uid.as_uuid(), "bulk send_invite failed");
+                            failed += 1;
+                            tracing::warn!(reason = %reason, user_id = %uid.as_uuid(), "bulk send_invite failed");
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        failed += 1;
+                    }
                     Err(e) => {
+                        failed += 1;
                         tracing::warn!(error = %e, user_id = %uid.as_uuid(), "get_user for bulk invite failed");
                     }
                 }
             }
+            let flash = if failed == 0 {
+                "bulk_invited"
+            } else {
+                "bulk_invite_failed"
+            };
             Redirect::to(&format!(
-                "/ui/admin/realms/{realm_name}/users?flash=bulk_invited"
+                "/ui/admin/realms/{realm_name}/users?flash={flash}"
             ))
             .into_response()
         }

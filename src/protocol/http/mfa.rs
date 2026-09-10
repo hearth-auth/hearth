@@ -526,6 +526,57 @@ struct MagicLinkRequestBody {
     email: String,
 }
 
+/// Builds the browser redemption URL and mails it, off the request path.
+///
+/// The URL points at `/ui/realms/<realm>/magic-link`, the browser redemption
+/// route. SMTP latency is kept off the request path so a registered address
+/// is not distinguishable from an unknown one.
+fn deliver_magic_link(
+    state: &Arc<AppState>,
+    realm_id: &crate::core::RealmId,
+    realm_name: &str,
+    email: &str,
+    token: &str,
+) {
+    let Some(email_service) = state.email.clone() else {
+        tracing::warn!("magic_link: no email transport configured; the link cannot be delivered");
+        return;
+    };
+
+    let realm = state.identity.get_realm(realm_id).ok().flatten();
+    let branding = realm
+        .as_ref()
+        .and_then(|r| r.config().email_branding.clone());
+    let stored = realm
+        .as_ref()
+        .and_then(|r| r.config().email_templates.get("magic_link").cloned());
+
+    let url = format!(
+        "{}/ui/realms/{}/magic-link?token={}",
+        state.public_base_url,
+        form_urlencoded::byte_serialize(realm_name.as_bytes()).collect::<String>(),
+        form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>(),
+    );
+    let recipient = email.to_string();
+    let job = move || {
+        if let Err(e) = email_service.send_magic_link_email(
+            &recipient,
+            &url,
+            branding.as_ref(),
+            stored.as_ref(),
+            None,
+        ) {
+            tracing::warn!(error = %e, "magic_link: delivery failed");
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(job);
+        }
+        Err(_) => job(),
+    }
+}
+
 /// POST /v1/{realm}/auth/magic-link
 ///
 /// Requests a magic-link login email. Always returns 202 regardless of whether
@@ -562,7 +613,17 @@ async fn magic_link_request(
     }
 
     // Request magic link; ignore per-email RateLimited to prevent enumeration.
-    let _ = state.identity.request_magic_link(&realm_id, &body.email);
+    // The token used to be minted and dropped, so the flow could never
+    // complete (audit 2026-08-28 §4.24#6). Deliver it.
+    if let Ok(response) = state.identity.request_magic_link(&realm_id, &body.email) {
+        deliver_magic_link(
+            &state,
+            &realm_id,
+            &realm_name,
+            &body.email,
+            response.token(),
+        );
+    }
 
     (
         StatusCode::ACCEPTED,

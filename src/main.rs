@@ -986,6 +986,14 @@ async fn run_serve(
             };
         info!(path = %data_path.display(), "using data directory (dev mode)");
         let mut storage_config = StorageConfig::dev(data_path);
+        // `storage.fsync` is a real knob in dev mode: absent leaves
+        // `SyncMode::None` (fast local iteration), an explicit `true` gives the
+        // production group-commit path so a developer can reproduce a
+        // durability bug without editing code (audit §4.11#12).
+        if config.storage.fsync_enabled(true) {
+            storage_config.wal_config.sync_mode = hearth::storage::wal::SyncMode::EveryWrite;
+            info!("storage.fsync: true honoured in dev mode — WAL uses SyncMode::EveryWrite");
+        }
         // Dev mode otherwise uses the default 100k-entry hot tier. An explicit
         // `storage.hot_tier_capacity` lets a corpus-scale load profile size the
         // hot tier below the working set so cold/SST tier misses fire (HEA-1800).
@@ -1020,12 +1028,14 @@ async fn run_serve(
             cap
         });
 
-        if !config.storage.fsync {
-            tracing::warn!(
-                    "storage.fsync=false is ignored in production mode — WAL durability is non-negotiable; \
-                     use dev mode or a custom WalConfig if you need fsync disabled"
-                );
-        }
+        // `storage.fsync: false` outside dev mode is now a hard validation
+        // error (audit §4.11#12), so by the time we get here the knob can only
+        // resolve to `true`. The previous code warned and carried on, which is
+        // how the key stayed ignored in production for as long as it did.
+        debug_assert!(
+            config.storage.fsync_enabled(false),
+            "config validation must reject storage.fsync: false outside dev mode"
+        );
         let mut storage_config = StorageConfig::production(
             PathBuf::from(&config.storage.data_dir),
             config.storage.wal_max_size_bytes,
@@ -1554,6 +1564,7 @@ async fn run_serve(
         &config,
         identity_engine.as_ref(),
         rbac_engine.as_ref(),
+        audit_engine.as_ref(),
     ) {
         Ok(rotated) => rotated,
         Err(e) => {
@@ -1806,6 +1817,10 @@ async fn run_serve(
                                         device_codes = stats.device_codes_deleted,
                                         pending_tickets = stats.pending_tickets_deleted,
                                         grant_families = stats.grant_families_deleted,
+                                        saml_states = stats.saml_states_deleted,
+                                        saml_assertions = stats.saml_assertions_deleted,
+                                        revoked_jtis = stats.revoked_jtis_deleted,
+                                        session_family_rows = stats.session_family_rows_deleted,
                                         rate_trackers_pruned = stats.rate_trackers_pruned,
                                         errors = stats.errors,
                                         "cleanup: swept expired entities",
@@ -2169,10 +2184,12 @@ async fn run_serve(
     );
 
     // A-10: build the JWKS rate limiter from the operator-configured RPS limit.
-    // Dev mode disables the cap (u32::MAX) to keep local iteration and CLI
-    // integration tests deterministic; production retains the configured cap.
+    // Dev mode disables the cap to keep local iteration and CLI integration
+    // tests deterministic; production retains the configured cap. `disabled()`
+    // replaces the old `u32::MAX` stand-in, which existed only because `0`
+    // used to mean "deny everything" on this one limiter (audit §4.13#7).
     let jwks_rate_limiter = if config.dev_mode {
-        Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX))
+        Arc::new(JwksRateLimiter::disabled())
     } else {
         Arc::new(JwksRateLimiter::with_rps_limit(
             config.security.jwks_rps_limit,
@@ -2338,6 +2355,22 @@ async fn run_serve(
         info!("backup restore signature verification ENABLED (security.backup.verify_key)");
     }
 
+    // Externally-reachable origin for links Hearth emails to users (magic
+    // links, reset links). Falls back to the bind address when
+    // `onboarding.base_url` is unset.
+    let public_base_url = config.onboarding.base_url.clone().unwrap_or_else(|| {
+        let host = match config.server.bind_address.as_str() {
+            "0.0.0.0" | "::" | "[::]" => "localhost",
+            h => h,
+        };
+        let scheme = if config.server.tls_cert_path.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        format!("{scheme}://{host}:{}", config.server.port)
+    });
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -2361,7 +2394,9 @@ async fn run_serve(
             // without manually setting every capability flag.
             .with_agent_identity(true)
             .with_agent_approval(true)
-            .with_agent_advanced(true),
+            .with_agent_advanced(true)
+            .with_email(Some(Arc::clone(&email_service)))
+            .with_public_base_url(public_base_url.clone()),
         )
     } else {
         Arc::new(
@@ -2383,7 +2418,9 @@ async fn run_serve(
             .with_backup_verify_key(backup_verify_key)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
-            .with_agent_advanced(config.agent_auth.capabilities.advanced),
+            .with_agent_advanced(config.agent_auth.capabilities.advanced)
+            .with_email(Some(Arc::clone(&email_service)))
+            .with_public_base_url(public_base_url.clone()),
         )
     };
 
@@ -2619,6 +2656,31 @@ async fn run_serve(
             }
         }
     }
+
+    // 22.5 / 22.12 — install the operational and HTTP/2 limits before either
+    // listener binds. Both `serve_router_on` and `serve_tls_router` read these,
+    // so a knob cannot land on one listener and miss the other. Before this,
+    // `operational.request_timeout_secs`, `operational.max_connections` and
+    // `operational.queue_depth` were parsed and validated but read by nothing
+    // (audit §4.4#3), and the HTTP/2 rapid-reset caps were compiled-in
+    // constants applied on the TLS accept loop only (§4.12#20).
+    if !http::limits::init_server_limits(http::limits::ServerLimits {
+        request_timeout: Duration::from_secs(config.operational.request_timeout_secs),
+        max_connections: config.operational.max_connections,
+        queue_depth: config.operational.queue_depth,
+        http2_max_concurrent_streams: config.security.http2.max_concurrent_streams,
+        http2_max_pending_reset_streams: config.security.http2.max_pending_reset_streams,
+    }) {
+        warn!("server limits were already installed; the first installation stands");
+    }
+    info!(
+        request_timeout_secs = config.operational.request_timeout_secs,
+        max_connections = config.operational.max_connections,
+        queue_depth = config.operational.queue_depth,
+        http2_max_concurrent_streams = config.security.http2.max_concurrent_streams,
+        http2_max_pending_reset_streams = config.security.http2.max_pending_reset_streams,
+        "operational + HTTP/2 limits installed"
+    );
 
     let mut app_router = http::router(Arc::clone(&app_state)).merge(web::router(web_state));
     if let Some(mc_state) = &mailcatcher_state {
@@ -4396,16 +4458,35 @@ fn mime_for_logo(path: &std::path::Path) -> &'static str {
 /// pass. Callers on a failure path can print the `Err` verbatim; a clean `Ok`
 /// tells them the config itself was not the problem.
 ///
-/// `force_dev` applies the same relaxations `--dev` does (`dev_mode`, no
-/// `fsync`) so the report matches the rules the caller was validated under.
+/// `force_dev` applies the same relaxation `--dev` does (`dev_mode`) so the
+/// report matches the rules the caller was validated under.
+///
+/// Audit §4.13#8: this is the validator behind `hearth config validate` *and*
+/// behind the admin visual config editor, which is a raw JSON→YAML passthrough
+/// that writes `hearth.yaml`. It runs `Config::validate_all`, which
+/// `Config::validate` now delegates to, so it can no longer bless a config the
+/// server refuses to start with. The one remaining gate it must apply itself is
+/// the `dev_mode:`-in-a-file refusal, which lives in the checked loader
+/// (`from_yaml_str`) rather than in either validator.
 fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<Config, String> {
+    if !force_dev {
+        match std::fs::read_to_string(file) {
+            Ok(raw) if hearth::config::validate::yaml_declares_dev_mode(&raw) => {
+                return Err(
+                    "✗ Configuration invalid — 1 error(s):\n\n  dev_mode: cannot be set in a \
+                     config file; use `hearth serve --dev` instead\n"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
     let mut config = match Config::from_file_unchecked(file) {
         Ok(c) => c,
         Err(e) => return Err(format!("✗ Configuration invalid\n\n  parse error: {e}\n")),
     };
     if force_dev {
         config.dev_mode = true;
-        config.storage.fsync = false;
     }
 
     // Collect all structural issues in one pass.

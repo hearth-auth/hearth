@@ -38,6 +38,7 @@ pub mod tokens;
 pub mod tool_permissions;
 pub(crate) mod totp;
 mod types;
+pub mod user_code;
 mod validation;
 pub(crate) mod webauthn;
 
@@ -1852,6 +1853,12 @@ pub trait IdentityEngine: Send + Sync {
     fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError>;
 
     /// Persists a SAML state bag (SP-initiated login; 10-minute TTL).
+    ///
+    /// The `saml:state:` key space is written by an unauthenticated GET, so
+    /// implementations MUST bound it: reclaim expired bags and refuse with
+    /// [`IdentityError::RateLimited`] once the realm holds
+    /// [`federation::saml::SAML_STATE_MAX_PER_REALM`] live bags
+    /// (audit 2026-08-28 §4.10#9).
     fn put_saml_state(&self, bag: &federation::saml::SamlStateBag) -> Result<(), IdentityError>;
 
     /// Retrieves and deletes a SAML state bag (single-use).
@@ -1863,11 +1870,17 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Marks an assertion ID consumed for this IdP (replay guard).
     /// Returns `SamlReplay` if the ID has already been seen.
+    ///
+    /// `expires_at_secs` is the Unix-seconds instant past which the guarded
+    /// assertion can no longer validate (its `NotOnOrAfter` plus the SP clock
+    /// skew). The sentinel is reclaimable from then on, which is what keeps
+    /// the `saml:asn:` key space bounded (audit 2026-08-28 §4.10#9).
     fn mark_saml_assertion_consumed(
         &self,
         realm_id: &RealmId,
         idp_id: &crate::core::IdpId,
         assertion_id: &str,
+        expires_at_secs: i64,
     ) -> Result<(), IdentityError>;
 
     /// Records that the IdP issued an assertion to an SP for a user session.

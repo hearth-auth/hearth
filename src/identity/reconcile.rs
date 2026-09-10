@@ -1770,6 +1770,9 @@ pub fn save_snapshot(
 ///
 /// Returns `Err` on storage I/O failures from data-action handlers.
 /// Returns a list of realm names whose `rotate_signing_key` flag was consumed.
+///
+/// `audit` receives one event per config-driven signing-key rotation, matching
+/// what the HTTP rotation route records (audit 2026-08-28 §4.14#9).
 /// The caller should clear those flags in the config snapshot before saving so
 /// subsequent restarts with the flag still in YAML do not re-rotate.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
@@ -1778,6 +1781,7 @@ pub fn apply_diff(
     config: &Config,
     engine: &dyn IdentityEngine,
     rbac: &dyn RbacEngine,
+    audit: &dyn crate::audit::AuditEngine,
 ) -> Result<Vec<String>, IdentityError> {
     let mut consumed_rotations: Vec<String> = Vec::new();
     for diff in diffs {
@@ -1900,7 +1904,7 @@ pub fn apply_diff(
             // ── Signing key rotation ──────────────────────────────────────────
             ConfigDiff::RealmSigningKeyRotationRequested { realm } => {
                 info!(realm, "config diff: signing key rotation requested");
-                match apply_signing_key_rotation(config, engine, realm) {
+                match apply_signing_key_rotation(config, engine, audit, realm) {
                     Ok(()) => {
                         consumed_rotations.push(realm.clone());
                     }
@@ -1914,14 +1918,96 @@ pub fn apply_diff(
     Ok(consumed_rotations)
 }
 
-/// Looks up a realm by name and rotates its Ed25519 signing key.
+/// Compiled-in default refresh-token lifetime, in seconds (7 days).
+///
+/// Mirrors `TokenConfig::default().refresh_token_ttl`; kept here so
+/// [`config_refresh_ttl_secs`] can answer for a config that leaves the key
+/// unset.
+const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 7 * 86_400;
+
+/// Parses a duration string into whole seconds, discarding a malformed value.
+fn duration_secs(raw: Option<&str>) -> Option<u64> {
+    let micros = crate::config::parse_duration_to_micros(raw?).ok()?;
+    u64::try_from(micros / 1_000_000).ok()
+}
+
+/// Returns the longest refresh-token lifetime this config can issue, in
+/// seconds — the maximum of `token.refresh_token_ttl` and every
+/// `realms.<name>.auth.token.refresh_token_ttl` override.
+///
+/// A signing-key rotation that retires the old key sooner than this cuts off
+/// refresh tokens that are still inside their own validity window (audit
+/// 2026-08-28 §4.15#3).
+#[must_use]
+pub fn config_refresh_ttl_secs(config: &Config) -> u64 {
+    let global = duration_secs(config.token.refresh_token_ttl.as_deref())
+        .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS);
+    config
+        .realms
+        .as_ref()
+        .map(|realms| {
+            realms
+                .values()
+                .filter_map(|r| {
+                    duration_secs(
+                        r.auth
+                            .as_ref()
+                            .and_then(|a| a.token.as_ref())
+                            .and_then(|t| t.refresh_token_ttl.as_deref()),
+                    )
+                })
+                .fold(global, u64::max)
+        })
+        .unwrap_or(global)
+}
+
+/// Returns the grace window, in seconds, that a **config-driven** rotation
+/// (`rotate_signing_key: true` on a realm) gives the outgoing key.
+///
+/// An explicit `token.signing_key_rotation_grace_period` is honoured verbatim
+/// — an operator who names a window owns the consequence. When the key is
+/// absent the default is the longest refresh-token lifetime the config can
+/// issue rather than a fixed 24 hours, so a *planned* rotation does not
+/// silently invalidate refresh tokens that still have days left to run.
+///
+/// This does not touch `POST /admin/realms/{id}/rotate-signing-key`, whose
+/// default is still `0` — a revoking rotation, the remedy for a leaked key
+/// (audit 2026-08-28 B9).
+#[must_use]
+pub fn config_rotation_grace_secs(config: &Config) -> u64 {
+    let refresh_ttl = config_refresh_ttl_secs(config);
+    match duration_secs(config.token.signing_key_rotation_grace_period.as_deref()) {
+        Some(explicit) => {
+            if explicit < refresh_ttl {
+                warn!(
+                    grace_period_secs = explicit,
+                    refresh_token_ttl_secs = refresh_ttl,
+                    "token.signing_key_rotation_grace_period is shorter than the longest \
+                     refresh-token lifetime; a config-driven rotation will invalidate \
+                     refresh tokens that have not yet reached their own exp"
+                );
+            }
+            explicit
+        }
+        None => refresh_ttl,
+    }
+}
+
+/// Looks up a realm by name, rotates its Ed25519 signing key, and records the
+/// rotation in the realm's audit log.
 ///
 /// Returns `Ok(())` on success. The caller is responsible for recording the
 /// consumed realm name so the snapshot's `rotate_signing_key` flag can be
 /// cleared before it is saved.
+///
+/// The audit event mirrors the one the HTTP rotation route writes, with
+/// [`Actor::System`](crate::audit::Actor) in place of an admin user: without it
+/// a config-driven re-key left no trace in the log at all (audit 2026-08-28
+/// §4.14#9).
 fn apply_signing_key_rotation(
     config: &Config,
     engine: &dyn IdentityEngine,
+    audit: &dyn crate::audit::AuditEngine,
     realm_name: &str,
 ) -> Result<(), IdentityError> {
     let realm = match engine.get_realm_by_name(realm_name) {
@@ -1935,14 +2021,25 @@ fn apply_signing_key_rotation(
         }
         Err(e) => return Err(e),
     };
-    let grace_period_secs = config
-        .token
-        .signing_key_rotation_grace_period
-        .as_deref()
-        .and_then(|s| crate::config::parse_duration_to_micros(s).ok())
-        .map(|micros| (micros / 1_000_000) as u64)
-        .unwrap_or(86_400); // default: 24 hours
-    engine.rotate_realm_signing_key(realm.id(), grace_period_secs)
+    let grace_period_secs = config_rotation_grace_secs(config);
+    engine.rotate_realm_signing_key(realm.id(), grace_period_secs)?;
+
+    if let Err(e) = audit.append(&crate::audit::CreateAuditEvent {
+        realm_id: realm.id().clone(),
+        actor: "system".to_string(),
+        action: crate::audit::AuditAction::RealmUpdated,
+        resource_type: "realm".to_string(),
+        resource_id: realm.id().as_uuid().to_string(),
+        metadata: Some(serde_json::json!({
+            "action": "rotate_signing_key",
+            "grace_period_secs": grace_period_secs,
+            "source": "config",
+        })),
+    }) {
+        // The key is already rotated; a failed audit write must not undo it.
+        warn!(realm = realm_name, error = %e, "config-driven signing key rotation: audit append failed");
+    }
+    Ok(())
 }
 
 /// Looks up a realm by name and reconciles its organization set from config.

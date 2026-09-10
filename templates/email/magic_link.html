@@ -1,0 +1,10 @@
+{% extends "email/base.html" %}
+{% block title %}Sign in to {{ product_name }}{% endblock %}
+{% block content %}
+<p>Click the button below to sign in. No password required.</p>
+<div class="btn-wrapper">
+  <a href="{{ magic_link_url }}" class="btn">Sign In</a>
+</div>
+<p class="url-fallback">If the button doesn't work, copy and paste this URL into your browser:<br>{{ magic_link_url }}</p>
+<p>This link expires in 15 minutes and can be used once. If you didn't ask to sign in, you can safely ignore this message — nobody gains access to your account.</p>
+{% endblock %}

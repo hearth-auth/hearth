@@ -306,6 +306,7 @@ use crate::rbac::error::RbacError;
 use crate::rbac::registry::{classify_scope_string, ScopeKind};
 use crate::storage::StorageEngine;
 
+mod advisory_lock;
 pub(super) mod approval;
 pub(super) mod oauth;
 mod sharded_cache;
@@ -520,6 +521,18 @@ pub struct EmbeddedIdentityEngine {
     /// credential, we verify against this dummy hash so the response time
     /// is indistinguishable from a real failed verification.
     dummy_hash: String,
+    /// Per-realm dummy hashes, keyed by realm.
+    ///
+    /// A realm that tunes `password_memory_cost` or `password_time_cost` makes
+    /// its real verifications cost more than the engine-wide dummy, so an
+    /// absent account answered measurably faster than a present one — measured
+    /// at +88 ms (audit 2026-08-28 §4.17#4). The dummy must cost what that
+    /// realm's real credentials cost.
+    ///
+    /// Cached because computing the dummy is itself an Argon2 hash: computing
+    /// one per attempt would make the absent-account arm cost *twice* a real
+    /// verification, replacing the oracle with its mirror image.
+    dummy_hashes: Mutex<std::collections::HashMap<RealmId, String>>,
     /// Default Ed25519 signing key for JWT token issuance (Phase 0 compat).
     signing_key: Arc<SigningKey>,
     /// Per-realm Ed25519 signing keys, lazily loaded from storage.
@@ -576,21 +589,6 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard is always released inside a scoped block before any I/O or storage call.
     realm_saml_keys: Mutex<HashMap<String, Arc<crate::identity::tokens::RsaSigningKey>>>,
-    /// Server-wide RSA-2048 signing key advertised at `/certs` for RS256
-    /// (HEA-51 / OIDC M1, HEA-1655).
-    ///
-    /// Lazily initialized on first JWKS access — RSA keygen is slow
-    /// (~0.5-1s), so we don't pay that cost in tests that never touch
-    /// `/certs` or in startup paths that don't need OIDC. The key is
-    /// persisted under `sys:oidc:rsa:key` in the system realm so the `kid`
-    /// survives restarts (HEA-1655).
-    oidc_rsa_key: std::sync::OnceLock<Arc<crate::identity::tokens::RsaSigningKey>>,
-    /// Server-wide ECDSA P-256 signing key advertised at `/certs` for
-    /// ES256 (HEA-51 / OIDC M1).
-    ///
-    /// Lazily initialized on first JWKS access. EC keygen is fast but we
-    /// follow the same OnceLock pattern as `oidc_rsa_key` for symmetry.
-    oidc_ecdsa_key: std::sync::OnceLock<Arc<crate::identity::tokens::EcdsaSigningKey>>,
     /// Per-user failed attempt trackers for rate limiting.
     ///
     /// Key is `(RealmId, UserId)` serialized as a string to avoid
@@ -1179,6 +1177,10 @@ impl EmbeddedIdentityEngine {
     ) -> Result<Self, IdentityError> {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let kek = config.key_encryption_key.as_ref().map(|k| k.as_bytes());
+        // Must run before any signing key is read: it converts the legacy
+        // plaintext rows a pre-KEK boot left behind, after which the read
+        // paths refuse unenveloped material (audit 2026-08-28 §4.15#7).
+        Self::enroll_store_in_key_encryption(&storage, kek)?;
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage, kek)?);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let sv_store = Arc::new(SessionVersionStore::new(
@@ -1192,6 +1194,7 @@ impl EmbeddedIdentityEngine {
             rbac,
             audit,
             dummy_hash,
+            dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
@@ -1199,8 +1202,6 @@ impl EmbeddedIdentityEngine {
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
-            oidc_rsa_key: std::sync::OnceLock::new(),
-            oidc_ecdsa_key: std::sync::OnceLock::new(),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             attempt_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1258,6 +1259,7 @@ impl EmbeddedIdentityEngine {
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
             ),
         };
+        engine.purge_legacy_oidc_rsa_keys();
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
         engine.populate_realm_status_cache()?;
@@ -1753,6 +1755,7 @@ impl EmbeddedIdentityEngine {
             rbac,
             audit,
             dummy_hash,
+            dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
@@ -1760,8 +1763,6 @@ impl EmbeddedIdentityEngine {
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
-            oidc_rsa_key: std::sync::OnceLock::new(),
-            oidc_ecdsa_key: std::sync::OnceLock::new(),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             attempt_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1822,6 +1823,7 @@ impl EmbeddedIdentityEngine {
         // Best-effort: log but do not propagate initialization errors so
         // existing test harnesses that pre-seed storage don't break on a
         // duplicate-realm error. `new()` propagates; this constructor does not.
+        engine.purge_legacy_oidc_rsa_keys();
         if let Err(e) = engine.seed_system_realm_if_absent() {
             tracing::warn!(error = %e, "with_signing_key: seed_system_realm_if_absent failed");
         }
@@ -1939,6 +1941,90 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Brings every signing key already in the store under the HKEY envelope
+    /// the first time a KEK-configured process opens it, then marks the store
+    /// enrolled.
+    ///
+    /// Before this, switching `security.key_encryption_key` on for an existing
+    /// data directory encrypted only what was written *afterwards*: every key
+    /// already on disk stayed in plaintext until somebody happened to rotate
+    /// it, and the read path accepted unenveloped material forever (audit
+    /// 2026-08-28 §4.15#7). The marker is what lets the read path switch to
+    /// [`unwrap_key_strict`](crate::identity::key_encryption::unwrap_key_strict)
+    /// afterwards: once every key has been through the envelope, an
+    /// unenveloped one is corruption or a downgrade, not a legacy row.
+    ///
+    /// Covers the three signing-key families — `sys:global:key`,
+    /// `realm:key:*` and `realm:retiring:*` — all of which live under the
+    /// system realm, so the sweep is one bounded scan and does not walk
+    /// tenant data.
+    ///
+    /// Runs before `Self` exists, hence the `&Arc<dyn StorageEngine>`
+    /// argument. A no-op when no KEK is configured or the store is already
+    /// enrolled.
+    fn enroll_store_in_key_encryption(
+        storage: &Arc<dyn StorageEngine>,
+        kek: Option<&[u8; 32]>,
+    ) -> Result<(), IdentityError> {
+        let Some(kek) = kek else { return Ok(()) };
+        let sys_realm = keys::system_realm_id();
+        let marker = keys::encode_kek_enrollment_marker();
+        let already = storage
+            .get(&sys_realm, &marker)
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        let mut rewrapped = 0_usize;
+        // Re-wrap the single global key, then each prefix family.
+        let global = keys::encode_global_signing_key();
+        if let Some(raw) = storage
+            .get(&sys_realm, &global)
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?
+        {
+            if !crate::identity::key_encryption::is_enveloped(&raw) {
+                let wrapped = crate::identity::key_encryption::wrap_key(&raw, Some(kek))?;
+                storage
+                    .put(&sys_realm, &global, &wrapped)
+                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+                rewrapped += 1;
+            }
+        }
+
+        for prefix in [
+            keys::realm_signing_key_scan_prefix(),
+            keys::realm_retiring_key_all_scan_prefix(),
+        ] {
+            let end = keys::prefix_end(&prefix);
+            let entries = storage
+                .scan(&sys_realm, &prefix, &end)
+                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+            for entry in entries {
+                if crate::identity::key_encryption::is_enveloped(&entry.value) {
+                    continue;
+                }
+                let wrapped = crate::identity::key_encryption::wrap_key(&entry.value, Some(kek))?;
+                storage
+                    .put(&sys_realm, &entry.key, &wrapped)
+                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+                rewrapped += 1;
+            }
+        }
+
+        // Written last: a crash mid-sweep leaves the marker absent, so the
+        // next start redoes the sweep rather than switching to strict reads
+        // over a half-migrated store.
+        storage
+            .put(&sys_realm, &marker, &[1_u8])
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        tracing::info!(
+            rewrapped,
+            "key_encryption_key enrolled: every stored signing key is now HKEY-enveloped"
+        );
+        Ok(())
+    }
+
     /// Loads the server-wide global signing key from storage, or generates and
     /// persists a new one on first startup.
     ///
@@ -1960,7 +2046,7 @@ impl EmbeddedIdentityEngine {
             .get(&sys_realm, &storage_key)
             .map_err(|e| IdentityError::Storage(Box::new(e)))?
         {
-            let key_bytes = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
+            let key_bytes = crate::identity::key_encryption::unwrap_key_strict(&raw, kek)?;
             return SigningKey::from_pkcs8(&key_bytes);
         }
 
@@ -2974,6 +3060,41 @@ impl EmbeddedIdentityEngine {
         Ok(cfg)
     }
 
+    /// Returns the timing-defence dummy hash used when no real credential is
+    /// available for `realm_id`.
+    ///
+    /// Built from the realm's effective Argon2id settings, so verifying against
+    /// it costs what verifying that realm's real credentials costs. Falls back
+    /// to the engine-wide dummy when the realm record cannot be read, which is
+    /// the same cost as the untuned case.
+    pub(crate) fn dummy_hash_for_realm(&self, realm_id: &RealmId) -> String {
+        #[allow(clippy::expect_used)]
+        // INVARIANT: the cache mutex guards a HashMap only; nothing it calls
+        // can panic while the lock is held, so it cannot be poisoned.
+        let mut cache = self
+            .dummy_hashes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(hash) = cache.get(realm_id) {
+            return hash.clone();
+        }
+        let hash = match self.credential_config_for_realm(realm_id) {
+            Ok(cfg) => credentials::compute_dummy_hash(&cfg),
+            Err(_) => self.dummy_hash.clone(),
+        };
+        cache.insert(realm_id.clone(), hash.clone());
+        hash
+    }
+
+    /// Performs one password verification against the realm's dummy hash.
+    ///
+    /// Used by every arm of a login that cannot verify a real credential, so
+    /// that all of them do the same work before answering.
+    fn dummy_verify_for_realm(&self, realm_id: &RealmId, password: &CleartextPassword) {
+        let dummy = self.dummy_hash_for_realm(realm_id);
+        let _ = credentials::verify_hash(password, &dummy);
+    }
+
     /// Serializes a session to binary bytes (postcard via [`SessionStorageRecord`]).
     fn serialize_session(session: &Session) -> Result<Vec<u8>, IdentityError> {
         crate::codec::encode(&session.to_storage_record())
@@ -3455,31 +3576,15 @@ impl EmbeddedIdentityEngine {
         Ok(TokenPair::new(new_access, new_refresh))
     }
 
-    /// Unambiguous alphabet for device user codes (RFC 8628).
-    ///
-    /// Excludes I/1, O/0, L to avoid confusion. 28 characters.
-    const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKMNPQRSTVWXYZ23456789";
-
-    /// User code length (8 characters).
-    const USER_CODE_LENGTH: usize = 8;
-
     /// Generates a random user code for device authorization.
     ///
-    /// Uses an unambiguous alphabet to avoid visual confusion.
+    /// Delegates to [`crate::identity::user_code`], which draws from the
+    /// unambiguous RFC 8628 alphabet with rejection sampling. The previous
+    /// implementation here mapped a uniform byte with `byte % 28`; because
+    /// `256 = 9 * 28 + 4` that gave the first four symbols a tenth pre-image
+    /// (audit 2026-08-28 §4.25#4, task 22.26).
     fn generate_user_code(rng: &ring::rand::SystemRandom) -> Result<String, IdentityError> {
-        let mut bytes = [0u8; Self::USER_CODE_LENGTH];
-        rng.fill(&mut bytes)
-            .map_err(|_| IdentityError::SigningError {
-                reason: "random generation failed".to_string(),
-            })?;
-        let code: String = bytes
-            .iter()
-            .map(|b| {
-                let idx = (*b as usize) % Self::USER_CODE_ALPHABET.len();
-                Self::USER_CODE_ALPHABET[idx] as char
-            })
-            .collect();
-        Ok(code)
+        crate::identity::user_code::generate_user_code_with(rng)
     }
 
     /// Computes the PKCE S256 code challenge from a code verifier.
@@ -3898,6 +4003,9 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         token: &str,
     ) -> Result<(TokenClaims, bool), IdentityError> {
+        // Same reason as `realm_jwks`: without this a second node keeps
+        // *trusting* a key the operator revoked on the first (§4.15#6).
+        self.sync_realm_key_epoch(realm_id);
         let realm_key = self.get_or_load_realm_signing_key(realm_id)?;
         match tokens::verify_token_signature(token, realm_key.public_key_bytes()) {
             Ok(claims) => Ok((claims, false)),
@@ -3959,7 +4067,8 @@ impl EmbeddedIdentityEngine {
                 let Some(deadline_secs) = keys::parse_retiring_key_deadline(&entry.key) else {
                     continue;
                 };
-                let Ok(plaintext) = crate::identity::key_encryption::unwrap_key(&entry.value, kek)
+                let Ok(plaintext) =
+                    crate::identity::key_encryption::unwrap_key_strict(&entry.value, kek)
                 else {
                     continue;
                 };
@@ -4094,6 +4203,67 @@ impl EmbeddedIdentityEngine {
     ///
     /// Checks the in-memory cache first, then loads from storage on cache miss.
     /// Returns `RealmNotFound` if no per-realm key exists.
+    /// Reads the realm's persisted rotation epoch, in seconds-free `u64` form.
+    ///
+    /// Returns `0` for a realm that has never been rotated, matching the
+    /// in-memory default so the two are directly comparable.
+    fn read_persisted_key_epoch(&self, realm_id: &RealmId) -> u64 {
+        let sys_realm = keys::system_realm_id();
+        let epoch_key = keys::encode_realm_key_epoch(realm_id);
+        match self.storage.get(&sys_realm, &epoch_key) {
+            Ok(Some(bytes)) => <[u8; 8]>::try_from(bytes.as_slice())
+                .map(u64::from_le_bytes)
+                .unwrap_or(0),
+            Ok(None) => 0,
+            Err(err) => {
+                tracing::warn!(
+                    realm = %realm_id.as_uuid(),
+                    error = %err,
+                    "could not read the realm signing-key epoch; \
+                     keeping the cached key for this call"
+                );
+                // Fail *soft* deliberately: a transient storage error must not
+                // take down token validation. The next call re-reads.
+                self.realm_key_epoch.get(realm_id).unwrap_or(0)
+            }
+        }
+    }
+
+    /// Reconciles this process's signing-key caches with the epoch recorded in
+    /// storage, evicting them when another node has rotated the realm's key.
+    ///
+    /// `realm_signing_keys`, `realm_retiring_keys` and the token-claims cache
+    /// are process-local. `rotate_realm_signing_key` clears them on the node it
+    /// runs on and nowhere else, so a second node kept publishing the retired
+    /// `kid` in its JWKS and kept accepting tokens signed with it — including
+    /// after a revoking rotation, the remedy for a leaked key (audit 2026-08-28
+    /// §4.15#6).
+    ///
+    /// The epoch is an ordinary storage row under the system realm, so it
+    /// replicates through Raft with the key material itself; every node
+    /// therefore observes the bump without any new transport. Routing it
+    /// through storage rather than a `StorageEngine` trait default matters:
+    /// `serve` always installs a `ClusterStorageAdapter`, and a default method
+    /// would silently no-op in production.
+    fn sync_realm_key_epoch(&self, realm_id: &RealmId) {
+        let persisted = self.read_persisted_key_epoch(realm_id);
+        let local = self.realm_key_epoch.get(realm_id).unwrap_or(0);
+        if persisted <= local {
+            return;
+        }
+        // Bump first so a concurrent cache-miss fill that snapshots the epoch
+        // discards its stale insert, exactly as the local rotation path does.
+        self.realm_key_epoch.insert(realm_id.clone(), persisted);
+        self.realm_signing_keys.remove(realm_id);
+        self.realm_retiring_keys.remove(realm_id);
+        self.flush_token_claims_cache();
+        tracing::info!(
+            realm = %realm_id.as_uuid(),
+            epoch = persisted,
+            "signing key rotated on another node; local key caches invalidated"
+        );
+    }
+
     fn get_or_load_realm_signing_key(
         &self,
         realm_id: &RealmId,
@@ -4122,7 +4292,7 @@ impl EmbeddedIdentityEngine {
             .key_encryption_key
             .as_ref()
             .map(|k| k.as_bytes());
-        let key_bytes = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
+        let key_bytes = crate::identity::key_encryption::unwrap_key_strict(&raw, kek)?;
 
         let signing_key = Arc::new(SigningKey::from_pkcs8(&key_bytes)?);
 
@@ -4478,15 +4648,12 @@ impl EmbeddedIdentityEngine {
     /// Callers hold this lock across the get → check-used → mark-used sequence
     /// to prevent two concurrent requests for the same token from both passing
     /// the `used` check before either writes back.
-    fn token_redemption_lock(&self, token_hash: &str) -> Arc<Mutex<()>> {
-        let mut map = self
-            .token_redemption_locks
-            .lock()
-            .expect("token_redemption_locks poisoned");
-        Arc::clone(
-            map.entry(token_hash.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
+    ///
+    /// The returned handle reclaims its map entry when the last holder drops
+    /// it, so the map cannot grow with the number of distinct tokens ever
+    /// presented (audit 2026-08-28 §4.3#4).
+    fn token_redemption_lock(&self, token_hash: &str) -> advisory_lock::AdvisoryLock<'_> {
+        advisory_lock::AdvisoryLock::acquire(&self.token_redemption_locks, token_hash)
     }
 
     /// Returns the per-code-hash advisory lock for authorization code single-use enforcement.
@@ -4494,15 +4661,12 @@ impl EmbeddedIdentityEngine {
     /// Callers hold this lock across the entire get → validate → delete →
     /// issue-tokens sequence to prevent two concurrent requests for the same
     /// code from both loading it before either deletes it (TOCTOU / OAUTH-06).
-    fn code_exchange_lock(&self, code_hash: &str) -> Arc<Mutex<()>> {
-        let mut map = self
-            .code_exchange_locks
-            .lock()
-            .expect("code_exchange_locks poisoned");
-        Arc::clone(
-            map.entry(code_hash.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
+    ///
+    /// The returned handle reclaims its map entry when the last holder drops
+    /// it, so the map cannot grow with the number of distinct codes ever
+    /// presented (audit 2026-08-28 §4.3#4).
+    fn code_exchange_lock(&self, code_hash: &str) -> advisory_lock::AdvisoryLock<'_> {
+        advisory_lock::AdvisoryLock::acquire(&self.code_exchange_locks, code_hash)
     }
 
     /// Returns the per-`(realm_id, fid)` advisory lock serializing grant-family
@@ -4793,6 +4957,21 @@ impl EmbeddedIdentityEngine {
             cascade_work_done = true;
             storage
                 .delete(&sys_realm, &key_storage_key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 4b. Delete the rotation-epoch counter that goes with the key. It is
+        //     not secret, but leaving it behind would hand a realm re-created
+        //     under the same UUID an epoch from its predecessor.
+        let epoch_storage_key = keys::encode_realm_key_epoch(realm_id);
+        if storage
+            .get(&sys_realm, &epoch_storage_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            cascade_work_done = true;
+            storage
+                .delete(&sys_realm, &epoch_storage_key)
                 .map_err(Self::storage_err)?;
         }
 
@@ -5943,6 +6122,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn realm_jwks(&self, realm_id: &RealmId) -> Result<JwksDocument, IdentityError> {
+        // A rotation performed on another node must stop this one publishing
+        // the retired kid (audit 2026-08-28 §4.15#6).
+        self.sync_realm_key_epoch(realm_id);
         let active_key = self.get_or_load_realm_signing_key(realm_id)?;
         let mut jwks = active_key.to_jwks();
 
@@ -6215,11 +6397,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // key sees the change and discards its stale insert instead of
         // resurrecting it past the `remove()` below (HEA-2096). Serialised by
         // `realm_ops_lock`, so the read-then-write bump cannot lose an update.
+        //
+        // The epoch is also *persisted*, so it replicates with the key
+        // material and every other node can tell that its own cached key is
+        // stale. Read the stored value rather than the local one: on a node
+        // that has never rotated this realm the local counter is 0 and would
+        // hand back an epoch another node has already used (§4.15#6).
         let next_epoch = self
-            .realm_key_epoch
-            .get(realm_id)
-            .unwrap_or(0)
+            .read_persisted_key_epoch(realm_id)
+            .max(self.realm_key_epoch.get(realm_id).unwrap_or(0))
             .wrapping_add(1);
+        self.storage
+            .put(
+                &sys_realm,
+                &keys::encode_realm_key_epoch(realm_id),
+                &next_epoch.to_le_bytes(),
+            )
+            .map_err(Self::storage_err)?;
         self.realm_key_epoch.insert(realm_id.clone(), next_epoch);
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
@@ -6611,8 +6805,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Enforce realm policy: password must be in the allowed_auth_methods list.
         self.check_allowed_auth_method(realm_id, "password")?;
 
-        // Rate limit check: reject early if account is locked out
-        self.check_rate_limit(realm_id, user_id)?;
+        // Lockout is decided AFTER the equal work below, not before it. A
+        // locked account is by definition an account that EXISTS, and the old
+        // early return answered roughly 12 ms faster than a nonexistent one,
+        // which turned the lockout control into an account-existence oracle
+        // (audit 2026-08-28 §4.17#5). The real credential is still never
+        // verified while locked — the dummy stands in for it, at the same cost.
+        if let Err(locked) = self.check_rate_limit(realm_id, user_id) {
+            self.dummy_verify_for_realm(realm_id, password);
+            return Err(locked);
+        }
 
         // Check user exists
         let user = self.get_user(realm_id, user_id)?;
@@ -6620,7 +6822,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // Timing defense: verify against dummy hash so timing is
             // indistinguishable from a real failed verification.
             // Return generic error to prevent user enumeration.
-            let _ = credentials::verify_hash(password, &self.dummy_hash);
+            self.dummy_verify_for_realm(realm_id, password);
             let count = self.record_failed_attempt(realm_id, user_id);
             self.emit_login_failed_audit(realm_id, user_id, count);
             return Err(IdentityError::InvalidCredential {
@@ -6638,7 +6840,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let Some(cred_bytes) = cred_bytes else {
             // Timing defense: same as above.
             // Return generic error to prevent credential enumeration.
-            let _ = credentials::verify_hash(password, &self.dummy_hash);
+            self.dummy_verify_for_realm(realm_id, password);
             let count = self.record_failed_attempt(realm_id, user_id);
             self.emit_login_failed_audit(realm_id, user_id, count);
             return Err(IdentityError::InvalidCredential {
@@ -6908,7 +7110,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             };
 
         // Generate session
-        let session_id = SessionId::generate();
+        //
+        // 22.27 (audit 2026-08-28 §4.25#5): the session ID is an unguessable
+        // handle, so it is drawn with a full 128 bits rather than
+        // `SessionId::generate()`'s UUID v4, which reserves the version nibble
+        // and the variant bits and carries only 122. It is still a `Uuid`, so
+        // storage keys, cookie encoding, and the wire shape are unchanged.
+        let session_id = SessionId::new(crate::core::random_secret_uuid());
         let now = self.clock.now();
         let expires_at = now.add_micros(self.config.session.ttl_micros);
         let session = Session::new(
@@ -7763,9 +7971,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         dpop_jkt: Option<&str>,
         bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError> {
-        // Verify Ed25519 signature against realm key (with global-key fallback
-        // for Phase 0 realms). Rejects forged/tampered tokens at the crypto
-        // layer before any claim or session inspection.
+        // Verify the Ed25519 signature against the realm's own key (and any
+        // in-grace retiring key). There is no global-key fallback — a realm
+        // with no key of its own fails closed. Rejects forged/tampered tokens
+        // at the crypto layer before any claim or session inspection.
         let claims = self.verify_token_signature_for_realm(realm_id, refresh_token)?;
 
         // Must be a refresh token
@@ -7862,24 +8071,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn jwks(&self) -> JwksDocument {
+        // Ed25519 only. Hearth signs every token it issues with EdDSA, and
+        // `id_token_signing_alg_values_supported` advertises exactly that.
+        //
+        // This document used to carry two more entries. An RSA-2048 `RS256`
+        // key Hearth never signs with, and an EC P-256 `ES256` key whose
+        // private half was regenerated on every process start — so a relying
+        // party that selected the ES256 entry cached a public key (under
+        // `max-age=3600`) whose private half no longer existed. Publishing a
+        // key invites verification against it; ARCHITECTURE.md §8.1 permits
+        // RS256/ES256 (MAY) but never required advertising keys that sign
+        // nothing (audit 2026-08-28 §4.2#4, §4.15#5).
         let mut keys = vec![self.signing_key.to_jwk()];
-        // RS256 + ES256 advertised for ecosystem compatibility per
-        // ARCHITECTURE.md §8.1 and HEA-51 OIDC M1. Persisted in storage so
-        // the `kid` survives restarts (HEA-1655). Failures here would only
-        // fire if `ring` entropy collection or storage I/O failed; we log and
-        // serve a partial JWKS rather than 500 the endpoint.
-        match self.oidc_rsa_jwk() {
-            Ok(jwk) => keys.push(jwk),
-            Err(err) => tracing::error!(error = %err, "failed to materialize RS256 JWKS entry"),
-        }
-        // Include retiring OIDC RSA keys that are still within their grace
-        // window so tokens signed before an explicit rotation remain
-        // verifiable (HEA-1655).
-        keys.extend(self.oidc_rsa_retiring_jwks());
-        match self.oidc_ecdsa_jwk() {
-            Ok(jwk) => keys.push(jwk),
-            Err(err) => tracing::error!(error = %err, "failed to materialize ES256 JWKS entry"),
-        }
         // Since HEA-1712, issue_tokens_with_context signs with per-realm keys.
         // The bootstrap / session tokens for the system realm carry the
         // system-realm kid, which the global JWKS must include so clients
@@ -8538,6 +8741,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let challenge = webauthn::generate_challenge()?;
         let pending = PendingWebAuthnChallenge {
             challenge: challenge.clone(),
+            realm_id: realm_id.clone(),
             rp_id: options.rp_id.clone(),
             user_id: Some(user_id.clone()),
             ceremony_type: CeremonyType::Registration,
@@ -8574,11 +8778,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: "missing challenge in clientDataJSON".to_string(),
             })?;
 
+        // SECURITY (audit 2026-08-28 §4.18#8): the challenge store is
+        // process-global. Redemption must prove the challenge was minted by
+        // *this* realm for *this* ceremony — otherwise a challenge issued to
+        // one tenant enrols a credential in another, and a login challenge
+        // enrols a passkey.
         let pending = self
             .webauthn_challenges
-            .remove(challenge_b64)
-            .ok_or_else(|| IdentityError::WebAuthnRegistrationFailed {
-                reason: "challenge not found or expired".to_string(),
+            .redeem(challenge_b64, realm_id, CeremonyType::Registration)
+            .map_err(|e| IdentityError::WebAuthnRegistrationFailed {
+                reason: e.reason().to_string(),
             })?;
 
         // Check expiry
@@ -8680,6 +8889,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let challenge = webauthn::generate_challenge()?;
         let pending = PendingWebAuthnChallenge {
             challenge: challenge.clone(),
+            realm_id: realm_id.clone(),
             rp_id: options.rp_id.clone(),
             user_id: user_id.cloned(),
             ceremony_type: CeremonyType::Authentication,
@@ -8716,11 +8926,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: "missing challenge in clientDataJSON".to_string(),
             })?;
 
+        // SECURITY (audit 2026-08-28 §4.18#8): bind the redemption to the
+        // realm and the ceremony that minted the challenge — see the matching
+        // comment in `complete_webauthn_registration`.
         let pending = self
             .webauthn_challenges
-            .remove(challenge_b64)
-            .ok_or_else(|| IdentityError::WebAuthnAuthenticationFailed {
-                reason: "challenge not found or expired".to_string(),
+            .redeem(challenge_b64, realm_id, CeremonyType::Authentication)
+            .map_err(|e| IdentityError::WebAuthnAuthenticationFailed {
+                reason: e.reason().to_string(),
             })?;
 
         // Check expiry
@@ -9207,6 +9420,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get(realm_id, &email_key)
             .map_err(Self::storage_err)?;
         if existing.is_some() {
+            // The response has to *cost* the same as the fresh arm, not just
+            // look the same. Skipping Argon2id here made a registered address
+            // return in a fraction of the time a fresh one takes — a timing
+            // oracle for account existence (audit 2026-08-28 §4.24#4). Hash
+            // and discard so both arms pay the same KDF bill.
+            let discarded = credentials::hash_password(
+                &request.password,
+                &self.config.credential,
+                self.clock.now().as_micros(),
+            );
+            drop(discarded);
             let fake = magic_link::generate_magic_link_token()?;
             return Ok(RegisterUserResponse {
                 user_id: UserId::generate(),
@@ -13593,6 +13817,36 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         bag: &crate::identity::federation::saml::SamlStateBag,
     ) -> Result<(), IdentityError> {
+        // 22.11 (audit 2026-08-28 §4.10#9): `GET …/federation/saml/begin` is
+        // unauthenticated, and before this every call leaked one permanent row
+        // unless the browser came back through the ACS. Reclaim what has aged
+        // out, then refuse once the realm is at its ceiling — the key space
+        // must not be an anonymous write amplifier. The purge keeps the scan
+        // bounded by the cap itself.
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let live = crate::identity::cleanup::sweep_saml_states(
+            &bag.realm_id,
+            self.storage.as_ref(),
+            now_secs,
+        )
+        .map(|_| ())
+        .and_then(|()| {
+            let prefix = keys::saml_state_scan_prefix();
+            let end = keys::prefix_end(&prefix);
+            self.storage
+                .scan(&bag.realm_id, &prefix, &end)
+                .map(|e| e.len())
+        })
+        .map_err(Self::storage_err)?;
+        if live >= crate::identity::federation::saml::SAML_STATE_MAX_PER_REALM {
+            tracing::warn!(
+                realm = %bag.realm_id,
+                live,
+                "SAML request-state capacity reached; refusing new SP-initiated login"
+            );
+            return Err(IdentityError::RateLimited);
+        }
+
         let key = keys::encode_saml_state_key(&bag.token);
         let bytes = serde_json::to_vec(bag).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
@@ -13620,9 +13874,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
-        // 10-minute TTL.
+        // TTL — the sweeper deletes anything older, this refuses a straggler.
         let age_secs = (self.clock.now().as_micros() - bag.created_at.as_micros()) / 1_000_000;
-        if age_secs > 600 {
+        if age_secs > crate::identity::federation::saml::SAML_STATE_TTL_SECS {
             return Err(IdentityError::FederationInvalidState);
         }
         Ok(bag)
@@ -13633,6 +13887,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         idp_id: &crate::core::IdpId,
         assertion_id: &str,
+        expires_at_secs: i64,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_saml_assertion_id(idp_id, assertion_id);
         if self
@@ -13643,8 +13898,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         {
             return Err(IdentityError::Saml(SamlError::Replay));
         }
+        // 22.11 (audit 2026-08-28 §4.10#9): the sentinel used to be an empty
+        // value with no expiry, so the `saml:asn:` key space grew by one row
+        // per successful login and never shrank. Record when the guarded
+        // assertion stops being replayable so the cleanup sweeper can reclaim
+        // it; the format matches the JAR/DPoP JTI sentinels.
         self.storage
-            .put(realm_id, &key, &[])
+            .put(realm_id, &key, &expires_at_secs.to_le_bytes())
             .map_err(Self::storage_err)
     }
 
@@ -15414,6 +15674,86 @@ mod tests {
         (dir, engine, clock)
     }
 
+    // ===== 22.2: per-code / per-token advisory-lock map reclamation =====
+
+    /// `code_exchange_locks` and `token_redemption_locks` are keyed by a value
+    /// an unauthenticated caller controls the cardinality of — one entry per
+    /// distinct authorization code and per distinct magic-link / reset token
+    /// ever presented, valid or not. Nothing ever removed an entry, so the maps
+    /// grew for the life of the process (audit 2026-08-28 §4.3#4).
+    ///
+    /// Reclamation is by refcount, not by capacity: the entry is dropped when
+    /// the last holder releases it, so a lock another task is already holding
+    /// (or is about to take, having cloned the handle under the map lock) is
+    /// never removed out from under it.
+    #[test]
+    fn advisory_lock_maps_do_not_grow_without_bound() {
+        let (_dir, engine, _clock) = setup_engine();
+
+        for i in 0..512 {
+            let code_hash = format!("code-hash-{i}");
+            let lock = engine.code_exchange_lock(&code_hash);
+            let _guard = lock.lock().expect("code lock");
+        }
+        for i in 0..512 {
+            let token_hash = format!("token-hash-{i}");
+            let lock = engine.token_redemption_lock(&token_hash);
+            let _guard = lock.lock().expect("token lock");
+        }
+
+        let codes = engine.code_exchange_locks.lock().expect("code map").len();
+        let tokens = engine
+            .token_redemption_locks
+            .lock()
+            .expect("token map")
+            .len();
+
+        assert_eq!(
+            codes, 0,
+            "every per-code advisory lock was released, so the map must be \
+             empty; it held {codes} entries — one per code ever presented"
+        );
+        assert_eq!(
+            tokens, 0,
+            "every per-token advisory lock was released, so the map must be \
+             empty; it held {tokens} entries — one per token ever presented"
+        );
+    }
+
+    /// The reclamation must not evict an entry a second holder still needs:
+    /// two handles to the same key must resolve to the *same* mutex, and the
+    /// entry must survive until both are dropped.
+    #[test]
+    fn advisory_lock_entry_survives_while_another_holder_exists() {
+        let (_dir, engine, _clock) = setup_engine();
+
+        let first = engine.code_exchange_lock("shared");
+        let second = engine.code_exchange_lock("shared");
+        assert!(
+            std::ptr::eq(first.mutex(), second.mutex()),
+            "two acquirers of the same code hash must serialize on one mutex"
+        );
+        assert_eq!(
+            engine.code_exchange_locks.lock().expect("map").len(),
+            1,
+            "the entry must still be present while two holders exist"
+        );
+
+        drop(first);
+        assert_eq!(
+            engine.code_exchange_locks.lock().expect("map").len(),
+            1,
+            "the entry must survive while the second holder is still alive"
+        );
+
+        drop(second);
+        assert_eq!(
+            engine.code_exchange_locks.lock().expect("map").len(),
+            0,
+            "the last holder dropping must reclaim the entry"
+        );
+    }
+
     // ===== HEA-2096: signing-key cache-miss vs. rotation race =====
 
     /// A one-shot rendezvous the [`GatedStorage`] decorator uses to park a
@@ -16520,6 +16860,244 @@ mod tests {
             .expect_err("should fail");
         // Returns generic InvalidCredential to prevent credential enumeration
         assert!(matches!(err, IdentityError::InvalidCredential { .. }));
+    }
+
+    // ===== 19.9 / 19.10: login timing must not depend on account state =====
+    //
+    // Audit 2026-08-28 §4.17#4 and §4.17#5 are the same oracle from two sides:
+    //
+    //   §4.17#4 — the absent-user dummy hash was built once from the ENGINE
+    //             base Argon2 config. A realm that tunes `password_memory_cost`
+    //             up hashed real credentials far more expensively than the
+    //             dummy, so "no such user" answered ~88 ms faster.
+    //   §4.17#5 — `check_rate_limit` returned RateLimited BEFORE any hashing,
+    //             so a locked (therefore EXISTING) account answered ~12 ms
+    //             faster than a nonexistent one.
+    //
+    // Both are asserted structurally, never by wall clock: the dummy hash must
+    // carry the realm's Argon2 parameters, and every arm must perform the same
+    // number of `verify_hash` calls before the outcome is decided.
+
+    /// Extracts `m=`, `t=` and `p=` from an Argon2 PHC string.
+    ///
+    /// Returns `(memory_cost_kib, time_cost, parallelism)`.
+    fn argon2_params_of(phc: &str) -> (u32, u32, u32) {
+        let params = phc.split('$').nth(3).expect("PHC params segment");
+        let mut memory_kib = 0;
+        let mut time_cost = 0;
+        let mut parallelism = 0;
+        for pair in params.split(',') {
+            let (name, raw) = pair.split_once('=').expect("k=v");
+            let value: u32 = raw.parse().expect("numeric param");
+            match name {
+                "m" => memory_kib = value,
+                "t" => time_cost = value,
+                "p" => parallelism = value,
+                _ => {}
+            }
+        }
+        (memory_kib, time_cost, parallelism)
+    }
+
+    fn realm_with_argon2(
+        engine: &EmbeddedIdentityEngine,
+        memory_cost: u32,
+        time_cost: u32,
+    ) -> RealmId {
+        engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("tuned-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    password_memory_cost: Some(memory_cost),
+                    password_time_cost: Some(time_cost),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone()
+    }
+
+    // ----- 19.9 -----
+
+    #[test]
+    fn dummy_hash_is_built_from_the_realms_argon2_parameters() {
+        let (_dir, engine, _clock) = setup_engine();
+        let tuned = realm_with_argon2(&engine, 2048, 3);
+
+        let dummy = engine.dummy_hash_for_realm(&tuned);
+        let (m, t, _p) = argon2_params_of(&dummy);
+        assert_eq!(
+            (m, t),
+            (2048, 3),
+            "the absent-user dummy hash must cost what the realm's real \
+             credentials cost, else a tuned realm leaks account existence by \
+             timing; got {dummy}"
+        );
+    }
+
+    #[test]
+    fn two_realms_with_different_argon2_get_different_dummy_hashes() {
+        let (_dir, engine, _clock) = setup_engine();
+        let cheap = realm_with_argon2(&engine, 1024, 1);
+        let dear = realm_with_argon2(&engine, 4096, 3);
+
+        assert_eq!(
+            argon2_params_of(&engine.dummy_hash_for_realm(&cheap)).0,
+            1024
+        );
+        assert_eq!(
+            argon2_params_of(&engine.dummy_hash_for_realm(&dear)).0,
+            4096
+        );
+    }
+
+    #[test]
+    fn untuned_realm_dummy_hash_matches_the_engine_base_config() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let base = CredentialConfig::fast_for_testing();
+
+        let (m, t, p) = argon2_params_of(&engine.dummy_hash_for_realm(&realm));
+        assert_eq!(
+            (m, t, p),
+            (base.memory_cost_kib, base.time_cost, base.parallelism),
+            "a realm with no Argon2 override must inherit the engine base config"
+        );
+    }
+
+    #[test]
+    fn absent_user_hashes_exactly_once_on_a_tuned_realm() {
+        // The per-realm dummy hash must be memoised: computing it inside the
+        // login path would double the work and re-open the oracle from the
+        // other direction.
+        let (_dir, engine, _clock) = setup_engine();
+        let tuned = realm_with_argon2(&engine, 1024, 1);
+        let pw = CleartextPassword::from_string("password12".to_string());
+
+        // Warm the cache the same way the first absent-user login would.
+        let _ = engine.verify_password(&tuned, &UserId::generate(), &pw);
+
+        let before = credentials::hash_verification_count();
+        let _ = engine.verify_password(&tuned, &UserId::generate(), &pw);
+        assert_eq!(
+            credentials::hash_verification_count() - before,
+            1,
+            "an absent-user login must perform exactly one hash verification"
+        );
+    }
+
+    // ----- 19.10 -----
+
+    #[test]
+    fn locked_account_still_performs_the_password_hash() {
+        let (_dir, engine, _clock) = setup_engine_with_rate_limit(3, 60_000_000);
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let pw = CleartextPassword::from_string("correct-pw12".to_string());
+        engine
+            .set_password(&realm, user.id(), &pw)
+            .expect("set password");
+
+        for i in 0..3 {
+            let wrong = CleartextPassword::from_string(format!("wrong-{i}"));
+            let _ = engine.verify_password(&realm, user.id(), &wrong);
+        }
+
+        let before = credentials::hash_verification_count();
+        let result = engine.verify_password(&realm, user.id(), &pw);
+        let hashes = credentials::hash_verification_count() - before;
+
+        assert!(
+            matches!(result, Err(IdentityError::RateLimited)),
+            "a locked account must still be refused, got: {result:?}"
+        );
+        assert_eq!(
+            hashes, 1,
+            "the lockout decision must be applied AFTER the hash, else a locked \
+             (therefore existing) account answers faster than a nonexistent one"
+        );
+    }
+
+    #[test]
+    fn locked_and_absent_accounts_do_the_same_hashing_work() {
+        let (_dir, engine, _clock) = setup_engine_with_rate_limit(3, 60_000_000);
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let pw = CleartextPassword::from_string("correct-pw12".to_string());
+        engine
+            .set_password(&realm, user.id(), &pw)
+            .expect("set password");
+        for i in 0..3 {
+            let wrong = CleartextPassword::from_string(format!("wrong-{i}"));
+            let _ = engine.verify_password(&realm, user.id(), &wrong);
+        }
+        // Warm the realm's dummy-hash cache.
+        let _ = engine.verify_password(&realm, &UserId::generate(), &pw);
+
+        let a = credentials::hash_verification_count();
+        let locked = engine.verify_password(&realm, user.id(), &pw);
+        let b = credentials::hash_verification_count();
+        let absent = engine.verify_password(&realm, &UserId::generate(), &pw);
+        let c = credentials::hash_verification_count();
+
+        assert!(matches!(locked, Err(IdentityError::RateLimited)));
+        assert!(matches!(
+            absent,
+            Err(IdentityError::InvalidCredential { .. })
+        ));
+        assert_eq!(
+            b - a,
+            c - b,
+            "locked-existing and absent accounts must hash the same number of times"
+        );
+    }
+
+    #[test]
+    fn locked_account_with_the_correct_password_never_reports_success() {
+        let (_dir, engine, _clock) = setup_engine_with_rate_limit(3, 60_000_000);
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let pw = CleartextPassword::from_string("correct-pw12".to_string());
+        engine
+            .set_password(&realm, user.id(), &pw)
+            .expect("set password");
+        for i in 0..3 {
+            let wrong = CleartextPassword::from_string(format!("wrong-{i}"));
+            let _ = engine.verify_password(&realm, user.id(), &wrong);
+        }
+
+        // Running the hash before the lockout decision must not leak the
+        // verdict, and must not clear the lockout either.
+        for _ in 0..2 {
+            let result = engine.verify_password(&realm, user.id(), &pw);
+            assert!(
+                matches!(result, Err(IdentityError::RateLimited)),
+                "a correct password on a locked account must stay RateLimited, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_with_no_credential_and_absent_user_hash_the_same_number_of_times() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let credless = create_test_user(&engine, &realm);
+        let pw = CleartextPassword::from_string("password12".to_string());
+        // Warm the dummy-hash cache.
+        let _ = engine.verify_password(&realm, &UserId::generate(), &pw);
+
+        let a = credentials::hash_verification_count();
+        let _ = engine.verify_password(&realm, credless.id(), &pw);
+        let b = credentials::hash_verification_count();
+        let _ = engine.verify_password(&realm, &UserId::generate(), &pw);
+        let c = credentials::hash_verification_count();
+
+        assert_eq!(
+            b - a,
+            c - b,
+            "no-credential and absent-user arms must match"
+        );
     }
 
     // ===== Credential Scenario 3: Password change =====
@@ -17733,6 +18311,98 @@ mod tests {
         .expect("engine creation")
         .with_hibp_transport(Arc::new(NeverPwnedStub));
         (dir, engine, clock)
+    }
+
+    // ----- 19.10 -----
+
+    /// Every arm of a failed login must perform the same number of password
+    /// hash verifications.
+    ///
+    /// This is asserted structurally, by counting hash invocations, rather than
+    /// by timing. A wall-clock assertion would be flaky, and `make test-quality`
+    /// bans `sleep` in tests. The count is the thing that actually causes the
+    /// timing difference, so counting it is the stronger check.
+    #[test]
+    fn locked_absent_and_wrong_password_logins_all_do_one_hash() {
+        let (_dir, engine, _clock) = setup_engine_with_rate_limit(3, 10_000_000);
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let pw = CleartextPassword::from_string("correct-pw12".to_string());
+        engine
+            .set_password(&realm, user.id(), &pw)
+            .expect("set password");
+
+        let attempt = CleartextPassword::from_string("wrong-pw-9999".to_string());
+
+        // Arm 1 — the account exists and the password is wrong.
+        let before = credentials::hash_verification_count();
+        let result = engine.verify_password(&realm, user.id(), &attempt);
+        assert!(matches!(result, Ok(false)), "got {result:?}");
+        let wrong_password = credentials::hash_verification_count() - before;
+
+        // Arm 2 — no such account.
+        let absent = UserId::new(uuid::Uuid::new_v4());
+        let before = credentials::hash_verification_count();
+        let result = engine.verify_password(&realm, &absent, &attempt);
+        assert!(
+            matches!(result, Err(IdentityError::InvalidCredential { .. })),
+            "got {result:?}"
+        );
+        let unknown_user = credentials::hash_verification_count() - before;
+
+        // Arm 3 — the account exists and is locked out. Two more failures take
+        // the user over the configured limit of three.
+        for _ in 0..2 {
+            let _ = engine.verify_password(&realm, user.id(), &attempt);
+        }
+        let before = credentials::hash_verification_count();
+        let result = engine.verify_password(&realm, user.id(), &attempt);
+        assert!(
+            matches!(result, Err(IdentityError::RateLimited)),
+            "the account must be locked by now; got {result:?}"
+        );
+        let locked_out = credentials::hash_verification_count() - before;
+
+        assert_eq!(
+            (wrong_password, unknown_user, locked_out),
+            (1, 1, 1),
+            "a wrong password, an unknown account and a locked account must \
+             each cost exactly one hash verification; a locked account that \
+             skipped the hash answered ~12 ms faster and so revealed that the \
+             account exists (audit 2026-08-28 §4.17#5)"
+        );
+    }
+
+    /// A locked account must never have its real credential checked.
+    ///
+    /// The equal-work fix must not turn the lockout into a free oracle for
+    /// password correctness: presenting the CORRECT password while locked must
+    /// still be refused, and must cost the same one hash as any other arm.
+    #[test]
+    fn a_locked_account_does_not_verify_the_real_credential() {
+        let (_dir, engine, _clock) = setup_engine_with_rate_limit(1, 10_000_000);
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let pw = CleartextPassword::from_string("correct-pw12".to_string());
+        engine
+            .set_password(&realm, user.id(), &pw)
+            .expect("set password");
+
+        let wrong = CleartextPassword::from_string("wrong-pw-9999".to_string());
+        let _ = engine.verify_password(&realm, user.id(), &wrong);
+
+        let correct = CleartextPassword::from_string("correct-pw12".to_string());
+        let before = credentials::hash_verification_count();
+        let result = engine.verify_password(&realm, user.id(), &correct);
+        assert!(
+            matches!(result, Err(IdentityError::RateLimited)),
+            "a locked account must be refused even with the right password; got {result:?}"
+        );
+        assert_eq!(
+            credentials::hash_verification_count() - before,
+            1,
+            "the locked arm must do one dummy verification, not zero and not two"
+        );
     }
 
     #[test]
@@ -22648,203 +23318,67 @@ mod tests {
         );
     }
 
-    // ===== HEA-1655: OIDC RSA key persistence + JWKS grace window =====
+    // ===== §4.2#4 / §4.15#5: the JWKS publishes only what Hearth signs with =====
+    //
+    // Replaces the HEA-1655 OIDC RSA persistence tests. That key family — a
+    // server-wide RSA-2048 keypair under `sys:oidc:rsa:key`, plus its retiring
+    // rows — existed only to fill the `RS256` entry in this document. Hearth
+    // never signed anything with it, it was the one key family written without
+    // the HKEY envelope (§4.15#4), and the sibling `ES256` key was regenerated
+    // on every process start. All three are gone; these tests hold the line.
 
     #[test]
-    fn oidc_rsa_kid_survives_engine_restart() {
-        // Rebuild the engine from the same storage path to simulate a restart.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
-
-        let make_engine = |cfg: StorageConfig, ts: i64| {
-            let storage =
-                Arc::new(EmbeddedStorageEngine::open(cfg).expect("open")) as Arc<dyn StorageEngine>;
-            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(ts))) as Arc<dyn Clock>;
-            let audit = Arc::new(EmbeddedAuditEngine::new(
-                Arc::clone(&storage),
-                Arc::clone(&clock),
-            ));
-            EmbeddedIdentityEngine::new(
-                storage,
-                clock,
-                IdentityConfig {
-                    credential: CredentialConfig::fast_for_testing(),
-                    ..IdentityConfig::default()
-                },
-                audit as Arc<dyn AuditEngine>,
-            )
-            .expect("engine")
-        };
-
-        // First engine: trigger RSA key generation + WAL persist via jwks().
-        let engine1 = make_engine(storage_cfg.clone(), 1_000_000);
-        let jwks1 = engine1.jwks();
-        let rsa_kid1 = jwks1
-            .keys
-            .iter()
-            .find(|k| k.kty == "RSA")
-            .map(|k| k.kid.clone())
-            .expect("RS256 key must appear in JWKS");
-        drop(engine1);
-
-        // Second engine from same storage — simulates a server restart.
-        let engine2 = make_engine(storage_cfg, 2_000_000);
-        let jwks2 = engine2.jwks();
-        let rsa_kid2 = jwks2
-            .keys
-            .iter()
-            .find(|k| k.kty == "RSA")
-            .map(|k| k.kid.clone())
-            .expect("RS256 key must appear in JWKS after restart");
-
-        assert_eq!(
-            rsa_kid1, rsa_kid2,
-            "OIDC RSA kid must be stable across restarts"
-        );
-    }
-
-    #[test]
-    fn oidc_rsa_retiring_key_in_jwks_during_grace() {
-        // Hold the storage Arc so we can write retiring keys directly (simulating
-        // what a future key-rotation call would do).
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage = Arc::new(
-            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
-                .expect("open"),
-        ) as Arc<dyn StorageEngine>;
-        let clock =
-            Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000))) as Arc<dyn Clock>;
-        let audit = Arc::new(EmbeddedAuditEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock),
-        ));
-        let engine = EmbeddedIdentityEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock),
-            IdentityConfig {
-                credential: CredentialConfig::fast_for_testing(),
-                ..IdentityConfig::default()
-            },
-            audit as Arc<dyn AuditEngine>,
-        )
-        .expect("engine");
-
-        // Trigger RSA key generation + storage.
-        let jwks_before = engine.jwks();
-        let current_rsa_kid = jwks_before
-            .keys
-            .iter()
-            .find(|k| k.kty == "RSA")
-            .map(|k| k.kid.clone())
-            .expect("RS256 key in initial JWKS");
-
-        // Generate a separate "previous" RSA key and write it as a retiring
-        // entry with a future deadline (simulating a recent rotation).
-        let retiring_key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)
-            .expect("gen retiring key");
-        let retiring_kid = retiring_key.key_id().to_string();
-        assert_ne!(
-            retiring_kid, current_rsa_kid,
-            "retiring and current kids must differ"
-        );
-
-        let sys = crate::identity::keys::system_realm_id();
-        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
-        let deadline_secs = now_secs + 86_400; // 24 h from now
-        let storage_key =
-            crate::identity::keys::encode_oidc_rsa_retiring_key(deadline_secs, &retiring_kid);
-
-        // JSON envelope matches the StoredRsaKey format in engine/oauth.rs.
-        #[derive(serde::Serialize)]
-        struct Stored<'a> {
-            pkcs8: &'a [u8],
-            cert: &'a [u8],
-        }
-        let body = serde_json::to_vec(&Stored {
-            pkcs8: retiring_key.pkcs8_bytes(),
-            cert: retiring_key.cert_der(),
-        })
-        .expect("serialize retiring key");
-        storage
-            .put(&sys, &storage_key, &body)
-            .expect("write retiring key");
-
-        // JWKS must now contain both the current kid and the retiring kid.
-        let jwks_after = engine.jwks();
-        let rsa_kids: Vec<&str> = jwks_after
-            .keys
-            .iter()
-            .filter(|k| k.kty == "RSA")
-            .map(|k| k.kid.as_str())
-            .collect();
-        assert!(
-            rsa_kids.contains(&current_rsa_kid.as_str()),
-            "current kid must appear in JWKS; got {rsa_kids:?}"
-        );
-        assert!(
-            rsa_kids.contains(&retiring_kid.as_str()),
-            "retiring kid must appear in JWKS during grace; got {rsa_kids:?}"
-        );
-    }
-
-    #[test]
-    fn oidc_rsa_expired_retiring_key_omitted_from_jwks() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage = Arc::new(
-            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
-                .expect("open"),
-        ) as Arc<dyn StorageEngine>;
-        let clock =
-            Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000))) as Arc<dyn Clock>;
-        let audit = Arc::new(EmbeddedAuditEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock),
-        ));
-        let engine = EmbeddedIdentityEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock),
-            IdentityConfig {
-                credential: CredentialConfig::fast_for_testing(),
-                ..IdentityConfig::default()
-            },
-            audit as Arc<dyn AuditEngine>,
-        )
-        .expect("engine");
-
-        engine.jwks(); // Trigger RSA key persistence.
-
-        // Write an already-expired retiring key (deadline in the past).
-        let expired_key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)
-            .expect("gen expired key");
-        let expired_kid = expired_key.key_id().to_string();
-        let sys = crate::identity::keys::system_realm_id();
-        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
-        let deadline_past = now_secs.saturating_sub(1); // already expired
-        let storage_key =
-            crate::identity::keys::encode_oidc_rsa_retiring_key(deadline_past, &expired_kid);
-        #[derive(serde::Serialize)]
-        struct Stored<'a> {
-            pkcs8: &'a [u8],
-            cert: &'a [u8],
-        }
-        let body = serde_json::to_vec(&Stored {
-            pkcs8: expired_key.pkcs8_bytes(),
-            cert: expired_key.cert_der(),
-        })
-        .expect("serialize");
-        storage.put(&sys, &storage_key, &body).expect("put");
-
-        // The expired key must NOT appear in JWKS.
+    fn global_jwks_publishes_eddsa_only() {
+        let (_dir, engine, _clock) = setup_engine();
         let jwks = engine.jwks();
-        let rsa_kids: Vec<&str> = jwks
-            .keys
-            .iter()
-            .filter(|k| k.kty == "RSA")
-            .map(|k| k.kid.as_str())
-            .collect();
+        assert!(!jwks.keys.is_empty(), "JWKS must not be empty");
+        for key in &jwks.keys {
+            assert_eq!(
+                key.alg, "EdDSA",
+                "JWKS must publish only algorithms Hearth signs with; found {}",
+                key.alg
+            );
+            assert_eq!(key.kty, "OKP", "every published key must be OKP/Ed25519");
+        }
+    }
+
+    #[test]
+    fn no_oidc_rsa_key_material_is_written_to_storage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+            1_700_000_000_000_000,
+        ))) as Arc<dyn Clock>;
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            clock,
+            IdentityConfig {
+                credential: CredentialConfig::fast_for_testing(),
+                ..IdentityConfig::default()
+            },
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine");
+
+        // Materialising the JWKS is what used to generate and persist the key.
+        let _ = engine.jwks();
+
+        let prefix = keys::legacy_oidc_rsa_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let rows = storage
+            .scan(&keys::system_realm_id(), &prefix, &end)
+            .expect("scan");
         assert!(
-            !rsa_kids.contains(&expired_kid.as_str()),
-            "expired retiring kid must be omitted from JWKS; got {rsa_kids:?}"
+            rows.is_empty(),
+            "no sys:oidc:rsa:* row may be written; found {} row(s)",
+            rows.len()
         );
     }
 

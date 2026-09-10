@@ -88,17 +88,65 @@ pub fn extract_client_ip(
 
     // Walk right-to-left, find the first non-trusted hop
     for ip_str in xff.rsplit(',').map(str::trim).filter(|s| !s.is_empty()) {
-        match ip_str.parse::<IpAddr>() {
-            Ok(ip) if is_trusted(ip, trusted_proxies) => {}
-            Ok(ip) => return ip.to_canonical().to_string(),
+        match parse_forwarded_hop(ip_str) {
+            Some(ip) if is_trusted(ip, trusted_proxies) => {}
+            Some(ip) => return ip.to_canonical().to_string(),
             // Everything left of an unparseable hop is unverifiable — stop
             // the walk and fail closed to the peer.
-            Err(_) => return peer.ip().to_canonical().to_string(),
+            None => return peer.ip().to_canonical().to_string(),
         }
     }
 
     // All IPs in XFF are trusted (or XFF is empty) — fall back to peer
     peer.ip().to_canonical().to_string()
+}
+
+/// Parses one `X-Forwarded-For` hop into an [`IpAddr`].
+///
+/// Accepts the three spellings real proxies emit (audit 2026-08-28 §4.17#3):
+///
+/// | Form | Example |
+/// |------|---------|
+/// | bare IP | `203.0.113.50`, `2001:db8::1` |
+/// | IPv4 + port | `203.0.113.50:44321` (HAProxy `forwardfor` with `port`) |
+/// | bracketed IPv6, optional port | `[2001:db8::1]`, `[2001:db8::1]:443` |
+///
+/// Anything else — an RFC 7239 obfuscated identifier (`unknown`, `_hidden`),
+/// an unclosed bracket, a non-numeric port — returns `None`. The caller treats
+/// `None` as an unverifiable hop and fails closed to the socket peer, so this
+/// stays strict about *which* hop it will trust while no longer discarding an
+/// entire proxy fleet's clients into one rate-limit bucket.
+fn parse_forwarded_hop(hop: &str) -> Option<IpAddr> {
+    let hop = hop.trim();
+    if hop.is_empty() {
+        return None;
+    }
+
+    // Bracketed IPv6, with or without a `:port` suffix.
+    if let Some(rest) = hop.strip_prefix('[') {
+        let (inner, after) = rest.split_once(']')?;
+        if !after.is_empty() {
+            let port = after.strip_prefix(':')?;
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+        }
+        return inner.parse::<IpAddr>().ok();
+    }
+
+    // Bare IP (v4 or unbracketed v6).
+    if let Ok(ip) = hop.parse::<IpAddr>() {
+        return Some(ip);
+    }
+
+    // `a.b.c.d:port`. A single colon can only be an IPv4 port separator — an
+    // unbracketed IPv6 literal always carries at least two colons, and one
+    // with a port is only legal in bracketed form.
+    let (host, port) = hop.rsplit_once(':')?;
+    if host.contains(':') || port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    host.parse::<std::net::Ipv4Addr>().ok().map(IpAddr::V4)
 }
 
 /// Compares canonicalized so a v4-mapped v6 peer (`::ffff:10.0.0.1` on a
@@ -428,5 +476,152 @@ mod tests {
     #[test]
     fn garbage_ua_returns_none() {
         assert_eq!(parse_device_label(Some("not-a-real-user-agent")), None);
+    }
+
+    // ===== 19.8: XFF hops carrying a port suffix or IPv6 brackets =====
+    //
+    // Audit 2026-08-28 §4.17#3. A proxy that appends `client:port` (HAProxy
+    // `forwardfor` with `port`, some CDNs) or a bracketed IPv6 literal made
+    // `str::parse::<IpAddr>()` fail, which the fail-closed walk treats as an
+    // unverifiable hop and collapses to the proxy's own IP — so every client
+    // behind that proxy shared ONE per-IP rate-limit bucket.
+    //
+    // The walk must stay strict about WHICH hop it trusts (an unrecognisable
+    // hop still fails closed to the peer) while accepting these two forms.
+
+    #[test]
+    fn xff_ipv4_hop_with_port_yields_the_client_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.50:44321"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(
+            result, "203.0.113.50",
+            "an `ip:port` hop must resolve to the client IP, not collapse to the proxy"
+        );
+    }
+
+    #[test]
+    fn xff_bracketed_ipv6_hop_with_port_yields_the_client_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("[2001:db8::1]:443"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "2001:db8::1");
+    }
+
+    #[test]
+    fn xff_bracketed_ipv6_hop_without_port_yields_the_client_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("[2001:db8::2]"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "2001:db8::2");
+    }
+
+    #[test]
+    fn trusted_hop_written_with_a_port_is_still_recognised_as_trusted() {
+        // The rightmost hop is the trusted proxy, spelled with a port. It must
+        // be skipped (not treated as the client, and not aborting the walk) so
+        // the walk continues left to the real client.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.50, 10.0.0.2:8080"),
+        );
+        let trusted: Vec<IpAddr> = vec![
+            "10.0.0.1".parse().expect("valid IP"),
+            "10.0.0.2".parse().expect("valid IP"),
+        ];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(
+            result, "203.0.113.50",
+            "a trusted hop spelled `ip:port` must still be recognised as trusted"
+        );
+    }
+
+    #[test]
+    fn xff_v4_mapped_v6_hop_with_port_canonicalises() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("[::ffff:203.0.113.9]:1234"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(
+            result, "203.0.113.9",
+            "a v4-mapped hop must canonicalise so one client cannot hold two buckets"
+        );
+    }
+
+    // ----- strictness must survive: unrecognisable hops still fail closed -----
+
+    #[test]
+    fn xff_hop_with_non_numeric_port_still_fails_closed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.50:notaport"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "10.0.0.1", "a malformed hop must fail closed");
+    }
+
+    #[test]
+    fn xff_unclosed_bracket_hop_still_fails_closed() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("[2001:db8::1"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "10.0.0.1", "an unclosed bracket must fail closed");
+    }
+
+    #[test]
+    fn xff_obfuscated_hop_still_fails_closed() {
+        // RFC 7239 obfuscated identifiers ("unknown", "_hidden") carry no IP.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.50, unknown"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(
+            result, "10.0.0.1",
+            "an obfuscated hop is unverifiable — everything left of it must be discarded"
+        );
+    }
+
+    #[test]
+    fn xff_bare_ipv6_hop_without_brackets_is_unchanged() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("2001:db8::7"));
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, trusted_peer(), &trusted);
+        assert_eq!(result, "2001:db8::7");
+    }
+
+    #[test]
+    fn xff_port_form_from_an_untrusted_peer_is_still_ignored() {
+        // The port-tolerant parse must not weaken the trust gate itself.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.50:44321"),
+        );
+        let trusted: Vec<IpAddr> = vec!["10.0.0.1".parse().expect("valid IP")];
+        let result = extract_client_ip(&headers, peer_addr(), &trusted);
+        assert_eq!(
+            result, "192.168.1.100",
+            "XFF from an untrusted peer must be ignored regardless of hop syntax"
+        );
     }
 }

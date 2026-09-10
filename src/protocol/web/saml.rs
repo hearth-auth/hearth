@@ -17,7 +17,9 @@ use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, Timestamp};
 use crate::identity::federation::saml::authn_request::BuildAuthnRequestParams;
 use crate::identity::federation::saml::response::ResponseBuilder;
-use crate::identity::federation::saml::types::{SamlNameIdFormat, SamlStateBag};
+use crate::identity::federation::saml::types::{
+    SamlNameIdFormat, SamlStateBag, SAML_ASSERTION_SENTINEL_SKEW_SECS,
+};
 use crate::identity::federation::saml::{
     build_authn_request_xml, build_idp_metadata, build_logout_response_xml, build_post_form_html,
     build_redirect_url, build_response_xml, build_sp_metadata, parse_authn_request,
@@ -65,7 +67,9 @@ pub async fn sp_metadata(
     // Build SP metadata. For Phase 1 we advertise unsigned AuthnRequests by
     // default but include our signing cert so the operator's IdP admin can
     // enable signature validation on their side.
-    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
+    let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
+        return saml_origin_unconfigured();
+    };
     let acs_url = format!("{realm_url}/federation/saml/acs");
     let sp_entity_id = realm_url.clone();
 
@@ -167,7 +171,9 @@ pub async fn sp_acs(
         attribute_map: idp_cfg.claim_mappings.clone(),
     };
 
-    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
+    let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
+        return saml_origin_unconfigured();
+    };
     let sp_entity_id = realm_url.clone();
     let acs_url = format!("{realm_url}/federation/saml/acs");
     let now = Timestamp::from_micros(
@@ -192,12 +198,22 @@ pub async fn sp_acs(
             assertion,
             ..
         } => {
-            // Replay guard.
-            if let Err(_e) =
-                state
-                    .identity
-                    .mark_saml_assertion_consumed(&realm, &bag.idp_id, &assertion.id)
-            {
+            // Replay guard. The sentinel carries the instant past which this
+            // assertion can no longer validate, so the key space it lives in
+            // can be reclaimed (22.11 / audit §4.10#9).
+            let sentinel_expiry_secs = assertion
+                .not_on_or_after
+                .map_or_else(
+                    || now.as_micros() / 1_000_000,
+                    |noa| noa.as_micros() / 1_000_000,
+                )
+                .saturating_add(SAML_ASSERTION_SENTINEL_SKEW_SECS);
+            if let Err(_e) = state.identity.mark_saml_assertion_consumed(
+                &realm,
+                &bag.idp_id,
+                &assertion.id,
+                sentinel_expiry_secs,
+            ) {
                 let _ = state.audit.append(&CreateAuditEvent {
                     realm_id: realm.clone(),
                     actor: "system".to_string(),
@@ -209,26 +225,89 @@ pub async fn sp_acs(
                 return (StatusCode::BAD_REQUEST, "replay detected").into_response();
             }
 
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm.clone(),
-                actor: identity.external_sub.clone(),
-                action: AuditAction::SamlLoginCompleted,
-                resource_type: "saml".to_string(),
-                resource_id: assertion.id.clone(),
-                metadata: Some(serde_json::json!({ "idp": idp_cfg.name })),
-            });
-
-            // In a complete deployment the handler would now invoke
-            // federation linking / JIT provisioning. That plumbing reuses
-            // the OIDC-side helpers — outside Phase 1 scope for the web
-            // layer. We confirm the flow by redirecting to the return_to.
+            // 19.5 (audit §4.10#6, §4.22#4): this used to stop here — audit a
+            // completed login and 302 to `return_to` with no cookie and no
+            // user. The assertion proved who the caller is and nothing acted
+            // on it. Run the identity through the same federation pipeline the
+            // OIDC callback uses (link → auto-link → confirm → JIT), then
+            // issue a real Hearth session.
+            //
             // A-52: sanitize the stored return_to before using it as Location.
             let return_to = bag
                 .return_to
                 .as_deref()
                 .and_then(|u| validate_return_to(u, &[]))
                 .unwrap_or_else(|| "/ui/account".to_string());
-            Redirect::to(&return_to).into_response()
+
+            let Some(service) = super::federation::build_service(&state) else {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "federation unavailable")
+                    .into_response();
+            };
+            let link_mode = match state.identity.get_realm(&realm) {
+                Ok(Some(r)) => r
+                    .config()
+                    .federation_link_mode
+                    .unwrap_or(crate::identity::federation::LinkMode::Confirm),
+                _ => crate::identity::federation::LinkMode::Confirm,
+            };
+            let external_sub = identity.external_sub.clone();
+            let fed_outcome = match service.resolve_identity(&realm, identity, link_mode, now) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(error = %e, "SAML identity resolution failed");
+                    let _ = state.audit.append(&CreateAuditEvent {
+                        realm_id: realm.clone(),
+                        actor: "system".to_string(),
+                        action: AuditAction::SamlLoginFailed,
+                        resource_type: "saml".to_string(),
+                        resource_id: assertion.id.clone(),
+                        metadata: Some(serde_json::json!({ "reason": "link" })),
+                    });
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "SAML login failed")
+                        .into_response();
+                }
+            };
+
+            let secure = state.is_secure_request(&headers);
+            let response = super::federation::complete_federation_outcome(
+                &state,
+                &headers,
+                &realm,
+                &bag.idp_id,
+                fed_outcome,
+                &return_to,
+                secure,
+            );
+
+            // Audit the login as completed only when a session cookie was
+            // actually issued. A confirm-to-link hop or an MFA challenge is a
+            // redirect without one — real progress, but not a completed
+            // login, and the audit log must not say otherwise.
+            if issued_session_cookie(&response) {
+                let _ = state.audit.append(&CreateAuditEvent {
+                    realm_id: realm.clone(),
+                    actor: external_sub,
+                    action: AuditAction::SamlLoginCompleted,
+                    resource_type: "saml".to_string(),
+                    resource_id: assertion.id.clone(),
+                    metadata: Some(serde_json::json!({ "idp": idp_cfg.name })),
+                });
+            } else if response.status().is_redirection() {
+                tracing::info!(
+                    assertion_id = %assertion.id,
+                    "SAML assertion accepted; login pending a further step"
+                );
+            } else {
+                let _ = state.audit.append(&CreateAuditEvent {
+                    realm_id: realm.clone(),
+                    actor: "system".to_string(),
+                    action: AuditAction::SamlLoginFailed,
+                    resource_type: "saml".to_string(),
+                    resource_id: assertion.id.clone(),
+                    metadata: Some(serde_json::json!({ "reason": "session" })),
+                });
+            }
+            response
         }
         SamlSpOutcome::Rejected { error } => {
             let reason = match &error {
@@ -275,12 +354,17 @@ pub async fn sp_begin(
         return (StatusCode::BAD_REQUEST, "IdP is not SAML").into_response();
     }
 
-    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
+    let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
+        return saml_origin_unconfigured();
+    };
     let sp_entity_id = realm_url.clone();
     let acs_url = format!("{realm_url}/federation/saml/acs");
 
     let req_id = format!("_h{}", uuid::Uuid::new_v4().simple());
-    let state_token = uuid::Uuid::new_v4().simple().to_string();
+    // 22.27 (audit 2026-08-28 §4.25#5): RelayState is the only thing binding the
+    // ACS callback to this login attempt, so it gets a full 128 bits rather than
+    // the 122 a UUID v4 carries. Same 32-hex shape as before.
+    let state_token = crate::core::random_secret_hex();
     let now = now();
 
     let authn_xml = build_authn_request_xml(&BuildAuthnRequestParams {
@@ -347,7 +431,9 @@ pub async fn idp_metadata(
         None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
     };
 
-    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
+    let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
+        return saml_origin_unconfigured();
+    };
     let sso_url = format!("{realm_url}/saml/sso");
     let slo_service_url = format!("{realm_url}/saml/slo-idp");
     let entity_id = realm_url.clone();
@@ -512,7 +598,9 @@ async fn idp_complete_sso(
     // EmailAddress NameID format that registered SPs default to).
     let subject_name_id = session.user_email.clone();
 
-    let realm_url = realm_base_url_for_realm(&headers, &state, &realm).unwrap_or_default();
+    let Some(realm_url) = realm_base_url_for_realm(&headers, &state, &realm) else {
+        return saml_origin_unconfigured();
+    };
     let idp_entity_id = realm_url.clone();
 
     let key = match state
@@ -593,7 +681,9 @@ pub async fn idp_sso_init(
     };
     let subject_name_id = session.user_email.clone();
 
-    let realm_url = realm_base_url_from_headers(&state, &headers, &realm_name);
+    let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
+        return saml_origin_unconfigured();
+    };
     let idp_entity_id = realm_url.clone();
     let key = match state
         .identity
@@ -725,7 +815,9 @@ async fn idp_complete_slo(
         return (StatusCode::BAD_REQUEST, "SP has no SLO URL registered").into_response();
     };
 
-    let realm_url = realm_base_url_for_realm(&headers, &state, &realm).unwrap_or_default();
+    let Some(realm_url) = realm_base_url_for_realm(&headers, &state, &realm) else {
+        return saml_origin_unconfigured();
+    };
     let idp_entity_id = realm_url.clone();
     let key = match state
         .identity
@@ -800,66 +892,120 @@ fn resolve_realm(state: &WebState, realm_name: &str) -> Option<RealmId> {
         .map(|r| r.id().clone())
 }
 
-/// Resolves the trusted public origin for this server (scheme + host).
+/// Whether `response` carries a `Set-Cookie` for the Hearth session cookie.
 ///
-/// S3 (HEA-1751): SAML audience/destination validation MUST NOT be anchored
-/// to an attacker-controlled `Host` header. When the operator has configured
-/// `onboarding.base_url` (the canonical public URL, also used for emailed
-/// links), that value is authoritative and the request headers are ignored.
-/// Only when no base URL is configured (dev / tests) do we fall back to the
-/// request `Host` — in that mode there is no multi-tenant origin to spoof.
-fn trusted_base_url(state: &WebState, headers: &axum::http::HeaderMap) -> String {
-    let configured = state
-        .config
-        .as_ref()
-        .and_then(|c| c.onboarding.base_url.as_deref());
-    trusted_origin(configured, headers)
+/// The SAML ACS audits `saml_login_completed` only when this is true. A
+/// confirm-to-link hop or an MFA challenge is also a redirect, and neither is
+/// a completed login — auditing one would repeat exactly the defect 19.5
+/// closes (audit 2026-08-28 §4.22#4).
+fn issued_session_cookie(response: &Response) -> bool {
+    let prefix = format!("{}=", super::auth::SESSION_COOKIE);
+    response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|c| c.starts_with(&prefix) && !c.contains("Max-Age=0"))
 }
 
-/// Pure core of [`trusted_base_url`]: prefer the configured public origin,
-/// ignoring the request `Host` entirely when one is set. Falls back to the
-/// `Host` header only when no origin is configured.
-fn trusted_origin(configured_base_url: Option<&str>, headers: &axum::http::HeaderMap) -> String {
-    configured_base_url
-        .map(|u| u.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| base_url_from_headers(headers))
+/// The response returned when no attacker-independent SAML origin exists.
+///
+/// SAML entity IDs, `Destination` and `AudienceRestriction` are all absolute
+/// URLs that must be stable and operator-chosen. Serving a SAML endpoint
+/// without one is a misconfiguration, not a request error.
+fn saml_origin_unconfigured() -> Response {
+    tracing::warn!(
+        "SAML endpoint refused: neither `onboarding.base_url` nor `oidc.issuer` is \
+         configured, and the request Host is not loopback. SAML audience and \
+         destination validation must be anchored to a configured absolute URL."
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "SAML is not configured: set `onboarding.base_url` (or `oidc.issuer`) to this \
+         server's public URL",
+    )
+        .into_response()
 }
 
-/// Extracts the public base URL from the request's `Host` header.
+/// Resolves the public origin for this server (scheme + host).
 ///
-/// Only used as the dev/test fallback for [`trusted_base_url`] when no
-/// `onboarding.base_url` is configured. Operators terminating TLS at a proxy
-/// should propagate `X-Forwarded-Host` / `X-Forwarded-Proto` if they want
-/// HTTPS-only URLs in that fallback mode.
-fn base_url_from_headers(headers: &axum::http::HeaderMap) -> String {
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
-        .unwrap_or("localhost:8420");
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_else(|| {
-            if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
-                "http"
-            } else {
-                "https"
-            }
-        });
-    format!("{scheme}://{host}")
+/// SAML audience and destination validation must be anchored to a value an
+/// attacker cannot set (audit 2026-08-28 §4.10#7). Resolution order:
+///
+/// 1. `onboarding.base_url` — the canonical public URL, also used for emailed
+///    links.
+/// 2. `oidc.issuer` — the other absolute public URL a production deployment
+///    already configures.
+/// 3. A loopback `Host` header (`localhost`, `127.0.0.1`, `[::1]`) for dev and
+///    tests, where there is no multi-tenant origin to spoof.
+///
+/// Returns `None` in every other case — notably a deployment started from the
+/// shipped `hearth.example.yaml`, where both keys are commented out. Forwarded
+/// headers (`X-Forwarded-Host`, `X-Forwarded-Proto`) are **never** consulted on
+/// this path: they are settable by anyone who can reach the port, and a SAML
+/// origin derived from one is an origin the attacker chose.
+fn trusted_base_url(state: &WebState, headers: &axum::http::HeaderMap) -> Option<String> {
+    let cfg = state.config.as_ref();
+    let onboarding = cfg.and_then(|c| c.onboarding.base_url.as_deref());
+    let issuer = cfg.and_then(|c| c.oidc.issuer.as_deref());
+    trusted_origin(configured_public_origin(onboarding, issuer), headers)
+}
+
+/// Picks the configured absolute public URL, preferring `onboarding.base_url`
+/// over `oidc.issuer`. Empty strings are not configuration.
+fn configured_public_origin<'a>(
+    onboarding_base_url: Option<&'a str>,
+    oidc_issuer: Option<&'a str>,
+) -> Option<&'a str> {
+    onboarding_base_url
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| oidc_issuer.filter(|u| !u.trim().is_empty()))
+}
+
+/// Pure core of [`trusted_base_url`]: use the configured public origin when
+/// there is one, otherwise fall back to a **loopback** `Host` and nothing else.
+fn trusted_origin(
+    configured_base_url: Option<&str>,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    if let Some(u) = configured_base_url {
+        return Some(u.trim_end_matches('/').to_string());
+    }
+    loopback_base_url_from_host(headers)
+}
+
+/// Dev/test fallback: the request `Host`, accepted only when it names a
+/// loopback address.
+///
+/// `X-Forwarded-Host` and `X-Forwarded-Proto` are deliberately not read. A
+/// non-loopback `Host` yields `None` so the caller fails closed rather than
+/// anchoring a security decision to a request header.
+fn loopback_base_url_from_host(headers: &axum::http::HeaderMap) -> Option<String> {
+    // No `Host` at all (in-process router tests, HTTP/1.0) is not an
+    // attacker-chosen origin — it is no origin. Use the loopback default.
+    let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
+        return Some("http://localhost:8420".to_string());
+    };
+    // RFC 7230: an IPv6 literal is bracketed; everything else splits on the
+    // first colon (the optional port).
+    let hostname = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    if matches!(hostname, "localhost" | "127.0.0.1" | "::1") {
+        Some(format!("http://{host}"))
+    } else {
+        None
+    }
 }
 
 fn realm_base_url_from_headers(
     state: &WebState,
     headers: &axum::http::HeaderMap,
     realm_name: &str,
-) -> String {
-    format!(
-        "{}/ui/realms/{}",
-        trusted_base_url(state, headers),
-        realm_name
-    )
+) -> Option<String> {
+    trusted_base_url(state, headers).map(|base| format!("{base}/ui/realms/{realm_name}"))
 }
 
 fn realm_base_url_for_realm(
@@ -867,7 +1013,7 @@ fn realm_base_url_for_realm(
     state: &WebState,
     realm: &RealmId,
 ) -> Option<String> {
-    let base = trusted_base_url(state, headers);
+    let base = trusted_base_url(state, headers)?;
     state
         .identity
         .get_realm(realm)
@@ -902,7 +1048,8 @@ mod tests {
         // controls the `Host` header must NOT be able to shift the origin
         // used for SAML audience/destination validation.
         let headers = headers_with_host("evil.attacker.example");
-        let origin = trusted_origin(Some("https://auth.company.example/"), &headers);
+        let origin = trusted_origin(Some("https://auth.company.example/"), &headers)
+            .expect("a configured origin always resolves");
         assert_eq!(origin, "https://auth.company.example");
         assert!(
             !origin.contains("attacker"),
@@ -914,15 +1061,84 @@ mod tests {
     fn trusted_origin_trims_trailing_slash_on_config() {
         let headers = headers_with_host("ignored.example");
         assert_eq!(
-            trusted_origin(Some("https://auth.company.example/"), &headers),
-            "https://auth.company.example"
+            trusted_origin(Some("https://auth.company.example/"), &headers).as_deref(),
+            Some("https://auth.company.example")
+        );
+    }
+
+    /// 19.4/19.6 (audit §4.10#7): `X-Forwarded-Host` is settable by anyone who
+    /// can reach the port. It must never reach the SAML origin — not even in
+    /// the unconfigured dev fallback, where the loopback `Host` is used
+    /// instead.
+    #[test]
+    fn trusted_origin_never_reads_x_forwarded_host() {
+        let mut headers = headers_with_host("localhost:8420");
+        headers.insert(
+            "x-forwarded-host",
+            "evil.attacker.example".parse().expect("xfh header"),
+        );
+        headers.insert("x-forwarded-proto", "https".parse().expect("xfp header"));
+        let origin = trusted_origin(None, &headers);
+        assert_eq!(
+            origin.as_deref(),
+            Some("http://localhost:8420"),
+            "X-Forwarded-Host / -Proto must not steer the SAML origin"
+        );
+    }
+
+    /// 19.6: with no configured absolute URL and a non-loopback `Host`, there
+    /// is no attacker-independent origin to validate against. Refuse rather
+    /// than trust the header — this is the shipped-example-config case the
+    /// audit reported.
+    #[test]
+    fn trusted_origin_refuses_unconfigured_non_loopback_host() {
+        let headers = headers_with_host("auth.company.example");
+        assert_eq!(
+            trusted_origin(None, &headers),
+            None,
+            "an unconfigured deployment must refuse to anchor SAML to the Host header"
+        );
+    }
+
+    /// A request with no `Host` at all carries no origin to spoof; the
+    /// loopback default keeps in-process router tests and HTTP/1.0 clients
+    /// working without trusting anything.
+    #[test]
+    fn trusted_origin_defaults_to_loopback_when_host_absent() {
+        assert_eq!(
+            trusted_origin(None, &HeaderMap::new()).as_deref(),
+            Some("http://localhost:8420")
         );
     }
 
     #[test]
-    fn trusted_origin_falls_back_to_host_when_unconfigured() {
-        // Dev / test mode: no configured origin, so the Host header is used.
-        let headers = headers_with_host("localhost:8420");
-        assert_eq!(trusted_origin(None, &headers), "http://localhost:8420");
+    fn trusted_origin_falls_back_to_loopback_host_when_unconfigured() {
+        // Dev / test mode: no configured origin, loopback Host is accepted.
+        for host in ["localhost:8420", "127.0.0.1:8420", "[::1]:8420"] {
+            let headers = headers_with_host(host);
+            assert_eq!(
+                trusted_origin(None, &headers).as_deref(),
+                Some(format!("http://{host}").as_str()),
+                "loopback host {host} must be usable in the dev fallback"
+            );
+        }
+    }
+
+    /// 19.6: `oidc.issuer` is the other absolute public URL an operator
+    /// configures; it is accepted when `onboarding.base_url` is absent so a
+    /// production deployment is not forced to set two keys.
+    #[test]
+    fn configured_public_origin_prefers_onboarding_then_issuer() {
+        assert_eq!(
+            configured_public_origin(Some("https://a.example"), Some("https://b.example")),
+            Some("https://a.example")
+        );
+        assert_eq!(
+            configured_public_origin(None, Some("https://b.example")),
+            Some("https://b.example")
+        );
+        assert_eq!(configured_public_origin(None, None), None);
+        // An empty string is not a configured origin.
+        assert_eq!(configured_public_origin(Some(""), None), None);
     }
 }

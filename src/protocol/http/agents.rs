@@ -158,6 +158,13 @@ async fn agent_card(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // `extract_admin_auth` admits every `hearth.*.admin` sub-admin; every other
+    // handler in this module names `hearth.agents.admin`, this one named
+    // nothing, so a `hearth.clients.admin` token read agent cards
+    // (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id;
 
     let agent_id_str = match query.agent_id {

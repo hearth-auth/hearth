@@ -16,6 +16,7 @@
 //! with the active pepper.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use argon2::Argon2;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -420,6 +421,23 @@ pub(crate) fn argon2_params_need_rehash(hash_str: &str, config: &CredentialConfi
         || p.map_or(false, |v| v != config.parallelism)
 }
 
+/// Process-wide count of [`verify_hash`] invocations.
+///
+/// Instrumentation only — never a security control. Timing-parity tests assert
+/// *structurally* that the account-exists, account-absent and account-locked
+/// arms of a login all perform the same number of hash verifications, rather
+/// than asserting a flaky wall-clock difference (audit §4.17#4, §4.17#5).
+static HASH_VERIFICATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the number of password-hash verifications performed since start-up.
+///
+/// A monotonically increasing counter; only differences between two reads are
+/// meaningful. Off the hot path — password verification never runs there.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn hash_verification_count() -> u64 {
+    HASH_VERIFICATIONS.load(Ordering::Relaxed)
+}
+
 /// Verifies a password against a hash string.
 ///
 /// Dispatches to the correct algorithm based on the hash prefix.
@@ -427,6 +445,7 @@ pub(crate) fn verify_hash(
     password: &CleartextPassword,
     hash_str: &str,
 ) -> Result<bool, IdentityError> {
+    HASH_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
     // Try bcrypt first — bcrypt hashes start with "$2b$", "$2a$", or "$2y$".
     // "$2y$" is a PHP-introduced cosmetic variant, functionally identical to "$2b$".
     if hash_str.starts_with("$2b$") || hash_str.starts_with("$2a$") || hash_str.starts_with("$2y$")

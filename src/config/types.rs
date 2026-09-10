@@ -213,9 +213,20 @@ pub struct StorageSection {
     /// count makes that too expensive.
     #[serde(default = "StorageSection::default_hot_tier_per_realm_metrics")]
     pub hot_tier_per_realm_metrics: bool,
-    /// Whether to fsync WAL writes. MUST be true in production.
-    #[serde(default = "StorageSection::default_fsync")]
-    pub fsync: bool,
+    /// Whether to `fsync` WAL writes before acknowledging them.
+    ///
+    /// Absent (`None`) resolves to the mode default: **on** in production,
+    /// **off** under `--dev`. An explicit value is honoured in dev mode so a
+    /// developer can exercise the real group-commit path locally.
+    ///
+    /// `fsync: false` outside dev mode is a hard configuration error, not a
+    /// warning: WAL durability is the one thing the storage engine promises,
+    /// and previously this key was accepted, logged about, and then ignored —
+    /// production always built `SyncMode::EveryWrite` regardless (audit
+    /// §4.11#12, §6). Resolve it through [`Self::fsync_enabled`]; do not read
+    /// the field directly.
+    #[serde(default)]
+    pub fsync: Option<bool>,
     /// Total byte budget for the process-wide decrypted-block cache shared by
     /// all v3 SST readers (HEA-1914). Bounds decrypted cold-tier residency
     /// independent of corpus size. Default 256 MiB.
@@ -244,8 +255,18 @@ impl StorageSection {
         64 * 1024 * 1024 // 64 MiB
     }
 
-    const fn default_fsync() -> bool {
-        true
+    /// Resolves `storage.fsync` against the run mode.
+    ///
+    /// This is the single place the knob is interpreted, so a caller cannot
+    /// accidentally read the raw `Option` and reintroduce the "parsed but
+    /// ignored" bug this replaced. Production refuses `Some(false)` during
+    /// validation, so the `dev_mode = false` arm can only ever return `true`.
+    #[must_use]
+    pub const fn fsync_enabled(&self, dev_mode: bool) -> bool {
+        match self.fsync {
+            Some(explicit) => explicit,
+            None => !dev_mode,
+        }
     }
 
     const fn default_block_cache_bytes() -> usize {
@@ -266,7 +287,7 @@ impl Default for StorageSection {
             hot_tier_capacity: None,
             hot_tier_max_memory: None,
             hot_tier_per_realm_metrics: Self::default_hot_tier_per_realm_metrics(),
-            fsync: Self::default_fsync(),
+            fsync: None,
             block_cache_bytes: Self::default_block_cache_bytes(),
             compaction: CompactionSection::default(),
         }
@@ -850,7 +871,14 @@ pub struct TokenYamlConfig {
     pub refresh_token_ttl: Option<String>,
     /// Grace period during which the old signing key remains in JWKS after a
     /// **config-driven** rotation — `rotate_signing_key: true` on a realm,
-    /// applied at startup (e.g. `"24h"`). Default: 24 hours.
+    /// applied at startup (e.g. `"24h"`).
+    ///
+    /// Default: the longest refresh-token lifetime this config can issue —
+    /// the greater of `token.refresh_token_ttl` and any per-realm
+    /// `auth.token.refresh_token_ttl`. A fixed 24 h default retired every
+    /// outstanding refresh token six days before its own `exp` (audit
+    /// 2026-08-28 §4.15#3). A shorter explicit value is honoured verbatim and
+    /// logs a startup warning.
     ///
     /// It does not apply to `POST /admin/realms/{id}/rotate-signing-key`,
     /// which revokes the retired key unless the request names a window
@@ -3269,10 +3297,13 @@ impl RealmYamlConfig {
             }),
             // Required actions are managed via the admin API, not via hearth.yaml.
             default_required_actions: Vec::new(),
-            // Breach-check config is managed via the admin API or per-realm YAML.
-            // Default is disabled so existing realms are unaffected.
+            // Audit §4.13#9: breach-check has NO YAML key and NO admin-API surface.
+            // `RealmYamlConfig` has no `breach_check` field, so a config file
+            // declaring one is rejected by `deny_unknown_fields`. It is reachable
+            // only by constructing `RealmConfig` in-process. Always default here.
             breach_check: crate::identity::BreachCheckConfig::default(),
-            // Adaptive MFA defaults to disabled; enable per-realm via admin API or YAML.
+            // Audit §4.13#9: adaptive MFA has NO YAML key and NO admin-API surface —
+            // same as `breach_check` above. Always default here.
             adaptive_mfa: crate::identity::AdaptiveMfaConfig::default(),
             // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
             sms_otp_expiry_seconds: None,
@@ -3288,8 +3319,10 @@ impl RealmYamlConfig {
             fapi_profile,
             risk_scorer_config: None,
             quotas: None,
-            // Pre-token webhook is configured via admin API or per-realm YAML.
-            // Defaults to None (disabled) so existing realms are unaffected.
+            // Audit §4.13#9: the pre-token webhook has NO YAML key and NO admin-API
+            // surface. `RealmYamlConfig` has no `pre_token_webhook` field, so a
+            // config file declaring one is rejected by `deny_unknown_fields`. It is
+            // reachable only by constructing `RealmConfig` in-process. Always None.
             pre_token_webhook: None,
             approval_webhook: None,
             mfa_required_roles: None,
@@ -3464,7 +3497,9 @@ mod tests {
         assert_eq!(cfg.memtable_flush_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.hot_tier_capacity, None);
         assert_eq!(cfg.hot_tier_max_memory, None);
-        assert!(cfg.fsync);
+        assert_eq!(cfg.fsync, None, "absent means 'resolve from the run mode'");
+        assert!(cfg.fsync_enabled(false), "production resolves to fsync on");
+        assert!(!cfg.fsync_enabled(true), "dev resolves to fsync off");
     }
 
     #[test]
@@ -3713,4 +3748,15 @@ pub struct Config {
     /// and [`Config::from_yaml_str`].
     #[serde(skip)]
     pub config_warnings: Vec<super::env::EnvVarWarning>,
+    /// Security keys the operator set that no code consumes, plus secret keys
+    /// that resolved to the empty string (audit §1A item 5, §4.13#4).
+    ///
+    /// Populated at parse time by [`Config::from_yaml_str`] and
+    /// [`Config::from_yaml_str_unchecked`], because the check needs the raw
+    /// post-substitution YAML — the struct itself cannot distinguish a key the
+    /// operator wrote from a compiled-in default. `validate_all` folds these in
+    /// so `serve`, `hearth config validate`, and the admin config editor all
+    /// fail closed on the same set.
+    #[serde(skip)]
+    pub key_liveness_issues: Vec<ValidationIssue>,
 }

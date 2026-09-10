@@ -164,6 +164,49 @@ impl EmailService {
         })
     }
 
+    /// Sends a passwordless sign-in ("magic link") email with per-realm
+    /// branding.
+    ///
+    /// The magic-link endpoint used to mint a token and never deliver it, so
+    /// the flow could not complete (audit 2026-08-28 §4.24#6).
+    pub fn send_magic_link_email(
+        &self,
+        to: &str,
+        url: &str,
+        realm_branding: Option<&EmailBranding>,
+        stored: Option<&LocalizedEmailTemplate>,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let branding = self.resolve_branding(realm_branding);
+        let vars = [
+            ("magic_link_url", url),
+            ("product_name", branding.product_name.as_str()),
+            (
+                "support_email",
+                branding.support_email.as_deref().unwrap_or(""),
+            ),
+            (
+                "custom_footer_text",
+                branding.custom_footer_text.as_deref().unwrap_or(""),
+            ),
+        ];
+        let mut msg = if let Some(tmpl) = stored {
+            let body = tmpl.resolve(locale);
+            render_stored_or_fallback(
+                body,
+                &vars,
+                "magic_link",
+                || templates::render_magic_link(url, &branding, self.custom_templates.as_ref()),
+                || templates::render_magic_link(url, &branding, None),
+            )?
+        } else {
+            templates::render_magic_link(url, &branding, self.custom_templates.as_ref())
+                .or_else(|_| templates::render_magic_link(url, &branding, None))?
+        };
+        msg.to = to.to_string();
+        self.sender.send(&msg)
+    }
+
     /// Sends a password reset email with per-realm branding.
     ///
     /// Resolves branding (global defaults + realm overrides), renders

@@ -152,6 +152,14 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/realms/{realm_id}/config", patch(admin_patch_realm_config))
         .route(
+            "/realms/{realm_id}/cross-realm-policies",
+            get(admin_list_cross_realm_policies).post(admin_create_cross_realm_policy),
+        )
+        .route(
+            "/realms/{realm_id}/cross-realm-policies/{policy_id}",
+            delete(admin_delete_cross_realm_policy),
+        )
+        .route(
             "/sessions/{session_id}/sv-bump",
             post(admin_sv_bump_session),
         )
@@ -228,6 +236,49 @@ fn require_realm(state: &AppState, realm_id: &RealmId) -> Result<crate::identity
     }
 }
 
+/// Confirms that `user_id` names a user in `realm_id`.
+///
+/// A sub-resource listing (`/consents`, `/roles`, `/sessions`) scopes its own
+/// query to the caller's realm, so it never serves another realm's rows — but
+/// without this precheck it answers `200 {"items": []}` for a user that does
+/// not exist there, which is indistinguishable from a user that exists and has
+/// no rows. Handlers that read a sub-resource of a user **must** call this
+/// first so the absent parent is reported as `404` (audit 2026-08-28 §4.1#10).
+fn require_user_in_realm(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> Result<(), Response> {
+    match state.identity.get_user(realm_id, user_id) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        )
+            .into_response()),
+        Err(e) => Err(identity_error_to_response(&e).into_response()),
+    }
+}
+
+/// Confirms that `group_id` names a group in `realm_id`.
+///
+/// The group twin of [`require_user_in_realm`]; same `§4.1#10` rationale.
+fn require_group_in_realm(
+    state: &AppState,
+    realm_id: &RealmId,
+    group_id: &GroupId,
+) -> Result<(), Response> {
+    match state.rbac.get_group(realm_id, group_id) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "group not found"})),
+        )
+            .into_response()),
+        Err(e) => Err(rbac_error_to_response(&e).into_response()),
+    }
+}
+
 /// Refuses a write aimed at the reserved system realm.
 ///
 /// The README states the system realm is read-only through public APIs, and
@@ -253,25 +304,121 @@ fn reject_system_realm_write(auth: &AdminAuth) -> Result<(), Response> {
     Ok(())
 }
 
+/// Capability a cross-realm `/admin/realms/{id}/*` operation must be granted by
+/// a stored [`crate::identity::CrossRealmTrustPolicy`] before it is permitted.
+///
+/// A policy may also carry `*`, which grants every capability.
+const CROSS_REALM_ADMIN_CAPABILITY: &str = "hearth.admin";
+
 /// Enforces realm-level object authorization (BOLA guard).
 ///
 /// Returns `path_realm_id` when access is permitted:
-/// - The **system realm** (nil UUID) is a superuser that may operate on any realm.
-/// - Otherwise `auth.realm_id` must equal `path_realm_id` exactly.
+/// - `auth.realm_id == path_realm_id` — no boundary is crossed, always allowed.
+/// - The **system realm** (nil UUID) is a superuser that may operate on any
+///   realm, *subject to the target realm's cross-realm trust policies* (see
+///   [`cross_realm_crossing_permitted`]).
+/// - Otherwise `403 Forbidden`.
 ///
-/// Returns `403 Forbidden` in all other cases. Every handler that exposes a
-/// `{realm_id}` path parameter **must** obtain the realm through this function
-/// rather than using `path_realm_id` directly.
-fn scoped_realm(auth: &AdminAuth, path_realm_id: RealmId) -> Result<RealmId, Response> {
-    if auth.realm_id.as_uuid().is_nil() || auth.realm_id == path_realm_id {
+/// Every handler that exposes a `{realm_id}` path parameter **must** obtain the
+/// realm through this function rather than using `path_realm_id` directly.
+fn scoped_realm(
+    state: &AppState,
+    auth: &AdminAuth,
+    path_realm_id: RealmId,
+) -> Result<RealmId, Response> {
+    if auth.realm_id == path_realm_id {
+        return Ok(path_realm_id);
+    }
+    if !auth.realm_id.as_uuid().is_nil() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response());
+    }
+
+    // A genuine realm crossing. Audit 2026-08-28 §4.1#8: consult the target
+    // realm's stored cross-realm trust policies instead of waving the system
+    // realm through unconditionally.
+    if cross_realm_crossing_permitted(state, &auth.realm_id, &path_realm_id)? {
         Ok(path_realm_id)
     } else {
         Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "forbidden"})),
+            Json(serde_json::json!({
+                "error": "cross_realm_capability_not_allowed",
+                "message": "the target realm's cross-realm trust policy does not \
+                            grant this capability"
+            })),
         )
             .into_response())
     }
+}
+
+/// Decides whether `source` may reach into `target` for an admin operation.
+///
+/// Three-way outcome, collapsed onto a `bool`:
+/// 1. **Permitted** — a live policy in `target` names `source` and grants
+///    [`CROSS_REALM_ADMIN_CAPABILITY`] (or `*`). Returns `true`.
+/// 2. **Denied** — a live policy in `target` names `source` but withholds that
+///    capability. Returns `false`; the crossing is refused.
+/// 3. **Ungoverned** — no live policy in `target` names `source` at all. The
+///    default is *permissive-with-audit*: the crossing is allowed and a
+///    `WARN`-level record is emitted. Fail-closed here would brick the system
+///    realm's management plane on every deployment that has never authored a
+///    policy, which is every deployment today.
+///
+/// A realm therefore opts into enforcement by authoring its first policy for a
+/// given source realm; until then behaviour is unchanged.
+///
+/// A tenant realm can no longer author a policy that names the system realm as
+/// source — `create_cross_realm_policy` in `advanced.rs` refuses that for a
+/// non-system actor, so a tenant cannot deny service to the platform operator.
+/// The deny branch here therefore fires only on a policy stored before that
+/// rule existed, or one authored by a system-realm actor. Recovery from such a
+/// policy is `DELETE /v1/cross-realm-policies/{id}` **by that realm's own
+/// admin**: those routes are keyed on the caller's realm, so there is no
+/// operator-side path to them.
+fn cross_realm_crossing_permitted(
+    state: &AppState,
+    source: &RealmId,
+    target: &RealmId,
+) -> Result<bool, Response> {
+    let permitted = state
+        .identity
+        .check_cross_realm_policy(target, source, CROSS_REALM_ADMIN_CAPABILITY)
+        .map_err(|e| identity_error_to_response(&e).into_response())?;
+    if permitted {
+        return Ok(true);
+    }
+
+    let policies = state
+        .identity
+        .list_cross_realm_policies(target)
+        .map_err(|e| identity_error_to_response(&e).into_response())?;
+    let now = crate::core::Timestamp::from_micros(super::now_micros());
+    let governed = policies
+        .iter()
+        .any(|p| &p.source_realm_id == source && p.expires_at.is_none_or(|exp| now < exp));
+
+    if governed {
+        tracing::warn!(
+            source_realm = %source.as_uuid(),
+            target_realm = %target.as_uuid(),
+            capability = CROSS_REALM_ADMIN_CAPABILITY,
+            "cross-realm admin operation refused by trust policy"
+        );
+        return Ok(false);
+    }
+
+    tracing::warn!(
+        source_realm = %source.as_uuid(),
+        target_realm = %target.as_uuid(),
+        capability = CROSS_REALM_ADMIN_CAPABILITY,
+        "cross-realm admin operation permitted by default: no cross-realm trust \
+         policy governs this realm pair"
+    );
+    Ok(true)
 }
 
 /// Scans every realm page for the realm whose name equals `slug`.
@@ -1217,7 +1364,7 @@ async fn admin_get_realm(
         }
     };
 
-    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1277,7 +1424,7 @@ async fn admin_delete_realm(
         }
     };
 
-    let tid = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+    let tid = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1356,7 +1503,7 @@ async fn admin_patch_user_required_actions(
     // check. The hand-rolled copy that stood here omitted `scoped_realm`'s
     // nil-UUID branch, so the system operator was refused an operation every
     // other `/admin/realms/{id}/*` handler grants them (audit 2026-08-28 §4.1#6).
-    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -1514,29 +1661,80 @@ async fn admin_patch_realm_config(
     };
     // Same shared BOLA guard as every other `/admin/realms/{id}/*` handler; see
     // the note on `admin_patch_user_required_actions` (audit 2026-08-28 §4.1#6).
-    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
 
-    let action_strs = body["default_required_actions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    // Audit §4.13#6: an unrecognised key used to be dropped on the floor and
+    // the request answered `200`, so a misspelled `defualt_required_actions`
+    // looked applied and was not. Refuse it instead.
+    const KNOWN_KEYS: &[&str] = &[
+        "default_required_actions",
+        "mfa_methods",
+        "sms_otp_expiry_seconds",
+        "sms_otp_max_attempts",
+        "email_otp_expiry_seconds",
+        "email_otp_max_attempts",
+        "fapi_profile",
+        "dcr_policy",
+    ];
+    if let Some(obj) = body.as_object() {
+        if let Some(unknown) = obj.keys().find(|k| !KNOWN_KEYS.contains(&k.as_str())) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "unknown field `{unknown}`; expected one of: {}",
+                        KNOWN_KEYS.join(", ")
+                    )
+                })),
+            )
+                .into_response();
+        }
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "body must be a JSON object"})),
+        )
+            .into_response();
+    }
 
-    let mut actions: Vec<RequiredAction> = Vec::with_capacity(action_strs.len());
-    for v in action_strs {
-        match serde_json::from_value::<RequiredAction>(v.clone()) {
-            Ok(a) => actions.push(a),
-            Err(_) => {
-                let s = v.as_str().unwrap_or("(non-string)");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
-                )
-                    .into_response();
+    // Audit §4.13#6: absent means "leave unchanged". `body["…"].as_array()`
+    // yielded `None` for both an absent key and an explicit `[]`, and the
+    // `unwrap_or_default()` collapsed them — so a PATCH that only set
+    // `mfa_methods` cleared the realm's default required actions.
+    let action_strs: Option<Vec<serde_json::Value>> = match body.get("default_required_actions") {
+        None => None,
+        Some(serde_json::Value::Array(a)) => Some(a.clone()),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "default_required_actions must be an array of action-type strings"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut actions: Option<Vec<RequiredAction>> = None;
+    if let Some(strs) = action_strs {
+        let mut parsed = Vec::with_capacity(strs.len());
+        for v in strs {
+            match serde_json::from_value::<RequiredAction>(v.clone()) {
+                Ok(a) => parsed.push(a),
+                Err(_) => {
+                    let s = v.as_str().unwrap_or("(non-string)");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
+                    )
+                        .into_response();
+                }
             }
         }
+        actions = Some(parsed);
     }
 
     let realm = match state.identity.get_realm(&realm_id) {
@@ -1552,7 +1750,9 @@ async fn admin_patch_realm_config(
     };
 
     let mut config = realm.config().clone();
-    config.default_required_actions = actions;
+    if let Some(actions) = actions {
+        config.default_required_actions = actions;
+    }
 
     // Optional fields: apply only when present in the JSON body.
     if let Some(methods) = body["mfa_methods"].as_array() {
@@ -1718,7 +1918,7 @@ async fn admin_rotate_realm_signing_key(
         Err(e) => return e,
     };
 
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1803,7 +2003,7 @@ async fn admin_get_realm_branding(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1844,7 +2044,7 @@ async fn admin_patch_realm_branding(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1931,7 +2131,7 @@ async fn admin_list_realm_email_templates(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1959,7 +2159,7 @@ async fn admin_get_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1998,7 +2198,7 @@ async fn admin_put_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -2093,7 +2293,7 @@ async fn admin_delete_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -2521,6 +2721,10 @@ async fn admin_list_user_consents(
             .into_response();
     };
     let user_id = UserId::new(uuid);
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_user_in_realm(&state, &auth.realm_id, &user_id) {
+        return resp;
+    }
     match state
         .identity
         .list_consents_by_user(&auth.realm_id, &user_id)
@@ -3545,6 +3749,14 @@ async fn admin_get_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // `extract_admin_auth` is the outer gate only — it admits every
+    // `hearth.*.admin` sub-admin. The rest of the role family (list, create,
+    // update, delete) names `hearth.realm.admin`; this handler named nothing,
+    // so a `hearth.clients.admin` token read role definitions
+    // (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
@@ -3813,6 +4025,10 @@ async fn admin_list_group_members(
         Ok(g) => g,
         Err(e) => return e.into_response(),
     };
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_group_in_realm(&state, &auth.realm_id, &group_id) {
+        return resp;
+    }
     match state.rbac.list_group_members(
         &auth.realm_id,
         &group_id,
@@ -3940,6 +4156,10 @@ async fn admin_list_user_assignments(
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_user_in_realm(&state, &auth.realm_id, &user_id) {
+        return resp;
+    }
     match state.rbac.list_user_assignments(&auth.realm_id, &user_id) {
         Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
@@ -4428,6 +4648,14 @@ async fn admin_list_webhook_deliveries(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Every sibling in the webhook family names `hearth.realm.admin`; this
+    // handler named nothing, so any sub-admin read the delivery log — which
+    // carries request and response bodies (audit 2026-08-28 §4.1#9). The gate
+    // sits before the engine check so a deployment without webhooks still
+    // answers `403` rather than disclosing that the feature is off.
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),
@@ -4436,6 +4664,28 @@ async fn admin_list_webhook_deliveries(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+
+    // The delivery scan is realm-scoped, so an unknown webhook produced an
+    // empty `200` rather than `404` (audit 2026-08-28 §4.1#10). Confirm the
+    // parent subscription exists in this realm first.
+    match engine.get(&auth.realm_id, &webhook_id) {
+        Ok(_) => {}
+        Err(crate::webhook::WebhookError::NotFound { .. }) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "webhook not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            error!("get webhook failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "get webhook failed"})),
+            )
+                .into_response();
+        }
+    }
 
     let query = DeliveryQuery {
         realm_id: auth.realm_id,
@@ -5046,7 +5296,7 @@ async fn admin_sv_bump_all(
                 .into_response()
         }
     };
-    let realm_id = match scoped_realm(&auth, RealmId::new(uuid)) {
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(uuid)) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -5102,6 +5352,10 @@ async fn admin_list_user_sessions(
             .into_response();
     };
     let user_id = crate::core::UserId::new(uuid);
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_user_in_realm(&state, &auth.realm_id, &user_id) {
+        return resp;
+    }
     match state
         .identity
         .list_sessions_by_user(&auth.realm_id, &user_id, &params.as_page_request())
@@ -5180,5 +5434,156 @@ async fn admin_revoke_session(
             (StatusCode::NO_CONTENT, ()).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-realm trust policies, operator side (task 25.14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolves the target realm for the cross-realm policy routes.
+///
+/// Deliberately does NOT consult the target realm's cross-realm policy, unlike
+/// [`scoped_realm`]. These three routes are the operator's recovery valve: a
+/// policy that withholds `hearth.admin` locks the operator out of every other
+/// `/admin/realms/{id}/*` route, and a valve that the lock also closes is not a
+/// valve. Everything else about the guard is unchanged — a tenant admin still
+/// cannot reach a realm that is not their own.
+///
+/// The exemption is narrow and audited: only these routes use it, and every
+/// call still passes through `extract_admin_auth` and a permission gate.
+fn scoped_realm_for_recovery(
+    auth: &AdminAuth,
+    path_realm_id: RealmId,
+) -> Result<RealmId, Response> {
+    if auth.realm_id == path_realm_id || auth.realm_id.as_uuid().is_nil() {
+        return Ok(path_realm_id);
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({"error": "forbidden"})),
+    )
+        .into_response())
+}
+
+/// Parses a realm id from the path and applies the recovery-scoped guard.
+fn recovery_target_realm(auth: &AdminAuth, realm_id_str: &str) -> Result<RealmId, Response> {
+    let realm_uuid: uuid::Uuid = realm_id_str.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid realm ID"})),
+        )
+            .into_response()
+    })?;
+    scoped_realm_for_recovery(auth, RealmId::new(realm_uuid))
+}
+
+/// `GET /admin/realms/{realm_id}/cross-realm-policies`
+///
+/// Lists the cross-realm trust policies stored in the named realm, so an
+/// operator can see what governs a realm before changing it.
+async fn admin_list_cross_realm_policies(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    let realm_id = match recovery_target_realm(&auth, &realm_id_str) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let identity = Arc::clone(&state.identity);
+    match tokio::task::spawn_blocking(move || identity.list_cross_realm_policies(&realm_id)).await {
+        Ok(Ok(policies)) => Json(serde_json::json!({"items": policies})).into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin_list_cross_realm_policies panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `POST /admin/realms/{realm_id}/cross-realm-policies`
+///
+/// Authors a cross-realm trust policy INTO the named realm. Without this an
+/// operator had no way to write a policy for a tenant realm, so the deny branch
+/// enforced by [`scoped_realm`] was reachable only through data written before
+/// the system-source rule existed.
+async fn admin_create_cross_realm_policy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+    Json(body): Json<crate::identity::CreateCrossRealmPolicyRequest>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    let realm_id = match recovery_target_realm(&auth, &realm_id_str) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // Task 25.11 holds here too: a tenant admin must not author a policy that
+    // names the reserved system realm as its source, or they could revoke the
+    // platform operator.
+    if let Err(e) =
+        super::advanced::reject_tenant_authored_system_source(&auth.realm_id, &body.source_realm_id)
+    {
+        return e;
+    }
+    let identity = Arc::clone(&state.identity);
+    match tokio::task::spawn_blocking(move || identity.create_cross_realm_policy(&realm_id, &body))
+        .await
+    {
+        Ok(Ok(policy)) => (StatusCode::CREATED, Json(policy)).into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin_create_cross_realm_policy panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `DELETE /admin/realms/{realm_id}/cross-realm-policies/{policy_id}`
+///
+/// Removes a policy from the named realm. This is the recovery action: a
+/// deletion can only ever relax the operator's access, never widen it.
+async fn admin_delete_cross_realm_policy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((realm_id_str, policy_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    let realm_id = match recovery_target_realm(&auth, &realm_id_str) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let identity = Arc::clone(&state.identity);
+    match tokio::task::spawn_blocking(move || {
+        identity.delete_cross_realm_policy(&realm_id, &policy_id)
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin_delete_cross_realm_policy panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }

@@ -600,48 +600,43 @@ pub(crate) fn encode_global_signing_key() -> Vec<u8> {
     b"sys:global:key".to_vec()
 }
 
-/// Storage key for the server-wide OIDC RSA-2048 signing key.
+/// Scan prefix covering every legacy server-wide OIDC RSA key row.
 ///
-/// Format: `sys:oidc:rsa:key` — JSON `{"pkcs8": [...], "cert": [...]}`.
-/// Stored under the system realm. Generated once on first JWKS request and
-/// persisted so the `kid` survives restarts (HEA-1655).
-pub(crate) fn encode_oidc_rsa_key() -> Vec<u8> {
-    b"sys:oidc:rsa:key".to_vec()
+/// Two families lived under it: `sys:oidc:rsa:key` (the active keypair) and
+/// `sys:oidc:rsa:retiring:{deadline:020}:{kid}` (grace-window keys), both
+/// serialised as plain JSON `{"pkcs8": [...], "cert": [...]}` — an
+/// **unencrypted** RSA-2048 private key, while every other key family went
+/// through the HKEY envelope (audit 2026-08-28 §4.15#4).
+///
+/// Nothing signs with these keys any more: the JWKS publishes Ed25519 only
+/// (§4.2#4, §4.15#5). The prefix is retained so startup can delete what an
+/// older build wrote.
+pub(crate) fn legacy_oidc_rsa_scan_prefix() -> Vec<u8> {
+    b"sys:oidc:rsa:".to_vec()
 }
 
-/// Storage key for a retiring OIDC RSA key during its grace window.
+/// Storage key for a realm's signing-key rotation epoch.
 ///
-/// Format: `sys:oidc:rsa:retiring:{deadline_secs:020}:{kid}`
+/// Format: `realm:keygen:{uuid}` → 8-byte little-endian `u64`.
 ///
-/// `deadline_secs` is zero-padded to 20 digits so lexicographic order
-/// matches time order, enabling efficient range scan.
-/// Stored under the system realm.
-///
-/// Called by the OIDC RSA key-rotation function (and by tests). Suppressing
-/// `dead_code` because the production write-path (rotation) is a follow-up.
-#[allow(dead_code)]
-pub(crate) fn encode_oidc_rsa_retiring_key(deadline_secs: u64, kid: &str) -> Vec<u8> {
-    format!("sys:oidc:rsa:retiring:{deadline_secs:020}:{kid}").into_bytes()
+/// Stored under the system realm and therefore replicated through Raft like
+/// any other write, which is what makes it visible to every node. The
+/// in-process `realm_signing_keys` cache is keyed against it so a rotation
+/// performed on one node invalidates the others' caches instead of leaving
+/// them publishing and trusting the pre-rotation key (audit 2026-08-28
+/// §4.15#6).
+pub(crate) fn encode_realm_key_epoch(realm_id: &RealmId) -> Vec<u8> {
+    format!("realm:keygen:{}", realm_id.as_uuid()).into_bytes()
 }
 
-/// Scan prefix for all retiring OIDC RSA keys.
+/// Storage key for the KEK enrolment marker.
 ///
-/// Used to enumerate grace-window keys for inclusion in JWKS.
-pub(crate) fn oidc_rsa_retiring_scan_prefix() -> Vec<u8> {
-    b"sys:oidc:rsa:retiring:".to_vec()
-}
-
-/// Parses the deadline (Unix seconds) from a retiring OIDC RSA storage key.
-///
-/// Expected format: `sys:oidc:rsa:retiring:{deadline:020}:{kid}`.
-/// Returns `None` when the key does not match.
-pub(crate) fn parse_oidc_rsa_retiring_deadline(key_bytes: &[u8]) -> Option<u64> {
-    const PREFIX: &str = "sys:oidc:rsa:retiring:";
-    let s = std::str::from_utf8(key_bytes).ok()?;
-    let after = s.strip_prefix(PREFIX)?;
-    // First 20 characters are the zero-padded deadline.
-    let deadline_str = after.get(..20)?;
-    deadline_str.parse::<u64>().ok()
+/// Written once, the first time a KEK-configured process opens a store. Its
+/// presence means every signing key in the store has been through the HKEY
+/// envelope, so an unenveloped signing key read afterwards is a downgrade and
+/// is refused rather than migrated (audit 2026-08-28 §4.15#7).
+pub(crate) fn encode_kek_enrollment_marker() -> Vec<u8> {
+    b"sys:kek:enrolled".to_vec()
 }
 
 /// Encodes the storage key for a retiring realm signing key.
@@ -669,6 +664,22 @@ pub(crate) fn encode_realm_retiring_key(
 /// Format: `realm:retiring:{realm_uuid}:`
 pub(crate) fn realm_retiring_key_scan_prefix(realm_id: &RealmId) -> Vec<u8> {
     format!("{REALM_RETIRING_KEY_PREFIX}{}:", realm_id.as_uuid()).into_bytes()
+}
+
+/// Scan prefix covering every realm's active signing key.
+///
+/// Format: `realm:key:` — used by the KEK enrolment sweep, which must reach
+/// every stored signing key regardless of realm.
+pub(crate) fn realm_signing_key_scan_prefix() -> Vec<u8> {
+    REALM_KEY_PREFIX.as_bytes().to_vec()
+}
+
+/// Scan prefix covering every realm's retiring signing keys.
+///
+/// Format: `realm:retiring:` — the realm-agnostic counterpart of
+/// [`realm_retiring_key_scan_prefix`], used by the KEK enrolment sweep.
+pub(crate) fn realm_retiring_key_all_scan_prefix() -> Vec<u8> {
+    REALM_RETIRING_KEY_PREFIX.as_bytes().to_vec()
 }
 
 /// Parses the deadline (Unix seconds) encoded in a retiring-key storage key.
@@ -1436,7 +1447,6 @@ pub(crate) fn encode_saml_state_key(state_token: &str) -> Vec<u8> {
 }
 
 /// Returns the scan prefix for SAML outbound request state.
-#[allow(dead_code)]
 pub(crate) fn saml_state_scan_prefix() -> Vec<u8> {
     SAML_STATE_PREFIX.as_bytes().to_vec()
 }
@@ -1455,7 +1465,6 @@ pub(crate) fn encode_saml_assertion_prefix_for_idp(idp_id: &IdpId) -> Vec<u8> {
 }
 
 /// Returns the scan prefix for all SAML assertion sentinels in the realm.
-#[allow(dead_code)]
 pub(crate) fn saml_assertion_scan_prefix() -> Vec<u8> {
     SAML_ASSERTION_PREFIX.as_bytes().to_vec()
 }
@@ -1508,6 +1517,33 @@ pub(crate) fn encode_session_grant_family(session_id: &SessionId, family_id: &st
 /// Format: `oauth:session_fam:{session_uuid}:`.
 pub(crate) fn encode_session_grant_family_prefix(session_id: &SessionId) -> Vec<u8> {
     format!("{SESSION_GRANT_FAMILY_PREFIX}{}:", session_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix for the whole session → grant-family index.
+///
+/// Format: `oauth:session_fam:`. Used by the background cleanup sweep to
+/// reclaim index rows whose grant family no longer exists (audit
+/// 2026-08-28 §4.16#13).
+pub(crate) fn session_grant_family_scan_prefix() -> Vec<u8> {
+    SESSION_GRANT_FAMILY_PREFIX.as_bytes().to_vec()
+}
+
+/// Splits a `oauth:session_fam:{session_uuid}:{family_id}` key into its
+/// `family_id` suffix.
+///
+/// Returns `None` when `key` does not carry the index prefix, is not valid
+/// UTF-8, or has no `:` separating the session UUID from the family id — the
+/// sweep leaves such a row alone rather than guessing.
+pub(crate) fn decode_session_grant_family_id(key: &[u8]) -> Option<&str> {
+    let rest = key.strip_prefix(SESSION_GRANT_FAMILY_PREFIX.as_bytes())?;
+    let rest = std::str::from_utf8(rest).ok()?;
+    // `{session_uuid}:{family_id}` — the family id may itself contain `:`,
+    // so split once at the first separator.
+    let (_session, family_id) = rest.split_once(':')?;
+    if family_id.is_empty() {
+        return None;
+    }
+    Some(family_id)
 }
 
 // ---------------------------------------------------------------------------

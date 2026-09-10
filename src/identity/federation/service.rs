@@ -178,13 +178,33 @@ impl FederationService {
         // FederationTokenVerificationFailed on mismatch or absence.
         // Reaching this line means the nonce was already verified.
 
+        let outcome = self.resolve_identity(realm_id, identity, link_mode, now)?;
+        Ok((bag, outcome))
+    }
+
+    /// Maps a resolved [`ExternalIdentity`] onto a [`FederationOutcome`].
+    ///
+    /// This is the protocol-independent half of [`Self::callback`]: everything
+    /// after the upstream credential has been verified and before a session is
+    /// created. SAML reaches the same three cases through
+    /// [`crate::identity::federation::saml::SamlSpService`] rather than an
+    /// OAuth code exchange, so it calls this directly — the linking policy
+    /// (`LinkMode`), the confirm-to-link ticket and the JIT fallback must be
+    /// identical whichever protocol asserted the identity.
+    pub fn resolve_identity(
+        &self,
+        realm_id: &RealmId,
+        identity: ExternalIdentity,
+        link_mode: LinkMode,
+        now: Timestamp,
+    ) -> Result<FederationOutcome, IdentityError> {
         // 1. Existing link?
         if let Some(user_id) = self.engine.find_user_by_external_identity(
             realm_id,
             &identity.idp_id,
             &identity.external_sub,
         )? {
-            return Ok((bag, FederationOutcome::ExistingUser(user_id)));
+            return Ok(FederationOutcome::ExistingUser(user_id));
         }
 
         // 2. Email match → dispatch by LinkMode.
@@ -201,11 +221,13 @@ impl FederationService {
                             &identity.idp_id,
                             &identity.external_sub,
                         )?;
-                        return Ok((bag, FederationOutcome::AutoLinked(existing.id().clone())));
+                        return Ok(FederationOutcome::AutoLinked(existing.id().clone()));
                     }
                     LinkMode::Confirm => {
                         let ticket = ConfirmLinkTicket {
-                            ticket: uuid::Uuid::new_v4().to_string(),
+                            // 22.27 (audit 2026-08-28 §4.25#5): 128-bit ticket,
+                            // not a 122-bit UUID v4.
+                            ticket: crate::core::random_secret_hex(),
                             realm_id: realm_id.clone(),
                             user_id: existing.id().clone(),
                             identity: identity.clone(),
@@ -214,14 +236,14 @@ impl FederationService {
                             ),
                         };
                         self.engine.put_confirm_link_ticket(&ticket)?;
-                        return Ok((bag, FederationOutcome::ConfirmLinkRequired(ticket)));
+                        return Ok(FederationOutcome::ConfirmLinkRequired(ticket));
                     }
                 }
             }
         }
 
         // 3. No existing user / unverified email / link disabled → JIT.
-        Ok((bag, FederationOutcome::JitProvision(identity)))
+        Ok(FederationOutcome::JitProvision(identity))
     }
 
     /// Called by the web handler after it has provisioned a fresh user

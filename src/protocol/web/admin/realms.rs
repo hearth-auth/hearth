@@ -2597,17 +2597,25 @@ pub async fn admin_realm_admin_revoke(
 
 /// Request body for `PATCH /admin/realms/{realm}/config`.
 ///
-/// All fields are optional — send only the keys you want to change.
-/// Unknown JSON keys are silently ignored by `serde`.
+/// All fields are optional — send only the keys you want to change. Unknown
+/// keys are **refused** with `400`: the handler previously accepted them
+/// silently and answered `200`, so a typo like `defualt_required_actions`
+/// looked applied and was not (audit §4.13#6).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchRealmConfigBody {
     /// Replaces the realm's full `default_required_actions` list.
     ///
-    /// Pass an empty array (`[]`) to clear the default. All strings must
-    /// be valid v1 action types (`"VERIFY_EMAIL"`, `"UPDATE_PASSWORD"`);
-    /// unknown values return 400.
+    /// Absent leaves the realm's current list **unchanged**; pass an empty
+    /// array (`[]`) to clear it. This used to be `Vec<String>` with
+    /// `#[serde(default)]`, so an omitted key deserialized to `vec![]` and the
+    /// handler cleared the realm's default required actions on every request
+    /// that only meant to change, say, `mfa_methods` (audit §4.13#6).
+    ///
+    /// All strings must be valid v1 action types (`"VERIFY_EMAIL"`,
+    /// `"UPDATE_PASSWORD"`); unknown values return 400.
     #[serde(default)]
-    pub default_required_actions: Vec<String>,
+    pub default_required_actions: Option<Vec<String>>,
     /// Replaces the realm's allowed MFA methods list (e.g. `["totp","sms"]`).
     ///
     /// `null` / absent leaves the field unchanged. Pass `[]` to clear.
@@ -2641,28 +2649,53 @@ pub async fn admin_api_realm_config_patch(
     RequireAdmin(_session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    axum::Json(body): axum::Json<PatchRealmConfigBody>,
+    // Deserialize the raw object first so an unknown or misspelled key comes
+    // back as a `400` with the offending key named, rather than the bare `422`
+    // the `Json<PatchRealmConfigBody>` extractor would produce.
+    axum::Json(raw): axum::Json<serde_json::Value>,
 ) -> Response {
     use crate::identity::{RequiredAction, UpdateRealmRequest};
 
-    // Validate and parse action strings.
-    let mut actions: Vec<RequiredAction> = Vec::with_capacity(body.default_required_actions.len());
-    for s in &body.default_required_actions {
-        match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
-            Ok(a) => actions.push(a),
-            Err(_) => {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    axum::Json(serde_json::json!({ "error": format!("unknown action type: {s}") })),
-                )
-                    .into_response();
-            }
+    let body: PatchRealmConfigBody = match serde_json::from_value(raw) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
-    }
+    };
+
+    // Validate and parse action strings.
+    let actions: Option<Vec<RequiredAction>> = match &body.default_required_actions {
+        None => None,
+        Some(strs) => {
+            let mut parsed = Vec::with_capacity(strs.len());
+            for s in strs {
+                match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone()))
+                {
+                    Ok(a) => parsed.push(a),
+                    Err(_) => {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(
+                                serde_json::json!({ "error": format!("unknown action type: {s}") }),
+                            ),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Some(parsed)
+        }
+    };
 
     // Build updated config: start from existing, apply only provided fields.
     let mut config = target.0.config().clone();
-    config.default_required_actions = actions;
+    if let Some(actions) = actions {
+        config.default_required_actions = actions;
+    }
     if let Some(methods) = body.mfa_methods {
         config.mfa_methods = if methods.is_empty() {
             None

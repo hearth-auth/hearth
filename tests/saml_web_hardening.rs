@@ -676,3 +676,249 @@ fn idp_metadata_advertises_want_authn_requests_signed() {
         "once an SP requires signed AuthnRequests the metadata must say so: {body}"
     );
 }
+
+// ============================================================================
+// 19.5 (audit 2026-08-28 §4.10#6, §4.22#4) — the SP assertion consumer must
+// create a session.
+//
+// It validated the assertion, wrote a `saml_login_completed` audit event and
+// then 302'd the browser to `return_to` with no cookie and no user. Every
+// downstream page treated the caller as anonymous, while the audit log said a
+// login had completed.
+//
+// 19.6 (§4.10#7) — and the SP entity ID / ACS URL those assertions are
+// validated against must never come from `X-Forwarded-Host`.
+// ============================================================================
+
+/// Registers a SAML-kind IdP connector whose `client_secret` carries the IdP's
+/// signing certificate (the shape `sp_acs` reads).
+fn register_saml_idp(
+    identity: &dyn IdentityEngine,
+    realm_id: &hearth::core::RealmId,
+    name: &str,
+    entity_id: &str,
+    cert_pem: String,
+) -> hearth::core::IdpId {
+    use hearth::identity::federation::{FederationSecret, IdpConfig, IdpKind};
+    let now = SystemClock.now();
+    let id = hearth::core::IdpId::generate();
+    let mut claim_mappings = BTreeMap::new();
+    claim_mappings.insert("email".to_string(), "NameID".to_string());
+    identity
+        .register_idp(&IdpConfig {
+            id: id.clone(),
+            realm_id: realm_id.clone(),
+            name: name.to_string(),
+            kind: IdpKind::Saml,
+            display_name: "Corp SAML".to_string(),
+            issuer: entity_id.to_string(),
+            authorization_endpoint: format!("{entity_id}/sso"),
+            token_endpoint: String::new(),
+            userinfo_endpoint: None,
+            jwks_uri: None,
+            scopes: Vec::new(),
+            client_id: String::new(),
+            client_secret: FederationSecret::new(cert_pem),
+            claim_mappings,
+            leeway_seconds: 60,
+            want_assertions_signed: false,
+            apple: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("register saml idp");
+    id
+}
+
+/// Builds, signs and base64-encodes a `<Response>` for the ACS.
+fn signed_saml_response_b64(
+    key: &hearth::identity::tokens::RsaSigningKey,
+    request_id: &str,
+    acs_url: &str,
+    sp_entity_id: &str,
+    idp_entity_id: &str,
+    email: &str,
+) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use hearth::identity::federation::saml::{build_response_xml, sign_element, ResponseBuilder};
+
+    let now = SystemClock.now();
+    let attrs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let xml = build_response_xml(&ResponseBuilder {
+        response_id: "_resp_19_5",
+        in_response_to: Some(request_id),
+        issue_instant: now,
+        destination: acs_url,
+        issuer: idp_entity_id,
+        audience: sp_entity_id,
+        assertion_id: "_assert_19_5",
+        subject_name_id: email,
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess-19-5",
+        not_before: hearth::core::Timestamp::from_micros(now.as_micros() - 60_000_000),
+        not_on_or_after: hearth::core::Timestamp::from_micros(now.as_micros() + 600_000_000),
+        attributes: &attrs,
+    });
+    let signed = sign_element(xml.as_bytes(), "_resp_19_5", key).expect("sign response");
+    B64.encode(signed)
+}
+
+/// Seeds the in-flight state bag the ACS consumes as `RelayState`.
+fn seed_saml_state(
+    identity: &dyn IdentityEngine,
+    realm_id: &hearth::core::RealmId,
+    idp_id: &hearth::core::IdpId,
+    token: &str,
+    request_id: &str,
+) {
+    use hearth::identity::federation::saml::SamlStateBag;
+    identity
+        .put_saml_state(&SamlStateBag {
+            token: token.to_string(),
+            request_id: request_id.to_string(),
+            realm_id: realm_id.clone(),
+            idp_id: idp_id.clone(),
+            return_to: Some("/ui/account".to_string()),
+            created_at: SystemClock.now(),
+        })
+        .expect("put saml state");
+}
+
+fn post_acs(
+    app: &axum::Router,
+    saml_response_b64: &str,
+    relay_state: &str,
+    extra_headers: &[(&str, &str)],
+) -> axum::http::Response<Body> {
+    let body = format!(
+        "SAMLResponse={}&RelayState={}",
+        urlencoding_lite(saml_response_b64),
+        urlencoding_lite(relay_state)
+    );
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/ui/realms/demo/federation/saml/acs")
+        .header("content-type", "application/x-www-form-urlencoded");
+    for (k, v) in extra_headers {
+        builder = builder.header(*k, *v);
+    }
+    send(app, builder.body(Body::from(body)).unwrap())
+}
+
+/// 19.5: a valid assertion must produce a Hearth session — a `Set-Cookie`
+/// carrying the session cookie — and must JIT-provision the asserted user.
+#[test]
+fn sp_acs_valid_assertion_creates_a_session() {
+    let (app, identity, realm_id) = build_app_full();
+    let idp_key = hearth::identity::tokens::RsaSigningKey::generate("corp-idp", 365).expect("key");
+    let idp_id = register_saml_idp(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        cert_der_to_pem(idp_key.cert_der()),
+    );
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-19-5",
+        "_req_19_5",
+    );
+
+    // The router test client sends no Host header, so the SP origin is the
+    // loopback default.
+    let sp_entity_id = "http://localhost:8420/ui/realms/demo";
+    let acs_url = format!("{sp_entity_id}/federation/saml/acs");
+    let b64 = signed_saml_response_b64(
+        &idp_key,
+        "_req_19_5",
+        &acs_url,
+        sp_entity_id,
+        "https://corp-idp.example",
+        "saml-user@corp.example",
+    );
+
+    let resp = post_acs(&app, &b64, "relay-19-5", &[]);
+    let status = resp.status().as_u16();
+    let cookies: Vec<String> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_string())
+        .collect();
+
+    assert_eq!(
+        status, 303,
+        "a validated assertion must redirect the browser"
+    );
+    assert!(
+        cookies.iter().any(|c| c.starts_with("hearth_ui_session=")),
+        "the SP assertion consumer must issue a Hearth session cookie; got {cookies:?}"
+    );
+    assert!(
+        identity
+            .get_user_by_email(&realm_id, "saml-user@corp.example")
+            .expect("lookup")
+            .is_some(),
+        "the asserted subject must be provisioned as a real user"
+    );
+}
+
+/// 19.6: `X-Forwarded-Host` must not steer the SP entity ID / ACS URL the
+/// assertion is validated against. An assertion minted for the attacker's
+/// origin must be refused even when the attacker sets the header to match.
+#[test]
+fn sp_acs_ignores_x_forwarded_host_when_choosing_the_audience() {
+    let (app, identity, realm_id) = build_app_full();
+    let idp_key = hearth::identity::tokens::RsaSigningKey::generate("corp-idp", 365).expect("key");
+    let idp_id = register_saml_idp(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        cert_der_to_pem(idp_key.cert_der()),
+    );
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-19-6",
+        "_req_19_6",
+    );
+
+    // Assertion minted for an origin the attacker chose via X-Forwarded-Host.
+    let evil_entity_id = "https://evil.attacker.example/ui/realms/demo";
+    let acs_url = format!("{evil_entity_id}/federation/saml/acs");
+    let b64 = signed_saml_response_b64(
+        &idp_key,
+        "_req_19_6",
+        &acs_url,
+        evil_entity_id,
+        "https://corp-idp.example",
+        "victim@corp.example",
+    );
+
+    let resp = post_acs(
+        &app,
+        &b64,
+        "relay-19-6",
+        &[
+            ("x-forwarded-host", "evil.attacker.example"),
+            ("x-forwarded-proto", "https"),
+        ],
+    );
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "an assertion bound to an X-Forwarded-Host origin must be rejected"
+    );
+    assert!(
+        identity
+            .get_user_by_email(&realm_id, "victim@corp.example")
+            .expect("lookup")
+            .is_none(),
+        "a rejected assertion must not provision a user"
+    );
+}

@@ -131,13 +131,26 @@ fn build_signature_block(signed_info: &str, signature_b64: &str, cert_b64: &str)
 /// `signing_cert_pem` is the expected IdP certificate (PEM).
 ///
 /// Returns the verified signed element's canonical bytes on success.
+///
 /// Rejects:
-/// - Missing `<Signature>`.
-/// - Signature-wrapping attacks (signature URI doesn't match the
-///   enclosing element's ID).
-/// - Algorithm downgrade (SHA-1, inclusive C14N, RSA-SHA1).
-/// - Digest mismatch.
-/// - Signature verification failure.
+/// - Missing `<Signature>` or `<SignedInfo>`.
+/// - A `<ds:Reference URI>` that is not `#<id>` for the enclosing element's
+///   own `ID` attribute.
+/// - A `SignedInfo` naming SHA-1 or RSA-SHA1, or one that does not name both
+///   RSA-SHA256 and SHA-256.
+/// - Digest mismatch on the canonicalized element.
+/// - Signature verification failure over the canonicalized `SignedInfo`.
+///
+/// What it does **not** check — do not rely on this function for these:
+/// - The declared `<ds:CanonicalizationMethod>` and `<ds:Transform>`
+///   algorithms are never read. Both the element and `SignedInfo` are
+///   canonicalized with exclusive C14N unconditionally, so a document
+///   declaring inclusive C14N is not rejected as a downgrade; it simply fails
+///   the digest or signature check if its bytes do not match.
+/// - Full XML-signature-wrapping defence. The URI/ID binding here is only one
+///   half. The caller must additionally bound the assertion count for the
+///   whole document and confirm that the element it consumes is the element
+///   whose ID was verified — see `sp.rs::complete_inner`.
 pub fn verify_signed_element(
     full_xml: &[u8],
     local_name: &str,

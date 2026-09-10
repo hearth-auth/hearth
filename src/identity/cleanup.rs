@@ -15,6 +15,7 @@
 //! for missing keys, so a swept device code surfaces as a clean expiry.
 
 use crate::core::{Clock, RealmId, Timestamp};
+use crate::identity::federation::saml::SAML_STATE_TTL_SECS;
 use crate::identity::keys;
 use crate::identity::oidc::{
     StoredDeviceCode, StoredGrantFamily, StoredPushedAuthorizationRequest,
@@ -70,6 +71,30 @@ pub struct CleanupStats {
     pub dpop_jtis_deleted: u64,
     /// Actor token JTI replay-cache entries swept (RFC 8693 B.5).
     pub actor_jtis_deleted: u64,
+    /// SAML SP-side request-state bags swept (`saml:state:`).
+    ///
+    /// This key space is written by an unauthenticated GET
+    /// (`…/federation/saml/begin`) and, before 22.11, was only ever removed
+    /// by a matching ACS POST — an abandoned login leaked a row forever.
+    pub saml_states_deleted: u64,
+    /// SAML assertion replay sentinels swept (`saml:asn:`).
+    ///
+    /// Each sentinel only needs to outlive the assertion it guards; past that
+    /// point the assertion's own `NotOnOrAfter` rejects any replay.
+    pub saml_assertions_deleted: u64,
+    /// Revoked-JTI blocklist entries (`oauth:revjti:`) swept (22.13).
+    ///
+    /// A blocklist entry only has to outlive the revoked token it names: once
+    /// the token's own `exp` has passed, validation rejects it on the expiry
+    /// check and the row is dead weight. Legacy rows that carry no expiry are
+    /// never swept — deleting one would silently un-revoke a live token.
+    pub revoked_jtis_deleted: u64,
+    /// Session → grant-family index rows (`oauth:session_fam:`) reclaimed (22.13).
+    ///
+    /// A row is written when a grant family is created and removed when the
+    /// session is revoked. A family that merely *expires* is reclaimed by
+    /// `sweep_grant_families` and used to leave its index row behind forever.
+    pub session_family_rows_deleted: u64,
     /// A-18 idle/absolute-timeout sessions evicted by the background sweep.
     ///
     /// Policy-expired sessions are rejected fail-closed on the read path with
@@ -96,6 +121,10 @@ impl CleanupStats {
             + self.jar_jtis_deleted
             + self.dpop_jtis_deleted
             + self.actor_jtis_deleted
+            + self.saml_states_deleted
+            + self.saml_assertions_deleted
+            + self.revoked_jtis_deleted
+            + self.session_family_rows_deleted
             + self.rate_trackers_pruned
             + self.sessions_evicted
     }
@@ -106,6 +135,33 @@ impl CleanupStats {
 /// Errors from individual sweeps are logged and counted in
 /// [`CleanupStats::errors`]; the function always returns `CleanupStats`
 /// (best-effort). The next tick retries any failed sweeps.
+/// Records one sweep's outcome into `slot`, counting and logging a failure.
+///
+/// Every sweep in [`sweep_expired`] has the same shape: on success record the
+/// count, on failure count an error and warn. Keeping that shape in one place
+/// means a sweep added later cannot quietly drop its error — the class of
+/// defect the audit found across the protocol layer's audit writes.
+fn record<E: std::fmt::Display>(
+    realm_id: &RealmId,
+    slot: &mut u64,
+    errors: &mut u64,
+    what: &str,
+    result: Result<u64, E>,
+) {
+    match result {
+        Ok(n) => *slot = n,
+        Err(e) => {
+            *errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                sweep = what,
+                "cleanup: sweep failed"
+            );
+        }
+    }
+}
+
 pub(crate) fn sweep_expired(
     realm_id: &RealmId,
     storage: &dyn StorageEngine,
@@ -114,104 +170,100 @@ pub(crate) fn sweep_expired(
 ) -> CleanupStats {
     let mut stats = CleanupStats::default();
     let now = clock.now();
+    let mut errors = 0_u64;
 
-    match sweep_auth_codes(realm_id, storage, now, config.max_per_type) {
-        Ok(n) => stats.auth_codes_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: auth code sweep failed"
-            );
-        }
-    }
-
-    match sweep_device_codes(realm_id, storage, now, config.max_per_type) {
-        Ok(n) => stats.device_codes_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: device code sweep failed"
-            );
-        }
-    }
-
-    match sweep_pending_tickets(realm_id, storage, now, config.max_per_type) {
-        Ok(n) => stats.pending_tickets_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: pending ticket sweep failed"
-            );
-        }
-    }
-
-    match sweep_grant_families(realm_id, storage, now, config.max_per_type) {
-        Ok(n) => stats.grant_families_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: grant family sweep failed"
-            );
-        }
-    }
-
-    match sweep_par_requests(realm_id, storage, now, config.max_per_type) {
-        Ok(n) => stats.par_requests_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: PAR request sweep failed"
-            );
-        }
-    }
+    record(
+        realm_id,
+        &mut stats.auth_codes_deleted,
+        &mut errors,
+        "auth code",
+        sweep_auth_codes(realm_id, storage, now, config.max_per_type),
+    );
+    record(
+        realm_id,
+        &mut stats.device_codes_deleted,
+        &mut errors,
+        "device code",
+        sweep_device_codes(realm_id, storage, now, config.max_per_type),
+    );
+    record(
+        realm_id,
+        &mut stats.pending_tickets_deleted,
+        &mut errors,
+        "pending ticket",
+        sweep_pending_tickets(realm_id, storage, now, config.max_per_type),
+    );
+    record(
+        realm_id,
+        &mut stats.grant_families_deleted,
+        &mut errors,
+        "grant family",
+        sweep_grant_families(realm_id, storage, now, config.max_per_type),
+    );
+    record(
+        realm_id,
+        &mut stats.par_requests_deleted,
+        &mut errors,
+        "PAR request",
+        sweep_par_requests(realm_id, storage, now, config.max_per_type),
+    );
 
     let now_secs = now.as_micros() / 1_000_000;
-    match sweep_jar_jtis(realm_id, storage, now_secs) {
-        Ok(n) => stats.jar_jtis_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: JAR JTI sweep failed"
-            );
-        }
-    }
+    record(
+        realm_id,
+        &mut stats.jar_jtis_deleted,
+        &mut errors,
+        "JAR JTI",
+        sweep_jar_jtis(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.dpop_jtis_deleted,
+        &mut errors,
+        "DPoP JTI",
+        sweep_dpop_jtis(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.actor_jtis_deleted,
+        &mut errors,
+        "actor JTI",
+        sweep_actor_jtis(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.saml_states_deleted,
+        &mut errors,
+        "SAML request-state",
+        sweep_saml_states(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.saml_assertions_deleted,
+        &mut errors,
+        "SAML replay-sentinel",
+        sweep_saml_assertions(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.revoked_jtis_deleted,
+        &mut errors,
+        "revoked-JTI blocklist",
+        sweep_revoked_jtis(realm_id, storage, now_secs),
+    );
 
-    match sweep_dpop_jtis(realm_id, storage, now_secs) {
-        Ok(n) => stats.dpop_jtis_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: DPoP JTI sweep failed"
-            );
-        }
-    }
+    // Ordered after `sweep_grant_families`: that sweep is what turns a live
+    // index row into an orphan, so running it first lets the same tick reclaim
+    // both halves instead of leaving the index a tick behind.
+    record(
+        realm_id,
+        &mut stats.session_family_rows_deleted,
+        &mut errors,
+        "session grant-family index",
+        sweep_session_family_index(realm_id, storage, config.max_per_type),
+    );
 
-    match sweep_actor_jtis(realm_id, storage, now_secs) {
-        Ok(n) => stats.actor_jtis_deleted = n,
-        Err(e) => {
-            stats.errors += 1;
-            tracing::warn!(
-                realm = %realm_id,
-                error = %e,
-                "cleanup: actor JTI sweep failed"
-            );
-        }
-    }
-
+    stats.errors = errors;
     stats
 }
 
@@ -508,6 +560,156 @@ pub(crate) fn sweep_actor_jtis(
         };
         let expires_at = i64::from_le_bytes(bytes);
         if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Reclaims expired SAML SP-side request state (`saml:state:` — audit
+/// 2026-08-28 §4.10#9).
+///
+/// Every `GET …/federation/saml/begin` writes one bag. Only a matching ACS
+/// POST removed it, so every abandoned or attacker-issued login leaked a row
+/// permanently — and the writer is unauthenticated. Entries older than
+/// [`SAML_STATE_TTL_SECS`] are already refused on the read path; this deletes
+/// them.
+///
+/// A bag whose JSON no longer deserializes is left in place for realm-cascade
+/// deletion rather than silently dropped.
+pub(crate) fn sweep_saml_states(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::saml_state_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bag) =
+            serde_json::from_slice::<crate::identity::federation::saml::SamlStateBag>(&entry.value)
+        else {
+            continue;
+        };
+        let created_secs = bag.created_at.as_micros() / 1_000_000;
+        if now_secs.saturating_sub(created_secs) > SAML_STATE_TTL_SECS {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Reclaims expired SAML assertion replay sentinels (`saml:asn:` — audit
+/// 2026-08-28 §4.10#9).
+///
+/// Each sentinel stores an 8-byte little-endian `i64` Unix-seconds expiry
+/// derived from the assertion's own `NotOnOrAfter` plus the SP clock skew.
+/// Once that moment passes the assertion cannot be replayed anyway — its
+/// validity window closed — so the sentinel has no further work to do.
+///
+/// Sentinels written before 22.11 stored an empty value. Those fail the
+/// 8-byte conversion and are left for realm-cascade deletion, exactly as the
+/// JAR/DPoP JTI sweeps treat their own legacy entries.
+pub(crate) fn sweep_saml_assertions(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::saml_assertion_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Reclaims expired entries from the sessionless-token revocation blocklist.
+///
+/// `oauth:revjti:{jti}` rows are written by RFC 7009 revocation and by agent
+/// token revocation. The value is an 8-byte little-endian `i64` holding the
+/// revoked token's own `exp` in Unix seconds; once that instant has passed the
+/// token is rejected on the ordinary expiry check and the row serves no
+/// purpose. Nothing ever deleted these rows, so the blocklist grew for the
+/// life of the realm (audit 2026-08-28 §4.16#13).
+///
+/// Rows whose value is not exactly 8 bytes are the legacy `b"1"` encoding,
+/// which carries no expiry. They are left in place: the hot-path projection
+/// treats them as `i64::MAX`, so deleting one would un-revoke a live token.
+///
+/// Deleting an expired row cannot resurrect a token. The hot-path
+/// revoked-JTI projection self-evicts on the same `exp`, so the cache and the
+/// key space agree without any cross-layer invalidation.
+pub(crate) fn sweep_revoked_jtis(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::revoked_jti_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            // Legacy `b"1"` (no expiry) or a malformed row: never reclaimed.
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Reclaims `oauth:session_fam:` index rows whose grant family is gone.
+///
+/// The row exists so that revoking a session can cascade into every refresh
+/// token family the session issued. It is written at family creation (after
+/// the family record itself) and deleted on session revocation — but a family
+/// that simply expires is reclaimed by [`sweep_grant_families`], which leaves
+/// the index row behind with nothing to point at. Those rows accumulated
+/// forever (audit 2026-08-28 §4.16#13).
+///
+/// A row is reclaimed only when its family record is absent, which is exact
+/// rather than time-based: the family record is always written before the
+/// index row, so "family missing" can only mean the family has been deleted,
+/// never that it is about to be created.
+pub(crate) fn sweep_session_family_index(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    max_per_type: usize,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::session_grant_family_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        if deleted >= max_per_type as u64 {
+            break;
+        }
+        // A row we cannot parse is left alone rather than guessed at.
+        let Some(family_id) = keys::decode_session_grant_family_id(&entry.key) else {
+            continue;
+        };
+        let family_key = keys::encode_grant_family(family_id);
+        if storage.get(realm_id, &family_key)?.is_none() {
             storage.delete(realm_id, &entry.key)?;
             deleted += 1;
         }
@@ -1242,6 +1444,240 @@ mod tests {
         assert!(
             s.get(&realm, &bad_key).expect("get").is_some(),
             "malformed entry must survive"
+        );
+    }
+
+    // ==================================================================
+    // 22.11 (audit 2026-08-28 §4.10#9) — the two unbounded SAML key
+    // spaces. `saml:state:` is written by an unauthenticated GET; both
+    // grew forever because nothing ever reclaimed them.
+    // ==================================================================
+
+    fn seed_saml_state(
+        s: &EmbeddedStorageEngine,
+        realm: &RealmId,
+        token: &str,
+        created_at_secs: i64,
+    ) {
+        let bag = crate::identity::federation::saml::SamlStateBag {
+            token: token.to_string(),
+            request_id: format!("_req-{token}"),
+            realm_id: realm.clone(),
+            idp_id: crate::core::IdpId::generate(),
+            return_to: None,
+            created_at: Timestamp::from_micros(created_at_secs * 1_000_000),
+        };
+        let key = keys::encode_saml_state_key(token);
+        s.put(
+            realm,
+            &key,
+            &serde_json::to_vec(&bag).expect("serialize bag"),
+        )
+        .expect("put saml state");
+    }
+
+    fn seed_saml_assertion(
+        s: &EmbeddedStorageEngine,
+        realm: &RealmId,
+        idp_id: &crate::core::IdpId,
+        assertion_id: &str,
+        expires_at_secs: i64,
+    ) {
+        let key = keys::encode_saml_assertion_id(idp_id, assertion_id);
+        s.put(realm, &key, &expires_at_secs.to_le_bytes())
+            .expect("put saml assertion sentinel");
+    }
+
+    #[test]
+    fn sweep_saml_states_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        // TTL is 600 s, so anything created more than 600 s ago is expired.
+        seed_saml_state(&s, &realm, "stale-1", NOW_SECS - 601);
+        seed_saml_state(&s, &realm, "stale-2", NOW_SECS - 7200);
+        seed_saml_state(&s, &realm, "fresh-1", NOW_SECS - 30);
+
+        let deleted = sweep_saml_states(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 2, "both expired state bags must be removed");
+        assert!(
+            s.get(&realm, &keys::encode_saml_state_key("stale-1"))
+                .expect("get")
+                .is_none(),
+            "stale-1 must be gone"
+        );
+        assert!(
+            s.get(&realm, &keys::encode_saml_state_key("fresh-1"))
+                .expect("get")
+                .is_some(),
+            "an in-flight login must survive the sweep"
+        );
+    }
+
+    #[test]
+    fn sweep_saml_assertions_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let idp = crate::core::IdpId::generate();
+
+        seed_saml_assertion(&s, &realm, &idp, "_a-expired", NOW_SECS - 1);
+        seed_saml_assertion(&s, &realm, &idp, "_a-active", NOW_SECS + 300);
+
+        let deleted = sweep_saml_assertions(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 1, "only the expired replay sentinel is reclaimed");
+        assert!(
+            s.get(&realm, &keys::encode_saml_assertion_id(&idp, "_a-active"))
+                .expect("get")
+                .is_some(),
+            "a sentinel whose assertion can still be replayed must survive"
+        );
+    }
+
+    #[test]
+    fn sweep_saml_key_spaces_are_isolated_across_realms() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        let idp = crate::core::IdpId::generate();
+
+        seed_saml_state(&s, &realm_b, "other-realm", NOW_SECS - 7200);
+        seed_saml_assertion(&s, &realm_b, &idp, "_a-other", NOW_SECS - 1);
+
+        assert_eq!(
+            sweep_saml_states(&realm_a, &s, NOW_SECS).expect("sweep states"),
+            0
+        );
+        assert_eq!(
+            sweep_saml_assertions(&realm_a, &s, NOW_SECS).expect("sweep assertions"),
+            0
+        );
+        assert!(
+            s.get(&realm_b, &keys::encode_saml_state_key("other-realm"))
+                .expect("get")
+                .is_some(),
+            "realm_b entries must be untouched by a realm_a sweep"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_includes_saml_key_spaces() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+        let now_secs = (T0 + ONE_HOUR) / 1_000_000;
+        let idp = crate::core::IdpId::generate();
+
+        seed_saml_state(&s, &realm, "stale", now_secs - 7200);
+        seed_saml_assertion(&s, &realm, &idp, "_a-expired", now_secs - 60);
+
+        let stats = sweep_expired(&realm, &s, &clock, &CleanupConfig::default());
+        assert_eq!(
+            stats.saml_states_deleted, 1,
+            "sweep_expired must reclaim expired SAML request state"
+        );
+        assert_eq!(
+            stats.saml_assertions_deleted, 1,
+            "sweep_expired must reclaim expired SAML replay sentinels"
+        );
+    }
+
+    // --- 22.13: revoked-JTI blocklist + session→grant-family index ---
+
+    /// `oauth:revjti:` is written on every sessionless-token revocation and,
+    /// before this sweep, was never deleted: the blocklist grew for the life of
+    /// the realm even though an entry is only load-bearing until the revoked
+    /// token's own `exp` passes (audit 2026-08-28 §4.16#13).
+    #[test]
+    fn sweep_expired_reclaims_expired_revoked_jtis() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+        let now_secs = (T0 + ONE_HOUR) / 1_000_000;
+
+        let stale = keys::encode_revoked_jti("jti-stale");
+        s.put(&realm, &stale, &(now_secs - 1).to_le_bytes())
+            .expect("put stale");
+        let live = keys::encode_revoked_jti("jti-live");
+        s.put(&realm, &live, &(now_secs + 3600).to_le_bytes())
+            .expect("put live");
+        // Legacy entries carry no expiry and must be left alone: deleting one
+        // would un-revoke a token that is still valid.
+        let legacy = keys::encode_revoked_jti("jti-legacy");
+        s.put(&realm, &legacy, b"1").expect("put legacy");
+
+        let stats = sweep_expired(&realm, &s, &clock, &CleanupConfig::default());
+
+        assert_eq!(
+            stats.revoked_jtis_deleted, 1,
+            "only the entry whose own exp has passed may be reclaimed"
+        );
+        assert!(
+            s.get(&realm, &stale).expect("get").is_none(),
+            "an expired blocklist entry must be reclaimed"
+        );
+        assert!(
+            s.get(&realm, &live).expect("get").is_some(),
+            "a blocklist entry for a still-valid token must survive"
+        );
+        assert!(
+            s.get(&realm, &legacy).expect("get").is_some(),
+            "a legacy no-expiry blocklist entry must survive"
+        );
+    }
+
+    /// `oauth:session_fam:` rows are written at grant-family creation and only
+    /// removed when the session is revoked. A family that simply expires (swept
+    /// by `sweep_grant_families`) left its index row behind forever.
+    #[test]
+    fn sweep_expired_reclaims_orphaned_session_family_index_rows() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+        let session_id = crate::core::SessionId::generate();
+
+        // Family A is still live — its index row must survive.
+        let live_family = StoredGrantFamily {
+            family_id: "fam-live".into(),
+            current_refresh_hash: "h".into(),
+            session_id: session_id.clone(),
+            realm_id: realm.clone(),
+            revoked: false,
+            created_at: Timestamp::from_micros(T0),
+            expires_at: Timestamp::from_micros(T0 + 10 * ONE_HOUR),
+            client_id: None,
+            resources: Vec::new(),
+            amr_values: Vec::new(),
+            ua_hash: None,
+            bound_asn: None,
+            bound_jkt: None,
+        };
+        s.put(
+            &realm,
+            &keys::encode_grant_family("fam-live"),
+            &serde_json::to_vec(&live_family).expect("serialize"),
+        )
+        .expect("put family");
+        let live_row = keys::encode_session_grant_family(&session_id, "fam-live");
+        s.put(&realm, &live_row, &[]).expect("put live row");
+
+        // Family B no longer exists — its index row is unreachable garbage.
+        let orphan_row = keys::encode_session_grant_family(&session_id, "fam-gone");
+        s.put(&realm, &orphan_row, &[]).expect("put orphan row");
+
+        let stats = sweep_expired(&realm, &s, &clock, &CleanupConfig::default());
+
+        assert_eq!(
+            stats.session_family_rows_deleted, 1,
+            "only the index row whose grant family is gone may be reclaimed"
+        );
+        assert!(
+            s.get(&realm, &orphan_row).expect("get").is_none(),
+            "an index row pointing at a deleted grant family must be reclaimed"
+        );
+        assert!(
+            s.get(&realm, &live_row).expect("get").is_some(),
+            "an index row for a live grant family must survive: it is what \
+             cascades refresh-token revocation when the session ends"
         );
     }
 }

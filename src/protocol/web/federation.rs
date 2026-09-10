@@ -323,15 +323,45 @@ async fn callback_impl(
         }
     };
 
+    complete_federation_outcome(
+        &state,
+        &headers,
+        &realm_id,
+        &bag.idp_id,
+        outcome,
+        &bag.return_to,
+        secure,
+    )
+}
+
+/// Turns a [`FederationOutcome`] into the browser response that finishes the
+/// login: a Hearth session for an existing or auto-linked user, JIT
+/// provisioning followed by a session, or the confirm-to-link hop.
+///
+/// Shared with the SAML assertion consumer (`super::saml::sp_acs`, audit
+/// 2026-08-28 §4.10#6 / §4.22#4). SAML asserts the identity through
+/// `SamlSpService` instead of an OAuth code exchange, but everything from the
+/// resolved outcome onward — linking policy, JIT user shape, audit events and
+/// the session cookie — must be the same code, or the two protocols drift.
+#[allow(clippy::too_many_lines)]
+pub(super) fn complete_federation_outcome(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    realm_id: &RealmId,
+    bag_idp_id: &IdpId,
+    outcome: FederationOutcome,
+    return_to: &str,
+    secure: bool,
+) -> Response {
     match outcome {
         FederationOutcome::ExistingUser(user_id) => {
-            audit_federation_completed(&state, &realm_id, &bag.idp_id, &user_id, false);
-            complete_login(&state, &headers, &realm_id, &user_id, &bag.return_to)
+            audit_federation_completed(state, realm_id, bag_idp_id, &user_id, false);
+            complete_login(state, headers, realm_id, &user_id, return_to)
         }
         FederationOutcome::AutoLinked(user_id) => {
-            audit_federation_linked(&state, &realm_id, &bag.idp_id, &user_id, "auto");
-            audit_federation_completed(&state, &realm_id, &bag.idp_id, &user_id, true);
-            complete_login(&state, &headers, &realm_id, &user_id, &bag.return_to)
+            audit_federation_linked(state, realm_id, bag_idp_id, &user_id, "auto");
+            audit_federation_completed(state, realm_id, bag_idp_id, &user_id, true);
+            complete_login(state, headers, realm_id, &user_id, return_to)
         }
         FederationOutcome::JitProvision(identity) => {
             // Create a fresh user for this external identity.
@@ -346,7 +376,7 @@ async fn callback_impl(
             let email_taken = if identity.email.is_empty() {
                 false
             } else {
-                match state.identity.get_user_by_email(&realm_id, &identity.email) {
+                match state.identity.get_user_by_email(realm_id, &identity.email) {
                     Ok(Some(_)) => true,
                     Ok(None) => false,
                     Err(e) => {
@@ -360,7 +390,7 @@ async fn callback_impl(
                 // one (GitHub private-email users, or minimal-scope
                 // flows), and for "treat as separate" cases where the
                 // upstream email collides with an existing local user.
-                synthetic_federation_email(&bag.idp_id, &identity.external_sub)
+                synthetic_federation_email(bag_idp_id, &identity.external_sub)
             } else {
                 identity.email.clone()
             };
@@ -382,15 +412,15 @@ async fn callback_impl(
                 last_name: identity.last_name.clone(),
                 attributes: Default::default(),
             };
-            let new_user = match state.identity.create_user(&realm_id, &req) {
+            let new_user = match state.identity.create_user(realm_id, &req) {
                 Ok(u) => u,
                 Err(e) => {
                     tracing::warn!(error = %e, "JIT user create failed");
                     return handlers_common::server_error();
                 }
             };
-            if let Err(e) = service.after_jit_provision(
-                &realm_id,
+            if let Err(e) = state.identity.link_external_identity(
+                realm_id,
                 new_user.id(),
                 &identity.idp_id,
                 &identity.external_sub,
@@ -398,21 +428,15 @@ async fn callback_impl(
                 tracing::warn!(error = %e, "JIT link failed");
                 return handlers_common::server_error();
             }
-            audit_federation_jit(&state, &realm_id, &identity.idp_id, new_user.id());
-            audit_federation_linked(
-                &state,
-                &realm_id,
-                &identity.idp_id,
-                new_user.id(),
-                "initial",
-            );
-            audit_federation_completed(&state, &realm_id, &identity.idp_id, new_user.id(), true);
-            complete_login(&state, &headers, &realm_id, new_user.id(), &bag.return_to)
+            audit_federation_jit(state, realm_id, &identity.idp_id, new_user.id());
+            audit_federation_linked(state, realm_id, &identity.idp_id, new_user.id(), "initial");
+            audit_federation_completed(state, realm_id, &identity.idp_id, new_user.id(), true);
+            complete_login(state, headers, realm_id, new_user.id(), return_to)
         }
         FederationOutcome::ConfirmLinkRequired(ticket) => {
             // Persist the HMAC-bound cookie and redirect.
             let tag = compute_confirm_ticket_mac(
-                cookie_secret_32(&state),
+                cookie_secret_32(state),
                 &ticket.user_id,
                 &ticket.ticket,
             );
@@ -654,7 +678,7 @@ pub async fn confirm_link_submit(
 
 // ------ helpers ------
 
-fn build_service(state: &WebState) -> Option<FederationService> {
+pub(super) fn build_service(state: &WebState) -> Option<FederationService> {
     // Tests inject a stub transport via `WebState::with_federation_http`.
     // Production builds leave it `None` and fall through to the ureq-
     // backed implementation.

@@ -30,6 +30,7 @@ mod agents;
 mod approval;
 mod auth;
 mod health;
+pub mod limits;
 mod mfa;
 mod oauth;
 mod serve;
@@ -43,7 +44,9 @@ mod users;
 // ── Public API (preserve existing import paths for external crates) ───────────
 
 pub use auth::has_export_capability;
-pub use serve::{serve, serve_redirect, serve_router, serve_tls, serve_tls_router};
+pub use serve::{
+    serve, serve_redirect, serve_router, serve_router_on, serve_tls, serve_tls_router,
+};
 pub use state::AppState;
 
 // ── Crate-internal re-exports (used by scim, cluster_admin, and handler mods) ──
@@ -57,11 +60,11 @@ pub(crate) use auth::{
 // Re-export all shared helpers so child handler modules can use `super::name`.
 // Child modules need these accessible at the `crate::protocol::http` level.
 pub(crate) use auth::{
-    check_export_capability, check_export_rate_limit, check_token_rate_limit,
-    emit_export_watermark, extract_bearer_token, extract_realm_id, extract_user_auth,
-    identity_error_to_response, make_ip_rate_limit_response, now_micros, proto_to_rest_json,
-    rbac_error_to_response, resolve_realm_by_name, validate_user_token_with_dpop,
-    verify_manifest_signature,
+    check_anonymous_token_rate_limit, check_export_capability, check_export_rate_limit,
+    check_token_rate_limit, emit_export_watermark, extract_bearer_token, extract_realm_id,
+    extract_user_auth, identity_error_to_response, make_ip_rate_limit_response, now_micros,
+    proto_to_rest_json, rbac_error_to_response, resolve_realm_by_name,
+    validate_user_token_with_dpop, verify_manifest_signature,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -326,6 +329,64 @@ async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next:
     }
 }
 
+/// Rejects a realm-path request whose `X-Realm-ID` header names a *different*
+/// realm than the `/realms/{realm_name}/…` path segment (audit §4.16#12).
+///
+/// The deployment guide tells operators to front Hearth with a proxy that maps
+/// a tenant subdomain onto `X-Realm-ID`. The realm-path routes resolve their
+/// realm from the path alone, so before this guard a request to
+/// `tenant-a.example.com/realms/tenant-b/token` was served as tenant B while
+/// the proxy believed it had pinned tenant A — silent tenant confusion.
+///
+/// Semantics (the safe reading): the header may only *confirm* the path realm,
+/// never select or override it.
+///
+/// * No `X-Realm-ID` header — unchanged behaviour, the path decides.
+/// * Header present and equal to the path realm's id — unchanged behaviour.
+/// * Header present and different, or not a UUID — `400 realm_mismatch`.
+/// * Path realm unknown — passed through so the handler still answers `404`.
+async fn realm_path_header_agreement(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // Parsed eagerly into an owned value so the borrow of `req` ends here and
+    // `req` can still be handed to `next`. The outer `Option` is header
+    // presence; the inner one is "parsed as a UUID".
+    let Some(claimed) = req
+        .headers()
+        .get("x-realm-id")
+        .map(|v| v.to_str().ok().and_then(|s| s.parse::<uuid::Uuid>().ok()))
+    else {
+        return next.run(req).await;
+    };
+
+    // The path realm is authoritative. If it does not resolve we let the
+    // handler produce its own 404 rather than masking it with a 400.
+    let Ok(Some(realm)) = state.identity.get_realm_by_name(&realm_name) else {
+        return next.run(req).await;
+    };
+
+    if claimed.is_some_and(|id| id == *realm.id().as_uuid()) {
+        return next.run(req).await;
+    }
+
+    tracing::warn!(
+        path_realm = %realm_name,
+        "X-Realm-ID disagrees with the realm named in the request path"
+    );
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({
+            "error": "realm_mismatch",
+            "error_description":
+                "X-Realm-ID does not match the realm named in the request path",
+        })),
+    )
+        .into_response()
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 /// Builds the HTTP router with all configured routes.
@@ -333,7 +394,15 @@ async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next:
 /// The returned router is ready to be served with [`serve`].
 pub fn router(state: Arc<AppState>) -> Router {
     let admin_routes = admin::admin_api_routes();
-    let realm_routes = oauth::realm_routes().merge(session::realm_routes());
+    // Every route nested under `/realms/{realm_name}` gets the agreement guard
+    // via `route_layer`, so it runs only on a matched realm route and leaves
+    // 404s untouched (audit §4.16#12).
+    let realm_routes = oauth::realm_routes()
+        .merge(session::realm_routes())
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            realm_path_header_agreement,
+        ));
 
     let mut base = Router::new()
         .merge(health::routes())

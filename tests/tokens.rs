@@ -112,8 +112,9 @@ async fn token_issuance_and_validation_roundtrip() {
     // token. Session tokens are signed with the per-realm key (HEA-SEC-18 made
     // signature verification fail-closed on the per-realm key), so external
     // verifiers must use the realm JWKS — the same key issuance uses.
-    // (Plus RS256/ES256 ecosystem-compat entries from HEA-51 — those are
-    // verification-only and not the signer for this access token.)
+    // Every published entry is EdDSA: the RS256/ES256 ecosystem-compat entries
+    // were removed because Hearth signed with neither (audit 2026-08-28
+    // §4.2#4, §4.15#5).
     let jwks = harness.identity().realm_jwks(&realm).expect("realm jwks");
     let jwk = jwks
         .keys

@@ -1496,3 +1496,292 @@ async fn uv_proven_passkey_satisfies_mfa_required() {
         "a user-verified passkey must produce a session: cookies={cookies:?} body={body_text}"
     );
 }
+
+// ============================================================================
+// §4.18#8 — the pending-challenge store is process-global
+//
+// A `WebAuthn` challenge is minted into one in-process map keyed only by the
+// challenge bytes. Nothing records which realm asked for it, and nothing
+// records whether it was minted for a registration or an authentication, so a
+// challenge issued by realm A is redeemable in realm B, and a challenge issued
+// to enrol a passkey is redeemable to log one in.
+// ============================================================================
+
+/// A registration challenge minted in realm A must not be redeemable against
+/// realm B — and refusing it must not consume it, so realm A's own ceremony
+/// still completes.
+#[tokio::test]
+async fn registration_challenge_minted_in_realm_a_is_refused_in_realm_b() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm_a = create_realm(&harness);
+    let realm_b = create_realm(&harness);
+    let user_a = create_user(&harness, &realm_a);
+    let user_b = create_user(&harness, &realm_b);
+    let origin = "https://example.com";
+
+    let authenticator = webauthn_helper::TestAuthenticator::new("example.com");
+
+    let challenge = harness
+        .identity()
+        .start_webauthn_registration(
+            &realm_a,
+            user_a.id(),
+            &RegistrationOptions {
+                rp_id: "example.com".to_string(),
+                discoverable: false,
+            },
+        )
+        .expect("start registration in realm A");
+
+    let (cdj, att) = authenticator.build_registration_response(&challenge, origin);
+
+    let err = harness
+        .identity()
+        .complete_webauthn_registration(&realm_b, user_b.id(), &cdj, &att, origin, false)
+        .expect_err("a realm-A challenge must not enrol a credential in realm B");
+    assert!(
+        matches!(err, IdentityError::WebAuthnRegistrationFailed { .. }),
+        "expected WebAuthnRegistrationFailed for a cross-realm redemption, got: {err}"
+    );
+
+    // Nothing was written to realm B.
+    let leaked = harness
+        .identity()
+        .list_webauthn_credentials(&realm_b, user_b.id())
+        .expect("list realm B credentials");
+    assert!(
+        leaked.is_empty(),
+        "a realm-A challenge enrolled {} credential(s) in realm B",
+        leaked.len()
+    );
+
+    // The refusal must not have burned the challenge: realm A still completes.
+    let info = harness
+        .identity()
+        .complete_webauthn_registration(&realm_a, user_a.id(), &cdj, &att, origin, false)
+        .expect("the minting realm still completes its own ceremony");
+    assert_eq!(info.credential_id(), authenticator.credential_id);
+}
+
+/// An authentication challenge minted in realm A must not authenticate in
+/// realm B, even when the very same authenticator is enrolled in both.
+#[tokio::test]
+async fn authentication_challenge_minted_in_realm_a_is_refused_in_realm_b() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm_a = create_realm(&harness);
+    let realm_b = create_realm(&harness);
+    let user_a = create_user(&harness, &realm_a);
+    let user_b = create_user(&harness, &realm_b);
+    let origin = "https://example.com";
+
+    // One physical authenticator, enrolled as a discoverable credential in
+    // both realms — the same passkey used against two tenants of one server.
+    let authenticator = webauthn_helper::TestAuthenticator::new("example.com");
+    for (realm, user) in [(&realm_a, &user_a), (&realm_b, &user_b)] {
+        let challenge = harness
+            .identity()
+            .start_webauthn_registration(
+                realm,
+                user.id(),
+                &RegistrationOptions {
+                    rp_id: "example.com".to_string(),
+                    discoverable: true,
+                },
+            )
+            .expect("start registration");
+        let (cdj, att) = authenticator.build_registration_response(&challenge, origin);
+        harness
+            .identity()
+            .complete_webauthn_registration(realm, user.id(), &cdj, &att, origin, true)
+            .expect("complete registration");
+    }
+
+    // Realm A mints a discoverable (username-less) authentication challenge.
+    let challenge = harness
+        .identity()
+        .start_webauthn_authentication(
+            &realm_a,
+            None,
+            &AuthenticationOptions {
+                rp_id: "example.com".to_string(),
+            },
+        )
+        .expect("start authentication in realm A");
+
+    let handle = user_b.id().as_uuid().to_string();
+    let (cdj, auth_data, sig, user_handle) =
+        authenticator.build_authentication_response(&challenge, origin, 1, Some(&handle));
+
+    let err = harness
+        .identity()
+        .complete_webauthn_authentication(
+            &realm_b,
+            &CompleteAuthenticationParams {
+                credential_id: &authenticator.credential_id,
+                client_data_json: &cdj,
+                authenticator_data: &auth_data,
+                signature: &sig,
+                user_handle: user_handle.as_deref(),
+                origin,
+            },
+        )
+        .expect_err("a realm-A challenge must not authenticate in realm B");
+    assert!(
+        matches!(
+            err,
+            IdentityError::WebAuthnAuthenticationFailed { .. }
+                | IdentityError::InvalidAssertion { .. }
+        ),
+        "expected a rejection for a cross-realm assertion, got: {err}"
+    );
+}
+
+/// A challenge minted to *enrol* a passkey must not be redeemable to *log in*
+/// with one. Otherwise a single enrolment touch is replayable as a login.
+#[tokio::test]
+async fn registration_challenge_is_refused_at_an_authentication_redemption() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+    let origin = "https://example.com";
+
+    let authenticator = webauthn_helper::TestAuthenticator::new("example.com");
+
+    // Enrol a credential the normal way so the assertion has something to
+    // verify against.
+    let challenge = harness
+        .identity()
+        .start_webauthn_registration(
+            &realm,
+            user.id(),
+            &RegistrationOptions {
+                rp_id: "example.com".to_string(),
+                discoverable: false,
+            },
+        )
+        .expect("start registration");
+    let (cdj, att) = authenticator.build_registration_response(&challenge, origin);
+    harness
+        .identity()
+        .complete_webauthn_registration(&realm, user.id(), &cdj, &att, origin, false)
+        .expect("complete registration");
+
+    // A *second* registration challenge, redeemed on the authentication path.
+    let reg_challenge = harness
+        .identity()
+        .start_webauthn_registration(
+            &realm,
+            user.id(),
+            &RegistrationOptions {
+                rp_id: "example.com".to_string(),
+                discoverable: false,
+            },
+        )
+        .expect("start second registration");
+    let (auth_cdj, auth_data, sig, _) =
+        authenticator.build_authentication_response(&reg_challenge, origin, 7, None);
+
+    let err = harness
+        .identity()
+        .complete_webauthn_authentication(
+            &realm,
+            &CompleteAuthenticationParams {
+                credential_id: &authenticator.credential_id,
+                client_data_json: &auth_cdj,
+                authenticator_data: &auth_data,
+                signature: &sig,
+                user_handle: None,
+                origin,
+            },
+        )
+        .expect_err("a registration challenge must not authenticate");
+    assert!(
+        matches!(
+            err,
+            IdentityError::WebAuthnAuthenticationFailed { .. }
+                | IdentityError::InvalidAssertion { .. }
+        ),
+        "expected a rejection for a registration challenge on the login path, got: {err}"
+    );
+
+    // The correctly-minted ceremony still works.
+    let auth_challenge = harness
+        .identity()
+        .start_webauthn_authentication(
+            &realm,
+            Some(user.id()),
+            &AuthenticationOptions {
+                rp_id: "example.com".to_string(),
+            },
+        )
+        .expect("start authentication");
+    let (ok_cdj, ok_auth_data, ok_sig, _) =
+        authenticator.build_authentication_response(&auth_challenge, origin, 8, None);
+    let result = harness
+        .identity()
+        .complete_webauthn_authentication(
+            &realm,
+            &CompleteAuthenticationParams {
+                credential_id: &authenticator.credential_id,
+                client_data_json: &ok_cdj,
+                authenticator_data: &ok_auth_data,
+                signature: &ok_sig,
+                user_handle: None,
+                origin,
+            },
+        )
+        .expect("the matching ceremony still succeeds");
+    assert_eq!(result.user_id(), user.id());
+}
+
+/// The mirror image: a challenge minted to *log in* must not be redeemable to
+/// enrol a new passkey, which would turn one login touch into a persistent
+/// account backdoor.
+#[tokio::test]
+async fn authentication_challenge_is_refused_at_a_registration_redemption() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+    let origin = "https://example.com";
+
+    let auth_challenge = harness
+        .identity()
+        .start_webauthn_authentication(
+            &realm,
+            Some(user.id()),
+            &AuthenticationOptions {
+                rp_id: "example.com".to_string(),
+            },
+        )
+        .expect("start authentication");
+
+    let attacker = webauthn_helper::TestAuthenticator::new("example.com");
+    let (cdj, att) = attacker.build_registration_response(&auth_challenge, origin);
+
+    let err = harness
+        .identity()
+        .complete_webauthn_registration(&realm, user.id(), &cdj, &att, origin, false)
+        .expect_err("an authentication challenge must not enrol a credential");
+    assert!(
+        matches!(err, IdentityError::WebAuthnRegistrationFailed { .. }),
+        "expected WebAuthnRegistrationFailed for a login challenge on the enrol path, got: {err}"
+    );
+
+    let creds = harness
+        .identity()
+        .list_webauthn_credentials(&realm, user.id())
+        .expect("list credentials");
+    assert!(
+        creds.is_empty(),
+        "an authentication challenge enrolled {} credential(s)",
+        creds.len()
+    );
+}

@@ -209,6 +209,12 @@ pub struct WebState {
     /// the CSRF bypass must call `.with_dev_mode(true)` explicitly.
     /// Production startup calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
     pub dev_mode: bool,
+    /// Brute-force guard for `POST /ui/device` (task 22.26, audit §4.25#4).
+    ///
+    /// Bounds both the rate and the total number of user-code guesses an
+    /// authenticated session may make. Shared via `Arc` so the router can be
+    /// cloned per request without resetting the counters.
+    pub device_approval_guard: Arc<crate::abuse::device_approval::DeviceApprovalGuard>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -291,7 +297,23 @@ impl WebState {
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
             dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
+            device_approval_guard: Arc::new(
+                crate::abuse::device_approval::DeviceApprovalGuard::new(),
+            ),
         }
+    }
+
+    /// Replaces the device-approval brute-force guard (task 22.26).
+    ///
+    /// Tests that need a specific attempt ceiling — or none at all — install
+    /// their own guard here.
+    #[must_use]
+    pub fn with_device_approval_guard(
+        mut self,
+        guard: Arc<crate::abuse::device_approval::DeviceApprovalGuard>,
+    ) -> Self {
+        self.device_approval_guard = guard;
+        self
     }
 
     /// Replaces the bytes served at `/ui/static/app.css` with operator-supplied
@@ -824,6 +846,11 @@ pub fn router(state: WebState) -> Router {
             "/reset-password",
             axum::routing::get(handlers::reset_password_form).post(handlers::reset_password_submit),
         )
+        // Magic-link redemption — the terminal step of the passwordless flow.
+        .route(
+            "/magic-link",
+            axum::routing::get(handlers::magic_link_redeem),
+        )
         .route(
             "/register",
             axum::routing::get(handlers::register_form).post(handlers::register_submit),
@@ -871,6 +898,10 @@ pub fn router(state: WebState) -> Router {
                 .post(handlers::reset_password_submit_scoped),
         )
         .route(
+            "/realms/{realm}/magic-link",
+            axum::routing::get(handlers::magic_link_redeem_scoped),
+        )
+        .route(
             "/realms/{realm}/verify-email",
             axum::routing::get(handlers::verify_email_scoped),
         )
@@ -906,6 +937,14 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/forgot-password/sent",
             axum::routing::get(handlers::admin_forgot_password_sent),
+        )
+        // The target of the link `/ui/admin/forgot-password` emails. Without
+        // it an admin who forgets their password cannot recover
+        // (audit 2026-08-28 §4.24#7).
+        .route(
+            "/admin/reset-password",
+            axum::routing::get(handlers::admin_reset_password_form)
+                .post(handlers::admin_reset_password_submit),
         )
         // Convenience alias: /ui/admin is the admin home per R-2 (UI_ROUTING.md).
         // Redirects to the realms list which is the canonical admin landing page.

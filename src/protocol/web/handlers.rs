@@ -41,6 +41,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
 
+use crate::abuse::device_approval::{DeviceApprovalDecision, DeviceApprovalGuard};
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
@@ -3013,6 +3014,26 @@ pub async fn admin_forgot_password_submit(
     forgot_password_submit_impl(state, headers, form, RealmSource::Admin, captcha_ok)
 }
 
+/// Runs `job` on the blocking pool without waiting for it.
+///
+/// Used for outbound mail on pre-auth flows: a transport that takes hundreds
+/// of milliseconds must not make the "this address exists" arm of a handler
+/// distinguishable from the silent one (audit 2026-08-28 §4.24#3 / #4).
+///
+/// Falls back to running `job` inline when no Tokio runtime is available
+/// (unit tests calling the impl directly) — correctness before latency.
+fn spawn_off_request_path<F>(job: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(job);
+        }
+        Err(_) => job(),
+    }
+}
+
 /// Shared implementation. Looks up the user in the resolved realm.
 /// Always redirects to the "check your email" page regardless of outcome
 /// (enumeration resistance).
@@ -3059,22 +3080,29 @@ fn forgot_password_submit_impl(
                 &headers,
             );
             let reset_url = format!("{base}{action_prefix}/reset-password?token={token}");
-            if let Some(ref email_service) = state.email {
+            if let Some(email_service) = state.email.clone() {
                 let realm_branding = realm.config().email_branding.clone();
                 let stored = realm
                     .config()
                     .email_templates
                     .get("password_reset")
                     .cloned();
-                if let Err(e) = email_service.send_password_reset_email(
-                    email,
-                    &reset_url,
-                    realm_branding.as_ref(),
-                    stored.as_ref(),
-                    None,
-                ) {
-                    tracing::warn!(error = %e, "forgot_password: failed to send email");
-                }
+                // Hand the send to the blocking pool and return immediately.
+                // Keeping the SMTP round-trip on the request path made the
+                // "account exists" arm measurably slower than the silent one,
+                // which is an enumeration oracle (audit 2026-08-28 §4.24#3).
+                let recipient = email.to_string();
+                spawn_off_request_path(move || {
+                    if let Err(e) = email_service.send_password_reset_email(
+                        &recipient,
+                        &reset_url,
+                        realm_branding.as_ref(),
+                        stored.as_ref(),
+                        None,
+                    ) {
+                        tracing::warn!(error = %e, "forgot_password: failed to send email");
+                    }
+                });
             } else {
                 tracing::warn!(
                     reset_url = %crate::protocol::redact::Redact(&reset_url),
@@ -3137,7 +3165,7 @@ pub async fn reset_password_form(
     State(state): State<Arc<WebState>>,
     Query(query): Query<ResetPasswordQuery>,
 ) -> Response {
-    reset_password_form_impl(state, query, None)
+    reset_password_form_impl(state, query, RealmSource::Path(None))
 }
 
 /// Renders the reset-password form at `/ui/realms/<name>/reset-password`.
@@ -3146,18 +3174,30 @@ pub async fn reset_password_form_scoped(
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     Query(query): Query<ResetPasswordQuery>,
 ) -> Response {
-    reset_password_form_impl(state, query, Some(realm_name))
+    reset_password_form_impl(state, query, RealmSource::Path(Some(realm_name)))
+}
+
+/// Renders the admin reset-password form at `/ui/admin/reset-password`.
+///
+/// `admin_forgot_password_submit` emails a link under `/ui/admin`; without
+/// this route that link 404s and the admin account is unrecoverable
+/// (audit 2026-08-28 §4.24#7).
+pub async fn admin_reset_password_form(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<ResetPasswordQuery>,
+) -> Response {
+    reset_password_form_impl(state, query, RealmSource::Admin)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn reset_password_form_impl(
     state: Arc<WebState>,
     query: ResetPasswordQuery,
-    path_realm: Option<String>,
+    source: RealmSource,
 ) -> Response {
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, false) {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -3197,6 +3237,15 @@ pub struct ResetPasswordFormData {
     pub password_confirm: String,
 }
 
+/// Minimum password length the browser forms enforce before spending an
+/// Argon2id permit.
+///
+/// Mirrors the engine's unconditional floor
+/// (`identity::validation::MIN_PASSWORD_LENGTH_FLOOR`). Keeping the two in
+/// step is what lets the form name the real requirement instead of failing
+/// deep in the engine with a generic message (audit 2026-08-28 §4.24#5).
+const MIN_BROWSER_PASSWORD_LENGTH: usize = 12;
+
 /// Context resolved pre-gate for reset-password submissions. Built outside the
 /// KDF admission gate so cheap validation rejects (password mismatch, minimum
 /// length) never consume a permit (HEA-1981 / F4).
@@ -3212,9 +3261,9 @@ struct PreparedReset {
 fn reset_prepare(
     state: &Arc<WebState>,
     form: &ResetPasswordFormData,
-    path_realm: Option<String>,
+    source: RealmSource,
 ) -> Result<PreparedReset, Response> {
-    let (realm, action_prefix) = match resolve_pre_auth_realm(state, path_realm, true) {
+    let (realm, action_prefix) = match resolve_for_source(state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -3246,10 +3295,14 @@ fn reset_prepare(
             "Passwords do not match.".to_string(),
         ));
     }
-    if form.password.len() < 8 {
+    // The pre-gate threshold must be the real policy floor. It used to be 8
+    // while the message said 12, so an 8-to-11-character password sailed past
+    // here, was rejected deep inside the engine, and came back as a generic
+    // "try again" that named no requirement (audit 2026-08-28 §4.24#5).
+    if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
         return Err(reset_err(
             form.token.clone(),
-            "Password must be at least 12 characters.".to_string(),
+            format!("Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."),
         ));
     }
     Ok(PreparedReset {
@@ -3266,7 +3319,7 @@ pub async fn reset_password_submit(
 ) -> Response {
     // Cheap pre-gate validation — password mismatch/length never consumes a KDF
     // permit (HEA-1981 / F4).
-    let prepared = match reset_prepare(&state, &form, None) {
+    let prepared = match reset_prepare(&state, &form, RealmSource::Path(None)) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -3291,7 +3344,36 @@ pub async fn reset_password_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    let prepared = match reset_prepare(&state, &form, Some(realm_name)) {
+    let prepared = match reset_prepare(&state, &form, RealmSource::Path(Some(realm_name))) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let shed_state = Arc::clone(&state);
+    let shed_headers = headers.clone();
+    match gate()
+        .run(move || reset_password_submit_impl(state, form, prepared))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => {
+            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
+        }
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Handles reset-password form submission at `/ui/admin/reset-password`.
+///
+/// Completes the loop opened by `admin_forgot_password_submit`, whose emailed
+/// link previously pointed at a route that did not exist — leaving an admin
+/// account with a forgotten password unrecoverable through the UI
+/// (audit 2026-08-28 §4.24#7).
+pub async fn admin_reset_password_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<ResetPasswordFormData>,
+) -> Response {
+    let prepared = match reset_prepare(&state, &form, RealmSource::Admin) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -3358,6 +3440,21 @@ fn reset_password_submit_impl(
             String::new(),
             "This reset link is invalid or has expired. Please request a new one.".to_string(),
         ),
+        // The realm's password policy refused the new password. The token is
+        // NOT consumed on this path, so hand back the reason AND the token so
+        // the user can retry on the same link rather than being told to "try
+        // again" with no idea what to change (audit 2026-08-28 §4.24#5).
+        Err(IdentityError::InvalidInput { ref reason }) => {
+            let mut msg = reason.clone();
+            if let Some(first) = msg.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            reset_err(form.token, format!("{msg}."))
+        }
+        Err(IdentityError::PasswordReused) => reset_err(
+            form.token,
+            "That password has been used before. Please choose a different one.".to_string(),
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "reset_password: error resetting password");
             reset_err(
@@ -3366,6 +3463,135 @@ fn reset_password_submit_impl(
             )
         }
     }
+}
+
+// ============================================================================
+// Magic-link redemption
+// ============================================================================
+
+/// Query parameters for the magic-link redemption route.
+#[derive(Debug, Deserialize)]
+pub struct MagicLinkQuery {
+    /// The opaque single-use token from the emailed link.
+    pub token: Option<String>,
+}
+
+/// `GET /ui/magic-link` — redeems a magic link and starts a browser session.
+///
+/// Before this existed the flow had no terminal step: a token could be minted
+/// and mailed but never exchanged for anything (audit 2026-08-28 §4.24#6).
+pub async fn magic_link_redeem(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Query(query): Query<MagicLinkQuery>,
+) -> Response {
+    magic_link_redeem_impl(state, &headers, query, RealmSource::Path(None))
+}
+
+/// `GET /ui/realms/<name>/magic-link` — realm-scoped magic-link redemption.
+pub async fn magic_link_redeem_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<MagicLinkQuery>,
+) -> Response {
+    magic_link_redeem_impl(state, &headers, query, RealmSource::Path(Some(realm_name)))
+}
+
+/// Shared implementation for both magic-link redemption routes.
+///
+/// On success: revoke any prior cookie session, mint a new one, and redirect
+/// into the signed-in UI. On any failure: render the login page with a
+/// neutral "expired or already used" banner — never a hint about whether the
+/// address exists.
+#[allow(clippy::needless_pass_by_value)]
+fn magic_link_redeem_impl(
+    state: Arc<WebState>,
+    headers: &HeaderMap,
+    query: MagicLinkQuery,
+    source: RealmSource,
+) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return resp,
+    };
+
+    let expired = |state: &Arc<WebState>| -> Response {
+        let mut tmpl = LoginTemplate::new(
+            Some(
+                "This sign-in link has expired or has already been used. \
+                 Request a new one."
+                    .to_string(),
+            ),
+            None,
+            &action_prefix,
+            registration_enabled(&realm),
+            DEFAULT_LOGIN_LOCALE,
+            state.product_name.clone(),
+            state.logo_url.clone(),
+        );
+        tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+        tmpl.inline_theme_css = state.inline_theme_css();
+        tmpl.new_magic_link_url = Some(format!("{action_prefix}/login"));
+        render_status(&tmpl, StatusCode::BAD_REQUEST)
+    };
+
+    let Some(token) = query.token.filter(|t| !t.trim().is_empty()) else {
+        return expired(&state);
+    };
+
+    let user_id = match state.identity.validate_magic_link(realm.id(), &token) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::info!(error = %e, "magic_link: redemption rejected");
+            return expired(&state);
+        }
+    };
+
+    // A-41: destroy any pre-existing session cookie before issuing a new one.
+    revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
+
+    let session_ctx = crate::identity::SessionContext {
+        ip_address: None,
+        user_agent_raw: headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        device_label: None,
+        ..Default::default()
+    };
+    let session = match state
+        .identity
+        .create_session(realm.id(), &user_id, &session_ctx)
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "magic_link: create_session failed");
+            return internal_error_response();
+        }
+    };
+
+    let secure = state.is_secure_request(headers);
+    let IssuedCookies {
+        session_cookie,
+        csrf_cookie,
+    } = issue_auth_cookies(&state.cookie_secret, realm.id(), session.id(), secure);
+    state.set_current_realm(realm.id().clone());
+
+    let mut response = Redirect::to("/ui").into_response();
+    append_cookie(&mut response, &session_cookie);
+    append_cookie(&mut response, &csrf_cookie);
+    append_cookie(
+        &mut response,
+        &super::auth::last_realm_cookie(
+            &super::auth::last_realm_value(state.identity.as_ref(), realm.id()),
+            secure,
+        ),
+    );
+    response
 }
 
 // ============================================================================
@@ -3890,9 +4116,9 @@ fn register_submit_impl(
     if form.password != form.password_confirm {
         return render_err("Passwords do not match.".to_string(), form.email);
     }
-    if form.password.len() < 8 {
+    if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
         return render_err(
-            "Password must be at least 12 characters.".to_string(),
+            format!("Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."),
             form.email,
         );
     }
@@ -3924,7 +4150,7 @@ fn register_submit_impl(
         }
     };
 
-    if let Some(email_service) = state.email.as_ref() {
+    if let Some(email_service) = state.email.clone() {
         let base = derive_base_url(
             state
                 .config
@@ -3939,15 +4165,21 @@ fn register_submit_impl(
         );
         let branding = realm.config().email_branding.clone();
         let stored_verification = realm.config().email_templates.get("verification").cloned();
-        if let Err(e) = email_service.send_verification_email(
-            &form.email,
-            &verify_url,
-            branding.as_ref(),
-            stored_verification.as_ref(),
-            None,
-        ) {
-            tracing::warn!(error = %e, "register_submit: failed to send verification email");
-        }
+        // Off the request path: the mail send must not add latency that
+        // distinguishes a fresh address from a registered one
+        // (audit 2026-08-28 §4.24#4).
+        let recipient = form.email.clone();
+        spawn_off_request_path(move || {
+            if let Err(e) = email_service.send_verification_email(
+                &recipient,
+                &verify_url,
+                branding.as_ref(),
+                stored_verification.as_ref(),
+                None,
+            ) {
+                tracing::warn!(error = %e, "register_submit: failed to send verification email");
+            }
+        });
     } else {
         tracing::warn!(
             "register_submit: no email transport configured; verification cannot be delivered"
@@ -4371,9 +4603,18 @@ pub async fn device_approve_form(
 }
 
 /// POST `/ui/device` — processes the device approval form.
+///
+/// Guarded by [`crate::abuse::device_approval::DeviceApprovalGuard`]
+/// (task 22.26, audit 2026-08-28 §4.25#4): an authenticated session gets a
+/// bounded number of wrong user codes before an escalating lockout, and the
+/// endpoint is rate-shaped per IP and per realm. Without a ceiling an
+/// attacker does not need to guess a *specific* code — any code currently
+/// pending in the realm approves a device they control.
 pub async fn device_approve_submit(
     State(state): State<Arc<WebState>>,
     session: super::auth::UiSession,
+    headers: HeaderMap,
+    PeerAddr(peer_addr): PeerAddr,
     Form(form): Form<DeviceApproveForm>,
 ) -> Response {
     // F5: verify CSRF before mutating. csrf_token is always present in the
@@ -4384,9 +4625,29 @@ pub async fn device_approve_submit(
         return resp;
     }
 
+    let guard_key = format!(
+        "{}:{}",
+        session.realm_id.as_uuid(),
+        session.user_id.as_uuid()
+    );
+    let peer_ip = captcha_client_ip(&headers, peer_addr, &state.trusted_proxies);
+    let realm_key = session.realm_id.as_uuid().to_string();
+
+    match state
+        .device_approval_guard
+        .check(&guard_key, peer_ip, &realm_key)
+    {
+        DeviceApprovalDecision::Allow => {}
+        decision => return device_approval_refusal(decision),
+    }
+
     let code = form.user_code.trim().to_uppercase();
 
     if code.is_empty() || code.len() > 8 {
+        let decision = state.device_approval_guard.record_failure(&guard_key);
+        if decision != DeviceApprovalDecision::Allow {
+            return device_approval_refusal(decision);
+        }
         return Redirect::to("/ui/device?flash=invalid").into_response();
     }
 
@@ -4394,15 +4655,44 @@ pub async fn device_approve_submit(
         .identity
         .approve_device(&session.realm_id, &code, &session.user_id)
     {
-        Ok(()) => Redirect::to("/ui/device?flash=approved").into_response(),
+        Ok(()) => {
+            state.device_approval_guard.record_success(&guard_key);
+            Redirect::to("/ui/device?flash=approved").into_response()
+        }
         Err(IdentityError::DeviceCodeExpired) => {
+            // An expired code is a code that really existed, so it is not a
+            // guess. Do not charge it against the attempt budget.
             Redirect::to("/ui/device?flash=expired").into_response()
         }
         Err(e) => {
             tracing::warn!(error = %e, "device_approve: approve_device failed");
+            let decision = state.device_approval_guard.record_failure(&guard_key);
+            if decision != DeviceApprovalDecision::Allow {
+                return device_approval_refusal(decision);
+            }
             Redirect::to("/ui/device?flash=invalid").into_response()
         }
     }
+}
+
+/// Renders a 429 for a shaped or locked-out device-approval attempt.
+///
+/// Both cases carry `Retry-After` so a well-behaved client backs off instead
+/// of hammering, and neither reveals whether the submitted code existed.
+fn device_approval_refusal(decision: DeviceApprovalDecision) -> Response {
+    let retry_after = match decision {
+        DeviceApprovalDecision::LockedOut { until, .. } => {
+            DeviceApprovalGuard::retry_after_secs(until)
+        }
+        _ => 1,
+    };
+    tracing::warn!(?decision, "device_approve: refused by brute-force guard");
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, retry_after.to_string())],
+        "Too many device approval attempts. Please wait and try again.",
+    )
+        .into_response()
 }
 
 // ============================================================================

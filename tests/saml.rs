@@ -257,12 +257,15 @@ async fn engine_replay_protection_works() {
         })
         .expect("create");
     let idp = IdpId::generate();
+    // 22.11: the sentinel now records when the guarded assertion stops being
+    // replayable, so the cleanup sweeper can reclaim it.
+    let expires_at_secs = 4_102_444_800; // 2100-01-01, well past any sweep
     h.identity()
-        .mark_saml_assertion_consumed(realm.id(), &idp, "_a1")
+        .mark_saml_assertion_consumed(realm.id(), &idp, "_a1", expires_at_secs)
         .expect("first");
     let err = h
         .identity()
-        .mark_saml_assertion_consumed(realm.id(), &idp, "_a1")
+        .mark_saml_assertion_consumed(realm.id(), &idp, "_a1", expires_at_secs)
         .expect_err("second should reject");
     assert!(matches!(
         err,
@@ -468,4 +471,301 @@ fn sp_rejects_wrapped_assertion_signed_elsewhere_in_the_document() {
             assertion.id, identity.email
         ),
     }
+}
+
+// ============================================================================
+// 19.4 (audit 2026-08-28 §4.10#5) — the signed `<SubjectConfirmationData>`
+// bindings, end-to-end through the signature-verifying SP service.
+// ============================================================================
+
+/// Builds a signed `<Response>` for `https://sp.example`, optionally rewriting
+/// the bearer `<SubjectConfirmationData>` attributes *before* signing — so the
+/// IdP's signature covers the rewritten value. That is the real attack shape:
+/// a legitimately signed assertion minted for a different recipient.
+fn signed_response_with_rewritten_confirmation(
+    key: &RsaSigningKey,
+    rewrite: &[(&str, &str)],
+) -> Vec<u8> {
+    let now = Timestamp::from_micros(1_700_000_000 * 1_000_000);
+    let mut xml = build_response_xml(&ResponseBuilder {
+        response_id: "_r1",
+        in_response_to: Some("_req1"),
+        issue_instant: now,
+        destination: "https://sp.example/acs",
+        issuer: "https://idp.example",
+        audience: "https://sp.example",
+        assertion_id: "_a1",
+        subject_name_id: "alice@example.com",
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess1",
+        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
+        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
+        attributes: &BTreeMap::new(),
+    });
+    for (from, to) in rewrite {
+        assert!(xml.contains(from), "fixture must contain {from}");
+        xml = xml.replace(from, to);
+    }
+    sign_element(xml.as_bytes(), "_r1", key).expect("sign")
+}
+
+/// Same fixture, but the bearer `<SubjectConfirmationData NotOnOrAfter>` — and
+/// only that copy — is moved into the past. `<Conditions NotOnOrAfter>` keeps
+/// the original, still-open instant.
+fn signed_response_with_closed_bearer_window(key: &RsaSigningKey) -> Vec<u8> {
+    const MARKER: &str = r#"<saml:SubjectConfirmationData NotOnOrAfter=""#;
+    let now = Timestamp::from_micros(1_700_000_000 * 1_000_000);
+    let xml = build_response_xml(&ResponseBuilder {
+        response_id: "_r1",
+        in_response_to: Some("_req1"),
+        issue_instant: now,
+        destination: "https://sp.example/acs",
+        issuer: "https://idp.example",
+        audience: "https://sp.example",
+        assertion_id: "_a1",
+        subject_name_id: "alice@example.com",
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess1",
+        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
+        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
+        attributes: &BTreeMap::new(),
+    });
+    let start = xml.find(MARKER).expect("fixture has a bearer confirmation") + MARKER.len();
+    let end = start + xml[start..].find('"').expect("closing quote");
+    let mut rewritten = String::with_capacity(xml.len());
+    rewritten.push_str(&xml[..start]);
+    rewritten.push_str("2023-11-13T00:00:00.000000000Z");
+    rewritten.push_str(&xml[end..]);
+    assert!(
+        rewritten.contains("<saml:Conditions NotBefore="),
+        "Conditions must be untouched"
+    );
+    sign_element(rewritten.as_bytes(), "_r1", key).expect("sign")
+}
+
+fn sp_idp_config(cert_pem: String) -> SamlIdpConfig {
+    SamlIdpConfig {
+        idp_id: IdpId::generate(),
+        name: "corp".into(),
+        entity_id: "https://idp.example".into(),
+        sso_url: "https://idp.example/sso".into(),
+        slo_url: None,
+        idp_certificates_pem: vec![cert_pem],
+        sign_authn_requests: false,
+        want_assertions_signed: false,
+        attribute_map: BTreeMap::new(),
+    }
+}
+
+/// Control: the unmodified fixture is accepted, so the rejections below are
+/// caused by the rewritten binding and nothing else.
+#[tokio::test]
+async fn sp_accepts_well_bound_subject_confirmation() {
+    let _h = TestHarness::embedded().await.expect("harness");
+    let key = RsaSigningKey::generate("test-idp", 365).expect("key");
+    let signed = signed_response_with_rewritten_confirmation(&key, &[]);
+    let outcome = SamlSpService::complete(
+        &sp_idp_config(cert_der_to_pem(key.cert_der())),
+        "https://sp.example",
+        "https://sp.example/acs",
+        Some("_req1"),
+        Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        &signed,
+    );
+    assert!(
+        matches!(outcome, SamlSpOutcome::Accepted { .. }),
+        "a correctly bound bearer assertion must be accepted"
+    );
+}
+
+/// §4.10#5: an assertion the IdP legitimately signed for **another** service
+/// provider — its `Recipient` names that SP's ACS — must be refused when
+/// replayed here, even though the outer `<Response Destination=…>` is ours.
+#[tokio::test]
+async fn sp_rejects_assertion_minted_for_another_recipient() {
+    let _h = TestHarness::embedded().await.expect("harness");
+    let key = RsaSigningKey::generate("test-idp", 365).expect("key");
+    let signed = signed_response_with_rewritten_confirmation(
+        &key,
+        &[(
+            r#"Recipient="https://sp.example/acs""#,
+            r#"Recipient="https://other-sp.example/acs""#,
+        )],
+    );
+    let outcome = SamlSpService::complete(
+        &sp_idp_config(cert_der_to_pem(key.cert_der())),
+        "https://sp.example",
+        "https://sp.example/acs",
+        Some("_req1"),
+        Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        &signed,
+    );
+    match outcome {
+        SamlSpOutcome::Rejected { error } => assert!(
+            matches!(
+                error,
+                hearth::identity::IdentityError::Saml(
+                    hearth::identity::federation::saml::SamlError::DestinationMismatch
+                )
+            ),
+            "expected a Recipient/destination rejection, got {error:?}"
+        ),
+        SamlSpOutcome::Accepted { .. } => {
+            panic!("an assertion minted for another SP's ACS was accepted")
+        }
+    }
+}
+
+/// §4.10#5: the bearer `NotOnOrAfter` is its own window. An assertion whose
+/// `<Conditions>` are still open but whose bearer window has closed must be
+/// refused.
+#[tokio::test]
+async fn sp_rejects_closed_bearer_window() {
+    let _h = TestHarness::embedded().await.expect("harness");
+    let key = RsaSigningKey::generate("test-idp", 365).expect("key");
+    // Conditions/NotOnOrAfter stays open; only the bearer copy (inside
+    // SubjectConfirmationData) is pulled back into the past. The builder emits
+    // the same instant in both places, so rewrite it positionally.
+    let signed = signed_response_with_closed_bearer_window(&key);
+    let outcome = SamlSpService::complete(
+        &sp_idp_config(cert_der_to_pem(key.cert_der())),
+        "https://sp.example",
+        "https://sp.example/acs",
+        Some("_req1"),
+        Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        &signed,
+    );
+    match outcome {
+        SamlSpOutcome::Rejected { error } => assert!(
+            matches!(
+                error,
+                hearth::identity::IdentityError::Saml(
+                    hearth::identity::federation::saml::SamlError::Expired
+                )
+            ),
+            "expected an Expired rejection from the bearer window, got {error:?}"
+        ),
+        SamlSpOutcome::Accepted { .. } => {
+            panic!("an assertion whose bearer window had closed was accepted")
+        }
+    }
+}
+
+/// §4.10#5: `InResponseTo` inside the signed element must name the
+/// `AuthnRequest` this SP issued.
+#[tokio::test]
+async fn sp_rejects_signed_in_response_to_mismatch() {
+    let _h = TestHarness::embedded().await.expect("harness");
+    let key = RsaSigningKey::generate("test-idp", 365).expect("key");
+    // Rewrite only the copy inside <SubjectConfirmationData>; the
+    // <Response InResponseTo="_req1"> envelope still says the right thing,
+    // which is precisely why the envelope copy is not enough.
+    let signed = signed_response_with_rewritten_confirmation(
+        &key,
+        &[(
+            r#"Recipient="https://sp.example/acs" InResponseTo="_req1""#,
+            r#"Recipient="https://sp.example/acs" InResponseTo="_attacker""#,
+        )],
+    );
+    let outcome = SamlSpService::complete(
+        &sp_idp_config(cert_der_to_pem(key.cert_der())),
+        "https://sp.example",
+        "https://sp.example/acs",
+        Some("_req1"),
+        Timestamp::from_micros(1_700_000_000 * 1_000_000),
+        &signed,
+    );
+    match outcome {
+        SamlSpOutcome::Rejected { error } => assert!(
+            matches!(
+                error,
+                hearth::identity::IdentityError::Saml(
+                    hearth::identity::federation::saml::SamlError::InvalidAuthnRequest { .. }
+                )
+            ),
+            "expected an InResponseTo rejection, got {error:?}"
+        ),
+        SamlSpOutcome::Accepted { .. } => {
+            panic!("a signed InResponseTo mismatch was accepted")
+        }
+    }
+}
+
+// ============================================================================
+// 22.11 (audit 2026-08-28 §4.10#9) — the `saml:state:` key space is written by
+// an unauthenticated GET and must not grow without bound.
+// ============================================================================
+
+/// Counts live `saml:state:` rows in a realm. The prefix is asserted non-empty
+/// by the caller first, so a drifted key format fails loudly rather than making
+/// the reclamation assertion pass vacuously.
+fn count_saml_state_rows(h: &TestHarness, realm: &hearth::core::RealmId) -> usize {
+    h.storage()
+        .scan(realm, b"saml:state:", b"saml:state;")
+        .expect("scan saml state")
+        .len()
+}
+
+/// The unauthenticated `…/federation/saml/begin` writer reclaims what has aged
+/// out before it writes, so an abandoned login cannot leak a row for the life
+/// of the store.
+#[tokio::test]
+async fn put_saml_state_reclaims_expired_bags() {
+    use hearth::identity::federation::saml::SamlStateBag;
+
+    let h = TestHarness::embedded().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&hearth::identity::CreateRealmRequest {
+            name: "saml-cap".into(),
+            config: None,
+        })
+        .expect("create realm");
+    let realm_id = realm.id().clone();
+    let idp_id = IdpId::generate();
+
+    let now_micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_micros() as i64;
+
+    // An abandoned login from an hour ago: past the 600 s TTL.
+    h.identity()
+        .put_saml_state(&SamlStateBag {
+            token: "abandoned".into(),
+            request_id: "_req-abandoned".into(),
+            realm_id: realm_id.clone(),
+            idp_id: idp_id.clone(),
+            return_to: None,
+            created_at: Timestamp::from_micros(now_micros - 3_600 * 1_000_000),
+        })
+        .expect("seed abandoned bag");
+    assert_eq!(
+        count_saml_state_rows(&h, &realm_id),
+        1,
+        "the seeded bag must be visible under the saml:state: prefix — if this \
+         is 0 the key format drifted and the reclamation check below would be \
+         vacuous"
+    );
+
+    // A fresh login. Writing it must first reclaim the stale row.
+    h.identity()
+        .put_saml_state(&SamlStateBag {
+            token: "in-flight".into(),
+            request_id: "_req-in-flight".into(),
+            realm_id: realm_id.clone(),
+            idp_id,
+            return_to: None,
+            created_at: Timestamp::from_micros(now_micros),
+        })
+        .expect("write fresh bag");
+
+    assert_eq!(
+        count_saml_state_rows(&h, &realm_id),
+        1,
+        "the abandoned bag must have been reclaimed, leaving only the live one"
+    );
+    h.identity()
+        .take_saml_state(&realm_id, "in-flight")
+        .expect("the live bag is the survivor");
 }

@@ -72,15 +72,60 @@ impl Drop for TracingGuard {
 /// # Panics
 ///
 /// Panics if the global subscriber has already been set (called twice).
+pub mod redact;
+
+/// Dependency log targets that serialize an outbound request head.
+///
+/// `ureq_proto::util::log_data` hex-dumps the bytes it is about to put on the
+/// wire, `Authorization: Bearer <provider api key>` included, and
+/// `tracing-subscriber` bridges those `log` records into the global subscriber.
+/// The `h2`, `hyper` and `hyper_util` framing targets do the same for their own
+/// protocols. Every one of Hearth's egress paths — federation, email, SMS and
+/// webhook dispatch — carries a provider credential in those headers.
+///
+/// These caps are applied last and unconditionally, so neither
+/// `observability.log_level: trace` nor a `RUST_LOG` value can lift them. A
+/// directive with the same target replaces the parsed one rather than being
+/// added alongside it.
+const WIRE_DUMP_CAPS: &[&str] = &[
+    "ureq_proto::util=off",
+    "ureq_proto=warn",
+    "h2=warn",
+    "hyper=warn",
+    "hyper_util=warn",
+    "rustls=warn",
+];
+
+/// Log targets that are merely noisy rather than dangerous.
+///
+/// Unlike [`WIRE_DUMP_CAPS`] these are defaults, so an operator who asks for
+/// them through `RUST_LOG` gets them.
+const NOISY_DEFAULTS: &str = "globset=warn,tower=warn";
+
+/// Builds the production log filter for `log_level`.
+///
+/// `RUST_LOG` takes priority over `log_level` for ordinary targets. The
+/// wire-dump caps in [`WIRE_DUMP_CAPS`] are then applied on top of whichever
+/// source won, because a credential must not reach the log at any level.
+///
+/// An unparseable cap directive is skipped rather than panicking; the caps are
+/// compile-time constants, so that arm is unreachable in practice.
+#[must_use]
+pub fn build_env_filter(log_level: &str) -> EnvFilter {
+    let mut filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("{log_level},{NOISY_DEFAULTS}")));
+
+    for cap in WIRE_DUMP_CAPS {
+        if let Ok(directive) = cap.parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
+
+    filter
+}
+
 pub fn init(config: &ObservabilityConfig) -> TracingGuard {
-    // RUST_LOG takes priority. When absent, bake per-crate warn overrides for
-    // known noisy dependencies so they don't pollute default output.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!(
-            "{},globset=warn,h2=warn,hyper=warn,tower=warn",
-            config.log_level
-        ))
-    });
+    let filter = build_env_filter(&config.log_level);
 
     let json = config.log_format == "json";
     let is_tty = std::io::stdout().is_terminal();

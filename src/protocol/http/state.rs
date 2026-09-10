@@ -110,6 +110,19 @@ pub struct AppState {
     /// limit by switching protocols. Defaults to production-safe limits;
     /// override via `with_request_shaper` using an operator-configured instance.
     pub request_shaper: Arc<RequestShaper>,
+
+    /// Outbound email transport, when one is configured.
+    ///
+    /// `None` in embedded harnesses that do not wire delivery. Required by
+    /// the magic-link endpoint: without it the minted link can never reach
+    /// the account holder (audit 2026-08-28 §4.24#6).
+    pub email: Option<Arc<crate::identity::email::EmailService>>,
+
+    /// Externally-reachable origin (no trailing slash) used to build links
+    /// that are emailed to users, e.g. `https://auth.example.com`.
+    ///
+    /// Sourced from `onboarding.base_url`; falls back to the bind address.
+    pub public_base_url: String,
 }
 
 impl AppState {
@@ -141,6 +154,8 @@ impl AppState {
             agent_advanced_enabled: false,
             allowed_hosts: Vec::new(),
             request_shaper: Arc::new(RequestShaper::new()),
+            email: None,
+            public_base_url: "http://localhost:8420".to_string(),
         }
     }
 
@@ -178,6 +193,8 @@ impl AppState {
             agent_advanced_enabled: false,
             allowed_hosts: Vec::new(),
             request_shaper: Arc::new(RequestShaper::new()),
+            email: None,
+            public_base_url: "http://localhost:8420".to_string(),
         }
     }
 
@@ -212,6 +229,8 @@ impl AppState {
             agent_advanced_enabled: false,
             allowed_hosts: Vec::new(),
             request_shaper: Arc::new(RequestShaper::new()),
+            email: None,
+            public_base_url: "http://localhost:8420".to_string(),
         }
     }
 
@@ -321,6 +340,22 @@ impl AppState {
     /// switching protocols.
     pub fn with_request_shaper(mut self, shaper: Arc<RequestShaper>) -> Self {
         self.request_shaper = shaper;
+        self
+    }
+
+    /// Wires the outbound email transport used by the magic-link endpoint.
+    #[must_use]
+    pub fn with_email(mut self, email: Option<Arc<crate::identity::email::EmailService>>) -> Self {
+        self.email = email;
+        self
+    }
+
+    /// Sets the externally-reachable origin used to build emailed links.
+    ///
+    /// A trailing slash is trimmed so callers can concatenate paths directly.
+    #[must_use]
+    pub fn with_public_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.public_base_url = base_url.into().trim_end_matches('/').to_string();
         self
     }
 

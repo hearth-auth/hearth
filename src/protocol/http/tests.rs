@@ -1775,3 +1775,1076 @@ async fn public_rbac_writes_still_serve_a_tenant_realm() {
         "a tenant realm admin must still be able to create a role"
     );
 }
+
+// ── Audit 2026-08-28 §4.1#8 — cross-realm trust policy enforcement ──────────
+
+/// Stores a cross-realm trust policy in `target_realm` naming `source_realm`.
+fn store_cross_realm_policy(
+    state: &Arc<AppState>,
+    target_realm: &str,
+    source_realm: &str,
+    capabilities: &[&str],
+) {
+    let target_uuid: uuid::Uuid = target_realm.parse().expect("target uuid");
+    let source_uuid: uuid::Uuid = source_realm.parse().expect("source uuid");
+    let target = crate::core::RealmId::new(target_uuid);
+    let source = crate::core::RealmId::new(source_uuid);
+    state
+        .identity
+        .create_cross_realm_policy(
+            &target,
+            &crate::identity::CreateCrossRealmPolicyRequest {
+                source_realm_id: source,
+                allowed_capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
+                expires_in_secs: None,
+            },
+        )
+        .expect("create cross-realm policy");
+}
+
+/// Audit 2026-08-28 §4.1#8 — `check_cross_realm_policy` had no production
+/// caller: a realm could store a trust policy, see it audited, and the server
+/// would never consult it. The `scoped_realm` guard is the one production path
+/// where a realm boundary is actually crossed (a nil-realm system operator
+/// reaching into a tenant realm), so the policy is enforced there.
+///
+/// A policy that governs the (target, source) pair but withholds the admin
+/// capability must now refuse the crossing.
+#[tokio::test]
+async fn denying_cross_realm_policy_refuses_the_system_operator() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("xrealm-policy-deny").await;
+    store_cross_realm_policy(
+        &f.state,
+        &f.peer_realm_id,
+        &f.system_realm_id,
+        &["agents:read"],
+    );
+
+    let uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+    let status =
+        admin_patch_status(&f.state, &uri, &f.system_token, &f.system_realm_id, BODY).await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a stored cross-realm policy that withholds the admin capability must \
+         refuse the crossing"
+    );
+}
+
+/// The permitting half of the same property: a policy that grants the admin
+/// capability leaves the crossing open.
+#[tokio::test]
+async fn permitting_cross_realm_policy_allows_the_system_operator() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("xrealm-policy-allow").await;
+    store_cross_realm_policy(
+        &f.state,
+        &f.peer_realm_id,
+        &f.system_realm_id,
+        &["hearth.admin"],
+    );
+
+    let uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+    let status =
+        admin_patch_status(&f.state, &uri, &f.system_token, &f.system_realm_id, BODY).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a stored cross-realm policy granting hearth.admin must permit the crossing"
+    );
+}
+
+/// A wildcard capability permits every cross-realm admin operation.
+#[tokio::test]
+async fn wildcard_cross_realm_policy_allows_the_system_operator() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("xrealm-policy-wildcard").await;
+    store_cross_realm_policy(&f.state, &f.peer_realm_id, &f.system_realm_id, &["*"]);
+
+    let uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+    let status =
+        admin_patch_status(&f.state, &uri, &f.system_token, &f.system_realm_id, BODY).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a wildcard cross-realm policy must permit the crossing"
+    );
+}
+
+/// A policy naming a *different* source realm does not govern this crossing,
+/// so the permissive-with-audit default still applies. This is the guard that
+/// keeps an unrelated tenant's policy from locking the operator out.
+#[tokio::test]
+async fn unrelated_cross_realm_policy_leaves_the_default_permissive() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("xrealm-policy-unrelated").await;
+    store_cross_realm_policy(
+        &f.state,
+        &f.peer_realm_id,
+        &f.dev_realm_id,
+        &["agents:read"],
+    );
+
+    let uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+    let status =
+        admin_patch_status(&f.state, &uri, &f.system_token, &f.system_realm_id, BODY).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a policy naming another source realm must not govern the system \
+         operator's crossing"
+    );
+}
+
+// ── Audit 2026-08-28 §4.1#9 and §4.1#10 ─────────────────────────────────────
+//
+// #9: `extract_admin_auth` admits any of the five `hearth.*.admin` permissions,
+//     and its own comment says "sub-admins pass this outer gate but are still
+//     checked per-handler via require_admin_permission()". Eight authenticated
+//     admin handlers never made that per-handler call, so a token holding only
+//     `hearth.clients.admin` reached role definitions, webhook delivery logs,
+//     AAT validation, transaction-token consumption, SPIFFE mappings,
+//     cross-realm trust policies and agent cards.
+//
+// #10: five admin sub-resource handlers scope their query to the caller's realm
+//     but never check that the *parent* object exists there, so a parent absent
+//     from the realm produced `200` with an empty collection instead of `404`.
+
+/// A dev-mode `AppState` with every optional admin surface wired: the Phase-A
+/// agent routes, the Phase-D advanced routes, and a storage-backed webhook
+/// engine.
+///
+/// Without these the routes under test are either unregistered (404 from the
+/// router) or answer `501 Not Implemented` before reaching the handler, and a
+/// status assertion on them would be vacuous.
+fn test_state_dev_full(temp_dir: &std::path::Path) -> Arc<AppState> {
+    let config = StorageConfig::dev(temp_dir.to_path_buf());
+    let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open storage"));
+    let clock = Arc::new(SystemClock) as Arc<dyn crate::core::Clock>;
+    let identity_config = IdentityConfig {
+        credential: CredentialConfig::fast_for_testing(),
+        ..IdentityConfig::default()
+    };
+    let rbac_engine: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let audit_engine = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let identity_engine = EmbeddedIdentityEngine::with_rbac(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+        identity_config,
+        Arc::clone(&rbac_engine),
+        Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+    )
+    .expect("identity engine");
+    let webhook = Arc::new(crate::webhook::EmbeddedWebhookEngine::new(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    )) as Arc<dyn crate::webhook::WebhookEngine>;
+
+    Arc::new(
+        AppState::new_dev(
+            Arc::new(identity_engine),
+            rbac_engine,
+            audit_engine as Arc<dyn AuditEngine>,
+        )
+        .with_agent_identity(true)
+        .with_agent_advanced(true)
+        .with_webhook(webhook),
+    )
+}
+
+/// The fixture for the §4.1#9 / §4.1#10 admin-surface tests.
+struct AdminSurfaceFixture {
+    state: Arc<AppState>,
+    realm_id: String,
+    /// A full `hearth.admin` superuser token.
+    admin_token: String,
+    /// A token whose *only* permission is `hearth.clients.admin`. It passes the
+    /// outer `extract_admin_auth` gate and must be refused by every handler
+    /// outside the OAuth-client domain.
+    narrow_token: String,
+    /// A user that really exists in `realm_id`.
+    user_id: String,
+    /// A group that really exists in `realm_id`.
+    group_id: String,
+    /// A webhook subscription that really exists in `realm_id`.
+    webhook_id: String,
+    /// The reserved system realm (nil UUID), as a string.
+    system_realm_id: String,
+    /// A **system-realm** token carrying `hearth.admin`.
+    system_admin_token: String,
+    /// A **system-realm** token whose only permission is `hearth.users.admin`.
+    /// It clears `extract_cluster_admin_auth`'s nil-realm assertion, so it is
+    /// the only token that can tell a cluster permission gate apart from the
+    /// realm gate.
+    system_narrow_token: String,
+    _dir: tempfile::TempDir,
+}
+
+/// Bootstraps a dev deployment, mints a single-permission sub-admin token, and
+/// creates one real user, group and webhook so both directions of the property
+/// can be asserted.
+#[allow(clippy::too_many_lines)]
+async fn admin_surface_fixture() -> AdminSurfaceFixture {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev_full(dir.path());
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let realm_id_str: String = json["realm_id"].as_str().expect("realm_id").into();
+    let realm_id = crate::core::RealmId::new(realm_id_str.parse().expect("realm uuid"));
+
+    // A sub-admin holding the shipped `hearth.clients.admin` delegation role,
+    // whose only permission is `hearth.clients.admin`. This is exactly the
+    // shape `src/rbac/seed.rs` tells operators to assign for Keycloak-style
+    // delegation, so the test measures the real deployment story.
+    let narrow_role = state
+        .rbac
+        .get_role_by_name(&realm_id, "hearth.clients.admin")
+        .expect("lookup seed role")
+        .expect("seed role hearth.clients.admin is present after bootstrap");
+    let narrow_user = state
+        .identity
+        .create_user(
+            &realm_id,
+            &crate::identity::CreateUserRequest {
+                email: "clients-only@example.com".to_string(),
+                display_name: "Clients Only".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create narrow user");
+    let narrow_uid = narrow_user.id().clone();
+    state
+        .identity
+        .update_user(
+            &realm_id,
+            &narrow_uid,
+            &crate::identity::UpdateUserRequest {
+                status: Some(crate::identity::UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate narrow user");
+    state
+        .rbac
+        .assign_role(
+            &realm_id,
+            &crate::rbac::AssignRoleRequest {
+                subject: crate::rbac::Subject::User(narrow_uid.clone()),
+                role_id: narrow_role.id.clone(),
+                scope: crate::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign narrow role");
+    let narrow_session = state
+        .identity
+        .create_session(
+            &realm_id,
+            &narrow_uid,
+            &crate::identity::SessionContext::default(),
+        )
+        .expect("narrow session");
+    let narrow_tokens = state
+        .identity
+        .issue_tokens(&realm_id, &narrow_uid, narrow_session.id())
+        .expect("narrow tokens");
+
+    // Real objects, so the 404 assertions cannot pass by blanket-404ing.
+    let real_user = state
+        .identity
+        .create_user(
+            &realm_id,
+            &crate::identity::CreateUserRequest {
+                email: "present@example.com".to_string(),
+                display_name: "Present User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create real user");
+    let real_group = state
+        .rbac
+        .create_group(
+            &realm_id,
+            &crate::rbac::CreateGroupRequest {
+                name: "Present Group".to_string(),
+                slug: "present-group".to_string(),
+                description: None,
+            },
+        )
+        .expect("create real group");
+    let real_webhook = state
+        .webhook
+        .as_ref()
+        .expect("webhook engine")
+        .create(&crate::webhook::CreateWebhookRequest {
+            realm_id: realm_id.clone(),
+            url: "https://example.com/hook".to_string(),
+            secret: "0123456789abcdef0123456789abcdef".to_string(),
+            enabled: true,
+            event_filters: Vec::new(),
+        })
+        .expect("create real webhook");
+
+    // A sub-admin **inside the system realm**. `extract_cluster_admin_auth`
+    // asserts the caller's realm is the nil-UUID system realm and stops there,
+    // so only a system-realm token can distinguish a missing permission gate
+    // from the realm assertion that is already present. Bootstrap has already
+    // RBAC-seeded the system realm, so the delegation role exists.
+    let system_realm = crate::identity::keys::system_realm_id();
+    let sys_role = state
+        .rbac
+        .get_role_by_name(&system_realm, "hearth.users.admin")
+        .expect("lookup system seed role")
+        .expect("seed role hearth.users.admin is present in the system realm");
+    let sys_user = state
+        .identity
+        .create_admin_user(&crate::identity::CreateUserRequest {
+            email: "cluster-subadmin@hearth.test".to_string(),
+            display_name: "Cluster Sub-Admin".to_string(),
+            ..Default::default()
+        })
+        .expect("create system-realm sub-admin");
+    let sys_uid = sys_user.id().clone();
+    state
+        .identity
+        .update_user(
+            &system_realm,
+            &sys_uid,
+            &crate::identity::UpdateUserRequest {
+                status: Some(crate::identity::UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate system-realm sub-admin");
+    state
+        .rbac
+        .assign_role(
+            &system_realm,
+            &crate::rbac::AssignRoleRequest {
+                subject: crate::rbac::Subject::User(sys_uid.clone()),
+                role_id: sys_role.id.clone(),
+                scope: crate::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign system-realm sub-admin role");
+    let sys_session = state
+        .identity
+        .create_session(
+            &system_realm,
+            &sys_uid,
+            &crate::identity::SessionContext::default(),
+        )
+        .expect("system-realm sub-admin session");
+    let sys_tokens = state
+        .identity
+        .issue_tokens(&system_realm, &sys_uid, sys_session.id())
+        .expect("system-realm sub-admin tokens");
+
+    AdminSurfaceFixture {
+        admin_token: json["access_token"].as_str().expect("access_token").into(),
+        narrow_token: narrow_tokens.access_token().to_string(),
+        system_realm_id: json["system_realm_id"]
+            .as_str()
+            .expect("system_realm_id")
+            .into(),
+        system_admin_token: json["system_access_token"]
+            .as_str()
+            .expect("system_access_token")
+            .into(),
+        system_narrow_token: sys_tokens.access_token().to_string(),
+        realm_id: realm_id_str,
+        user_id: real_user.id().as_uuid().to_string(),
+        group_id: real_group.id.as_uuid().to_string(),
+        webhook_id: real_webhook.id.as_uuid().to_string(),
+        state,
+        _dir: dir,
+    }
+}
+
+/// Sends one authenticated admin request and returns only its status code.
+async fn admin_request_status(
+    state: &Arc<AppState>,
+    method: &str,
+    uri: &str,
+    token: &str,
+    realm_header: &str,
+    body: &str,
+) -> StatusCode {
+    router(Arc::clone(state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_header)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// Every authenticated admin route that carried no per-handler permission gate,
+/// as `(method, uri, body)`.
+///
+/// The bodies must deserialize into the handler's `Json` extractor or the
+/// request dies at `422` inside the extractor and the assertion measures the
+/// extractor rather than the gate.
+const UNGATED_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
+    // `hearth.realm.admin` domain — the siblings in each family already gate.
+    (
+        "GET",
+        "/admin/roles/00000000-0000-0000-0000-0000000000a1",
+        "",
+    ),
+    (
+        "GET",
+        "/admin/webhooks/00000000-0000-0000-0000-0000000000a2/deliveries",
+        "",
+    ),
+    // `hearth.agents.admin` domain — Phase-D advanced + Phase-A agent card.
+    ("POST", "/v1/aats/validate", r#"{"aat":"not-a-real-aat"}"#),
+    (
+        "POST",
+        "/v1/transaction-tokens/consume",
+        r#"{"token":"not-a-real-token"}"#,
+    ),
+    (
+        "GET",
+        "/v1/spiffe-mappings/agt_00000000-0000-0000-0000-0000000000a3",
+        "",
+    ),
+    ("GET", "/v1/cross-realm-policies", ""),
+    ("GET", "/v1/cross-realm-policies/no-such-policy", ""),
+    (
+        "GET",
+        "/.well-known/agent.json?agent_id=agt_00000000-0000-0000-0000-0000000000a4",
+        "",
+    ),
+];
+
+/// Audit 2026-08-28 §4.1#9 — every authenticated admin handler carries a
+/// per-handler permission gate.
+///
+/// `extract_admin_auth` admits any of the five `hearth.*.admin` permissions on
+/// purpose: it is the outer gate, and each handler is expected to name the
+/// sub-admin domain it belongs to. The eight routes listed above named none, so
+/// a token holding only `hearth.clients.admin` reached role definitions,
+/// webhook delivery logs and the whole agent-authorization surface.
+///
+/// Both directions are asserted: the narrow token must be refused, and the
+/// `hearth.admin` superuser must still get through — a gate that refuses
+/// everyone would otherwise pass the first half vacuously.
+#[tokio::test]
+async fn every_authenticated_admin_handler_gates_on_a_sub_admin_permission() {
+    let f = admin_surface_fixture().await;
+
+    for (method, uri, body) in UNGATED_ADMIN_ROUTES {
+        let status =
+            admin_request_status(&f.state, method, uri, &f.narrow_token, &f.realm_id, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must refuse a token holding only hearth.clients.admin"
+        );
+    }
+
+    for (method, uri, body) in UNGATED_ADMIN_ROUTES {
+        let status =
+            admin_request_status(&f.state, method, uri, &f.admin_token, &f.realm_id, body).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must still admit a hearth.admin superuser; the gate must \
+             name a domain, not refuse everyone"
+        );
+    }
+}
+
+/// Audit 2026-08-28 §4.1#10 — an admin sub-resource route answers `404` when
+/// its parent object is absent from the caller's realm.
+///
+/// Each of these handlers scopes its own query to `auth.realm_id`, so no other
+/// realm's rows are ever served; the defect is the status code. A caller asking
+/// for the sessions of a user that does not exist in their realm was answered
+/// `200 {"items": []}` — indistinguishable from a user that exists and has no
+/// sessions.
+///
+/// The `{present}` form of each route is walked too: a handler that answered
+/// `404` unconditionally would pass the first half and fail here.
+#[tokio::test]
+async fn admin_subresource_routes_answer_404_for_a_parent_absent_from_the_realm() {
+    let f = admin_surface_fixture().await;
+    const MISSING: &str = "00000000-0000-0000-0000-0000000000ff";
+
+    let absent = [
+        format!("/admin/users/{MISSING}/consents"),
+        format!("/admin/users/{MISSING}/roles"),
+        format!("/admin/users/{MISSING}/sessions"),
+        format!("/admin/groups/{MISSING}/members"),
+        format!("/admin/webhooks/{MISSING}/deliveries"),
+    ];
+    for uri in &absent {
+        let status =
+            admin_request_status(&f.state, "GET", uri, &f.admin_token, &f.realm_id, "").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "GET {uri} must answer 404 for a parent absent from the caller's realm"
+        );
+    }
+
+    let present = [
+        format!("/admin/users/{}/consents", f.user_id),
+        format!("/admin/users/{}/roles", f.user_id),
+        format!("/admin/users/{}/sessions", f.user_id),
+        format!("/admin/groups/{}/members", f.group_id),
+        format!("/admin/webhooks/{}/deliveries", f.webhook_id),
+    ];
+    for uri in &present {
+        let status =
+            admin_request_status(&f.state, "GET", uri, &f.admin_token, &f.realm_id, "").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "GET {uri} must still answer 200 for a parent that exists in the realm"
+        );
+    }
+}
+
+// ── Audit 2026-08-28 §4.1#8 follow-up — who may author a system-source policy ─
+
+/// Fixture for the cross-realm-policy *write* tests: a bootstrapped dev
+/// deployment with the Phase-D advanced routes registered (without
+/// `with_agent_advanced(true)` every `/v1/cross-realm-policies` assertion would
+/// be vacuous — the router answers `404` before reaching the handler), plus one
+/// peer tenant realm to act as a benign non-system source.
+struct XRealmWriteFixture {
+    state: Arc<AppState>,
+    dev_token: String,
+    dev_realm_id: String,
+    system_token: String,
+    system_realm_id: String,
+    peer_realm_id: String,
+    _dir: tempfile::TempDir,
+}
+
+async fn xrealm_write_fixture(peer_name: &str) -> XRealmWriteFixture {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev_full(dir.path());
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    let peer = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: peer_name.to_string(),
+            config: None,
+        })
+        .expect("create peer realm");
+
+    XRealmWriteFixture {
+        dev_token: json["access_token"].as_str().expect("access_token").into(),
+        dev_realm_id: json["realm_id"].as_str().expect("realm_id").into(),
+        system_token: json["system_access_token"]
+            .as_str()
+            .expect("system_access_token")
+            .into(),
+        system_realm_id: json["system_realm_id"]
+            .as_str()
+            .expect("system_realm_id")
+            .into(),
+        peer_realm_id: peer.id().as_uuid().to_string(),
+        state,
+        _dir: dir,
+    }
+}
+
+/// `POST /v1/cross-realm-policies` as `token` in `realm_header`, naming
+/// `source_realm` as the policy's source. Returns only the status code.
+async fn post_cross_realm_policy(
+    state: &Arc<AppState>,
+    token: &str,
+    realm_header: &str,
+    source_realm: &str,
+) -> StatusCode {
+    let body = format!(
+        r#"{{"source_realm_id":"{source_realm}","allowed_capabilities":["agents:read"],"expires_in_secs":null}}"#
+    );
+    router(Arc::clone(state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/cross-realm-policies")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_header)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// Audit 2026-08-28 §4.1#8 follow-up — the enforcement wired into `scoped_realm`
+/// reads cross-realm trust policies out of the *target* realm, and every
+/// `/v1/cross-realm-policies` write stores the policy in the **actor's own**
+/// realm. A tenant admin could therefore author a policy naming the reserved
+/// system realm as source, withhold `hearth.admin`, and revoke the platform
+/// operator's `/admin/realms/{id}/*` access to their realm — a tenant denying
+/// service to the operator.
+///
+/// A policy whose source is the system realm may now only be authored by a
+/// system-realm actor.
+#[tokio::test]
+async fn tenant_realm_cannot_author_a_system_source_cross_realm_policy() {
+    let f = xrealm_write_fixture("xrealm-write-deny").await;
+
+    let status =
+        post_cross_realm_policy(&f.state, &f.dev_token, &f.dev_realm_id, &f.system_realm_id).await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a tenant-realm admin must not author a cross-realm policy naming the \
+         reserved system realm as its source"
+    );
+}
+
+/// The permitting half: a system-realm actor authoring the same policy succeeds.
+#[tokio::test]
+async fn system_realm_actor_may_author_a_system_source_cross_realm_policy() {
+    let f = xrealm_write_fixture("xrealm-write-allow").await;
+
+    let status = post_cross_realm_policy(
+        &f.state,
+        &f.system_token,
+        &f.system_realm_id,
+        &f.system_realm_id,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a system-realm actor must still be able to author a system-source policy"
+    );
+}
+
+/// Policies between two tenant realms are unaffected by the new rule.
+#[tokio::test]
+async fn tenant_to_tenant_cross_realm_policy_is_unaffected() {
+    let f = xrealm_write_fixture("xrealm-write-tenant").await;
+
+    let status =
+        post_cross_realm_policy(&f.state, &f.dev_token, &f.dev_realm_id, &f.peer_realm_id).await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a policy naming another tenant realm as source must still be accepted"
+    );
+}
+
+/// The recovery valve must stay open. A policy stored before this rule existed
+/// (written here through the engine, as the API no longer permits it) is the
+/// residue case: the tenant admin must be able to `DELETE` it, because deleting
+/// a system-source policy can only ever *relax* the operator's access — the
+/// ungoverned default is permissive. Refusing the delete would make a legacy
+/// lockout unrecoverable from either side.
+#[tokio::test]
+async fn tenant_realm_may_delete_a_legacy_system_source_policy() {
+    let f = xrealm_write_fixture("xrealm-write-residue").await;
+
+    let dev_uuid: uuid::Uuid = f.dev_realm_id.parse().expect("dev uuid");
+    let sys_uuid: uuid::Uuid = f.system_realm_id.parse().expect("system uuid");
+    let policy = f
+        .state
+        .identity
+        .create_cross_realm_policy(
+            &crate::core::RealmId::new(dev_uuid),
+            &crate::identity::CreateCrossRealmPolicyRequest {
+                source_realm_id: crate::core::RealmId::new(sys_uuid),
+                allowed_capabilities: vec!["agents:read".to_string()],
+                expires_in_secs: None,
+            },
+        )
+        .expect("legacy policy");
+
+    let resp = router(Arc::clone(&f.state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/cross-realm-policies/{}", policy.policy_id))
+                .header("Authorization", format!("Bearer {}", f.dev_token))
+                .header("X-Realm-ID", &f.dev_realm_id)
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "a tenant admin must be able to delete a legacy system-source policy"
+    );
+}
+
+// ── Audit follow-up: `/admin/cluster/*` permission gate ──────────────────────
+//
+// The same defect class as §4.1#9, one layer up. `extract_cluster_admin_auth`
+// proves the caller holds a valid admin token *and* that their realm is the
+// nil-UUID system realm — then stops. It reads no permission, so a system-realm
+// operator delegated only `hearth.users.admin` could bootstrap Raft membership
+// or transfer leadership: the two most destructive operations in the product.
+
+/// Every `/admin/cluster/*` route, as `(method, uri, body)`.
+///
+/// All three handlers read the body as `axum::body::Bytes`, not `Json<T>`, and
+/// treat an empty body as the default request — so no extractor can answer
+/// before the handler runs and mask the gate under test.
+const CLUSTER_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
+    ("POST", "/admin/cluster/bootstrap", ""),
+    ("GET", "/admin/cluster/status", ""),
+    ("POST", "/admin/cluster/transfer-leadership", ""),
+];
+
+/// Audit follow-up to 2026-08-28 §4.1#9 — the cluster plane requires
+/// `hearth.admin`, not merely a system-realm identity.
+///
+/// Three assertions, and all three are needed:
+///
+/// 1. A **system-realm** token holding only `hearth.users.admin` is refused.
+///    It must be system-realm: a tenant-realm token is already refused by the
+///    nil-UUID assertion, so testing with one would pass vacuously against the
+///    gate that was already there.
+/// 2. A `hearth.admin` system token is **not** refused. The fixture runs
+///    single-node, so it gets `503 not in cluster mode` — which also proves the
+///    permission gate is ordered *before* the cluster-availability check: the
+///    sub-admin in (1) never learns whether this deployment runs a cluster.
+/// 3. A tenant-realm token is still refused, so the pre-existing realm boundary
+///    has not regressed.
+#[tokio::test]
+async fn cluster_admin_routes_require_hearth_admin_not_just_a_system_realm_identity() {
+    let f = admin_surface_fixture().await;
+
+    for (method, uri, body) in CLUSTER_ADMIN_ROUTES {
+        let status = admin_request_status(
+            &f.state,
+            method,
+            uri,
+            &f.system_narrow_token,
+            &f.system_realm_id,
+            body,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must refuse a system-realm token holding only \
+             hearth.users.admin"
+        );
+    }
+
+    for (method, uri, body) in CLUSTER_ADMIN_ROUTES {
+        let status = admin_request_status(
+            &f.state,
+            method,
+            uri,
+            &f.system_admin_token,
+            &f.system_realm_id,
+            body,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {uri} must admit a hearth.admin system operator and fail \
+             only on cluster availability; a 403 here would mean the gate \
+             refuses everyone, and anything else would mean the gate is not \
+             ordered before the availability check"
+        );
+    }
+
+    for (method, uri, body) in CLUSTER_ADMIN_ROUTES {
+        let status =
+            admin_request_status(&f.state, method, uri, &f.admin_token, &f.realm_id, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} must still refuse a tenant-realm admin (HEA-763 \
+             realm boundary, unchanged)"
+        );
+    }
+}
+
+// ── 25.14 — the operator's authoring path into a tenant realm's policies ─────
+
+/// Sends an authenticated admin request with no body and returns status + body.
+async fn admin_request(
+    state: &Arc<AppState>,
+    method: &str,
+    uri: &str,
+    token: &str,
+    realm_header: &str,
+    body: Option<String>,
+) -> (StatusCode, serde_json::Value) {
+    let builder = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-Realm-ID", realm_header)
+        .header("Content-Type", "application/json");
+    let req = match body {
+        Some(b) => builder.body(axum::body::Body::from(b)).expect("request"),
+        None => builder.body(axum::body::Body::empty()).expect("request"),
+    };
+    let resp = router(Arc::clone(state))
+        .oneshot(req)
+        .await
+        .expect("response");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 200_000)
+        .await
+        .expect("body");
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// 25.14 — the recovery valve, end to end. A policy stored in a tenant realm
+/// that withholds `hearth.admin` locks the platform operator out of that
+/// realm's `/admin/realms/{id}/*` routes (the 17.5 enforcement). Before this
+/// route existed the operator had no way to reach that policy: every
+/// `/v1/cross-realm-policies` handler is keyed on the caller's own realm.
+///
+/// The new route is deliberately **exempt** from the cross-realm policy consult
+/// — a valve gated on the thing it exists to undo is not a valve — so the
+/// operator can delete the policy and recover.
+#[tokio::test]
+async fn operator_recovers_from_a_locking_policy_through_the_admin_route() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("xrealm-valve").await;
+    store_cross_realm_policy(
+        &f.state,
+        &f.peer_realm_id,
+        &f.system_realm_id,
+        &["agents:read"],
+    );
+
+    let config_uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+    let locked = admin_patch_status(
+        &f.state,
+        &config_uri,
+        &f.system_token,
+        &f.system_realm_id,
+        BODY,
+    )
+    .await;
+    assert_eq!(
+        locked,
+        StatusCode::FORBIDDEN,
+        "precondition: the policy must actually lock the operator out"
+    );
+
+    // The operator can still SEE what governs the realm...
+    let list_uri = format!("/admin/realms/{}/cross-realm-policies", f.peer_realm_id);
+    let (status, listed) = admin_request(
+        &f.state,
+        "GET",
+        &list_uri,
+        &f.system_token,
+        &f.system_realm_id,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator must be able to list");
+    let policy_id = listed["items"][0]["policy_id"]
+        .as_str()
+        .expect("policy_id in listing")
+        .to_string();
+
+    // ...and remove it.
+    let (status, _) = admin_request(
+        &f.state,
+        "DELETE",
+        &format!("{list_uri}/{policy_id}"),
+        &f.system_token,
+        &f.system_realm_id,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "the valve must be exempt from the policy it exists to undo"
+    );
+
+    let recovered = admin_patch_status(
+        &f.state,
+        &config_uri,
+        &f.system_token,
+        &f.system_realm_id,
+        BODY,
+    )
+    .await;
+    assert_eq!(
+        recovered,
+        StatusCode::OK,
+        "operator access must be restored once the policy is gone"
+    );
+}
+
+/// 25.14 — the operator can author a policy into a tenant realm, which is what
+/// makes the 17.5 deny branch reachable on a clean deployment: before this
+/// route, no principal could put a system-source policy into a tenant realm at
+/// all (25.11 refuses the tenant, and `/v1/*` is keyed on the caller's realm).
+#[tokio::test]
+async fn operator_authors_a_cross_realm_policy_into_a_tenant_realm() {
+    const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
+
+    let f = cross_realm_fixture("xrealm-author").await;
+    let list_uri = format!("/admin/realms/{}/cross-realm-policies", f.peer_realm_id);
+
+    let (status, created) = admin_request(
+        &f.state,
+        "POST",
+        &list_uri,
+        &f.system_token,
+        &f.system_realm_id,
+        Some(format!(
+            r#"{{"source_realm_id":"{}","allowed_capabilities":["agents:read"],"expires_in_secs":null}}"#,
+            f.system_realm_id
+        )),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "operator may author the policy"
+    );
+    assert_eq!(
+        created["target_realm_id"].as_str(),
+        Some(f.peer_realm_id.as_str()),
+        "the policy must be stored in the tenant realm named in the path"
+    );
+
+    // The policy withholds hearth.admin, so the 17.5 deny branch now fires on a
+    // deployment where nothing else could have produced it.
+    let config_uri = format!("/admin/realms/{}/config", f.peer_realm_id);
+    let status = admin_patch_status(
+        &f.state,
+        &config_uri,
+        &f.system_token,
+        &f.system_realm_id,
+        BODY,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an operator-authored policy that withholds hearth.admin must bind the operator"
+    );
+}
+
+/// 25.14 — the exemption is narrow: it removes the policy consult, not the BOLA
+/// guard. A tenant admin still cannot reach a peer realm's policies.
+#[tokio::test]
+async fn tenant_admin_cannot_reach_a_peer_realms_cross_realm_policies() {
+    let f = cross_realm_fixture("xrealm-bola").await;
+    let list_uri = format!("/admin/realms/{}/cross-realm-policies", f.peer_realm_id);
+
+    for (method, body) in [
+        ("GET", None),
+        (
+            "POST",
+            Some(
+                r#"{"source_realm_id":"00000000-0000-0000-0000-000000000000","allowed_capabilities":[],"expires_in_secs":null}"#
+                    .to_string(),
+            ),
+        ),
+    ] {
+        let (status, _) =
+            admin_request(&f.state, method, &list_uri, &f.dev_token, &f.dev_realm_id, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {list_uri} must refuse a peer realm's admin"
+        );
+    }
+}
+
+/// 25.14 — the 25.11 write rule still applies on this route. A tenant admin
+/// operating on their *own* realm (path realm == token realm, so the BOLA guard
+/// passes) must still not author a policy naming the system realm as source.
+#[tokio::test]
+async fn tenant_admin_cannot_author_a_system_source_policy_on_the_admin_route() {
+    let f = cross_realm_fixture("xrealm-own-realm").await;
+    let list_uri = format!("/admin/realms/{}/cross-realm-policies", f.dev_realm_id);
+
+    let (status, _) = admin_request(
+        &f.state,
+        "POST",
+        &list_uri,
+        &f.dev_token,
+        &f.dev_realm_id,
+        Some(format!(
+            r#"{{"source_realm_id":"{}","allowed_capabilities":["*"],"expires_in_secs":null}}"#,
+            f.system_realm_id
+        )),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the 25.11 system-source rule must hold on the admin route too"
+    );
+}

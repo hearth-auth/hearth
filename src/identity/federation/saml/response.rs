@@ -12,6 +12,29 @@ use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 
+/// The `urn:oasis:names:tc:SAML:2.0:cm:bearer` subject-confirmation method.
+const CM_BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
+
+/// A `<SubjectConfirmationData>` carried by a bearer `<SubjectConfirmation>`
+/// *inside* an `<Assertion>`.
+///
+/// These are the bindings the SAML 2.0 Web Browser SSO profile (§4.1.4.3)
+/// requires an SP to check, and they live inside the element the IdP signs.
+/// The `<Response>`-level `Destination` and `InResponseTo` are unsigned
+/// whenever only the assertion carries a signature, so these are the copies
+/// that actually bind the assertion to this SP and to this login attempt
+/// (audit 2026-08-28 §4.10#5).
+#[derive(Debug, Clone, Default)]
+pub struct BearerConfirmation {
+    /// `Recipient` — the ACS URL the IdP minted this assertion for.
+    pub recipient: Option<String>,
+    /// `NotOnOrAfter` — the bearer window, independent of `Conditions`.
+    pub not_on_or_after: Option<Timestamp>,
+    /// `InResponseTo` — the `AuthnRequest` ID this answers, absent for
+    /// unsolicited (IdP-initiated) responses.
+    pub in_response_to: Option<String>,
+}
+
 /// Parsed `<Assertion>` contents relevant to the consuming SP.
 #[derive(Debug, Clone)]
 pub struct Assertion {
@@ -26,6 +49,11 @@ pub struct Assertion {
     pub in_response_to: Option<String>,
     pub session_index: Option<String>,
     pub destination: Option<String>,
+    /// Bearer `<SubjectConfirmationData>` elements found *within this
+    /// assertion*. Never populated from a `<SubjectConfirmation>` that sits
+    /// outside every `<saml:Assertion>` — the consumed bindings must come
+    /// from the same element whose signature was verified.
+    pub bearer_confirmations: Vec<BearerConfirmation>,
 }
 
 /// Parsed `<Response>` structure.
@@ -133,6 +161,10 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
 
     let mut state = ParseState::Root;
     let mut current: Option<Assertion> = None;
+    // True while inside a `<SubjectConfirmation Method="…:cm:bearer">`. A
+    // `<SubjectConfirmationData>` is only recorded when this is set AND we are
+    // inside an `<Assertion>` — see `Assertion::bearer_confirmations`.
+    let mut in_bearer_confirmation = false;
     let mut attr_name: Option<String> = None;
     let mut attr_values: Vec<String> = Vec::new();
     let mut capturing_text: Option<TextTarget> = None;
@@ -158,6 +190,15 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
                 // self-closing capturing element (which emits no `End`).
                 capturing_text = None;
                 text_buf.clear();
+                // Close the bearer-confirmation window on any element that is
+                // neither the confirmation itself nor its data child. This
+                // also covers a self-closing `<SubjectConfirmation/>`, which
+                // emits no `End` event.
+                if !is_element(e, ns::SAML, "SubjectConfirmation")
+                    && !is_element(e, ns::SAML, "SubjectConfirmationData")
+                {
+                    in_bearer_confirmation = false;
+                }
                 if is_element(e, ns::SAMLP, "Response") {
                     response_id = attr(e, "ID");
                     in_response_to = attr(e, "InResponseTo");
@@ -180,8 +221,26 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
                         in_response_to: in_response_to.clone(),
                         session_index: None,
                         destination: destination.clone(),
+                        bearer_confirmations: Vec::new(),
                     });
                     state = ParseState::Assertion;
+                } else if is_element(e, ns::SAML, "SubjectConfirmation") {
+                    in_bearer_confirmation =
+                        attr(e, "Method").is_some_and(|m| m.trim() == CM_BEARER);
+                } else if is_element(e, ns::SAML, "SubjectConfirmationData") {
+                    // Only bindings inside the assertion count. A
+                    // `<SubjectConfirmationData>` planted elsewhere in the
+                    // document is outside the signed element and is ignored.
+                    if in_bearer_confirmation {
+                        if let Some(ref mut a) = current {
+                            a.bearer_confirmations.push(BearerConfirmation {
+                                recipient: attr(e, "Recipient"),
+                                not_on_or_after: attr(e, "NotOnOrAfter")
+                                    .and_then(|s| parse_xsd_datetime(&s)),
+                                in_response_to: attr(e, "InResponseTo"),
+                            });
+                        }
+                    }
                 } else if is_element(e, ns::SAML, "Issuer") {
                     capturing_text = Some(if matches!(state, ParseState::Assertion) {
                         TextTarget::AssertionIssuer
@@ -256,6 +315,10 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
                             a.attributes.insert(n, std::mem::take(&mut attr_values));
                         }
                     }
+                } else if name_bytes.ends_with(b":SubjectConfirmation")
+                    || name_bytes == b"SubjectConfirmation"
+                {
+                    in_bearer_confirmation = false;
                 } else if name_bytes.ends_with(b":Assertion") || name_bytes == b"Assertion" {
                     if let Some(a) = current.take() {
                         assertions.push(a);
@@ -325,6 +388,7 @@ pub struct ValidateParams<'a> {
 /// On success returns the assertion. The caller is responsible for the
 /// replay check (the assertion ID must not be reused) — this is done
 /// externally against storage.
+#[allow(clippy::too_many_lines)] // Each block is one normative SAML check.
 pub fn extract_and_validate_assertion(
     resp: &SamlResponse,
     p: &ValidateParams<'_>,
@@ -383,13 +447,74 @@ pub fn extract_and_validate_assertion(
         return Err(IdentityError::Saml(SamlError::Expired));
     }
 
-    // InResponseTo.
+    // InResponseTo (Response level — unsigned when only the assertion is
+    // signed, so the authoritative copy is the one checked below).
     if let Some(expected) = p.expected_in_response_to {
         match &resp.in_response_to {
             Some(got) if got == expected => {}
             _ => {
                 return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
                     reason: "InResponseTo mismatch".to_string(),
+                }))
+            }
+        }
+    }
+
+    // The signed `<SubjectConfirmationData>` bindings (audit 2026-08-28
+    // §4.10#5, SAML 2.0 profiles §4.1.4.3).
+    //
+    // These three attributes are what actually bind a bearer assertion to
+    // *this* SP and to *this* login attempt, and — unlike their `<Response>`
+    // level twins — they sit inside the element the IdP signed. They were
+    // parsed nowhere and enforced nowhere: an assertion minted for another
+    // service provider, or one whose bearer window had closed, was accepted
+    // as long as the outer envelope looked right.
+    //
+    // `a` is the single assertion the caller has already tied to the verified
+    // signature (`SamlSpService::complete_inner` refuses a document with more
+    // than one `<saml:Assertion>` and compares the consumed ID against the
+    // verified one), and `bearer_confirmations` is populated only from inside
+    // an `<Assertion>` — so these bindings come from the verified element.
+    let confirmation = match a.bearer_confirmations.as_slice() {
+        [one] => one,
+        [] => {
+            return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
+                reason: "assertion carries no bearer SubjectConfirmationData".to_string(),
+            }))
+        }
+        _ => {
+            // Two bearer confirmations make "the" Recipient ambiguous, which
+            // is exactly the ambiguity a wrapping attack wants. Refuse.
+            return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
+                reason: "multiple bearer SubjectConfirmationData elements".to_string(),
+            }));
+        }
+    };
+
+    // Recipient MUST name this SP's ACS URL.
+    match &confirmation.recipient {
+        Some(r) if r == p.acs_url => {}
+        _ => return Err(IdentityError::Saml(SamlError::DestinationMismatch)),
+    }
+
+    // The bearer NotOnOrAfter is mandatory and is its own window — it is
+    // typically far tighter than `Conditions/NotOnOrAfter`.
+    let bearer_noa = confirmation
+        .not_on_or_after
+        .ok_or(IdentityError::Saml(SamlError::Expired))?;
+    if bearer_noa.as_micros() <= now_micros - skew {
+        return Err(IdentityError::Saml(SamlError::Expired));
+    }
+
+    // InResponseTo MUST name the AuthnRequest we issued. When we issued none
+    // (unsolicited / IdP-initiated) there is nothing to bind against and the
+    // attribute is not consulted.
+    if let Some(expected) = p.expected_in_response_to {
+        match confirmation.in_response_to.as_deref() {
+            Some(got) if got == expected => {}
+            _ => {
+                return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
+                    reason: "SubjectConfirmationData InResponseTo mismatch".to_string(),
                 }))
             }
         }
@@ -561,5 +686,283 @@ mod tests {
         let xml = b"<!DOCTYPE foo [<!ENTITY x \"x\">]><samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" ID=\"_r\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\"></samlp:Response>";
         let result = parse_response(xml);
         assert!(result.is_err(), "DOCTYPE in SAML Response must be rejected");
+    }
+
+    // ==================================================================
+    // 19.4 (audit 2026-08-28 §4.10#5) — the signed
+    // `<SubjectConfirmationData>` bindings.
+    // ==================================================================
+
+    /// Builds a `<Response>` whose bearer `<SubjectConfirmationData>` carries
+    /// the supplied attribute string. Every other field is valid for
+    /// `sp_entity_id = https://sp.example`, `acs_url = https://sp.example/acs`
+    /// and `now = 2023-11-14T22:13:20Z` (1 700 000 000).
+    fn response_with_subject_confirmation(scd_attrs: &str) -> Vec<u8> {
+        format!(
+            concat!(
+                r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+                r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+                r#"IssueInstant="2023-11-14T00:00:00Z" InResponseTo="_req1" "#,
+                r#"Destination="https://sp.example/acs">"#,
+                r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+                r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+                r#"<saml:Assertion ID="_a1">"#,
+                r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+                r#"<saml:Subject>"#,
+                r#"<saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">"#,
+                r#"alice@example.com</saml:NameID>"#,
+                r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">"#,
+                r#"<saml:SubjectConfirmationData {scd}/>"#,
+                r#"</saml:SubjectConfirmation></saml:Subject>"#,
+                r#"<saml:Conditions NotBefore="2023-11-14T00:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+                r#"<saml:AudienceRestriction><saml:Audience>https://sp.example</saml:Audience>"#,
+                r#"</saml:AudienceRestriction></saml:Conditions>"#,
+                r#"</saml:Assertion></samlp:Response>"#,
+            ),
+            scd = scd_attrs,
+        )
+        .into_bytes()
+    }
+
+    fn validate_fixture(
+        scd_attrs: &str,
+        expected_in_response_to: Option<&str>,
+    ) -> Result<Assertion, IdentityError> {
+        let xml = response_with_subject_confirmation(scd_attrs);
+        let parsed = parse_response(&xml).expect("parse");
+        extract_and_validate_assertion(
+            &parsed,
+            &ValidateParams {
+                sp_entity_id: "https://sp.example",
+                acs_url: "https://sp.example/acs",
+                idp_entity_id: "https://idp.example",
+                expected_in_response_to,
+                now: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+                clock_skew_secs: 60,
+            },
+        )
+    }
+
+    /// Control: a fully-bound bearer confirmation is accepted, so the three
+    /// rejection tests below cannot pass vacuously.
+    #[test]
+    fn validate_accepts_well_formed_bearer_subject_confirmation() {
+        let res = validate_fixture(
+            r#"InResponseTo="_req1" Recipient="https://sp.example/acs" NotOnOrAfter="2099-01-01T00:00:00Z""#,
+            Some("_req1"),
+        );
+        assert!(
+            res.is_ok(),
+            "a correctly bound bearer confirmation must be accepted, got {res:?}"
+        );
+    }
+
+    /// §4.10#5: `Recipient` names a different service provider. The assertion
+    /// was minted for someone else and must not be honoured here — even though
+    /// the outer `Destination` is ours.
+    #[test]
+    fn validate_rejects_subject_confirmation_recipient_mismatch() {
+        let res = validate_fixture(
+            r#"InResponseTo="_req1" Recipient="https://other-sp.example/acs" NotOnOrAfter="2099-01-01T00:00:00Z""#,
+            Some("_req1"),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(IdentityError::Saml(SamlError::DestinationMismatch))
+            ),
+            "SubjectConfirmationData Recipient naming another SP must be refused, got {res:?}"
+        );
+    }
+
+    /// §4.10#5: the bearer `NotOnOrAfter` is a tighter bound than
+    /// `Conditions/NotOnOrAfter` and must be enforced independently.
+    #[test]
+    fn validate_rejects_expired_bearer_subject_confirmation() {
+        let res = validate_fixture(
+            r#"InResponseTo="_req1" Recipient="https://sp.example/acs" NotOnOrAfter="2023-11-13T00:00:00Z""#,
+            Some("_req1"),
+        );
+        assert!(
+            matches!(res, Err(IdentityError::Saml(SamlError::Expired))),
+            "an expired bearer SubjectConfirmationData must be refused, got {res:?}"
+        );
+    }
+
+    /// §4.10#5: a missing bearer `NotOnOrAfter` leaves the bearer token
+    /// unbounded in time.
+    #[test]
+    fn validate_rejects_bearer_confirmation_without_not_on_or_after() {
+        let res = validate_fixture(
+            r#"InResponseTo="_req1" Recipient="https://sp.example/acs""#,
+            Some("_req1"),
+        );
+        assert!(
+            matches!(res, Err(IdentityError::Saml(SamlError::Expired))),
+            "a bearer confirmation with no NotOnOrAfter must be refused, got {res:?}"
+        );
+    }
+
+    /// §4.10#5: `InResponseTo` inside the signed assertion must name the
+    /// `AuthnRequest` this SP issued. The `<Response>`-level `InResponseTo`
+    /// is unsigned when only the assertion is signed, so this is the binding
+    /// that actually matters.
+    #[test]
+    fn validate_rejects_subject_confirmation_in_response_to_mismatch() {
+        let res = validate_fixture(
+            r#"InResponseTo="_attacker" Recipient="https://sp.example/acs" NotOnOrAfter="2099-01-01T00:00:00Z""#,
+            Some("_req1"),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
+            ),
+            "SubjectConfirmationData InResponseTo mismatch must be refused, got {res:?}"
+        );
+    }
+
+    /// §4.10#5: an assertion that carries no `InResponseTo` inside the signed
+    /// element is not bound to the login attempt we started, even when the
+    /// unsigned `<Response>` envelope carries the right value.
+    #[test]
+    fn validate_rejects_bearer_confirmation_missing_in_response_to() {
+        let res = validate_fixture(
+            r#"Recipient="https://sp.example/acs" NotOnOrAfter="2099-01-01T00:00:00Z""#,
+            Some("_req1"),
+        );
+        assert!(
+            matches!(
+                res,
+                Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
+            ),
+            "a bearer confirmation with no InResponseTo must be refused when a \
+             request ID was expected, got {res:?}"
+        );
+    }
+
+    /// §4.10#5: an assertion with no bearer `<SubjectConfirmation>` at all
+    /// carries none of the three bindings, so it must not be accepted.
+    #[test]
+    fn validate_rejects_assertion_without_bearer_subject_confirmation() {
+        let xml = concat!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+            r#"IssueInstant="2023-11-14T00:00:00Z" Destination="https://sp.example/acs">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+            r#"<saml:Assertion ID="_a1">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<saml:Subject><saml:NameID "#,
+            r#"Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">"#,
+            r#"alice@example.com</saml:NameID></saml:Subject>"#,
+            r#"<saml:Conditions NotBefore="2023-11-14T00:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+            r#"<saml:AudienceRestriction><saml:Audience>https://sp.example</saml:Audience>"#,
+            r#"</saml:AudienceRestriction></saml:Conditions>"#,
+            r#"</saml:Assertion></samlp:Response>"#,
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        let res = extract_and_validate_assertion(
+            &parsed,
+            &ValidateParams {
+                sp_entity_id: "https://sp.example",
+                acs_url: "https://sp.example/acs",
+                idp_entity_id: "https://idp.example",
+                expected_in_response_to: None,
+                now: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+                clock_skew_secs: 60,
+            },
+        );
+        assert!(
+            matches!(
+                res,
+                Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
+            ),
+            "an assertion with no bearer SubjectConfirmation must be refused, got {res:?}"
+        );
+    }
+
+    /// §4.10#5 + XSW: two bearer confirmations make "the" recipient
+    /// ambiguous. Refuse rather than pick one.
+    #[test]
+    fn validate_rejects_multiple_bearer_subject_confirmations() {
+        let xml = concat!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+            r#"IssueInstant="2023-11-14T00:00:00Z" Destination="https://sp.example/acs">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+            r#"<saml:Assertion ID="_a1">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<saml:Subject><saml:NameID "#,
+            r#"Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">"#,
+            r#"alice@example.com</saml:NameID>"#,
+            r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">"#,
+            r#"<saml:SubjectConfirmationData Recipient="https://other-sp.example/acs" "#,
+            r#"NotOnOrAfter="2099-01-01T00:00:00Z"/></saml:SubjectConfirmation>"#,
+            r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">"#,
+            r#"<saml:SubjectConfirmationData Recipient="https://sp.example/acs" "#,
+            r#"NotOnOrAfter="2099-01-01T00:00:00Z"/></saml:SubjectConfirmation>"#,
+            r#"</saml:Subject>"#,
+            r#"<saml:Conditions NotBefore="2023-11-14T00:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+            r#"<saml:AudienceRestriction><saml:Audience>https://sp.example</saml:Audience>"#,
+            r#"</saml:AudienceRestriction></saml:Conditions>"#,
+            r#"</saml:Assertion></samlp:Response>"#,
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        let res = extract_and_validate_assertion(
+            &parsed,
+            &ValidateParams {
+                sp_entity_id: "https://sp.example",
+                acs_url: "https://sp.example/acs",
+                idp_entity_id: "https://idp.example",
+                expected_in_response_to: None,
+                now: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+                clock_skew_secs: 60,
+            },
+        );
+        assert!(
+            matches!(
+                res,
+                Err(IdentityError::Saml(SamlError::InvalidAuthnRequest { .. }))
+            ),
+            "two bearer SubjectConfirmations must be refused as ambiguous, got {res:?}"
+        );
+    }
+
+    /// The parser must attribute a `<SubjectConfirmationData>` to the
+    /// assertion that encloses it — never to a sibling placed outside every
+    /// `<saml:Assertion>`. This is the parse-side half of the
+    /// signature-wrapping defence: `verify_signed_element` authenticates one
+    /// element, and only bindings inside that element may be read.
+    #[test]
+    fn parse_ignores_subject_confirmation_outside_any_assertion() {
+        let xml = concat!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+            r#"IssueInstant="2023-11-14T00:00:00Z" Destination="https://sp.example/acs">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            // Decoy: a bearer confirmation that belongs to no assertion.
+            r#"<saml:Subject><saml:SubjectConfirmation "#,
+            r#"Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">"#,
+            r#"<saml:SubjectConfirmationData Recipient="https://sp.example/acs" "#,
+            r#"NotOnOrAfter="2099-01-01T00:00:00Z"/></saml:SubjectConfirmation></saml:Subject>"#,
+            r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+            r#"<saml:Assertion ID="_a1">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<saml:Subject><saml:NameID "#,
+            r#"Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">"#,
+            r#"alice@example.com</saml:NameID></saml:Subject>"#,
+            r#"<saml:Conditions NotBefore="2023-11-14T00:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z">"#,
+            r#"<saml:AudienceRestriction><saml:Audience>https://sp.example</saml:Audience>"#,
+            r#"</saml:AudienceRestriction></saml:Conditions>"#,
+            r#"</saml:Assertion></samlp:Response>"#,
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        assert!(
+            parsed.assertions[0].bearer_confirmations.is_empty(),
+            "a SubjectConfirmationData outside every <Assertion> must not be \
+             attributed to the assertion"
+        );
     }
 }

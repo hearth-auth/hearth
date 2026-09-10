@@ -105,6 +105,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   longer imply that HA works today.  The exclusive `data_dir` advisory lock is now documented,
   including that it forbids two nodes sharing a directory or a `ReadWriteMany` mount.  **The
   supported production topology for 1.x is single-node** (`replicaCount: 1`, `ReadWriteOnce` PVC).
+- **The JWKS publishes only Ed25519 (audit 2026-08-28 §4.2#4, §4.15#5)** — `/jwks`, `/certs` and
+  `/.well-known/jwks.json` carried three key types: the `EdDSA` key Hearth actually signs with, an
+  RSA-2048 `RS256` key it has never signed anything with, and an EC P-256 `ES256` key whose private
+  half was regenerated on every process start — so a relying party that selected the ES256 entry
+  cached (for `max-age=3600`) a public key whose private half no longer existed. Both extra entries
+  are gone and the unused RSA keypair, which was the one key family written to storage without the
+  HKEY envelope, is deleted from storage on startup. `id_token_signing_alg_values_supported` already
+  advertised `EdDSA` only, so a client that read discovery is unaffected. **Action:** a relying party
+  pinned to the RS256 or ES256 `kid` must re-fetch the JWKS and verify with `EdDSA`.
+- **A config-driven signing-key rotation now defaults its grace window to the refresh-token lifetime
+  (audit 2026-08-28 §4.15#3)** — `rotate_signing_key: true` on a realm used a fixed 24-hour window
+  while `token.refresh_token_ttl` defaults to `7d`, so a *planned* rotation invalidated every
+  outstanding refresh token six days before its own `exp`. With `token.signing_key_rotation_grace_period`
+  unset, the window is now the longest refresh-token lifetime the config can issue. An explicit value
+  is still honoured verbatim, with a startup warning when it is shorter than that lifetime. The
+  `POST /admin/realms/{id}/rotate-signing-key` default is unchanged at `0` — a revoking rotation.
 
 ### Fixed
 - **The system operator reaches realm config and required-actions cross-realm (audit 2026-08-28
@@ -345,6 +361,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   chart now defaults to `v<appVersion>`, its in-repo version tracks the crate version, and
   `scripts/check-chart-image-tag.sh` fails CI if either drifts again. Override `image.tag` as before
   to pin a different image.
+- **A config-driven signing-key rotation is written to the audit log (audit 2026-08-28 §4.14#9)** —
+  `POST /admin/realms/{id}/rotate-signing-key` recorded a `realm_updated` event; the
+  `rotate_signing_key: true` config path performed the identical operation and recorded nothing, so
+  the audit log could not show that a realm had been re-keyed. It now writes the same event with
+  `metadata.action = "rotate_signing_key"`, `metadata.source = "config"` and an actor of `system`.
+- **Eight admin endpoints now check the sub-admin permission they belong to (audit 2026-08-28
+  §4.1#9)** — admin authentication admits any of `hearth.admin`, `hearth.users.admin`,
+  `hearth.clients.admin`, `hearth.realm.admin` and `hearth.agents.admin`, and each handler is
+  expected to name its own domain on top of that. Eight named none, so a token delegated a single
+  narrow permission reached all of them: `GET /admin/roles/{id}`,
+  `GET /admin/webhooks/{id}/deliveries`, `POST /v1/aats/validate`,
+  `POST /v1/transaction-tokens/consume`, `GET /v1/spiffe-mappings/{agent_id}`,
+  `GET /v1/cross-realm-policies`, `GET /v1/cross-realm-policies/{id}` and
+  `GET /.well-known/agent.json`. The first two now require `hearth.realm.admin` and the rest
+  `hearth.agents.admin`, matching every sibling route in their family. `hearth.admin` still passes
+  everywhere. **Operators delegating narrow sub-admin roles may see new `403`s on these eight
+  routes** — grant the named permission to restore access.
+- **An admin sub-resource whose parent is absent from the realm answers `404` (audit 2026-08-28
+  §4.1#10)** — `GET /admin/users/{id}/consents`, `/roles` and `/sessions`,
+  `GET /admin/groups/{id}/members` and `GET /admin/webhooks/{id}/deliveries` each scoped their query
+  to the caller's realm but never checked that the parent object existed there, so an unknown or
+  peer-realm id was answered `200` with an empty collection — indistinguishable from a real object
+  with no rows. All five now return `404`. No response ever contained another realm's data; only the
+  status code changes.
 
 ### Fixed
 - **`hearth backup` says what happened (audit 2026-08-28 §4.9#8, §4.14#6)** — `create`, `restore`,
@@ -941,8 +981,188 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   genuinely wants a new key can pass the new `hearth backup restore --allow-missing-signing-key` flag
   to opt in explicitly. The HTTP restore endpoint always fails closed (no override). When the signing
   key is present it round-trips byte-for-byte, so pre-backup tokens keep validating.
+- **Federation JWKS, token and userinfo fetches are behind the SSRF guard (audit 2026-08-28
+  §4.6#2)** — every upstream fetch a federation connector makes (`jwks_uri`, `token_endpoint`,
+  `userinfo_endpoint`, OIDC discovery, GitHub `/user` and `/user/emails`, Apple) went out on a
+  bare `ureq` call with `ureq`'s defaults: no SSRF check, up to ten redirects followed, and no
+  timeout at all. The endpoints come from realm configuration, so an operator-supplied or
+  redirect-supplied URL could reach an RFC 1918 host, loopback, or the cloud instance-metadata
+  address `169.254.169.254`, and an upstream that never answered pinned a blocking thread
+  indefinitely. Federation egress now runs through the same guard as webhook egress and
+  back-channel logout: `https` only, every resolved address checked, the connect-time DNS lookup
+  checked again to close the rebinding race, redirects refused, and a 5 s connect / 10 s total
+  timeout. **Operator action:** a federation connector whose `issuer`, `token_endpoint`,
+  `jwks_uri` or `userinfo_endpoint` points at `http://`, at loopback, or at a private address no
+  longer completes a login — use publicly-resolvable `https` endpoints. This includes the
+  `examples/federation-flow/` demo, whose bundled upstream IdP listens on
+  `http://localhost:9090`.
+- **`link_existing_accounts: auto` now carries its account-takeover warning wherever an operator
+  sets it (audit 2026-08-28 §4.6#4)** — `auto` links an upstream identity to whatever local
+  account already holds the asserted email address, with no local re-authentication, so an IdP
+  that does not verify email can hand an attacker an existing Hearth account together with its
+  roles and permissions. The risk was disclosed in one guide but not in the configuration
+  reference, the README, `hearth.maximal.yaml`, the YAML example set, the concepts guide, or the
+  federation and SAML examples. All of those now state it at the point the value is set. No
+  behavior change; `confirm` remains the default.
+- **A KEK-configured deployment refuses an unenveloped signing key, and enabling the KEK
+  re-encrypts what is already stored (audit 2026-08-28 §4.15#7)** — with `security.key_encryption_key`
+  set, the read path still accepted any signing key that lacked the `HKEY` envelope, so an attacker
+  with write access to the store could strip the envelope and substitute key material of their own.
+  Turning the KEK on also encrypted only *subsequent* writes: every key already on disk stayed in
+  plaintext until somebody happened to rotate it. The first KEK-configured start now re-wraps every
+  stored signing key (`sys:global:key`, `realm:key:*`, `realm:retiring:*`) and marks the store
+  enrolled; after that an unenveloped signing key is refused rather than used. **Action:** none —
+  the migration is automatic and idempotent. Take a backup before the first KEK-enabled boot, as
+  with any in-place key migration.
+- **A rotation on one node invalidates the other nodes' signing-key caches (audit 2026-08-28
+  §4.15#6)** — the active-key, retiring-key and token-claims caches are process-local, and rotation
+  cleared them only on the node that served the request. Every other node kept publishing the retired
+  `kid` in its JWKS and kept *accepting* tokens signed with it, including after a revoking rotation —
+  the remedy for a leaked key. Rotation now persists a per-realm rotation epoch alongside the key
+  material, which replicates like any other write, and each node drops its caches when it observes
+  the epoch move.
+- **A `WebAuthn` challenge is bound to the realm and the ceremony that minted it (audit 2026-08-28
+  §4.18#8)** — pending passkey challenges live in one process-global map keyed only by the
+  challenge bytes, and nothing recorded which realm had asked for the challenge or whether it was
+  minted to enrol a credential or to log one in. A challenge issued by realm A therefore completed
+  against realm B, enrolling a credential for a user of another tenant, and a registration
+  challenge satisfied a login (and a login challenge enrolled a new passkey — one authenticator
+  touch turned into a persistent second factor on the account). `POST /webauthn/register/complete`
+  and `POST /webauthn/auth/complete` now refuse a challenge whose realm or ceremony does
+  not match the one that minted it, with `challenge was issued for a different realm` /
+  `... different ceremony`; a refused redemption leaves the challenge in place so it cannot be used
+  to cancel someone else's in-flight ceremony.
+- **Cross-realm trust policies are now enforced on the admin API, and only the operator may name
+  the system realm as a source (audit 2026-08-28 §4.1#8)** — a realm could create a
+  `CrossRealmTrustPolicy`, see it stored and audited, and the server would never read it:
+  `check_cross_realm_policy` had no production caller. The `/admin/realms/{id}/*` BOLA guard now
+  consults it on the one production path that actually crosses a realm boundary — a nil-UUID
+  system-realm operator reaching into a tenant realm. When the target realm holds a live policy
+  naming the system realm, the crossing is permitted only if that policy grants `hearth.admin` (or
+  `*`); otherwise it is refused with `403 cross_realm_capability_not_allowed`. When **no** live
+  policy names the source realm the default stays **permissive** and the crossing is logged at
+  `WARN`, so deployments that have never authored a policy are unchanged.
+
+  Because every `/v1/cross-realm-policies` write stores the policy in the **actor's own** realm,
+  that enforcement on its own would have let a tenant admin revoke the platform operator. So
+  `POST /v1/cross-realm-policies` now refuses, with `403 system_realm_source_forbidden`, any
+  policy whose `source_realm_id` is the reserved system realm unless the actor is itself a
+  system-realm principal. Policies between two tenant realms are unaffected. `DELETE` is
+  deliberately **not** restricted: removing a system-source policy can only relax the operator's
+  access, never tighten it, so it stays available as the recovery valve for a policy stored before
+  this rule existed. **Operators:** a tenant realm that already holds a policy naming the system
+  realm as source will now gate your `/admin/realms/{id}/*` access to that realm, and only that
+  realm's own admin can `DELETE` it — these routes are keyed on the caller's realm, so there is no
+  operator-side path to them. Audit any such policy before upgrading; the routes exist only where
+  `agent_auth.capabilities.advanced` is enabled.
+- **`X-Realm-ID` must agree with the realm in a `/realms/{name}/…` path (audit 2026-08-28
+  §4.16#12)** — the deployment guide tells operators to front Hearth with a proxy that maps a
+  tenant subdomain onto `X-Realm-ID`, but all eleven realm-path routes
+  (`/.well-known/openid-configuration`, `/.well-known/jwks.json`, `/authorize`, `/as/par`,
+  `/token`, `/revoke`, `/introspect`, `/device_authorization`, `/userinfo`, `/register`,
+  `/end_session`) resolved their realm from the path alone and ignored the header, so
+  `tenant-a.example.com/realms/tenant-b/token` was served as tenant B while the proxy believed it
+  had pinned tenant A. When the header is present it must now name the same realm as the path;
+  a mismatched or malformed header is refused with `400 realm_mismatch`. The header never selects
+  or overrides the path realm, and requests without the header are unchanged.
+- **`POST /revoke` no longer writes the presented token into the audit log (audit 2026-08-28
+  §4.16#9)** — the RFC 7009 revocation event recorded the raw bearer token as its `resource_id`.
+  The audit log is durable, is exported verbatim by the admin CSV export, and is readable by every
+  realm admin, so a still-valid token sat there as a replayable credential at rest. The event now
+  references the token by `jti:<token jti>`, falling back to `sha256:<first 16 hex chars>` when the
+  token carries no `jti`. Both forms are stable, so operators can still correlate repeated
+  revocations of the same token; neither is reversible.
+- **Clientless `grant_type=refresh_token` requests are rate-limited (audit 2026-08-28 §4.16#8)** —
+  the token-endpoint limiter buckets on `(realm, client_id)`, and both `POST /token` and
+  `POST /realms/{realm}/token` consulted it only when the body carried a parseable `client_id`.
+  Hearth's clientless session refresh (no `client_id`, no Basic auth) was therefore invisible to
+  the limiter and could be flooded without bound. Such requests are now bucketed by client IP —
+  resolved through the same trusted-proxy walk as every other IP-keyed control, so a spoofed
+  `X-Forwarded-For` cannot pick its own bucket — against the same
+  `security.rate_limiting.token_per_minute` cap, and are refused with `429` plus `Retry-After`.
+  Setting that cap to `0` still means unlimited.
+- **SDK authorization middleware verifies the token before reading its permissions (audit
+  2026-08-28 §8.3, tasks 25.1/25.3)** — the Go, Kotlin, Python, Rust and TypeScript SDKs each
+  shipped an `embedded`-mode permission guard that decoded the JWT payload and trusted the
+  `permissions` claim without checking the signature, `alg`, `exp` or `iss`. **An application
+  using the affected middleware was accepting unverified tokens**: an unauthenticated attacker
+  could mint `{"alg":"none"}` with `permissions: ["admin.write"]`, present it as a Bearer token,
+  and be allowed through — no key material, no call to Hearth, and expired or revoked tokens
+  passed indefinitely. Every gate now verifies through the SDK's own `verifyToken`/`VerifyToken`
+  path (EdDSA against the realm's cached JWKS, plus `exp`, `nbf`, `iss` and `aud`) before any
+  claim is read, and denies when verification fails. Affected surfaces: Go
+  `RequirePermission(ModeEmbedded)`, `Client.HasPermission/HasRole/InGroup/InOrg`, and the Gin
+  and Echo `HearthMiddleware`/`RequirePermission` adapters (whose `HearthMiddleware` previously
+  only stashed the bearer token and never verified it); Python `RequirePermissionMiddleware`
+  (ASGI), `WsgiPermissionMiddleware`, `HearthDjangoMiddleware` and `@require_permission`; Rust
+  `check_permission(Embedded)`, `HearthClient::has_permission/has_role/in_group/in_org`, and the
+  tower and actix layers — the actix layer's `VerifiedToken` newtype now holds a token that was
+  actually verified; Kotlin `requirePermission(EMBEDDED)`; TypeScript
+  `requirePermission({mode:"embedded"})`. The Node and PHP SDKs already verified and are
+  unchanged. **Breaking:** Go's four RBAC predicates take a leading `ctx context.Context`; Rust's
+  four are now `async` methods on `&self` rather than associated functions; Python's Django
+  `@require_permission` and `HearthDjangoMiddleware` require a configured `HEARTH_CLIENT` in
+  embedded mode (they deny without one); TypeScript's exported `JwksClient.verify` now pins `iss`
+  — set `issuer` (and optionally `audience`) on the `JwksClient` config or pass `options.issuer`,
+  or it throws `ConfigurationError` rather than performing a signature-only check that would
+  accept a token from any issuer sharing the JWKS. The TypeScript README's embedded-mode example
+  no longer shows a raw `accessToken` being gated without verification.
+- **`nbf` is validated by the Go, PHP, Python and Rust SDKs (audit 2026-08-28 §8.3, task 25.2)** —
+  all four verified `exp` and `iss` but never read `nbf`, so a post-dated token was accepted
+  before the moment its issuer said it became valid, contrary to RFC 7519 §4.1.5 and to each
+  SDK's own documentation. All four now reject a token whose `nbf` is in the future, using the
+  same clock-skew allowance as their existing `iat` check (5 s). Go additionally exposes
+  `Claims.NotBefore()`. Go's `TokenNotYetValidError` previously fired only for a future `iat`,
+  which misreported coverage that did not exist.
+- **The signed SAML `<SubjectConfirmationData>` bindings are parsed and enforced (audit 2026-08-28
+  §4.10#5, task 19.4)** — the SP assertion consumer read `Destination` and `InResponseTo` from the
+  `<Response>` envelope, which is unsigned whenever only the `<Assertion>` carries a signature, and
+  never looked inside the signed element at all. `Recipient`, the bearer `NotOnOrAfter` and
+  `InResponseTo` are now read from the bearer `<SubjectConfirmationData>` **within the assertion
+  whose signature was verified** and checked against this SP's ACS URL, the current clock and the
+  `AuthnRequest` ID Hearth issued. An assertion minted for another service provider, one whose
+  bearer window has closed, one carrying no bearer confirmation, and one carrying two (ambiguous)
+  are all refused.
+- **SAML audience and destination validation is anchored to configured absolute URLs (audit
+  2026-08-28 §4.10#7, task 19.6)** — with `onboarding.base_url` unset, which is how
+  `hearth.example.yaml` ships it, the SP entity ID, ACS URL and IdP entity ID were derived from
+  `X-Forwarded-Host` / `X-Forwarded-Proto`, so anyone who could reach the port chose the origin
+  every SAML security check was measured against. Forwarded headers are no longer read on the SAML
+  path at all. The origin comes from `onboarding.base_url`, falling back to `oidc.issuer`; a
+  loopback `Host` still works for dev and tests. **Breaking for one configuration:** a deployment
+  serving SAML on a non-loopback host with neither key set now receives `500` from every
+  `/ui/realms/{realm}/saml/*` and `/ui/realms/{realm}/federation/saml/*` route until one is
+  configured. Set `onboarding.base_url` to this server's public URL.
+- **The two unbounded SAML key spaces are bounded (audit 2026-08-28 §4.10#9, task 22.11)** —
+  `saml:state:` (SP request state) was written by the unauthenticated
+  `GET …/federation/saml/begin` and removed only by a matching ACS POST, so every abandoned or
+  attacker-issued login leaked a row permanently; `saml:asn:` (assertion replay sentinels) grew by
+  one row per successful login and had no expiry at all. The periodic cleanup sweeper now reclaims
+  both — expired state bags, and sentinels past the moment their assertion stops validating — and
+  `put_saml_state` refuses with a rate-limit error once a realm holds 10 000 live bags, so the
+  unauthenticated writer can no longer grow the store without bound.
+- **The cluster plane requires `hearth.admin`, not merely a system-realm identity (audit
+  2026-08-28 §4.1#9, follow-up)** — `POST /admin/cluster/bootstrap`,
+  `GET /admin/cluster/status` and `POST /admin/cluster/transfer-leadership` proved the caller's
+  realm was the reserved system realm and stopped there. Admin authentication deliberately admits
+  every `hearth.*.admin` sub-admin, so an operator delegated only `hearth.users.admin` in the
+  system realm could initialize Raft membership or force a leadership transfer — the two most
+  destructive operations in the product. All three now also require `hearth.admin`. The check runs
+  before the cluster-availability check, so an unauthorized caller gets `403` and never learns
+  whether the deployment runs a cluster. **Operators who delegate narrow system-realm roles will
+  see a new `403` on all three `/admin/cluster/*` routes** — grant `hearth.admin` (the seeded
+  `realm.admin` role already carries it, so the bootstrap `system_access_token` and any existing
+  full operator are unaffected).
 
 ### Fixed
+- **SP-initiated SAML SSO now signs the user in (audit 2026-08-28 §4.10#6, §4.22#4, task 19.5)** —
+  the assertion consumer validated the assertion, wrote a `saml_login_completed` audit event and
+  redirected the browser to `return_to` with no session cookie and no user, so a documented
+  federation login authenticated nobody while the audit log said otherwise. A validated assertion
+  now runs through the same federation pipeline the OIDC callback uses — existing link, auto-link,
+  confirm-to-link, or JIT provisioning per the realm's `federation.link_mode` — and issues a real
+  Hearth session, honouring `mfa_required`. `saml_login_completed` is written only when a session
+  cookie is actually issued; a confirm-to-link or MFA hop no longer claims a completed login.
 - **`token.signing_key_rotation_grace_period` is now validated at start-up (audit 2026-08-28
   §4.15#2)** — a malformed value was silently swallowed and fell back to the 24-hour default, and a
   negative value wrapped through an unsigned cast into an effectively infinite grace window,

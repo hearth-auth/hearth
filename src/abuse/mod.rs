@@ -39,6 +39,7 @@ pub mod captcha;
 pub mod challenge;
 pub mod cidr;
 pub mod detector;
+pub mod device_approval;
 pub mod email_reputation;
 pub mod guards;
 pub mod ip_reputation;

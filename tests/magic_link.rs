@@ -367,3 +367,99 @@ fn magic_link_retry_after_reports_nonzero_when_blocked() {
         "Retry-After secs must be positive when IP is at threshold; got {retry_after}"
     );
 }
+
+// ===== Audit 2026-08-28 §4.24#6: the SDK grant must be accepted =====
+
+/// All seven SDKs complete the passwordless flow by posting
+/// `grant_type=urn:hearth:grant-type:magic-link` with the opaque token to the
+/// token endpoint. The endpoint had no arm for that grant, so every SDK's
+/// `exchangeMagicLink` was rejected with `unsupported_grant_type` and the
+/// flow could not complete.
+#[tokio::test]
+async fn magic_link_grant_is_accepted_at_the_token_endpoint() {
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
+    use hearth::protocol::http::{router, AppState};
+    use tower::ServiceExt as _;
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user_with_email(&harness, &realm, "grant@magic.test");
+
+    let minted = harness
+        .identity()
+        .request_magic_link(&realm, "grant@magic.test")
+        .expect("mint magic link");
+
+    let app = router(Arc::new(AppState::new_dev(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    )));
+
+    let body = serde_json::json!({
+        "grant_type": "urn:hearth:grant-type:magic-link",
+        "token": minted.token(),
+    })
+    .to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .expect("build POST"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("read body");
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the magic-link grant must be accepted (audit §4.24#6); body: {text}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("json body");
+    let access_token = parsed
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .expect("access_token in the grant response");
+    let claims = harness
+        .identity()
+        .validate_token(&realm, access_token)
+        .expect("the issued access token must validate");
+    assert!(
+        claims.sub.contains(&user.id().as_uuid().to_string()),
+        "the token must be bound to the magic link's user; sub was {}",
+        claims.sub
+    );
+
+    // Single use: replaying the same token must not mint a second session.
+    let replay = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("build POST"),
+        )
+        .await
+        .expect("oneshot");
+    assert_ne!(
+        replay.status(),
+        StatusCode::OK,
+        "a magic-link token must be single-use at the token endpoint"
+    );
+}

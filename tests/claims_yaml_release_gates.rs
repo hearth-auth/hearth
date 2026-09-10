@@ -24,6 +24,12 @@ server:
   trust_forwarded_proto: true
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+email:
+  transport: smtp
+  from: "noreply@example.com"
+  smtp:
+    host: "smtp.example.com"
+    port: 587
 "#;
 
 fn config_with_claims(mappings_yaml: &str) -> Result<Config, String> {

@@ -112,8 +112,63 @@ fn prod_log_transport_with_domain_restricted_reg_is_error() {
     );
 }
 
+/// Audit §4.24#9: a **password-only** realm still needs email — the
+/// forgot-password link is its only self-service recovery path. `log`
+/// transport silently discards every reset mail, so this must be a hard
+/// production error too.
+#[test]
+fn prod_log_transport_with_password_auth_is_error() {
+    let yaml = prod_config_yaml("      allowed_auth_methods: [password, passkey]");
+    let result = hearth::config::Config::from_yaml_str(&yaml);
+    let err = result.expect_err(
+        "email.transport = log with password auth in production must be a validation error \
+         — password reset mail would be silently discarded (audit §4.24#9)",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("email.transport"),
+        "error must identify the offending field 'email.transport'; got: {msg}"
+    );
+    assert!(
+        msg.contains("password"),
+        "error must explain that password reset needs email; got: {msg}"
+    );
+}
+
+/// Audit §4.24#9: a realm with no `auth` block at all defaults to allowing
+/// password authentication, so it needs email too.
+#[test]
+fn prod_log_transport_with_default_auth_realm_is_error() {
+    let yaml = r#"
+server:
+  port: 8420
+  bind_address: "127.0.0.1"
+  trust_forwarded_proto: true
+storage:
+  data_dir: "/tmp/hearth-sec24-test"
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+oidc:
+  issuer: "https://auth.example.com"
+email:
+  transport: log
+realms:
+  testrealm:
+    display_name: "Test"
+"#;
+    let result = hearth::config::Config::from_yaml_str(yaml);
+    assert!(
+        result.is_err(),
+        "a realm with no auth block allows password auth, so log transport must be refused \
+         in production (audit §4.24#9)"
+    );
+}
+
 /// HSEC-010: `log` transport in production with no email-requiring realm
 /// features must NOT produce a validation error (warning only at runtime).
+///
+/// A realm restricted to passkeys only has no email-bearing flow: no
+/// magic link, no self-registration, and no password to reset.
 #[test]
 fn prod_log_transport_without_email_features_is_ok() {
     let yaml = r#"
@@ -132,7 +187,7 @@ email:
 realms:
   testrealm:
     auth:
-      allowed_auth_methods: [password, passkey]
+      allowed_auth_methods: [passkey]
 "#;
     let result = hearth::config::Config::from_yaml_str(yaml);
     assert!(

@@ -117,6 +117,45 @@ pub(crate) fn wrap_key(plaintext: &[u8], kek: Option<&[u8; 32]>) -> Result<Vec<u
     Ok(out)
 }
 
+/// Returns `true` when `bytes` carries the HKEY envelope header.
+///
+/// Used by the KEK enrolment sweep to tell an already-wrapped row from a
+/// legacy plaintext one without attempting a decrypt.
+pub(crate) fn is_enveloped(bytes: &[u8]) -> bool {
+    bytes.len() >= MAGIC.len() && &bytes[..MAGIC.len()] == MAGIC
+}
+
+/// [`unwrap_key`], but **refuses** unenveloped bytes when a KEK is configured.
+///
+/// [`unwrap_key`] passes any non-`HKEY` blob straight through, which is the
+/// right behaviour the first time a KEK is switched on over an existing data
+/// directory — the legacy rows must still be readable so they can be
+/// re-encrypted. It is the wrong behaviour afterwards: once every key in the
+/// store has been through the envelope, an unenveloped signing key is either
+/// corruption or a downgrade, where an attacker with write access to storage
+/// strips the envelope and substitutes key material of their own choosing.
+///
+/// Signing-key read paths use this after the store has been marked
+/// KEK-enrolled (audit 2026-08-28 §4.15#7).
+///
+/// # Errors
+///
+/// Returns [`IdentityError::SigningError`] when `kek` is `Some` and `bytes`
+/// carries no envelope, plus every error [`unwrap_key`] returns.
+pub(crate) fn unwrap_key_strict(
+    bytes: &[u8],
+    kek: Option<&[u8; 32]>,
+) -> Result<Zeroizing<Vec<u8>>, IdentityError> {
+    if kek.is_some() && !is_enveloped(bytes) {
+        return Err(IdentityError::SigningError {
+            reason: "signing key is not HKEY-enveloped on a deployment with \
+                     key_encryption_key configured; refusing to use it"
+                .into(),
+        });
+    }
+    unwrap_key(bytes, kek)
+}
+
 /// Reads stored key material, decrypting if the HKEY envelope is present.
 ///
 /// - If `bytes` starts with `HKEY`, decrypts with `kek` (returns an error if
@@ -266,6 +305,33 @@ mod tests {
         let w2 = wrap_key(plaintext, Some(&fixed_kek())).expect("wrap 2");
         // Nonces are random; successive wraps must produce different output.
         assert_ne!(w1, w2, "each wrap call must use a fresh nonce");
+    }
+
+    #[test]
+    fn strict_unwrap_refuses_plaintext_when_kek_configured() {
+        let plaintext = b"\x30\x26legacy-pkcs8";
+        let err = unwrap_key_strict(plaintext, Some(&fixed_kek()))
+            .expect_err("strict mode must refuse unenveloped material");
+        assert!(matches!(err, IdentityError::SigningError { .. }));
+        // The lenient reader still accepts it — that is what the enrolment
+        // sweep uses to read the legacy row before re-wrapping it.
+        assert!(unwrap_key(plaintext, Some(&fixed_kek())).is_ok());
+    }
+
+    #[test]
+    fn strict_unwrap_passes_plaintext_through_without_a_kek() {
+        let plaintext = b"\x30\x26raw-pkcs8-bytes-here";
+        let out = unwrap_key_strict(plaintext, None).expect("no KEK configured");
+        assert_eq!(out.as_slice(), plaintext);
+    }
+
+    #[test]
+    fn strict_unwrap_accepts_an_enveloped_blob() {
+        let plaintext = b"ed25519-pkcs8-material-here-1234";
+        let wrapped = wrap_key(plaintext, Some(&fixed_kek())).expect("wrap");
+        assert!(is_enveloped(&wrapped));
+        let out = unwrap_key_strict(&wrapped, Some(&fixed_kek())).expect("strict unwrap");
+        assert_eq!(out.as_slice(), plaintext);
     }
 
     #[test]

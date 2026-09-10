@@ -311,10 +311,37 @@ impl TokenRateLimiter {
         client_id: &ClientId,
         now_micros: i64,
     ) -> TokenRateLimitOutcome {
+        self.check_bucket(realm_id, &client_id.as_uuid().to_string(), now_micros)
+    }
+
+    /// Bucket name for a token request that carries no client identity.
+    ///
+    /// A clientless `grant_type=refresh_token` exchange (Hearth's session
+    /// refresh) authenticates nothing at the edge, so the peer address is the
+    /// only identity available to bucket it under. The `ip:` prefix keeps
+    /// these buckets disjoint from the client-UUID buckets used by
+    /// [`Self::check`] (audit 2026-08-28 §4.16#8).
+    #[must_use]
+    pub fn anonymous_ip_bucket(client_ip: &str) -> String {
+        format!("ip:{client_ip}")
+    }
+
+    /// Records a request against an arbitrary bucket within a realm.
+    ///
+    /// `bucket` is any stable per-caller discriminator — a client UUID for an
+    /// authenticated request, [`Self::anonymous_ip_bucket`] for one that
+    /// carries no client identity. A `limit` of `0` still means **unlimited**,
+    /// exactly as it does for [`Self::check`].
+    pub fn check_bucket(
+        &self,
+        realm_id: &RealmId,
+        bucket: &str,
+        now_micros: i64,
+    ) -> TokenRateLimitOutcome {
         if self.limit == 0 {
             return TokenRateLimitOutcome::Allowed;
         }
-        let key = format!("{}:{}", realm_id.as_uuid(), client_id.as_uuid());
+        let key = format!("{}:{}", realm_id.as_uuid(), bucket);
         let mut trackers = self
             .trackers
             .lock()
@@ -363,6 +390,14 @@ pub const JWKS_RATE_WINDOW_MICROS: i64 = 1_000_000;
 #[derive(Debug)]
 pub struct JwksRateLimiter {
     /// Maximum allowed requests per second per IP.
+    ///
+    /// `0` means **unlimited**, matching [`AdminRateLimiter`],
+    /// [`TokenRateLimiter`] and [`ExportRateLimiter`]. It previously meant
+    /// *deny everything* here — `count <= 0` is false for the very first
+    /// request — so the same sentinel removed the cap on three limiters and
+    /// blackholed JWKS and OIDC discovery on the fourth, in one file (audit
+    /// §4.13#7). Set from `security.jwks_rps_limit`, whose documented default
+    /// is 60.
     rps_limit: u32,
     trackers: Mutex<HashMap<String, RateTracker>>,
 }
@@ -379,8 +414,19 @@ impl JwksRateLimiter {
         Self::with_rps_limit(JWKS_RATE_LIMIT_PER_SEC)
     }
 
+    /// Creates a limiter that never rate-limits.
+    ///
+    /// **Load-test use only** — wired from `security.load_test_unthrottled` on
+    /// a loopback bind. Mirrors [`AdminRateLimiter::disabled`] so the intent is
+    /// spelled out at the call site rather than encoded in a magic number.
+    pub fn disabled() -> Self {
+        Self::with_rps_limit(0)
+    }
+
     /// Creates a limiter with a custom per-IP requests-per-second cap.
     ///
+    /// A `rps_limit` of `0` disables the limiter (equivalent to
+    /// [`Self::disabled`]), consistent with every other limiter in this module.
     /// Use this to apply the operator-configured value from
     /// `security.jwks_rps_limit` in `hearth.yaml`.
     pub fn with_rps_limit(rps_limit: u32) -> Self {
@@ -395,6 +441,9 @@ impl JwksRateLimiter {
     /// `now_micros` is the current Unix timestamp in microseconds; pass a fixed
     /// value in tests to drive time deterministically.
     pub fn check(&self, ip: &str, now_micros: i64) -> bool {
+        if self.rps_limit == 0 {
+            return true;
+        }
         let mut trackers = self
             .trackers
             .lock()
@@ -809,5 +858,33 @@ mod tests {
             "request {} must be rejected (over limit)",
             limit
         );
+    }
+
+    /// Audit §4.13#7 (task 20.8): the `0` sentinel had two meanings in one
+    /// file. `AdminRateLimiter`, `TokenRateLimiter` and `ExportRateLimiter`
+    /// read `0` as **unlimited**; `JwksRateLimiter` read it as **deny
+    /// everything** (`count <= 0` is false for the first request), so
+    /// `security.jwks_rps_limit: 0` blackholed every JWKS and discovery fetch
+    /// — an outage for every relying party — while the same value on any other
+    /// limiter removed the cap. `0` now means unlimited everywhere.
+    #[test]
+    fn jwks_limit_zero_never_sheds() {
+        let limiter = JwksRateLimiter::with_rps_limit(0);
+        for i in 0..(JWKS_RATE_LIMIT_PER_SEC * 10) {
+            assert!(
+                limiter.check("6.6.6.6", 0),
+                "request {i} must be allowed — 0 means unlimited, not deny-all"
+            );
+        }
+    }
+
+    /// The explicit spelling of the same intent, mirroring `disabled()` on the
+    /// other three limiters.
+    #[test]
+    fn jwks_disabled_never_sheds() {
+        let limiter = JwksRateLimiter::disabled();
+        for i in 0..(JWKS_RATE_LIMIT_PER_SEC * 10) {
+            assert!(limiter.check("7.7.7.7", 0), "request {i} must be allowed");
+        }
     }
 }

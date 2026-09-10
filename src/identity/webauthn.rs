@@ -18,7 +18,7 @@ use ring::rand::SecureRandom;
 use ring::signature;
 use serde::{Deserialize, Serialize};
 
-use crate::core::UserId;
+use crate::core::{RealmId, UserId};
 use crate::identity::error::IdentityError;
 
 /// `WebAuthn` challenge size in bytes (minimum 16 per spec, we use 32).
@@ -62,12 +62,17 @@ const COSE_LABEL_Y: i64 = -3;
 pub(crate) struct PendingWebAuthnChallenge {
     /// The raw challenge bytes (32 bytes, base64url-encoded for the client).
     pub challenge: Vec<u8>,
+    /// The realm that minted this challenge.
+    ///
+    /// The store is process-global, so this is the only thing that keeps a
+    /// challenge issued by one tenant from being redeemed against another
+    /// (audit 2026-08-28 §4.18#8).
+    pub realm_id: RealmId,
     /// The relying party ID (e.g., "example.com").
     pub rp_id: String,
     /// The user ID this challenge is for (None for discoverable auth).
     pub user_id: Option<UserId>,
     /// Whether this is a registration or authentication challenge.
-    #[allow(dead_code)]
     pub ceremony_type: CeremonyType,
     /// When this challenge was created (Unix microseconds).
     pub created_at: i64,
@@ -218,10 +223,48 @@ impl WebAuthnAuthResult {
     }
 }
 
+/// Why a pending challenge could not be redeemed.
+///
+/// The store is shared by every realm in the process, so "the key exists" is
+/// not on its own a licence to complete the ceremony.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChallengeRedemptionError {
+    /// No pending challenge with that key: never minted, already redeemed,
+    /// or expired and swept.
+    NotFound,
+    /// The challenge was minted by a different realm.
+    RealmMismatch,
+    /// The challenge was minted for the other ceremony (registration vs
+    /// authentication).
+    CeremonyMismatch,
+}
+
+impl ChallengeRedemptionError {
+    /// A short, non-sensitive reason suitable for an `IdentityError` message.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::NotFound => "challenge not found or expired",
+            Self::RealmMismatch => "challenge was issued for a different realm",
+            Self::CeremonyMismatch => "challenge was issued for a different ceremony",
+        }
+    }
+}
+
+impl fmt::Display for ChallengeRedemptionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 /// In-memory store for pending `WebAuthn` challenges.
 ///
 /// Challenges are keyed by base64url-encoded challenge bytes and expire
 /// after `CHALLENGE_EXPIRY_MICROS`. Cleanup happens lazily at ceremony start.
+///
+/// The store is process-global — one map for every realm — so each entry
+/// carries the realm and the ceremony it was minted for, and redemption is
+/// only possible through [`WebAuthnChallengeStore::redeem`], which checks
+/// both (audit 2026-08-28 §4.18#8).
 pub(crate) struct WebAuthnChallengeStore {
     challenges: Mutex<HashMap<String, PendingWebAuthnChallenge>>,
 }
@@ -249,12 +292,29 @@ impl WebAuthnChallengeStore {
         key
     }
 
-    /// Removes and returns a pending challenge by its base64url key.
+    /// Redeems a pending challenge by its base64url key, consuming it.
     ///
-    /// Returns `None` if the challenge does not exist.
-    pub(crate) fn remove(&self, key: &str) -> Option<PendingWebAuthnChallenge> {
+    /// The challenge is only handed back — and only removed — when it was
+    /// minted by `realm_id` for `ceremony_type`. A mismatch leaves the entry
+    /// in place so that a wrong-realm or wrong-ceremony attempt cannot burn
+    /// the ceremony the legitimate caller is still holding.
+    pub(crate) fn redeem(
+        &self,
+        key: &str,
+        realm_id: &RealmId,
+        ceremony_type: CeremonyType,
+    ) -> Result<PendingWebAuthnChallenge, ChallengeRedemptionError> {
         let mut map = self.challenges.lock().expect("challenge store lock");
-        map.remove(key)
+        let pending = map.get(key).ok_or(ChallengeRedemptionError::NotFound)?;
+        if &pending.realm_id != realm_id {
+            return Err(ChallengeRedemptionError::RealmMismatch);
+        }
+        if pending.ceremony_type != ceremony_type {
+            return Err(ChallengeRedemptionError::CeremonyMismatch);
+        }
+        // INVARIANT: `get` above proved the key is present and the map is
+        // still locked, so the removal cannot fail.
+        map.remove(key).ok_or(ChallengeRedemptionError::NotFound)
     }
 
     /// Removes expired challenges from the store.
@@ -1385,6 +1445,11 @@ mod tests {
     use super::test_helper::WebAuthnTestHelper;
     use super::*;
 
+    /// The realm every ceremony-mechanics test mints its challenges in.
+    fn test_realm() -> RealmId {
+        RealmId::new(uuid::Uuid::nil())
+    }
+
     #[test]
     fn challenge_generation_produces_32_bytes() {
         let challenge = generate_challenge().expect("generate");
@@ -1399,13 +1464,88 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
 
         let key = store.insert(pending);
-        assert!(store.remove(&key).is_some());
-        assert!(store.remove(&key).is_none()); // Already removed
+        assert!(store
+            .redeem(&key, &test_realm(), CeremonyType::Registration)
+            .is_ok());
+        // Already redeemed.
+        assert!(matches!(
+            store.redeem(&key, &test_realm(), CeremonyType::Registration),
+            Err(ChallengeRedemptionError::NotFound)
+        ));
+    }
+
+    /// The store is one map for the whole process, so a challenge minted by
+    /// realm A must not be redeemable by realm B — and the refusal must not
+    /// consume it (audit 2026-08-28 §4.18#8).
+    #[test]
+    fn challenge_store_refuses_a_foreign_realm_without_consuming_the_entry() {
+        let store = WebAuthnChallengeStore::new();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        let key = store.insert(PendingWebAuthnChallenge {
+            challenge: generate_challenge().expect("generate"),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            realm_id: realm_a.clone(),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        });
+
+        assert!(matches!(
+            store.redeem(&key, &realm_b, CeremonyType::Registration),
+            Err(ChallengeRedemptionError::RealmMismatch)
+        ));
+        assert!(
+            store
+                .redeem(&key, &realm_a, CeremonyType::Registration)
+                .is_ok(),
+            "the minting realm must still be able to redeem its own challenge"
+        );
+    }
+
+    /// A registration challenge must not satisfy an authentication redemption,
+    /// nor the reverse.
+    #[test]
+    fn challenge_store_refuses_the_other_ceremony() {
+        let store = WebAuthnChallengeStore::new();
+        let realm = RealmId::generate();
+        let reg_key = store.insert(PendingWebAuthnChallenge {
+            challenge: generate_challenge().expect("generate"),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            realm_id: realm.clone(),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        });
+        let auth_key = store.insert(PendingWebAuthnChallenge {
+            challenge: generate_challenge().expect("generate"),
+            rp_id: "example.com".to_string(),
+            user_id: None,
+            realm_id: realm.clone(),
+            ceremony_type: CeremonyType::Authentication,
+            created_at: 1_000_000,
+        });
+
+        assert!(matches!(
+            store.redeem(&reg_key, &realm, CeremonyType::Authentication),
+            Err(ChallengeRedemptionError::CeremonyMismatch)
+        ));
+        assert!(matches!(
+            store.redeem(&auth_key, &realm, CeremonyType::Registration),
+            Err(ChallengeRedemptionError::CeremonyMismatch)
+        ));
+        assert!(store
+            .redeem(&reg_key, &realm, CeremonyType::Registration)
+            .is_ok());
+        assert!(store
+            .redeem(&auth_key, &realm, CeremonyType::Authentication)
+            .is_ok());
     }
 
     #[test]
@@ -1417,6 +1557,7 @@ mod tests {
             challenge,
             rp_id: "example.com".to_string(),
             user_id: None,
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 1_000_000,
         };
@@ -1424,7 +1565,10 @@ mod tests {
         store.insert(pending);
         // Cleanup at a time well past expiry
         store.cleanup_expired(1_000_000 + CHALLENGE_EXPIRY_MICROS + 1);
-        assert!(store.remove(&key).is_none());
+        assert!(matches!(
+            store.redeem(&key, &test_realm(), CeremonyType::Authentication),
+            Err(ChallengeRedemptionError::NotFound)
+        ));
     }
 
     #[test]
@@ -1479,6 +1623,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1513,6 +1658,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1551,6 +1697,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1565,6 +1712,7 @@ mod tests {
             challenge: auth_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -1593,6 +1741,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1606,6 +1755,7 @@ mod tests {
             challenge: c1.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -1621,6 +1771,7 @@ mod tests {
             challenge: c2.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 3_000_000,
         };
@@ -1647,6 +1798,7 @@ mod tests {
             challenge: c1.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1660,6 +1812,7 @@ mod tests {
             challenge: c2.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1677,6 +1830,7 @@ mod tests {
                 challenge: challenge.clone(),
                 rp_id: "example.com".to_string(),
                 user_id: Some(user_id.clone()),
+                realm_id: test_realm(),
                 ceremony_type: CeremonyType::Authentication,
                 created_at: 2_000_000,
             };
@@ -1695,6 +1849,7 @@ mod tests {
                 challenge: challenge.clone(),
                 rp_id: "example.com".to_string(),
                 user_id: Some(user_id.clone()),
+                realm_id: test_realm(),
                 ceremony_type: CeremonyType::Authentication,
                 created_at: 2_000_000,
             };
@@ -1723,6 +1878,7 @@ mod tests {
             challenge: reg_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1737,6 +1893,7 @@ mod tests {
             challenge: auth_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: None, // No user specified — discoverable flow
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -1777,6 +1934,7 @@ mod tests {
             challenge: reg_c.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1790,6 +1948,7 @@ mod tests {
             challenge: auth_c.clone(),
             rp_id: "example.com".to_string(),
             user_id: None,
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -1815,6 +1974,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1864,6 +2024,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1933,6 +2094,7 @@ mod tests {
             challenge: reg_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -1948,6 +2110,7 @@ mod tests {
                 challenge: challenge.clone(),
                 rp_id: "example.com".to_string(),
                 user_id: Some(user_id.clone()),
+                realm_id: test_realm(),
                 ceremony_type: CeremonyType::Authentication,
                 created_at: 2_000_000,
             };
@@ -1967,6 +2130,7 @@ mod tests {
                 challenge: challenge.clone(),
                 rp_id: "example.com".to_string(),
                 user_id: Some(user_id.clone()),
+                realm_id: test_realm(),
                 ceremony_type: CeremonyType::Authentication,
                 created_at: 3_000_000,
             };
@@ -1992,6 +2156,7 @@ mod tests {
             challenge: reg_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2007,6 +2172,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -2032,6 +2198,7 @@ mod tests {
             challenge: reg_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2046,6 +2213,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(), // Server expects example.com
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -2090,6 +2258,7 @@ mod tests {
             challenge: reg_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2113,6 +2282,7 @@ mod tests {
             challenge: fake_challenge,
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -2145,6 +2315,7 @@ mod tests {
             challenge: reg_challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2165,6 +2336,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -2208,6 +2380,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2258,6 +2431,7 @@ mod tests {
             challenge: reg_c.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2274,6 +2448,7 @@ mod tests {
             challenge: auth_c.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(user_id.clone()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Authentication,
             created_at: 2_000_000,
         };
@@ -2381,6 +2556,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2421,6 +2597,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2462,6 +2639,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };
@@ -2498,6 +2676,7 @@ mod tests {
             challenge: challenge.clone(),
             rp_id: "example.com".to_string(),
             user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
             ceremony_type: CeremonyType::Registration,
             created_at: 1_000_000,
         };

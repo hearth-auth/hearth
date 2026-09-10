@@ -39,6 +39,27 @@ struct VerificationText<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "email/magic_link.html")]
+struct MagicLinkHtml<'a> {
+    magic_link_url: &'a str,
+    product_name: &'a str,
+    logo_url: &'a Option<String>,
+    logo_svg_inline: &'a Option<String>,
+    accent_color: &'a str,
+    support_email: &'a Option<String>,
+    custom_footer_text: &'a Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "email/magic_link.txt")]
+struct MagicLinkText<'a> {
+    magic_link_url: &'a str,
+    product_name: &'a str,
+    support_email: &'a Option<String>,
+    custom_footer_text: &'a Option<String>,
+}
+
+#[derive(Template)]
 #[template(path = "email/setup.html")]
 struct SetupHtml<'a> {
     setup_url: &'a str,
@@ -205,6 +226,52 @@ pub(crate) fn render_setup(
 }
 
 /// Renders a password reset email.
+/// Renders a passwordless sign-in ("magic link") email.
+///
+/// Without this the magic-link endpoint minted a token and dropped it — the
+/// flow could never complete (audit 2026-08-28 §4.24#6).
+pub(crate) fn render_magic_link(
+    url: &str,
+    branding: &ResolvedBranding,
+    custom: Option<&tera::Tera>,
+) -> Result<EmailMessage, EmailError> {
+    let subject = format!("Sign in to {}", branding.product_name);
+
+    let (html_body, text_body) = if let Some(tera) = custom {
+        render_tera_pair(tera, "magic_link", url, "magic_link_url", branding)?
+    } else {
+        let html = MagicLinkHtml {
+            magic_link_url: url,
+            product_name: &branding.product_name,
+            logo_url: &branding.logo_url,
+            logo_svg_inline: &branding.logo_svg_inline,
+            accent_color: &branding.accent_color,
+            support_email: &branding.support_email,
+            custom_footer_text: &branding.custom_footer_text,
+        };
+        let text = MagicLinkText {
+            magic_link_url: url,
+            product_name: &branding.product_name,
+            support_email: &branding.support_email,
+            custom_footer_text: &branding.custom_footer_text,
+        };
+        let html_str = html.render().map_err(|e| EmailError::Template {
+            reason: format!("askama render magic_link.html failed: {e}"),
+        })?;
+        let text_str = text.render().map_err(|e| EmailError::Template {
+            reason: format!("askama render magic_link.txt failed: {e}"),
+        })?;
+        (html_str, text_str)
+    };
+
+    Ok(EmailMessage {
+        to: String::new(), // Caller sets this
+        subject,
+        text_body,
+        html_body,
+    })
+}
+
 pub(crate) fn render_password_reset(
     url: &str,
     branding: &ResolvedBranding,

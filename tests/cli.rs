@@ -430,11 +430,20 @@ fn cli_config_example_prints_yaml() {
 
 #[test]
 fn cli_config_validate_accepts_valid_file() {
-    // `dev_mode: true` relaxes data_dir / oidc-issuer requirements, so this
-    // minimal file validates cleanly.
+    // `dev_mode` may no longer be set in a config file — `hearth serve --dev`
+    // is the only way to reach dev mode (audit 2026-08-28 §4.7#3), and the
+    // validator refuses the key outright. So this fixture is a minimal but
+    // genuinely valid PRODUCTION config instead.
     let path = write_temp_config(
         "valid",
-        "dev_mode: true\nserver:\n  bind_address: \"127.0.0.1\"\n  port: 8420\n",
+        concat!(
+            "server:\n  bind_address: \"127.0.0.1\"\n  port: 8420\n",
+            "  trust_forwarded_proto: true\n",
+            "storage:\n  data_dir: \"/tmp/hearth-cli-validate\"\n",
+            "oidc:\n  issuer: \"https://auth.example.com\"\n",
+            "security:\n  key_encryption_key: \"",
+            "1111111111111111111111111111111111111111111111111111111111111111\"\n",
+        ),
     );
     let output = Command::new(hearth_bin())
         .args(["config", "validate"])

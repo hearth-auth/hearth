@@ -205,6 +205,7 @@ mod tests {
             in_response_to: None,
             session_index: None,
             destination: None,
+            bearer_confirmations: Vec::new(),
         };
         let ext = assertion_to_external_identity(IdpId::generate(), &a, &m).expect("map");
         assert_eq!(ext.email, "alice@example.com");

@@ -5,7 +5,6 @@
 //! `impl IdentityEngine for EmbeddedIdentityEngine`.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -37,150 +36,48 @@ use super::validate_claim_payload;
 use super::EmbeddedIdentityEngine;
 use super::CLOCK_SKEW_SECS;
 
-/// JSON envelope used to persist an RSA keypair in storage.
-///
-/// Not logged or displayed; fields carry sensitive key material.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredRsaKey {
-    pkcs8: Vec<u8>,
-    cert: Vec<u8>,
-}
-
 impl EmbeddedIdentityEngine {
-    // ===== OIDC signing-key helpers (moved from mod.rs) =====
+    // ===== Legacy OIDC RSA key material =====
 
-    /// Returns the server-wide OIDC RSA signing key, loading from or
-    /// persisting to storage on first call so the `kid` survives restarts
-    /// (HEA-1655). Subsequent calls return the cached value from the OnceLock.
-    fn oidc_rsa_signing_key(
-        &self,
-    ) -> Result<Arc<crate::identity::tokens::RsaSigningKey>, IdentityError> {
-        if let Some(existing) = self.oidc_rsa_key.get() {
-            return Ok(Arc::clone(existing));
-        }
-        let key = Arc::new(self.load_or_persist_oidc_rsa_key()?);
-        // Race: if another thread initialized in parallel, prefer the
-        // already-stored value so all callers observe the same `kid`.
-        let _ = self.oidc_rsa_key.set(Arc::clone(&key));
-        Ok(Arc::clone(
-            self.oidc_rsa_key
-                .get()
-                .expect("oidc_rsa_key set above or by racing thread"),
-        ))
-    }
-
-    /// Loads the OIDC RSA keypair from storage, or generates a new one and
-    /// persists it (WAL-synced) on first startup.
+    /// Deletes every `sys:oidc:rsa:*` row left by an older build.
     ///
-    /// Stored under the system realm as `sys:oidc:rsa:key`.
-    fn load_or_persist_oidc_rsa_key(
-        &self,
-    ) -> Result<crate::identity::tokens::RsaSigningKey, IdentityError> {
+    /// That family held a server-wide RSA-2048 keypair serialised as plain
+    /// JSON — PKCS#8 **private** key included, with no HKEY envelope, while
+    /// every other key family was wrapped (audit 2026-08-28 §4.15#4). Its only
+    /// consumer was the `RS256` entry in the global JWKS, and Hearth never
+    /// signed anything with it, so the JWKS now publishes Ed25519 only
+    /// (§4.2#4, §4.15#5).
+    ///
+    /// Wrapping a key nothing uses would keep an unnecessary private key at
+    /// rest; the row is removed instead. Called once per process from the
+    /// constructor. Best-effort: a storage failure here is logged, never
+    /// fatal, and the sweep retries on the next start.
+    pub(super) fn purge_legacy_oidc_rsa_keys(&self) {
         let sys = keys::system_realm_id();
-        let storage_key = keys::encode_oidc_rsa_key();
-
-        if let Some(bytes) = self
-            .storage
-            .get(&sys, &storage_key)
-            .map_err(Self::storage_err)?
-        {
-            let stored: StoredRsaKey =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            return crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
-                &stored.pkcs8,
-                &stored.cert,
+        let prefix = keys::legacy_oidc_rsa_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = match self.storage.scan(&sys, &prefix, &end) {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not scan for legacy OIDC RSA key rows");
+                return;
+            }
+        };
+        let mut removed = 0_usize;
+        for entry in entries {
+            match self.storage.delete(&sys, &entry.key) {
+                Ok(()) => removed += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, "could not delete a legacy OIDC RSA key row");
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                "removed unencrypted legacy OIDC RSA key rows; the JWKS publishes Ed25519 only"
             );
         }
-
-        // First startup: generate, WAL-persist, then return.
-        let key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)?;
-        let body = serde_json::to_vec(&StoredRsaKey {
-            pkcs8: key.pkcs8_bytes().to_vec(),
-            cert: key.cert_der().to_vec(),
-        })
-        .map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(&sys, &storage_key, &body)
-            .map_err(Self::storage_err)?;
-
-        Ok(key)
-    }
-
-    pub(super) fn oidc_rsa_jwk(&self) -> Result<crate::identity::tokens::Jwk, IdentityError> {
-        self.oidc_rsa_signing_key()?.to_jwk()
-    }
-
-    /// Collects retiring OIDC RSA keys whose grace-window has not yet expired
-    /// and returns their JWKs for inclusion in `/certs`.
-    ///
-    /// Retiring keys are written by a key-rotation call and scanned via the
-    /// `sys:oidc:rsa:retiring:` prefix range under the system realm.
-    pub(super) fn oidc_rsa_retiring_jwks(&self) -> Vec<crate::identity::tokens::Jwk> {
-        let sys = keys::system_realm_id();
-        let prefix = keys::oidc_rsa_retiring_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
-
-        let Ok(entries) = self.storage.scan(&sys, &prefix, &end) else {
-            return vec![];
-        };
-
-        let kek = self
-            .config
-            .key_encryption_key
-            .as_ref()
-            .map(|k| k.as_bytes());
-        let mut out = Vec::new();
-        for entry in entries {
-            let Some(deadline) = keys::parse_oidc_rsa_retiring_deadline(&entry.key) else {
-                continue;
-            };
-            if deadline <= now_secs {
-                continue; // Grace period expired — omit.
-            }
-            let Ok(json_bytes) = crate::identity::key_encryption::unwrap_key(&entry.value, kek)
-            else {
-                continue;
-            };
-            let Ok(stored) = serde_json::from_slice::<StoredRsaKey>(&json_bytes) else {
-                continue;
-            };
-            let Ok(key) = crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
-                &stored.pkcs8,
-                &stored.cert,
-            ) else {
-                continue;
-            };
-            if let Ok(jwk) = key.to_jwk() {
-                out.push(jwk);
-            }
-        }
-        out
-    }
-
-    /// Returns the server-wide ECDSA P-256 signing key used to publish the
-    /// ES256 entry in the `/certs` JWKS.
-    fn oidc_ecdsa_signing_key(
-        &self,
-    ) -> Result<Arc<crate::identity::tokens::EcdsaSigningKey>, IdentityError> {
-        if let Some(existing) = self.oidc_ecdsa_key.get() {
-            return Ok(Arc::clone(existing));
-        }
-        let generated = Arc::new(crate::identity::tokens::EcdsaSigningKey::generate()?);
-        let _ = self.oidc_ecdsa_key.set(Arc::clone(&generated));
-        Ok(Arc::clone(
-            self.oidc_ecdsa_key
-                .get()
-                .expect("oidc_ecdsa_key set above or by racing thread"),
-        ))
-    }
-
-    pub(super) fn oidc_ecdsa_jwk(&self) -> Result<crate::identity::tokens::Jwk, IdentityError> {
-        Ok(self.oidc_ecdsa_signing_key()?.to_jwk())
     }
 }
 
@@ -2527,7 +2424,9 @@ impl EmbeddedIdentityEngine {
         let now = self.clock.now();
         let ttl_secs: i64 = 90;
         let expires_at = now.add_micros(ttl_secs * 1_000_000);
-        let request_uri_id = uuid::Uuid::new_v4().to_string();
+        // 22.27 (audit 2026-08-28 §4.25#5): RFC 9126 §7.1 makes 128 bits the
+        // normative floor for a `request_uri`. A UUID v4 carries only 122.
+        let request_uri_id = crate::core::random_secret_hex();
 
         let stored = StoredPushedAuthorizationRequest {
             request_uri_id: request_uri_id.clone(),
@@ -2604,6 +2503,25 @@ impl EmbeddedIdentityEngine {
         Ok(stored)
     }
 
+    /// Builds a non-reversible audit reference for a revoked token.
+    ///
+    /// The audit log is durable, CSV-exportable from the admin console, and
+    /// readable by every realm admin, so it MUST NOT carry credential
+    /// material (audit 2026-08-28 §4.16#9). Prefers the token's own `jti` —
+    /// a public identifier that is already recorded in the JTI blocklist —
+    /// and otherwise falls back to a truncated SHA-256 digest of the token,
+    /// which correlates repeated revocations of the same token without being
+    /// reversible. The raw token is never returned.
+    fn audit_token_reference(claims: &TokenClaims, token: &str) -> String {
+        if let Some(jti) = claims.jti.as_deref().filter(|j| !j.is_empty()) {
+            return format!("jti:{jti}");
+        }
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(token.as_bytes()));
+        // A hex SHA-256 is always 64 chars; `get` keeps this panic-free.
+        format!("sha256:{}", digest.get(..16).unwrap_or(digest.as_str()))
+    }
+
     pub(super) fn revoke_token_inner(
         &self,
         realm_id: &RealmId,
@@ -2678,12 +2596,15 @@ impl EmbeddedIdentityEngine {
             _ => {} // Unknown token type → silent success
         }
 
+        // Never persist the presented bearer token: `resource_id` is written
+        // verbatim to the append-only log (audit 2026-08-28 §4.16#9).
+        let token_ref = Self::audit_token_reference(&claims, &request.token);
         self.record_audit(
             realm_id,
             None,
             AuditAction::SessionRevoked,
             "token",
-            &request.token,
+            &token_ref,
         )?;
 
         Ok(())
@@ -2696,8 +2617,9 @@ impl EmbeddedIdentityEngine {
     ) -> Result<crate::identity::oidc::IntrospectionResponse, IdentityError> {
         use crate::identity::oidc::IntrospectionResponse;
 
-        // 1. Verify Ed25519 signature against realm key (with global-key
-        // fallback for Phase 0 realms). Forged or tampered tokens are
+        // 1. Verify the Ed25519 signature against the realm's own key (and any
+        // in-grace retiring key). There is no global-key fallback — a realm
+        // with no key of its own fails closed. Forged or tampered tokens are
         // cryptographically rejected; RFC 7662 semantics: return inactive.
         let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
             return Ok(IntrospectionResponse::inactive());
@@ -3184,6 +3106,19 @@ impl EmbeddedIdentityEngine {
                 return Err(IdentityError::InvalidInput {
                     reason: "redirect_uris cannot be empty".to_string(),
                 });
+            }
+            // Audit §4.3#3: re-run the register-time rules. `register_client_inner`
+            // routes every redirect URI through `validation::validate_redirect_uri`
+            // (no fragment, no wildcard, no dangerous scheme, http only for a
+            // loopback host). Applying them only at registration made all four
+            // bypassable by register-then-PATCH.
+            for uri in uris {
+                if uri.trim().is_empty() {
+                    return Err(IdentityError::InvalidInput {
+                        reason: "redirect URIs must not be empty".to_string(),
+                    });
+                }
+                validation::validate_redirect_uri(uri)?;
             }
             client.set_redirect_uris(uris.clone());
         }
@@ -3732,7 +3667,9 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &PendingAuthorizationRequest,
     ) -> Result<String, IdentityError> {
-        let ticket = uuid::Uuid::new_v4().to_string();
+        // 22.27 (audit 2026-08-28 §4.25#5): 128-bit consent ticket; a UUID v4
+        // spends six bits on the version/variant and carries only 122.
+        let ticket = crate::core::random_secret_hex();
         let key = keys::encode_pending_auth_key(&ticket);
         let bytes = serde_json::to_vec(request).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
