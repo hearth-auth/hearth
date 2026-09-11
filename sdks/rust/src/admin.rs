@@ -120,8 +120,10 @@ impl AdminClient {
     // ------------------------------------------------------------------
 
     // Realms are provisioned via hearth.yaml, not the admin API. There is no
-    // `create_realm` method: the server returns 405 for POST /admin/realms
-    // (HEA-2171). Only read paths are exposed.
+    // `create_realm` and no `update_realm` method: the server answers 405 with
+    // "Realms are managed via hearth.yaml" to both POST /admin/realms and
+    // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+    // paths and deletion are exposed.
 
     pub async fn list_realms(&self) -> Result<Vec<Realm>, HearthError> {
         let resp = self
@@ -142,21 +144,6 @@ impl AdminClient {
         let resp = self
             .http
             .get(format!("{}/admin/realms/{realm_id}", self.base_url))
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(resp.json().await?)
-    }
-
-    pub async fn update_realm(
-        &self,
-        realm_id: &str,
-        req: &UpdateRealmRequest,
-    ) -> Result<Realm, HearthError> {
-        let resp = self
-            .http
-            .put(format!("{}/admin/realms/{realm_id}", self.base_url))
-            .json(req)
             .send()
             .await?;
         Self::check(&resp)?;
@@ -231,7 +218,7 @@ impl AdminClient {
     ) -> Result<OAuthClient, HearthError> {
         let resp = self
             .http
-            .patch(format!("{}/admin/clients/{client_id}", self.base_url))
+            .patch(format!("{}/admin/applications/{client_id}", self.base_url))
             .json(req)
             .send()
             .await?;

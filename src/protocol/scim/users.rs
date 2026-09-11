@@ -133,14 +133,17 @@ fn audit(
         "via": "scim",
         "external_id": external_id,
     });
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: actor.to_string(),
-        action,
-        resource_type: "user".to_string(),
-        resource_id: user_id.as_uuid().to_string(),
-        metadata: Some(metadata),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: actor.to_string(),
+            action,
+            resource_type: "user".to_string(),
+            resource_id: user_id.as_uuid().to_string(),
+            metadata: Some(metadata),
+        },
+    );
 }
 
 /// Returns `true` when the target user holds admin-level permissions

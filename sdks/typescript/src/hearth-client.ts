@@ -304,7 +304,8 @@ export class HearthClient {
    * Verify a JWT using JWKS-backed EdDSA/Ed25519 local signature verification (spec §2).
    *
    * Performs all mandatory validation steps in order:
-   * 1. Signature against the JWKS endpoint (EdDSA/OKP/Ed25519 required; RS256/ES256 accepted).
+   * 1. Signature against the JWKS endpoint (EdDSA/OKP/Ed25519 only — RS256 and
+   *    ES256 are refused; Hearth never signs with them).
    * 2. `exp` claim (rejects expired tokens).
    * 3. `nbf` claim (rejects post-dated tokens).
    * 4. `iss` claim (must match configured `issuerUrl`).

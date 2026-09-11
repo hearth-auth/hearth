@@ -796,14 +796,17 @@ fn synthetic_federation_email(idp_id: &IdpId, external_sub: &str) -> String {
 }
 
 fn audit_federation_started(state: &Arc<WebState>, realm: &RealmId, idp_name: &str) {
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: "anonymous".to_string(),
-        action: AuditAction::FederationLoginStarted,
-        resource_type: "federation_idp".to_string(),
-        resource_id: idp_name.to_string(),
-        metadata: None,
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: "anonymous".to_string(),
+            action: AuditAction::FederationLoginStarted,
+            resource_type: "federation_idp".to_string(),
+            resource_id: idp_name.to_string(),
+            metadata: None,
+        },
+    );
 }
 
 fn audit_federation_completed(
@@ -813,14 +816,17 @@ fn audit_federation_completed(
     user: &UserId,
     linked_this_request: bool,
 ) {
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: user.as_uuid().to_string(),
-        action: AuditAction::FederationLoginCompleted,
-        resource_type: "federation_idp".to_string(),
-        resource_id: idp.as_uuid().to_string(),
-        metadata: Some(serde_json::json!({ "linked_this_request": linked_this_request })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: user.as_uuid().to_string(),
+            action: AuditAction::FederationLoginCompleted,
+            resource_type: "federation_idp".to_string(),
+            resource_id: idp.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({ "linked_this_request": linked_this_request })),
+        },
+    );
 }
 
 fn audit_federation_linked(
@@ -830,25 +836,31 @@ fn audit_federation_linked(
     user: &UserId,
     mode: &str,
 ) {
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: user.as_uuid().to_string(),
-        action: AuditAction::FederationAccountLinked,
-        resource_type: "federation_idp".to_string(),
-        resource_id: idp.as_uuid().to_string(),
-        metadata: Some(serde_json::json!({ "mode": mode })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: user.as_uuid().to_string(),
+            action: AuditAction::FederationAccountLinked,
+            resource_type: "federation_idp".to_string(),
+            resource_id: idp.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({ "mode": mode })),
+        },
+    );
 }
 
 fn audit_federation_jit(state: &Arc<WebState>, realm: &RealmId, idp: &IdpId, user: &UserId) {
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: user.as_uuid().to_string(),
-        action: AuditAction::FederationJitProvisioned,
-        resource_type: "federation_idp".to_string(),
-        resource_id: idp.as_uuid().to_string(),
-        metadata: None,
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: user.as_uuid().to_string(),
+            action: AuditAction::FederationJitProvisioned,
+            resource_type: "federation_idp".to_string(),
+            resource_id: idp.as_uuid().to_string(),
+            metadata: None,
+        },
+    );
 }
 
 /// Emits the unlink audit event — called from `account_linked.rs`.
@@ -859,14 +871,17 @@ pub(crate) fn audit_federation_unlinked(
     user: &UserId,
     via: &str,
 ) {
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: user.as_uuid().to_string(),
-        action: AuditAction::FederationAccountUnlinked,
-        resource_type: "federation_idp".to_string(),
-        resource_id: idp.as_uuid().to_string(),
-        metadata: Some(serde_json::json!({ "via": via })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: user.as_uuid().to_string(),
+            action: AuditAction::FederationAccountUnlinked,
+            resource_type: "federation_idp".to_string(),
+            resource_id: idp.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({ "via": via })),
+        },
+    );
 }
 
 // Helper: pull the 32-byte cookie secret out of WebState. We can't add

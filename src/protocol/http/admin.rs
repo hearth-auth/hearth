@@ -29,9 +29,11 @@ use crate::webhook::{
 };
 use tracing::error;
 
+#[cfg(feature = "dev-endpoints")]
+use super::extract_realm_id;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
-    extract_realm_id, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
+    identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
     require_admin_permission, require_any_admin_permission, verify_manifest_signature, AdminAuth,
     AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
@@ -1160,17 +1162,20 @@ async fn admin_delete_user_device_fingerprints(
         .delete_user_device_fingerprints(&auth.realm_id, &user_id)
     {
         Ok(erased) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::DeviceFingerprintsErased,
-                resource_type: "user".to_string(),
-                resource_id: user_uuid.to_string(),
-                metadata: Some(serde_json::json!({
-                    "via": "admin_api",
-                    "count": erased,
-                })),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::DeviceFingerprintsErased,
+                    resource_type: "user".to_string(),
+                    resource_id: user_uuid.to_string(),
+                    metadata: Some(serde_json::json!({
+                        "via": "admin_api",
+                        "count": erased,
+                    })),
+                },
+            );
             (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -1213,14 +1218,17 @@ async fn admin_bulk_users(
 
             match state.identity.bulk_create_users(&auth.realm_id, &requests) {
                 Ok(results) => {
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: auth.realm_id.clone(),
-                        actor: auth.user_id.as_uuid().to_string(),
-                        action: crate::audit::AuditAction::BulkUsersCreated,
-                        resource_type: "user".to_string(),
-                        resource_id: format!("batch:{}", results.len()),
-                        metadata: Some(serde_json::json!({"via": "admin_api"})),
-                    });
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: auth.realm_id.clone(),
+                            actor: auth.user_id.as_uuid().to_string(),
+                            action: crate::audit::AuditAction::BulkUsersCreated,
+                            resource_type: "user".to_string(),
+                            resource_id: format!("batch:{}", results.len()),
+                            metadata: Some(serde_json::json!({"via": "admin_api"})),
+                        },
+                    );
 
                     let proto_results: Vec<_> =
                         results.iter().map(user_bulk_result_to_proto).collect();
@@ -1253,14 +1261,17 @@ async fn admin_bulk_users(
 
             match state.identity.bulk_disable_users(&auth.realm_id, &user_ids) {
                 Ok(results) => {
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: auth.realm_id.clone(),
-                        actor: auth.user_id.as_uuid().to_string(),
-                        action: crate::audit::AuditAction::BulkUsersDisabled,
-                        resource_type: "user".to_string(),
-                        resource_id: format!("batch:{}", results.len()),
-                        metadata: Some(serde_json::json!({"via": "admin_api"})),
-                    });
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: auth.realm_id.clone(),
+                            actor: auth.user_id.as_uuid().to_string(),
+                            action: crate::audit::AuditAction::BulkUsersDisabled,
+                            resource_type: "user".to_string(),
+                            resource_id: format!("batch:{}", results.len()),
+                            metadata: Some(serde_json::json!({"via": "admin_api"})),
+                        },
+                    );
 
                     let proto_results: Vec<_> =
                         results.iter().map(void_bulk_result_to_proto).collect();
@@ -1440,14 +1451,17 @@ async fn admin_delete_realm(
                     // Scoped to the SYSTEM realm: appending under the realm
                     // that was just deleted would re-create `audit:*` keys in
                     // a key space the cascade must leave empty (§4.9#1).
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: crate::identity::keys::system_realm_id(),
-                        actor: auth.user_id.as_uuid().to_string(),
-                        action: crate::audit::AuditAction::RealmDeleted,
-                        resource_type: "realm".to_string(),
-                        resource_id: realm_uuid.to_string(),
-                        metadata: Some(serde_json::json!({"via": "admin_api"})),
-                    });
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: crate::identity::keys::system_realm_id(),
+                            actor: auth.user_id.as_uuid().to_string(),
+                            action: crate::audit::AuditAction::RealmDeleted,
+                            resource_type: "realm".to_string(),
+                            resource_id: realm_uuid.to_string(),
+                            metadata: Some(serde_json::json!({"via": "admin_api"})),
+                        },
+                    );
                     StatusCode::NO_CONTENT.into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
@@ -1583,32 +1597,38 @@ async fn admin_patch_user_required_actions(
 
     let admin_id = auth.user_id.as_uuid().to_string();
     for a in &add_actions {
-        let _ = state.audit.append(&CreateAuditEvent {
-            realm_id: realm_id.clone(),
-            actor: admin_id.clone(),
-            action: AuditAction::RequiredActionAssigned,
-            resource_type: "user".to_string(),
-            resource_id: uid.as_uuid().to_string(),
-            metadata: Some(serde_json::json!({
-                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
-                "admin_id": admin_id,
-                "via": "admin_api",
-            })),
-        });
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: admin_id.clone(),
+                action: AuditAction::RequiredActionAssigned,
+                resource_type: "user".to_string(),
+                resource_id: uid.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({
+                    "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                    "admin_id": admin_id,
+                    "via": "admin_api",
+                })),
+            },
+        );
     }
     for a in &remove_actions {
-        let _ = state.audit.append(&CreateAuditEvent {
-            realm_id: realm_id.clone(),
-            actor: admin_id.clone(),
-            action: AuditAction::RequiredActionRemoved,
-            resource_type: "user".to_string(),
-            resource_id: uid.as_uuid().to_string(),
-            metadata: Some(serde_json::json!({
-                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
-                "admin_id": admin_id,
-                "via": "admin_api",
-            })),
-        });
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: admin_id.clone(),
+                action: AuditAction::RequiredActionRemoved,
+                resource_type: "user".to_string(),
+                resource_id: uid.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({
+                    "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                    "admin_id": admin_id,
+                    "via": "admin_api",
+                })),
+            },
+        );
     }
 
     (
@@ -1940,14 +1960,19 @@ async fn admin_rotate_realm_signing_key(
         .rotate_realm_signing_key(&realm_id, grace_period_secs)
     {
         Ok(()) => {
-            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"action": "rotate_signing_key", "grace_period_secs": grace_period_secs})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &crate::audit::CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(
+                        serde_json::json!({"action": "rotate_signing_key", "grace_period_secs": grace_period_secs}),
+                    ),
+                },
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -2091,14 +2116,17 @@ async fn admin_patch_realm_branding(
         },
     ) {
         Ok(updated) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api", "op": "patch_branding"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api", "op": "patch_branding"})),
+                },
+            );
             let cfg = updated.config();
             (
                 StatusCode::OK,
@@ -2257,16 +2285,19 @@ async fn admin_put_realm_email_template(
         },
     ) {
         Ok(updated) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(
-                    serde_json::json!({"via": "admin_api", "op": "put_email_template", "kind": kind}),
-                ),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(
+                        serde_json::json!({"via": "admin_api", "op": "put_email_template", "kind": kind}),
+                    ),
+                },
+            );
             match updated.config().email_templates.get(&kind) {
                 Some(tmpl) => (StatusCode::OK, Json(tmpl.clone())).into_response(),
                 None => StatusCode::NO_CONTENT.into_response(),
@@ -2319,16 +2350,19 @@ async fn admin_delete_realm_email_template(
         },
     ) {
         Ok(_) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(
-                    serde_json::json!({"via": "admin_api", "op": "delete_email_template", "kind": kind}),
-                ),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(
+                        serde_json::json!({"via": "admin_api", "op": "delete_email_template", "kind": kind}),
+                    ),
+                },
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -2381,14 +2415,17 @@ async fn admin_register_client(
 
     match state.identity.register_client(&auth.realm_id, &request) {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientRegistered,
-                resource_type: "client".to_string(),
-                resource_id: client.client_id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientRegistered,
+                    resource_type: "client".to_string(),
+                    resource_id: client.client_id().as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             (
                 StatusCode::CREATED,
                 Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
@@ -2556,14 +2593,17 @@ async fn admin_update_client(
         .update_client(&auth.realm_id, &ClientId::new(client_uuid), &request)
     {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientUpdated,
-                resource_type: "client".to_string(),
-                resource_id: client_uuid.to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientUpdated,
+                    resource_type: "client".to_string(),
+                    resource_id: client_uuid.to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             (
                 StatusCode::OK,
                 Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
@@ -2604,14 +2644,17 @@ async fn admin_delete_client(
         .delete_client(&auth.realm_id, &ClientId::new(client_uuid))
     {
         Ok(()) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientDeleted,
-                resource_type: "client".to_string(),
-                resource_id: client_uuid.to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientDeleted,
+                    resource_type: "client".to_string(),
+                    resource_id: client_uuid.to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -2781,18 +2824,21 @@ async fn admin_revoke_user_consent(
         .revoke_consent(&auth.realm_id, &user_id, &client_id)
     {
         Ok(()) => {
-            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ConsentRevoked,
-                resource_type: "oauth_client".to_string(),
-                resource_id: client_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({
-                    "via": "admin",
-                    "target_user": user_id.as_uuid().to_string(),
-                    "client_id": client_id.as_uuid().to_string(),
-                })),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &crate::audit::CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ConsentRevoked,
+                    resource_type: "oauth_client".to_string(),
+                    resource_id: client_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({
+                        "via": "admin",
+                        "target_user": user_id.as_uuid().to_string(),
+                        "client_id": client_id.as_uuid().to_string(),
+                    })),
+                },
+            );
             (StatusCode::NO_CONTENT, ()).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -2903,6 +2949,7 @@ async fn admin_get_user_effective_permissions(
 /// the route is unregistered in production so it cannot be fingerprinted or
 /// reached in a non-dev deployment. The loopback-only bind constraint (enforced
 /// at config validation) ensures only local processes can reach this endpoint.
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_probe_user(
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -2966,6 +3013,7 @@ pub(super) async fn dev_probe_user(
 /// Required headers: `X-Realm-ID: <realm-uuid>`
 /// Request body:  `{"user_id": "<user-uuid>"}`
 /// Response body: `{"session_id": "<session-uuid>"}`
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_seed_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3001,6 +3049,7 @@ pub(super) async fn dev_seed_session(
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedSessionRequest {
     user_id: String,
 }
@@ -3015,6 +3064,7 @@ pub(super) struct DevSeedSessionRequest {
 /// Required headers: `X-Realm-ID: <realm-uuid>`
 /// Request body:  `{"user_id": "<user-uuid>"}`
 /// Response body: `{"access_token": "<jwt>"}`
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_seed_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3057,6 +3107,7 @@ pub(super) async fn dev_seed_token(
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedTokenRequest {
     user_id: String,
 }
@@ -3078,6 +3129,7 @@ pub(super) struct DevSeedTokenRequest {
 /// Required headers: `X-Realm-ID: <realm-uuid>`
 /// Request body:  `{"user_id": "<user-uuid>", "password": "<cleartext>"}`
 /// Response: `204 No Content` on success.
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_seed_password(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3106,6 +3158,7 @@ pub(super) async fn dev_seed_password(
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedPasswordRequest {
     user_id: String,
     password: String,
@@ -3117,6 +3170,7 @@ pub(super) struct DevSeedPasswordRequest {
 /// test suite log in without needing to propagate the password through the
 /// bootstrap response. Acceptable in dev mode; `admin_bootstrap` is a 404
 /// in production.
+#[cfg(feature = "dev-endpoints")]
 pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 
 /// Seeds a system-realm admin user (`admin@hearth.test`) the first time a dev
@@ -3125,6 +3179,7 @@ pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 /// user already existed — the existing password is left untouched.
 ///
 /// Best-effort: logs on error but never returns a failure to the caller.
+#[cfg(feature = "dev-endpoints")]
 fn dev_seed_system_admin(state: &AppState) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
 
@@ -3216,6 +3271,7 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
 ///
 /// Best-effort: logs on error and returns `None` rather than failing bootstrap.
 /// Call [`dev_seed_system_admin`] first to guarantee the admin user exists.
+#[cfg(feature = "dev-endpoints")]
 fn dev_system_admin_token(state: &AppState) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
     let admin = match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
@@ -3259,6 +3315,7 @@ fn dev_system_admin_token(state: &AppState) -> Option<String> {
 /// returned once in the response body. Subsequent calls (re-bootstrap) require
 /// a valid Bearer token and do NOT change the existing admin password (HEA-1670).
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn admin_bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4892,14 +4949,17 @@ async fn admin_backup_create(
                 .unwrap_or(0);
             let filename = format!("hearth-backup-{ts}.hearth-backup");
 
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth_realm_id,
-                actor,
-                action: crate::audit::AuditAction::BackupCreated,
-                resource_type: "backup".to_string(),
-                resource_id: filename.clone(),
-                metadata: params.realm.map(|s| serde_json::json!({"realm_slug": s})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth_realm_id,
+                    actor,
+                    action: crate::audit::AuditAction::BackupCreated,
+                    resource_type: "backup".to_string(),
+                    resource_id: filename.clone(),
+                    metadata: params.realm.map(|s| serde_json::json!({"realm_slug": s})),
+                },
+            );
 
             axum::http::Response::builder()
                 .status(StatusCode::OK)
@@ -5037,18 +5097,21 @@ async fn admin_backup_restore(
     }
 
     // SEC-14: emit audit event at restore start, before any destructive write.
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: auth.realm_id.clone(),
-        actor: auth.user_id.as_uuid().to_string(),
-        action: crate::audit::AuditAction::BackupRestored,
-        resource_type: "backup".to_string(),
-        resource_id: "restore".to_string(),
-        metadata: Some(serde_json::json!({
-            "dry_run": dry_run,
-            "mode": mode_str,
-            "realm_filter": realm_filter,
-        })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: auth.realm_id.clone(),
+            actor: auth.user_id.as_uuid().to_string(),
+            action: crate::audit::AuditAction::BackupRestored,
+            resource_type: "backup".to_string(),
+            resource_id: "restore".to_string(),
+            metadata: Some(serde_json::json!({
+                "dry_run": dry_run,
+                "mode": mode_str,
+                "realm_filter": realm_filter,
+            })),
+        },
+    );
 
     let identity = Arc::clone(&state.identity);
     let rbac = Arc::clone(&state.rbac);
@@ -5423,14 +5486,17 @@ async fn admin_revoke_session(
     let session_id = crate::core::SessionId::new(uuid);
     match state.identity.revoke_session(&auth.realm_id, &session_id) {
         Ok(()) => {
-            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::SessionRevoked,
-                resource_type: "session".to_string(),
-                resource_id: session_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &crate::audit::CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::SessionRevoked,
+                    resource_type: "session".to_string(),
+                    resource_id: session_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             (StatusCode::NO_CONTENT, ()).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),

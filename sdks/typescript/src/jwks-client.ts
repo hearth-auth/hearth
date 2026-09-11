@@ -137,7 +137,8 @@ export class JwksClient {
       const { payload } = await jwtVerify(token, ks, {
         issuer,
         audience,
-        algorithms: ["EdDSA", "RS256", "ES256", "RS384", "ES384"],
+        // EdDSA only — Hearth never signs with RSA or ECDSA (§25.10).
+        algorithms: ["EdDSA"],
         clockTolerance,
       });
       return new Claims(payload as Record<string, unknown>);

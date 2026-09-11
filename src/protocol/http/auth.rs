@@ -134,6 +134,69 @@ pub(crate) fn extract_admin_auth(
     })
 }
 
+/// Enforces the DPoP sender-constraint (RFC 9449 §7.2) on the administrative
+/// surface.
+///
+/// `extract_admin_auth` (and SCIM's `authenticate`) validate the bearer token's
+/// signature, realm and permissions but never looked at `cnf`. A DPoP-bound
+/// admin token — one whose holder proved possession of a private key at
+/// issuance — was therefore accepted as a plain `Bearer` for every admin read
+/// and write, which is exactly the replay the binding exists to prevent
+/// (audit 2026-08-28 §4.19#8). The resource endpoints under `/oauth` have
+/// enforced this since HEA-2031 through `enforce_dpop_binding`; the admin
+/// surface simply never called it.
+///
+/// It runs as a layer rather than inside `extract_admin_auth` because the
+/// proof covers the request method and URI, and the extractor sees only
+/// headers. Applied with `route_layer` to the `/admin` and `/scim/v2` routers,
+/// so it never fires on an unmatched path.
+///
+/// Fail-open is deliberate for *unauthenticated* shapes only: a request with no
+/// bearer token, no realm header, or a token that does not validate is passed
+/// through untouched so the handler's own gate produces the usual `400`/`401`.
+/// A token that **would** be accepted and carries `cnf.jkt` must present a
+/// matching proof or the request is rejected here.
+pub(crate) async fn enforce_admin_dpop(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // `nest` strips the mount prefix from `Uri`, so the path the client signed
+    // survives only in `OriginalUri` (HEA-2031 hit the same trap on
+    // `/userinfo`). Fall back to the request URI when the extension is absent.
+    let path = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(|| req.uri().path().to_string(), |o| o.0.path().to_string());
+    let method = req.method().as_str().to_string();
+
+    let outcome = {
+        let headers = req.headers();
+        let token = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_owned);
+        match (token, extract_realm_id(headers)) {
+            (Some(token), Ok(realm_id)) => state
+                .identity
+                .validate_token(&realm_id, &token)
+                .ok()
+                .and_then(|claims| claims.cnf.as_ref().map(|cnf| cnf.jkt.clone()))
+                .map(|jkt| {
+                    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, path);
+                    enforce_dpop_binding(headers, &state, &realm_id, &token, &jkt, &method, &htu)
+                }),
+            _ => None,
+        }
+    };
+
+    match outcome {
+        Some(Err(rejection)) => rejection.into_response(),
+        _ => next.run(req).await,
+    }
+}
+
 /// Extracts and validates admin authentication for cluster-level operations.
 ///
 /// Identical to [`extract_admin_auth`] but additionally asserts **both** of:
@@ -384,14 +447,17 @@ pub(crate) fn emit_export_watermark(
     if let Some(slug) = realm_slug {
         metadata["realm_slug"] = serde_json::Value::String(slug.to_string());
     }
-    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: user_id.as_uuid().to_string(),
-        action: crate::audit::AuditAction::RealmExportWatermarked,
-        resource_type: "export".to_string(),
-        resource_id: export_id.to_string(),
-        metadata: Some(metadata),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &crate::audit::CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: user_id.as_uuid().to_string(),
+            action: crate::audit::AuditAction::RealmExportWatermarked,
+            resource_type: "export".to_string(),
+            resource_id: export_id.to_string(),
+            metadata: Some(metadata),
+        },
+    );
 }
 
 /// Verifies a detached Ed25519 signature on a backup manifest (A-30).

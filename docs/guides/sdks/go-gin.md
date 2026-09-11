@@ -49,7 +49,7 @@ r.Use(hearthgin.HearthMiddleware(client))
 | `"hearth_token"` | `hearthgin.TokenContextKey` | Raw JWT string |
 | `"hearth_client"` | `hearthgin.ClientContextKey` | `*hearth.Client` |
 
-Requests with no `Authorization` header receive `HTTP 401 Unauthorized` by default. Requests that carry a token continue to the next handler; the token is not verified at this stage — verification is a local JWKS check that happens when you call `GetToken` + `HasPermission` or invoke `RequirePermission`.
+Requests with no `Authorization` header receive `HTTP 401 Unauthorized` by default. Requests that carry a token continue to the next handler; the token is not verified at this stage — verification is a JWKS-backed signature check that happens when you call `GetToken` + `HasPermission(ctx, ...)` or invoke `RequirePermission`.
 
 ## Read the token in a handler
 
@@ -58,8 +58,8 @@ Use `hearthgin.GetToken` to retrieve the JWT string stored in context, then call
 ```go
 r.GET("/profile", func(c *gin.Context) {
     token := hearthgin.GetToken(c)
-    // HasPermission decodes claims locally — no network call
-    if !client.HasPermission(token, "profile.read") {
+    // HasPermission verifies the token before reading its claims
+    if !client.HasPermission(c.Request.Context(), token, "profile.read") {
         c.AbortWithStatus(http.StatusForbidden)
         return
     }
@@ -180,7 +180,7 @@ func main() {
         token := hearthgin.GetToken(c)
         c.JSON(http.StatusOK, gin.H{
             "authenticated": true,
-            "has_admin":     client.HasPermission(token, "admin.write"),
+            "has_admin":     client.HasPermission(c.Request.Context(), token, "admin.write"),
         })
     })
 

@@ -179,6 +179,11 @@ export interface Realm {
 }
 
 /** Parameters for updating a realm. */
+/**
+ * Realm patch shape. No client method sends it: realms are provisioned from
+ * `hearth.yaml` and `PATCH /admin/realms/{id}` answers 405 (audit
+ * 2026-08-28 §25.4).
+ */
 export interface UpdateRealmParams {
   name?: string;
   status?: string;

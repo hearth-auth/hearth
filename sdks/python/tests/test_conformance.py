@@ -321,7 +321,7 @@ class TestAdminClients:
 
     def test_update_client(self, respx_mock):
         from hearth.types import UpdateClientRequest
-        respx_mock.put("http://localhost:8420/admin/clients/c1").mock(
+        respx_mock.patch("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(200, json={
                 "id": "c1", "name": "Updated App", "redirect_uris": [], "trust_level": "confidential"
             })
@@ -370,7 +370,7 @@ class TestAdminRoles:
 
     def test_update_role(self, respx_mock):
         from hearth.types import UpdateRoleRequest
-        respx_mock.put("http://localhost:8420/admin/roles/r1").mock(
+        respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
             return_value=httpx.Response(200, json={"id": "r1", "name": "superadmin", "description": None})
         )
         req = UpdateRoleRequest(name="superadmin")
@@ -417,7 +417,7 @@ class TestAdminGroups:
 
     def test_update_group(self, respx_mock):
         from hearth.types import UpdateGroupRequest
-        respx_mock.put("http://localhost:8420/admin/groups/g1").mock(
+        respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
             return_value=httpx.Response(200, json={"id": "g1", "name": "infra", "description": "Infrastructure"})
         )
         req = UpdateGroupRequest(name="infra", description="Infrastructure")
@@ -461,3 +461,77 @@ class TestAdminOrgMembers:
             return_value=httpx.Response(204)
         )
         self._admin().remove_org_member("org_1", "u1")
+
+
+# ---------------------------------------------------------------------------
+# §12 Admin — HTTP verb contract (audit 2026-08-28 §25.4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.respx(base_url="http://localhost:8420")
+class TestAdminMutationVerbs:
+    """Every Hearth admin mutation is a ``PATCH``.
+
+    ``PUT`` gets a bare 405 from the server's method router — no body, no
+    error code — so the verb is part of the wire contract. These tests assert
+    the method actually put on the wire, not just that a mocked call returned.
+    """
+
+    def _admin(self):
+        from hearth.admin import AdminClient
+        return AdminClient("http://localhost:8420", "tok", "realm-1")
+
+    def test_update_user_sends_patch(self, respx_mock):
+        from hearth.types import UpdateUserRequest
+        route = respx_mock.patch("http://localhost:8420/admin/users/u1").mock(
+            return_value=httpx.Response(200, json={
+                "id": "u1", "email": "a@b.c", "username": "alice", "status": "active",
+            })
+        )
+        self._admin().update_user("u1", UpdateUserRequest(display_name="New"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
+
+    def test_update_client_sends_patch_to_applications(self, respx_mock):
+        from hearth.types import UpdateClientRequest
+        route = respx_mock.patch(
+            "http://localhost:8420/admin/applications/c1"
+        ).mock(
+            return_value=httpx.Response(200, json={
+                "id": "c1", "name": "Updated", "redirect_uris": [],
+                "trust_level": "confidential",
+            })
+        )
+        self._admin().update_client("c1", UpdateClientRequest(name="Updated"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
+
+    def test_update_role_sends_patch(self, respx_mock):
+        from hearth.types import UpdateRoleRequest
+        route = respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
+            return_value=httpx.Response(200, json={
+                "id": "r1", "name": "admin", "permissions": [],
+            })
+        )
+        self._admin().update_role("r1", UpdateRoleRequest(description="New"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
+
+    def test_update_group_sends_patch(self, respx_mock):
+        from hearth.types import UpdateGroupRequest
+        route = respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
+            return_value=httpx.Response(200, json={"id": "g1", "name": "eng"})
+        )
+        self._admin().update_group("g1", UpdateGroupRequest(name="eng"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
+
+    def test_update_realm_is_not_offered(self):
+        """Realms are provisioned from ``hearth.yaml``.
+
+        ``POST /admin/realms`` and ``PATCH /admin/realms/{id}`` both answer 405
+        with "Realms are managed via hearth.yaml", so no verb makes
+        ``update_realm`` work and the SDK must not offer it at all.
+        """
+        from hearth.admin import AdminClient
+        assert not hasattr(AdminClient, "update_realm")
+        assert not hasattr(AdminClient, "create_realm")

@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use super::c14n::{canonicalize, canonicalize_with_inherited};
-use super::xml::{alg, escape_attr, find_element_range, ns, parse_err};
+use super::xml::{alg, escape_attr, find_child_element_range, find_element_range, ns, parse_err};
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 use crate::identity::tokens::RsaSigningKey;
@@ -138,15 +138,17 @@ fn build_signature_block(signed_info: &str, signature_b64: &str, cert_b64: &str)
 ///   own `ID` attribute.
 /// - A `SignedInfo` naming SHA-1 or RSA-SHA1, or one that does not name both
 ///   RSA-SHA256 and SHA-256.
+/// - A declared `<ds:CanonicalizationMethod>` that is not exclusive C14N 1.0
+///   without comments, and a `<ds:Transforms>` list that is absent, omits the
+///   enveloped-signature transform, or names anything other than
+///   enveloped-signature and exclusive C14N. Hearth applies exactly that
+///   chain unconditionally, so a document declaring a different one is an
+///   algorithm downgrade and is refused at the declaration rather than being
+///   left to fail the digest.
 /// - Digest mismatch on the canonicalized element.
 /// - Signature verification failure over the canonicalized `SignedInfo`.
 ///
 /// What it does **not** check — do not rely on this function for these:
-/// - The declared `<ds:CanonicalizationMethod>` and `<ds:Transform>`
-///   algorithms are never read. Both the element and `SignedInfo` are
-///   canonicalized with exclusive C14N unconditionally, so a document
-///   declaring inclusive C14N is not rejected as a downgrade; it simply fails
-///   the digest or signature check if its bytes do not match.
 /// - Full XML-signature-wrapping defence. The URI/ID binding here is only one
 ///   half. The caller must additionally bound the assertion count for the
 ///   whole document and confirm that the element it consumes is the element
@@ -166,6 +168,12 @@ pub fn verify_signed_element(
     let element_id = extract_id_attr(element_bytes)?;
     let (signed_info_bytes, signature_value_b64, reference_uri, digest_b64) =
         extract_signature_fields(element_bytes)?;
+
+    // Algorithm-downgrade defence: the transform chain the document declares
+    // must be the one we actually apply. Checked before any crypto so a
+    // document describing a computation we do not implement is refused
+    // outright rather than implicitly reinterpreted (audit 2026-08-28 §25.5).
+    enforce_declared_algorithms(&signed_info_bytes)?;
 
     // Signature-wrapping defense: the Reference URI must be `#<id>`
     // where `id` equals the enclosing element's ID.
@@ -246,14 +254,20 @@ fn extract_id_attr(element_bytes: &[u8]) -> Result<String, IdentityError> {
 fn extract_signature_fields(
     element_bytes: &[u8],
 ) -> Result<(Vec<u8>, String, String, String), IdentityError> {
-    // Find <ds:Signature ... as direct child only (depth 2 from the
-    // enclosing root). We use find_element_range with ds namespace.
-    let sig_range = find_element_range(element_bytes, ns::DS, "Signature", None)?
+    // Find <ds:Signature> as a DIRECT CHILD of the signed element only.
+    //
+    // An enveloped signature is by definition a child of what it signs, and
+    // `c14n::canonicalize(.., true)` strips exactly the depth-2 element when
+    // it computes the digest. Searching at any depth would let a signature
+    // belonging to a descendant (e.g. the `<Assertion>` inside a
+    // `<Response>`) be read as though it were this element's own — audit
+    // 2026-08-28 §25.6.
+    let sig_range = find_child_element_range(element_bytes, ns::DS, "Signature")?
         .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let sig_bytes = &element_bytes[sig_range.0..sig_range.1];
 
-    // Find SignedInfo.
-    let signed_info_range = find_element_range(sig_bytes, ns::DS, "SignedInfo", None)?
+    // Find SignedInfo — likewise a direct child of <ds:Signature>.
+    let signed_info_range = find_child_element_range(sig_bytes, ns::DS, "SignedInfo")?
         .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let signed_info = sig_bytes[signed_info_range.0..signed_info_range.1].to_vec();
 
@@ -267,6 +281,92 @@ fn extract_signature_fields(
     let digest = extract_text_element(&signed_info, "DigestValue")?;
 
     Ok((signed_info, sv, reference_uri, digest))
+}
+
+/// Refuses a `<ds:SignedInfo>` whose declared canonicalization method or
+/// reference transform chain is not the one Hearth implements.
+///
+/// Hearth's suite is locked: exclusive C14N 1.0 without comments, and a
+/// reference transform list of `enveloped-signature` followed by exclusive
+/// C14N. `verify_signed_element` applies exactly that chain regardless of
+/// what the document says, so a `SignedInfo` declaring anything else
+/// describes a computation we are not performing — inclusive C14N,
+/// `#WithComments`, XPath filtering or XSLT. Reading the declaration turns a
+/// silent mismatch into an explicit downgrade rejection.
+fn enforce_declared_algorithms(signed_info: &[u8]) -> Result<(), IdentityError> {
+    let si = std::str::from_utf8(signed_info).map_err(|_| parse_err("SignedInfo not utf8"))?;
+
+    if declared_c14n_method(si).as_deref() != Some(alg::EXC_C14N) {
+        return Err(IdentityError::Saml(SamlError::UnsupportedAlgorithm));
+    }
+
+    let transforms =
+        declared_transforms(si).ok_or(IdentityError::Saml(SamlError::UnsupportedAlgorithm))?;
+    let declares_enveloped = transforms.iter().any(|t| t == alg::ENVELOPED);
+    let all_supported = transforms
+        .iter()
+        .all(|t| t == alg::ENVELOPED || t == alg::EXC_C14N);
+    if !declares_enveloped || !all_supported {
+        return Err(IdentityError::Saml(SamlError::UnsupportedAlgorithm));
+    }
+    Ok(())
+}
+
+/// Returns the `Algorithm` of the first `<ds:CanonicalizationMethod>`.
+fn declared_c14n_method(signed_info: &str) -> Option<String> {
+    let at = next_start_tag(signed_info, "CanonicalizationMethod")?;
+    tag_attr(&signed_info[at..], "Algorithm")
+}
+
+/// Returns every `<ds:Transform>` `Algorithm` in document order, or `None`
+/// when the reference declares no `<ds:Transforms>` container at all.
+///
+/// A `<ds:Transform>` carrying no `Algorithm` yields an empty string, which
+/// no supported algorithm URI equals — so it is rejected by the caller
+/// rather than silently skipped.
+fn declared_transforms(signed_info: &str) -> Option<Vec<String>> {
+    next_start_tag(signed_info, "Transforms")?;
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = next_start_tag(&signed_info[from..], "Transform") {
+        let at = from + rel;
+        out.push(tag_attr(&signed_info[at..], "Algorithm").unwrap_or_default());
+        from = at;
+    }
+    Some(out)
+}
+
+/// Finds the next start tag for `local`, tolerating an optional `ds:`
+/// prefix, and returns the byte offset just past the element name.
+///
+/// Requires a tag-name terminator so a longer name that merely starts with
+/// `local` does not match: `<ds:Transforms>` is not a `<ds:Transform>`.
+fn next_start_tag(s: &str, local: &str) -> Option<usize> {
+    let mut from = 0usize;
+    while let Some(rel) = s[from..].find('<') {
+        let at = from + rel;
+        let after = &s[at + 1..];
+        let unprefixed = after.strip_prefix("ds:").unwrap_or(after);
+        if let Some(tail) = unprefixed.strip_prefix(local) {
+            if tail.starts_with([' ', '\t', '\r', '\n', '/', '>']) {
+                return Some(s.len() - tail.len());
+            }
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// Reads an attribute value out of a start tag whose name has already been
+/// consumed, bounded to that tag's closing `>`.
+fn tag_attr(tag_tail: &str, attr_name: &str) -> Option<String> {
+    let end = tag_tail.find('>')?;
+    let header = &tag_tail[..end];
+    let key = format!("{attr_name}=\"");
+    let at = header.find(&key)?;
+    let after = &header[at + key.len()..];
+    let close = after.find('"')?;
+    Some(after[..close].to_string())
 }
 
 fn extract_text_element(bytes: &[u8], local: &str) -> Result<String, IdentityError> {
@@ -507,5 +607,160 @@ mod tests {
         }
         out.push_str("-----END CERTIFICATE-----\n");
         out
+    }
+
+    /// Signs a trivial `<Assertion ID="a1">` and returns `(signed_xml, pem)`.
+    fn signed_assertion() -> (Vec<u8>, String) {
+        let key = RsaSigningKey::generate("hearth-test", 365).expect("key");
+        let cert_pem = cert_der_to_pem(key.cert_der());
+        let payload =
+            br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">hello</Assertion>"#;
+        let signed = sign_element(payload, "a1", &key).expect("sign");
+        (signed, cert_pem)
+    }
+
+    /// Rewrites the first occurrence of `from` to `to` inside a signed
+    /// document, panicking when the needle is absent so a silently-skipped
+    /// mutation cannot make a rejection test pass vacuously.
+    fn replace_once(xml: &[u8], from: &str, to: &str) -> Vec<u8> {
+        let s = std::str::from_utf8(xml).expect("signed doc is utf8");
+        assert!(s.contains(from), "needle {from:?} not present in document");
+        s.replacen(from, to, 1).into_bytes()
+    }
+
+    // ---------------------------------------------------------------
+    // 25.6 — `<ds:Signature>` discovery must not descend past a direct child
+    // ---------------------------------------------------------------
+
+    /// A `<ds:Signature>` nested below the signed element's direct children
+    /// is NOT that element's signature and must never be read as one.
+    ///
+    /// The nested block here is deliberately incomplete — it has no
+    /// `<ds:SignatureValue>` — so *reading* it is observable: field
+    /// extraction fails with `SamlError::Parse`. Correct behaviour is to
+    /// never see it at all and report a missing signature
+    /// (`SamlError::Signature`).
+    #[test]
+    fn nested_signature_is_not_read_as_the_elements_own() {
+        let (_, cert_pem) = signed_assertion();
+        let xml = br##"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1"><Wrapper><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:Reference URI="#a1"><ds:DigestValue>AA==</ds:DigestValue></ds:Reference></ds:SignedInfo></ds:Signature></Wrapper></Assertion>"##;
+
+        let err = verify_signed_element(xml, "Assertion", &cert_pem)
+            .err()
+            .expect("an element with no direct-child signature must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::Signature)),
+            "nested <ds:Signature> was read as the element's own signature: {err:?}"
+        );
+    }
+
+    /// The companion positive case: a signature that IS a direct child is
+    /// still found. Pairs with the test above so the depth constraint cannot
+    /// be satisfied by simply never finding a signature.
+    #[test]
+    fn direct_child_signature_is_still_found() {
+        let (signed, cert_pem) = signed_assertion();
+        let verified = verify_signed_element(&signed, "Assertion", &cert_pem).expect("verify");
+        assert_eq!(verified.id, "a1");
+    }
+
+    // ---------------------------------------------------------------
+    // 25.5 — declared CanonicalizationMethod / Transforms are enforced
+    // ---------------------------------------------------------------
+
+    /// A `SignedInfo` declaring inclusive C14N must be refused as an
+    /// algorithm downgrade, not merely fail the signature check.
+    #[test]
+    fn inclusive_canonicalization_method_rejected() {
+        let (signed, cert_pem) = signed_assertion();
+        let tampered = replace_once(
+            &signed,
+            r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">"#,
+            r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315">"#,
+        );
+        let err = verify_signed_element(&tampered, "Assertion", &cert_pem)
+            .err()
+            .expect("inclusive c14n must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::UnsupportedAlgorithm)),
+            "declared CanonicalizationMethod not enforced: {err:?}"
+        );
+    }
+
+    /// `#WithComments` exclusive C14N is a different algorithm and must be
+    /// refused rather than silently canonicalized without comments.
+    #[test]
+    fn exc_c14n_with_comments_rejected() {
+        let (signed, cert_pem) = signed_assertion();
+        let tampered = replace_once(
+            &signed,
+            r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">"#,
+            r#"<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#WithComments">"#,
+        );
+        let err = verify_signed_element(&tampered, "Assertion", &cert_pem)
+            .err()
+            .expect("#WithComments must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::UnsupportedAlgorithm)),
+            "#WithComments canonicalization not enforced: {err:?}"
+        );
+    }
+
+    /// An XSLT transform is the classic XML-DSIG code-execution vector. It
+    /// must be refused at the declaration, not implicitly ignored.
+    #[test]
+    fn xslt_transform_rejected() {
+        let (signed, cert_pem) = signed_assertion();
+        let tampered = replace_once(
+            &signed,
+            r#"<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">"#,
+            r#"<ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xslt-19991116">"#,
+        );
+        let err = verify_signed_element(&tampered, "Assertion", &cert_pem)
+            .err()
+            .expect("XSLT transform must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::UnsupportedAlgorithm)),
+            "declared <ds:Transform> list not enforced: {err:?}"
+        );
+    }
+
+    /// Hearth always applies the enveloped-signature transform when it
+    /// digests the element. A reference that does not declare it describes a
+    /// different computation and must be refused.
+    #[test]
+    fn missing_enveloped_transform_rejected() {
+        let (signed, cert_pem) = signed_assertion();
+        let tampered = replace_once(
+            &signed,
+            r#"<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform>"#,
+            "",
+        );
+        let err = verify_signed_element(&tampered, "Assertion", &cert_pem)
+            .err()
+            .expect("a reference without the enveloped transform must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::UnsupportedAlgorithm)),
+            "missing enveloped-signature transform not enforced: {err:?}"
+        );
+    }
+
+    /// A reference carrying no `<ds:Transforms>` at all is equally
+    /// unrepresentable for our fixed algorithm suite.
+    #[test]
+    fn missing_transforms_element_rejected() {
+        let (signed, cert_pem) = signed_assertion();
+        let tampered = replace_once(
+            &signed,
+            r#"<ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform></ds:Transforms>"#,
+            "",
+        );
+        let err = verify_signed_element(&tampered, "Assertion", &cert_pem)
+            .err()
+            .expect("a reference with no transforms must be rejected");
+        assert!(
+            matches!(err, IdentityError::Saml(SamlError::UnsupportedAlgorithm)),
+            "absent <ds:Transforms> not enforced: {err:?}"
+        );
     }
 }

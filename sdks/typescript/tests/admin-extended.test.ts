@@ -48,11 +48,14 @@ describe("AdminClient — OAuth Clients CRUD", () => {
     expect(url).toBe(`${BASE}/admin/clients/cli1`);
   });
 
-  it("updateClient PATCHes /admin/clients/:id", async () => {
+  // The server mounts the client-mutation route at /admin/applications/{id} and
+  // implements it as PATCH; /admin/clients/{id} is not a route at all
+  // (audit 2026-08-28 §25.4).
+  it("updateClient PATCHes /admin/applications/:id", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ client_id: "cli1", client_name: "Updated" }));
     await makeAdmin().updateClient("cli1", { client_name: "Updated" });
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${BASE}/admin/clients/cli1`);
+    expect(url).toBe(`${BASE}/admin/applications/cli1`);
     expect(init.method).toBe("PATCH");
   });
 

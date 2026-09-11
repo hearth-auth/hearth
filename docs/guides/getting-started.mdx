@@ -796,7 +796,7 @@ client := hearth.NewClient(hearthURL, realmID)
 func adminOnly(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-        if !client.HasPermission(token, "hearth.admin") {
+        if !client.HasPermission(r.Context(), token, "hearth.admin") {
             http.Error(w, "Forbidden", http.StatusForbidden)
             return
         }
@@ -1007,7 +1007,8 @@ See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider set
 use hearth_sdk::HearthClient;
 
 // `token: &str` is the Bearer value from the Authorization header.
-if !HearthClient::has_permission(token, "hearth.admin")? {
+// `has_permission` verifies the token before reading any claim.
+if !client.has_permission(token, "hearth.admin").await? {
     // reject with 403 Forbidden
 }
 ```

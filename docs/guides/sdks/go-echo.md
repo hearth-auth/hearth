@@ -62,8 +62,8 @@ Use `hearthecho.GetToken` to retrieve the JWT string stored in context, then cal
 ```go
 e.GET("/profile", func(c echo.Context) error {
     token := hearthecho.GetToken(c)
-    // HasPermission decodes claims locally — no network call
-    if !client.HasPermission(token, "profile.read") {
+    // HasPermission verifies the token before reading its claims
+    if !client.HasPermission(c.Request().Context(), token, "profile.read") {
         return echo.ErrForbidden
     }
     return c.JSON(http.StatusOK, map[string]any{"sub": "..."})
@@ -184,7 +184,7 @@ func main() {
         token := hearthecho.GetToken(c)
         return c.JSON(http.StatusOK, map[string]any{
             "authenticated": true,
-            "has_admin":     client.HasPermission(token, "admin.write"),
+            "has_admin":     client.HasPermission(c.Request().Context(), token, "admin.write"),
         })
     })
 

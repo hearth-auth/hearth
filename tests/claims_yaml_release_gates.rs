@@ -22,6 +22,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:

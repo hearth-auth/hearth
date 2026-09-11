@@ -31,6 +31,8 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
   };
 }
 
+let keyPairCounter = 0;
+
 interface KeyPairResult {
   privateKey: jose.KeyLike;
   publicKey: jose.KeyLike;
@@ -38,9 +40,18 @@ interface KeyPairResult {
   jwk: jose.JWK;
 }
 
-async function generateKeyPair(alg: "RS256" | "ES256" = "RS256"): Promise<KeyPairResult> {
-  const { privateKey, publicKey } = await jose.generateKeyPair(alg);
-  const kid = `key-${alg}-${Date.now()}`;
+async function generateKeyPair(
+  alg: "EdDSA" | "RS256" | "ES256" = "EdDSA",
+): Promise<KeyPairResult> {
+  const { privateKey, publicKey } =
+    alg === "EdDSA"
+      ? await jose.generateKeyPair("EdDSA", { crv: "Ed25519" })
+      : await jose.generateKeyPair(alg);
+  // Monotonic counter, not a timestamp: Ed25519 keygen is fast enough that two
+  // keys generated back to back would otherwise share a `kid`, and the
+  // rotation test needs them to differ.
+  keyPairCounter += 1;
+  const kid = `key-${alg}-${keyPairCounter}`;
   const jwk = await jose.exportJWK(publicKey);
   return { privateKey, publicKey, kid, jwk: { ...jwk, kid, alg, use: "sig" } };
 }
@@ -89,12 +100,12 @@ describe("JwksVerifier — clock skew boundary (§9)", () => {
   });
 
   it("accepts token with exp = now + skew_tolerance (boundary valid)", async () => {
-    const kp = await generateKeyPair("RS256");
+    const kp = await generateKeyPair();
     // exp is now + clockSkew — still within tolerance (not yet expired)
     const exp = NOW + CLOCK_SKEW_DEFAULT_S;
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp, iat: NOW - 10 },
-      kp.privateKey, "RS256", kp.kid,
+      kp.privateKey, "EdDSA", kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -107,11 +118,11 @@ describe("JwksVerifier — clock skew boundary (§9)", () => {
   });
 
   it("rejects token with exp = now - skew_tolerance - 1 (just outside tolerance)", async () => {
-    const kp = await generateKeyPair("RS256");
+    const kp = await generateKeyPair();
     const exp = NOW - CLOCK_SKEW_DEFAULT_S - 1;
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp, iat: NOW - 200 },
-      kp.privateKey, "RS256", kp.kid,
+      kp.privateKey, "EdDSA", kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -123,12 +134,12 @@ describe("JwksVerifier — clock skew boundary (§9)", () => {
   });
 
   it("accepts token with iat = now + skew_tolerance (future iat within tolerance)", async () => {
-    const kp = await generateKeyPair("RS256");
+    const kp = await generateKeyPair();
     const iat = NOW + CLOCK_SKEW_DEFAULT_S;
     const exp = NOW + 3600;
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp, iat },
-      kp.privateKey, "RS256", kp.kid,
+      kp.privateKey, "EdDSA", kp.kid,
     );
 
     const verifier = new JwksVerifier(
@@ -149,13 +160,13 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("re-fetches JWKS on key miss and succeeds with rotated key", async () => {
-    const oldKey = await generateKeyPair("RS256");
-    const newKey = await generateKeyPair("RS256");
+    const oldKey = await generateKeyPair();
+    const newKey = await generateKeyPair();
 
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
       { sub: "u1", iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
-      newKey.privateKey, "RS256", newKey.kid,
+      newKey.privateKey, "EdDSA", newKey.kid,
     );
 
     // First factory call: stale JWKS with only old key; second: rotated JWKS
@@ -186,11 +197,11 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
   });
 
   it("invalidateCache forces new factory call on next verifyToken", async () => {
-    const kp = await generateKeyPair("ES256");
+    const kp = await generateKeyPair();
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
       { sub: "u2", iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
-      kp.privateKey, "ES256", kp.kid,
+      kp.privateKey, "EdDSA", kp.kid,
     );
 
     let factoryCallCount = 0;
@@ -216,7 +227,29 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
 describe("JwksVerifier — algorithm support", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it.each(["RS256", "ES256"] as const)("verifies %s tokens", async (alg) => {
+  it("verifies EdDSA tokens", async () => {
+    const kp = await generateKeyPair();
+    const NOW_REAL = Math.floor(Date.now() / 1000);
+    const token = await signToken(
+      { sub: "user-EdDSA", iss: ISSUER, exp: NOW_REAL + 3600, iat: NOW_REAL },
+      kp.privateKey, "EdDSA", kp.kid,
+    );
+
+    const verifier = new JwksVerifier(
+      makeConfig(),
+      stubDiscovery(),
+      makeLocalFactory({ keys: [kp.jwk] }),
+    );
+    const verified = await verifier.verifyToken(token);
+    expect(verified.subject()).toBe("user-EdDSA");
+  });
+
+  // Hearth signs every access token with Ed25519. There is no configuration in
+  // which it emits RS256 or ES256, so a token bearing one of those algorithms
+  // was signed by something that is not Hearth's access-token signing key —
+  // and must be refused even when a matching key is present in the JWKS
+  // (audit 2026-08-28 §25.10).
+  it.each(["RS256", "ES256"] as const)("refuses %s tokens", async (alg) => {
     const kp = await generateKeyPair(alg);
     const NOW_REAL = Math.floor(Date.now() / 1000);
     const token = await signToken(
@@ -229,7 +262,6 @@ describe("JwksVerifier — algorithm support", () => {
       stubDiscovery(),
       makeLocalFactory({ keys: [kp.jwk] }),
     );
-    const verified = await verifier.verifyToken(token);
-    expect(verified.subject()).toBe(`user-${alg}`);
+    await expect(verifier.verifyToken(token)).rejects.toThrow();
   });
 });

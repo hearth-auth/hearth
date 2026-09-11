@@ -192,7 +192,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 
 | Logical accessor | TS | Node | Go | PHP | Python | Rust | Kotlin |
 |-----------------|-------|------|-----|-----|--------|------|--------|
-| `subject()` | `Claims.subject()` | `VerifiedToken.subject` (getter) | `Client.HasPermission` (local decode) | `Claims::subject()` | `Claims.subject()` | `Claims::subject()` | `Claims.subject()` |
+| `subject()` | `Claims.subject()` | `VerifiedToken.subject` (getter) | — (see the Go note below) | `Claims::subject()` | `Claims.subject()` | `Claims::subject()` | `Claims.subject()` |
 | `issuer()` | `Claims.issuer()` | — | — | `Claims::issuer()` | `Claims.issuer()` | `Claims::issuer()` | `Claims.issuer()` |
 | `audiences()` | `Claims.audiences()` | — | — | `Claims::audiences()` | `Claims.audiences()` | `Claims::audiences()` | `Claims.audiences()` |
 | `expiry()` | `Claims.expiry()` | — | — | `Claims::expiry()` | `Claims.expiry()` | `Claims::expiry()` | `Claims.expiry()` |
@@ -201,16 +201,16 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | `scope()` | `Claims.scope()` | — | — | `Claims::scope()` | `Claims.scope()` | `Claims::scope()` | `Claims.scope()` |
 | `scopes()` | `Claims.scopes()` | — | — | `Claims::scopes()` | `Claims.scopes()` | `Claims::scopes()` | `Claims.scopes()` |
 | `hasScope(s)` | `Claims.hasScope(s)` | — | — | `Claims::hasScope(s)` | `Claims.hasScope(s)` | `Claims::hasScope(s)` | `Claims.hasScope(s)` |
-| `hasRole(r)` | `Claims.hasRole(r)` | — | `Client.HasRole(token, role)` | `Claims::hasRole(r)` | `Claims.hasRole(r)` | `Claims::hasRole(r)` | `Claims.hasRole(r)`; `HearthClient.hasRole(token, role)` |
-| `hasPermission(p)` | `Claims.hasPermission(p)` | — | `Client.HasPermission(token, perm)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)`; `HearthClient.hasPermission(token, perm)` |
-| `inGroup(g)` | `Claims.inGroup(g)` | — | `Client.InGroup(token, slug)` | `Claims::inGroup(g)` | `Claims.in_group(g)` | `Claims::inGroup(g)` | — |
-| `inOrg(o)` | `Claims.inOrg(o)` | — | `Client.InOrg(token, orgID)` | `Claims::inOrg(o)` | `Claims.in_org(o)` | `Claims::inOrg(o)` | — |
+| `hasRole(r)` | `Claims.hasRole(r)` | — | `Client.HasRole(ctx, token, role)` | `Claims::hasRole(r)` | `Claims.hasRole(r)` | `Claims::hasRole(r)` | `Claims.hasRole(r)`; `HearthClient.hasRole(token, role)` |
+| `hasPermission(p)` | `Claims.hasPermission(p)` | — | `Client.HasPermission(ctx, token, perm)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)`; `HearthClient.hasPermission(token, perm)` |
+| `inGroup(g)` | `Claims.inGroup(g)` | — | `Client.InGroup(ctx, token, slug)` | `Claims::inGroup(g)` | `Claims.in_group(g)` | `Claims::inGroup(g)` | — |
+| `inOrg(o)` | `Claims.inOrg(o)` | — | `Client.InOrg(ctx, token, orgID)` | `Claims::inOrg(o)` | `Claims.in_org(o)` | `Claims::inOrg(o)` | — |
 | `tokenType()` | `Claims.tokenType()` | — | — | `Claims::tokenType()` | `Claims.token_type()` | `Claims::tokenType()` | — |
 | `organizationId()` | `Claims.organizationId()` | — | — | `Claims::organizationId()` | `Claims.organization_id()` | `Claims::organizationId()` | — |
 | `orgGroups()` | `Claims.orgGroups()` | — | — | `Claims::orgGroups()` | `Claims.org_groups()` | `Claims::orgGroups()` | — |
 | `get(claim)` | `Claims.get(claim)` | — | — | `Claims::get(claim)` | `Claims.get(key)` | `Claims::get(key)` | — |
 
-> **Go note:** Go uses top-level client methods (`Client.HasPermission`, `HasRole`, `InGroup`, `InOrg`) that local-decode the JWT without network. The remaining 13 accessors (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `tokenType`, `organizationId`, `orgGroups`, `get`) must be added to a `Claims` struct in Go. Use snake_case for `in_group`/`in_org`/`token_type`/`organization_id`/`org_groups` per Go convention for exported accessors that are multi-word — or PascalCase exported methods: `InGroup`, `InOrg`, `TokenType`, `OrganizationId`, `OrgGroups`.
+> **Go note:** Go uses top-level client methods (`Client.HasPermission`, `HasRole`, `InGroup`, `InOrg`). Each takes a leading `context.Context` and verifies the token against the realm JWKS before reading any claim — the JWKS is cached, so there is usually no network round-trip, but the check is a signature verification, not a bare decode (audit 2026-08-28 §25.1). The remaining 13 accessors (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `tokenType`, `organizationId`, `orgGroups`, `get`) must be added to a `Claims` struct in Go. Use snake_case for `in_group`/`in_org`/`token_type`/`organization_id`/`org_groups` per Go convention for exported accessors that are multi-word — or PascalCase exported methods: `InGroup`, `InOrg`, `TokenType`, `OrganizationId`, `OrgGroups`.
 >
 > **Node note:** `VerifiedToken` currently exposes raw payload. Add typed accessor methods matching this table.
 >

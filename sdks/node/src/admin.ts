@@ -104,17 +104,14 @@ export class AdminClient {
   // ── Realms ─────────────────────────────────────────────────────────────────
   //
   // Realms are provisioned via hearth.yaml, not the admin API. There is no
-  // `createRealm` method: the server returns 405 for POST /admin/realms
-  // (HEA-2171). Only read paths are exposed.
+  // `createRealm` and no `updateRealm` method: the server answers 405 with
+  // "Realms are managed via hearth.yaml" to both POST /admin/realms and
+  // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+  // paths and deletion are exposed.
 
   /** Get a realm by ID. */
   async getRealm(id: string): Promise<Record<string, unknown>> {
     return this.request("GET", this.buildUrl(`/admin/realms/${id}`));
-  }
-
-  /** Update a realm by ID. */
-  async updateRealm(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PATCH", this.buildUrl(`/admin/realms/${id}`), params);
   }
 
   /** Delete a realm by ID. */
@@ -142,7 +139,7 @@ export class AdminClient {
 
   /** Update an OAuth client by ID. */
   async updateClient(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PATCH", this.buildUrl(`/admin/clients/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/applications/${id}`), params);
   }
 
   /** Delete an OAuth client by ID. */

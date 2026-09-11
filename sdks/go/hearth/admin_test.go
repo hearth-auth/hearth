@@ -142,9 +142,12 @@ func TestAdminGetClient(t *testing.T) {
 	}
 }
 
+// The server mounts the client-mutation route at /admin/applications/{id} and
+// implements it as PATCH; /admin/clients/{id} is not a route at all
+// (audit 2026-08-28 §25.4).
 func TestAdminUpdateClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/clients/cl1" || r.Method != "PATCH" {
+		if r.URL.Path != "/admin/applications/cl1" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}

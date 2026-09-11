@@ -16,7 +16,7 @@
 | Audit log events | 90 days | Yes (per-realm via API) | Yes (background pruner) |
 | Sessions | 24 hours | Yes (`auth.session_ttl`) | Yes (TTL on write) |
 | Access tokens | 15 minutes | Yes (`token.access_token_ttl`) | Yes (TTL; verified on use) |
-| Refresh tokens | 7 days | Yes (`token.refresh_token_ttl`) | Yes (TTL; deleted on rotation) |
+| Refresh tokens | 7 days | Yes (`token.refresh_token_ttl`) | Yes (TTL; rotation replaces the stored hash, the family row is swept at `expires_at`) |
 | Authorization codes | 10 minutes | Yes (`oidc.authorization_code_ttl`) | Yes (TTL on write) |
 | Revoked JTI blocklist | Matches originating token TTL | No | Yes (storage TTL) |
 | User records | Indefinite | No | No — explicit deletion only |
@@ -147,7 +147,7 @@ Access tokens are short-lived JWTs. They are **not stored** in Hearth — they a
 
 ### Refresh tokens
 
-Refresh tokens are stored as a SHA-256 hash of the current token in a grant family record (`oauth:family:{family_id}`). The plaintext refresh token is never persisted. On rotation, the old hash is replaced; on revocation, the family record is deleted. A background sweep removes grant families whose `expires_at` has elapsed.
+Refresh tokens are stored as a SHA-256 hash of the current token in a grant family record (`oauth:family:{family_id}`). The plaintext refresh token is never persisted. On rotation, the old hash is replaced in place. Revocation does **not** delete the record — it sets `revoked = true`, because the row is what a later presentation of a rotated-out token is checked against; deleting it would turn a revoked grant into an unknown one. A background sweep removes grant families whose `expires_at` has elapsed, revoked or not.
 
 | Config key | Default | Per-realm override |
 |---|---|---|

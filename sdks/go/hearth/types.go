@@ -195,6 +195,10 @@ type Realm struct {
 }
 
 // UpdateRealmRequest contains parameters for updating a realm.
+//
+// Retained for callers that model a realm patch locally; no client method
+// sends it. Realms are provisioned from hearth.yaml and the server answers 405
+// to PATCH /admin/realms/{id} (audit 2026-08-28 §25.4).
 type UpdateRealmRequest struct {
 	Name   *string `json:"name,omitempty"`
 	Status *string `json:"status,omitempty"`

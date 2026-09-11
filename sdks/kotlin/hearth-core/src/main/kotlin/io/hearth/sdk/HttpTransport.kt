@@ -73,6 +73,31 @@ internal suspend inline fun <reified Req, reified Res> OkHttpClient.post(
 }
 
 /**
+ * Executes a PATCH request to [url] with JSON-encoded [payload] and optional [headers].
+ *
+ * Every Hearth admin mutation is a PATCH. The server answers a bare 405 to PUT
+ * — no body, no error code — so the verb is part of the wire contract
+ * (audit 2026-08-28 §25.4).
+ */
+internal suspend inline fun <reified Req, reified Res> OkHttpClient.patch(
+    url: String,
+    payload: Req,
+    headers: Map<String, String> = emptyMap(),
+): Res {
+    val body = JSON.encodeToString(payload).toRequestBody(JSON_MEDIA_TYPE)
+    val request = Request.Builder().url(url).apply {
+        headers.forEach { (k, v) -> addHeader(k, v) }
+        patch(body)
+    }.build()
+
+    executeAsync(request).use { resp ->
+        val bodyStr = resp.body?.string() ?: ""
+        if (!resp.isSuccessful) throw ApiError(resp.code, "HTTP ${resp.code}: $bodyStr")
+        return JSON.decodeFromString(bodyStr)
+    }
+}
+
+/**
  * Executes a PUT request to [url] with JSON-encoded [payload] and optional [headers].
  */
 internal suspend inline fun <reified Req, reified Res> OkHttpClient.put(

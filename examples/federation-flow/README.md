@@ -4,16 +4,24 @@ A browser-visible demo of Hearth as an **OIDC relying party** — the
 counterpart to [`../oauth-consent-flow/`](../oauth-consent-flow/),
 which demonstrates Hearth as an OIDC *provider*.
 
-> **Fully offline.** No Google console, no Okta tenant, no external
-> credentials of any kind. The upstream IdP in step 1 is a local
-> `node-oidc-provider` process with two hardcoded demo accounts
-> (`alice-ext-id` / `bob-ext-id`, password `demo`). To wire in a real
-> IdP (Google, Dex, etc.) instead, see the [appendix](#using-a-real-upstream-instead-appendix).
+> **No third-party account needed** — but you *do* need one https tunnel.
+> The upstream IdP in step 1 is a local `node-oidc-provider` process with two
+> hardcoded demo accounts (`alice-ext-id` / `bob-ext-id`, password `demo`), so
+> there is no Google console and no Okta tenant to set up. However, Hearth's
+> federation transport refuses any upstream that is not `https://`, or whose
+> host resolves into a loopback / private / link-local / cloud-metadata range.
+> That guard is deliberate, has no dev bypass and no allowlist, and applies in
+> `--dev` exactly as it does in production — so a bare `http://localhost:9090`
+> issuer cannot complete a login. Step 1b puts the local IdP behind a public
+> https tunnel, which satisfies the guard without loosening it. To wire in a
+> real IdP (Google, Dex, etc.) instead, see the
+> [appendix](#using-a-real-upstream-instead-appendix).
 
 You'll run three processes:
 
-1. **A local OIDC upstream** at `http://localhost:9090`, built on
-   [`node-oidc-provider`](https://github.com/panva/node-oidc-provider).
+1. **A local OIDC upstream** on port `9090`, built on
+   [`node-oidc-provider`](https://github.com/panva/node-oidc-provider),
+   published at a public `https://` URL by a tunnel (step 1b).
    Stands in for Google / Azure AD / Okta / etc.
 2. **Hearth** at `http://localhost:8420`, configured via
    [`hearth.yaml`](./hearth.yaml) to federate against the local upstream.
@@ -51,6 +59,12 @@ You'll run three processes:
 - Node.js 18 or later (for both Node sub-projects).
 - Three free local ports: **8420** (Hearth), **9090** (upstream IdP),
   **3000** (client).
+- An https tunnel for port 9090 — [`cloudflared`](https://developers.cloudflare.com/cloudflare-tunnel/)
+  (no account needed for a quick tunnel) or [`ngrok`](https://ngrok.com/).
+  Hearth's federation SSRF guard rejects `http://` and loopback upstreams, so
+  the back-channel calls it makes (discovery, token, userinfo, jwks) must reach
+  the demo IdP over a public https hostname. Only those server-to-server calls
+  go through the tunnel; the browser redirects stay on localhost.
 
 > **Build time.** The first `cargo run --release` in step 2 compiles
 > the full Hearth binary — expect **5–15 minutes** on a typical laptop.
@@ -85,9 +99,42 @@ Local OIDC upstream listening on http://localhost:9090
   Password:  demo
 ```
 
-Leave it running. If port 9090 is taken, edit both `ISSUER` in
-`src/server.ts` and `federation.providers.upstream.issuer` (plus all
-its endpoints) in `hearth.yaml`.
+Leave it running. If port 9090 is taken, set `HEARTH_DEMO_PORT` to a free
+port and forward the tunnel there instead.
+
+### 1b. Publish the upstream over https
+
+Hearth will not fetch an `http://` or loopback upstream — see the callout at
+the top. Open a third terminal and start a tunnel to port 9090:
+
+```bash
+# Cloudflare quick tunnel (no account required)
+cloudflared tunnel --url http://localhost:9090
+
+# ...or ngrok
+ngrok http 9090
+```
+
+Both print a public hostname, e.g. `https://calm-wolf-1234.trycloudflare.com`.
+Then restart the IdP with that hostname as its issuer, so the discovery
+document and the `iss` claim it signs match what Hearth will ask for:
+
+```bash
+# from: examples/federation-flow/upstream-idp
+HEARTH_DEMO_ISSUER=https://calm-wolf-1234.trycloudflare.com npm start
+```
+
+Finally, replace every `<your-tunnel-host>` placeholder in
+[`hearth.yaml`](./hearth.yaml) with that hostname — there are five
+(`issuer`, `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`,
+`jwks_uri`). Confirm the tunnel is live before moving on:
+
+```bash
+curl -fsS https://calm-wolf-1234.trycloudflare.com/.well-known/openid-configuration | head -5
+```
+
+A quick tunnel's hostname changes every time you restart it, so redo this
+step (and the `hearth.yaml` edit) if you stop the tunnel.
 
 ### 2. Start Hearth in a second terminal
 
@@ -157,7 +204,7 @@ DevTools → Application → Cookies → delete everything under
 
 1. Click **Sign in** on the client page.
 2. You're sent to Hearth's `/ui/realms/demo/federation/begin?idp=upstream`,
-   which 302s to the upstream IdP at `localhost:9090`.
+   which 302s to the upstream IdP at your tunnel hostname.
 3. The upstream's built-in login page asks for an account id —
    enter `alice-ext-id` (or `bob-ext-id`) and password `demo`.
 4. Approve the (dev-mode) interaction prompt.
@@ -331,13 +378,29 @@ EOF
 dex serve /tmp/dex.yaml
 ```
 
-(The password hash above is `demo`.) The same `hearth.yaml`
-configuration works unchanged.
+(The password hash above is `demo`.) Dex is subject to the same SSRF guard, so
+put it behind the step 1b tunnel too — set `issuer` to the tunnel hostname and
+point `hearth.yaml` at it. A real IdP (Google, Okta, Azure AD) already serves a
+public https issuer and needs no tunnel.
 
 ---
 
 ## Troubleshooting
 
+- **`SSRF guard blocked federation upstream fetch: webhook URL must use the
+  https:// scheme`** in the Hearth log, and the sign-in button lands on an
+  error page: `hearth.yaml` still points at `http://localhost:9090`, or the
+  `<your-tunnel-host>` placeholders were never replaced. Hearth refuses to make
+  a back-channel call to a non-https or loopback upstream, in `--dev` as much as
+  in production. Complete step 1b.
+- **`destination IP 127.0.0.1 resolves from '<host>' and is in a private/reserved
+  range`**: the hostname in `hearth.yaml` is https but still resolves to
+  loopback (a `/etc/hosts` entry, or a tunnel that is not running). Check the
+  tunnel with `curl -fsS https://<host>/.well-known/openid-configuration`.
+- **`invalid issuer` / `iss` mismatch after the upstream redirect**: the IdP was
+  started without `HEARTH_DEMO_ISSUER`, so it signs tokens with
+  `http://localhost:9090` while Hearth expects the tunnel hostname. Restart it
+  with the env var set (step 1b).
 - **`npm error Missing script: "start"`** when running `npm start`: you're
   in `examples/federation-flow/` itself. There's no root `package.json`
   here — each sub-project owns its own. `cd` into either

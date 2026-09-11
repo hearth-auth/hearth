@@ -464,7 +464,7 @@ When a delegated token is re-bound at each hop:
 When the initial token request includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint (`cnf.jkt`) of that proof key (HEA-1725). This means:
 
 - The issued refresh token is bound to the DPoP key pair that was active at grant issuance.
-- Every subsequent refresh request on that grant family **MUST** include a DPoP proof signed by the same key pair. A mismatch is rejected with `invalid_dpop_proof`.
+- Every subsequent refresh request on that grant family **MUST** include a DPoP proof signed by the same key pair. A thumbprint that does not match the family's `bound_jkt` is rejected with **401 `invalid_token`** (`IdentityError::DPopBindingMismatch`); `invalid_dpop_proof` is reserved for a proof that fails to parse or verify on its own terms.
 - **Key rotation invalidates the refresh token.** An agent that rotates its DPoP key pair must re-authorise from scratch (new authorization code flow). It cannot reuse an existing refresh token with the new key.
 
 **Practical guidance for agents:**

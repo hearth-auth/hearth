@@ -229,8 +229,8 @@ if (!$claims->hasPermission('docs.edit')) {
 ```rust
 use hearth_sdk::HearthClient;
 
-// Reads embedded JWT claims locally — no network call
-let allowed = HearthClient::has_permission(&access_token, "docs.edit")?;
+// Verifies the token against the cached JWKS, then reads its claims
+let allowed = client.has_permission(&access_token, "docs.edit").await?;
 if !allowed {
     return Err(StatusCode::FORBIDDEN.into_response());
 }

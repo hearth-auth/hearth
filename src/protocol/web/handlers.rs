@@ -42,6 +42,7 @@ use axum::Form;
 use serde::Deserialize;
 
 use crate::abuse::device_approval::{DeviceApprovalDecision, DeviceApprovalGuard};
+use crate::abuse::runtime::PreAuthVerdict;
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
@@ -1119,6 +1120,13 @@ struct PreparedLogin {
     /// `true` for the `/ui/admin/login` surface — routed to the reserved admin
     /// gate (HEA-1892 / F2).
     is_admin: bool,
+    /// Parsed client IP for the abuse guards (task 20.13). `None` when no IP
+    /// could be determined — every guard skips in that case.
+    guard_ip: Option<std::net::IpAddr>,
+    /// A-17 tarpit delay owed by this attempt. Awaited by
+    /// [`login_submit_gated`] **before** the KDF gate; it must not be slept on
+    /// synchronously, which would park an executor thread.
+    tarpit_delay: Option<std::time::Duration>,
 }
 
 /// Orchestrates a login submission across the bounded KDF admission gate
@@ -1149,6 +1157,13 @@ async fn login_submit_gated(
         // Rejected pre-gate: no KDF permit was ever acquired.
         Err(response) => return response,
     };
+
+    // A-17 tarpit: the delay is owed before any further work and is awaited,
+    // never slept on, so a tarpitted flood costs the server a timer rather
+    // than an executor thread.
+    if let Some(delay) = prepared.tarpit_delay {
+        tokio::time::sleep(delay).await;
+    }
 
     let is_admin = prepared.is_admin;
     // Extract shed context before all values are moved into the closure.
@@ -1285,6 +1300,43 @@ fn login_prepare(
         return Err(render_ctx.generic_error(&email));
     }
 
+    // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, P-2 IP
+    // reputation, P-3 bot signal, A-16 challenge, A-3 cardinality and A-17
+    // tarpit all run here, before a KDF permit is acquired, for the same
+    // reason the rate limit does: rejected traffic must not consume admission
+    // capacity. Every arm collapses into the one generic page, so login
+    // enumeration properties are unchanged. All are fail-open until the
+    // operator enables them in `security:`.
+    let guard_ip = session_ctx
+        .ip_address
+        .as_deref()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
+    let mut tarpit_delay = None;
+    match state.abuse_guards.pre_auth_login(
+        guard_ip,
+        &email,
+        headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+        realm.config().cidr_policy.as_ref(),
+    ) {
+        PreAuthVerdict::Allow => {}
+        PreAuthVerdict::Deny { reason } => {
+            tracing::warn!(ip = %client_ip, guard = reason, "login: refused by abuse guard");
+            return Err(render_ctx.generic_error(&email));
+        }
+        PreAuthVerdict::Challenge { reason } => {
+            // No inline challenge surface exists on this form yet, so the
+            // signal is recorded and the attempt is refused rather than
+            // silently allowed — a challenge the caller cannot answer is a
+            // denial, and saying otherwise would be the same class of claim
+            // defect this task closes.
+            tracing::warn!(ip = %client_ip, guard = reason, "login: challenged by abuse guard");
+            return Err(render_ctx.generic_error(&email));
+        }
+        PreAuthVerdict::Delay(d) => tarpit_delay = Some(d),
+    }
+
     Ok(PreparedLogin {
         realm,
         render_ctx,
@@ -1292,6 +1344,8 @@ fn login_prepare(
         client_ip,
         email,
         is_admin,
+        guard_ip,
+        tarpit_delay,
     })
 }
 
@@ -1317,6 +1371,8 @@ fn login_finish(
         client_ip,
         email,
         is_admin: _,
+        guard_ip,
+        tarpit_delay: _,
     } = prepared;
     let return_to = render_ctx.return_to.clone();
 
@@ -1329,6 +1385,32 @@ fn login_finish(
         state
             .identity
             .record_ip_login_attempt(realm.id(), &client_ip);
+        // A login attempt against an address that has no account was audited
+        // NOWHERE: `verify_password` — which is what emits `LoginFailed` — is
+        // never reached, so a credential-stuffing run against a realm's whole
+        // address space left the audit trail empty while the per-IP counter
+        // ticked in memory (audit 2026-08-28 §4.14#7).
+        //
+        // Resource id is the literal `unknown`, not the submitted address: the
+        // realm's audit log is readable by realm admins, and echoing arbitrary
+        // attacker-supplied addresses into it would turn the log into a
+        // reflected store of third-party email addresses. The client IP is the
+        // actionable field and is recorded.
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &crate::audit::CreateAuditEvent {
+                realm_id: realm.id().clone(),
+                actor: "anonymous".to_string(),
+                action: crate::audit::AuditAction::LoginFailed,
+                resource_type: "credential".to_string(),
+                resource_id: "unknown".to_string(),
+                metadata: Some(serde_json::json!({
+                    "reason": "unknown_account",
+                    "ip": client_ip,
+                })),
+            },
+        );
+        state.abuse_guards.record_login_failure(guard_ip);
         return render_ctx.generic_error(&email);
     };
 
@@ -1337,11 +1419,12 @@ fn login_finish(
         .identity
         .verify_password(realm.id(), user.id(), &password)
     {
-        Ok(true) => {}
+        Ok(true) => state.abuse_guards.record_login_success(guard_ip),
         Ok(false) => {
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
+            state.abuse_guards.record_login_failure(guard_ip);
             return render_ctx.generic_error(&email);
         }
         Err(e) => {
@@ -1349,6 +1432,7 @@ fn login_finish(
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
+            state.abuse_guards.record_login_failure(guard_ip);
             return render_ctx.generic_error(&email);
         }
     }
@@ -3092,7 +3176,31 @@ fn forgot_password_submit_impl(
                 // "account exists" arm measurably slower than the silent one,
                 // which is an enumeration oracle (audit 2026-08-28 §4.24#3).
                 let recipient = email.to_string();
+                // A-4 + A-50 (task 20.13): the per-realm outbound breadth
+                // budget and the cross-realm per-recipient fan-out cap. Both
+                // are fail-open until the operator enables them. The check
+                // runs inside the off-request-path closure so a refused send
+                // costs the caller exactly what an allowed one does — the
+                // arm is invisible in the response either way (§4.24#3).
+                let guards = Arc::clone(&state.abuse_guards);
+                let realm_key = realm.id().as_uuid().to_string();
                 spawn_off_request_path(move || {
+                    match guards.check_outbound_email(&realm_key, &recipient) {
+                        crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                            tracing::warn!(
+                                guard = reason,
+                                "forgot_password: outbound cap reached; reset email not sent"
+                            );
+                            return;
+                        }
+                        crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                            tracing::warn!(
+                                guard = reason,
+                                "forgot_password: outbound soft cap reached"
+                            );
+                        }
+                        crate::abuse::runtime::OutboundVerdict::Allow => {}
+                    }
                     if let Err(e) = email_service.send_password_reset_email(
                         &recipient,
                         &reset_url,
@@ -4123,6 +4231,27 @@ fn register_submit_impl(
         );
     }
 
+    // P-5 email reputation (task 20.13). The adapter was never constructed on
+    // a production path, so `security.providers.email_reputation` did nothing
+    // at all. It is opt-in and only the disposable-domain signal refuses:
+    // role addresses (`admin@`, `support@`) and a missing MX are legitimate in
+    // plenty of tenants and are recorded, not blocked (§6.1 fail-open).
+    let reputation = state.abuse_guards.check_email_reputation(form.email.trim());
+    if reputation.is_disposable {
+        tracing::warn!("register_submit: refused a disposable email domain");
+        return render_err(
+            "That email provider is not accepted. Please use a different address.".to_string(),
+            form.email,
+        );
+    }
+    if reputation.is_role_address || reputation.domain_has_no_mx {
+        tracing::info!(
+            role_address = reputation.is_role_address,
+            no_mx = reputation.domain_has_no_mx,
+            "register_submit: email reputation signal recorded"
+        );
+    }
+
     let request = crate::identity::RegisterUserRequest {
         email: form.email.clone(),
         display_name: form.display_name.clone(),
@@ -4169,7 +4298,25 @@ fn register_submit_impl(
         // distinguishes a fresh address from a registered one
         // (audit 2026-08-28 §4.24#4).
         let recipient = form.email.clone();
+        // A-4 + A-50 (task 20.13) — see the identical block in
+        // `forgot_password_submit_impl`. Inside the off-request-path closure
+        // so the arm adds no measurable latency to either outcome.
+        let guards = Arc::clone(&state.abuse_guards);
+        let realm_key = realm.id().as_uuid().to_string();
         spawn_off_request_path(move || {
+            match guards.check_outbound_email(&realm_key, &recipient) {
+                crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                    tracing::warn!(
+                        guard = reason,
+                        "register_submit: outbound cap reached; verification email not sent"
+                    );
+                    return;
+                }
+                crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                    tracing::warn!(guard = reason, "register_submit: outbound soft cap reached");
+                }
+                crate::abuse::runtime::OutboundVerdict::Allow => {}
+            }
             if let Err(e) = email_service.send_verification_email(
                 &recipient,
                 &verify_url,

@@ -438,7 +438,7 @@ fn cli_config_validate_accepts_valid_file() {
         "valid",
         concat!(
             "server:\n  bind_address: \"127.0.0.1\"\n  port: 8420\n",
-            "  trust_forwarded_proto: true\n",
+            "  trust_forwarded_proto: true\n  trusted_proxies: [\"127.0.0.1\"]\n",
             "storage:\n  data_dir: \"/tmp/hearth-cli-validate\"\n",
             "oidc:\n  issuer: \"https://auth.example.com\"\n",
             "security:\n  key_encryption_key: \"",

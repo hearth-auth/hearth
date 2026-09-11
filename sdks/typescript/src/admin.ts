@@ -3,7 +3,6 @@ import type {
   CreateUserParams,
   PageResponse,
   Realm,
-  UpdateRealmParams,
   UpdateUserParams,
   User,
 } from "./types.js";
@@ -47,7 +46,7 @@ export class AdminClient {
     return this.get(`/admin/users/${userId}`);
   }
 
-  /** PUT /admin/users/:id — update a user. */
+  /** PATCH /admin/users/:id — update a user. */
   async updateUser(userId: string, params: UpdateUserParams): Promise<User> {
     return this.request("PATCH", `/admin/users/${userId}`, {
       email: params.email,
@@ -70,8 +69,10 @@ export class AdminClient {
   // === Realms ===
   //
   // Realms are provisioned via hearth.yaml, not the admin API. There is no
-  // `createRealm`/`updateRealm` client method: the server returns 405 for
-  // POST and PATCH /admin/realms (HEA-2171). Only read paths are exposed.
+  // `createRealm`/`updateRealm` client method: the server answers 405 with
+  // "Realms are managed via hearth.yaml" to both POST /admin/realms and
+  // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+  // paths and deletion are exposed.
 
   /** GET /admin/realms — list realms with pagination. */
   async listRealms(options?: {
@@ -87,18 +88,6 @@ export class AdminClient {
   /** GET /admin/realms/:id — get a realm by ID. */
   async getRealm(realmId: string): Promise<Realm> {
     return this.get(`/admin/realms/${realmId}`);
-  }
-
-  /** PUT /admin/realms/:id — update a realm. */
-  async updateRealm(
-    realmId: string,
-    params: UpdateRealmParams,
-  ): Promise<Realm> {
-    return this.request("PATCH", `/admin/realms/${realmId}`, {
-      name: params.name,
-      status: params.status,
-      config: params.config,
-    });
   }
 
   /** DELETE /admin/realms/:id — delete a realm. */
@@ -124,9 +113,9 @@ export class AdminClient {
     return this.get(`/admin/clients/${clientId}`);
   }
 
-  /** PATCH /admin/clients/:id — update a client. */
+  /** PATCH /admin/applications/:id — update a client. */
   async updateClient(clientId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PATCH", `/admin/clients/${clientId}`, params);
+    return this.request("PATCH", `/admin/applications/${clientId}`, params);
   }
 
   /** DELETE /admin/clients/:id — delete a client. */

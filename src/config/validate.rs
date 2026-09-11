@@ -14,7 +14,7 @@ use super::types::{
     SecurityYaml, ServerConfig, SmsConfig, SmsTransport, StorageSection, TokenYamlConfig,
     ValidationIssue,
 };
-use crate::identity::credentials::{PepperConfig, PepperKey};
+use crate::identity::credentials::{CredentialConfig, PepperConfig, PepperKey};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Valid-value tables
@@ -470,6 +470,7 @@ impl Config {
         }
 
         validate_trusted_proxies(&self.server, &mut issues);
+        validate_argon2_costs_all(&self.auth, self.realms.as_ref(), self.dev_mode, &mut issues);
 
         // ── Checks that used to live only in `validate` (audit §4.13#8) ─────
         //
@@ -486,6 +487,18 @@ impl Config {
         if let Err(e) = self.security.validate_kdf_admission() {
             issues.push(config_error_to_issue(&e));
         }
+
+        validate_auth_password_costs(&self.auth, &mut issues);
+        validate_webauthn_preference(
+            "auth.webauthn_resident_key",
+            self.auth.webauthn_resident_key.as_deref(),
+            &mut issues,
+        );
+        validate_webauthn_preference(
+            "auth.webauthn_user_verification",
+            self.auth.webauthn_user_verification.as_deref(),
+            &mut issues,
+        );
 
         // §4.11#12 / §6: `storage.fsync` was accepted, warned about, and then
         // ignored — production always built `SyncMode::EveryWrite`. Refuse the
@@ -548,6 +561,42 @@ impl Config {
     #[must_use]
     pub const fn fsync_effective(&self) -> bool {
         self.storage.fsync_enabled(self.dev_mode)
+    }
+
+    /// Builds the engine-wide base [`CredentialConfig`] this config asks for.
+    ///
+    /// The single resolution point for the documented global Argon2 knobs
+    /// `auth.password_memory_cost` and `auth.password_time_cost` (audit
+    /// §4.17#8). Both keys parsed into [`AuthConfig`] and were then read by
+    /// nothing: `main.rs` built `CredentialConfig::default()` (or
+    /// `fast_for_testing()` under `--dev`) and only the *per-realm*
+    /// `realms.<name>.password_memory_cost` overrides in
+    /// `credential_config_for_realm` had any effect. An operator who raised the
+    /// global cost after a hardware upgrade got a clean boot and unchanged
+    /// hashing.
+    ///
+    /// `pepper` is threaded through because it is resolved separately by
+    /// [`SecurityYaml::resolve_pepper`] and the two must land on the same
+    /// struct.
+    ///
+    /// Range validation lives in [`Self::validate_all`], so a config that
+    /// reaches this function has already been refused if the parameters are
+    /// outside Argon2's own bounds.
+    #[must_use]
+    pub fn base_credential_config(&self, pepper: Option<PepperConfig>) -> CredentialConfig {
+        let mut cfg = if self.dev_mode {
+            CredentialConfig::fast_for_testing()
+        } else {
+            CredentialConfig::default()
+        };
+        if let Some(memory_cost) = self.auth.password_memory_cost {
+            cfg.memory_cost_kib = memory_cost;
+        }
+        if let Some(time_cost) = self.auth.password_time_cost {
+            cfg.time_cost = time_cost;
+        }
+        cfg.pepper = pepper;
+        cfg
     }
 
     /// Validates configuration values, returning the first problem found.
@@ -763,22 +812,161 @@ fn is_public_listener(bind_address: &str) -> bool {
 // Fail-fast validators (used by `Config::validate`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
+/// Refuses a `residentKey` / `userVerification` preference the browser does
+/// not understand.
 ///
-/// Also emits a startup warning when `trusted_proxies` is empty on a public
-/// listener — in that configuration every request uses the direct socket IP
-/// for per-IP rate limiting and audit records, which is correct for
-/// direct-bind deployments but wrong if the server is behind a reverse proxy
-/// that sends the real client IP via `X-Forwarded-For`.
-fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIssue>) {
+/// An unrecognised string is forwarded verbatim in the ceremony options and
+/// the browser silently falls back to `"preferred"` — so a realm that asked
+/// for `"Required"` (or misspelled it) gets a passkey that proves possession
+/// only, with no signal that the policy was ignored (audit §4.18#9, B10).
+fn validate_webauthn_preference(
+    field: &str,
+    value: Option<&str>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(value) = value else { return };
+    if !crate::config::types::VALID_WEBAUTHN_PREFERENCES.contains(&value) {
+        issues.push(ValidationIssue {
+            field: field.to_string(),
+            reason: format!(
+                "unknown WebAuthn preference '{}'; valid values are: {}. An unrecognised value \
+                 is silently ignored by the browser, which falls back to 'preferred'.",
+                value,
+                crate::config::types::VALID_WEBAUTHN_PREFERENCES.join(", ")
+            ),
+        });
+    }
+}
+
+/// Validates the global Argon2id knobs against the algorithm's own bounds.
+///
+/// `auth.password_memory_cost` / `auth.password_time_cost` now reach the base
+/// [`CredentialConfig`] (audit §4.17#8), so a value `argon2::Params::new`
+/// refuses would turn every password verification into a 500 at request time
+/// rather than a refusal at boot. Bounds are Argon2's, not OWASP's: the OWASP
+/// floor is a separate finding (§4.17#6).
+fn validate_auth_password_costs(auth: &AuthConfig, issues: &mut Vec<ValidationIssue>) {
+    if let Some(memory_cost) = auth.password_memory_cost {
+        // `MAX_M_COST` is `u32::MAX` on this build, so only the lower bound can
+        // ever fire; comparing against it too would be an absurd comparison.
+        if memory_cost < argon2::Params::MIN_M_COST {
+            issues.push(ValidationIssue {
+                field: "auth.password_memory_cost".to_string(),
+                reason: format!(
+                    "must be at least {} KiB — Argon2id rejects anything outside that range, \
+                     and the failure would surface as a 500 on every login rather than at \
+                     start-up",
+                    argon2::Params::MIN_M_COST,
+                ),
+            });
+        }
+    }
+    if let Some(time_cost) = auth.password_time_cost {
+        if time_cost < argon2::Params::MIN_T_COST {
+            issues.push(ValidationIssue {
+                field: "auth.password_time_cost".to_string(),
+                reason: format!(
+                    "must be at least {} — Argon2id rejects a zero iteration count, and the \
+                     failure would surface as a 500 on every login rather than at start-up",
+                    argon2::Params::MIN_T_COST,
+                ),
+            });
+        }
+    }
+}
+
+/// Returns advisory start-up warnings about `server`, as data.
+///
+/// These used to be `tracing::warn!` calls inside [`validate_trusted_proxies`],
+/// which runs from `Config::from_file` while `load_config` parses the file —
+/// *before* `telemetry::init` installs a subscriber. Every one of them was
+/// written into the void (audit 2026-08-28 §4.17#7, and the same shape as the
+/// CLI-subcommand silence fixed in 16.2). Returning them lets `run_serve` log
+/// them after the subscriber exists.
+#[must_use]
+pub fn deferred_server_warnings(server: &ServerConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
     if server.trusted_proxies.is_empty() && is_public_listener(&server.bind_address) {
-        tracing::warn!(
-            bind_address = %server.bind_address,
-            "server.trusted_proxies is empty on a public listener — all requests will use \
+        warnings.push(format!(
+            "server.trusted_proxies is empty on a public listener ({}) — all requests will use \
              the direct socket IP for per-IP rate limiting and audit records. \
              If Hearth is behind a reverse proxy, set server.trusted_proxies to the \
-             proxy IP(s) so the real client IP is read from X-Forwarded-For."
-        );
+             proxy IP(s) so the real client IP is read from X-Forwarded-For.",
+            server.bind_address
+        ));
+    }
+    warnings
+}
+
+/// Reports every Argon2id cost pair that falls below the OWASP floor.
+///
+/// `password_memory_cost` / `password_time_cost` are settable globally under
+/// `auth:` and per realm under `realms.<name>:`, and both accepted arbitrarily
+/// low values (audit 2026-08-28 §4.17#6). This is the `hearth.yaml` door; the
+/// realm create/update API is gated independently in the identity engine,
+/// because a layer must not assume the one above it validated.
+///
+/// Each realm is checked against its *effective* pair — its own override, else
+/// the global `auth:` value, else the compiled-in default — so a realm that
+/// lowers only one of the two is still caught. Dev mode is exempt: it runs
+/// `CredentialConfig::fast_for_testing` parameters on purpose.
+fn validate_argon2_costs_all(
+    auth: &crate::config::AuthConfig,
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    dev_mode: bool,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if dev_mode {
+        return;
+    }
+    let base = crate::identity::CredentialConfig::default();
+    let global_m = auth.password_memory_cost.unwrap_or(base.memory_cost_kib);
+    let global_t = auth.password_time_cost.unwrap_or(base.time_cost);
+
+    if auth.password_memory_cost.is_some() || auth.password_time_cost.is_some() {
+        if let Err(reason) = crate::identity::validate_argon2_cost(global_m, global_t) {
+            issues.push(ValidationIssue {
+                field: "auth.password_memory_cost".to_string(),
+                reason,
+            });
+        }
+    }
+
+    let Some(realms) = realms else { return };
+    for (name, realm) in realms {
+        if realm.password_memory_cost.is_none() && realm.password_time_cost.is_none() {
+            continue;
+        }
+        let m = realm.password_memory_cost.unwrap_or(global_m);
+        let t = realm.password_time_cost.unwrap_or(global_t);
+        if let Err(reason) = crate::identity::validate_argon2_cost(m, t) {
+            issues.push(ValidationIssue {
+                field: format!("realms.{name}.password_memory_cost"),
+                reason,
+            });
+        }
+    }
+}
+
+/// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
+fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIssue>) {
+    // 19.12: `trust_forwarded_proto` makes `X-Forwarded-Proto` decide whether a
+    // session cookie carries `Secure`. With an empty `trusted_proxies` the
+    // header is attacker-controlled, so the flag that is supposed to prove
+    // "TLS terminates upstream" proves nothing. Production validation used to
+    // push operators here — it demanded TLS **or** this flag, and this flag
+    // defaulted to trusting every peer (audit 2026-08-28 §4.17#7).
+    if server.trust_forwarded_proto && server.trusted_proxies.is_empty() {
+        issues.push(ValidationIssue {
+            field: "server.trust_forwarded_proto".to_string(),
+            reason: "server.trust_forwarded_proto = true requires a non-empty \
+                     server.trusted_proxies. With no proxy list, X-Forwarded-Proto is \
+                     accepted from any peer, so any client can decide whether its own \
+                     session cookie carries the Secure attribute. List the reverse-proxy \
+                     IP(s) in server.trusted_proxies, or configure direct TLS with \
+                     server.tls_cert_path + server.tls_key_path instead."
+                .to_string(),
+        });
     }
 
     for (i, entry) in server.trusted_proxies.iter().enumerate() {
@@ -1403,6 +1591,16 @@ fn validate_realm_auth_configs_all(
             }
         }
         let Some(auth) = &cfg.auth else { continue };
+        validate_webauthn_preference(
+            &format!("realms.{name}.auth.webauthn_resident_key"),
+            auth.webauthn_resident_key.as_deref(),
+            issues,
+        );
+        validate_webauthn_preference(
+            &format!("realms.{name}.auth.webauthn_user_verification"),
+            auth.webauthn_user_verification.as_deref(),
+            issues,
+        );
         if let Some(methods) = &auth.mfa_methods {
             for m in methods {
                 if !VALID_MFA_METHODS.contains(&m.as_str()) {
@@ -1774,6 +1972,153 @@ mod tests {
             msg.contains("dev_mode"),
             "error must name the key; got: {msg}"
         );
+    }
+
+    // ===== 19.11: the OWASP Argon2id floor on the YAML door =====
+
+    /// Minimum production preamble: KEK + TLS + a non-log transport, so the
+    /// only issue a test config can trip is the one it is testing.
+    fn prod_preamble() -> String {
+        "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nserver:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"10.0.0.1\"]\n\
+               storage:\n  data_dir: \"/tmp/hea-19-11\"\n"
+    }
+
+    fn argon2_issues(yaml: &str) -> Vec<ValidationIssue> {
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parses");
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.reason.contains("OWASP"))
+            .collect()
+    }
+
+    #[test]
+    fn yaml_argon2_cost_below_the_owasp_floor_is_refused() {
+        let yaml =
+            prod_preamble() + "auth:\n  password_memory_cost: 1024\n  password_time_cost: 1\n";
+        let issues = argon2_issues(&yaml);
+        assert_eq!(
+            issues.len(),
+            1,
+            "expected exactly one OWASP issue, got: {issues:?}"
+        );
+        assert_eq!(issues[0].field, "auth.password_memory_cost");
+    }
+
+    #[test]
+    fn yaml_per_realm_argon2_override_below_the_floor_is_refused() {
+        // The global block is compliant; only the realm drops below. A check
+        // that read the global block alone would pass this config.
+        let yaml = prod_preamble()
+            + "auth:\n  password_memory_cost: 19456\n  password_time_cost: 2\n\
+               realms:\n  acme:\n    password_memory_cost: 512\n";
+        let issues = argon2_issues(&yaml);
+        assert_eq!(issues.len(), 1, "expected one OWASP issue, got: {issues:?}");
+        assert_eq!(issues[0].field, "realms.acme.password_memory_cost");
+    }
+
+    #[test]
+    fn yaml_argon2_cost_at_the_owasp_floor_is_accepted() {
+        for pair in [
+            "  password_memory_cost: 19456\n  password_time_cost: 2\n",
+            "  password_memory_cost: 47104\n  password_time_cost: 1\n",
+            "  password_memory_cost: 65536\n  password_time_cost: 3\n",
+        ] {
+            let yaml = prod_preamble() + "auth:\n" + pair;
+            let issues = argon2_issues(&yaml);
+            assert!(issues.is_empty(), "{pair} must be accepted, got {issues:?}");
+        }
+    }
+
+    #[test]
+    fn yaml_with_no_argon2_override_is_accepted() {
+        let issues = argon2_issues(&prod_preamble());
+        assert!(
+            issues.is_empty(),
+            "the compiled-in default is already OWASP-compliant; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn dev_mode_does_not_enforce_the_argon2_floor() {
+        let yaml = "dev_mode: true\nauth:\n  password_memory_cost: 256\n  password_time_cost: 1\n";
+        let issues = argon2_issues(yaml);
+        assert!(
+            issues.is_empty(),
+            "dev mode runs fast_for_testing parameters on purpose; got {issues:?}"
+        );
+    }
+
+    // ===== 19.12: plaintext production must not be forced into a spoofable
+    // `trust_forwarded_proto` with an empty `trusted_proxies` =====
+
+    #[test]
+    fn trust_forwarded_proto_without_trusted_proxies_is_refused_in_production() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nserver:\n  trust_forwarded_proto: true\n\
+               storage:\n  data_dir: \"/tmp/hea-19-12\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        let hit = issues
+            .iter()
+            .find(|i| i.field == "server.trust_forwarded_proto")
+            .unwrap_or_else(|| {
+                panic!("trust_forwarded_proto with no trusted_proxies must be refused: {issues:?}")
+            });
+        assert!(
+            hit.reason.contains("trusted_proxies"),
+            "the refusal must name the key that fixes it; got: {}",
+            hit.reason
+        );
+        // And the fail-fast path must agree with the collecting path.
+        assert!(config.validate().is_err(), "validate() must refuse it too");
+    }
+
+    #[test]
+    fn trust_forwarded_proto_with_trusted_proxies_is_accepted() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nserver:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"10.0.0.1\"]\n\
+               storage:\n  data_dir: \"/tmp/hea-19-12b\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.field == "server.trust_forwarded_proto"),
+            "a proxy list makes the header trustworthy; got {issues:?}"
+        );
+    }
+
+    #[test]
+    fn empty_trusted_proxies_warning_is_deferred_not_logged_during_validation() {
+        // The warning used to be a `tracing::warn!` fired from inside
+        // `validate_trusted_proxies`, which runs while `load_config` parses the
+        // file — before `telemetry::init` installs a subscriber, so it went
+        // nowhere. It is now returned as data for `run_serve` to log after the
+        // subscriber exists.
+        let server = ServerConfig {
+            bind_address: "0.0.0.0".to_string(),
+            trusted_proxies: Vec::new(),
+            ..ServerConfig::default()
+        };
+        let warnings = super::deferred_server_warnings(&server);
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(
+            warnings[0].contains("trusted_proxies"),
+            "got: {}",
+            warnings[0]
+        );
+
+        let loopback = ServerConfig {
+            bind_address: "127.0.0.1".to_string(),
+            trusted_proxies: Vec::new(),
+            ..ServerConfig::default()
+        };
+        assert!(super::deferred_server_warnings(&loopback).is_empty());
     }
 
     #[test]
@@ -2245,6 +2590,85 @@ mod tests {
         }
     }
 
+    // ===== auth.password_memory_cost / auth.password_time_cost (§4.17#8) =====
+
+    /// The documented global Argon2 knobs must reach the engine's *base*
+    /// credential config, not just the per-realm override path.
+    #[test]
+    fn auth_password_costs_reach_the_base_credential_config() {
+        let yaml = "\
+storage:
+  data_dir: \"/tmp/hea-20-12\"
+auth:
+  password_memory_cost: 131072
+  password_time_cost: 4
+";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let resolved = config.base_credential_config(None);
+        assert_eq!(
+            resolved.memory_cost_kib, 131_072,
+            "auth.password_memory_cost must set the base Argon2 memory cost"
+        );
+        assert_eq!(
+            resolved.time_cost, 4,
+            "auth.password_time_cost must set the base Argon2 time cost"
+        );
+    }
+
+    /// An absent `auth:` block must leave the compiled-in OWASP defaults alone.
+    #[test]
+    fn auth_password_costs_absent_keeps_engine_defaults() {
+        let yaml = "storage:\n  data_dir: \"/tmp/hea-20-12b\"\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let resolved = config.base_credential_config(None);
+        let default = crate::identity::CredentialConfig::default();
+        assert_eq!(resolved.memory_cost_kib, default.memory_cost_kib);
+        assert_eq!(resolved.time_cost, default.time_cost);
+    }
+
+    /// A time cost of zero is not a valid Argon2 parameter; `Params::new`
+    /// refuses it at hash time, which would turn every login into a 500. It
+    /// must be refused at start-up instead.
+    #[test]
+    fn auth_password_time_cost_zero_is_refused() {
+        let yaml = "\
+storage:
+  data_dir: \"/tmp/hea-20-12c\"
+auth:
+  password_time_cost: 0
+";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let issues = config.validate_all();
+        assert!(
+            issues.iter().any(|i| i.field == "auth.password_time_cost"
+                && i.reason.contains("Argon2id rejects a zero iteration count")),
+            "a zero Argon2 time cost must be refused by the algorithm-bounds check — the \
+             OWASP floor is dev-mode-exempt, so this arm is the only one that covers it; \
+             got: {issues:?}"
+        );
+    }
+
+    /// Argon2 requires `m_cost >= 8`; anything lower makes `Params::new` fail.
+    #[test]
+    fn auth_password_memory_cost_below_argon2_minimum_is_refused() {
+        let yaml = "\
+storage:
+  data_dir: \"/tmp/hea-20-12d\"
+auth:
+  password_memory_cost: 4
+";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let issues = config.validate_all();
+        assert!(
+            issues.iter().any(|i| i.field == "auth.password_memory_cost"
+                && i.reason
+                    .contains("Argon2id rejects anything outside that range")),
+            "an Argon2 memory cost below the algorithm minimum must be refused by the \
+             algorithm-bounds check, not only by the dev-mode-exempt OWASP floor; \
+             got: {issues:?}"
+        );
+    }
+
     #[test]
     fn resolve_pepper_absent_is_none() {
         // Unchanged default behaviour: no pepper section → CredentialConfig::pepper None.
@@ -2589,6 +3013,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 realms:
@@ -2619,6 +3044,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
@@ -2656,6 +3082,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
@@ -2690,6 +3117,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
@@ -2723,6 +3151,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:
@@ -2750,6 +3179,7 @@ oidc:
   issuer: "https://auth.example.com"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 security:
   key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
 email:

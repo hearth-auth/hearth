@@ -1954,10 +1954,14 @@ impl EmbeddedIdentityEngine {
     /// afterwards: once every key has been through the envelope, an
     /// unenveloped one is corruption or a downgrade, not a legacy row.
     ///
-    /// Covers the three signing-key families — `sys:global:key`,
-    /// `realm:key:*` and `realm:retiring:*` — all of which live under the
-    /// system realm, so the sweep is one bounded scan and does not walk
-    /// tenant data.
+    /// Covers every family of stored key material:
+    ///
+    /// - System-realm scans — `sys:global:key`, `realm:key:*`,
+    ///   `realm:retiring:*` and `realm:saml_key:*`.
+    /// - A realm walk — `agt:dpop:nonce-secret` and `mfa:dek:key`, which are
+    ///   written into each tenant realm's own namespace and therefore cannot
+    ///   be reached by a system-realm scan (audit 2026-08-28 §25.9). Two
+    ///   point reads per realm, not a scan of tenant data.
     ///
     /// Runs before `Self` exists, hence the `&Arc<dyn StorageEngine>`
     /// argument. A no-op when no KEK is configured or the store is already
@@ -1995,6 +1999,7 @@ impl EmbeddedIdentityEngine {
         for prefix in [
             keys::realm_signing_key_scan_prefix(),
             keys::realm_retiring_key_all_scan_prefix(),
+            keys::realm_saml_key_scan_prefix(),
         ] {
             let end = keys::prefix_end(&prefix);
             let entries = storage
@@ -2007,6 +2012,39 @@ impl EmbeddedIdentityEngine {
                 let wrapped = crate::identity::key_encryption::wrap_key(&entry.value, Some(kek))?;
                 storage
                     .put(&sys_realm, &entry.key, &wrapped)
+                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+                rewrapped += 1;
+            }
+        }
+
+        // Per-realm key material. Unlike the signing keys these are written
+        // into the tenant realm's own namespace, so a system-realm scan never
+        // sees them and they stayed in plaintext forever once a KEK was
+        // switched on over an existing store (§25.9). Both are single,
+        // well-known keys, so this is two point reads per realm.
+        // Per-realm key material. Unlike the signing keys these are written
+        // into the tenant realm's own namespace, so a system-realm scan never
+        // sees them and they stayed in plaintext forever once a KEK was
+        // switched on over an existing store (§25.9). Both are single,
+        // well-known keys, so this is two point reads per realm.
+        let realms = storage
+            .list_realms()
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        let per_realm_keys = [keys::dpop_nonce_secret_key(), keys::mfa_dek_key()];
+        for realm in &realms {
+            for storage_key in &per_realm_keys {
+                let Some(raw) = storage
+                    .get(realm, storage_key)
+                    .map_err(|e| IdentityError::Storage(Box::new(e)))?
+                else {
+                    continue;
+                };
+                if crate::identity::key_encryption::is_enveloped(&raw) {
+                    continue;
+                }
+                let wrapped = crate::identity::key_encryption::wrap_key(&raw, Some(kek))?;
+                storage
+                    .put(realm, storage_key, &wrapped)
                     .map_err(|e| IdentityError::Storage(Box::new(e)))?;
                 rewrapped += 1;
             }
@@ -2714,48 +2752,49 @@ impl EmbeddedIdentityEngine {
             .map(|k| k.as_bytes());
         let storage_key = keys::mfa_dek_key();
 
-        let key_bytes: [u8; 32] =
-            match self
-                .storage
-                .get(realm_id, &storage_key)
-                .map_err(Self::storage_err)?
-            {
-                Some(raw) => {
-                    let plaintext = crate::identity::key_encryption::unwrap_key(&raw, kek)
-                        .map_err(|e| IdentityError::SigningError {
-                            reason: format!("MFA DEK unwrap failed: {e}"),
-                        })?;
-                    if plaintext.len() != 32 {
-                        return Err(IdentityError::SigningError {
-                            reason: format!(
-                                "MFA DEK has wrong length: {} bytes (expected 32)",
-                                plaintext.len()
-                            ),
-                        });
-                    }
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&plaintext);
-                    arr
+        let key_bytes: [u8; 32] = match self
+            .storage
+            .get(realm_id, &storage_key)
+            .map_err(Self::storage_err)?
+        {
+            Some(raw) => {
+                // Strict: on a KEK-enrolled store an unenveloped DEK is a
+                // downgrade, not a legacy row (audit 2026-08-28 §25.9).
+                let plaintext = crate::identity::key_encryption::unwrap_key_strict(&raw, kek)
+                    .map_err(|e| IdentityError::SigningError {
+                        reason: format!("MFA DEK unwrap failed: {e}"),
+                    })?;
+                if plaintext.len() != 32 {
+                    return Err(IdentityError::SigningError {
+                        reason: format!(
+                            "MFA DEK has wrong length: {} bytes (expected 32)",
+                            plaintext.len()
+                        ),
+                    });
                 }
-                None => {
-                    let rng = ring::rand::SystemRandom::new();
-                    let mut key = [0u8; 32];
-                    rng.fill(&mut key)
-                        .map_err(|_| IdentityError::SigningError {
-                            reason: "MFA DEK generation failed".into(),
-                        })?;
-                    let wrapped =
-                        crate::identity::key_encryption::wrap_key(&key, kek).map_err(|e| {
-                            IdentityError::SigningError {
-                                reason: format!("MFA DEK wrap failed: {e}"),
-                            }
-                        })?;
-                    self.storage
-                        .put(realm_id, &storage_key, &wrapped)
-                        .map_err(Self::storage_err)?;
-                    key
-                }
-            };
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&plaintext);
+                arr
+            }
+            None => {
+                let rng = ring::rand::SystemRandom::new();
+                let mut key = [0u8; 32];
+                rng.fill(&mut key)
+                    .map_err(|_| IdentityError::SigningError {
+                        reason: "MFA DEK generation failed".into(),
+                    })?;
+                let wrapped =
+                    crate::identity::key_encryption::wrap_key(&key, kek).map_err(|e| {
+                        IdentityError::SigningError {
+                            reason: format!("MFA DEK wrap failed: {e}"),
+                        }
+                    })?;
+                self.storage
+                    .put(realm_id, &storage_key, &wrapped)
+                    .map_err(Self::storage_err)?;
+                key
+            }
+        };
 
         let mut cache = self.mfa_dek_cache.lock().expect("mfa_dek_cache poisoned");
         cache.insert(realm_id.clone(), key_bytes);
@@ -3040,6 +3079,44 @@ impl EmbeddedIdentityEngine {
             .and_then(|r| r.config().password_policy.clone()))
     }
 
+    /// Refuses a realm Argon2id override that falls below the OWASP floor.
+    ///
+    /// `password_memory_cost` and `password_time_cost` reach this engine from
+    /// `hearth.yaml` **and** over the wire via realm create/update, and both
+    /// accepted arbitrarily low values (audit 2026-08-28 §4.17#6). The wire
+    /// path is validated here because a layer must not assume the one above it
+    /// validated; `hearth.yaml` is validated independently in
+    /// `config::validate`.
+    ///
+    /// Refuses rather than clamps: silently raising a cost the operator chose
+    /// changes login latency with no diagnostic, and silently lowering it is
+    /// the defect itself. An override that is absent is not second-guessed —
+    /// the unspecified half resolves against the engine base config.
+    ///
+    /// Skipped entirely when the engine's own base credential config is below
+    /// the floor. That is by definition a dev or test engine built from
+    /// [`CredentialConfig::fast_for_testing`], where a production floor on
+    /// realm overrides would refuse the cheap parameters the suite depends on.
+    fn check_realm_argon2_floor(
+        &self,
+        config: &crate::identity::RealmConfig,
+    ) -> Result<(), IdentityError> {
+        if config.password_memory_cost.is_none() && config.password_time_cost.is_none() {
+            return Ok(());
+        }
+        if !self.config.credential.meets_owasp_floor() {
+            return Ok(());
+        }
+        let memory = config
+            .password_memory_cost
+            .unwrap_or(self.config.credential.memory_cost_kib);
+        let time = config
+            .password_time_cost
+            .unwrap_or(self.config.credential.time_cost);
+        credentials::validate_argon2_cost(memory, time)
+            .map_err(|reason| IdentityError::InvalidInput { reason })
+    }
+
     /// Resolves the effective Argon2id settings for a realm.
     ///
     /// Starts with engine defaults and applies per-realm `password_memory_cost`
@@ -3058,6 +3135,22 @@ impl EmbeddedIdentityEngine {
             }
         }
         Ok(cfg)
+    }
+
+    /// Resolves the effective magic-link lifetime for a realm, in microseconds.
+    ///
+    /// Reads `realms.<name>.auth.token.magic_link_ttl` (parsed into
+    /// [`RealmConfig::magic_link_ttl_micros`] and hard-capped at 30 minutes by
+    /// the A-14 config check) and falls back to the compiled-in
+    /// [`MAGIC_LINK_EXPIRY_MICROS`] default. A realm record that cannot be read
+    /// degrades to the default rather than failing the request — the caller is
+    /// mid-flow and a missing realm surfaces on the next lookup.
+    fn magic_link_expiry_micros(&self, realm_id: &RealmId) -> i64 {
+        self.get_realm(realm_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.config().magic_link_ttl_micros)
+            .unwrap_or(MAGIC_LINK_EXPIRY_MICROS)
     }
 
     /// Returns the timing-defence dummy hash used when no real credential is
@@ -3176,7 +3269,7 @@ impl EmbeddedIdentityEngine {
         // succeed (audit 2026-08-28 §4.16#1).
         let rotation_lock = self.grant_family_lock(realm_id, fid);
         // INVARIANT: guard held only across the sync rotation window; no .await in scope.
-        let _rotation_guard = rotation_lock.lock().expect("grant family lock poisoned");
+        let rotation_guard = rotation_lock.lock().expect("grant family lock poisoned");
 
         let family_key = keys::encode_grant_family(fid);
         let family_bytes = self
@@ -3250,6 +3343,10 @@ impl EmbeddedIdentityEngine {
             self.storage
                 .put(realm_id, &family_key, &updated)
                 .map_err(Self::storage_err)?;
+            // `revoke_session` now takes this same per-family lock for its
+            // cascade (§4.16#2), and `std::sync::Mutex` is not reentrant —
+            // release before calling it.
+            drop(rotation_guard);
             let _ = self.revoke_session(realm_id, session_id);
             return Err(IdentityError::TokenRevoked);
         }
@@ -4633,6 +4730,32 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Audits a failed second-factor verification.
+    ///
+    /// A *successful* verification emitted `CredentialVerified`; a failed one
+    /// emitted nothing at all, so a second-factor brute force left no trace in
+    /// the one log an operator reads (audit 2026-08-28 §4.14#7). The per-user
+    /// MFA attempt counter saw it; the audit trail did not.
+    ///
+    /// Reuses the existing `LoginFailed` vocabulary rather than inventing an
+    /// action — the abuse dashboard already counts and grades it — and
+    /// distinguishes the authentication stage in metadata. Best-effort,
+    /// exactly like [`Self::emit_login_failed_audit`]: a failed audit append
+    /// must not turn a wrong TOTP code into a 500.
+    fn emit_mfa_failed_audit(&self, realm_id: &RealmId, user_id: &UserId, factor: &str) {
+        let ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({ "stage": "mfa", "factor": factor })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::LoginFailed,
+            "credential",
+            &user_id.as_uuid().to_string(),
+        );
+    }
+
     /// Returns the per-realm lock for JWT Bearer JTI operations, creating it on first use.
     fn jwt_bearer_jti_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
         let mut map = self.jti_locks.lock().expect("jti_locks poisoned");
@@ -4672,10 +4795,21 @@ impl EmbeddedIdentityEngine {
     /// Returns the per-`(realm_id, fid)` advisory lock serializing grant-family
     /// rotation.
     ///
-    /// Callers hold this lock across the entire load → hash-check → issue →
-    /// rotate-write sequence in `rotate_grant_family`, so two concurrent
+    /// Every reader-modifier-writer of an `oauth:family:` row takes it, not
+    /// just the rotation. `rotate_grant_family` holds it across the whole
+    /// load → hash-check → issue → rotate-write sequence, so two concurrent
     /// presentations of one refresh token cannot both pass the current-hash
-    /// check (audit 2026-08-28 §4.16#1).
+    /// check (audit 2026-08-28 §4.16#1) — and that sequence is long enough
+    /// (RBAC resolution, claim profile, pre-token webhook) that any revoker
+    /// which did *not* take the lock had its write silently overwritten. So
+    /// `revoke_session`'s cascade (§4.16#2), the RFC 7009 `revoke_token`
+    /// handler (§4.16#7), the consent cascade (§4.16#11) and
+    /// `delete_client`'s cascade (§4.16#3) all take it too, and each re-reads
+    /// the row under it.
+    ///
+    /// The lock is **not** reentrant: a holder must release it before calling
+    /// anything that re-takes it, which is why `rotate_grant_family` drops its
+    /// guard before the theft-path `revoke_session`.
     fn grant_family_lock(&self, realm_id: &RealmId, fid: &str) -> Arc<Mutex<()>> {
         let key = format!("{}:{}", realm_id.as_uuid(), fid);
         let mut map = self
@@ -5089,12 +5223,17 @@ impl EmbeddedIdentityEngine {
             user.set_last_name(normalized);
         }
 
-        // 4. Apply status change if requested
+        // 4. Apply status change if requested.
+        //
+        // The flag is `new_status == Disabled`, NOT "the status transitioned to
+        // Disabled". Because the session revocation below is now fail-closed,
+        // the caller retries after a failure — and on that retry the previous
+        // status is already `Disabled`, so a transition test would skip the
+        // revocation and report success a second time without ever performing
+        // it. Revocation is idempotent, so re-running it costs nothing.
         let status_disabled = if let Some(new_status) = request.status {
-            let prev = user.status();
             user.set_status(new_status);
-            prev != crate::identity::types::UserStatus::Disabled
-                && new_status == crate::identity::types::UserStatus::Disabled
+            new_status == crate::identity::types::UserStatus::Disabled
         } else {
             false
         };
@@ -5164,14 +5303,27 @@ impl EmbeddedIdentityEngine {
         // sessions so that active access tokens cannot be used past revocation.
         // Access tokens embed claims at issuance and are not re-checked on the
         // hot path, so revocation is the only mechanism to enforce a disable.
+        //
+        // Fail closed. Swallowing the failure into a `tracing::warn!` and
+        // returning `Ok(user)` reported a disable that never happened: the
+        // operator saw a disabled user and an audit entry saying so, while the
+        // user's live access and refresh tokens kept working, because
+        // revocation is the only thing that stops them
+        // (audit 2026-08-28 §4.16#10). The user record is already persisted, so
+        // the disable is durable and the retry is a no-op on everything except
+        // the revocation it exists to complete.
         if status_disabled {
-            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
-                tracing::warn!(
-                    user_id = %user_id.as_uuid(),
-                    error = %e,
-                    "revoke_all_user_sessions failed on user disable"
-                );
-            }
+            let _revoked = self
+                .revoke_all_user_sessions(realm_id, user_id, None)
+                .map_err(|e| {
+                    tracing::error!(
+                        user_id = %user_id.as_uuid(),
+                        error = %e,
+                        "revoke_all_user_sessions failed on user disable; \
+                         reporting the disable as failed"
+                    );
+                    e
+                })?;
         }
 
         Ok(user)
@@ -5647,6 +5799,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             wh.validate()
                 .map_err(|reason| IdentityError::InvalidInput { reason })?;
         }
+        // 19.11: refuse an Argon2id override below the OWASP floor.
+        self.check_realm_argon2_floor(&config)?;
 
         // Generate a per-realm signing key
         let realm_signing_key = SigningKey::generate()?;
@@ -5815,6 +5969,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 wh.validate()
                     .map_err(|reason| IdentityError::InvalidInput { reason })?;
             }
+            // 19.11: refuse an Argon2id override below the OWASP floor.
+            self.check_realm_argon2_floor(config)?;
         }
 
         if let Some(ref name) = request.name {
@@ -7261,6 +7417,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.persist_session(realm_id, &session)?;
 
         // Cascade: revoke all refresh-token grant families issued under this session.
+        //
+        // The read-modify-write below must hold the same per-family advisory
+        // lock `rotate_grant_family` holds, or it is a lost update: a rotation
+        // that has already loaded the family (revoked = false) and is working
+        // through RBAC resolution and the pre-token webhook writes the family
+        // back — un-revoked, with a freshly rotated hash — *after* this
+        // cascade's write. The holder of the token that rotation was serving
+        // keeps a live chain across the revocation, and because the token it
+        // presented was the current one, no theft event ever fires
+        // (audit 2026-08-28 §4.16#2).
         let sfam_prefix = keys::encode_session_grant_family_prefix(session_id);
         let sfam_end = keys::prefix_end(&sfam_prefix);
         if let Ok(entries) = self.storage.scan(realm_id, &sfam_prefix, &sfam_end) {
@@ -7271,6 +7437,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     continue;
                 }
                 let family_key = keys::encode_grant_family(family_id);
+                let lock = self.grant_family_lock(realm_id, family_id);
+                // INVARIANT: guard held only across the sync re-read + revoke-write; no .await in scope.
+                let Ok(_guard) = lock.lock() else {
+                    continue;
+                };
+                // Re-read under the lock: a rotation that was in flight when
+                // the scan ran has finished and rewritten the row by now.
                 if let Ok(Some(fbytes)) = self.storage.get(realm_id, &family_key) {
                     if let Ok(mut fam) = serde_json::from_slice::<StoredGrantFamily>(&fbytes) {
                         if !fam.revoked {
@@ -7464,8 +7637,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     }
                 }
                 if session.is_valid(now) {
-                    let _ = self.revoke_session(realm_id, session.id());
-                    revoked += 1;
+                    // Do not discard the failure. This is the only mechanism
+                    // that stops a disabled user's already-issued access and
+                    // refresh tokens, and swallowing the error here made
+                    // `update_user(status = Disabled)` report a disable it had
+                    // not achieved (audit 2026-08-28 §4.16#10). A session that
+                    // disappeared between the page read and the revoke is
+                    // benign — it is already gone; anything else is fatal.
+                    match self.revoke_session(realm_id, session.id()) {
+                        Ok(()) => revoked += 1,
+                        Err(IdentityError::SessionNotFound) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
             }
 
@@ -7710,10 +7893,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Every refresh token belongs to a grant family, so rotation and
         // reuse detection apply to ROPC, step-up-MFA, device-grant and
         // password-reset refreshes exactly as they do to the
-        // authorization-code grant. Without an `fid`, `refresh_tokens` takes
-        // the legacy branch that has neither rotation, nor reuse detection,
-        // nor the client-authentication gates (audit 2026-08-28 §4.19#3,
-        // §4.16#6).
+        // authorization-code grant. `refresh_tokens` refuses a token that
+        // carries no `fid`, so omitting the family here does not degrade to a
+        // weaker path — it mints a token nothing will honour
+        // (audit 2026-08-28 §4.19#3, §4.16#6).
         let family_id = uuid::Uuid::new_v4().to_string();
         let pair = realm_signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
@@ -8058,15 +8241,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 bind_ctx,
             )
         } else {
-            // Legacy path: Phase-0 session tokens (fid == None).
-            // This branch is only reachable by tokens that already passed
-            // `verify_token_signature_for_realm` above. A tampered payload
-            // with fid stripped cannot reach here — the signature check at the
-            // top of this function rejects it first. The session↔user ownership
-            // binding enforced above prevents cross-user token issuance on this
-            // path.
-            self.refresh_session(realm_id, &session_id)?;
-            self.issue_tokens(realm_id, &user_id, &session_id)
+            // No grant family — refuse.
+            //
+            // This used to fall through to `refresh_session` + `issue_tokens`,
+            // which minted a brand-new pair without consuming the presented
+            // token. That branch had no rotation, no reuse detection and none
+            // of the client-authentication, FAPI DPoP or consent gates
+            // `rotate_grant_family` applies, so a family-less refresh token
+            // replayed forever and could never raise a theft event
+            // (audit 2026-08-28 §4.16#6).
+            //
+            // Since every issuance path embeds an `fid` (task 8.9), the only
+            // tokens that reach here were minted by an older binary. Serving
+            // them through a weaker branch than the one they skip is the
+            // defect; they are refused and the holder re-authenticates.
+            tracing::info!(
+                realm_id = %realm_id,
+                "refresh token presented without a grant family; refused"
+            );
+            Err(IdentityError::TokenRevoked)
         }
     }
 
@@ -8499,6 +8692,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             Ok(())
         } else {
             self.record_mfa_failed_attempt(realm_id, user_id);
+            self.emit_mfa_failed_audit(realm_id, user_id, "totp");
             Err(IdentityError::InvalidMfaCode)
         }
     }
@@ -8550,6 +8744,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
             None => {
                 self.record_mfa_failed_attempt(realm_id, user_id);
+                self.emit_mfa_failed_audit(realm_id, user_id, "recovery_code");
                 Err(IdentityError::InvalidMfaCode)
             }
         }
@@ -9185,11 +9380,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let ml_prefix = keys::magic_link_token_scan_prefix();
         let ml_end = crate::storage::prefix_scan_end(&ml_prefix);
         let now_micros = self.clock.now().as_micros();
+        // The sweep and the redemption check MUST agree on the lifetime, or a
+        // link the realm still considers live is skipped here and survives its
+        // own supersession (audit §4.24#12).
+        let expiry_micros = self.magic_link_expiry_micros(realm_id);
         if let Ok(entries) = self.storage.scan(realm_id, &ml_prefix, &ml_end) {
             for entry in entries {
                 if let Ok(mut prior) = serde_json::from_slice::<StoredMagicLink>(&entry.value) {
                     let age = now_micros - prior.created_at_micros;
-                    if !prior.used && prior.email == normalized && age < MAGIC_LINK_EXPIRY_MICROS {
+                    if !prior.used && prior.email == normalized && age < expiry_micros {
                         prior.used = true;
                         if let Ok(val) = serde_json::to_vec(&prior) {
                             let _ = self.storage.put(realm_id, &entry.key, &val);
@@ -9260,9 +9459,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MagicLinkTokenInvalid);
         }
 
-        // 4. Check expiry
+        // 4. Check expiry — use the realm's `auth.token.magic_link_ttl` when
+        //    configured, else the compiled-in 15-minute default.
+        let expiry_micros = self.magic_link_expiry_micros(realm_id);
         let now = self.clock.now().as_micros();
-        if now - stored.created_at_micros > MAGIC_LINK_EXPIRY_MICROS {
+        if now - stored.created_at_micros > expiry_micros {
             // Clean up stale record
             self.storage
                 .delete(realm_id, &key)
@@ -13697,7 +13898,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get(&sys_realm, &storage_key)
             .map_err(Self::storage_err)?
         {
-            let json_bytes = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
+            // Strict: on a KEK-enrolled store an unenveloped SAML key is a
+            // downgrade, not a legacy row (audit 2026-08-28 §25.9).
+            let json_bytes = crate::identity::key_encryption::unwrap_key_strict(&raw, kek)?;
             let stored: Stored =
                 serde_json::from_slice(&json_bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
@@ -14656,7 +14859,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get(realm_id, &secret_key)
             .map_err(Self::storage_err)?
         {
-            let plaintext = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
+            // Strict: on a KEK-enrolled store an unenveloped nonce secret is
+            // a downgrade, not a legacy row (audit 2026-08-28 §25.9).
+            let plaintext = crate::identity::key_encryption::unwrap_key_strict(&raw, kek)?;
             plaintext
                 .as_slice()
                 .try_into()
@@ -15639,6 +15844,10 @@ mod tests {
     use crate::identity::hibp::{HibpError, HibpTransport};
     use crate::identity::RealmConfig;
     use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+
+    /// Refresh-rotation family coverage, revocation lost-update races and the
+    /// consent cascade (audit 2026-08-28 §4.16#2, #6, #7, #10, #11).
+    mod refresh_races;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.
@@ -16916,6 +17125,124 @@ mod tests {
             .expect("create realm")
             .id()
             .clone()
+    }
+
+    // ===== 19.11: the OWASP Argon2id floor on the wire =====
+    //
+    // `password_memory_cost` / `password_time_cost` arrive both from
+    // `hearth.yaml` and from the realm create/update API. `config::validate`
+    // guards the YAML door; these guard the wire door, because the identity
+    // layer must not assume the protocol layer above it validated.
+
+    /// Builds an engine whose BASE credential config is the shipped production
+    /// default, which is what arms the per-realm floor. `setup_engine` uses
+    /// `fast_for_testing`, which deliberately opts out.
+    fn setup_production_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let storage =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::default(),
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation");
+        (dir, engine)
+    }
+
+    fn create_realm_with_argon2(
+        engine: &EmbeddedIdentityEngine,
+        memory_cost: Option<u32>,
+        time_cost: Option<u32>,
+    ) -> Result<Realm, IdentityError> {
+        engine.create_realm(&CreateRealmRequest {
+            name: format!("floor-realm-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                password_memory_cost: memory_cost,
+                password_time_cost: time_cost,
+                ..RealmConfig::default()
+            }),
+        })
+    }
+
+    #[test]
+    fn create_realm_refuses_argon2_cost_below_the_owasp_floor() {
+        let (_dir, engine) = setup_production_engine();
+        let err = create_realm_with_argon2(&engine, Some(1_024), Some(1))
+            .expect_err("m=1024 t=1 is far below the OWASP floor and must be refused");
+        assert!(
+            matches!(&err, IdentityError::InvalidInput { reason } if reason.contains("OWASP")),
+            "expected an InvalidInput naming OWASP, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn create_realm_refuses_a_lone_time_cost_that_drops_below_the_floor() {
+        // Only `time_cost` is overridden; memory resolves to the engine base
+        // (19456 KiB), which at t=1 is below the 47104-KiB one-pass set.
+        let (_dir, engine) = setup_production_engine();
+        let err = create_realm_with_argon2(&engine, None, Some(1))
+            .expect_err("t=1 against the 19456-KiB base must be refused");
+        assert!(
+            matches!(&err, IdentityError::InvalidInput { reason } if reason.contains("OWASP")),
+            "expected an InvalidInput naming OWASP, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn create_realm_accepts_argon2_cost_at_and_above_the_floor() {
+        let (_dir, engine) = setup_production_engine();
+        create_realm_with_argon2(&engine, Some(19_456), Some(2)).expect("the t=2 OWASP set");
+        create_realm_with_argon2(&engine, Some(47_104), Some(1)).expect("the t=1 OWASP set");
+        create_realm_with_argon2(&engine, Some(65_536), Some(3)).expect("stronger than either set");
+        create_realm_with_argon2(&engine, None, None).expect("no override at all");
+    }
+
+    #[test]
+    fn update_realm_refuses_argon2_cost_below_the_owasp_floor() {
+        let (_dir, engine) = setup_production_engine();
+        let realm = create_realm_with_argon2(&engine, None, None).expect("create realm");
+        let err = engine
+            .update_realm(
+                realm.id(),
+                &UpdateRealmRequest {
+                    config: Some(RealmConfig {
+                        password_memory_cost: Some(256),
+                        password_time_cost: Some(1),
+                        ..RealmConfig::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect_err("an update must be gated exactly as a create is");
+        assert!(
+            matches!(&err, IdentityError::InvalidInput { reason } if reason.contains("OWASP")),
+            "expected an InvalidInput naming OWASP, got: {err:?}"
+        );
+        // And the refusal must not have been written.
+        let stored = engine.get_realm(realm.id()).expect("get").expect("present");
+        assert_eq!(stored.config().password_memory_cost, None);
+    }
+
+    #[test]
+    fn a_test_engine_below_the_floor_does_not_enforce_it_on_realms() {
+        // `fast_for_testing` is itself below the floor; enforcing a production
+        // floor on realm overrides there would refuse the cheap parameters the
+        // whole suite (and the 19.9/19.10 timing tests below) depend on.
+        let (_dir, engine, _clock) = setup_engine();
+        create_realm_with_argon2(&engine, Some(1_024), Some(1))
+            .expect("a fast_for_testing engine must not enforce the production floor");
     }
 
     // ----- 19.9 -----
@@ -21115,6 +21442,168 @@ mod tests {
             "subject/session mismatch must be rejected, got: {result:?}"
         );
     }
+    // ===== 19.2: a failed second factor must be audited (§4.14#7) =====
+    //
+    // A *successful* TOTP or recovery-code verification emitted
+    // `CredentialVerified`. A failed one emitted nothing, so a second-factor
+    // brute force was visible only in an in-memory attempt counter and left
+    // the audit trail — the one log an operator reads — empty.
+
+    /// `setup_engine` drops its audit engine; these tests need to read it back.
+    fn setup_engine_with_audit() -> (
+        tempfile::TempDir,
+        EmbeddedIdentityEngine,
+        Arc<FakeClock>,
+        Arc<EmbeddedAuditEngine>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let storage =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            Arc::clone(&audit) as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
+        (dir, engine, clock, audit)
+    }
+
+    /// Enrols TOTP and returns the recovery codes the enrolment issued.
+    #[allow(clippy::cast_sign_loss)] // Test timestamps are always positive
+    fn enrol_totp(
+        engine: &EmbeddedIdentityEngine,
+        clock: &FakeClock,
+        realm: &RealmId,
+        user_id: &UserId,
+    ) -> Vec<String> {
+        let enrollment = engine.enroll_totp(realm, user_id).expect("enroll");
+        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
+        let secret_bytes = data_encoding::BASE32_NOPAD
+            .decode(enrollment.secret_base32.as_bytes())
+            .expect("decode");
+        let code = crate::identity::totp::compute_totp(&secret_bytes, now_secs / 30);
+        engine
+            .verify_totp_enrollment(realm, user_id, &code)
+            .expect("verify enrollment");
+        enrollment.recovery_codes.as_slice().to_vec()
+    }
+
+    fn login_failed_metadata(
+        audit: &EmbeddedAuditEngine,
+        realm: &RealmId,
+    ) -> Vec<serde_json::Value> {
+        let mut query = crate::audit::AuditQuery::for_realm(realm.clone());
+        query.action = Some(AuditAction::LoginFailed);
+        audit
+            .query(&query)
+            .expect("query audit")
+            .into_iter()
+            .map(|e| e.metadata.unwrap_or(serde_json::Value::Null))
+            .collect()
+    }
+
+    #[test]
+    fn failed_totp_verification_is_audited() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        enrol_totp(&engine, &clock, &realm, user.id());
+
+        assert!(
+            login_failed_metadata(&audit, &realm).is_empty(),
+            "enrolment alone must not record a login failure"
+        );
+
+        let err = engine
+            .verify_totp(&realm, user.id(), "000000")
+            .expect_err("a wrong code must be refused");
+        assert!(matches!(err, IdentityError::InvalidMfaCode));
+
+        let events = login_failed_metadata(&audit, &realm);
+        assert_eq!(events.len(), 1, "got: {events:?}");
+        assert_eq!(
+            events[0].get("stage").and_then(serde_json::Value::as_str),
+            Some("mfa"),
+            "the event must distinguish the second factor from the password stage"
+        );
+        assert_eq!(
+            events[0].get("factor").and_then(serde_json::Value::as_str),
+            Some("totp")
+        );
+    }
+
+    #[test]
+    fn failed_recovery_code_verification_is_audited() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        enrol_totp(&engine, &clock, &realm, user.id());
+
+        let err = engine
+            .verify_recovery_code(&realm, user.id(), "not-a-real-recovery-code")
+            .expect_err("a wrong recovery code must be refused");
+        assert!(matches!(err, IdentityError::InvalidMfaCode));
+
+        let events = login_failed_metadata(&audit, &realm);
+        assert_eq!(events.len(), 1, "got: {events:?}");
+        assert_eq!(
+            events[0].get("factor").and_then(serde_json::Value::as_str),
+            Some("recovery_code"),
+            "the recovery-code arm must be distinguishable from the TOTP arm"
+        );
+    }
+
+    #[test]
+    fn a_successful_second_factor_records_no_login_failure() {
+        // Guards against the fix over-firing: the success arm must stay clean,
+        // or the abuse dashboard's failure counter becomes meaningless.
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let codes = enrol_totp(&engine, &clock, &realm, user.id());
+
+        engine
+            .verify_recovery_code(&realm, user.id(), &codes[0])
+            .expect("a valid recovery code must verify");
+        assert!(
+            login_failed_metadata(&audit, &realm).is_empty(),
+            "a successful second factor must not record a failure"
+        );
+    }
+
+    #[test]
+    fn the_audit_chain_still_verifies_after_a_failed_second_factor() {
+        // The audit log is a keyed-HMAC chain. A write added on a conditional
+        // path must not skip or reorder a link.
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        enrol_totp(&engine, &clock, &realm, user.id());
+
+        for _ in 0..3 {
+            let _ = engine.verify_totp(&realm, user.id(), "000000");
+        }
+
+        assert!(
+            audit
+                .verify_integrity(&realm, None, None)
+                .expect("verify integrity"),
+            "the HMAC chain must verify after the new failure events"
+        );
+    }
+
     // ===== Adversarial: MFA brute-force lockout (Scenario F1) =====
 
     #[test]
@@ -21985,6 +22474,109 @@ mod tests {
         assert!(
             matches!(err, IdentityError::PasswordResetTokenInvalid),
             "expected PasswordResetTokenInvalid after TTL expiry, got: {err}"
+        );
+    }
+
+    // ===== Magic-link TTL (audit §4.24#12, task 20.15) =====
+
+    /// Creates a realm whose magic-link TTL is `ttl_micros` and a user in it.
+    fn magic_link_realm_with_ttl(
+        engine: &EmbeddedIdentityEngine,
+        ttl_micros: i64,
+    ) -> (RealmId, crate::identity::User) {
+        let realm = engine
+            .create_realm(&crate::identity::CreateRealmRequest {
+                name: format!("ml-ttl-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    magic_link_ttl_micros: Some(ttl_micros),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm");
+        let user = engine
+            .create_user(
+                realm.id(),
+                &crate::identity::CreateUserRequest {
+                    email: format!("mlttl-{}@example.com", uuid::Uuid::new_v4()),
+                    display_name: "ML TTL User".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+        (realm.id().clone(), user)
+    }
+
+    /// A realm that shortens `auth.token.magic_link_ttl` below the compiled-in
+    /// 15 minutes must have its links expire at the configured instant.
+    #[test]
+    fn magic_link_expires_at_realm_configured_short_ttl() {
+        let (_dir, engine, clock) = setup_engine();
+        let short_ttl: i64 = 5 * 60 * 1_000_000;
+        let (realm, user) = magic_link_realm_with_ttl(&engine, short_ttl);
+
+        let response = engine
+            .request_magic_link(&realm, user.email())
+            .expect("request_magic_link");
+        clock.advance(short_ttl + 1);
+
+        let err = engine
+            .validate_magic_link(&realm, response.token())
+            .expect_err("token past the realm's 5m TTL must be rejected");
+        assert!(
+            matches!(err, IdentityError::MagicLinkTokenInvalid),
+            "expected MagicLinkTokenInvalid after the realm TTL elapsed, got: {err:?}"
+        );
+    }
+
+    /// A realm that lengthens the TTL (up to the A-14 30-minute cap) must keep
+    /// its links valid past the compiled-in 15-minute constant. This is the arm
+    /// that fails when `magic_link_ttl_micros` is stored and never read.
+    #[test]
+    fn magic_link_honours_realm_configured_long_ttl() {
+        let (_dir, engine, clock) = setup_engine();
+        let long_ttl: i64 = 30 * 60 * 1_000_000;
+        let (realm, user) = magic_link_realm_with_ttl(&engine, long_ttl);
+
+        let response = engine
+            .request_magic_link(&realm, user.email())
+            .expect("request_magic_link");
+        // Past the compiled-in 15-minute default, inside the realm's 30 minutes.
+        clock.advance(20 * 60 * 1_000_000);
+
+        let validated = engine
+            .validate_magic_link(&realm, response.token())
+            .expect("token inside the realm's 30m TTL must still validate");
+        assert_eq!(
+            validated.as_uuid(),
+            user.id().as_uuid(),
+            "the redeemed link must resolve to the requesting user"
+        );
+    }
+
+    /// The prior-token invalidation sweep in `request_magic_link` must use the
+    /// same realm TTL: with the compiled-in constant a still-live 20-minute-old
+    /// token under a 30-minute realm TTL is skipped by the sweep and stays
+    /// usable after a fresh link is issued (HSS-008 regression).
+    #[test]
+    fn magic_link_reissue_invalidates_prior_token_under_long_realm_ttl() {
+        let (_dir, engine, clock) = setup_engine();
+        let long_ttl: i64 = 30 * 60 * 1_000_000;
+        let (realm, user) = magic_link_realm_with_ttl(&engine, long_ttl);
+
+        let first = engine
+            .request_magic_link(&realm, user.email())
+            .expect("first request");
+        clock.advance(20 * 60 * 1_000_000);
+        let _second = engine
+            .request_magic_link(&realm, user.email())
+            .expect("second request");
+
+        let err = engine
+            .validate_magic_link(&realm, first.token())
+            .expect_err("the superseded link must be dead");
+        assert!(
+            matches!(err, IdentityError::MagicLinkTokenInvalid),
+            "expected MagicLinkTokenInvalid for the superseded link, got: {err:?}"
         );
     }
 

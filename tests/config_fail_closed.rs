@@ -19,7 +19,7 @@ use hearth::config::Config;
 /// block so the result never repeats a top-level key (YAML rejects duplicates).
 fn prod_yaml(storage_extra: &str, security_extra: &str, tail: &str) -> String {
     format!(
-        "server:\n  trust_forwarded_proto: true\n\
+        "server:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"127.0.0.1\"]\n\
          storage:\n  data_dir: \"/tmp/hearth-config-fail-closed\"\n{storage_extra}\
          security:\n  key_encryption_key: \"\
          1111111111111111111111111111111111111111111111111111111111111111\"\n{security_extra}\

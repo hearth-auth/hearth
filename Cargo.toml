@@ -144,6 +144,17 @@ rpassword = "7"
 secrecy = { version = "0.8", features = ["alloc"] }
 
 [features]
+# On by default so `make dev`, `cargo nextest` and the Playwright suite are
+# unaffected. The shipped container image builds with `--no-default-features`,
+# which is what actually keeps `/admin/bootstrap`, the `/dev/seed-*` family and
+# the hard-coded `admin@hearth.test` password out of the production binary
+# (audit §4.7#2, task 20.1). A runtime boolean left all of it compiled in.
+default = ["dev-endpoints"]
+
+# Dev-only HTTP endpoints and the hard-coded dev admin credential.
+# Never enable for a production build.
+dev-endpoints = []
+
 # Exposes internal test probes for use by the simulation crate. Never enable in production.
 test-hooks = []
 

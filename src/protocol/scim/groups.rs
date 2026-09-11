@@ -123,14 +123,17 @@ fn audit(
     org_id: &OrganizationId,
     external_id: Option<&str>,
 ) {
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: actor.to_string(),
-        action,
-        resource_type: "organization".to_string(),
-        resource_id: org_id.as_uuid().to_string(),
-        metadata: Some(json!({"via": "scim", "external_id": external_id})),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: actor.to_string(),
+            action,
+            resource_type: "organization".to_string(),
+            resource_id: org_id.as_uuid().to_string(),
+            metadata: Some(json!({"via": "scim", "external_id": external_id})),
+        },
+    );
 }
 
 fn reconcile_members(

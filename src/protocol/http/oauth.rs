@@ -976,14 +976,17 @@ async fn register_client(
 
     match state.identity.register_client(&auth.realm_id, &request) {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientRegistered,
-                resource_type: "client".to_string(),
-                resource_id: client.client_id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "clients_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientRegistered,
+                    resource_type: "client".to_string(),
+                    resource_id: client.client_id().as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "clients_api"})),
+                },
+            );
             (
                 StatusCode::CREATED,
                 Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
@@ -1115,14 +1118,17 @@ async fn register_client_dynamic(
 
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: "anonymous".to_string(),
-                action: crate::audit::AuditAction::ClientRegistered,
-                resource_type: "client".to_string(),
-                resource_id: client.client_id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "dynamic_registration"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: "anonymous".to_string(),
+                    action: crate::audit::AuditAction::ClientRegistered,
+                    resource_type: "client".to_string(),
+                    resource_id: client.client_id().as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "dynamic_registration"})),
+                },
+            );
 
             let response = DcrResponse {
                 client_id: client.client_id().as_uuid().to_string(),

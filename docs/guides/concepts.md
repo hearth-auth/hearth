@@ -112,7 +112,7 @@ A scope bundle maps a scope string to a subset of permissions. Even if a user ha
         │
         ▼
   POST /token      ──►  access token  (15-min TTL, signed JWT)
-                   ──►  refresh token (7-day TTL, opaque, rotates on use)
+                   ──►  refresh token (7-day TTL, signed JWT, rotates on use)
         │
         │  access token expires
         ▼
@@ -129,6 +129,19 @@ A scope bundle maps a scope string to a subset of permissions. Even if a user ha
 ### Refresh token rotation
 
 Every use of a refresh token issues a *new* refresh token and invalidates the old one. If a refresh token is presented a second time (i.e., a token was stolen and used in parallel), Hearth detects the reuse and revokes the **entire grant family** — all access and refresh tokens derived from that original login. This prevents silent session hijacking.
+
+Rotation is not optional and has no fallback path. Every grant that mints a refresh
+token — authorization code, ROPC, step-up MFA, device code and password reset alike —
+records a grant family and embeds its id in the token as `fid`. A refresh token that
+carries no `fid` is **refused**, not served: the branch that used to honour one had
+neither rotation, nor reuse detection, nor the client-authentication, DPoP and consent
+gates, so a token minted before this behaviour shipped must re-authenticate rather than
+be served under weaker guarantees.
+
+A grant family also dies with the authority it was issued under. Revoking the session,
+revoking the token (RFC 7009), deleting the client, and revoking the user's consent for
+that application each mark the family revoked; the next refresh on it fails with
+`invalid_grant`.
 
 ### Key endpoints
 

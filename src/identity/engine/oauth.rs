@@ -2559,9 +2559,27 @@ impl EmbeddedIdentityEngine {
                 }
             }
             "refresh" => {
-                // Revoke via grant family
+                // Revoke via grant family.
+                //
+                // The load → set revoked → write sequence must hold the same
+                // per-family advisory lock `rotate_grant_family` holds, or it
+                // is a lost update: a rotation that has already read the family
+                // and is working through RBAC resolution and the pre-token
+                // webhook writes it back un-revoked afterwards. RFC 7009 §2.2
+                // lets the client read the resulting `200 OK` as "the token is
+                // now invalid" while the grant is still live
+                // (audit 2026-08-28 §4.16#7).
+                //
+                // The guard is scoped to this block: `revoke_session` below
+                // re-takes the same lock for its own cascade, and
+                // `std::sync::Mutex` is not reentrant.
                 if let Some(ref fid) = claims.fid {
                     let family_key = keys::encode_grant_family(fid);
+                    let lock = self.grant_family_lock(realm_id, fid);
+                    // INVARIANT: guard held only across the sync re-read + revoke-write; no .await in scope.
+                    let _guard = lock.lock().map_err(|_| IdentityError::Internal {
+                        reason: "grant family lock poisoned".to_string(),
+                    })?;
                     if let Some(family_bytes) = self
                         .storage
                         .get(realm_id, &family_key)
@@ -3567,6 +3585,85 @@ impl EmbeddedIdentityEngine {
         Ok(record)
     }
 
+    /// Revokes every outstanding refresh-token grant family this user holds for
+    /// `client_id`.
+    ///
+    /// Consent is the authority the grant was issued under. Deleting the
+    /// consent record alone left the families live, and
+    /// `rotate_grant_family`'s consent check only compares scope digests *when
+    /// a record exists* — so deleting the record removed the only thing that
+    /// check could fail on and the application refreshed forever
+    /// (audit 2026-08-28 §4.16#11).
+    ///
+    /// Returns the number of families revoked. Errors reading an individual row
+    /// are fatal: a consent revocation that silently skipped a family would
+    /// reintroduce the defect.
+    fn revoke_grant_families_for_consent(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: Option<&ClientId>,
+    ) -> Result<usize, IdentityError> {
+        let prefix = keys::grant_family_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut revoked = 0usize;
+        for entry in &entries {
+            let listed: StoredGrantFamily =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            let Some(ref family_client) = listed.client_id else {
+                // A clientless (session) grant carries no consent to revoke.
+                continue;
+            };
+            if client_id.is_some_and(|wanted| family_client != wanted) {
+                continue;
+            }
+            // The family records the session, not the subject; resolve the
+            // owner so one user's revocation cannot revoke another's grant.
+            // `load_session_raw` so an already-revoked session still resolves.
+            let owner = self.load_session_raw(realm_id, &listed.session_id)?;
+            if owner.as_ref().map(crate::identity::types::Session::user_id) != Some(user_id) {
+                continue;
+            }
+            // Serialize with any in-flight rotation, then re-read under the
+            // lock so this revocation is not a lost update (§4.16#2).
+            let lock = self.grant_family_lock(realm_id, &listed.family_id);
+            // INVARIANT: guard held only across the sync re-read + revoke-write; no .await in scope.
+            let _guard = lock.lock().map_err(|_| IdentityError::Internal {
+                reason: "grant family lock poisoned".to_string(),
+            })?;
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &entry.key)
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let mut family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if family.revoked {
+                continue;
+            }
+            family.revoked = true;
+            let updated =
+                serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &entry.key, &updated)
+                .map_err(Self::storage_err)?;
+            revoked += 1;
+        }
+        Ok(revoked)
+    }
+
     pub(super) fn revoke_consent_inner(
         &self,
         realm_id: &RealmId,
@@ -3592,6 +3689,9 @@ impl EmbeddedIdentityEngine {
             // Also clean up any lingering legacy key.
             let legacy_key = keys::encode_consent_key(user_id, client_id);
             let _ = self.storage.delete(realm_id, &legacy_key);
+            // The grant families issued under this consent are dead with it
+            // (audit 2026-08-28 §4.16#11).
+            self.revoke_grant_families_for_consent(realm_id, user_id, Some(client_id))?;
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -3616,6 +3716,9 @@ impl EmbeddedIdentityEngine {
             self.storage
                 .delete(realm_id, &legacy_key)
                 .map_err(Self::storage_err)?;
+            // The grant families issued under this consent are dead with it
+            // (audit 2026-08-28 §4.16#11).
+            self.revoke_grant_families_for_consent(realm_id, user_id, Some(client_id))?;
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -3649,6 +3752,9 @@ impl EmbeddedIdentityEngine {
                 .delete(realm_id, &entry.key)
                 .map_err(Self::storage_err)?;
         }
+        // Every grant family this user holds against any client was issued
+        // under one of the consents just deleted (audit 2026-08-28 §4.16#11).
+        self.revoke_grant_families_for_consent(realm_id, user_id, None)?;
         self.record_audit(
             realm_id,
             Some(&AuditContext {

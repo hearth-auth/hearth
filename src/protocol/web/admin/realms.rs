@@ -1383,17 +1383,20 @@ pub async fn admin_audit_export(
 ) -> Response {
     // A-30: emit a watermark audit event at the start of every audit export.
     let export_id = uuid::Uuid::new_v4().to_string();
-    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-        realm_id: target.id().clone(),
-        actor: session.user_id.as_uuid().to_string(),
-        action: crate::audit::AuditAction::RealmExportWatermarked,
-        resource_type: "export".to_string(),
-        resource_id: export_id.clone(),
-        metadata: Some(serde_json::json!({
-            "export_id": export_id,
-            "export_type": "audit",
-        })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &crate::audit::CreateAuditEvent {
+            realm_id: target.id().clone(),
+            actor: session.user_id.as_uuid().to_string(),
+            action: crate::audit::AuditAction::RealmExportWatermarked,
+            resource_type: "export".to_string(),
+            resource_id: export_id.clone(),
+            metadata: Some(serde_json::json!({
+                "export_id": export_id,
+                "export_type": "audit",
+            })),
+        },
+    );
 
     let action = params
         .action

@@ -37,19 +37,25 @@ pub fn registered_security_key_paths() -> impl Iterator<Item = &'static str> {
 pub use types::parse_duration_to_micros;
 pub use types::ClusterConfig;
 pub use types::{
+    AbuseProvidersYaml, AdaptiveBackoffYaml, BotSignalYaml, CidrPolicyYaml, CrossRealmAggCapYaml,
+    DistributedAttackDetectorYaml, EmailReputationProviderYaml, OutboundVolumeShieldYaml,
+    RiskScorerYaml, TarpitYaml,
+};
+pub use types::{
     AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
     CaptchaYaml, ClaimMappingYaml, ClaimsYamlConfig, CompactionSection, DemoConfig, EmailConfig,
     EmailTransport, FederationProviderYaml, FederationYamlConfig, GlobalRateLimitYaml,
-    GroupYamlConfig, IpRateLimitYaml, LinkModeYaml, MailgunConfig, MailgunRegion, MailtrapConfig,
-    MetricsConfig, MigrateConflictPolicy, ObservabilityConfig, OidcYamlConfig, OnboardingConfig,
-    OperationalConfig, OrgConfigYaml, OrganizationYamlConfig, OtlpConfig, OtlpProtocol,
-    PasswordPolicyYaml, PasswordSecurityYaml, PepperYaml, PermissionYamlConfig, PostmarkConfig,
-    ProtectedResourceYamlConfig, RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml,
-    RealmScimYaml, RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig,
-    SamlServiceProviderYaml, ScopeBundleYamlConfig, SecurityYaml, SeedUserYamlConfig,
-    SeedingYamlConfig, SendgridConfig, ServerConfig, SmsConfig, SmsTransport, SmtpConfig,
-    SmtpEncryption, SnsSmsConfig, StorageSection, TlsMinVersionYaml, TokenYamlConfig,
-    TurnstileYaml, TwilioConfig,
+    GroupYamlConfig, IpRateLimitYaml, IpReputationActionYaml, IpReputationYaml, LinkModeYaml,
+    MailgunConfig, MailgunRegion, MailtrapConfig, MetricsConfig, MigrateConflictPolicy,
+    ObservabilityConfig, OidcYamlConfig, OnboardingConfig, OperationalConfig, OrgConfigYaml,
+    OrganizationYamlConfig, OtlpConfig, OtlpProtocol, PasswordPolicyYaml, PasswordSecurityYaml,
+    PepperYaml, PermissionYamlConfig, PostmarkConfig, ProtectedResourceYamlConfig, RateLimitYaml,
+    RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmSecurityYaml,
+    RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig, SamlServiceProviderYaml,
+    ScopeBundleYamlConfig, SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig,
+    ServerConfig, SmsConfig, SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig,
+    StorageSection, TlsMinVersionYaml, TokenYamlConfig, TurnstileYaml, TwilioConfig,
 };
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{Config, ValidationIssue};
+pub use validate::deferred_server_warnings;

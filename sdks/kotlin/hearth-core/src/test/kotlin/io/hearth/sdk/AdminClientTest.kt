@@ -84,10 +84,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateUser PUTs to admin slash users slash id`() = runTest {
+    fun `updateUser PATCHes admin slash users slash id`() = runTest {
         server.enqueue(MockResponse().setBody(userJson()).setResponseCode(200))
         client.updateUser("u1", UpdateUserRequest(displayName = "Alice Updated"))
-        assertEquals("/admin/users/u1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/users/u1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -119,13 +121,6 @@ class AdminClientTest {
     fun `getRealm GETs admin slash realms slash id`() = runTest {
         server.enqueue(MockResponse().setBody(realmJson()).setResponseCode(200))
         client.getRealm("r1")
-        assertEquals("/admin/realms/r1", server.takeRequest().path)
-    }
-
-    @Test
-    fun `updateRealm PUTs to admin slash realms slash id`() = runTest {
-        server.enqueue(MockResponse().setBody(realmJson()).setResponseCode(200))
-        client.updateRealm("r1", UpdateRealmRequest(name = "Updated"))
         assertEquals("/admin/realms/r1", server.takeRequest().path)
     }
 
@@ -166,10 +161,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateClient PUTs to admin slash clients slash id`() = runTest {
+    fun `updateClient PATCHes admin slash applications slash id`() = runTest {
         server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(200))
         client.updateClient("c1", UpdateClientRequest(clientName = "Updated App"))
-        assertEquals("/admin/clients/c1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/applications/c1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -209,10 +206,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateRole PUTs to admin slash roles slash id`() = runTest {
+    fun `updateRole PATCHes admin slash roles slash id`() = runTest {
         server.enqueue(MockResponse().setBody(roleJson()).setResponseCode(200))
         client.updateRole("role-1", UpdateRoleRequest(description = "Updated"))
-        assertEquals("/admin/roles/role-1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/roles/role-1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -252,10 +251,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateGroup PUTs to admin slash groups slash id`() = runTest {
+    fun `updateGroup PATCHes admin slash groups slash id`() = runTest {
         server.enqueue(MockResponse().setBody(groupJson()).setResponseCode(200))
         client.updateGroup("grp-1", UpdateGroupRequest(description = "Updated"))
-        assertEquals("/admin/groups/grp-1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/groups/grp-1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test

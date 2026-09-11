@@ -42,6 +42,19 @@ class HearthAuthentication(
 
     /** Returns the raw bearer token string as the credential. */
     override fun getCredentials(): String = rawToken
+
+    /**
+     * Returns the JWT subject as the authenticated name.
+     *
+     * This override is load-bearing, not cosmetic. `AbstractAuthenticationToken.getName()`
+     * resolves the name by asking the principal: when the principal is a
+     * `java.security.Principal` it returns `principal.getName()`. [getPrincipal]
+     * returns `this`, and an `Authentication` *is* a `Principal`, so the inherited
+     * implementation calls itself until the stack overflows. Anything that asks a
+     * Spring Security authentication for its name — access decisions, audit logging,
+     * `@PreAuthorize` — hit that (audit 2026-08-28 §25.8).
+     */
+    override fun getName(): String = claims.subject()
 }
 
 private fun buildAuthorities(claims: Claims) =

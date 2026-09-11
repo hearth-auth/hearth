@@ -309,7 +309,15 @@ impl TestHarness {
         let base_url = format!("http://{addr}");
 
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router).await.ok();
+            // Production installs `ConnectInfo` on both accept loops. The
+            // dev-endpoint loopback guard (task 20.1) fails CLOSED without it,
+            // so a harness that omits it answers 404 on `/admin/bootstrap`.
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .ok();
         });
 
         Ok(Self {
@@ -373,7 +381,15 @@ impl TestHarness {
         let base_url = format!("http://{addr}");
 
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router).await.ok();
+            // Production installs `ConnectInfo` on both accept loops. The
+            // dev-endpoint loopback guard (task 20.1) fails CLOSED without it,
+            // so a harness that omits it answers 404 on `/admin/bootstrap`.
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .ok();
         });
 
         Ok(Self {
@@ -438,7 +454,15 @@ impl TestHarness {
         let base_url = format!("http://{addr}");
 
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router).await.ok();
+            // Production installs `ConnectInfo` on both accept loops. The
+            // dev-endpoint loopback guard (task 20.1) fails CLOSED without it,
+            // so a harness that omits it answers 404 on `/admin/bootstrap`.
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .ok();
         });
 
         Ok(Self {

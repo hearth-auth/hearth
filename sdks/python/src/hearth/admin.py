@@ -10,7 +10,6 @@ from .types import (
     CreateUserRequest,
     UpdateUserRequest,
     Realm,
-    UpdateRealmRequest,
     PageResponse,
     OAuthClient,
     CreateClientRequest,
@@ -85,7 +84,7 @@ class AdminClient:
 
     def update_user(self, user_id: str, req: UpdateUserRequest) -> User:
         """Update an existing user."""
-        resp = self._http.put(
+        resp = self._http.patch(
             f"{self._base}/admin/users/{user_id}",
             json=req.model_dump(exclude_none=True),
         )
@@ -104,8 +103,10 @@ class AdminClient:
     # ------------------------------------------------------------------
 
     # Realms are provisioned via hearth.yaml, not the admin API. There is no
-    # ``create_realm`` method: the server returns 405 for POST /admin/realms
-    # (HEA-2171). Only read paths are exposed.
+    # ``create_realm`` and no ``update_realm`` method: the server returns 405
+    # with "Realms are managed via hearth.yaml" for both POST /admin/realms and
+    # PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+    # paths and deletion are exposed.
 
     def list_realms(self) -> List[Realm]:
         """List all realms."""
@@ -118,16 +119,6 @@ class AdminClient:
     def get_realm(self, realm_id: str) -> Realm:
         """Get a realm by ID."""
         resp = self._http.get(f"{self._base}/admin/realms/{realm_id}")
-        if resp.status_code != 200:
-            raise HearthError(resp.status_code, resp.text)
-        return Realm(**resp.json())
-
-    def update_realm(self, realm_id: str, req: UpdateRealmRequest) -> Realm:
-        """Update an existing realm."""
-        resp = self._http.put(
-            f"{self._base}/admin/realms/{realm_id}",
-            json=req.model_dump(exclude_none=True),
-        )
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
         return Realm(**resp.json())
@@ -173,8 +164,8 @@ class AdminClient:
 
     def update_client(self, client_id: str, req: UpdateClientRequest) -> OAuthClient:
         """Update an existing OAuth client."""
-        resp = self._http.put(
-            f"{self._base}/admin/clients/{client_id}",
+        resp = self._http.patch(
+            f"{self._base}/admin/applications/{client_id}",
             json=req.model_dump(exclude_none=True),
         )
         if resp.status_code != 200:
@@ -222,7 +213,7 @@ class AdminClient:
 
     def update_role(self, role_id: str, req: UpdateRoleRequest) -> Role:
         """Update an existing role."""
-        resp = self._http.put(
+        resp = self._http.patch(
             f"{self._base}/admin/roles/{role_id}",
             json=req.model_dump(exclude_none=True),
         )
@@ -271,7 +262,7 @@ class AdminClient:
 
     def update_group(self, group_id: str, req: UpdateGroupRequest) -> Group:
         """Update an existing group."""
-        resp = self._http.put(
+        resp = self._http.patch(
             f"{self._base}/admin/groups/{group_id}",
             json=req.model_dump(exclude_none=True),
         )

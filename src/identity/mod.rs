@@ -71,8 +71,9 @@ pub mod keys_test_helpers {
 }
 
 pub use credentials::{
-    hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,
-    PepperKey, StoredCredential,
+    hash_password, validate_argon2_cost, verify_password_with_pepper, CleartextPassword,
+    CredentialConfig, PepperConfig, PepperKey, StoredCredential, OWASP_ARGON2_MIN_MEMORY_KIB_T1,
+    OWASP_ARGON2_MIN_MEMORY_KIB_T2,
 };
 pub use email::{
     ApiKey, EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
@@ -115,18 +116,18 @@ pub use tokens::{
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, ApprovalWebhookConfig, AttributeDefinition,
-    AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, ConsentDecision,
-    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
-    CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
-    DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
-    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
-    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session,
-    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
-    WebAuthnAttestationPolicy, Webhook,
+    AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, CidrPolicy,
+    ConsentDecision, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
+    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
+    CredentialExport, DcrPolicy, DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest,
+    ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization,
+    OrganizationConfig, OrganizationInvitation, OrganizationMembership, OrganizationRole,
+    OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig,
+    PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
+    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
+    UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -657,6 +658,14 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// The refresh token's session must still be valid. The session's TTL
     /// is also refreshed. Returns a new token pair with updated expiration.
+    ///
+    /// Rotation is mandatory and has no fallback. The presented token must
+    /// carry an `fid` naming a live grant family whose current hash it matches;
+    /// a stale hash is treated as theft and revokes the family and its session,
+    /// and a token carrying no `fid` at all is refused rather than served by a
+    /// weaker path (audit 2026-08-28 §4.16#6). A family revoked by logout,
+    /// `revoke_token`, client deletion or consent revocation fails here with
+    /// [`IdentityError::TokenRevoked`].
     ///
     /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
     /// the current request (RFC 9449). FAPI 2.0 clients require it; the

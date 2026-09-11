@@ -4,6 +4,47 @@ This document records the security contract for implemented abuse-prevention
 features. See `docs/plans/HEA-1114-abuse-prevention.md` for the full
 phase-by-phase threat model.
 
+## What "Shipped" means here
+
+**Shipped** means the guard exists, is constructed from `hearth.yaml` at
+start-up, and is consulted on a production request path.
+
+That was not always true. The 2026-08-28 audit (§4.17 finding 9) found eight of
+these guards had no constructor anywhere except their own `#[cfg(test)]` block,
+and that the config keys documented below had no field to deserialize into —
+`security:` denies unknown fields, so pasting a documented block made the server
+refuse to boot. Both halves are fixed: the keys parse, `AbuseGuards`
+(`src/abuse/runtime.rs`) builds every guard from them at start-up, and
+`src/config/security_keys.rs` fails start-up if a `security.*` key is ever added
+again without naming the module that reads it.
+
+**Every guard is off by default.** A guard with `enabled: false` (or an absent
+threshold) is constructed in its own no-op form rather than skipped, so the
+call sites have no conditional branches and the §6.1 fail-open posture is a
+property of one constructor rather than of every caller. Upgrading changes no
+behaviour until an operator opts in.
+
+Where a guard is consulted:
+
+| Guard | Production call site |
+|-------|----------------------|
+| A-3 distributed-attack detector | login form, pre-gate |
+| A-9 tenant CIDR policy | login form, pre-gate |
+| A-16 CAPTCHA challenge state | login form, pre-gate |
+| A-17 login tarpit | login form, pre-gate (awaited, never slept on) |
+| P-2 IP reputation | login form, pre-gate |
+| P-3 bot signal | login form, pre-gate |
+| P-5 email reputation | `POST /ui/register` |
+| A-4 outbound volume shield | self-service verification and password-reset sends |
+| A-50 cross-realm aggregation cap | self-service verification and password-reset sends |
+| A-11 / P-4 risk scorer | refresh-token context-drift check (A-49) |
+| A-12 adaptive backoff | `POST /ui/device` approval guard |
+
+"Pre-gate" means before a permit is taken from the Argon2 admission gate, for
+the same reason the per-IP rate limit runs there: rejected traffic must not
+consume hashing capacity. Every refusal renders the one generic sign-in failure
+page, so none of these guards is an account-enumeration oracle.
+
 ---
 
 ## P-1 — `CaptchaProvider`: Cloudflare Turnstile Reference Adapter
@@ -483,7 +524,7 @@ Both fields default to `None` at grant-family creation; they are recorded on
 the **first refresh exchange** (lazy binding) so that clients that never
 refresh do not carry stale context.
 
-**Context detection** (`engine/mod.rs:2024-2071`):
+**Context detection** (`engine/mod.rs`, `rotate_grant_family`):
 
 1. `callback_impl` in `http.rs` extracts the `User-Agent` header and wraps it
    in a `RefreshBindContext { user_agent, asn }`.

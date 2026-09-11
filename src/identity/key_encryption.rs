@@ -135,8 +135,10 @@ pub(crate) fn is_enveloped(bytes: &[u8]) -> bool {
 /// corruption or a downgrade, where an attacker with write access to storage
 /// strips the envelope and substitutes key material of their own choosing.
 ///
-/// Signing-key read paths use this after the store has been marked
-/// KEK-enrolled (audit 2026-08-28 §4.15#7).
+/// Every key-material read path uses this after the store has been marked
+/// KEK-enrolled (audit 2026-08-28 §4.15#7): the Ed25519 signing keys, the
+/// per-realm SAML signing keys, the DPoP nonce secrets and the MFA at-rest
+/// DEK (§25.9).
 ///
 /// # Errors
 ///
@@ -148,7 +150,7 @@ pub(crate) fn unwrap_key_strict(
 ) -> Result<Zeroizing<Vec<u8>>, IdentityError> {
     if kek.is_some() && !is_enveloped(bytes) {
         return Err(IdentityError::SigningError {
-            reason: "signing key is not HKEY-enveloped on a deployment with \
+            reason: "key material is not HKEY-enveloped on a deployment with \
                      key_encryption_key configured; refusing to use it"
                 .into(),
         });

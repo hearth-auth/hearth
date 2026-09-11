@@ -218,7 +218,57 @@ impl Default for CredentialConfig {
     }
 }
 
+/// OWASP-recommended Argon2id memory cost, in KiB, for the two-iteration
+/// parameter set (`m=19456, t=2, p=1`).
+pub const OWASP_ARGON2_MIN_MEMORY_KIB_T2: u32 = 19_456;
+
+/// OWASP-recommended Argon2id memory cost, in KiB, for the one-iteration
+/// parameter set (`m=47104, t=1, p=1`).
+pub const OWASP_ARGON2_MIN_MEMORY_KIB_T1: u32 = 47_104;
+
+/// Checks an Argon2id `(memory_cost_kib, time_cost)` pair against the OWASP
+/// Password Storage Cheat Sheet floor.
+///
+/// The cheat sheet publishes two equivalent-strength parameter sets:
+/// `m=19456 KiB, t=2, p=1` and `m=47104 KiB, t=1, p=1`. A pair is accepted
+/// when it is at least as strong as one of them; `t=0` is never accepted.
+///
+/// Returns the operator-facing refusal reason on failure. Callers at a
+/// configuration boundary (`hearth.yaml` parsing, the realm create/update
+/// API) refuse rather than clamp: silently raising a cost an operator
+/// deliberately set would change login latency without telling anyone, and
+/// silently lowering it is the defect this guards against.
+///
+/// # Errors
+///
+/// Returns `Err` with a human-readable reason when the pair is weaker than
+/// both published parameter sets.
+pub fn validate_argon2_cost(memory_cost_kib: u32, time_cost: u32) -> Result<(), String> {
+    let ok = (time_cost >= 2 && memory_cost_kib >= OWASP_ARGON2_MIN_MEMORY_KIB_T2)
+        || (time_cost >= 1 && memory_cost_kib >= OWASP_ARGON2_MIN_MEMORY_KIB_T1);
+    if ok {
+        return Ok(());
+    }
+    Err(format!(
+        "Argon2id cost (memory_cost {memory_cost_kib} KiB, time_cost {time_cost}) is below the \
+         OWASP Password Storage Cheat Sheet floor. Use at least \
+         {OWASP_ARGON2_MIN_MEMORY_KIB_T2} KiB with time_cost 2, or \
+         {OWASP_ARGON2_MIN_MEMORY_KIB_T1} KiB with time_cost 1. Weaker parameters make \
+         offline cracking of a stolen credential store materially cheaper."
+    ))
+}
+
 impl CredentialConfig {
+    /// Returns `true` when these parameters meet the OWASP Argon2id floor.
+    ///
+    /// [`CredentialConfig::fast_for_testing`] deliberately does not, which is
+    /// how the engine recognises a test/dev configuration and declines to
+    /// enforce the per-realm floor on it.
+    #[must_use]
+    pub fn meets_owasp_floor(&self) -> bool {
+        validate_argon2_cost(self.memory_cost_kib, self.time_cost).is_ok()
+    }
+
     /// Returns a fast configuration suitable for tests.
     ///
     /// Uses minimal parameters to keep test execution fast while still
@@ -600,6 +650,59 @@ mod tests {
 
     fn test_config() -> CredentialConfig {
         CredentialConfig::fast_for_testing()
+    }
+
+    // ===== 19.11: OWASP Argon2id cost floor =====
+
+    #[test]
+    fn owasp_floor_accepts_both_published_parameter_sets() {
+        // OWASP Password Storage Cheat Sheet, Argon2id: m=19456 KiB / t=2 / p=1,
+        // or m=47104 KiB / t=1 / p=1.
+        assert!(validate_argon2_cost(19_456, 2).is_ok());
+        assert!(validate_argon2_cost(47_104, 1).is_ok());
+        // Anything stronger than a published set is fine too.
+        assert!(validate_argon2_cost(65_536, 3).is_ok());
+    }
+
+    #[test]
+    fn owasp_floor_rejects_costs_below_the_published_sets() {
+        for (m, t) in [
+            (19_455_u32, 2_u32), // one KiB under the t=2 set
+            (256, 1),            // fast_for_testing values, arbitrary-low case
+            (47_103, 1),         // one KiB under the t=1 set
+            (1_024, 3),          // high iterations cannot buy back memory
+            (65_536, 0),         // zero iterations is never acceptable
+        ] {
+            let err = validate_argon2_cost(m, t)
+                .expect_err(&format!("m={m} t={t} must be refused by the OWASP floor"));
+            assert!(
+                err.contains("OWASP"),
+                "refusal must name the standard it enforces, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_production_default_credential_config_clears_the_floor() {
+        let d = CredentialConfig::default();
+        assert!(
+            validate_argon2_cost(d.memory_cost_kib, d.time_cost).is_ok(),
+            "the shipped production default must not be refused by its own floor"
+        );
+    }
+
+    #[test]
+    fn fast_for_testing_is_below_the_floor_and_reports_it() {
+        let t = CredentialConfig::fast_for_testing();
+        assert!(
+            validate_argon2_cost(t.memory_cost_kib, t.time_cost).is_err(),
+            "fast_for_testing is deliberately below the floor; the check must see that"
+        );
+        assert!(
+            !t.meets_owasp_floor(),
+            "meets_owasp_floor must agree with validate_argon2_cost"
+        );
+        assert!(CredentialConfig::default().meets_owasp_floor());
     }
 
     // ===== CleartextPassword =====

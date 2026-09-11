@@ -871,12 +871,13 @@ fn reconcile_declared_realms(
             continue;
         }
 
-        let realm_config = yaml_cfg
+        let mut realm_config = yaml_cfg
             .to_realm_config(&config.auth, config.email.branding.as_ref())
             .map_err(|errors| IdentityError::ConfigInvalid {
                 realm_name: name.clone(),
                 errors,
             })?;
+        apply_global_security_defaults(&mut realm_config, config);
 
         let realm_id = match engine.get_realm_by_name(name)? {
             None => {
@@ -982,8 +983,26 @@ fn reconcile_declared_realms(
 /// Uses a default (empty) `RealmYamlConfig`, so validation always succeeds.
 fn default_realm_config(auth: &AuthConfig, config: &Config) -> RealmConfig {
     let yaml = RealmYamlConfig::default();
-    yaml.to_realm_config(auth, config.email.branding.as_ref())
-        .expect("default RealmYamlConfig must always pass validation")
+    let mut cfg = yaml
+        .to_realm_config(auth, config.email.branding.as_ref())
+        .expect("default RealmYamlConfig must always pass validation");
+    apply_global_security_defaults(&mut cfg, config);
+    cfg
+}
+
+/// Folds global `security:` settings that have no per-realm YAML key into a
+/// freshly built [`RealmConfig`].
+///
+/// `RealmYamlConfig::to_realm_config` is handed the `auth:` defaults but not
+/// the `security:` ones, so `risk_scorer_config` was hard-coded to `None` and
+/// the A-49 refresh-context check ran against `RiskScorerConfig::default()` —
+/// permanently disabled, whatever `security.risk_scorer` said (audit §4.17#9,
+/// task 20.13). This is the one place realm records are written from config,
+/// so it is the one place the fold belongs.
+fn apply_global_security_defaults(realm_config: &mut RealmConfig, config: &Config) {
+    if realm_config.risk_scorer_config.is_none() {
+        realm_config.risk_scorer_config = Some(config.security.risk_scorer.to_domain());
+    }
 }
 
 /// UUID v5 namespace for deterministic application client IDs.

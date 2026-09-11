@@ -149,6 +149,11 @@ pub struct Realm {
     pub created_at: Option<String>,
 }
 
+/// Realm mutation payload.
+///
+/// Retained for callers that model a realm patch locally; there is no client
+/// method that sends it. Realms are provisioned from `hearth.yaml` and the
+/// server answers 405 to `PATCH /admin/realms/{id}` (audit 2026-08-28 §25.4).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateRealmRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

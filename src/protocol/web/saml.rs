@@ -214,14 +214,17 @@ pub async fn sp_acs(
                 &assertion.id,
                 sentinel_expiry_secs,
             ) {
-                let _ = state.audit.append(&CreateAuditEvent {
-                    realm_id: realm.clone(),
-                    actor: "system".to_string(),
-                    action: AuditAction::SamlLoginFailed,
-                    resource_type: "saml".to_string(),
-                    resource_id: assertion.id.clone(),
-                    metadata: Some(serde_json::json!({ "reason": "replay" })),
-                });
+                crate::protocol::audit_log::record(
+                    state.audit.as_ref(),
+                    &CreateAuditEvent {
+                        realm_id: realm.clone(),
+                        actor: "system".to_string(),
+                        action: AuditAction::SamlLoginFailed,
+                        resource_type: "saml".to_string(),
+                        resource_id: assertion.id.clone(),
+                        metadata: Some(serde_json::json!({ "reason": "replay" })),
+                    },
+                );
                 return (StatusCode::BAD_REQUEST, "replay detected").into_response();
             }
 
@@ -255,14 +258,17 @@ pub async fn sp_acs(
                 Ok(o) => o,
                 Err(e) => {
                     tracing::warn!(error = %e, "SAML identity resolution failed");
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: realm.clone(),
-                        actor: "system".to_string(),
-                        action: AuditAction::SamlLoginFailed,
-                        resource_type: "saml".to_string(),
-                        resource_id: assertion.id.clone(),
-                        metadata: Some(serde_json::json!({ "reason": "link" })),
-                    });
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: realm.clone(),
+                            actor: "system".to_string(),
+                            action: AuditAction::SamlLoginFailed,
+                            resource_type: "saml".to_string(),
+                            resource_id: assertion.id.clone(),
+                            metadata: Some(serde_json::json!({ "reason": "link" })),
+                        },
+                    );
                     return (StatusCode::INTERNAL_SERVER_ERROR, "SAML login failed")
                         .into_response();
                 }
@@ -284,28 +290,34 @@ pub async fn sp_acs(
             // redirect without one — real progress, but not a completed
             // login, and the audit log must not say otherwise.
             if issued_session_cookie(&response) {
-                let _ = state.audit.append(&CreateAuditEvent {
-                    realm_id: realm.clone(),
-                    actor: external_sub,
-                    action: AuditAction::SamlLoginCompleted,
-                    resource_type: "saml".to_string(),
-                    resource_id: assertion.id.clone(),
-                    metadata: Some(serde_json::json!({ "idp": idp_cfg.name })),
-                });
+                crate::protocol::audit_log::record(
+                    state.audit.as_ref(),
+                    &CreateAuditEvent {
+                        realm_id: realm.clone(),
+                        actor: external_sub,
+                        action: AuditAction::SamlLoginCompleted,
+                        resource_type: "saml".to_string(),
+                        resource_id: assertion.id.clone(),
+                        metadata: Some(serde_json::json!({ "idp": idp_cfg.name })),
+                    },
+                );
             } else if response.status().is_redirection() {
                 tracing::info!(
                     assertion_id = %assertion.id,
                     "SAML assertion accepted; login pending a further step"
                 );
             } else {
-                let _ = state.audit.append(&CreateAuditEvent {
-                    realm_id: realm.clone(),
-                    actor: "system".to_string(),
-                    action: AuditAction::SamlLoginFailed,
-                    resource_type: "saml".to_string(),
-                    resource_id: assertion.id.clone(),
-                    metadata: Some(serde_json::json!({ "reason": "session" })),
-                });
+                crate::protocol::audit_log::record(
+                    state.audit.as_ref(),
+                    &CreateAuditEvent {
+                        realm_id: realm.clone(),
+                        actor: "system".to_string(),
+                        action: AuditAction::SamlLoginFailed,
+                        resource_type: "saml".to_string(),
+                        resource_id: assertion.id.clone(),
+                        metadata: Some(serde_json::json!({ "reason": "session" })),
+                    },
+                );
             }
             response
         }
@@ -315,14 +327,17 @@ pub async fn sp_acs(
                 _ => "parse",
             };
             tracing::warn!(%reason, error = %error, "SAML response rejected");
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm.clone(),
-                actor: "system".to_string(),
-                action: AuditAction::SamlLoginFailed,
-                resource_type: "saml".to_string(),
-                resource_id: String::new(),
-                metadata: Some(serde_json::json!({ "reason": reason })),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm.clone(),
+                    actor: "system".to_string(),
+                    action: AuditAction::SamlLoginFailed,
+                    resource_type: "saml".to_string(),
+                    resource_id: String::new(),
+                    metadata: Some(serde_json::json!({ "reason": reason })),
+                },
+            );
             (StatusCode::BAD_REQUEST, "SAML response rejected").into_response()
         }
     }
@@ -404,14 +419,17 @@ pub async fn sp_begin(
         Err(_) => return (StatusCode::BAD_REQUEST, "redirect build failed").into_response(),
     };
 
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: "anonymous".to_string(),
-        action: AuditAction::SamlLoginInitiated,
-        resource_type: "saml".to_string(),
-        resource_id: req_id,
-        metadata: Some(serde_json::json!({ "idp": idp_cfg.name })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: "anonymous".to_string(),
+            action: AuditAction::SamlLoginInitiated,
+            resource_type: "saml".to_string(),
+            resource_id: req_id,
+            metadata: Some(serde_json::json!({ "idp": idp_cfg.name })),
+        },
+    );
 
     Redirect::to(&url).into_response()
 }
@@ -580,14 +598,17 @@ async fn idp_complete_sso(
     }
 
     // Audit receipt.
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: "system".to_string(),
-        action: AuditAction::SamlIdpAuthnRequestReceived,
-        resource_type: "saml".to_string(),
-        resource_id: req.id.clone(),
-        metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::SamlIdpAuthnRequestReceived,
+            resource_type: "saml".to_string(),
+            resource_id: req.id.clone(),
+            metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
+        },
+    );
 
     // S1 (HEA-1751): this endpoint is a SAML *signing oracle* — it mints a
     // signed assertion for a registered SP. It MUST be gated on a live,
@@ -635,14 +656,17 @@ async fn idp_complete_sso(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response(),
     };
 
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: "system".to_string(),
-        action: AuditAction::SamlIdpResponseIssued,
-        resource_type: "saml".to_string(),
-        resource_id: response_id,
-        metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::SamlIdpResponseIssued,
+            resource_type: "saml".to_string(),
+            resource_id: response_id,
+            metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
+        },
+    );
 
     let html = build_post_form_html(
         &sp.acs_url,
@@ -719,14 +743,17 @@ pub async fn idp_sso_init(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response(),
     };
 
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: session.user_id.as_uuid().to_string(),
-        action: AuditAction::SamlIdpInitiatedSso,
-        resource_type: "saml".to_string(),
-        resource_id: response_id,
-        metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: session.user_id.as_uuid().to_string(),
+            action: AuditAction::SamlIdpInitiatedSso,
+            resource_type: "saml".to_string(),
+            resource_id: response_id,
+            metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
+        },
+    );
 
     let html = build_post_form_html(&sp.acs_url, "SAMLResponse", &signed_xml, None);
     Html(html).into_response()
@@ -827,14 +854,17 @@ async fn idp_complete_slo(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "no signing key").into_response(),
     };
 
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: "system".to_string(),
-        action: AuditAction::SamlSloRequested,
-        resource_type: "saml".to_string(),
-        resource_id: req.id.clone(),
-        metadata: Some(serde_json::json!({ "sp": sp.sp_key, "name_id": req.name_id })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::SamlSloRequested,
+            resource_type: "saml".to_string(),
+            resource_id: req.id.clone(),
+            metadata: Some(serde_json::json!({ "sp": sp.sp_key, "name_id": req.name_id })),
+        },
+    );
 
     let response_id = format!("_h{}", uuid::Uuid::new_v4().simple());
     let response_xml = build_logout_response_xml(&BuildLogoutResponseParams {
@@ -850,14 +880,17 @@ async fn idp_complete_slo(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "sign failed").into_response(),
     };
 
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: "system".to_string(),
-        action: AuditAction::SamlSloCompleted,
-        resource_type: "saml".to_string(),
-        resource_id: response_id,
-        metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::SamlSloCompleted,
+            resource_type: "saml".to_string(),
+            resource_id: response_id,
+            metadata: Some(serde_json::json!({ "sp": sp.sp_key })),
+        },
+    );
 
     let html = build_post_form_html(&slo_url, "SAMLResponse", &signed, relay_state.as_deref());
     Html(html).into_response()

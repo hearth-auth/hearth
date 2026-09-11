@@ -98,6 +98,11 @@ COPY hearth.example.yaml ./
 # BUILD_VERSION=<git tag>; a non-release value (the `dev` default, `pr-N`)
 # deliberately leaves HEARTH_RELEASE_VERSION unset, and build.rs warns loudly.
 ARG BUILD_VERSION=dev
+# `--no-default-features` drops the `dev-endpoints` feature, so `/admin/bootstrap`,
+# the `/dev/seed-*` family and the hard-coded `admin@hearth.test` password are not
+# compiled into the shipped binary at all (audit §4.7#2, task 20.1). The runtime
+# `dev_mode` check and the per-request loopback guard remain as defence in depth
+# for anyone who builds with default features.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
@@ -107,7 +112,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         *)       echo "BUILD_VERSION='$BUILD_VERSION' is not a release version;" \
                       "the binary will report the Cargo.toml fallback" ;; \
     esac \
-    && cargo build --release --bin hearth \
+    && cargo build --release --no-default-features --bin hearth \
     && strip target/release/hearth \
     && cp target/release/hearth /tmp/hearth
 

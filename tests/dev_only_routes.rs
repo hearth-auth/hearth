@@ -96,13 +96,7 @@ async fn bootstrap_route_present_in_dev_mode() {
     let app = dev_app(&harness).await;
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/bootstrap")
-                .body(Body::empty())
-                .expect("build request"),
-        )
+        .oneshot(loopback_bootstrap_request())
         .await
         .expect("request");
 
@@ -111,4 +105,24 @@ async fn bootstrap_route_present_in_dev_mode() {
         StatusCode::OK,
         "bootstrap route must be reachable in dev mode"
     );
+}
+
+/// Builds a bootstrap request that carries a loopback `ConnectInfo`.
+///
+/// The dev-only routes are loopback-gated (audit §4.7#2, task 20.1) and the
+/// guard reads the socket peer straight out of `ConnectInfo`, treating its
+/// absence as remote — `tower::oneshot` installs none. Every real serve path
+/// sets it, so a test that drives the router directly has to supply it.
+fn loopback_bootstrap_request() -> Request<Body> {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/bootstrap")
+        .body(Body::empty())
+        .expect("build request");
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            51234,
+        ))));
+    req
 }

@@ -2848,3 +2848,101 @@ async fn tenant_admin_cannot_author_a_system_source_policy_on_the_admin_route() 
         "the 25.11 system-source rule must hold on the admin route too"
     );
 }
+
+// ── 20.1: dev/test endpoints are loopback-only on every serve path ──────────
+
+/// Builds a `oneshot` request carrying an explicit peer address, so the
+/// loopback guard sees a real `ConnectInfo` rather than falling back.
+fn request_from_peer(
+    method: &str,
+    uri: &str,
+    peer: std::net::SocketAddr,
+) -> axum::http::Request<axum::body::Body> {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::empty())
+        .expect("request");
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    req
+}
+
+/// The dev-only endpoints are kept out of production by a runtime boolean
+/// alone. On the embedded path — a library consumer that builds the router and
+/// serves it themselves — nothing constrains the bind address, so `dev_mode`
+/// on a public listener publishes `/admin/bootstrap` and the `/dev/seed-*`
+/// family to the internet (audit §4.7#2).
+#[tokio::test]
+async fn dev_endpoints_refuse_a_non_loopback_peer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(dir.path());
+    let public: std::net::SocketAddr = "203.0.113.7:51234".parse().expect("addr");
+
+    for (method, uri) in [
+        ("POST", "/admin/bootstrap"),
+        ("GET", "/dev/probe-user?realm_id=x&email=y"),
+        ("POST", "/dev/seed-session"),
+        ("POST", "/dev/seed-token"),
+        ("POST", "/dev/seed-password"),
+    ] {
+        let resp = router(Arc::clone(&state))
+            .oneshot(request_from_peer(method, uri, public))
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must be unreachable from a non-loopback peer"
+        );
+    }
+}
+
+/// The same endpoints stay reachable from loopback, which is the only place
+/// `make dev` and the Playwright suite ever call them from.
+#[tokio::test]
+async fn dev_endpoints_remain_reachable_from_loopback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(dir.path());
+    let local: std::net::SocketAddr = "127.0.0.1:51234".parse().expect("addr");
+
+    let resp = router(state)
+        .oneshot(request_from_peer("POST", "/admin/bootstrap", local))
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "bootstrap from loopback must still work — `make dev` depends on it"
+    );
+}
+
+/// IPv6 loopback is loopback.
+#[tokio::test]
+async fn dev_endpoints_accept_ipv6_loopback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(dir.path());
+    let local: std::net::SocketAddr = "[::1]:51234".parse().expect("addr");
+
+    let resp = router(state)
+        .oneshot(request_from_peer("POST", "/admin/bootstrap", local))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// An IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) is what a dual-stack
+/// listener reports for a local IPv4 client. Treating it as remote would break
+/// `make dev` on a `::`-bound server.
+#[tokio::test]
+async fn dev_endpoints_accept_ipv4_mapped_loopback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(dir.path());
+    let local: std::net::SocketAddr = "[::ffff:127.0.0.1]:51234".parse().expect("addr");
+
+    let resp = router(state)
+        .oneshot(request_from_peer("POST", "/admin/bootstrap", local))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+}

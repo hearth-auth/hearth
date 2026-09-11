@@ -666,6 +666,17 @@ fn inject_enroll_email_otp_if_needed(
     }
 }
 
+/// Whether a realm-level passkey requirement is unmet for this user.
+///
+/// Split out from [`inject_enroll_mfa_if_needed`] so the rule is testable
+/// without a live `WebState`. A TOTP secret deliberately does **not** satisfy
+/// `webauthn_required`: the key names a passkey, and an operator who sets it
+/// after a phishing incident is asking for a phishing-resistant factor
+/// specifically (audit §4.18#9).
+const fn enroll_mfa_needed(realm_requires_passkey: bool, has_passkeys: bool) -> bool {
+    realm_requires_passkey && !has_passkeys
+}
+
 /// Dynamically injects `ENROLL_MFA` when a client-level or role-level MFA
 /// requirement is in effect and the user has no enrolled MFA factor.
 ///
@@ -691,6 +702,24 @@ fn inject_enroll_mfa_if_needed(
         .list_webauthn_credentials(realm, user_id)
         .unwrap_or_default()
         .is_empty();
+
+    // §4.18#9: `realms.<name>.auth.webauthn_required` was dead code — the
+    // field existed on `RealmConfig`, was hard-coded to `None` by
+    // `to_realm_config`, and nothing read it. It is a *passkey* requirement,
+    // so TOTP does not satisfy it and it must be evaluated before the
+    // "any factor will do" short-circuit below.
+    let realm_requires_passkey = state
+        .identity
+        .get_realm(realm)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().webauthn_required)
+        .unwrap_or(false);
+    if enroll_mfa_needed(realm_requires_passkey, has_passkeys) {
+        actions.push(RequiredAction::EnrollMfa);
+        return;
+    }
+
     if has_totp || has_passkeys {
         return;
     }
@@ -2343,6 +2372,32 @@ mod tests {
             }
         }
         out
+    }
+
+    // ===== realms.<name>.auth.webauthn_required (audit §4.18#9) =====
+
+    /// A realm that requires a passkey must intercept a user who has none.
+    #[test]
+    fn webauthn_required_realm_injects_enroll_mfa_when_no_passkey() {
+        assert!(
+            enroll_mfa_needed(true, false),
+            "webauthn_required with no registered passkey must force enrolment"
+        );
+    }
+
+    /// Once the passkey exists the requirement is satisfied and the user is
+    /// not intercepted again.
+    #[test]
+    fn webauthn_required_realm_is_satisfied_by_a_passkey() {
+        assert!(!enroll_mfa_needed(true, true));
+    }
+
+    /// A realm that does not set the key keeps the previous behaviour: the
+    /// client-level and role-level rules below decide, not this one.
+    #[test]
+    fn webauthn_not_required_never_forces_enrolment_on_its_own() {
+        assert!(!enroll_mfa_needed(false, false));
+        assert!(!enroll_mfa_needed(false, true));
     }
 
     #[test]

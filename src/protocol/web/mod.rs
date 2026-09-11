@@ -209,6 +209,12 @@ pub struct WebState {
     /// the CSRF bypass must call `.with_dev_mode(true)` explicitly.
     /// Production startup calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
     pub dev_mode: bool,
+    /// Abuse-prevention guards (A-3, A-4, A-9, A-16, A-17, A-50, P-2, P-3, P-5).
+    ///
+    /// Built once at start-up from the `security:` block. Every guard is
+    /// fail-open until an operator enables it, so the default — `disabled()`
+    /// — reproduces the behaviour these surfaces had before task 20.13.
+    pub abuse_guards: Arc<crate::abuse::runtime::AbuseGuards>,
     /// Brute-force guard for `POST /ui/device` (task 22.26, audit §4.25#4).
     ///
     /// Bounds both the rate and the total number of user-code guesses an
@@ -297,6 +303,7 @@ impl WebState {
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
             dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
+            abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
             device_approval_guard: Arc::new(
                 crate::abuse::device_approval::DeviceApprovalGuard::new(),
             ),
@@ -521,6 +528,16 @@ impl WebState {
         provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
     ) -> Self {
         self.captcha_provider = provider;
+        self
+    }
+
+    /// Installs the abuse-prevention guard set (task 20.13).
+    ///
+    /// When not called, the state carries
+    /// [`crate::abuse::runtime::AbuseGuards::disabled`] and no guard fires.
+    #[must_use]
+    pub fn with_abuse_guards(mut self, guards: Arc<crate::abuse::runtime::AbuseGuards>) -> Self {
+        self.abuse_guards = guards;
         self
     }
 
@@ -1101,9 +1118,14 @@ pub fn router(state: WebState) -> Router {
             "/realms/{realm}/federation/saml/metadata",
             axum::routing::get(saml::sp_metadata),
         )
+        // Task 21.1: SAML front-channel POSTs carry base64-inflated signed XML
+        // with an embedded certificate chain, so they get `BODY_LIMIT_SAML`
+        // rather than the 1 MiB JSON default the shared stack installs.
         .route(
             "/realms/{realm}/federation/saml/acs",
-            axum::routing::post(saml::sp_acs),
+            axum::routing::post(saml::sp_acs).route_layer(axum::extract::DefaultBodyLimit::max(
+                crate::protocol::http::BODY_LIMIT_SAML,
+            )),
         )
         .route(
             "/realms/{realm}/federation/saml/begin",
@@ -1115,7 +1137,11 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/realms/{realm}/saml/sso",
-            axum::routing::get(saml::idp_sso_get).post(saml::idp_sso_post),
+            axum::routing::get(saml::idp_sso_get)
+                .post(saml::idp_sso_post)
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_SAML,
+                )),
         )
         .route(
             "/realms/{realm}/saml/sso/init",
@@ -1123,7 +1149,11 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/realms/{realm}/saml/slo-idp",
-            axum::routing::get(saml::idp_slo_get).post(saml::idp_slo_post),
+            axum::routing::get(saml::idp_slo_get)
+                .post(saml::idp_slo_post)
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_SAML,
+                )),
         )
         // --- Browser-facing OAuth authorize + consent flow ---
         .route(
@@ -1190,7 +1220,11 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/admin-users/import",
             axum::routing::get(admin::admin_admin_users_import_form)
-                .post(admin::admin_admin_users_import_submit),
+                .post(admin::admin_admin_users_import_submit)
+                // Task 21.1: the only browser file upload — a CSV of users.
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_CSV_IMPORT,
+                )),
         )
         .route(
             "/admin/admin-users/import/template.csv",
@@ -1615,7 +1649,11 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/realms/{realm}/users/import",
             axum::routing::get(admin::admin_users_import_form)
-                .post(admin::admin_users_import_submit),
+                .post(admin::admin_users_import_submit)
+                // Task 21.1: the only browser file upload — a CSV of users.
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_CSV_IMPORT,
+                )),
         )
         .route(
             "/admin/realms/{realm}/users/import/template.csv",

@@ -128,14 +128,17 @@ async fn invoke_tool(
     match evaluate_tool_access(&claims.permissions, &body.tool, &tool_groups) {
         ToolAccessDecision::Allow => {
             // M6 — Audit every authorized invocation.
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: claims.sub.clone(),
-                action: AuditAction::AgentToolInvocation,
-                resource_type: "tool".to_string(),
-                resource_id: format!("{}.{}", body.tool, body.action),
-                metadata: None,
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: claims.sub.clone(),
+                    action: AuditAction::AgentToolInvocation,
+                    resource_type: "tool".to_string(),
+                    resource_id: format!("{}.{}", body.tool, body.action),
+                    metadata: None,
+                },
+            );
             (
                 StatusCode::OK,
                 Json(InvokeToolResponse {

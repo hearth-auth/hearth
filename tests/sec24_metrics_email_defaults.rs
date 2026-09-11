@@ -42,6 +42,7 @@ server:
   port: 8420
   bind_address: "127.0.0.1"
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 storage:
   data_dir: "/tmp/hearth-sec24-test"
 security:
@@ -144,6 +145,7 @@ server:
   port: 8420
   bind_address: "127.0.0.1"
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 storage:
   data_dir: "/tmp/hearth-sec24-test"
 security:
@@ -176,6 +178,7 @@ server:
   port: 8420
   bind_address: "127.0.0.1"
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 storage:
   data_dir: "/tmp/hearth-sec24-test"
 security:

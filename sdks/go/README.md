@@ -222,16 +222,12 @@ err = admin.DeleteUser(ctx, "<user-id>")
 
 ```go
 // Realms are provisioned via hearth.yaml, not the admin API — there is no
-// CreateRealm client method (the server returns 405). Only read paths exist.
+// CreateRealm and no UpdateRealm client method. The server answers 405 with
+// "Realms are managed via hearth.yaml" to both POST /admin/realms and
+// PATCH /admin/realms/{id}. Only read paths and deletion exist.
 
 // Get a realm by ID
 realm, err := admin.GetRealm(ctx, "<realm-id>")
-
-// Update a realm
-suspended := "suspended"
-updated, err := admin.UpdateRealm(ctx, "<realm-id>", hearth.UpdateRealmRequest{
-    Status: &suspended,
-})
 
 // Delete a realm (cascades users, sessions, clients, assignments)
 err = admin.DeleteRealm(ctx, "<realm-id>")
@@ -366,7 +362,8 @@ type User struct {
     UpdatedAt   int64  `json:"updated_at,omitempty"`
 }
 
-// UpdateRealmRequest — argument to AdminClient.UpdateRealm (nil fields = no change)
+// UpdateRealmRequest — realm patch shape. No client method sends it: realms are
+// provisioned from hearth.yaml and PATCH /admin/realms/{id} answers 405.
 type UpdateRealmRequest struct {
     Name   *string `json:"name,omitempty"`
     Status *string `json:"status,omitempty"`

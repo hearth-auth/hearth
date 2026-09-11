@@ -31,14 +31,21 @@ following hold. These are hard startup errors, not warnings.
 | **Key-encryption key** | `HEARTH_KEK` env var (recommended) **or** `security.key_encryption_key`, either one a random 64-lowercase-hex-character value (`openssl rand -hex 32`) | Without it, realm signing keys (Ed25519 private keys) are written to storage **in plaintext**. |
 | **HTTPS** | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` behind a TLS-terminating proxy | Without it, session cookies are issued without the `Secure` attribute and can be intercepted over plain HTTP. |
 | **No demo seeder** | Omit the `demo:` block, or set `demo.enabled: false` | `demo.enabled: true` mass-seeds accounts that all share a well-known default password. |
+| **A real email transport**, for any realm whose users can hold a password | Set `email.transport` to something other than `"log"` | `log` discards every message. A password-only realm configured this way validates, starts, and silently never delivers a reset email, so an account that forgets its password is unrecoverable. |
+| **No `storage.fsync: false`** | Omit the key (it defaults to `true` outside `--dev`) | WAL durability is not optional. The key was previously accepted and then ignored; it is now a hard error rather than a promise the engine did not keep. |
+| **No empty `${VAR}` substitution** | Set every referenced variable, or write `${VAR:-}` to declare the empty value deliberate | An empty expected credential compares equal to a caller who supplied none — it opens `/metrics` and authenticates a confidential client with `Basic <client_id>:`. |
+| **Argon2id costs at or above the OWASP floor** | Leave `auth.password_memory_cost` / `password_time_cost` unset, or set a pair at least as strong as one documented row | See [Argon2id cost floor](#argon2id-cost-floor). |
 
-Two further pieces of key material are read from the environment only — they have
-no YAML key:
+Further key material is read from the environment only — none of it has a YAML
+key:
 
 | Env var | Required? | Purpose |
 |---------|-----------|---------|
 | `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. When unset, production startup fails rather than auto-generating a world-readable `hearth.host_key` file. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
+| `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
+| `HEARTH_SMS_OTP_HMAC_KEY` | Required whenever `sms.transport` is not `"log"` | At least 32 bytes. Cryptographically binds an SMS OTP to this server; startup fails without it once a real SMS transport is configured. |
+| `HEARTH_TURNSTILE_SECRET_KEY` | Only when `security.captcha.provider: turnstile` | Cloudflare Turnstile secret. Preferred over writing `security.captcha.turnstile.secret_key` into the file. |
 
 > `dev_mode` is **not** a config-file key. A YAML file containing `dev_mode: true` is
 > rejected at startup — dev mode is armed only by `hearth serve --dev`.
@@ -115,7 +122,7 @@ Network binding and TLS configuration.
 | `tls_client_ca_path` | string | — | Path to a CA certificate for client certificate verification (mTLS). |
 | `tls_require_client_cert` | bool | `false` | When `true`, all connections must present a valid client certificate signed by `tls_client_ca_path`. |
 | `trusted_proxies` | list of strings | `[]` | IP addresses of trusted reverse proxies. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm. When empty (the default), the peer socket address is used and `X-Forwarded-For` is ignored — the safe default for direct-to-internet deployments. CIDR notation is not yet supported; supply individual IPs. |
-| `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header from proxies listed in `trusted_proxies`. When `true`, session cookies gain the `Secure` attribute when the forwarded proto header indicates HTTPS. Only enable when `trusted_proxies` is correctly configured. |
+| `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether session cookies carry `Secure`. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the header would then be accepted from any peer and a client could choose whether its own cookie is `Secure`. |
 
 When TLS is enabled, Hearth also spawns an HTTP → HTTPS redirect listener on `port - 1` (or port 80 when `port: 443`). Send `SIGHUP` to hot-reload the certificate and key without downtime.
 
@@ -553,17 +560,40 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_ttl` | duration | `"24h"` | Default session lifetime. |
-| `password_memory_cost` | integer | `65536` | Argon2id memory parameter in KiB (OWASP minimum). |
-| `password_time_cost` | integer | `3` | Argon2id time parameter (iterations). |
+| `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
+| `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
 | `mfa_required` | bool | `false` | Whether MFA is required for all users. Per-realm `auth.mfa_required` overrides. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
+| `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action. A TOTP secret does **not** satisfy it. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
+| `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
+| `webauthn_user_verification` | string | — | Global default `userVerification` preference: `"required"`, `"preferred"` or `"discouraged"`. `"required"` is what makes a passkey a genuine second factor. Per-realm `realms.<name>.auth.webauthn_user_verification` overrides. |
 
 ```yaml
 auth:
   session_ttl: "12h"
   password_memory_cost: 131072
   password_time_cost: 4
+  webauthn_user_verification: "required"
 ```
+
+#### Argon2id cost floor
+
+`password_memory_cost` and `password_time_cost` — globally under `auth:`, per realm under
+`realms.<name>:`, and on the realm config API — are refused when they fall below the
+[OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+parameter sets for Argon2id:
+
+| Memory cost (KiB) | Time cost |
+|-------------------|-----------|
+| `19456` (19 MiB)  | `2`       |
+| `47104` (46 MiB)  | `1`       |
+
+Anything at least as strong as one of those rows is accepted. A realm that overrides only one of
+the two is checked against its *effective* pair, so lowering `password_time_cost` to `1` while
+leaving memory at the `19456` default is refused. Hearth refuses rather than clamps: silently
+raising a cost would change login latency with no diagnostic, and silently lowering it is the
+defect the floor exists to prevent. `--dev` is exempt and runs deliberately cheap parameters.
+Start-up logs the effective parameters, at `WARN` when they are below the floor.
 
 ### `onboarding`
 
@@ -590,7 +620,7 @@ Global security hardening options.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dpop_nonce_secret` | string | `"auto"` | 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449). Absent or `"auto"`: a fresh random key is generated at each startup — safe for single-node deployments but invalidates all outstanding DPoP proofs on restart. A 64-character lowercase hex string is decoded to 32 bytes and used verbatim; use a stable hex key to keep nonces valid across rolling restarts or in multi-node deployments where all nodes must share the same secret. **Never use the all-zero key (`0000…`) in production** — the server rejects it at startup. Set via `HEARTH_DPOP_NONCE_SECRET` env var to avoid storing secrets in the YAML file. |
-| `allowed_hosts` | list of strings | `[]` (any) | Allowlist of `Host` header values the server will accept (A-40). Requests with a `Host` not in this list are rejected with `400 Bad Request`. Include the port for non-standard ports (e.g. `"localhost:8420"`). Empty list = accept any host (backward-compatible default). |
+| `allowed_hosts` | list of strings | `[]` (any) | Allowlist of `Host` header values the server will accept (A-40). Requests with a `Host` not in this list are rejected with `400 Bad Request`. Include the port for non-standard ports (e.g. `"localhost:8420"`). Empty list = accept any host (backward-compatible default). **Applies to the browser surface too** — the admin console (`/ui/*`), the hosted login and recovery pages, and the SAML front channel — so list every hostname a browser uses to reach them, not just the API hostname. Under `--dev` a loopback `Host` (`localhost`, `127.0.0.1`, `[::1]`, any port) is always admitted so the dev console stays reachable. |
 | `allowed_return_to_origins` | list of strings | `[]` | Absolute origins permitted as `return_to` redirect targets (A-52). Relative paths (`/ui/…`) are always accepted. Absolute URLs are only accepted when their `scheme://host[:port]` matches an entry here. |
 | `jwks_rps_limit` | integer | `60` | Maximum JWKS / discovery requests per source IP per second (A-10). Applies to all unauthenticated key-discovery endpoints. Requests beyond this limit receive `429 Too Many Requests`. |
 | `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
@@ -783,26 +813,41 @@ Alert on that gauge. Never ship `0` to a production bind.
 
 ##### Rate-Limit Durability After Restart
 
-Not all rate limiters survive a server restart:
+Every counter below is written to the WAL as it increments. A counter is only
+*restart-safe*, though, if it is also read back into memory at boot — the
+enforcement path reads the in-memory map, never storage. `EmbeddedIdentityEngine::new`
+calls `restore_attempt_trackers_from_wal`, which rehydrates five of the six
+tracker families; entries whose window has already expired are skipped, because
+they could never enforce a block.
 
 | Limiter | Scope | Restart-safe? |
 |---------|-------|---------------|
-| `login_per_account` (password brute-force) | per user | **Yes** — WAL-persisted and restored at startup |
-| `login_per_ip` (IP flood) | per source IP | **No** — in-memory only, cleared on restart |
-| Magic-link request rate | per email | **No** — in-memory only, cleared on restart |
-| Password-reset request rate | per email | **No** — in-memory only, cleared on restart |
-| Self-registration rate | per email / per IP | **No** — in-memory only, cleared on restart |
+| `login_per_account` (password brute-force) | per user | **Yes** — WAL-persisted and rehydrated at startup |
+| `login_per_ip` (IP flood) | per source IP | **Yes** — WAL-persisted and rehydrated at startup |
+| Magic-link request rate | per email (hashed) | **Yes** — WAL-persisted and rehydrated at startup |
+| Password-reset request rate | per email (hashed) | **Yes** — WAL-persisted and rehydrated at startup |
+| Self-registration rate | per email (hashed) | **Yes** — WAL-persisted and rehydrated at startup |
+| Self-registration rate | per source IP | **No** — in-memory only, cleared on restart |
+| MFA failed-attempt counter | per user | **Yes** — WAL-persisted and rehydrated at startup |
 
-**Security implication:** an attacker who triggers or waits for a server restart can temporarily bypass the in-memory rate limits for magic-link, password-reset, and IP-based login flows. The window is narrow — the attacker must act immediately after restart — but operators should be aware of this behaviour in rolling-restart or high-availability deployments.
+Email addresses are never stored in the clear in a rate-limit key: the key
+suffix is a digest, and the rehydrator recomputes the same digest so the
+in-memory key matches the one the writer used.
+
+**Security implication:** one counter — the per-source-IP arm of the
+self-registration limiter — is cleared by a restart. An attacker who triggers or
+waits for a restart gets a fresh registration budget from a single IP. The
+per-email arm of the same limiter survives, so the bypass only helps an attacker
+who is also varying the address. Every other limit above holds across a restart,
+including a rolling one.
 
 **Recommended mitigations:**
 
-- Deploy a reverse-proxy (nginx, Caddy, Cloudflare) with its own IP-based rate limiting in front of Hearth. Proxy-level limits are not affected by application restarts.
-- Keep restart windows short and infrequent in production.
-- Enable CAPTCHA or MFA for magic-link and password-reset flows when operating in high-threat environments.
-
-> **Future work:** WAL-persisted magic-link, password-reset, and IP rate trackers are tracked in
-> [HEA-1139](/HEA/issues/HEA-1139). Contributions welcome.
+- Deploy a reverse-proxy (nginx, Caddy, Cloudflare) with its own IP-based rate
+  limiting in front of Hearth. Proxy-level limits are unaffected by application
+  restarts and cover the one gap above.
+- Enable CAPTCHA on the registration form (`security.captcha`) in high-threat
+  environments.
 
 #### `security.http2`
 
@@ -874,6 +919,146 @@ security:
     enabled: true
     spamhaus:
       refresh_interval_secs: 86400  # 24 hours
+```
+
+---
+
+#### Abuse-prevention guards
+
+Eight guards documented in [`ABUSE.md`](ABUSE.md) are configured here. **Every
+one is off by default** — an existing configuration is unaffected until an
+operator opts in, which is the fail-open posture ABUSE.md §6.1 requires.
+
+Until the keys below existed, `security:` carried `deny_unknown_fields` and none
+of these blocks had a field to land in, so pasting a documented block made the
+server refuse to boot.
+
+##### `security.tarpit` (A-17)
+
+Deterministic per-IP delay on the login form after repeated failures. The delay
+is applied before the Argon2 admission gate, so tarpitted traffic consumes a
+timer rather than hashing capacity.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `threshold` | integer | — | Failures per IP within `window_secs` before delays apply. Absent = disabled. |
+| `window_secs` | integer | `60` | Rolling window for counting failures. |
+| `delay_ms` | integer | `200` | Delay injected per tarpitted request. |
+
+```yaml
+security:
+  tarpit:
+    threshold: 5
+    window_secs: 60
+    delay_ms: 200
+```
+
+##### `security.captcha` challenge state (A-16)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `challenge_threshold` | integer | — | Failures per IP within `window_secs` before a challenge is demanded. Absent = disabled. |
+| `window_secs` | integer | `60` | Rolling window for counting failures. |
+| `challenge_ttl_secs` | integer | `1800` | How long challenge state persists once the threshold is crossed. |
+
+##### `security.distributed_attack_detector` (A-3)
+
+Cardinality detector for credential spraying and stuffing.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Whether the detector runs. |
+| `window` | duration | `"300s"` | Rolling detection window. Items from up to `2 × window` ago may still count. |
+| `username_per_ip_threshold` | integer | `20` | Distinct usernames from one IP before the attempt is challenged. |
+| `ip_per_username_threshold` | integer | `20` | Distinct IPs against one username before the attempt is challenged. |
+
+```yaml
+security:
+  distributed_attack_detector:
+    enabled: true
+    window: "300s"
+    username_per_ip_threshold: 20
+    ip_per_username_threshold: 20
+```
+
+##### `security.outbound_volume_shield` (A-4)
+
+Per-realm cap on the number of **distinct recipients** reached in a window.
+Consulted before the self-service verification and password-reset sends.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Whether the shield runs. |
+| `window` | duration | `"3600s"` | Rolling window. |
+| `email_soft_cap` | integer | `1000` | Distinct email recipients before the send is flagged for operator review. |
+| `email_hard_cap` | integer | `5000` | Distinct email recipients before the send is abandoned. |
+| `sms_soft_cap` | integer | `100` | Distinct SMS recipients before flagging. |
+| `sms_hard_cap` | integer | `500` | Distinct SMS recipients before abandoning. |
+
+##### `security.cross_realm_aggregation_cap` (A-50)
+
+Closes the A-4 bypass where an attacker splits sends across realms: counts how
+many **distinct realms** have reached one recipient.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Whether the cap runs. |
+| `window` | duration | `"3600s"` | Rolling window. |
+| `alert_threshold` | integer | `3` | Distinct realms per recipient before an operator alert. The send still proceeds. |
+| `email_realm_soft_cap` | integer | `5` | Distinct realms per email address before flagging. |
+| `email_realm_hard_cap` | integer | `10` | Distinct realms per email address before abandoning. |
+| `sms_realm_soft_cap` | integer | `3` | Distinct realms per phone number before flagging. |
+| `sms_realm_hard_cap` | integer | `6` | Distinct realms per phone number before abandoning. |
+
+##### `security.risk_scorer` (A-11 / P-4)
+
+Weights for the step-up MFA risk engine. These become the default
+`risk_scorer_config` for every realm, which the refresh-context drift check
+(A-49) reads at token-refresh time.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Whether scoring is active. `false` always scores `0.0`. |
+| `step_up_threshold` | float | `0.5` | Score at or above which step-up MFA is required. Range `[0.0, 1.0]`. |
+| `new_device_weight` | float | `0.3` | Contribution of an unrecognised device. |
+| `new_country_weight` | float | `0.4` | Contribution of an unrecognised country. |
+| `password_age_weight` | float | `0.2` | Contribution of a password older than the threshold. |
+| `password_age_days_threshold` | integer | `365` | Age in days before `password_age_weight` applies. |
+| `breach_corpus_weight` | float | `1.0` | Contribution of a confirmed breach-corpus hit. Defaults to `1.0` so any hit alone forces step-up. |
+| `refresh_context_delta_weight` | float | `0.35` | Contribution per changed dimension (UA hash, ASN) on refresh. |
+
+##### `security.adaptive_backoff` (A-12)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. |
+| `offense_cooldown` | duration | `"7d"` | How long a clean record must persist before the offence counter resets. |
+
+##### `security.providers` (P-3, P-5)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_signal.enabled` | bool | `false` | Install the built-in UA + JA3/JA4 heuristic adapter in place of the no-op. |
+| `bot_signal.extra_ja3_blocklist` | list of strings | `[]` | Extra JA3 hashes beyond the built-in list. |
+| `bot_signal.extra_ja4_blocklist` | list of strings | `[]` | Extra JA4 hashes or prefixes beyond the built-in list. |
+| `email_reputation.enabled` | bool | `false` | Install the built-in disposable-domain / role-address adapter in place of the no-op. |
+| `email_reputation.extra_disposable_domains` | list of strings | `[]` | Extra disposable domains beyond the built-in list. |
+
+Only the disposable-domain signal refuses a registration. A role address
+(`admin@`, `support@`) or a domain with no MX is recorded and allowed — both are
+legitimate in plenty of tenants.
+
+```yaml
+security:
+  providers:
+    bot_signal:
+      enabled: true
+      extra_ja3_blocklist:
+        - "deadbeef00000000deadbeef00000000"
+    email_reputation:
+      enabled: true
+      extra_disposable_domains:
+        - "my-internal-throwaway.example"
 ```
 
 ---
@@ -1038,8 +1223,8 @@ Each realm entry supports:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_ttl` | duration | inherits `auth.session_ttl` | Per-realm session lifetime override. |
-| `password_memory_cost` | integer | inherits `auth.password_memory_cost` | Per-realm Argon2id memory cost. |
-| `password_time_cost` | integer | inherits `auth.password_time_cost` | Per-realm Argon2id time cost. |
+| `password_memory_cost` | integer | inherits `auth.password_memory_cost` | Per-realm Argon2id memory cost. Subject to the [Argon2id cost floor](#argon2id-cost-floor). |
+| `password_time_cost` | integer | inherits `auth.password_time_cost` | Per-realm Argon2id time cost. Subject to the [Argon2id cost floor](#argon2id-cost-floor). |
 | `email` | object | — | Per-realm email branding overrides. |
 | `web` | object | — | Per-realm UI theme overrides. |
 | `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs, self-registration, and DCR). |
@@ -1055,6 +1240,37 @@ Each realm entry supports:
 | `branding.accent_color` | string | Override the email accent color for this realm. |
 | `branding.support_email` | string | Override the support email shown in footers. |
 | `branding.custom_footer_text` | string | Override the email footer text. |
+
+### `realms.<name>.security`
+
+Per-realm security policy.
+
+#### `realms.<name>.security.cidr_policy` (A-9)
+
+Tenant-managed network allow/deny lists, consulted on the login form before any
+password hashing. Evaluation is **deny first, then allow**: a `deny` match
+refuses outright, and a non-empty `allow` list refuses everything it does not
+contain. Both lists empty (the default) means no network restriction.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allow` | list of CIDRs | `[]` | Sources permitted to authenticate. Empty = no allow-list restriction. |
+| `deny` | list of CIDRs | `[]` | Sources refused outright. Evaluated before `allow`. |
+
+```yaml
+realms:
+  my-realm:
+    security:
+      cidr_policy:
+        allow:
+          - "10.0.0.0/8"
+          - "2001:db8::/32"
+        deny:
+          - "198.51.100.0/24"
+```
+
+> A refused login renders the same generic page as any other failure, so the
+> policy is not an account-enumeration oracle.
 
 ### `realms.<name>.web`
 
@@ -1073,6 +1289,9 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
 | `mfa_methods` | list | — | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods are offered for enrollment and challenge; methods not in the list are rejected. Absent = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
+| `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action. A TOTP secret does **not** satisfy it — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
+| `webauthn_resident_key` | string | inherits `auth.webauthn_resident_key` | `residentKey` preference sent in `authenticatorSelection` during registration: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup — the browser would silently ignore it and fall back to `"preferred"`. |
+| `webauthn_user_verification` | string | inherits `auth.webauthn_user_verification` | `userVerification` preference sent during registration and authentication: `"required"`, `"preferred"` or `"discouraged"`. Set `"required"` to make a passkey a genuine second factor; a ceremony that proves user *presence* only is possession alone. |
 | `password_policy` | object | — | Password complexity requirements (see below). |
 | `token` | object | — | Per-realm token TTL overrides. |
 | `rate_limit` | object | — | Per-realm rate limit overrides. |
@@ -1964,6 +2183,11 @@ Every field's default value at a glance.
 | `auth` | `session_ttl` | `"24h"` |
 | `auth` | `mfa_required` | `false` |
 | `auth` | `passkey_requires_mfa` | `false` |
+| `auth` | `password_memory_cost` | `19456` (19 MiB) |
+| `auth` | `password_time_cost` | `2` |
+| `auth` | `webauthn_required` | *(unset)* — no passkey requirement |
+| `auth` | `webauthn_resident_key` | *(unset)* — the WebAuthn default, `"preferred"` |
+| `auth` | `webauthn_user_verification` | *(unset)* — the WebAuthn default, `"preferred"` |
 | `realms.<name>.auth.adaptive_mfa` | `enabled` | `false` |
 | `realms.<name>.auth.adaptive_mfa` | `recognition_window_days` | `30` |
 | `realms.<name>.auth.webauthn_attestation` | `allow_none` | `true` |
@@ -2013,4 +2237,39 @@ Every field's default value at a glance.
 | `security.rate_limiting.login_per_account` | `lockout_seconds` | `300` |
 | `security.rate_limiting` | `admin_per_minute` | `100` |
 | `security.rate_limiting` | `token_per_minute` | `200` |
+| `security.captcha` | `challenge_threshold` | *(unset)* — A-16 challenge disabled |
+| `security.captcha` | `window_secs` | `60` |
+| `security.captcha` | `challenge_ttl_secs` | `1800` (30 min) |
+| `security.tarpit` | `threshold` | *(unset)* — A-17 tarpit disabled |
+| `security.tarpit` | `window_secs` | `60` |
+| `security.tarpit` | `delay_ms` | `200` |
+| `security.distributed_attack_detector` | `enabled` | `false` |
+| `security.distributed_attack_detector` | `window` | `"300s"` |
+| `security.distributed_attack_detector` | `username_per_ip_threshold` | `20` |
+| `security.distributed_attack_detector` | `ip_per_username_threshold` | `20` |
+| `security.outbound_volume_shield` | `enabled` | `false` |
+| `security.outbound_volume_shield` | `window` | `"3600s"` |
+| `security.outbound_volume_shield` | `email_soft_cap` / `email_hard_cap` | `1000` / `5000` |
+| `security.outbound_volume_shield` | `sms_soft_cap` / `sms_hard_cap` | `100` / `500` |
+| `security.cross_realm_aggregation_cap` | `enabled` | `false` |
+| `security.cross_realm_aggregation_cap` | `window` | `"3600s"` |
+| `security.cross_realm_aggregation_cap` | `alert_threshold` | `3` |
+| `security.cross_realm_aggregation_cap` | `email_realm_soft_cap` / `email_realm_hard_cap` | `5` / `10` |
+| `security.cross_realm_aggregation_cap` | `sms_realm_soft_cap` / `sms_realm_hard_cap` | `3` / `6` |
+| `security.risk_scorer` | `enabled` | `false` |
+| `security.risk_scorer` | `step_up_threshold` | `0.5` |
+| `security.risk_scorer` | `new_device_weight` | `0.3` |
+| `security.risk_scorer` | `new_country_weight` | `0.4` |
+| `security.risk_scorer` | `password_age_weight` | `0.2` |
+| `security.risk_scorer` | `password_age_days_threshold` | `365` |
+| `security.risk_scorer` | `breach_corpus_weight` | `1.0` |
+| `security.risk_scorer` | `refresh_context_delta_weight` | `0.35` |
+| `security.adaptive_backoff` | `durations` | `["1m", "5m", "30m", "24h"]` |
+| `security.adaptive_backoff` | `offense_cooldown` | `"7d"` |
+| `security.providers.bot_signal` | `enabled` | `false` |
+| `security.providers.email_reputation` | `enabled` | `false` |
+| `realms.<name>.security.cidr_policy` | `allow` / `deny` | `[]` / `[]` (no network restriction) |
+| `realms.<name>.auth` | `webauthn_required` | inherits `auth.webauthn_required` |
+| `realms.<name>.auth` | `webauthn_resident_key` | inherits `auth.webauthn_resident_key` |
+| `realms.<name>.auth` | `webauthn_user_verification` | inherits `auth.webauthn_user_verification` |
 | `onboarding` | `enabled` | `true` |

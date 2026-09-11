@@ -13,7 +13,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `405 Method Not Allowed`. Realms are provisioned via `hearth.yaml` and reconciled
   at startup; manage them there and restart Hearth to apply changes. Read paths
   (`getRealm`, `listRealms`) are unaffected. All seven SDK test suites now run in CI.
-
+- **`updateRealm` removed from all SDKs (§25.4)** — realms are provisioned from
+  `hearth.yaml`; the server answers 405 with "Realms are managed via hearth.yaml" to
+  both `POST /admin/realms` and `PATCH /admin/realms/{id}`. The Go, Kotlin, Node, PHP,
+  Python, Rust and TypeScript SDKs each shipped an `updateRealm`/`update_realm` method
+  that could not succeed against any Hearth server. The request payload types
+  (`UpdateRealmRequest`/`UpdateRealmParams`) are retained for callers that model a
+  realm patch locally.
 ### Added
 - **Hot-tier evictions and promotions can be read per realm (audit 2026-08-28 §4.9#6)** — the hot
   tier is one cache shared by every tenant, and its eviction and promotion counters carried no
@@ -67,6 +73,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   **412 Precondition Failed** instead of silently overwriting a newer write. Provisioning pipelines
   (Okta, Azure AD) that use `If-Match` for concurrency control no longer lose updates when two
   operations race. Requests without `If-Match` are unaffected.
+- **Abuse-prevention guards are configurable and live (audit 2026-08-28 §4.17#9)** — eight guards
+  `docs/specs/ABUSE.md` marks "Shipped" had no constructor outside their own test modules, and their
+  documented config keys made the server refuse to boot because `security:` denies unknown fields.
+  `security.tarpit` (A-17), `security.distributed_attack_detector` (A-3),
+  `security.outbound_volume_shield` (A-4), `security.cross_realm_aggregation_cap` (A-50),
+  `security.risk_scorer` (A-11/P-4), `security.adaptive_backoff` (A-12),
+  `security.providers.bot_signal` (P-3), `security.providers.email_reputation` (P-5),
+  `security.captcha.{challenge_threshold,window_secs,challenge_ttl_secs}` (A-16) and
+  `realms.<name>.security.cidr_policy` (A-9) now parse, are registered in the start-up key-liveness
+  registry, and are consulted on the login form and the self-service mail paths. **Every guard is
+  off by default**, so an existing configuration is unchanged until an operator opts in.
+- **`auth.password_memory_cost` / `auth.password_time_cost` reach the engine (audit 2026-08-28
+  §4.17#8)** — both keys parsed and were then read by nothing: the base Argon2id config came from a
+  compiled-in default and only the per-realm overrides had any effect. An operator who raised the
+  global cost got a clean boot and unchanged hashing. A value Argon2id itself rejects is now a
+  start-up error rather than a 500 on every login.
+- **Three WebAuthn realm policies are settable (audit 2026-08-28 §4.18#9)** —
+  `webauthn_required`, `webauthn_resident_key` and `webauthn_user_verification` are now readable
+  from `realms.<name>.auth` and from the global `auth:` block, which the admin visual config editor
+  already had form controls for. All three were hard-coded to `None` when a realm config was built,
+  so no YAML value could reach them, and `webauthn_required` had no consumer at all: a realm that
+  sets it now intercepts a user with no passkey through the `ENROLL_MFA` required action. An
+  unrecognised `residentKey` / `userVerification` preference is refused at start-up instead of being
+  silently ignored by the browser.
 
 ### Changed
 - **BREAKING: `POST /realms/{realm}/introspect` and `/revoke` now require client authentication
@@ -121,6 +151,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   unset, the window is now the longest refresh-token lifetime the config can issue. An explicit value
   is still honoured verbatim, with a startup warning when it is shorter than that lifetime. The
   `POST /admin/realms/{id}/rotate-signing-key` default is unchanged at `0` — a revoking rotation.
+- **The browser routes now run under the API router's guard stack (audit 2026-08-28 §4.5#1–#4,
+  §4.10#8, §4.24#8)** — the web tree was merged *beside* the API router rather than under it, and
+  `Router::layer` wraps only the routes registered before it. The `Host` allowlist
+  (`security.allowed_hosts`), the per-IP request shaper (`security.request_shaper`), the JSON
+  parse-bomb depth guard, the request body limit and the `hearth_http_request_duration_seconds`
+  histogram therefore all stopped at the API surface and reached none of `/ui/*`, the SAML ACS and
+  `begin` endpoints, or the pre-auth recovery pages. All five now apply there.
+  **Operators:** if `security.allowed_hosts` is set, it now also governs the admin console and the
+  hosted login pages — add every hostname browsers use to reach them. Under `--dev` a loopback
+  `Host` is always admitted so `make dev` keeps working. `/ui/static/*` and the favicons are exempt
+  from the per-IP cap (they serve in-binary bytes and re-validate on every navigation). Body limits
+  are sized per shape: 1 MiB by default, 4 MiB on the SAML front-channel POST bindings, and 16 MiB
+  on the two admin CSV user-import uploads.
+- **BREAKING: a refresh token with no grant family is refused (audit 2026-08-28 §4.16#6)** — every
+  grant that mints a refresh token records a grant family and embeds its id in the token as `fid`.
+  A refresh token presented *without* one used to fall through to a legacy branch that issued a
+  fresh pair without consuming the token it was given: no rotation, no reuse detection, and none of
+  the confidential-client, FAPI DPoP or consent gates. It replayed forever and could never raise a
+  theft event. `POST /token` with `grant_type=refresh_token` now answers `invalid_grant` for such a
+  token. **Operators:** only tokens minted before the grant-family change shipped are affected;
+  their holders re-authenticate, and the effect expires with `token.refresh_token_ttl` (7 days by
+  default).
+- **BREAKING: DPoP-bound tokens are enforced on `/admin/*`, SCIM and the gRPC admin API
+  (audit 2026-08-28 §4.19#8)** — a token carrying `cnf.jkt` is usable only by the holder of the key
+  it was bound to (RFC 9449 §7.2). The admin and SCIM surfaces validated the bearer token's
+  signature, realm and permissions and never looked at `cnf`, so a stolen sender-constrained admin
+  token was replayable as a plain `Bearer` for every admin read and write. `/admin/*` and
+  `/scim/v2/*` now require a matching `DPoP` proof header whenever the presented token is bound;
+  unbound tokens are unaffected. The gRPC admin services have no proof channel to validate against
+  and now **refuse** a `cnf`-bound token with `UNAUTHENTICATED` — use the REST admin surface with
+  such a token.
 
 ### Fixed
 - **The system operator reaches realm config and required-actions cross-realm (audit 2026-08-28
@@ -385,7 +446,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   peer-realm id was answered `200` with an empty collection — indistinguishable from a real object
   with no rows. All five now return `404`. No response ever contained another realm's data; only the
   status code changes.
-
+- **`auth.token.magic_link_ttl` is read (audit 2026-08-28 §4.24#12)** — the key was documented,
+  parsed, hard-capped at 30 minutes and stored on the realm record, and then never consulted:
+  magic links always expired on the compiled-in 15-minute constant. Both the redemption check and
+  the supersession sweep now use the realm's configured lifetime, so a realm that shortens it is
+  honoured and one that lengthens it no longer leaves a superseded link usable.
+- **SDK admin mutations send `PATCH`, not `PUT` (§25.4)** — Hearth implements the
+  users, applications, roles and groups admin mutations as `PATCH`; the PHP, Python,
+  Rust and Kotlin admin clients sent `PUT` and got a bare 405 with no body. All four
+  now send `PATCH`. The client-mutation route also moved to its real path: the SDKs
+  addressed `/admin/clients/{id}`, which is not a route at all — it is
+  `/admin/applications/{id}`. The TypeScript doc comments claiming `PUT` were
+  corrected.
+- **Kotlin `HearthAuthentication.getName()` no longer overflows the stack (§25.8)** —
+  `getPrincipal()` returns `this`, and `AbstractAuthenticationToken.getName()` resolves
+  the name by calling `getName()` on the principal, so any Spring Security code path
+  that asked the authentication for its name — access decisions, audit logging,
+  `@PreAuthorize` — recursed until the stack overflowed. It now returns the JWT
+  subject.
 ### Fixed
 - **`hearth backup` says what happened (audit 2026-08-28 §4.9#8, §4.14#6)** — `create`, `restore`,
   `verify` and `inspect` installed no tracing subscriber, so every diagnostic those paths emit was
@@ -422,6 +500,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   index are now removed last, in one atomic batch, so a fault leaves the user still deletable. A
   retry against a user already orphaned by an earlier release now sweeps those rows before
   reporting `404`.
+- **A session or token revocation is no longer lost to a concurrent refresh rotation (audit
+  2026-08-28 §4.16#2, §4.16#7)** — marking a grant family revoked is a read-modify-write, and
+  `revoke_session`'s cascade and the RFC 7009 `POST /revoke` handler both performed it without the
+  advisory lock a rotation holds. A rotation already inside its window — which spans RBAC
+  resolution, the claim profile and the pre-token webhook — wrote the family back un-revoked with a
+  freshly rotated hash. `POST /revoke` answered `200`, which RFC 7009 §2.2 lets a client read as
+  "the token is now invalid", and the grant kept working; a logout raced the same way. Both now
+  take the lock and re-read the row under it.
+- **Revoking an application's consent now kills its refresh chain (audit 2026-08-28 §4.16#11)** —
+  `DELETE` of a consent removed the consent record and nothing else, leaving every grant family
+  issued under it live. The refresh path's consent check only compares scope digests *when a record
+  exists*, so deleting the record removed the only thing that check could fail on and the
+  application refreshed indefinitely. Revoking one consent, or all of a user's consents, now
+  revokes the matching grant families; the next refresh returns `invalid_grant`.
+- **Disabling a user fails loudly when the session revocation fails (audit 2026-08-28 §4.16#10)** —
+  `PATCH /admin/users/{id}` with `status: "Disabled"` revokes every session, because access tokens
+  embed their claims at issuance and revocation is the only thing that stops them. A failure in
+  that write was swallowed into a log line and the call returned `200`: the operator saw a disabled
+  user and an audit entry saying so, while the user's refresh token kept minting tokens. The call
+  now returns the error. The user record is already persisted at that point, so a retry completes
+  the revocation rather than short-circuiting as a no-op.
 
 ### Security
 - **The reserved system realm is read-only for RBAC writes on the public APIs (audit 2026-08-28
@@ -1153,7 +1252,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   see a new `403` on all three `/admin/cluster/*` routes** — grant `hearth.admin` (the seeded
   `realm.admin` role already carries it, so the bootstrap `system_access_token` and any existing
   full operator are unaffected).
-
+- **Dev and test endpoints are compiled out of the production image and are loopback-only (audit
+  2026-08-28 §4.7#2)** — `/admin/bootstrap`, `/dev/probe-user` and the `/dev/seed-*` family were
+  kept out of production by a runtime boolean alone, so the handlers and the hard-coded
+  `admin@hearth.test` password shipped in every binary, and the *embedded* path — a library consumer
+  who builds the router and serves it themselves — had no bind-address constraint at all, unlike
+  `hearth serve --dev`. Three gates now apply: a new `dev-endpoints` cargo feature (on by default
+  for local development, **off** in the shipped container image, which builds with
+  `--no-default-features`), the existing `dev_mode` route-table check, and a per-request guard that
+  answers `404` to any peer that is not loopback. The refusal is byte-identical to a production
+  build's, so a scanner cannot tell the two apart.
+- **SAML signature discovery is bounded to a direct child (§25.6)** — `<ds:Signature>`
+  and `<ds:SignedInfo>` were located by a scan that matched the first element at any
+  depth, despite a doc comment claiming direct children only. A signature belonging to
+  a descendant could therefore be read as the enclosing element's own. The URI/ID and
+  digest bindings meant no forged document got through, but the code now enforces the
+  depth it documents.
+- **SAML `<ds:CanonicalizationMethod>` and `<ds:Transforms>` are read and enforced
+  (§25.5)** — Hearth applies exclusive C14N 1.0 plus the enveloped-signature transform
+  unconditionally, and previously never looked at what the document declared. A
+  `SignedInfo` naming inclusive C14N, `#WithComments`, XPath or XSLT is now refused as
+  an algorithm downgrade (`SamlUnsupportedAlgorithm`) instead of being left to fail the
+  digest with an opaque signature error.
+- **KEK enrolment and strict unwrap now cover every key family (§25.9)** — the
+  `key_encryption_key` enrolment sweep and the strict (envelope-required) read path
+  covered the Ed25519 signing keys only. Per-realm SAML signing keys, DPoP nonce
+  secrets and the MFA at-rest DEK stayed in plaintext forever after a KEK was switched
+  on over an existing data directory, and their read paths accepted unenveloped bytes.
+  The sweep now also scans `realm:saml_key:*` and walks each realm for
+  `agt:dpop:nonce-secret` and `mfa:dek:key`; all three read paths refuse unenveloped
+  material once the store is marked enrolled.
+- **Node and TypeScript SDKs accept EdDSA only (§25.10)** — their JWKS verifiers
+  allowed `RS256`, `ES256` and the RSA/ECDSA 384/512 variants. Hearth signs access
+  tokens with Ed25519 in every configuration, so those algorithms only widened what a
+  token presented to the SDK could be signed with. `hearth-node`'s `JwksVerifier` and
+  Next.js edge middleware and `@hearth/sdk`'s `JwksClient` now pass
+  `algorithms: ["EdDSA"]`.
 ### Fixed
 - **SP-initiated SAML SSO now signs the user in (audit 2026-08-28 §4.10#6, §4.22#4, task 19.5)** —
   the assertion consumer validated the assertion, wrote a `saml_login_completed` audit event and
@@ -3318,6 +3452,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **`memmap2` bumped to 0.9.11** — resolves RUSTSEC-2026-0186 (unsound pointer offset in
   `[unchecked_]advise_range()` and `flush[_async]_range()`); 0.9.11 adds bounds validation
   before the `madvise`/`msync` syscalls, eliminating the UB path (HEA-1520).
+- **Argon2id cost now has an OWASP floor at both doors (audit 2026-08-28 §4.17#6)** —
+  `auth.password_memory_cost` / `auth.password_time_cost` in `hearth.yaml`, their per-realm
+  `realms.<name>.*` overrides, and the same two fields on `POST`/`PATCH` realm config over the
+  wire all accepted arbitrarily low values, down to `m=1 KiB, t=1`. Both doors now **refuse**
+  (they do not silently clamp) anything weaker than the OWASP Password Storage Cheat Sheet's
+  published parameter sets — `m=19456 KiB, t=2` or `m=47104 KiB, t=1`. A realm that overrides
+  only one of the two is checked against its effective pair, so lowering `password_time_cost`
+  alone is caught. Start-up now logs the Argon2id parameters the process will hash with, at
+  `WARN` when they are below the floor. `--dev` is exempt and unchanged.
+- **`server.trust_forwarded_proto: true` now requires `server.trusted_proxies` (audit 2026-08-28
+  §4.17#7)** — production validation demands direct TLS *or* `trust_forwarded_proto`, and
+  `trusted_proxies` defaults to empty, so the documented plaintext-behind-a-proxy deployment
+  accepted `X-Forwarded-Proto` from any peer: a client could decide whether its own session
+  cookie carried `Secure`. Enabling the flag with an empty proxy list is now a validation error
+  at start-up and in `hearth config validate`. **Operator action:** if you run plaintext behind
+  a reverse proxy, list the proxy IP(s) in `server.trusted_proxies`.
+- **Failed second factors and failed logins for unknown addresses are now audited (audit
+  2026-08-28 §4.14#7)** — a wrong TOTP code or recovery code recorded nothing in the audit log
+  (only a successful one did), and a login attempt for an address with no account never reached
+  the code that emits `LoginFailed` at all. A credential-stuffing run therefore left the trail
+  empty. Both now append `LoginFailed`: the second-factor case with
+  `metadata.stage = "mfa"` and `metadata.factor = "totp" | "recovery_code"`, the unknown-address
+  case with `metadata.reason = "unknown_account"` and the client IP. The submitted address is
+  **not** stored, so the log cannot be used to collect third-party addresses.
+- **Protocol-layer audit write failures are no longer silent (audit 2026-08-28 §4.14#8)** — 40
+  audit writes across the REST, browser, SCIM and SAML handlers discarded the `append` result,
+  so a storage error, a full disk or a broken HMAC chain produced no log line anywhere: the
+  mutation succeeded and its audit record did not. All 40 now route through one helper that logs
+  every failure at a severity taken from the action's own `AuditFailurePolicy` — `ERROR` for
+  destructive and security-sensitive actions, `WARN` otherwise — naming the realm, action and
+  resource whose trail has a hole in it.
 
 ## [1.0.0] — 2026-06-21
 

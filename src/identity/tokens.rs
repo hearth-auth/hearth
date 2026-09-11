@@ -845,10 +845,13 @@ pub struct IssueTokenRequest<'a> {
     pub scope: Option<String>,
     /// Grant-family identifier embedded in both tokens' `fid` claim.
     ///
-    /// A refresh token whose `fid` is present rotates through the grant
-    /// family and is subject to reuse detection; one without falls into the
-    /// legacy non-rotating branch (audit 2026-08-28 §4.19#3, §4.16#6). The
-    /// caller is responsible for persisting the matching `StoredGrantFamily`.
+    /// Every issued refresh token carries one. `refresh_tokens` rotates the
+    /// family's stored hash on each exchange and treats a stale hash as theft;
+    /// a refresh token presented **without** an `fid` is refused outright,
+    /// because the branch that used to serve one had neither rotation nor
+    /// reuse detection (audit 2026-08-28 §4.19#3, §4.16#6). The caller is
+    /// responsible for persisting the matching `StoredGrantFamily`; a token
+    /// minted with an `fid` whose family was never written is dead on arrival.
     pub fid: Option<String>,
 }
 

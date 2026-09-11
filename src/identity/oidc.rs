@@ -1519,9 +1519,16 @@ pub(crate) struct StoredDeviceCode {
 
 /// Tracks a grant family for refresh token rotation and theft detection.
 ///
-/// Each authorization code exchange or client credentials grant creates
-/// a family. On refresh, the hash is rotated. If a stale hash is presented,
-/// the entire family (and its session) is revoked.
+/// Every grant that issues a refresh token creates one: the authorization-code
+/// exchange, and — through `issue_tokens_with_context` — ROPC, step-up MFA, the
+/// device grant, password reset and Hearth's own session tokens. The
+/// `client_credentials` and `jwt-bearer` grants issue no refresh token (RFC 6749
+/// §4.4.3) and so create no family.
+///
+/// On refresh, the hash is rotated. If a stale hash is presented, the entire
+/// family (and its session) is revoked. Revocation sets `revoked`; the row
+/// survives until the expiry sweep, because it is what a later presentation of
+/// a rotated-out token is checked against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredGrantFamily {
     /// Unique family identifier.

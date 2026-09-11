@@ -111,17 +111,21 @@ class HearthSecurityAutoConfigurationTest {
     }
 
     // ── Support configurations ─────────────────────────────────────────────────
+    //
+    // Kotlin classes and members are final by default; Spring proxies
+    // `@Configuration` classes with CGLIB and rejects a final class or a final
+    // `@Bean` method outright. Both must be `open`.
 
     @Configuration
-    class CustomClientConfig {
+    open class CustomClientConfig {
         @Bean
-        fun hearthClient(): HearthClient = mockk()
+        open fun hearthClient(): HearthClient = mockk()
     }
 
     @Configuration
-    class CustomFilterConfig {
+    open class CustomFilterConfig {
         @Bean
-        fun hearthJwtAuthenticationFilter(): HearthJwtAuthenticationFilter =
+        open fun hearthJwtAuthenticationFilter(): HearthJwtAuthenticationFilter =
             HearthJwtAuthenticationFilter(mockk())
     }
 }

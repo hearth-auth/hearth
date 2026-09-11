@@ -107,6 +107,14 @@ const fn unwired(path: &'static str) -> SecurityKey {
 /// `registry_covers_every_security_leaf` fails.
 pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     key(
+        "security.adaptive_backoff.durations",
+        "src/abuse/backoff.rs (AdaptiveBackoffStore, via DeviceApprovalGuard)",
+    ),
+    key(
+        "security.adaptive_backoff.offense_cooldown",
+        "src/abuse/backoff.rs (AdaptiveBackoffStore, via DeviceApprovalGuard)",
+    ),
+    key(
         "security.allowed_hosts",
         "src/protocol/http/state.rs (host allowlist middleware)",
     ),
@@ -122,7 +130,47 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "security.backup.verify_key",
         "src/main.rs (backup manifest verification)",
     ),
+    key(
+        "security.captcha.challenge_threshold",
+        "src/abuse/runtime.rs (IpChallengeStore, A-16)",
+    ),
+    key(
+        "security.captcha.challenge_ttl_secs",
+        "src/abuse/runtime.rs (IpChallengeStore, A-16)",
+    ),
     key("security.captcha.provider", "src/abuse/captcha/mod.rs"),
+    key(
+        "security.captcha.window_secs",
+        "src/abuse/runtime.rs (IpChallengeStore, A-16)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.alert_threshold",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.email_realm_hard_cap",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.email_realm_soft_cap",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.enabled",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.sms_realm_hard_cap",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.sms_realm_soft_cap",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
+    key(
+        "security.cross_realm_aggregation_cap.window",
+        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
+    ),
     key(
         "security.captcha.turnstile.site_key",
         "src/abuse/captcha/mod.rs",
@@ -138,6 +186,22 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     key(
         "security.dev_csp_form_action_origins",
         "src/protocol/web/security.rs",
+    ),
+    key(
+        "security.distributed_attack_detector.enabled",
+        "src/abuse/runtime.rs (DistributedAttackDetector, A-3)",
+    ),
+    key(
+        "security.distributed_attack_detector.ip_per_username_threshold",
+        "src/abuse/runtime.rs (DistributedAttackDetector, A-3)",
+    ),
+    key(
+        "security.distributed_attack_detector.username_per_ip_threshold",
+        "src/abuse/runtime.rs (DistributedAttackDetector, A-3)",
+    ),
+    key(
+        "security.distributed_attack_detector.window",
+        "src/abuse/runtime.rs (DistributedAttackDetector, A-3)",
     ),
     secret(
         "security.dpop_nonce_secret",
@@ -196,6 +260,30 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/main.rs (loopback-gated)",
     ),
     key(
+        "security.outbound_volume_shield.email_hard_cap",
+        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
+    ),
+    key(
+        "security.outbound_volume_shield.email_soft_cap",
+        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
+    ),
+    key(
+        "security.outbound_volume_shield.enabled",
+        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
+    ),
+    key(
+        "security.outbound_volume_shield.sms_hard_cap",
+        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
+    ),
+    key(
+        "security.outbound_volume_shield.sms_soft_cap",
+        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
+    ),
+    key(
+        "security.outbound_volume_shield.window",
+        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
+    ),
+    key(
         "security.password.kdf.admin_max_in_flight",
         "src/config/validate.rs::resolve_admin_kdf_gate -> src/identity/kdf_gate.rs",
     ),
@@ -232,6 +320,26 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/config/validate.rs::resolve_pepper -> src/identity/credentials.rs",
     ),
     key(
+        "security.providers.bot_signal.enabled",
+        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
+    ),
+    key(
+        "security.providers.bot_signal.extra_ja3_blocklist",
+        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
+    ),
+    key(
+        "security.providers.bot_signal.extra_ja4_blocklist",
+        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
+    ),
+    key(
+        "security.providers.email_reputation.enabled",
+        "src/abuse/runtime.rs (BuiltinEmailReputation, P-5)",
+    ),
+    key(
+        "security.providers.email_reputation.extra_disposable_domains",
+        "src/abuse/runtime.rs (BuiltinEmailReputation, P-5)",
+    ),
+    key(
         "security.rate_limiting.admin_per_minute",
         "src/protocol/admin_auth.rs (AdminRateLimiter)",
     ),
@@ -262,8 +370,52 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/identity/engine/mod.rs (slug reservation)",
     ),
     key(
+        "security.risk_scorer.breach_corpus_weight",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.enabled",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.new_country_weight",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.new_device_weight",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.password_age_days_threshold",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.password_age_weight",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.refresh_context_delta_weight",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
+        "security.risk_scorer.step_up_threshold",
+        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
+    ),
+    key(
         "security.slug_cooldown_days",
         "src/identity/keys.rs (slug reservation key TTL)",
+    ),
+    key(
+        "security.tarpit.delay_ms",
+        "src/abuse/runtime.rs (TarpitStore, A-17)",
+    ),
+    key(
+        "security.tarpit.threshold",
+        "src/abuse/runtime.rs (TarpitStore, A-17)",
+    ),
+    key(
+        "security.tarpit.window_secs",
+        "src/abuse/runtime.rs (TarpitStore, A-17)",
     ),
     key("security.tls.crl_paths", "src/protocol/tls.rs"),
     key("security.tls.min_version", "src/protocol/tls.rs"),

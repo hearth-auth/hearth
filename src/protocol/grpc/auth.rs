@@ -49,6 +49,21 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
         .validate_token(&realm_id, &token)
         .map_err(|_| Status::new(Code::Unauthenticated, "invalid token"))?;
 
+    // RFC 9449 §7.2 — a `cnf`-bound token is usable only by the holder of the
+    // key it was bound to. This service has no DPoP proof channel: gRPC carries
+    // no `DPoP` header contract here and the handler cannot reconstruct the
+    // `htu` the client would have signed. Accepting the token anyway made the
+    // sender-constraint a no-op, so a stolen DPoP-bound admin token was
+    // replayable as a plain Bearer against every gRPC admin RPC
+    // (audit 2026-08-28 §4.19#8). Refuse it instead; the holder can use the
+    // REST admin surface, which does validate the proof.
+    if claims.cnf.is_some() {
+        return Err(Status::new(
+            Code::Unauthenticated,
+            "sender-constrained (DPoP) tokens are not accepted on the gRPC admin API",
+        ));
+    }
+
     let uuid_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
     let user_uuid: uuid::Uuid = uuid_str
         .parse()

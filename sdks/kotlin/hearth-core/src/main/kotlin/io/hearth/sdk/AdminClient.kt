@@ -53,7 +53,7 @@ class AdminClient(
 
     /** Updates a user. Only non-null fields are changed. */
     suspend fun updateUser(userId: String, request: UpdateUserRequest): User =
-        httpClient.put("$baseUrl/admin/users/$userId", request, authHeaders())
+        httpClient.patch("$baseUrl/admin/users/$userId", request, authHeaders())
 
     /** Deletes a user permanently. */
     suspend fun deleteUser(userId: String): Unit =
@@ -68,16 +68,14 @@ class AdminClient(
     // ── Realms ─────────────────────────────────────────────────────────────────
     //
     // Realms are provisioned via hearth.yaml, not the admin API. There is no
-    // `createRealm` method: the server returns 405 for POST /admin/realms
-    // (HEA-2171). Only read paths are exposed.
+    // `createRealm` and no `updateRealm` method: the server answers 405 with
+    // "Realms are managed via hearth.yaml" to both POST /admin/realms and
+    // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+    // paths and deletion are exposed.
 
     /** Retrieves a realm by [realmId]. */
     suspend fun getRealm(realmId: String): Realm =
         httpClient.get("$baseUrl/admin/realms/$realmId", authHeaders())
-
-    /** Updates a realm. Only non-null fields are changed. */
-    suspend fun updateRealm(realmId: String, request: UpdateRealmRequest): Realm =
-        httpClient.put("$baseUrl/admin/realms/$realmId", request, authHeaders())
 
     /** Deletes a realm permanently. */
     suspend fun deleteRealm(realmId: String): Unit =
@@ -101,7 +99,7 @@ class AdminClient(
 
     /** Updates an OAuth client. Only non-null fields are changed. */
     suspend fun updateClient(clientId: String, request: UpdateClientRequest): OAuthClient =
-        httpClient.put("$baseUrl/admin/clients/$clientId", request, authHeaders())
+        httpClient.patch("$baseUrl/admin/applications/$clientId", request, authHeaders())
 
     /** Deletes an OAuth client permanently. */
     suspend fun deleteClient(clientId: String): Unit =
@@ -125,7 +123,7 @@ class AdminClient(
 
     /** Updates a role. Only non-null fields are changed. */
     suspend fun updateRole(roleId: String, request: UpdateRoleRequest): Role =
-        httpClient.put("$baseUrl/admin/roles/$roleId", request, authHeaders())
+        httpClient.patch("$baseUrl/admin/roles/$roleId", request, authHeaders())
 
     /** Deletes a role permanently. */
     suspend fun deleteRole(roleId: String): Unit =
@@ -164,7 +162,7 @@ class AdminClient(
 
     /** Updates a group. Only non-null fields are changed. */
     suspend fun updateGroup(groupId: String, request: UpdateGroupRequest): Group =
-        httpClient.put("$baseUrl/admin/groups/$groupId", request, authHeaders())
+        httpClient.patch("$baseUrl/admin/groups/$groupId", request, authHeaders())
 
     /** Deletes a group permanently. */
     suspend fun deleteGroup(groupId: String): Unit =

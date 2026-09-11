@@ -77,14 +77,10 @@ func (a *AdminClient) GetRealm(ctx context.Context, realmID string) (*Realm, err
 	return &result, nil
 }
 
-// UpdateRealm updates a realm via the admin API.
-func (a *AdminClient) UpdateRealm(ctx context.Context, realmID string, req UpdateRealmRequest) (*Realm, error) {
-	var result Realm
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/realms/%s", realmID), req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
+// Realms are provisioned via hearth.yaml, not the admin API. There is no
+// CreateRealm and no UpdateRealm method: the server answers 405 with "Realms
+// are managed via hearth.yaml" to both POST /admin/realms and
+// PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4).
 
 // DeleteRealm deletes a realm via the admin API.
 func (a *AdminClient) DeleteRealm(ctx context.Context, realmID string) error {
@@ -114,7 +110,7 @@ func (a *AdminClient) GetClient(ctx context.Context, clientID string) (*OAuthCli
 // UpdateClient updates an OAuth client via the admin API.
 func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req UpdateClientRequest) (*OAuthClient, error) {
 	var result OAuthClient
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/clients/%s", clientID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/applications/%s", clientID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

@@ -126,12 +126,13 @@ describe("AdminClient — Realms CRUD", () => {
     expect(url).toBe("https://auth.example.com/admin/realms/realm_1");
   });
 
-  it("updateRealm sends PATCH /admin/realms/{id}", async () => {
-    fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ id: "realm_1" }) });
-    await client.updateRealm("realm_1", { name: "Updated" });
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://auth.example.com/admin/realms/realm_1");
-    expect(init.method).toBe("PATCH");
+  // Realms are provisioned from hearth.yaml. POST /admin/realms and
+  // PATCH /admin/realms/{id} both answer 405 with "Realms are managed via
+  // hearth.yaml", so no verb makes updateRealm work and the SDK must not
+  // offer it (audit 2026-08-28 §25.4).
+  it("does not offer updateRealm or createRealm", () => {
+    expect((client as unknown as Record<string, unknown>).updateRealm).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>).createRealm).toBeUndefined();
   });
 
   it("deleteRealm sends DELETE /admin/realms/{id}", async () => {

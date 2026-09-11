@@ -27,6 +27,7 @@ fn hearth_bin() -> std::path::PathBuf {
 const VALID_CONFIG: &str = r#"
 server:
   trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
 storage:
   data_dir: "/tmp/hearth-test"
 security:

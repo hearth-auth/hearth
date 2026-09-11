@@ -94,7 +94,7 @@ final class AdminClient
      */
     public function updateUser(string $id, array $params): array
     {
-        return $this->put("/admin/users/{$id}", $params);
+        return $this->patch("/admin/users/{$id}", $params);
     }
 
     /** Deletes a user by ID. */
@@ -122,8 +122,10 @@ final class AdminClient
     // =========================================================================
 
     // Realms are provisioned via hearth.yaml, not the admin API. There is no
-    // createRealm() method: the server returns 405 for POST /admin/realms
-    // (HEA-2171). Only read paths are exposed.
+    // createRealm() and no updateRealm() method: the server returns 405 with
+    // "Realms are managed via hearth.yaml" for both POST /admin/realms and
+    // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+    // paths and deletion are exposed.
 
     /**
      * Retrieves a realm by ID.
@@ -133,17 +135,6 @@ final class AdminClient
     public function getRealm(string $id): array
     {
         return $this->get("/admin/realms/{$id}");
-    }
-
-    /**
-     * Updates a realm by ID.
-     *
-     * @param array<string, mixed> $params
-     * @return array<string, mixed>
-     */
-    public function updateRealm(string $id, array $params): array
-    {
-        return $this->put("/admin/realms/{$id}", $params);
     }
 
     /** Deletes a realm by ID. */
@@ -197,7 +188,7 @@ final class AdminClient
      */
     public function updateClient(string $id, array $params): array
     {
-        return $this->put("/admin/clients/{$id}", $params);
+        return $this->patch("/admin/applications/{$id}", $params);
     }
 
     /** Deletes an OAuth client by ID. */
@@ -251,7 +242,7 @@ final class AdminClient
      */
     public function updateRole(string $id, array $params): array
     {
-        return $this->put("/admin/roles/{$id}", $params);
+        return $this->patch("/admin/roles/{$id}", $params);
     }
 
     /** Deletes a role by ID. */
@@ -305,7 +296,7 @@ final class AdminClient
      */
     public function updateGroup(string $id, array $params): array
     {
-        return $this->put("/admin/groups/{$id}", $params);
+        return $this->patch("/admin/groups/{$id}", $params);
     }
 
     /** Deletes a group by ID. */
@@ -427,6 +418,21 @@ final class AdminClient
     }
 
     /**
+     * Sends a PATCH request with a JSON body.
+     *
+     * Every Hearth admin mutation is a PATCH. The server answers a bare 405
+     * to PUT — no body, no error code — so the verb is part of the wire
+     * contract, not a style choice (audit 2026-08-28 §25.4).
+     *
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    private function patch(string $path, array $body): array
+    {
+        return $this->sendJson('PATCH', $path, $body);
+    }
+
+    /**
      * Sends a PUT request with a JSON body.
      *
      * @param array<string, mixed> $body
@@ -434,9 +440,20 @@ final class AdminClient
      */
     private function put(string $path, array $body): array
     {
+        return $this->sendJson('PUT', $path, $body);
+    }
+
+    /**
+     * Sends a JSON-bodied request with the given method.
+     *
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>
+     */
+    private function sendJson(string $method, string $path, array $body): array
+    {
         $encoded = json_encode($body, JSON_THROW_ON_ERROR);
         $request = $this->requestFactory
-            ->createRequest('PUT', $this->baseUrl . $path)
+            ->createRequest($method, $this->baseUrl . $path)
             ->withHeader('Authorization', "Bearer {$this->accessToken}")
             ->withHeader('X-Realm-ID', $this->realmId)
             ->withHeader('Content-Type', 'application/json')

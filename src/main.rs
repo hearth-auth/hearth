@@ -932,6 +932,14 @@ async fn run_serve(
         warn!(vars = ?vars, "config references unset or empty environment variables");
     }
 
+    // 19.12: advisory server warnings are produced as data by the validator and
+    // logged HERE, after the subscriber exists. They used to be `tracing::warn!`
+    // calls inside `Config::validate`, which runs from `load_config` above —
+    // before `telemetry::init`, so every one of them was discarded.
+    for warning in hearth::config::deferred_server_warnings(&config.server) {
+        warn!("{warning}");
+    }
+
     info!(
         dev_mode = config.dev_mode,
         port = config.server.port,
@@ -1305,12 +1313,18 @@ async fn run_serve(
         "kdf admin-reserved admission gate installed from security.password.kdf"
     );
 
+    // §4.17#8: the documented global `auth.password_memory_cost` /
+    // `auth.password_time_cost` keys reach the base Argon2 config here. Both
+    // arms go through the one resolver so the dev arm cannot drift.
+    let base_credential = config.base_credential_config(pepper);
+    info!(
+        memory_cost_kib = base_credential.memory_cost_kib,
+        time_cost = base_credential.time_cost,
+        "argon2id base parameters resolved from auth.password_*"
+    );
     let identity_config = if config.dev_mode {
         IdentityConfig {
-            credential: CredentialConfig {
-                pepper,
-                ..CredentialConfig::fast_for_testing()
-            },
+            credential: base_credential,
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -1321,10 +1335,7 @@ async fn run_serve(
         }
     } else {
         IdentityConfig {
-            credential: CredentialConfig {
-                pepper,
-                ..CredentialConfig::default()
-            },
+            credential: base_credential,
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -1334,6 +1345,32 @@ async fn run_serve(
             ..IdentityConfig::default()
         }
     };
+
+    // 19.11: state the Argon2id parameters this process will actually hash with,
+    // and warn when they fall below the OWASP floor. `hearth.yaml` and the realm
+    // API both refuse sub-floor values now, but `--dev` still runs
+    // `fast_for_testing`, and a realm override persisted before the gate existed
+    // is still honoured at verification time.
+    {
+        let cred = &identity_config.credential;
+        if cred.meets_owasp_floor() {
+            info!(
+                argon2_memory_kib = cred.memory_cost_kib,
+                argon2_time_cost = cred.time_cost,
+                argon2_parallelism = cred.parallelism,
+                "Argon2id password hashing parameters"
+            );
+        } else {
+            warn!(
+                argon2_memory_kib = cred.memory_cost_kib,
+                argon2_time_cost = cred.time_cost,
+                owasp_min_memory_kib_t2 = hearth::identity::OWASP_ARGON2_MIN_MEMORY_KIB_T2,
+                owasp_min_memory_kib_t1 = hearth::identity::OWASP_ARGON2_MIN_MEMORY_KIB_T1,
+                "Argon2id parameters are below the OWASP Password Storage Cheat Sheet floor; \
+                 a stolen credential store is materially cheaper to crack offline"
+            );
+        }
+    }
 
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
@@ -2437,6 +2474,27 @@ async fn run_serve(
     // `resolve_branding()` reads and inlines local SVGs directly.
     let (web_logo_url, custom_logo) = resolve_web_logo(&config);
 
+    // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
+    // the `security:` block. Nine guards documented "Shipped" in
+    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
+    // this is the production path. Every guard is fail-open until an operator
+    // enables it, so an existing config sees no behaviour change.
+    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
+        &config.security,
+    ));
+    abuse_guards.spawn_background_tasks(&config.security);
+    info!(
+        tarpit = config.security.tarpit.threshold.is_some(),
+        distributed_attack_detector = config.security.distributed_attack_detector.enabled,
+        outbound_volume_shield = config.security.outbound_volume_shield.enabled,
+        cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
+        bot_signal = config.security.providers.bot_signal.enabled,
+        email_reputation = config.security.providers.email_reputation.enabled,
+        ip_reputation = config.security.ip_reputation.enabled,
+        risk_scorer = config.security.risk_scorer.enabled,
+        "abuse-prevention guards installed"
+    );
+
     let mut web_state = WebState::new(
         Arc::clone(&identity_engine),
         Arc::clone(&rbac_engine),
@@ -2454,6 +2512,7 @@ async fn run_serve(
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
     .with_sms(sms_sender, sms_hmac_key_bytes)
+    .with_abuse_guards(Arc::clone(&abuse_guards))
     .with_dev_mode(config.dev_mode);
 
     if !api_trusted_proxies.is_empty() {
@@ -2682,10 +2741,18 @@ async fn run_serve(
         "operational + HTTP/2 limits installed"
     );
 
-    let mut app_router = http::router(Arc::clone(&app_state)).merge(web::router(web_state));
+    // 21.1 — the browser tree is merged *under* the API router's guard stack,
+    // not beside it. `http::router(..).merge(web::router(..))` left the `Host`
+    // allowlist, the per-IP request shaper, the JSON parse-bomb depth guard,
+    // the body limit and the request-duration histogram unreachable from
+    // `/ui/*`, the SAML front channel and the pre-auth recovery pages, because
+    // `Router::layer` wraps only the routes registered before it (audit §4.5#1
+    // through §4.5#4, §4.10#8, §4.24#8).
+    let mut browser_router = web::router(web_state);
     if let Some(mc_state) = &mailcatcher_state {
-        app_router = app_router.merge(web::mailcatcher_router(Arc::clone(mc_state)));
+        browser_router = browser_router.merge(web::mailcatcher_router(Arc::clone(mc_state)));
     }
+    let app_router = http::router_with(Arc::clone(&app_state), browser_router);
 
     // Spawn the webhook dispatcher. Uses a watch channel so we can signal
     // clean shutdown after the HTTP server exits.

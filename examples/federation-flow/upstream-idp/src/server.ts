@@ -4,7 +4,7 @@
  * Built on `node-oidc-provider` — the same library used under the hood by
  * several commercial IdPs. We configure it with two hardcoded accounts
  * and register Hearth as a confidential OIDC client. The provider serves
- * standard endpoints at http://localhost:9090/*:
+ * standard endpoints under the configured issuer (http://localhost:9090 by default):
  *
  *   /.well-known/openid-configuration — OIDC Discovery
  *   /jwks                             — RSA signing key (generated on startup)
@@ -25,8 +25,14 @@
 // @ts-expect-error — no TypeScript declarations published
 import Provider from "oidc-provider";
 
-const ISSUER = "http://localhost:9090";
-const PORT = 9090;
+// Hearth's federation transport refuses any upstream that is not https:// or
+// that resolves into a loopback/private range (the SSRF guard added in the
+// 2026-08-28 remediation, §22.7). A bare http://localhost issuer therefore
+// cannot complete a login, so the issuer is configurable: point HEARTH_DEMO_ISSUER
+// at the public https URL of a tunnel forwarding to this process. See README.md
+// step 1b.
+const ISSUER = process.env.HEARTH_DEMO_ISSUER ?? "http://localhost:9090";
+const PORT = Number(process.env.HEARTH_DEMO_PORT ?? 9090);
 
 // --- Fake user store --------------------------------------------------------
 

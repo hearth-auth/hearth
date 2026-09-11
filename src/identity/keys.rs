@@ -682,6 +682,15 @@ pub(crate) fn realm_retiring_key_all_scan_prefix() -> Vec<u8> {
     REALM_RETIRING_KEY_PREFIX.as_bytes().to_vec()
 }
 
+/// Scan prefix covering every realm's SAML signing key.
+///
+/// Format: `realm:saml_key:` — like the Ed25519 signing keys these live
+/// under the system realm, so the KEK enrolment sweep reaches them with one
+/// bounded scan rather than a realm walk.
+pub(crate) fn realm_saml_key_scan_prefix() -> Vec<u8> {
+    REALM_SAML_KEY_PREFIX.as_bytes().to_vec()
+}
+
 /// Parses the deadline (Unix seconds) encoded in a retiring-key storage key.
 ///
 /// The key is expected to follow the format produced by
