@@ -162,6 +162,37 @@ jobs:
         run: |
           cosign sign --yes "ghcr.io/hearth-auth/charts/hearth@${DIGEST}"
 
+      - name: Publish the chart for anonymous pull
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          # Same defect as the container image: a GHCR package is PRIVATE by
+          # default even under a public repository, so the README's documented
+          # `helm install` failed at the first command (audit 2026-08-28 §4.8#5,
+          # §4.12#4 — task 3.4). Idempotent, and re-applied on every publish so a
+          # recreated package cannot regress.
+          if gh api --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${{ github.repository_owner }}/packages/container/charts%2Fhearth" \
+              -f visibility=public 2>/dev/null; then
+            echo "::notice::the chart package is public"
+          else
+            echo "::warning::could not set chart visibility — set the PACKAGES_ADMIN_TOKEN secret to a PAT with write:packages"
+          fi
+
+      - name: Verify the chart is anonymously pullable
+        if: github.ref_type == 'tag'
+        run: |
+          # Must carry no credentials: the criterion is a stranger running the
+          # README's command. Both logins from earlier in this job are dropped.
+          helm registry logout ghcr.io || true
+          docker logout ghcr.io || true
+          if ! helm pull "oci://ghcr.io/hearth-auth/charts/hearth" --version "${CHART_VER}" --destination /tmp; then
+            echo "::error::the chart is not anonymously pullable — the README's Helm install path is broken"
+            exit 1
+          fi
+
       - name: Dry-run summary
         if: github.event_name == 'workflow_dispatch'
         run: |

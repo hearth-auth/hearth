@@ -386,6 +386,42 @@ jobs:
             --type cyclonedx \
             "ghcr.io/hearth-auth/hearth@${{ steps.inspect.outputs.digest }}"
 
+      - name: Publish the package for anonymous pull
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          # GHCR packages default to PRIVATE even when the repository is public,
+          # so the README's very first install command failed for everyone
+          # (audit 2026-08-28 §4.8#5, §4.12#4 — task 3.4). Setting it on every
+          # publish is idempotent and survives a package being recreated.
+          #
+          # GITHUB_TOKEN cannot change visibility; that needs a PAT with
+          # write:packages in the PACKAGES_ADMIN_TOKEN secret. Without it this
+          # step warns and the verification step below is what actually fails
+          # the release, so a missing secret cannot silently ship a private image.
+          if gh api --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${{ github.repository_owner }}/packages/container/hearth" \
+              -f visibility=public 2>/dev/null; then
+            echo "::notice::ghcr.io/${{ github.repository }} is public"
+          else
+            echo "::warning::could not set package visibility — set the PACKAGES_ADMIN_TOKEN secret to a PAT with write:packages"
+          fi
+
+      - name: Verify the image is anonymously pullable
+        if: github.ref_type == 'tag'
+        run: |
+          # The acceptance criterion for task 3.4 is the README's own command
+          # working for a stranger, so this check MUST carry no credentials.
+          # `docker logout` drops the login this job made earlier.
+          docker logout ghcr.io
+          TAG="${GITHUB_REF_NAME}"
+          if ! docker pull "ghcr.io/${{ github.repository }}:${TAG}"; then
+            echo "::error::ghcr.io/${{ github.repository }}:${TAG} is not anonymously pullable — the README's Docker install path is broken"
+            exit 1
+          fi
+
       - name: Summarize build
         if: always()
         run: |
