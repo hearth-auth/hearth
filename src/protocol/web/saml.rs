@@ -1221,6 +1221,90 @@ mod tests {
         }
     }
 
+    // ======================================================================
+    // 19.5 (audit 2026-08-28 §4.10#6, §4.22#4) — the ACS must not audit a
+    // login it did not complete.
+    //
+    // `issued_session_cookie` is the whole gate: `sp_acs` writes
+    // `saml_login_completed` if and only if it returns true. The original
+    // defect was an unconditional "completed" event on a cookie-less
+    // redirect, so every branch that redirects WITHOUT a session cookie must
+    // read false here.
+    // ======================================================================
+
+    /// Builds a `Response` carrying the given `Set-Cookie` headers.
+    fn response_with_cookies(cookies: &[&str]) -> Response {
+        let mut resp = StatusCode::SEE_OTHER.into_response();
+        for c in cookies {
+            resp.headers_mut().append(
+                header::SET_COOKIE,
+                axum::http::HeaderValue::from_str(c).expect("cookie header"),
+            );
+        }
+        resp
+    }
+
+    /// Control: a real login cookie reads true, so the refusals below cannot
+    /// pass vacuously.
+    #[test]
+    fn issued_session_cookie_sees_a_real_login_cookie() {
+        let resp =
+            response_with_cookies(&["hearth_ui_session=abc.def; HttpOnly; Path=/ui; SameSite=Lax"]);
+        assert!(
+            issued_session_cookie(&resp),
+            "a Set-Cookie for the session cookie must count as a completed login"
+        );
+    }
+
+    /// The confirm-to-link hop redirects with its own ticket cookie and no
+    /// session. It is real progress, but nobody is logged in — auditing it as
+    /// `saml_login_completed` is the exact defect 19.5 closes.
+    #[test]
+    fn issued_session_cookie_refuses_the_confirm_link_hop() {
+        let resp = response_with_cookies(&[
+            "hearth_ui_fed_confirm=tkt.mac; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=600",
+        ]);
+        assert!(
+            !issued_session_cookie(&resp),
+            "a confirm-to-link ticket cookie is not a session"
+        );
+    }
+
+    /// A logout-shaped cookie clears the session rather than establishing one.
+    /// Matching on the name alone would read it as a completed login.
+    #[test]
+    fn issued_session_cookie_refuses_a_cleared_session_cookie() {
+        let resp = response_with_cookies(&[
+            "hearth_ui_session=; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=0",
+        ]);
+        assert!(
+            !issued_session_cookie(&resp),
+            "an expiring session cookie must not count as a completed login"
+        );
+    }
+
+    /// A redirect with no `Set-Cookie` at all — the original 19.5 defect,
+    /// where the ACS 302'd to `return_to` and audited a completed login.
+    #[test]
+    fn issued_session_cookie_refuses_a_bare_redirect() {
+        assert!(
+            !issued_session_cookie(&response_with_cookies(&[])),
+            "a redirect carrying no cookie authenticates nobody"
+        );
+    }
+
+    /// A cookie whose *name* merely starts with the session cookie's name
+    /// must not satisfy the gate — the prefix ends at the `=`.
+    #[test]
+    fn issued_session_cookie_refuses_a_name_prefixed_cookie() {
+        let resp =
+            response_with_cookies(&["hearth_ui_session_hint=1; HttpOnly; Path=/ui; SameSite=Lax"]);
+        assert!(
+            !issued_session_cookie(&resp),
+            "only the session cookie itself proves a session was issued"
+        );
+    }
+
     /// 19.6: `oidc.issuer` is the other absolute public URL an operator
     /// configures; it is accepted when `onboarding.base_url` is absent so a
     /// production deployment is not forced to set two keys.

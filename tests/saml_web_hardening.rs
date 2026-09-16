@@ -51,6 +51,18 @@ fn build_app() -> axum::Router {
 /// so a test can register additional SPs (with known certs) against the same
 /// storage the router reads.
 fn build_app_full() -> (axum::Router, Arc<dyn IdentityEngine>, hearth::core::RealmId) {
+    let (app, identity, realm_id, _audit) = build_app_audited();
+    (app, identity, realm_id)
+}
+
+/// Like [`build_app_full`] but also hands back the audit engine, so a test can
+/// assert on what the handlers recorded (19.5).
+fn build_app_audited() -> (
+    axum::Router,
+    Arc<dyn IdentityEngine>,
+    hearth::core::RealmId,
+    Arc<dyn AuditEngine>,
+) {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -150,6 +162,7 @@ fn build_app_full() -> (axum::Router, Arc<dyn IdentityEngine>, hearth::core::Rea
         web::router(state),
         Arc::clone(&identity),
         realm.id().clone(),
+        Arc::clone(&audit),
     )
 }
 
@@ -920,6 +933,101 @@ fn sp_acs_ignores_x_forwarded_host_when_choosing_the_audience() {
             .expect("lookup")
             .is_none(),
         "a rejected assertion must not provision a user"
+    );
+}
+
+/// Counts the realm's audit events with the given action.
+fn count_audit(
+    audit: &dyn AuditEngine,
+    realm_id: &hearth::core::RealmId,
+    action: hearth::audit::AuditAction,
+) -> usize {
+    let mut q = hearth::audit::AuditQuery::for_realm(realm_id.clone());
+    q.action = Some(action);
+    audit.query(&q).expect("audit query").len()
+}
+
+/// 19.5 (§4.22#4): the audit log must not claim a login that did not happen.
+///
+/// The ACS wrote `saml_login_completed` unconditionally on the accept path,
+/// while issuing no cookie and authenticating nobody. The event is now gated on
+/// a session cookie actually being set, so a *rejected* assertion must leave the
+/// completed count untouched and record a failure instead.
+#[test]
+fn sp_acs_audits_completed_only_for_a_login_that_happened() {
+    use hearth::audit::AuditAction;
+
+    let (app, identity, realm_id, audit) = build_app_audited();
+    let idp_key = hearth::identity::tokens::RsaSigningKey::generate("corp-idp", 365).expect("key");
+    let idp_id = register_saml_idp(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        cert_der_to_pem(idp_key.cert_der()),
+    );
+
+    let sp_entity_id = "http://localhost:8420/ui/realms/demo";
+    let acs_url = format!("{sp_entity_id}/federation/saml/acs");
+
+    // A rejected assertion first: minted for another SP's audience, so
+    // validation fails before anything downstream runs.
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-bad",
+        "_req_bad",
+    );
+    let bad = signed_saml_response_b64(
+        &idp_key,
+        "_req_bad",
+        &acs_url,
+        "https://other-sp.example/ui/realms/demo",
+        "https://corp-idp.example",
+        "nobody@corp.example",
+    );
+    let resp = post_acs(&app, &bad, "relay-bad", &[]);
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "an assertion minted for another SP must be refused"
+    );
+    assert_eq!(
+        count_audit(audit.as_ref(), &realm_id, AuditAction::SamlLoginCompleted),
+        0,
+        "a refused assertion must never be audited as a completed login"
+    );
+    assert_eq!(
+        count_audit(audit.as_ref(), &realm_id, AuditAction::SamlLoginFailed),
+        1,
+        "a refused assertion must be audited as a failure"
+    );
+
+    // Now the accepted one, which does issue a session cookie.
+    seed_saml_state(identity.as_ref(), &realm_id, &idp_id, "relay-ok", "_req_ok");
+    let good = signed_saml_response_b64(
+        &idp_key,
+        "_req_ok",
+        &acs_url,
+        sp_entity_id,
+        "https://corp-idp.example",
+        "audited@corp.example",
+    );
+    let resp = post_acs(&app, &good, "relay-ok", &[]);
+    assert_eq!(resp.status().as_u16(), 303);
+
+    let mut q = hearth::audit::AuditQuery::for_realm(realm_id.clone());
+    q.action = Some(AuditAction::SamlLoginCompleted);
+    let completed = audit.query(&q).expect("audit query");
+    assert_eq!(
+        completed.len(),
+        1,
+        "the accepted assertion must be audited as exactly one completed login"
+    );
+    assert_eq!(
+        completed[0].actor, "audited@corp.example",
+        "the completed-login event must name the asserted subject"
     );
 }
 

@@ -100,7 +100,7 @@ export class JwksClient {
    * Verify a JWT using Ed25519/EdDSA JWKS-based local signature verification (spec §2).
    *
    * Executes all five spec §2 validation steps in order:
-   * 1. Signature against cached JWKS (EdDSA / RS256 / ES256).
+   * 1. Signature against cached JWKS — EdDSA only; RS256 and ES256 are refused.
    * 2. `exp` — rejects expired tokens.
    * 3. `iss` — always, against `options.issuer` or the client's configured
    *    `issuer`. Throws {@link ConfigurationError} when neither is set.

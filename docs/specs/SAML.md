@@ -151,15 +151,47 @@ order (all rejections use the listed `SamlError` variant):
 5. **Audience** — the parsed `AudienceRestriction/Audience` value MUST equal
    this SP's entity ID; else `AudienceMismatch`. A single audience value is
    parsed, so this is an equality check, not a membership test over a list.
-   The SP entity ID it is compared against is derived from `onboarding.base_url`
-   when configured, and otherwise from the request's `X-Forwarded-Host` / `Host`
-   headers — see the caveat on `trusted_base_url` in `src/protocol/web/saml.rs`.
+   The SP entity ID it is compared against comes from `onboarding.base_url`,
+   or from `oidc.issuer` when that is unset. Forwarded headers
+   (`X-Forwarded-Host`, `X-Forwarded-Proto`) are **never** consulted: anyone who
+   can reach the port can set them, and an origin the attacker chose is not an
+   origin. With neither key configured, only a **loopback** `Host`
+   (`localhost`, `127.0.0.1`, `[::1]`) is accepted, for dev and tests; any other
+   unconfigured `Host` makes the endpoint refuse with `500` rather than validate
+   against a header (`trusted_base_url` in `src/protocol/web/saml.rs`).
 6. **Validity window** — see §6.
-7. **InResponseTo** — see §6.2.
+7. **InResponseTo** (`<Response>` level) — see §6.2.
+8. **Bearer `<SubjectConfirmationData>`** — the assertion MUST carry exactly one
+   bearer `<SubjectConfirmation Method="…:cm:bearer">` whose
+   `<SubjectConfirmationData>` sits *inside* that assertion (SAML 2.0 profiles
+   §4.1.4.3). Zero is rejected as `InvalidAuthnRequest`, and so are two or more —
+   a second one makes "the" `Recipient` ambiguous, which is precisely what a
+   wrapping attack wants. Within it:
+   - `Recipient` MUST equal this SP's ACS URL; else `DestinationMismatch`.
+   - `NotOnOrAfter` is **mandatory** and is its own window, independent of (and
+     typically far tighter than) `Conditions/NotOnOrAfter`; a missing or
+     elapsed bound is `Expired`.
+   - `InResponseTo` MUST equal the `AuthnRequest` ID we issued, when we issued
+     one; else `InvalidAuthnRequest`. For an unsolicited (IdP-initiated)
+     response there is no request to bind against and the attribute is not
+     consulted.
+
+   These are the copies that matter: the `<Response>`-level `Destination` and
+   `InResponseTo` sit outside the signature whenever only the assertion is
+   signed, while these three are inside the element the IdP signed. They are
+   read from the same parsed assertion the ACS has already tied to the verified
+   signature — never from a re-parse of the raw document.
 
 Replay protection (assertion-ID uniqueness) is enforced by the ACS handler
 against storage, **outside** `extract_and_validate_assertion`; a re-used
 assertion ID MUST be rejected as `SamlError::Replay`.
+
+On acceptance the ACS runs the asserted identity through the same federation
+pipeline the OIDC callback uses — existing link, auto-link, confirm-to-link, or
+JIT provisioning — and issues a Hearth session cookie. `saml_login_completed`
+is recorded **only** when that cookie was actually set: a confirm-to-link hop is
+a redirect without one, and the audit log must not report a login that did not
+happen.
 
 ## 6. Time and correlation windows
 

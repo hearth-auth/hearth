@@ -8,15 +8,11 @@ import com.nimbusds.jose.jwk.JWKSelector
 import com.nimbusds.jose.jwk.JWKSet
 import com.nimbusds.jose.jwk.KeyType
 import com.nimbusds.jose.jwk.OctetKeyPair
-import com.nimbusds.jose.jwk.source.ImmutableJWKSet
-import com.nimbusds.jose.proc.JWSKeySelector
-import com.nimbusds.jose.proc.JWSVerificationKeySelector
 import com.nimbusds.jose.proc.SecurityContext
 import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.SignedJWT
 import com.nimbusds.jwt.proc.BadJWTException
 import com.nimbusds.jwt.proc.DefaultJWTClaimsVerifier
-import com.nimbusds.jwt.proc.DefaultJWTProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.ParseException
@@ -28,7 +24,7 @@ private const val CLOCK_SKEW_SECONDS = 5
  * JWT signature verifier backed by a [JwksClient].
  *
  * Implements the mandatory validation order from SDK.md §2:
- * 1. Signature against JWKS (EdDSA/Ed25519 — Hearth's primary algorithm; RS256/ES256 for federation)
+ * 1. Signature against JWKS (EdDSA/Ed25519 — Hearth's only signing algorithm)
  * 2. `exp` claim
  * 3. `iss` matches configured issuer
  * 4. `aud` contains configured client_id (optional — server SDK mode)
@@ -85,10 +81,23 @@ class TokenVerifier(
         }
     }
 
+    /**
+     * Dispatches on the JWS header algorithm. `EdDSA` is the only accepted value.
+     *
+     * There is no federation exception (SDK.md §2, audit 2026-08-28 §4.2#6). This verifier
+     * once fell back to RS256/ES256 "for relayed third-party IdP tokens"; Hearth performs no
+     * such relay — a federated login is exchanged for a Hearth-issued Ed25519 token, and the
+     * RSA and EC entries the JWKS once published were withdrawn. Accepting a second and third
+     * algorithm only widens the set of keys an attacker can steer this verifier onto.
+     */
     private fun processJwt(jwt: SignedJWT, keySet: JWKSet): Claims =
         when (jwt.header.algorithm) {
             JWSAlgorithm.EdDSA -> processEdDSA(jwt, keySet)
-            else -> processFederation(jwt, keySet)
+            else -> throw ClaimsError(
+                TokenInvalidError(
+                    "Unsupported JWT algorithm: expected EdDSA, got ${jwt.header.algorithm}",
+                ),
+            )
         }
 
     /**
@@ -128,41 +137,6 @@ class TokenVerifier(
         }
 
         throw TokenInvalidError("JWT signature verification failed")
-    }
-
-    /**
-     * RS256/ES256 verification for federation tokens via [DefaultJWTProcessor].
-     *
-     * These algorithms never appear on Hearth-issued tokens (SDK.md §2); this path
-     * only applies when relaying third-party IdP tokens.
-     */
-    private fun processFederation(jwt: SignedJWT, keySet: JWKSet): Claims {
-        val processor = DefaultJWTProcessor<SecurityContext>().apply {
-            val source = ImmutableJWKSet<SecurityContext>(keySet)
-            val rsaSelector = JWSVerificationKeySelector(JWSAlgorithm.RS256, source)
-            val ecSelector  = JWSVerificationKeySelector(JWSAlgorithm.ES256, source)
-            jwsKeySelector = CompositeKeySelector(rsaSelector, ecSelector)
-            jwtClaimsSetVerifier = buildClaimsVerifier()
-        }
-
-        return try {
-            Claims(processor.process(jwt, null))
-        } catch (e: BadJWTException) {
-            mapBadJwtException(e)
-        } catch (e: com.nimbusds.jose.JOSEException) {
-            throw TokenInvalidError("JWT signature verification failed")
-        } catch (e: Exception) {
-            val msg = e.message ?: ""
-            when {
-                msg.contains("expired", ignoreCase = true) ->
-                    throw TokenExpiredError("Token has expired")
-                msg.contains("issuer", ignoreCase = true) || msg.contains("iss claim", ignoreCase = true) ->
-                    throw TokenIssuerError("Token issuer does not match configured issuer")
-                msg.contains("audience", ignoreCase = true) ->
-                    throw TokenAudienceError("Token audience does not include expected client_id")
-                else -> throw TokenInvalidError("JWT verification failed")
-            }
-        }
     }
 
     /**
@@ -218,31 +192,8 @@ class TokenVerifier(
 }
 
 /**
- * Wraps a [HearthException] thrown during claims verification (after a valid EdDSA signature)
- * so that [TokenVerifier.verify] does not mistake a claims failure for a JWKS key-miss and
- * trigger a spurious JWKS re-fetch.
+ * Wraps a [HearthException] that is decided without consulting a key — a claims failure after a
+ * valid EdDSA signature, or an algorithm this verifier refuses — so that [TokenVerifier.verify]
+ * does not mistake it for a JWKS key-miss and trigger a spurious JWKS re-fetch.
  */
 private class ClaimsError(val typed: HearthException) : Exception()
-
-/**
- * Tries each [JWSKeySelector] in order; returns keys from the first whose algorithm matches the
- * JWS header. Used only for RS256/ES256 federation fallbacks — EdDSA is handled separately.
- */
-private class CompositeKeySelector(
-    private vararg val selectors: JWSKeySelector<SecurityContext>,
-) : JWSKeySelector<SecurityContext> {
-    override fun selectJWSKeys(
-        header: com.nimbusds.jose.JWSHeader,
-        ctx: SecurityContext?,
-    ): List<java.security.Key> {
-        for (sel in selectors) {
-            try {
-                val keys = sel.selectJWSKeys(header, ctx)
-                if (keys.isNotEmpty()) return keys
-            } catch (_: Exception) {
-                // Try next selector
-            }
-        }
-        return emptyList()
-    }
-}
