@@ -449,7 +449,6 @@ mod tests {
             DELIVERY_PERMITS.available_permits(),
             MAX_CONCURRENT_DELIVERIES
         );
-        assert!(MAX_CONCURRENT_DELIVERIES > 0);
     }
 
     #[test]

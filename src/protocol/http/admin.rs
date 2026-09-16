@@ -2537,8 +2537,14 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize;
-    // Option<Option<String>> naturally handles null vs absent vs string.
-    Option::<Option<String>>::deserialize(d)
+    // `Option::<Option<String>>::deserialize` does NOT distinguish the two:
+    // serde collapses an explicit `null` to the outer `None`, which is the
+    // same value an ABSENT field produces, so `null` silently meant "leave
+    // unchanged" instead of "clear". `#[serde(default)]` supplies `None` when
+    // the field is absent, and this function runs only when it is present, so
+    // wrapping one level here is what makes `null` reach the engine as
+    // `Some(None)`.
+    Ok(Some(Option::<String>::deserialize(d)?))
 }
 
 /// Admin: update client by ID.

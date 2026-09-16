@@ -103,10 +103,12 @@ fn create_realm(harness: &common::TestHarness, prefix: &str) -> RealmId {
         .create_realm(&CreateRealmRequest {
             name: format!("{prefix}-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
+                // Canonical names per VALID_MFA_METHODS; "email" is not one of
+                // them, and task 19.15 made the gate actually enforce the list.
                 mfa_methods: Some(vec![
                     "totp".to_string(),
                     "sms".to_string(),
-                    "email".to_string(),
+                    "email_otp".to_string(),
                 ]),
                 ..RealmConfig::default()
             }),

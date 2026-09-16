@@ -614,12 +614,17 @@ pub(super) fn otp_factor_for(
     realm: &crate::identity::Realm,
     user: &crate::identity::User,
 ) -> Option<OtpFactor> {
-    let methods = realm.config().mfa_methods.clone().unwrap_or_default();
-    if methods.iter().any(|m| m == "sms") && user.phone_verified() && state.sms.is_some() {
+    // An ABSENT `mfa_methods` restricts nothing — that is the semantics
+    // `EmbeddedIdentityEngine::require_mfa_method` enforces, and the same rule
+    // the TOTP branch below applies. `unwrap_or_default()` inverted it here,
+    // producing an empty list that allowed NO factor, so a realm that had
+    // simply never configured the key could never route to an OTP challenge.
+    let methods = realm.config().mfa_methods.clone();
+    let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
+    if offers("sms") && user.phone_verified() && state.sms.is_some() {
         return Some(OtpFactor::Sms);
     }
-    if methods.iter().any(|m| m == "email_otp") && user.email_otp_enabled() && state.email.is_some()
-    {
+    if offers("email_otp") && user.email_otp_enabled() && state.email.is_some() {
         return Some(OtpFactor::Email);
     }
     None
@@ -859,7 +864,20 @@ pub async fn mfa_otp_challenge_submit(
         return ra_response;
     }
 
-    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+    finish_otp_login(&state, &headers, &pending, session_ctx)
+}
+
+/// Issues the session once an OTP second factor has been proved.
+///
+/// Split out of `mfa_otp_challenge_submit` to keep that handler under the
+/// line limit; it is the whole "the factor checked out, now log them in" tail.
+fn finish_otp_login(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    pending: &super::auth::MfaPending,
+    session_ctx: SessionContext,
+) -> Response {
+    revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
     // An OTP the realm delivered out of band and the user typed back is a
     // proved second factor — the `mfa_required` gate reads exactly this
@@ -874,7 +892,7 @@ pub async fn mfa_otp_challenge_submit(
         .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
     {
         Ok(session) => {
-            let secure = state.is_secure_request(&headers);
+            let secure = state.is_secure_request(headers);
             let IssuedCookies {
                 session_cookie,
                 csrf_cookie,

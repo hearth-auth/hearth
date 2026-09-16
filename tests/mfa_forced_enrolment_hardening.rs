@@ -203,8 +203,49 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Fetches `/ui/login` and returns its `(csrf_cookie, csrf_field)` pair.
+///
+/// The login form is CSRF-protected. A POST without the double-submit pair
+/// re-renders the page with `422` and no inline error, which is
+/// indistinguishable from a rejected password unless you build the pair.
+async fn login_csrf(rig: &Rig) -> (String, String) {
+    let page = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ui/login")
+                .body(Body::empty())
+                .expect("build login GET"),
+        )
+        .await
+        .expect("login page");
+    let cookie = page
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hearth_ui_csrf="))
+        .map(|v| v.split(';').next().unwrap_or("").to_string())
+        .expect("the login page must issue a CSRF cookie");
+    let html = String::from_utf8_lossy(
+        &axum::body::to_bytes(page.into_body(), 1 << 20)
+            .await
+            .expect("login page body"),
+    )
+    .into_owned();
+    let marker = r#"name="_csrf" value=""#;
+    let start = html
+        .find(marker)
+        .map(|i| i + marker.len())
+        .expect("the login form must carry a hidden _csrf field");
+    let end = start + html[start..].find('"').expect("unterminated _csrf");
+    (cookie, html[start..end].to_string())
+}
+
 /// Logs in with the password and returns the MFA pending cookie value.
 async fn login_to_forced_enrolment(rig: &Rig) -> String {
+    let (csrf_cookie, csrf_field) = login_csrf(rig).await;
     let resp = rig
         .app
         .clone()
@@ -213,8 +254,9 @@ async fn login_to_forced_enrolment(rig: &Rig) -> String {
                 .method("POST")
                 .uri("/ui/login")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, csrf_cookie)
                 .body(Body::from(format!(
-                    "email=alice@acme.test&password={}",
+                    "email=alice@acme.test&password={}&_csrf={csrf_field}",
                     password()
                 )))
                 .expect("build login request"),

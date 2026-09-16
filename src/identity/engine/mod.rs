@@ -17492,7 +17492,7 @@ mod tests {
         let confidential = register_confidential_client(&engine, &realm, "s3cret");
 
         let public_hashes = hashes_during(|| {
-            drop(engine.authenticate_client(&realm, public.client_id(), Some("x")))
+            drop(engine.authenticate_client(&realm, public.client_id(), Some("x")));
         });
         let conf_hashes = hashes_during(|| {
             drop(engine.authenticate_client(&realm, confidential.client_id(), Some("x")));

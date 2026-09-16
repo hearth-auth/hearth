@@ -155,7 +155,7 @@ fn build_rig(mfa_required: bool) -> Rig {
     }
 }
 
-fn header_str<'a>(resp: &'a Response<Body>, name: header::HeaderName) -> Option<&'a str> {
+fn header_str(resp: &Response<Body>, name: header::HeaderName) -> Option<&str> {
     resp.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
@@ -167,7 +167,48 @@ fn has_cookie(resp: &Response<Body>, name: &str) -> bool {
         .any(|v| v.starts_with(&format!("{name}=")))
 }
 
+/// Fetches `/ui/login` and returns its `(csrf_cookie, csrf_field)` pair.
+///
+/// The login form is CSRF-protected, and a POST without the double-submit pair
+/// re-renders the page with `422` and no inline error — which looks exactly
+/// like a rejected credential, so build the pair rather than guessing.
+async fn login_csrf(rig: &Rig) -> (String, String) {
+    let page = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ui/login")
+                .body(Body::empty())
+                .expect("build login GET"),
+        )
+        .await
+        .expect("login page");
+    let cookie = page
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hearth_ui_csrf="))
+        .map(|v| v.split(';').next().unwrap_or("").to_string())
+        .expect("the login page must issue a CSRF cookie");
+    let html = String::from_utf8_lossy(
+        &axum::body::to_bytes(page.into_body(), 1 << 20)
+            .await
+            .expect("login page body"),
+    )
+    .into_owned();
+    let marker = r#"name="_csrf" value=""#;
+    let start = html
+        .find(marker)
+        .map(|i| i + marker.len())
+        .expect("the login form must carry a hidden _csrf field");
+    let end = start + html[start..].find('"').expect("unterminated _csrf");
+    (cookie, html[start..end].to_string())
+}
+
 async fn post_login(rig: &Rig) -> Response<Body> {
+    let (csrf_cookie, csrf_field) = login_csrf(rig).await;
     rig.app
         .clone()
         .oneshot(
@@ -175,8 +216,9 @@ async fn post_login(rig: &Rig) -> Response<Body> {
                 .method("POST")
                 .uri("/ui/login")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, csrf_cookie)
                 .body(Body::from(format!(
-                    "email=otp-user@acme.test&password={}",
+                    "email=otp-user@acme.test&password={}&_csrf={csrf_field}",
                     password()
                 )))
                 .expect("build login request"),
@@ -192,18 +234,40 @@ async fn post_login(rig: &Rig) -> Response<Body> {
 async fn login_challenges_an_email_otp_factor_instead_of_forcing_totp_enrolment() {
     let rig = build_rig(/* mfa_required */ true);
     let resp = post_login(&rig).await;
+    let status = resp.status();
+    let loc = header_str(&resp, header::LOCATION).map(str::to_string);
+    let pending = has_cookie(&resp, MFA_PENDING_COOKIE);
+    let session = has_cookie(&resp, SESSION_COOKIE);
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+    // Only the rendered error line is useful in a failure message; the rest of
+    // the page is boilerplate.
+    let body: String = body
+        .lines()
+        .filter(|l| {
+            let l = l.to_ascii_lowercase();
+            l.contains("error") || l.contains("invalid") || l.contains("incorrect")
+        })
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" | ");
 
     assert_eq!(
-        header_str(&resp, header::LOCATION),
+        loc.as_deref(),
         Some("/ui/mfa-otp-challenge"),
-        "an enrolled email-OTP factor must be challenged, not treated as absent"
+        "an enrolled email-OTP factor must be challenged, not treated as absent; \
+         status {status:?}, error {body}"
     );
     assert!(
-        has_cookie(&resp, MFA_PENDING_COOKIE),
+        pending,
         "the challenge needs the pending cookie that proves the password step"
     );
     assert!(
-        !has_cookie(&resp, SESSION_COOKIE),
+        !session,
         "no session may be issued before the second factor is proved"
     );
 }
@@ -215,6 +279,7 @@ async fn login_challenges_an_email_otp_factor_instead_of_forcing_totp_enrolment(
 async fn login_challenges_an_email_otp_factor_even_when_the_realm_does_not_require_mfa() {
     let rig = build_rig(/* mfa_required */ false);
     let resp = post_login(&rig).await;
+    let status = resp.status();
 
     assert!(
         !has_cookie(&resp, SESSION_COOKIE),
@@ -223,7 +288,8 @@ async fn login_challenges_an_email_otp_factor_even_when_the_realm_does_not_requi
     assert_eq!(
         header_str(&resp, header::LOCATION),
         Some("/ui/mfa-otp-challenge"),
-        "the OTP challenge must run before the session is issued"
+        "the OTP challenge must run before the session is issued; status {:?}",
+        status
     );
 }
 

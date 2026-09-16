@@ -297,8 +297,11 @@ fn every_registered_security_key_is_reachable_from_yaml() {
     // every registered path must still parse — a renamed field must break this
     // test rather than quietly stop being checked.
     for path in hearth::config::registered_security_key_paths() {
+        // Task 25.25 widened the registry past `security.` to cover `auth.`
+        // too, because the same dead-key class bit `auth.password_memory_cost`
+        // and `auth.token.magic_link_ttl`.
         assert!(
-            path.starts_with("security."),
+            path.starts_with("security.") || path.starts_with("auth."),
             "registry paths are absolute from the config root; got {path}"
         );
         assert!(

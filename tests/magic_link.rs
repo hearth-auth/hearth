@@ -7,7 +7,7 @@
 mod common;
 
 use hearth::core::RealmId;
-use hearth::identity::{CreateRealmRequest, CreateUserRequest, User};
+use hearth::identity::{CreateRealmRequest, CreateUserRequest, RegistrationPolicy, User};
 
 /// Helper: creates a real realm with a signing key.
 fn create_realm(harness: &common::TestHarness) -> RealmId {
@@ -16,6 +16,24 @@ fn create_realm(harness: &common::TestHarness) -> RealmId {
         .create_realm(&CreateRealmRequest {
             name: format!("ml-test-{}", uuid::Uuid::new_v4()),
             config: None,
+        })
+        .expect("create realm");
+    realm.id().clone()
+}
+
+/// Creates a realm whose self-registration policy is `policy`.
+fn create_realm_with_registration(
+    harness: &common::TestHarness,
+    policy: RegistrationPolicy,
+) -> RealmId {
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("ml-reg-{}", uuid::Uuid::new_v4()),
+            config: Some(hearth::identity::RealmConfig {
+                registration_policy: Some(policy),
+                ..hearth::identity::RealmConfig::default()
+            }),
         })
         .expect("create realm");
     realm.id().clone()
@@ -102,7 +120,12 @@ async fn magic_link_creates_account_for_unknown_email() {
     let harness = common::TestHarness::embedded()
         .await
         .expect("harness setup");
-    let realm = create_realm(&harness);
+    // Task 22.24 made `validate_magic_link` consult the realm's
+    // `RegistrationPolicy`, which defaults to `Disabled`. Creating an account
+    // from a magic link IS a registration, so this test must open the realm to
+    // registration; the fail-closed default is pinned by the sibling test
+    // below.
+    let realm = create_realm_with_registration(&harness, RegistrationPolicy::Open);
     let unknown_email = format!("newuser-{}@example.com", uuid::Uuid::new_v4());
 
     // Email should not exist yet
@@ -156,6 +179,43 @@ async fn magic_link_creates_account_for_unknown_email() {
 //
 // Request 3 magic links for same email → all succeed
 // Request 4th → fails with RateLimited
+
+/// Task 22.24 (audit 2026-08-28 §4.24#11): redeeming a magic link for an
+/// address with no account is a self-registration, and must obey the realm's
+/// `RegistrationPolicy`. Before this it created the account regardless, so a
+/// realm with registration disabled could still be populated by anyone who
+/// could request a link.
+#[tokio::test]
+async fn magic_link_refuses_to_create_an_account_when_registration_is_disabled() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm_with_registration(&harness, RegistrationPolicy::Disabled);
+    let unknown_email = format!("nobody-{}@example.com", uuid::Uuid::new_v4());
+
+    // Requesting stays silent: enumeration resistance is unchanged.
+    let response = harness
+        .identity()
+        .request_magic_link(&realm, &unknown_email)
+        .expect("request_magic_link for unknown email");
+
+    let err = harness
+        .identity()
+        .validate_magic_link(&realm, response.token())
+        .expect_err("a closed realm must not gain an account from a magic link");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::RegistrationDisabled),
+        "got {err:?}"
+    );
+    assert!(
+        harness
+            .identity()
+            .get_user_by_email(&realm, &unknown_email)
+            .expect("get_user_by_email")
+            .is_none(),
+        "no account may exist after the refusal"
+    );
+}
 
 #[tokio::test]
 async fn magic_link_rate_limiting() {

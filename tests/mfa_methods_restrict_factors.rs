@@ -161,7 +161,8 @@ async fn a_realm_that_does_not_offer_webauthn_refuses_a_passkey_ceremony() {
 fn email_otp_is_a_valid_configured_mfa_method() {
     let yaml = r#"
 server:
-  bind: "127.0.0.1:8420"
+  bind_address: "127.0.0.1"
+  port: 8420
 storage:
   data_dir: "/tmp/hearth-mfa-methods-test"
 realms:

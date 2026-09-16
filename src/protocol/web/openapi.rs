@@ -82,7 +82,7 @@ const DOCS_CSP: &str = "default-src 'none'; \
      frame-ancestors 'none'";
 
 /// Swagger UI HTML page. All sub-resources are same-origin.
-const SWAGGER_UI_HTML: &str = r##"<!DOCTYPE html>
+const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -96,7 +96,7 @@ const SWAGGER_UI_HTML: &str = r##"<!DOCTYPE html>
 <script src="/docs/assets/init.js"></script>
 </body>
 </html>
-"##;
+"#;
 
 /// Returns a router for `/openapi.json`, `/openapi.yaml`, `/docs`, and the
 /// same-origin Swagger UI assets under `/docs/assets/`.

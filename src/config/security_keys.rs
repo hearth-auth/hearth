@@ -975,17 +975,15 @@ mod tests {
         ));
     }
 
-    /// Parses `types.rs` and yields every dotted leaf path under `security:`.
-    ///
-    /// Deliberately a source parse rather than a `serde` reflection: the whole
-    /// point is to notice a field that was *added to the struct*, which no
-    /// runtime value can tell us about.
     // ── Task 25.25 — source analysis helpers ────────────────────────────────
     //
-    // These are textual, and say so. A borrow-checked call graph is what
-    // `cargo` has and a test does not; the question here is narrower than a
-    // real one — "does anything live still refer to this file at all" — and
-    // text answers it well enough to catch a consumer nobody calls.
+    // These parse SOURCE rather than reflecting over `serde`, deliberately:
+    // the whole point is to notice a field that was *added to the struct*,
+    // which no runtime value can tell us about. They are textual, and say so.
+    // A borrow-checked call graph is what `cargo` has and a test does not; the
+    // question here is narrower than a real one — "does anything live still
+    // refer to this file at all" — and text answers it well enough to catch a
+    // consumer nobody calls.
 
     /// Extracts every `src/**.rs` file named in a consumer entry.
     fn consumer_files(consumer: &str) -> Vec<String> {
@@ -994,7 +992,10 @@ mod tests {
             .filter_map(|token| {
                 let file = token.trim_matches(|c: char| !c.is_ascii_graphic());
                 let file = file.split("::").next().unwrap_or(file);
-                (file.starts_with("src/") && file.ends_with(".rs")).then(|| file.to_string())
+                let is_rust = std::path::Path::new(file)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("rs"));
+                (file.starts_with("src/") && is_rust).then(|| file.to_string())
             })
             .collect()
     }

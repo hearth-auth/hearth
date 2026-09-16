@@ -165,13 +165,19 @@ fn admin_cookie(rig: &TestRig) -> String {
     mac.update(b"|");
     mac.update(admin_realm.as_uuid().as_bytes());
     let tag = data_encoding::BASE64URL_NOPAD.encode(&mac.finalize().into_bytes());
+    // Task 21.2 gave the JSON-only `/ui/admin` mutations a CSRF check, and
+    // `test-ping` is one of them. The double-submit pair is a
+    // `hearth_ui_csrf` cookie plus a matching `x-csrf-token` header.
     format!(
-        "hearth_ui_session={}.{}.{}",
+        "hearth_ui_session={}.{}.{}; hearth_ui_csrf={CSRF}",
         rig.admin_session_id.as_uuid(),
         admin_realm.as_uuid(),
         tag,
     )
 }
+
+/// Double-submit CSRF token shared by the cookie and the header.
+const CSRF: &str = "webhook-test-ping-csrf-token";
 
 async fn post_test_ping(rig: &TestRig, json_body: &str) -> (StatusCode, serde_json::Value) {
     let cookie = admin_cookie(rig);
@@ -187,6 +193,7 @@ async fn post_test_ping(rig: &TestRig, json_body: &str) -> (StatusCode, serde_js
                 ))
                 .header(header::COOKIE, cookie)
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("x-csrf-token", CSRF)
                 .body(Body::from(json_body.to_string()))
                 .expect("build request"),
         )

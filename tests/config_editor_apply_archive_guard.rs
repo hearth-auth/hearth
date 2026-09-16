@@ -200,7 +200,10 @@ fn document(realms_json: Option<&str>) -> String {
         None => String::new(),
     };
     format!(
-        r#"{{"oidc":{{"issuer":"https://auth.example.com"}},"server":{{"trust_forwarded_proto":true,"trusted_proxies":["127.0.0.1"]}},"security":{{"key_encryption_key":"1111111111111111111111111111111111111111111111111111111111111111"}}{realms}}}"#
+        // A real email transport is required: the realms below enable password
+        // authentication, and task 19.21 refuses `transport: log` for such a
+        // realm in production because every reset mail would be discarded.
+        r#"{{"oidc":{{"issuer":"https://auth.example.com"}},"server":{{"trust_forwarded_proto":true,"trusted_proxies":["127.0.0.1"]}},"email":{{"transport":"smtp","from":"noreply@example.com","smtp":{{"host":"smtp.example.com","port":587}}}},"security":{{"key_encryption_key":"1111111111111111111111111111111111111111111111111111111111111111"}}{realms}}}"#
     )
 }
 

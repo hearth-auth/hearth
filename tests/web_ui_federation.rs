@@ -858,6 +858,22 @@ fn scoped_confirm_submit_links_the_external_identity() {
         .expect("ticket")
         .to_string();
 
+    // Task 21.14 made the POST handler actually read the `_csrf` field it had
+    // been parsing and ignoring, so the round trip must now fetch the confirm
+    // page first and submit the token it carries alongside its cookie.
+    let page = send(
+        &rig.app,
+        Request::builder()
+            .header("cookie", cookie.clone())
+            .uri(&location)
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(page.status(), StatusCode::OK);
+    let csrf_cookie = csrf_cookie_from(&page);
+    let csrf_field = csrf_field_from(&body_text(page));
+    let cookie = format!("{cookie}; {csrf_cookie}");
+
     rig.identity
         .set_password(
             &rig.realm_id,
@@ -876,7 +892,7 @@ fn scoped_confirm_submit_links_the_external_identity() {
         )
         .expect("activate");
 
-    let body = format!("ticket={ticket}&password=correct-horse-battery");
+    let body = format!("ticket={ticket}&password=correct-horse-battery&_csrf={csrf_field}");
     let resp = send(
         &rig.app,
         Request::builder()

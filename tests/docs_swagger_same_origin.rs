@@ -9,7 +9,7 @@
 //! every same-origin request.
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use axum::Router;
 use hearth::protocol::web::openapi::openapi_router;
 use tower::ServiceExt;
