@@ -379,6 +379,49 @@ mod tests {
         // See vorner/arc-swap#210 (report), #211 (opt-in `genlock-load`
         // RwLock-strategy mitigation), #203 (closed, unmerged UAF fix).
         //
+        // CONFIRMED INDEPENDENTLY (2026-09-16). Reproduction recipe, because the
+        // bug is invisible under a plain run — 180 runs of this test (60 serial,
+        // then 120 at 6-way parallelism) all passed. Hardening the allocator so
+        // it *checks* what the guard frees, instead of silently freeing a
+        // recycled chunk, surfaces it:
+        //
+        //   MALLOC_CHECK_=3 MALLOC_PERTURB_=165 \
+        //     <lib test binary> --exact \
+        //     rbac::resolution_cache::tests::concurrent_readers_never_observe_stale_after_bump
+        //
+        // run 10-way concurrent. 1 abort in 120 runs: `free(): invalid pointer`,
+        // SIGABRT, core dumped. `MALLOC_PERTURB_` only poisons freed memory and
+        // `MALLOC_CHECK_` only validates the chunk header — neither can fabricate
+        // an invalid free. The captured core's stack is frame-for-frame the one
+        // above, on a *reader* thread:
+        //   ShardedResolutionCache::get
+        //     -> drop_glue<arc_swap::Guard<Arc<HashMap<..>>>>
+        //       -> <HybridProtection as Drop>::drop
+        //         -> drop_in_place<Arc<HashMap<..>>> -> HashMap drop
+        //           -> RawTable::drop_inner_table -> ResolvedPermissions drop
+        //             -> Vec<Permission> -> String -> RawVec<u8> -> free() -> abort
+        // i.e. the reader's guard drop took the refcount to zero and ran the
+        // map's real destructor while the writer still owned it.
+        //
+        // Two corrections to the options above, checked against the vendored
+        // crate rather than the issue tracker:
+        //   * The RwLock strategy is NOT reachable from a production build of
+        //     1.9.2. `strategy/rw_lock.rs` is `#[cfg(feature =
+        //     "internal-test-strategies")]`, its own module doc says "*This is
+        //     not meant to be used in production code*", and there is no
+        //     `genlock-load` feature — 1.9.2 ships only `experimental-strategies`,
+        //     `experimental-thread-local`, `internal-test-strategies` and `weak`.
+        //   * There is no version to upgrade to. 1.9.2 is the newest published
+        //     release, and its only change over 1.9.1 is a doc note (#208). The
+        //     two releases before it were both memory-ordering fixes (1.9.0:
+        //     "original proofs based on wrong reading of standard"; 1.9.1: "one
+        //     more SeqCst"), and the crate carries its own `tests/bug-198.rs`
+        //     crash regression — this is a recurring defect class there, not a
+        //     one-off.
+        // So the remedy is to move off the crate or off this strategy; neither
+        // is available as a dependency bump, which is why it stays a
+        // workspace-level decision.
+        //
         // This code is 100% safe Rust and uses only arc-swap's public API, so
         // the fault is NOT in this module and must NOT be "fixed" by lowering
         // the iteration count again or by #[ignore]-ing this test: the same
