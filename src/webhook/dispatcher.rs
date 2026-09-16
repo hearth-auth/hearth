@@ -442,13 +442,158 @@ mod tests {
         assert_eq!(WEBHOOK_REPLAY_WINDOW_SECS, 300);
     }
 
-    /// 22.10: outbound deliveries are bounded process-wide.
-    #[test]
-    fn delivery_permits_are_bounded() {
+    /// 22.10: the permit pool is a real, finite bound, not an unbounded one.
+    #[tokio::test]
+    async fn delivery_permits_are_a_finite_pool() {
         assert_eq!(
             DELIVERY_PERMITS.available_permits(),
             MAX_CONCURRENT_DELIVERIES
         );
+        let all = DELIVERY_PERMITS
+            .acquire_many(u32::try_from(MAX_CONCURRENT_DELIVERIES).expect("bound fits u32"))
+            .await
+            .expect("the pool is never closed");
+        assert!(
+            DELIVERY_PERMITS.try_acquire().is_err(),
+            "a 65th concurrent delivery must not be admitted"
+        );
+        drop(all);
+        assert!(DELIVERY_PERMITS.try_acquire().is_ok());
+    }
+
+    /// Minimal `WebhookEngine` that reports every delivery record written.
+    struct SignallingWebhookEngine {
+        recorded: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    impl WebhookEngine for SignallingWebhookEngine {
+        fn create(
+            &self,
+            _req: &super::super::types::CreateWebhookRequest,
+        ) -> Result<super::super::types::WebhookSubscription, super::super::WebhookError> {
+            unimplemented!("not exercised by the permit test")
+        }
+        fn get(
+            &self,
+            _realm_id: &crate::core::RealmId,
+            _id: &crate::core::WebhookId,
+        ) -> Result<super::super::types::WebhookSubscription, super::super::WebhookError> {
+            unimplemented!("not exercised by the permit test")
+        }
+        fn update(
+            &self,
+            _realm_id: &crate::core::RealmId,
+            _id: &crate::core::WebhookId,
+            _req: &super::super::types::UpdateWebhookRequest,
+        ) -> Result<super::super::types::WebhookSubscription, super::super::WebhookError> {
+            unimplemented!("not exercised by the permit test")
+        }
+        fn delete(
+            &self,
+            _realm_id: &crate::core::RealmId,
+            _id: &crate::core::WebhookId,
+        ) -> Result<(), super::super::WebhookError> {
+            unimplemented!("not exercised by the permit test")
+        }
+        fn list(
+            &self,
+            _query: &WebhookQuery,
+        ) -> Result<Vec<super::super::types::WebhookSubscription>, super::super::WebhookError>
+        {
+            Ok(Vec::new())
+        }
+        fn record_delivery(
+            &self,
+            _delivery: &super::super::types::WebhookDelivery,
+        ) -> Result<(), super::super::WebhookError> {
+            let _ = self.recorded.send(());
+            Ok(())
+        }
+        fn list_deliveries(
+            &self,
+            _query: &super::super::types::DeliveryQuery,
+        ) -> Result<Vec<super::super::types::WebhookDelivery>, super::super::WebhookError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn permit_test_subscription() -> super::super::types::WebhookSubscription {
+        super::super::types::WebhookSubscription {
+            id: crate::core::WebhookId::generate(),
+            realm_id: crate::core::RealmId::new(uuid::Uuid::nil()),
+            // The SSRF guard refuses a loopback target outright, so the HTTP
+            // attempt resolves in microseconds and never touches the network.
+            url: "http://127.0.0.1:9/hook".to_string(),
+            secret: "permit-test-secret".to_string(),
+            enabled: true,
+            event_filters: Vec::new(),
+            created_at: crate::core::Timestamp::from_micros(0),
+            updated_at: crate::core::Timestamp::from_micros(0),
+        }
+    }
+
+    fn permit_test_event() -> AuditEvent {
+        AuditEvent {
+            id: crate::core::AuditEventId::generate(),
+            realm_id: crate::core::RealmId::new(uuid::Uuid::nil()),
+            actor: "system".to_string(),
+            action: crate::audit::AuditAction::UserCreated,
+            resource_type: "user".to_string(),
+            resource_id: "u1".to_string(),
+            timestamp: crate::core::Timestamp::from_micros(0),
+            metadata: None,
+            integrity_hash: "genesis".to_string(),
+        }
+    }
+
+    /// 22.10, the half a permit *count* assertion cannot see: the delivery path
+    /// must actually take a permit before it makes the HTTP attempt.
+    ///
+    /// With the pool exhausted, `deliver_with_retry` must get no further than
+    /// the semaphore — no attempt, and therefore no delivery record. Releasing
+    /// the permits must then let exactly that attempt through. Deleting the
+    /// `DELIVERY_PERMITS.acquire()` in `deliver_with_retry` makes the first
+    /// assertion fail: the attempt is made and recorded with the pool empty.
+    #[tokio::test]
+    async fn delivery_takes_a_permit_before_the_http_attempt() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Arc::new(SignallingWebhookEngine { recorded: tx });
+        let clock = Arc::new(crate::core::SystemClock) as Arc<dyn Clock>;
+
+        let hog = DELIVERY_PERMITS
+            .acquire_many(u32::try_from(MAX_CONCURRENT_DELIVERIES).expect("bound fits u32"))
+            .await
+            .expect("the pool is never closed");
+        assert_eq!(DELIVERY_PERMITS.available_permits(), 0);
+
+        let task = tokio::spawn(deliver_with_retry(
+            Arc::clone(&engine) as Arc<dyn WebhookEngine>,
+            clock,
+            permit_test_subscription(),
+            permit_test_event(),
+        ));
+
+        // The attempt is refused by the SSRF guard in microseconds when it is
+        // allowed to run at all, so nothing arriving inside this window means
+        // the task never got past the semaphore.
+        let blocked = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            blocked.is_err(),
+            "an outbound webhook attempt was made and recorded with zero permits \
+             available — the process-wide concurrency bound is not on the \
+             delivery path"
+        );
+        assert!(
+            !task.is_finished(),
+            "the delivery task must still be waiting"
+        );
+
+        drop(hog);
+        // Unbounded await: with a permit free the attempt must now happen.
+        rx.recv()
+            .await
+            .expect("releasing a permit must let the delivery proceed");
+        task.abort();
     }
 
     #[test]

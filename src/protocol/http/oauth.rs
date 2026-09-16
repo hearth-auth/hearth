@@ -668,7 +668,19 @@ fn non_empty_credential(field: &str) -> Option<&str> {
 ///   authenticates them (RFC 9700 §2.1.1);
 /// - confidential clients → the secret (HTTP Basic Auth preferred, body
 ///   `client_secret` fallback) must verify, else `Err` with a 401.
-fn enforce_confidential_client_auth(
+///
+/// 22.25 (audit 2026-08-28 §4.25#3): the *decision* above is unchanged, but the
+/// *work* is no longer a function of what the lookup found. Equalising
+/// `IdentityEngine::authenticate_client` alone did not close the oracle,
+/// because this gate short-circuits on the unknown and public arms before ever
+/// reaching the engine — so `POST /token` still answered an unknown
+/// `client_id` in microseconds and a registered confidential one in
+/// Argon2id-milliseconds. Hashing now depends only on the caller's own input:
+/// a presented secret costs exactly one verification on every arm (against a
+/// realm-parameterised dummy hash when there is no stored one), and presenting
+/// no secret costs none, which keeps the public-client browser flow off the
+/// Argon2id path entirely.
+pub(super) fn enforce_confidential_client_auth(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -698,32 +710,46 @@ fn enforce_confidential_client_auth(
     };
     let client_id = ClientId::new(uuid);
     let client = match state.identity.get_client(realm_id, &client_id) {
-        Ok(Some(c)) => c,
-        Ok(None) => return Ok(()),
+        Ok(c) => c,
         Err(e) => return Err(identity_error_to_response(&e).into_response()),
+    };
+    // A valid secret is mandatory for a confidential client. Prefer HTTP Basic
+    // Auth credentials (RFC 6749 §2.3.1), fall back to the body
+    // `client_secret`.
+    let secret = basic
+        .map(|(_, s)| s)
+        .or_else(|| body_client_secret.map(str::to_string));
+
+    // 22.25: run the verification before the outcome is decided, on every arm,
+    // whenever the caller presented a secret. `authenticate_client` performs
+    // exactly one Argon2id verification for a presented secret regardless of
+    // whether the client exists or holds a hash, so the unknown and public arms
+    // below now cost what the confidential arm costs. The result is discarded
+    // on the arms that do not consult it — the work is the point.
+    let verified = secret.as_deref().map(|s| {
+        state
+            .identity
+            .authenticate_client(realm_id, &client_id, Some(s))
+    });
+
+    let Some(client) = client else {
+        return Ok(());
     };
     if !client.is_confidential() {
         return Ok(());
     }
-    // Confidential client: a valid secret is mandatory. Prefer HTTP Basic Auth
-    // credentials (RFC 6749 §2.3.1), fall back to the body `client_secret`.
-    let secret = basic
-        .map(|(_, s)| s)
-        .or_else(|| body_client_secret.map(str::to_string));
-    state
-        .identity
-        .authenticate_client(realm_id, &client_id, secret.as_deref())
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Basic realm=\"hearth\"")],
-                Json(serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "client authentication failed"
-                })),
-            )
-                .into_response()
-        })
+    match verified {
+        Some(Ok(())) => Ok(()),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", "Basic realm=\"hearth\"")],
+            Json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "client authentication failed"
+            })),
+        )
+            .into_response()),
+    }
 }
 
 /// Returns the CORS `Access-Control-Allow-Origin` value for `origin` if it

@@ -1262,3 +1262,55 @@ fn confirm_link_submit_with_the_matching_csrf_passes_the_gate() {
         "passing the gate must reach the handler, which consumes the ticket"
     );
 }
+
+/// 22.16 (audit 2026-08-28 §4.22#8): the `redirect_uri` actually transmitted
+/// upstream must be the absolute, realm-scoped callback URL — the same string
+/// the admin Identity Provider detail page publishes for the operator to
+/// register with the provider.
+///
+/// `tests/web_ui_idp_admin.rs` covers the published half; this covers the
+/// transmitted half, so the two ends of the claim are pinned independently and
+/// a future divergence cannot pass both. The old value was
+/// `/realms/{realm}/federation/callback` — relative, and missing the `/ui`
+/// prefix — so upstream IdPs answered `redirect_uri_mismatch`.
+#[test]
+fn begin_transmits_the_absolute_realm_scoped_callback_as_redirect_uri() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .uri("/ui/realms/demo/federation/begin?idp=upstream")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("redirect")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let redirect_uri = location
+        .split("redirect_uri=")
+        .nth(1)
+        .map(|rest| {
+            let end = rest.find('&').unwrap_or(rest.len());
+            rest[..end].to_string()
+        })
+        .expect("the authorize URL must carry a redirect_uri");
+    // The parameter is percent-encoded in the query string.
+    let decoded = redirect_uri.replace("%3A", ":").replace("%2F", "/");
+
+    assert_eq!(
+        decoded, "http://localhost/ui/realms/demo/federation/callback",
+        "the transmitted redirect_uri must be the absolute, realm-scoped \
+         callback URL the admin page publishes"
+    );
+    assert!(
+        !decoded.starts_with("/realms/"),
+        "a relative redirect_uri is not a routable callback: {decoded}"
+    );
+}

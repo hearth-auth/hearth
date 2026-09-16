@@ -3036,3 +3036,215 @@ async fn api_json_does_not_gain_the_html_only_headers() {
         "the pre-existing machine-API headers must still be applied"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 22.25 (audit 2026-08-28 §4.25#3) — protocol-layer client-authentication
+// timing parity.
+// ---------------------------------------------------------------------------
+//
+// The identity-layer half is covered by the `hashes_during` tests in
+// `identity::engine`. This is the half that faces the network: the
+// `authorization_code`, device, revoke, introspect and token-exchange arms all
+// authenticate through `oauth::enforce_confidential_client_auth`, which short
+// circuits on an unknown or public client *before* reaching the engine — so
+// equalising the engine alone left the oracle wide open on `POST /token`.
+//
+// Measured by COUNTING Argon2id verifications, never by wall clock.
+
+use crate::core::{ClientId, RealmId};
+
+/// Runs `f` and returns how many hash verifications it performed.
+fn hashes_during(f: impl FnOnce()) -> u64 {
+    let before = crate::identity::credentials::hash_verification_count();
+    f();
+    crate::identity::credentials::hash_verification_count() - before
+}
+
+/// Builds a state with one confidential and one public client in a fresh realm.
+/// Returns `(state, realm_id, confidential_client_id, public_client_id)`.
+fn client_auth_fixture(temp_dir: &std::path::Path) -> (Arc<AppState>, RealmId, ClientId, ClientId) {
+    use crate::identity::{CreateRealmRequest, RegisterClientRequest};
+
+    let state = test_state(temp_dir);
+    let realm = state
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: format!("client-auth-timing-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+
+    let confidential = state
+        .identity
+        .register_client(
+            realm.id(),
+            &RegisterClientRequest {
+                client_name: "Confidential".to_string(),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                client_secret: Some("the-real-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register confidential client");
+    let public = state
+        .identity
+        .register_client(
+            realm.id(),
+            &RegisterClientRequest {
+                client_name: "Public".to_string(),
+                redirect_uris: vec!["https://spa.example.com/cb".to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register public client");
+
+    let realm_id = realm.id().clone();
+    let conf_id = confidential.client_id().clone();
+    let pub_id = public.client_id().clone();
+    (state, realm_id, conf_id, pub_id)
+}
+
+/// The defect: at the HTTP edge an unknown `client_id` returned before any
+/// hashing while a registered confidential one paid for an Argon2id
+/// verification, so `POST /token` response time said whether a client existed.
+#[test]
+fn http_client_auth_hashes_the_same_for_unknown_and_registered_clients() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let (state, realm_id, conf_id, _public) = client_auth_fixture(temp_dir.path());
+    let headers = axum::http::HeaderMap::new();
+    let unknown = ClientId::generate();
+
+    let known_hashes = hashes_during(|| {
+        let r = super::oauth::enforce_confidential_client_auth(
+            &state,
+            &realm_id,
+            &headers,
+            &conf_id.as_uuid().to_string(),
+            Some("wrong-secret"),
+        );
+        assert!(r.is_err(), "a wrong secret must still be refused");
+    });
+    let unknown_hashes = hashes_during(|| {
+        drop(super::oauth::enforce_confidential_client_auth(
+            &state,
+            &realm_id,
+            &headers,
+            &unknown.as_uuid().to_string(),
+            Some("wrong-secret"),
+        ));
+    });
+
+    assert_eq!(
+        known_hashes, 1,
+        "a presented secret must cost exactly one verification"
+    );
+    assert_eq!(
+        unknown_hashes, known_hashes,
+        "an unregistered client_id must cost the same hashing work at the HTTP \
+         edge as a registered one, or token-endpoint latency enumerates clients"
+    );
+}
+
+/// Client *type* must not be readable from hashing work either: a public
+/// client presenting a secret costs what a confidential one costs.
+#[test]
+fn http_client_auth_hashes_the_same_for_public_and_confidential_clients() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let (state, realm_id, conf_id, pub_id) = client_auth_fixture(temp_dir.path());
+    let headers = axum::http::HeaderMap::new();
+
+    let public_hashes = hashes_during(|| {
+        drop(super::oauth::enforce_confidential_client_auth(
+            &state,
+            &realm_id,
+            &headers,
+            &pub_id.as_uuid().to_string(),
+            Some("stray-secret"),
+        ));
+    });
+    let conf_hashes = hashes_during(|| {
+        drop(super::oauth::enforce_confidential_client_auth(
+            &state,
+            &realm_id,
+            &headers,
+            &conf_id.as_uuid().to_string(),
+            Some("stray-secret"),
+        ));
+    });
+
+    assert_eq!(
+        public_hashes, conf_hashes,
+        "client type must not be readable from hashing work"
+    );
+    assert_eq!(public_hashes, 1);
+}
+
+/// The other half of the rule, unchanged from the engine's: presenting no
+/// secret costs no hashing on any arm, so the public-client browser flow stays
+/// off the Argon2id path entirely.
+#[test]
+fn http_client_auth_without_a_secret_costs_no_hashing() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let (state, realm_id, conf_id, pub_id) = client_auth_fixture(temp_dir.path());
+    let headers = axum::http::HeaderMap::new();
+    let unknown = ClientId::generate();
+
+    for (label, id) in [
+        ("public", pub_id.as_uuid().to_string()),
+        ("confidential", conf_id.as_uuid().to_string()),
+        ("unknown", unknown.as_uuid().to_string()),
+    ] {
+        let n = hashes_during(|| {
+            drop(super::oauth::enforce_confidential_client_auth(
+                &state, &realm_id, &headers, &id, None,
+            ));
+        });
+        assert_eq!(n, 0, "{label}: no secret presented must cost no hashing");
+    }
+}
+
+/// The equalisation must not have loosened the decision the gate makes.
+#[test]
+fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let (state, realm_id, conf_id, pub_id) = client_auth_fixture(temp_dir.path());
+    let headers = axum::http::HeaderMap::new();
+    let cid = conf_id.as_uuid().to_string();
+
+    assert!(
+        super::oauth::enforce_confidential_client_auth(
+            &state,
+            &realm_id,
+            &headers,
+            &cid,
+            Some("the-real-secret"),
+        )
+        .is_ok(),
+        "the registered secret must still authenticate"
+    );
+    assert!(
+        super::oauth::enforce_confidential_client_auth(
+            &state,
+            &realm_id,
+            &headers,
+            &cid,
+            Some("nope"),
+        )
+        .is_err(),
+        "a wrong secret must still be refused"
+    );
+    // A public client is authenticated by PKCE, not a secret: still Ok.
+    assert!(super::oauth::enforce_confidential_client_auth(
+        &state,
+        &realm_id,
+        &headers,
+        &pub_id.as_uuid().to_string(),
+        Some("stray"),
+    )
+    .is_ok());
+}

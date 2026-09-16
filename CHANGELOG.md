@@ -287,6 +287,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **The `auth:` block is covered by the start-up configuration-liveness registry** — a key
   under `auth:` that no module consumes is now refused at start-up, on the same terms as
   `security:` since task 20.17 (25.25).
+- **Kotlin SDK `TokenVerifier` rejects every algorithm but EdDSA (audit 2026-08-28 §4.2#6)** — it
+  carried an RS256/ES256 "federation fallback" for relaying third-party IdP tokens. Hearth relays
+  no such token, and the RSA and EC keys its JWKS once published were withdrawn in 18.1, so the
+  fallback only widened the set of keys an attacker could steer the verifier onto. `verify()` now
+  throws `TokenInvalidError` for any `alg` other than `EdDSA`, matching the other six SDKs.
+  `docs/specs/SDK_SURFACE.md` §C-04 and §6.1, which still prescribed the fallback as normative,
+  were corrected to match `docs/specs/SDK.md` §2 (18.3).
 
 
 ### Fixed
@@ -3699,7 +3706,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a secret. Hashing work is now a function of the caller's own input: presenting a secret
   costs exactly one verification on every arm — against a realm-parameterised dummy hash
   when there is no stored one — and presenting no secret costs none, which keeps the public
-  client token path off Argon2id entirely.
+  client token path off Argon2id entirely. The same rule now applies at the HTTP edge: the
+  `authorization_code`, device, revoke, introspect and token-exchange arms of `POST /token`
+  short-circuited on an unknown or public `client_id` before reaching the engine, so
+  token-endpoint latency still enumerated clients on those six routes.
 - **Outbound webhook deliveries are bounded and replay-limited (audit 2026-08-28 §4.6#5)** —
   `X-Hearth-Signature-256` covers the body alone, so a captured delivery stayed valid
   forever; the new timestamped `X-Hearth-Signature` gives receivers an authenticated `t` to
