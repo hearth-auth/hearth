@@ -106,4 +106,22 @@ final class AdminClientTest extends TestCase
             'createRealm() cannot succeed against any Hearth server — the route 405s',
         );
     }
+    /**
+     * Hearth serves no organization route over HTTP at all. There is no
+     * `/admin/orgs`, no `/admin/orgs/{id}/members` and no per-member route
+     * anywhere in the router, so every one of these methods 404'd. There is
+     * nothing to repoint them at (audit 2026-08-28 §25.19).
+     */
+    public function testOrgMembershipMethodsAreNotOffered(): void
+    {
+        foreach (
+            ['addOrgMember', 'getOrgMember', 'updateOrgMember', 'removeOrgMember', 'listOrgMembers']
+            as $dead
+        ) {
+            self::assertFalse(
+                method_exists(AdminClient::class, $dead),
+                "{$dead}() cannot succeed against any Hearth server — /admin/orgs is not a route",
+            );
+        }
+    }
 }

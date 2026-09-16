@@ -169,13 +169,14 @@ $admin->deleteUser($user['id']);
 // createRealm() (the server returns 405). Only read paths are exposed.
 $page  = $admin->listRealms();
 
-// OAuth clients
+// OAuth clients — the server mounts these at /admin/applications*
 $client = $admin->createClient(['client_id' => 'frontend', 'redirect_uris' => ['https://...']]);
 
-// Roles, groups, org members — same CRUD pattern
+// Roles and groups — same CRUD pattern
 $admin->createRole(['name' => 'editor']);
 $admin->createGroup(['name' => 'engineering']);
-$admin->addOrgMember($orgId, ['user_id' => $userId, 'role' => 'member']);
+
+// There are no org-membership methods: Hearth serves no /admin/orgs route.
 ```
 
 ---

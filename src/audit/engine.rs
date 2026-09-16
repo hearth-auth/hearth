@@ -211,12 +211,18 @@ impl EmbeddedAuditEngine {
         let storage_key = keys::audit_hmac_key();
         let key_bytes: [u8; 32] = match self.storage.get(realm_id, &storage_key)? {
             Some(raw) => {
+                // Strict: on a deployment with a KEK configured, an
+                // unenveloped chain key is not a legacy row — the KEK
+                // enrolment sweep re-wraps this key at startup — it is
+                // corruption or an attacker with storage write access
+                // stripping the envelope and substituting an HMAC key of
+                // their own, which would let them rewrite the audit log and
+                // re-chain it (audit 2026-08-28 §25.21).
                 let plaintext =
-                    crate::identity::key_encryption::unwrap_key(&raw, self.kek.as_ref()).map_err(
-                        |e| AuditError::Serialization {
+                    crate::identity::key_encryption::unwrap_key_strict(&raw, self.kek.as_ref())
+                        .map_err(|e| AuditError::Serialization {
                             reason: format!("audit HMAC key unwrap failed: {e}"),
-                        },
-                    )?;
+                        })?;
                 if plaintext.len() != 32 {
                     return Err(AuditError::Serialization {
                         reason: format!(
@@ -265,7 +271,10 @@ impl EmbeddedAuditEngine {
         let Some(raw) = self.storage.get(realm_id, &keys::audit_hmac_key())? else {
             return Ok(None);
         };
-        let plaintext = crate::identity::key_encryption::unwrap_key(&raw, self.kek.as_ref())
+        // Strict for the same reason as the append path: an unenveloped chain
+        // key under a configured KEK is a downgrade, and accepting one here
+        // would let a tampered log verify clean (§25.21).
+        let plaintext = crate::identity::key_encryption::unwrap_key_strict(&raw, self.kek.as_ref())
             .map_err(|e| AuditError::Serialization {
                 reason: format!("audit HMAC key unwrap failed: {e}"),
             })?;
@@ -2142,6 +2151,166 @@ mod tests {
             .verify_integrity(&realm_id, None, None)
             .expect("verify");
         assert!(valid);
+    }
+
+    // ---------------------------------------------------------------
+    // 25.21 — the audit chain HMAC key is read with the STRICT unwrap
+    // ---------------------------------------------------------------
+
+    /// A KEK distinct from [`OTHER_KEK`], so "wrapped under a different KEK"
+    /// is expressible.
+    const ENGINE_KEK: [u8; 32] = [0x11; 32];
+    /// The KEK an attacker (or a mis-restored backup) wrapped the key under.
+    const OTHER_KEK: [u8; 32] = [0x22; 32];
+
+    /// Builds an engine over `storage` that wraps its chain key under
+    /// `ENGINE_KEK`.
+    fn kek_engine(storage: &Arc<EmbeddedStorageEngine>) -> EmbeddedAuditEngine {
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        EmbeddedAuditEngine::new(
+            Arc::clone(storage) as Arc<dyn StorageEngine>,
+            clock as Arc<dyn Clock>,
+        )
+        .with_kek(Some(ENGINE_KEK))
+    }
+
+    /// Fresh storage plus a realm id with no chain key yet.
+    fn kek_storage() -> (tempfile::TempDir, Arc<EmbeddedStorageEngine>, RealmId) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        (temp_dir, storage, RealmId::generate())
+    }
+
+    /// Plants `bytes` as the realm's stored chain key, bypassing the engine.
+    fn plant_chain_key(storage: &Arc<EmbeddedStorageEngine>, realm_id: &RealmId, bytes: &[u8]) {
+        storage
+            .put(realm_id, &keys::audit_hmac_key(), bytes)
+            .expect("plant chain key");
+    }
+
+    /// Site 1 — the append path (`get_realm_hmac_key`).
+    ///
+    /// The lenient unwrap passed any non-`HKEY` blob straight through, so a
+    /// 32-byte plaintext blob written by anyone with storage access became
+    /// *the* chain key: the attacker then knows the HMAC key, can rewrite
+    /// events and re-chain them, and `verify_integrity` reports clean.
+    #[test]
+    fn append_path_refuses_an_unenveloped_chain_key() {
+        let (_dir, storage, realm_id) = kek_storage();
+        plant_chain_key(&storage, &realm_id, &[0xAB; 32]);
+
+        let err = kek_engine(&storage)
+            .get_realm_hmac_key(&realm_id)
+            .expect_err("an unenveloped chain key must be refused under a configured KEK");
+        assert!(
+            matches!(err, AuditError::Serialization { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Site 2 — the verify path (`peek_realm_hmac_key`). Same substitution,
+    /// read through the other of the two call sites.
+    #[test]
+    fn verify_path_refuses_an_unenveloped_chain_key() {
+        let (_dir, storage, realm_id) = kek_storage();
+        plant_chain_key(&storage, &realm_id, &[0xAB; 32]);
+
+        let err = kek_engine(&storage)
+            .peek_realm_hmac_key(&realm_id)
+            .expect_err("an unenveloped chain key must be refused under a configured KEK");
+        assert!(
+            matches!(err, AuditError::Serialization { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// A chain key wrapped under a *different* KEK is refused at both sites.
+    /// Pairs with the two tests above: together they cover both ways the
+    /// stored bytes can fail to belong to this deployment's KEK.
+    #[test]
+    fn both_paths_refuse_a_chain_key_wrapped_under_another_kek() {
+        let (_dir, storage, realm_id) = kek_storage();
+        let foreign = crate::identity::key_encryption::wrap_key(&[0xCD; 32], Some(&OTHER_KEK))
+            .expect("wrap under the other KEK");
+        plant_chain_key(&storage, &realm_id, &foreign);
+
+        let engine = kek_engine(&storage);
+        engine
+            .get_realm_hmac_key(&realm_id)
+            .expect_err("append path must refuse a foreign-KEK chain key");
+        engine
+            .peek_realm_hmac_key(&realm_id)
+            .expect_err("verify path must refuse a foreign-KEK chain key");
+    }
+
+    /// The refusal is reachable through the public surface, not only through
+    /// the private key loaders: `append` and `verify_integrity` both fail
+    /// rather than silently adopting the substituted key.
+    #[test]
+    fn public_audit_surface_refuses_a_substituted_chain_key() {
+        let (_dir, storage, realm_id) = kek_storage();
+        plant_chain_key(&storage, &realm_id, &[0xAB; 32]);
+        let engine = kek_engine(&storage);
+
+        engine
+            .append(&CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: "a".to_string(),
+                action: AuditAction::RealmCreated,
+                resource_type: "realm".to_string(),
+                resource_id: "t1".to_string(),
+                metadata: None,
+            })
+            .expect_err("append must refuse a substituted chain key");
+        engine
+            .verify_integrity(&realm_id, None, None)
+            .expect_err("verify_integrity must refuse a substituted chain key");
+    }
+
+    /// The companion positive case. A key this engine wrapped itself round
+    /// trips through both sites, so the strict rule cannot be satisfied by
+    /// refusing everything — and a deployment with no KEK at all is
+    /// unaffected.
+    #[test]
+    fn a_properly_enveloped_chain_key_still_loads() {
+        let (_dir, storage, realm_id) = kek_storage();
+        let engine = kek_engine(&storage);
+
+        let minted = engine.get_realm_hmac_key(&realm_id).expect("mint");
+        let stored = storage
+            .get(&realm_id, &keys::audit_hmac_key())
+            .expect("get")
+            .expect("chain key persisted");
+        assert!(
+            crate::identity::key_encryption::is_enveloped(&stored),
+            "a KEK-configured engine must persist the chain key enveloped"
+        );
+
+        // A second engine over the same store reads it back through both
+        // sites without the benefit of the first engine's cache.
+        let fresh = kek_engine(&storage);
+        assert_eq!(fresh.get_realm_hmac_key(&realm_id).expect("reload"), minted);
+        assert_eq!(
+            kek_engine(&storage)
+                .peek_realm_hmac_key(&realm_id)
+                .expect("peek")
+                .expect("chain key present"),
+            minted
+        );
+
+        // No KEK configured: plaintext key material is still legitimate.
+        let (_dir2, storage2, realm2) = kek_storage();
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let plain = EmbeddedAuditEngine::new(
+            Arc::clone(&storage2) as Arc<dyn StorageEngine>,
+            clock as Arc<dyn Clock>,
+        );
+        plant_chain_key(&storage2, &realm2, &[0xAB; 32]);
+        assert_eq!(
+            plain.get_realm_hmac_key(&realm2).expect("no-KEK load"),
+            [0xAB; 32]
+        );
     }
 }
 

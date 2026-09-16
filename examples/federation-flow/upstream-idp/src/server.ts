@@ -91,7 +91,7 @@ const configuration = {
     {
       client_id: "hearth-demo",
       client_secret: "demo-secret-do-not-use-in-production",
-      redirect_uris: ["http://localhost:8420/ui/federation/callback"],
+      redirect_uris: ["http://localhost:8420/ui/realms/demo/federation/callback"],
       // Standard authorization code flow with RS256-signed ID tokens.
       grant_types: ["authorization_code"],
       response_types: ["code"],

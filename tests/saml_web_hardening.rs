@@ -922,3 +922,145 @@ fn sp_acs_ignores_x_forwarded_host_when_choosing_the_audience() {
         "a rejected assertion must not provision a user"
     );
 }
+
+// ============================================================================
+// Task 21.8 / audit §4.23#7 — the `/ui` CSP must not block Hearth's own
+// SAML HTTP-POST binding.
+// ============================================================================
+//
+// `SecurityHeadersLayer` puts `script-src 'self'; form-action 'self'` on every
+// `/ui` response. The HTTP-POST binding page auto-submits a form to the peer's
+// ACS URL, so that policy broke it twice over:
+//
+//   * the auto-submit was an inline `onload=` attribute, which `script-src`
+//     blocks — a nonce or hash cannot cover an event-handler attribute, so the
+//     flow stalls on a "Continue" button; and
+//   * the manual fallback POSTs cross-origin, which `form-action 'self'`
+//     blocks — so clicking Continue does nothing either.
+//
+// The fix is a per-response policy: a nonce for the one script, and the one
+// destination origin in `form-action`. Nothing broader.
+
+/// Returns the `/saml/sso` HTTP-POST binding response for `crm` (the SP
+/// `build_app_full` registers with `want_authn_requests_signed` left false).
+fn post_binding_response() -> axum::http::Response<Body> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let (app, identity, realm_id) = build_app_full();
+    let cookie = authenticated_cookie(identity.as_ref(), &realm_id, "csp-probe@demo.test");
+    let xml = authn_request_xml("_ar_csp", "https://crm.example");
+    let form = format!(
+        "SAMLRequest={}",
+        urlencoding_lite(&B64.encode(xml.as_bytes()))
+    );
+    send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/ui/realms/demo/saml/sso")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", cookie)
+            .body(Body::from(form))
+            .unwrap(),
+    )
+}
+
+fn csp_of(resp: &axum::http::Response<Body>) -> String {
+    resp.headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The binding page must carry a policy that names its own auto-submit script
+/// via a nonce — never the blanket `script-src 'self'`, under which an inline
+/// script element cannot run.
+#[test]
+fn saml_post_binding_page_permits_its_own_auto_submit() {
+    let resp = post_binding_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let csp = csp_of(&resp);
+    assert!(
+        csp.contains("script-src 'nonce-"),
+        "SAML POST binding response must carry a nonce-based script-src, got: {csp}"
+    );
+    assert!(
+        !csp.contains("'unsafe-inline'"),
+        "the fix must not open 'unsafe-inline': {csp}"
+    );
+
+    // The nonce in the header must be the nonce on the script element, or the
+    // browser refuses to run it and the flow stalls exactly as before.
+    let nonce = csp
+        .split("script-src 'nonce-")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .expect("nonce present in CSP")
+        .to_string();
+    assert!(
+        nonce.len() >= 16,
+        "nonce is too short to be random: {nonce}"
+    );
+    let body = body_string(resp);
+    assert!(
+        body.contains(&format!(r#"<script nonce="{nonce}">"#)),
+        "the page's script element must carry the CSP nonce ({nonce}):\n{body}"
+    );
+    assert!(
+        !body.contains("onload="),
+        "an inline onload= handler cannot be covered by a nonce and must be gone:\n{body}"
+    );
+}
+
+/// The policy must allow the form to POST to the SP's ACS origin, and only
+/// that origin — `form-action 'self'` blocked it, and a wildcard would be an
+/// escape hatch.
+#[test]
+fn saml_post_binding_page_permits_only_the_acs_origin() {
+    let resp = post_binding_response();
+    let csp = csp_of(&resp);
+    assert!(
+        csp.contains("form-action https://crm.example"),
+        "SAML POST binding response must allow its ACS origin in form-action, got: {csp}"
+    );
+    assert!(
+        !csp.contains("form-action *") && !csp.contains("form-action 'self' *"),
+        "form-action must not be a wildcard: {csp}"
+    );
+    // Only the destination origin — no bare 'self', no second host.
+    let directive = csp
+        .split("form-action ")
+        .nth(1)
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert_eq!(
+        directive, "https://crm.example",
+        "form-action must name exactly one destination"
+    );
+}
+
+/// Regression guard for the shared layer: it must not stomp the handler's
+/// policy, but it must still apply its own to every other `/ui` response.
+#[test]
+fn shared_ui_csp_still_applies_to_ordinary_pages() {
+    let app = build_app();
+    let resp = send(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/ui/realms/demo/saml/metadata")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let csp = csp_of(&resp);
+    assert!(
+        csp.contains("form-action 'self'"),
+        "a page with no policy of its own must still get the shared strict CSP, got: {csp}"
+    );
+}

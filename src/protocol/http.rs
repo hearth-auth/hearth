@@ -562,13 +562,20 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
     // without this layer it was replayable as a plain Bearer for every admin
     // read and write (audit 2026-08-28 §4.19#8). `route_layer` so it runs only
     // on a matched route and leaves 404s untouched.
-    let admin_routes = admin::admin_api_routes().route_layer(axum::middleware::from_fn_with_state(
-        Arc::clone(&state),
-        auth::enforce_admin_dpop,
-    ));
-    let scim_routes = crate::protocol::scim::router().route_layer(
-        axum::middleware::from_fn_with_state(Arc::clone(&state), auth::enforce_admin_dpop),
-    );
+    //
+    // 18.18 mounted it on the `/admin` and `/scim/v2` nests only. Every other
+    // handler that authenticates through `extract_admin_auth` is merged at the
+    // router root, not nested, and so was left replayable (task 25.17): `POST
+    // /users`, `POST /clients`, and the whole of `agents.rs`, `approval.rs` and
+    // `advanced.rs`. `admin_dpop` below is applied to each of them.
+    //
+    // `tool_invocation::routes()` is deliberately excluded: it reaches the raw
+    // token itself and already calls `validate_dpop_if_bound`, so a second
+    // validation would burn the proof's `jti` and answer a false replay.
+    let admin_dpop =
+        || axum::middleware::from_fn_with_state(Arc::clone(&state), auth::enforce_admin_dpop);
+    let admin_routes = admin::admin_api_routes().route_layer(admin_dpop());
+    let scim_routes = crate::protocol::scim::router().route_layer(admin_dpop());
     // Every route nested under `/realms/{realm_name}` gets the agreement guard
     // via `route_layer`, so it runs only on a matched realm route and leaves
     // 404s untouched (audit §4.16#12).
@@ -581,8 +588,9 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
 
     let mut base = Router::new()
         .merge(health::routes())
-        .merge(users::routes())
+        .merge(users::routes().route_layer(admin_dpop()))
         .merge(oauth::routes())
+        .merge(oauth::admin_routes().route_layer(admin_dpop()))
         .merge(mfa::routes())
         .merge(session::routes())
         .nest("/admin", admin_routes)
@@ -596,20 +604,23 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
     // (HEA-1412) so future handlers are protected by default even without
     // per-handler auth calls.
     if state.agent_identity_enabled {
-        base = base
-            .merge(agents::routes().route_layer(axum::middleware::from_fn(require_bearer_token)));
+        base = base.merge(
+            agents::routes()
+                .route_layer(axum::middleware::from_fn(require_bearer_token))
+                .route_layer(admin_dpop()),
+        );
     }
 
     // Register approval + tool-invocation check routes only when Phase C is enabled.
     // Tool invocation enforcement requires approval to be available (Phase C complete mediation).
     if state.agent_approval_enabled {
-        base = base.merge(approval::routes());
+        base = base.merge(approval::routes().route_layer(admin_dpop()));
         base = base.merge(tool_invocation::routes());
     }
 
     // Register Phase-D advanced routes (AAT, txn-token, SPIFFE, cross-realm).
     if state.agent_advanced_enabled {
-        base = base.merge(advanced::routes());
+        base = base.merge(advanced::routes().route_layer(admin_dpop()));
     }
 
     // Dev-only endpoints. Three independent gates, because each closes a
@@ -691,15 +702,36 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
         ))
 }
 
-/// Adds `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` to every
-/// REST API response. Unlike the web UI's full `SecurityHeadersLayer`, these two headers
-/// are safe for machine-API responses and do not require UI-specific context.
+/// Baseline `Content-Security-Policy` for browser-facing HTML served by the
+/// API router (`GET /docs`, the `GET /end_session` front-channel logout page).
 ///
-/// Both headers are **only** added when absent. Since task 21.1 this layer also
+/// Every directive here *removes* a capability, so the policy cannot break a
+/// page that works today: it forbids framing, plugin content, `<base>`
+/// rewriting and off-origin form submission, and says nothing about where
+/// scripts, styles or images may come from. Constraining `/docs`'s script
+/// origin is task 21.7's job — it sets its own, more specific header, and the
+/// insert below yields to it.
+const API_HTML_CSP: &str =
+    "object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
+/// Adds `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` to every
+/// REST API response, plus framing, caching and CSP protections on the API
+/// router's browser-facing HTML. Unlike the web UI's full
+/// `SecurityHeadersLayer`, the first two headers are safe for machine-API
+/// responses and do not require UI-specific context.
+///
+/// Every header is **only** added when absent. Since task 21.1 this layer also
 /// sees the browser responses, and the web tree's `SecurityHeadersLayer` runs
 /// inside it with a deliberately different, browser-appropriate
-/// `Referrer-Policy: strict-origin-when-cross-origin`. An unconditional
-/// `insert` here would silently overwrite it on every UI page.
+/// `Referrer-Policy: strict-origin-when-cross-origin` and a full `'self'`-based
+/// CSP. An unconditional `insert` here would silently overwrite them on every
+/// UI page.
+///
+/// The HTML branch closes audit 2026-08-28 §4.23#9 (task 21.10): `GET /docs`
+/// and the `GET /end_session` front-channel logout page are HTML rendered on
+/// the API side, outside `protocol::web::router`, so the web tree's layer never
+/// reached them and they shipped with no CSP, no `X-Frame-Options`, no
+/// `frame-ancestors` and no `Cache-Control`.
 async fn minimal_security_headers(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -717,5 +749,27 @@ async fn minimal_security_headers(
             axum::http::HeaderValue::from_static("no-referrer"),
         );
     }
+
+    let is_html = h
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"));
+    if is_html {
+        insert_if_absent(h, "x-frame-options", "DENY");
+        insert_if_absent(h, "cache-control", "no-store");
+        insert_if_absent(h, "content-security-policy", API_HTML_CSP);
+    }
     resp
+}
+
+/// Sets `name: value` only when the response does not already carry `name`.
+///
+/// Both arguments are `'static` so the header name and value are checked
+/// against the HTTP grammar at construction, exactly as the web tree's
+/// `SecurityHeadersLayer` does.
+fn insert_if_absent(h: &mut axum::http::HeaderMap, name: &'static str, value: &'static str) {
+    let name = axum::http::HeaderName::from_static(name);
+    if !h.contains_key(&name) {
+        h.insert(name, axum::http::HeaderValue::from_static(value));
+    }
 }

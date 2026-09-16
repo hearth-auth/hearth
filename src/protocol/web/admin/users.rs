@@ -3457,6 +3457,7 @@ pub struct PatchRequiredActionsBody {
 pub async fn admin_api_user_required_actions_patch(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
     axum::Json(body): axum::Json<PatchRequiredActionsBody>,

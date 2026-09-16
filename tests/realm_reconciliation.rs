@@ -271,6 +271,9 @@ async fn reconcile_federation_wires_claim_mappings_to_idp() {
         "entra".to_string(),
         FederationProviderYaml {
             kind: "oidc".to_string(),
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_pem: None,
             display_name: Some("Microsoft Entra".to_string()),
             issuer: Some("https://login.microsoftonline.com/tenant-id/v2.0".to_string()),
             authorization_endpoint: Some(

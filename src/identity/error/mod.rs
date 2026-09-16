@@ -320,6 +320,17 @@ pub enum IdentityError {
         /// The method that was attempted.
         method: &'static str,
     },
+    /// The realm's `mfa_methods` list does not offer this second factor.
+    ///
+    /// `mfa_methods` restricts both enrolment and presentation: a method the
+    /// operator did not list may not be enrolled and may not be presented
+    /// (CONFIGURATION.md, audit 2026-08-28 §4.18#10). An absent list is no
+    /// restriction at all, so this is never raised for it.
+    MfaMethodNotAllowed {
+        /// The factor that was attempted: `"totp"`, `"webauthn"`, `"sms"` or
+        /// `"email_otp"`.
+        method: &'static str,
+    },
     /// The requested webhook was not found in this realm.
     WebhookNotFound,
     /// The new password has appeared in a known data breach (HIBP check).

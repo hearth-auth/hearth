@@ -478,6 +478,8 @@ pub async fn admin_org_member_assign_role(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<MemberAssignRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -533,7 +535,7 @@ pub async fn admin_org_member_assign_role(
                     super::templates::htmx_toast_response("Role assigned", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Role assigned", "success")
+                org_redirect_flash(&org_id, target.0.name(), "Role assigned", "success", secure)
             }
         }
         Err(e) => {
@@ -552,6 +554,8 @@ pub async fn admin_org_member_unassign_role(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<MemberUnassignRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -588,7 +592,7 @@ pub async fn admin_org_member_unassign_role(
                     super::templates::htmx_toast_response("Role removed", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Role removed", "success")
+                org_redirect_flash(&org_id, target.0.name(), "Role removed", "success", secure)
             }
         }
         Err(e) => {
@@ -608,6 +612,8 @@ pub async fn admin_org_member_grant_perm(
     FriendlyForm(form): FriendlyForm<MemberGrantPermForm>,
 ) -> Response {
     use crate::core::Timestamp;
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -661,7 +667,13 @@ pub async fn admin_org_member_grant_perm(
                     super::templates::htmx_toast_response("Permission granted", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Permission granted", "success")
+                org_redirect_flash(
+                    &org_id,
+                    target.0.name(),
+                    "Permission granted",
+                    "success",
+                    secure,
+                )
             }
         }
         Err(e) => {
@@ -680,6 +692,8 @@ pub async fn admin_org_member_revoke_perm(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<MemberRevokePermForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -728,7 +742,13 @@ pub async fn admin_org_member_revoke_perm(
                     super::templates::htmx_toast_response("Permission revoked", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Permission revoked", "success")
+                org_redirect_flash(
+                    &org_id,
+                    target.0.name(),
+                    "Permission revoked",
+                    "success",
+                    secure,
+                )
             }
         }
         Err(e) => {

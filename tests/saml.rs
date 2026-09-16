@@ -336,7 +336,7 @@ async fn idp_can_issue_signed_response() {
     assert_eq!(verified.id, "_r");
 
     // HTML POST form wraps a base64 payload.
-    let html = build_post_form_html("https://sp/acs", "SAMLResponse", &signed, Some("rs"));
+    let html = build_post_form_html("https://sp/acs", "SAMLResponse", &signed, Some("rs"), None);
     assert!(html.contains("action=\"https://sp/acs\""));
 }
 

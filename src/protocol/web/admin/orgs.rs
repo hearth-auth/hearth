@@ -654,9 +654,9 @@ pub async fn admin_org_detail(
         inline_theme_css: state.inline_theme_css(),
     });
     if had_flash {
-        if let Ok(value) =
-            axum::http::HeaderValue::from_str(&super::templates::clear_flash_cookie())
-        {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&super::templates::clear_flash_cookie(
+            state.is_secure_request(&headers),
+        )) {
             response
                 .headers_mut()
                 .append(axum::http::header::SET_COOKIE, value);
@@ -1007,8 +1007,11 @@ pub async fn admin_org_add_member(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<AddMemberForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1021,7 +1024,13 @@ pub async fn admin_org_add_member(
     let user_id = match form.user_id.trim().parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
         Err(_) => {
-            return org_redirect_flash(&org_id, target.0.name(), "Invalid user selection", "error");
+            return org_redirect_flash(
+                &org_id,
+                target.0.name(),
+                "Invalid user selection",
+                "error",
+                secure,
+            );
         }
     };
 
@@ -1038,6 +1047,7 @@ pub async fn admin_org_add_member(
                 target.0.name(),
                 "Member added successfully",
                 "success",
+                secure,
             )
         }
         Err(IdentityError::AlreadyMember) => org_redirect_flash(
@@ -1045,10 +1055,17 @@ pub async fn admin_org_add_member(
             target.0.name(),
             "User is already a member",
             "error",
+            secure,
         ),
         Err(e) => {
             tracing::warn!(error = %e, "add_member failed");
-            org_redirect_flash(&org_id, target.0.name(), "Failed to add member", "error")
+            org_redirect_flash(
+                &org_id,
+                target.0.name(),
+                "Failed to add member",
+                "error",
+                secure,
+            )
         }
     }
 }
@@ -1204,6 +1221,8 @@ pub async fn admin_org_remove_member(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1237,7 +1256,13 @@ pub async fn admin_org_remove_member(
             if is_htmx {
                 super::templates::htmx_toast_response("Member removed", "success")
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Member removed", "success")
+                org_redirect_flash(
+                    &org_id,
+                    target.0.name(),
+                    "Member removed",
+                    "success",
+                    secure,
+                )
             }
         }
         Err(e) => {
@@ -1265,7 +1290,7 @@ pub async fn admin_org_remove_member(
                 }
                 super::templates::htmx_toast_response(&msg, "error")
             } else {
-                org_redirect_flash(&org_id, target.0.name(), &msg, "error")
+                org_redirect_flash(&org_id, target.0.name(), &msg, "error", secure)
             }
         }
     }
@@ -1361,6 +1386,8 @@ pub async fn admin_org_update_role(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<UpdateRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1426,7 +1453,7 @@ pub async fn admin_org_update_role(
                     super::templates::htmx_toast_response("Role updated", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Role updated", "success")
+                org_redirect_flash(&org_id, target.0.name(), "Role updated", "success", secure)
             }
         }
         Err(e) => {
@@ -1450,7 +1477,7 @@ pub async fn admin_org_update_role(
                 }
                 super::templates::htmx_toast_response(&msg, "error")
             } else {
-                org_redirect_flash(&org_id, target.0.name(), &msg, "error")
+                org_redirect_flash(&org_id, target.0.name(), &msg, "error", secure)
             }
         }
     }
@@ -1477,8 +1504,11 @@ pub async fn admin_org_invite(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<InviteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1542,7 +1572,7 @@ pub async fn admin_org_invite(
                 }
             }
             let msg = format!("Invitation sent to {}", form.email);
-            org_redirect_flash(&org_id, target.0.name(), &msg, "success")
+            org_redirect_flash(&org_id, target.0.name(), &msg, "success", secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, email = %form.email, "create_invitation failed");
@@ -1551,6 +1581,7 @@ pub async fn admin_org_invite(
                 target.0.name(),
                 "Failed to create invitation",
                 "error",
+                secure,
             )
         }
     }
@@ -1623,8 +1654,11 @@ pub async fn admin_org_status_toggle(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<StatusToggleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1643,6 +1677,7 @@ pub async fn admin_org_status_toggle(
                 target.0.name(),
                 "Unknown organization status",
                 "error",
+                secure,
             )
         }
     };
@@ -1665,14 +1700,20 @@ pub async fn admin_org_status_toggle(
                 OrganizationStatus::Suspended => "Organization suspended",
                 OrganizationStatus::Archived => "Organization archived",
             };
-            org_redirect_flash(&org_id, target.0.name(), label, "success")
+            org_redirect_flash(&org_id, target.0.name(), label, "success", secure)
         }
         Err(IdentityError::OrganizationNotFound) => {
             super::handlers_common::not_found("Organization not found")
         }
         Err(e) => {
             tracing::warn!(error = %e, "update_organization (status) failed");
-            org_redirect_flash(&org_id, target.0.name(), "Failed to change status", "error")
+            org_redirect_flash(
+                &org_id,
+                target.0.name(),
+                "Failed to change status",
+                "error",
+                secure,
+            )
         }
     }
 }
@@ -1694,8 +1735,11 @@ pub async fn admin_org_resend_invite(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid, iid)): AxumPath<(String, String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1725,6 +1769,7 @@ pub async fn admin_org_resend_invite(
                 target.0.name(),
                 "Failed to load invitation",
                 "error",
+                secure,
             );
         }
     };
@@ -1795,7 +1840,7 @@ pub async fn admin_org_resend_invite(
                 }
             }
             let msg = format!("Invitation resent to {email}");
-            org_redirect_flash(&org_id, target.0.name(), &msg, "success")
+            org_redirect_flash(&org_id, target.0.name(), &msg, "success", secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, email = %email, "resend create_invitation failed");
@@ -1804,6 +1849,7 @@ pub async fn admin_org_resend_invite(
                 target.0.name(),
                 "Failed to resend invitation",
                 "error",
+                secure,
             )
         }
     }
@@ -2008,6 +2054,7 @@ pub(super) fn org_redirect_flash(
     realm_name: &str,
     message: &str,
     kind: &str,
+    secure: bool,
 ) -> Response {
     // Cookie-based flash: redirect URL stays clean (no `?flash=…`)
     // so refreshes / bookmarks / back-button traversals don't replay the
@@ -2016,7 +2063,7 @@ pub(super) fn org_redirect_flash(
         "/ui/admin/realms/{realm_name}/organizations/{}",
         org_id.as_uuid()
     );
-    super::templates::redirect_with_flash(&url, message, kind)
+    super::templates::redirect_with_flash(&url, message, kind, secure)
 }
 
 /// Parses an organization role string from a form field.

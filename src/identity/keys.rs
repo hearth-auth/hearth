@@ -97,6 +97,9 @@ const CLIENT_ASSERTION_JTI_PREFIX: &str = "oauth:ca-jti:";
 /// Prefix for JAR (RFC 9101) signed request object JTI replay store.
 const JAR_JTI_PREFIX: &str = "oauth:jar-jti:";
 
+/// Prefix for the OIDC `nonce` replay store (22.21).
+const OIDC_NONCE_PREFIX: &str = "oauth:nonce:";
+
 /// Prefix for OAuth consent record storage.
 const OAUTH_CONSENT_PREFIX: &str = "oauth:consent:";
 
@@ -976,6 +979,38 @@ pub(crate) fn encode_jar_jti(jti: &str) -> Vec<u8> {
 /// Used during cascade realm deletion to purge the replay store.
 pub(crate) fn jar_jti_scan_prefix() -> Vec<u8> {
     JAR_JTI_PREFIX.as_bytes().to_vec()
+}
+
+// ===== OIDC nonce replay key encoding (22.21) =====
+
+/// Encodes the OIDC `nonce` replay sentinel key.
+///
+/// Format: `oauth:nonce:{client_uuid}:{sha256_hex(nonce)}`. Realm scoping is
+/// implicit — every `StorageEngine` call takes a `RealmId` and every key is
+/// realm-prefixed — so, unlike the process-local map this replaced, the realm
+/// need not appear in the key itself. Scoping to the client as well keeps one
+/// client's nonce choice from spuriously rejecting an identical nonce picked
+/// independently by another (HEA-1757 / O3).
+///
+/// The nonce is hashed rather than interpolated: it is caller-supplied and
+/// unbounded, and a raw key would put attacker-chosen bytes of arbitrary
+/// length into the keyspace. Nothing ever reads the nonce back out of the key
+/// — the sweeper reads only the value — so the hash loses nothing.
+pub(crate) fn encode_oidc_nonce(client_id: &ClientId, nonce: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{OIDC_NONCE_PREFIX}{}:{}",
+        client_id.as_uuid(),
+        hex::encode(Sha256::digest(nonce.as_bytes()))
+    )
+    .into_bytes()
+}
+
+/// Returns the scan prefix for every OIDC nonce sentinel in a realm.
+///
+/// Used by the periodic cleanup sweep and by cascade realm deletion.
+pub(crate) fn oidc_nonce_scan_prefix() -> Vec<u8> {
+    OIDC_NONCE_PREFIX.as_bytes().to_vec()
 }
 
 // ===== OAuth consent key encoding =====

@@ -379,24 +379,9 @@ type UpdateGroupRequest struct {
 	Name *string `json:"name,omitempty"`
 }
 
-// OrgMember represents an organization membership record.
-type OrgMember struct {
-	UserID    string `json:"user_id"`
-	OrgID     string `json:"org_id"`
-	Role      string `json:"role"`
-	CreatedAt int64  `json:"created_at,omitempty"`
-}
-
-// AddOrgMemberRequest contains parameters for adding a member to an organization.
-type AddOrgMemberRequest struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role,omitempty"`
-}
-
-// UpdateOrgMemberRequest contains parameters for updating an org membership.
-type UpdateOrgMemberRequest struct {
-	Role *string `json:"role,omitempty"`
-}
+// OrgMember, AddOrgMemberRequest and UpdateOrgMemberRequest were removed with
+// the org-membership methods: Hearth serves no organization route over HTTP
+// (audit 2026-08-28 §25.19).
 
 // APIError represents an error from the Hearth API.
 type APIError struct {

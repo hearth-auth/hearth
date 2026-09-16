@@ -259,19 +259,44 @@ data class UpdateGroupRequest(
     val description: String? = null,
 )
 
-// ── Admin — Organization Memberships ──────────────────────────────────────────
+// ── Admin — Organization Memberships — removed ────────────────────────────────
+//
+// OrgMember and AddOrgMemberRequest went with the org-membership methods: Hearth
+// serves no organization route over HTTP (audit 2026-08-28 §25.19).
 
+// ── Admin — Role assignment ───────────────────────────────────────────────────
+
+/** Body of `POST /admin/users/{id}/roles`. Omit [orgId] for a realm-scoped grant. */
 @Serializable
-data class OrgMember(
-    @SerialName("user_id") val userId: String,
-    val role: String,
-    @SerialName("joined_at") val joinedAt: Long? = null,
+data class AssignRoleRequest(
+    @SerialName("role_id") val roleId: String,
+    @SerialName("org_id") val orgId: String? = null,
 )
 
+/** Subject of a [RoleAssignment] — a user or a group. */
 @Serializable
-data class AddOrgMemberRequest(
-    @SerialName("user_id") val userId: String,
-    val role: String = "member",
+data class AssignmentSubject(
+    val type: String,
+    val id: String,
+)
+
+/** Applicability boundary of a [RoleAssignment] — realm-wide or one organization. */
+@Serializable
+data class AssignmentScope(
+    val type: String,
+    @SerialName("org_id") val orgId: String? = null,
+)
+
+/** A role granted to a subject, as returned by `POST /admin/users/{id}/roles`. */
+@Serializable
+data class RoleAssignment(
+    val id: String,
+    @SerialName("realm_id") val realmId: String,
+    val subject: AssignmentSubject,
+    @SerialName("role_id") val roleId: String,
+    val scope: AssignmentScope,
+    @SerialName("assigned_at") val assignedAt: Long? = null,
+    @SerialName("assigned_by") val assignedBy: String? = null,
 )
 
 // ── Permission delivery modes (HEA-922) ───────────────────────────────────────

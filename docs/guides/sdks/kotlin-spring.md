@@ -72,6 +72,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
+import org.springframework.security.web.AuthenticationEntryPoint
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 
@@ -82,6 +83,7 @@ class SecurityConfig {
     fun securityFilterChain(
         http: HttpSecurity,
         hearthFilter: HearthJwtAuthenticationFilter,
+        hearthEntryPoint: AuthenticationEntryPoint,   // auto-configured
     ): SecurityFilterChain {
         http
             .csrf { it.disable() }
@@ -91,13 +93,23 @@ class SecurityConfig {
                 auth.requestMatchers("/public/**").permitAll()
                 auth.anyRequest().authenticated()
             }
+            // Required. Spring Security registers an authentication entry point only
+            // for `httpBasic`, `formLogin` or `oauth2ResourceServer`; a chain with
+            // none of those falls back to `Http403ForbiddenEntryPoint`, so a request
+            // carrying no token at all is answered `403` with no `WWW-Authenticate`
+            // header instead of `401`.
+            .exceptionHandling { it.authenticationEntryPoint(hearthEntryPoint) }
         return http.build()
     }
 }
 ```
 
 Requests to `/public/**` pass through without a token. Every other request must carry a valid
-Hearth bearer token or Spring Security returns `401 Unauthorized`.
+Hearth bearer token or the chain returns `401 Unauthorized` with `WWW-Authenticate: Bearer`.
+
+**You do not need this class at all** unless you want public routes or per-route authorities.
+With just `hearth.issuer-url` set, the adapter installs exactly this chain minus the
+`permitAll` matcher, so every request is authenticated and a missing token gets `401`.
 
 ## Access claims with `@AuthenticationPrincipal`
 
@@ -202,9 +214,9 @@ class HearthConfig {
 
 | Request state | Filter behavior |
 |--------------|----------------|
-| No `Authorization: Bearer` header | Request passes through; Spring Security issues `401` for protected routes |
-| Token with invalid signature | `SecurityContextHolder` cleared; `401 Unauthorized` returned immediately |
-| Expired token | `SecurityContextHolder` cleared; `401 Unauthorized` returned immediately |
+| No `Authorization: Bearer` header | Request passes through; the chain's entry point answers. With `HearthAuthenticationEntryPoint` (the auto-configured default) that is `401` + `WWW-Authenticate: Bearer`. Omit the entry point from a hand-written chain and Spring Security answers `403` instead. |
+| Token with invalid signature | `SecurityContextHolder` cleared; `401 Unauthorized` + `WWW-Authenticate: Bearer error="invalid_token"` returned immediately |
+| Expired token | `SecurityContextHolder` cleared; `401 Unauthorized` + `WWW-Authenticate: Bearer error="invalid_token"` returned immediately |
 | Valid token | `HearthAuthentication` stored in `SecurityContextHolder`; filter chain continues |
 
 ## API reference

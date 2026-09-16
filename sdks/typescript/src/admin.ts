@@ -103,14 +103,14 @@ export class AdminClient {
 
   // === OAuth Clients ===
 
-  /** POST /admin/clients — register an OAuth 2.0 client. */
+  /** POST /admin/applications — register an OAuth 2.0 client. */
   async createClient(params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.post("/admin/clients", params);
+    return this.post("/admin/applications", params);
   }
 
-  /** GET /admin/clients/:id — get a client by ID. */
+  /** GET /admin/applications/:id — get a client by ID. */
   async getClient(clientId: string): Promise<Record<string, unknown>> {
-    return this.get(`/admin/clients/${clientId}`);
+    return this.get(`/admin/applications/${clientId}`);
   }
 
   /** PATCH /admin/applications/:id — update a client. */
@@ -118,9 +118,9 @@ export class AdminClient {
     return this.request("PATCH", `/admin/applications/${clientId}`, params);
   }
 
-  /** DELETE /admin/clients/:id — delete a client. */
+  /** DELETE /admin/applications/:id — delete a client. */
   async deleteClient(clientId: string): Promise<void> {
-    const resp = await fetch(`${this.baseUrl}/admin/clients/${clientId}`, {
+    const resp = await fetch(`${this.baseUrl}/admin/applications/${clientId}`, {
       method: "DELETE",
       headers: this.headers(),
     });
@@ -129,13 +129,13 @@ export class AdminClient {
     }
   }
 
-  /** GET /admin/clients — list clients with optional pagination. */
+  /** GET /admin/applications — list clients with optional pagination. */
   async listClients(options?: { limit?: number; cursor?: string }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
     const q = new URLSearchParams();
     if (options?.limit) q.set("limit", String(options.limit));
     if (options?.cursor) q.set("cursor", options.cursor);
     const qs = q.toString();
-    return this.get(`/admin/clients${qs ? `?${qs}` : ""}`);
+    return this.get(`/admin/applications${qs ? `?${qs}` : ""}`);
   }
 
   // === Roles ===
@@ -212,32 +212,13 @@ export class AdminClient {
     return this.get(`/admin/groups${qs ? `?${qs}` : ""}`);
   }
 
-  // === Org Members ===
-
-  /** POST /admin/orgs/:orgId/members — add a member to an organization. */
-  async addOrgMember(orgId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.post(`/admin/orgs/${orgId}/members`, params);
-  }
-
-  /** GET /admin/orgs/:orgId/members — list members of an organization. */
-  async listOrgMembers(orgId: string, options?: { limit?: number; cursor?: string }): Promise<{ items: Record<string, unknown>[]; next_cursor: string | null }> {
-    const q = new URLSearchParams();
-    if (options?.limit) q.set("limit", String(options.limit));
-    if (options?.cursor) q.set("cursor", options.cursor);
-    const qs = q.toString();
-    return this.get(`/admin/orgs/${orgId}/members${qs ? `?${qs}` : ""}`);
-  }
-
-  /** DELETE /admin/orgs/:orgId/members/:userId — remove a member from an organization. */
-  async removeOrgMember(orgId: string, userId: string): Promise<void> {
-    const resp = await fetch(`${this.baseUrl}/admin/orgs/${orgId}/members/${userId}`, {
-      method: "DELETE",
-      headers: this.headers(),
-    });
-    if (!resp.ok) {
-      throw new HearthError(resp.status, await resp.json());
-    }
-  }
+  // === Org Members — removed ===
+  //
+  // Hearth serves no organization route over HTTP: there is no /admin/orgs, no
+  // /admin/orgs/:orgId/members and no per-member route anywhere in the router,
+  // so addOrgMember, listOrgMembers and removeOrgMember every one 404'd
+  // (audit 2026-08-28 §25.19). Organization membership is administered through
+  // the admin console, not the admin API.
 
   private headers(): Record<string, string> {
     return {

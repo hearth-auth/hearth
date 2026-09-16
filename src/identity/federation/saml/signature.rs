@@ -134,6 +134,11 @@ fn build_signature_block(signed_info: &str, signature_b64: &str, cert_b64: &str)
 ///
 /// Rejects:
 /// - Missing `<Signature>` or `<SignedInfo>`.
+/// - A `<ds:SignedInfo>` carrying anything other than exactly one
+///   `<ds:Reference>`. Only the first reference is ever read, so a list would
+///   let every entry after it pass unverified — the classic multiple-reference
+///   wrapping shape. The count is bounded, so a padded list is refused on the
+///   second entry rather than scanned to the end.
 /// - A `<ds:Reference URI>` that is not `#<id>` for the enclosing element's
 ///   own `ID` attribute.
 /// - A `SignedInfo` naming SHA-1 or RSA-SHA1, or one that does not name both
@@ -271,6 +276,11 @@ fn extract_signature_fields(
         .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let signed_info = sig_bytes[signed_info_range.0..signed_info_range.1].to_vec();
 
+    // Exactly one <ds:Reference> — checked before anything reads one, so the
+    // "first reference" the extractors below pick up is the only one there
+    // is (audit 2026-08-28 §25.20).
+    enforce_single_reference(&signed_info)?;
+
     // Extract <ds:SignatureValue>…</ds:SignatureValue> textual content.
     let sv = extract_text_element(sig_bytes, "SignatureValue")?;
 
@@ -281,6 +291,61 @@ fn extract_signature_fields(
     let digest = extract_text_element(&signed_info, "DigestValue")?;
 
     Ok((signed_info, sv, reference_uri, digest))
+}
+
+/// The number of `<ds:Reference>` elements a `<ds:SignedInfo>` may carry.
+///
+/// One. XML-DSIG permits a list and requires every entry to validate; Hearth
+/// validates exactly one element per signature and has no representation for
+/// the rest, so any other count describes a computation we do not perform.
+const MAX_REFERENCES: usize = 1;
+
+/// Refuses a `<ds:SignedInfo>` that does not carry exactly one
+/// `<ds:Reference>`.
+///
+/// `extract_signature_fields` reads the *first* `<ds:Reference URI>` and the
+/// *first* `<ds:DigestValue>` and treats them as the whole of what the
+/// signature covers. With an unchecked list that is a signature-wrapping
+/// primitive: a `SignedInfo` whose first reference names the element being
+/// verified passes, while every later reference — naming some other part of
+/// the document, with a digest nobody computes — is silently discarded. The
+/// verifier then reports "signed" for a document whose signature, read
+/// correctly, does not validate (audit 2026-08-28 §25.20).
+///
+/// Hearth's own signer emits exactly one reference (`build_signed_info`), and
+/// `verify_signed_element` digests exactly one element, so "exactly one" is
+/// the shape Hearth actually consumes — not an arbitrary small bound with a
+/// per-entry check that no caller could use.
+///
+/// The scan stops at the first reference past [`MAX_REFERENCES`], so a
+/// document padded with thousands of `<ds:Reference>` elements is rejected on
+/// the second one rather than driving work proportional to the list length.
+///
+/// # Errors
+///
+/// Returns [`SamlError::Parse`] when the count is zero or greater than one.
+/// The reason is a fixed string — it carries no attacker-supplied bytes.
+fn enforce_single_reference(signed_info: &[u8]) -> Result<(), IdentityError> {
+    let si = std::str::from_utf8(signed_info).map_err(|_| parse_err("SignedInfo not utf8"))?;
+
+    let mut seen = 0usize;
+    let mut from = 0usize;
+    while let Some(rel) = next_start_tag(&si[from..], "Reference") {
+        seen += 1;
+        if seen > MAX_REFERENCES {
+            return Err(parse_err(
+                "SignedInfo must carry exactly one <ds:Reference>; found more than one",
+            ));
+        }
+        from += rel;
+    }
+
+    if seen == 0 {
+        return Err(parse_err(
+            "SignedInfo must carry exactly one <ds:Reference>; found none",
+        ));
+    }
+    Ok(())
 }
 
 /// Refuses a `<ds:SignedInfo>` whose declared canonicalization method or
@@ -743,6 +808,153 @@ mod tests {
             matches!(err, IdentityError::Saml(SamlError::UnsupportedAlgorithm)),
             "missing enveloped-signature transform not enforced: {err:?}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // 25.20 — the `<ds:Reference>` list is bounded and validated
+    // ---------------------------------------------------------------
+
+    /// A `<ds:Reference>` block that is well-formed and declares the exact
+    /// transform chain 25.5 demands, so appending it isolates the
+    /// *reference count* as the only thing wrong with the document.
+    fn extra_reference(uri: &str) -> String {
+        let env = alg::ENVELOPED;
+        let c14n = alg::EXC_C14N;
+        let dig = alg::SHA256;
+        let value = B64.encode([0u8; 32]);
+        // Positional arguments, not inline capture: `format_args!` refuses to
+        // capture named variables when the format string comes out of a macro,
+        // and `concat!` is a macro.
+        format!(
+            concat!(
+                r#"<ds:Reference URI="{0}"><ds:Transforms>"#,
+                r#"<ds:Transform Algorithm="{1}"></ds:Transform>"#,
+                r#"<ds:Transform Algorithm="{2}"></ds:Transform>"#,
+                r#"</ds:Transforms><ds:DigestMethod Algorithm="{3}"></ds:DigestMethod>"#,
+                r#"<ds:DigestValue>{4}</ds:DigestValue></ds:Reference>"#
+            ),
+            uri, env, c14n, dig, value
+        )
+    }
+
+    /// Signs `<Assertion ID="a1">hello</Assertion>` after letting `rewrite`
+    /// rebuild the `<ds:SignedInfo>`.
+    ///
+    /// The RSA signature is computed over whatever `rewrite` returns, so the
+    /// resulting document is *genuinely signed* by the returned certificate.
+    /// That is what makes the reference-count tests non-vacuous: every other
+    /// check in `verify_signed_element` — declared algorithms, URI/ID
+    /// binding, element digest, `SignedInfo` signature — passes, so an
+    /// acceptance can only mean the reference list went unchecked.
+    fn signed_assertion_with_rewritten_signed_info(
+        rewrite: &dyn Fn(&str) -> String,
+    ) -> (Vec<u8>, String) {
+        let key = RsaSigningKey::generate("hearth-test", 365).expect("key");
+        let cert_pem = cert_der_to_pem(key.cert_der());
+        let payload =
+            br#"<Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1">hello</Assertion>"#;
+
+        let canonical = canonicalize(payload, true).expect("canonicalize element");
+        let mut hasher = Sha256::new();
+        hasher.update(&canonical);
+        let digest_b64 = B64.encode(hasher.finalize());
+
+        let signed_info = rewrite(&build_signed_info("a1", &digest_b64));
+        let canonical_si = canonicalize(signed_info.as_bytes(), false).expect("canonicalize si");
+        let signature_b64 = B64.encode(key.sign(&canonical_si).expect("sign"));
+        let signature_xml =
+            build_signature_block(&signed_info, &signature_b64, &B64.encode(key.cert_der()));
+
+        let open_end = payload
+            .iter()
+            .position(|&b| b == b'>')
+            .expect("root tag closes");
+        let mut out = Vec::with_capacity(payload.len() + signature_xml.len());
+        out.extend_from_slice(&payload[..=open_end]);
+        out.extend_from_slice(signature_xml.as_bytes());
+        out.extend_from_slice(&payload[open_end + 1..]);
+        (out, cert_pem)
+    }
+
+    /// Asserts the document was refused with a `Parse` error naming the
+    /// reference-count rule — not merely refused, which the signature check
+    /// would also do for a tampered document.
+    fn assert_reference_count_rejected(result: Result<SignedElement, IdentityError>, case: &str) {
+        let err = result
+            .err()
+            .unwrap_or_else(|| panic!("{case}: must be rejected"));
+        match err {
+            IdentityError::Saml(SamlError::Parse { ref reason }) => assert!(
+                reason.contains("exactly one <ds:Reference>"),
+                "{case}: rejected for the wrong reason: {reason}"
+            ),
+            other => panic!("{case}: expected a reference-count Parse error, got {other:?}"),
+        }
+    }
+
+    /// The defect: a `SignedInfo` carrying a genuine reference for `#a1`
+    /// followed by a second reference naming something else. The whole
+    /// `SignedInfo` is legitimately signed, so before the count check this
+    /// document *verified* — the second reference was read by nobody and its
+    /// digest was never computed.
+    #[test]
+    fn second_reference_in_signed_info_rejected() {
+        let (signed, cert_pem) = signed_assertion_with_rewritten_signed_info(&|si| {
+            si.replace(
+                "</ds:SignedInfo>",
+                &format!("{}</ds:SignedInfo>", extra_reference("#wrapped")),
+            )
+        });
+        assert_reference_count_rejected(
+            verify_signed_element(&signed, "Assertion", &cert_pem),
+            "two <ds:Reference> elements",
+        );
+    }
+
+    /// The bound: a padded list is refused, and refused for the count — not
+    /// left to fail some later check by accident.
+    #[test]
+    fn many_references_in_signed_info_rejected() {
+        let extras: String = (0..64)
+            .map(|i| extra_reference(&format!("#r{i}")))
+            .collect();
+        let (signed, cert_pem) = signed_assertion_with_rewritten_signed_info(&|si| {
+            si.replace("</ds:SignedInfo>", &format!("{extras}</ds:SignedInfo>"))
+        });
+        assert_reference_count_rejected(
+            verify_signed_element(&signed, "Assertion", &cert_pem),
+            "sixty-five <ds:Reference> elements",
+        );
+    }
+
+    /// A `SignedInfo` with no reference at all covers nothing. It must be
+    /// refused by the count rule, not stumble into a missing-attribute parse
+    /// error further down.
+    #[test]
+    fn signed_info_with_no_reference_rejected() {
+        let (signed, cert_pem) = signed_assertion_with_rewritten_signed_info(&|si| {
+            let open = si.find("<ds:Reference ").expect("reference present");
+            let close = si.find("</ds:Reference>").expect("reference closes");
+            let mut out = String::from(&si[..open]);
+            out.push_str(&si[close + "</ds:Reference>".len()..]);
+            out
+        });
+        assert_reference_count_rejected(
+            verify_signed_element(&signed, "Assertion", &cert_pem),
+            "zero <ds:Reference> elements",
+        );
+    }
+
+    /// The companion positive case: the single-reference document Hearth
+    /// itself emits still verifies, so the count rule cannot be satisfied by
+    /// rejecting everything.
+    #[test]
+    fn single_reference_document_still_verifies() {
+        let (signed, cert_pem) =
+            signed_assertion_with_rewritten_signed_info(&|si: &str| si.to_string());
+        let verified = verify_signed_element(&signed, "Assertion", &cert_pem)
+            .expect("a single-reference signature must still verify");
+        assert_eq!(verified.id, "a1");
     }
 
     /// A reference carrying no `<ds:Transforms>` at all is equally

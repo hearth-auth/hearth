@@ -289,3 +289,90 @@ async fn check_cross_realm_policy_returns_false_for_expired_policy() {
         "expired policy must not grant access even for a listed capability"
     );
 }
+
+// ── Task 25.15: legacy system-sourced policies are named at start-up ─────────
+//
+// Task 25.11 refuses to *author* a policy naming the system realm as its source
+// unless a system-realm actor writes it. That guard is write-side only: a
+// policy written before it shipped is still stored, is still consulted by
+// `check_cross_realm_policy`, and still silently narrows what the platform
+// operator may do inside that realm. `find_system_sourced_cross_realm_policies`
+// is what the start-up path walks to name them; these tests pin its contract.
+
+/// Writes a policy directly through the engine, bypassing the protocol-edge
+/// guard 25.11 added — which is exactly how a pre-25.11 policy got there.
+fn store_policy(h: &TestHarness, target: &RealmId, source: &RealmId, caps: &[&str]) -> String {
+    h.identity()
+        .create_cross_realm_policy(
+            target,
+            &CreateCrossRealmPolicyRequest {
+                source_realm_id: source.clone(),
+                allowed_capabilities: caps.iter().map(|s| (*s).to_string()).collect(),
+                expires_in_secs: None,
+            },
+        )
+        .expect("create policy")
+        .policy_id
+}
+
+#[tokio::test]
+async fn system_sourced_policy_in_a_tenant_realm_is_reported() {
+    let h = TestHarness::embedded().await.expect("harness");
+    let tenant = make_realm(&h, "legacy-target");
+    let policy_id = store_policy(
+        &h,
+        &tenant,
+        &RealmId::new(uuid::Uuid::nil()),
+        &["search:read"],
+    );
+
+    let found = hearth::identity::find_system_sourced_cross_realm_policies(h.identity());
+
+    let hit = found
+        .iter()
+        .find(|p| p.policy_id == policy_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "a policy naming the system realm as its source in tenant realm \
+                 {tenant:?} must be reported; got {found:?}"
+            )
+        });
+    assert_eq!(
+        hit.target_realm_id, tenant,
+        "the report must name the realm that stores the policy, because that is \
+         the realm the operator has been gated out of"
+    );
+    assert_eq!(
+        hit.allowed_capabilities,
+        vec!["search:read".to_string()],
+        "the report must carry the capability list: an operator locked out of a \
+         realm is looking at exactly this short list"
+    );
+}
+
+#[tokio::test]
+async fn tenant_to_tenant_policy_is_not_reported() {
+    let h = TestHarness::embedded().await.expect("harness");
+    let target = make_realm(&h, "t2t-target");
+    let source = make_realm(&h, "t2t-source");
+    let policy_id = store_policy(&h, &target, &source, &["search:read"]);
+
+    let found = hearth::identity::find_system_sourced_cross_realm_policies(h.identity());
+    assert!(
+        !found.iter().any(|p| p.policy_id == policy_id),
+        "an ordinary tenant-to-tenant policy does not gate the operator and must \
+         not be reported; got {found:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_realm_with_no_policies_reports_nothing_for_itself() {
+    let h = TestHarness::embedded().await.expect("harness");
+    let quiet = make_realm(&h, "quiet");
+
+    let found = hearth::identity::find_system_sourced_cross_realm_policies(h.identity());
+    assert!(
+        !found.iter().any(|p| p.target_realm_id == quiet),
+        "a realm with no stored policy must never appear in the report; got {found:?}"
+    );
+}

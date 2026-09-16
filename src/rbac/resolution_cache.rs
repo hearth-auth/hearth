@@ -361,13 +361,34 @@ mod tests {
             .collect();
 
         // Writer: fill-then-bump many times, mirroring the engine's
-        // resolve→mutation interleaving. Capped at 5_000 (down from 50_000) so
-        // the test does not create ruinous allocation pressure under full-suite
-        // parallelism: each iteration clones two single-entry HashMaps via rcu,
-        // and running 50k of those concurrently with 4500+ other tests caused
-        // a one-time flake (HEA-1953). 5k still exercises thousands of
-        // concurrent reader/writer interleavings — more than enough to catch any
-        // ordering hole in the ArcSwap-based invalidation path.
+        // resolve→mutation interleaving. Capped at 5_000 (down from 50_000).
+        //
+        // NOTE (task 25.16, 2026-09-15): the earlier HEA-1953 note attributed
+        // the flake here to "ruinous allocation pressure" and lowered the
+        // iteration count as the remedy. That diagnosis was wrong, and lowering
+        // the count only made the symptom rarer. The real cause is an *upstream
+        // memory-safety bug in arc-swap* (<= 1.9.2, the default hybrid
+        // debt/hazard strategy): a `Guard` returned by `load()` can dereference
+        // an `Arc` inner that has already been freed and re-allocated, so the
+        // guard's drop runs a spurious `Arc` decrement. Reproduced here at ~5
+        // aborts per 200 runs under real concurrent-build load; every captured
+        // core has the identical stack
+        //   ShardedResolutionCache::get
+        //     -> arc_swap::Guard drop -> HybridProtection::drop
+        //       -> Arc<HashMap<..>> drop -> free() -> SIGSEGV / "free(): invalid size"
+        // See vorner/arc-swap#210 (report), #211 (opt-in `genlock-load`
+        // RwLock-strategy mitigation), #203 (closed, unmerged UAF fix).
+        //
+        // This code is 100% safe Rust and uses only arc-swap's public API, so
+        // the fault is NOT in this module and must NOT be "fixed" by lowering
+        // the iteration count again or by #[ignore]-ing this test: the same
+        // load+rcu pattern is used on production hot paths (identity engine,
+        // storage memtable/tiered, TLS cert swap). The remedy is an arc-swap
+        // upgrade or strategy change, which is a workspace-level decision.
+        //
+        // 5k still exercises thousands of concurrent reader/writer
+        // interleavings — enough to catch any ordering hole in the
+        // ArcSwap-based invalidation path.
         barrier.wait();
         for v in 0..5_000u64 {
             cache.insert(k.clone(), cache.generation(&realm), resolved_with("v.read"));

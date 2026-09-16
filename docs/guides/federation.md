@@ -47,12 +47,23 @@ that initiates federation is:
 
 After the upstream IdP completes authentication it redirects back to the Hearth callback:
 
-| Realm type | Redirect URI to register at the IdP |
-|---|---|
-| Default realm | `https://auth.example.com/ui/federation/callback` |
-| Named realm | `https://auth.example.com/ui/realms/<realm>/federation/callback` |
+| Redirect URI to register at the IdP |
+|---|
+| `https://auth.example.com/ui/realms/<realm>/federation/callback` |
 
-Substitute `auth.example.com` with your `oidc.issuer` hostname.
+Substitute `auth.example.com` with your `onboarding.base_url` (falling back to the
+server's own bind address when that is unset) and `<realm>` with the realm the
+connector is declared under.
+
+> **The callback URI is always realm-scoped**, including on single-realm
+> deployments. Hearth sends exactly this string as `redirect_uri`, and upstream
+> IdPs compare it byte-for-byte against what you registered. The admin Identity
+> Provider page — `/ui/admin/realms/<realm>/identity-providers/<id>` — prints
+> the exact value to paste, built from the same code that transmits it.
+>
+> Before Hearth 1.7 the unscoped `…/ui/federation/callback` was transmitted
+> instead. If you registered that URI, re-register the realm-scoped one when you
+> upgrade or federated logins will fail with `redirect_uri_mismatch`.
 
 ---
 
@@ -66,8 +77,7 @@ Substitute `auth.example.com` with your `oidc.issuer` hostname.
 2. Click **Create Credentials → OAuth client ID**.
 3. Application type: **Web application**.
 4. Under **Authorized redirect URIs**, add:
-   - `https://auth.example.com/ui/federation/callback` (default realm)
-   - or `https://auth.example.com/ui/realms/<realm>/federation/callback` (named realm)
+   - `https://auth.example.com/ui/realms/<realm>/federation/callback`
 5. Copy the **Client ID** and **Client secret**.
 
 ### Step 2 — Add to hearth.yaml
@@ -113,8 +123,7 @@ curl -s https://auth.example.com/ui/federation/begin?idp=google
 
 1. Open **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App**.
 2. Set **Authorization callback URL** to:
-   - `https://auth.example.com/ui/federation/callback` (default realm)
-   - or `https://auth.example.com/ui/realms/<realm>/federation/callback` (named realm)
+   - `https://auth.example.com/ui/realms/<realm>/federation/callback`
 3. Copy the **Client ID** and generate a **Client secret**.
 
 ### Step 2 — Add to hearth.yaml
@@ -157,8 +166,7 @@ kill -HUP $(pidof hearth)
 
 1. Open **Azure Portal → Microsoft Entra ID → App registrations → New registration**.
 2. Under **Redirect URIs**, add:
-   - `https://auth.example.com/ui/federation/callback` (default realm)
-   - or `https://auth.example.com/ui/realms/<realm>/federation/callback` (named realm)
+   - `https://auth.example.com/ui/realms/<realm>/federation/callback`
 3. Under **Certificates & secrets**, create a new **Client secret**. Copy its value.
 4. Copy the **Application (client) ID** and the **Directory (tenant) ID**.
 
@@ -209,20 +217,24 @@ See [Custom claim mappings](#custom-claim-mappings) for more detail.
 1. Open **Apple Developer Portal → Certificates, Identifiers & Profiles → Identifiers**.
 2. Create a new **Services ID** (type: Services).
 3. Under the Services ID, enable **Sign in with Apple** and add the redirect URI:
-   - `https://auth.example.com/ui/federation/callback`
+   - `https://auth.example.com/ui/realms/<realm>/federation/callback`
 4. Note your **Services ID** (this is `client_id`).
 
-### Step 2 — Generate the client_secret JWT
+### Step 2 — Download the Sign in with Apple key
 
-Apple requires `client_secret` to be a short-lived ES256 JWT signed with your Apple private
-key — not a static string. Generate it with the `ruby` script from Apple's documentation or
-the `apple-client-secret-gen` CLI. The JWT expires in at most 6 months and must be regenerated
-before expiry.
+Apple does not accept a static `client_secret`: every token-endpoint call must present a
+short-lived ES256 JWT signed with your Apple private key. **Hearth generates that assertion
+itself on each login** — you supply the key material, not the JWT, so there is nothing to
+regenerate before an expiry.
 
-Store the generated JWT in an environment variable:
+1. In the Apple Developer Portal, go to **Keys → +** and enable **Sign in with Apple**.
+2. Download the `.p8` file. Apple lets you download it exactly once.
+3. Note the **Key ID** shown next to the key and your 10-character **Team ID**.
 
 ```bash
-export APPLE_CLIENT_SECRET="eyJhbGci..."
+export APPLE_TEAM_ID="A1B2C3D4E5"
+export APPLE_KEY_ID="ABCDE12345"
+export APPLE_PRIVATE_KEY_PEM="$(cat AuthKey_ABCDE12345.p8)"
 ```
 
 ### Step 3 — Add to hearth.yaml
@@ -237,9 +249,19 @@ realms:
       providers:
         apple:
           type: apple
-          client_id:     "${APPLE_CLIENT_ID}"      # your Services ID
-          client_secret: "${APPLE_CLIENT_SECRET}"  # short-lived ES256 JWT
+          client_id:             "${APPLE_CLIENT_ID}"          # your Services ID
+          apple_team_id:         "${APPLE_TEAM_ID}"
+          apple_key_id:          "${APPLE_KEY_ID}"
+          apple_private_key_pem: "${APPLE_PRIVATE_KEY_PEM}"    # the .p8 contents
 ```
+
+All three `apple_*` fields are required for `type: apple`; Hearth refuses to start and names
+the missing one. `client_secret` is ignored for Apple connectors.
+
+> Apple returns the authorization response as a cross-site `POST`
+> (`response_mode=form_post`) rather than a redirect, so the callback route must be reachable
+> over **HTTPS** — the browser will not send Hearth's state-binding cookie to an `http://`
+> origin on that request.
 
 ---
 

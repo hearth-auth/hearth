@@ -304,7 +304,7 @@ pub struct StateBag {
 /// produced an email match with an existing local user. Stored at
 /// `fed:confirm:{ticket_uuid}` with a 10-minute TTL. Consumed by the
 /// user successfully re-authenticating locally on
-/// `/ui/federation/confirm-link`.
+/// `/ui/realms/{realm}/federation/confirm-link`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfirmLinkTicket {
     /// Opaque single-use ticket (UUID string).

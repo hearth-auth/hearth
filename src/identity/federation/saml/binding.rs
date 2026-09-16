@@ -106,11 +106,25 @@ pub fn decode_redirect_request(param_value: &str) -> Result<Vec<u8>, IdentityErr
 /// The browser loads this HTML and auto-submits the form to `action`,
 /// carrying the SAML payload as `SAMLResponse` (or `SAMLRequest`) plus
 /// a RelayState.
+///
+/// `nonce` selects how the auto-submit is wired (task 21.8, audit §4.23#7):
+///
+/// * `Some(n)` — a `<script nonce="n">` element performs the submit. A CSP
+///   nonce covers a `<script>` element but **never** an inline event-handler
+///   attribute, so the historical `<body onload="...">` is silently dead under
+///   any policy stricter than `script-src 'unsafe-inline'`. Callers that emit
+///   this page under a CSP must pass a nonce and put the same value in
+///   `script-src 'nonce-n'`.
+/// * `None` — the legacy `onload` attribute, for callers with no CSP.
+///
+/// The `<noscript>` manual-submit button is kept either way, but note it is
+/// only usable if the emitting response also allows `action` in `form-action`.
 pub fn build_post_form_html(
     action: &str,
     param_name: &str,
     saml_xml: &[u8],
     relay_state: Option<&str>,
+    nonce: Option<&str>,
 ) -> String {
     let b64 = B64.encode(saml_xml);
     let relay = relay_state
@@ -121,13 +135,63 @@ pub fn build_post_form_html(
             )
         })
         .unwrap_or_default();
+    let (body_attr, submit_script) = match nonce {
+        Some(n) => (
+            String::new(),
+            format!(
+                r#"<script nonce="{}">document.forms[0].submit();</script>"#,
+                escape_attr(n)
+            ),
+        ),
+        None => (
+            r#" onload="document.forms[0].submit()""#.to_string(),
+            String::new(),
+        ),
+    };
     format!(
-        r#"<!DOCTYPE html><html><head><title>SAML</title></head><body onload="document.forms[0].submit()"><noscript><p>JavaScript is required to complete the SAML flow. Submit the form below manually.</p></noscript><form method="POST" action="{action}"><input type="hidden" name="{param}" value="{payload}"/>{relay}<input type="submit" value="Continue"/></form></body></html>"#,
+        r#"<!DOCTYPE html><html><head><title>SAML</title></head><body{body_attr}><noscript><p>JavaScript is required to complete the SAML flow. Submit the form below manually.</p></noscript><form method="POST" action="{action}"><input type="hidden" name="{param}" value="{payload}"/>{relay}<input type="submit" value="Continue"/></form>{submit_script}</body></html>"#,
+        body_attr = body_attr,
         action = escape_attr(action),
         param = param_name,
         payload = escape_attr(&b64),
         relay = relay,
+        submit_script = submit_script,
     )
+}
+
+/// Generates a fresh 128-bit CSP nonce, base64url-encoded.
+///
+/// Used by the SAML HTTP-POST binding pages so the auto-submit script can run
+/// under `script-src 'nonce-…'` without opening `'unsafe-inline'`.
+#[must_use]
+pub fn csp_nonce() -> String {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 16];
+    // INVARIANT: `fill` fails only on catastrophic OS RNG failure, at which
+    // point the process cannot serve anything safely anyway.
+    #[allow(clippy::unwrap_used)]
+    SystemRandom::new().fill(&mut bytes).unwrap();
+    data_encoding::BASE64URL_NOPAD.encode(&bytes)
+}
+
+/// Returns the `scheme://host[:port]` origin of `url`, for a CSP `form-action`
+/// source expression. Returns `None` when `url` is not an absolute http(s) URL.
+#[must_use]
+pub fn url_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    // Strip userinfo — never valid in a CSP source expression.
+    let host = authority.rsplit('@').next()?;
+    if host.is_empty() || host.contains(|c: char| c.is_whitespace() || c == ';' || c == ',') {
+        return None;
+    }
+    Some(format!("{}://{host}", scheme.to_ascii_lowercase()))
 }
 
 /// Decodes an inbound HTTP-POST form body SAML payload (base64 only,
@@ -242,7 +306,13 @@ mod tests {
     #[test]
     fn post_form_contains_payload() {
         let xml = b"<Response>x</Response>";
-        let html = build_post_form_html("https://sp.example/acs", "SAMLResponse", xml, Some("rs"));
+        let html = build_post_form_html(
+            "https://sp.example/acs",
+            "SAMLResponse",
+            xml,
+            Some("rs"),
+            None,
+        );
         assert!(html.contains("action=\"https://sp.example/acs\""));
         assert!(html.contains("name=\"SAMLResponse\""));
         assert!(html.contains("RelayState"));

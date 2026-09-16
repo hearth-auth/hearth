@@ -356,31 +356,6 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::RealmSuspended);
         }
 
-        // 2b. Nonce replay protection (OIDC Core §3.1.2.1 — unconditional)
-        //
-        // O3 (HEA-1757): the replay set is keyed by `{realm}:{client}:{nonce}` so
-        // detection is scoped to a single client within a single realm. A raw
-        // (global) key would let one client's nonce usage collide with — and
-        // spuriously reject — an identical nonce chosen independently by a client
-        // in another realm, which is a cross-tenant availability leak.
-        if let Some(ref nonce) = request.nonce {
-            let now = self.clock.now();
-            let ttl_micros = self.config.oidc.authorization_code_ttl_secs * 1_000_000;
-            let scoped_key = format!(
-                "{}:{}:{nonce}",
-                realm_id.as_uuid(),
-                request.client_id.as_uuid()
-            );
-            let mut nonces = self.used_nonces.lock().expect("nonce lock");
-            // Sweep nonces older than the auth-code TTL to bound memory.
-            nonces.retain(|_, inserted_at| now.as_micros() - inserted_at.as_micros() < ttl_micros);
-            if nonces.insert(scoped_key, now).is_some() {
-                return Err(IdentityError::InvalidGrant {
-                    reason: "nonce has already been used".to_string(),
-                });
-            }
-        }
-
         // 3. Load and validate client
         let client_key = keys::encode_oauth_client(&request.client_id);
         let client_bytes = self
@@ -458,6 +433,74 @@ impl EmbeddedIdentityEngine {
         // 4. Validate redirect_uri matches a registered URI
         if !client.redirect_uris().contains(&request.redirect_uri) {
             return Err(IdentityError::InvalidRedirectUri);
+        }
+
+        // 4a. Nonce replay protection (OIDC Core §3.1.2.1 — unconditional)
+        //
+        // O3 (HEA-1757): detection is scoped to a single client within a single
+        // realm. A global key would let one client's nonce usage collide with —
+        // and spuriously reject — an identical nonce chosen independently by a
+        // client in another realm, which is a cross-tenant availability leak.
+        //
+        // 22.21 (audit 2026-08-28 §4.22#14) — this used to be a process-local
+        // `Mutex<HashMap>`, which was wrong twice over:
+        //
+        //  * **It did not replicate.** A nonce burned on one node was unknown
+        //    to every other node and to the same node after a restart, so the
+        //    replay guard was defeated by simply retrying against a different
+        //    node. The sentinel now goes through `self.storage`, which `serve`
+        //    always wraps in a `ClusterStorageAdapter`, so the write is a Raft
+        //    command and every node sees it.
+        //  * **It swept the entire set on every `/authorize`.** A `retain` over
+        //    the whole map, holding one global `std::sync::Mutex`, ran on every
+        //    authorization request in the process — O(n) work and a hard
+        //    serialisation point on a request path. Reclamation is now the
+        //    periodic cleanup sweep's job (`sweep_oidc_nonces`), exactly like
+        //    the JAR/DPoP JTI and SAML assertion sentinels.
+        //
+        // `put_if_absent` is atomic through the cluster adapter, so the
+        // check-and-burn has no TOCTOU window between nodes either.
+        //
+        // Placed *after* the client and redirect_uri checks rather than
+        // before them (where the in-memory version sat): the sentinel is now
+        // a durable, fsynced write, so burning one for a request that is
+        // about to be rejected for an unknown client or an unregistered
+        // redirect_uri would turn a doomed request into storage traffic. A
+        // replayed nonce on an otherwise-invalid request now reports the
+        // invalid request, which is also one oracle fewer.
+        if let Some(ref nonce) = request.nonce {
+            let now = self.clock.now();
+            let expires_at_secs =
+                now.as_micros() / 1_000_000 + self.config.oidc.authorization_code_ttl_secs;
+            let key = keys::encode_oidc_nonce(&request.client_id, nonce);
+            let fresh = self
+                .storage
+                .put_if_absent(realm_id, &key, &expires_at_secs.to_le_bytes())
+                .map_err(Self::storage_err)?;
+            if !fresh {
+                // Lazy expiry on the read path. Reclamation is the periodic
+                // sweep's job, but a sentinel must not outlive the
+                // authorization code it guards: between the code expiring and
+                // the next sweep tick, the nonce would still be refused even
+                // though replaying it can no longer buy the attacker anything.
+                // The JAR and DPoP JTI sentinels expire lazily for the same
+                // reason. A malformed or unreadable value fails CLOSED.
+                let stored_expiry = self
+                    .storage
+                    .get(realm_id, &key)
+                    .map_err(Self::storage_err)?
+                    .and_then(|v| v.as_slice().try_into().ok().map(i64::from_le_bytes));
+                let expired = stored_expiry
+                    .is_some_and(|expires_at| now.as_micros() / 1_000_000 >= expires_at);
+                if !expired {
+                    return Err(IdentityError::InvalidGrant {
+                        reason: "nonce has already been used".to_string(),
+                    });
+                }
+                self.storage
+                    .put(realm_id, &key, &expires_at_secs.to_le_bytes())
+                    .map_err(Self::storage_err)?;
+            }
         }
 
         self.validate_client_scope_request(&client, &request.scope)?;
@@ -612,6 +655,8 @@ impl EmbeddedIdentityEngine {
                 issuer,
                 jarm_jwt,
                 response_mode,
+                // 22.3: the JAR-effective, registration-validated URI.
+                request.redirect_uri.clone(),
             ));
         }
 
@@ -619,6 +664,9 @@ impl EmbeddedIdentityEngine {
             raw_code,
             request.state.clone(),
             issuer,
+            // 22.3: the JAR-effective, registration-validated URI — never the
+            // caller's outer `redirect_uri`, which a JAR may have overridden.
+            request.redirect_uri.clone(),
         ))
     }
 
@@ -1340,11 +1388,15 @@ impl EmbeddedIdentityEngine {
                 .client_secret
                 .as_deref()
                 .ok_or(IdentityError::InvalidClientSecret)?;
-            let secret_hash = client
-                .client_secret_hash()
-                .ok_or(IdentityError::InvalidClientSecret)?;
-            let valid = credentials::verify_raw_secret(secret.as_bytes(), secret_hash)?;
-            if !valid {
+            // 22.25 (audit 2026-08-28 §4.25#3): a presented secret costs one
+            // Argon2id verification whatever the client turns out to be. A
+            // client with no stored hash used to return before hashing, so the
+            // response time told the caller the client's type.
+            if !self.verify_presented_client_secret(
+                realm_id,
+                client.client_secret_hash(),
+                secret,
+            )? {
                 return Err(IdentityError::InvalidClientSecret);
             }
         }
@@ -2700,6 +2752,13 @@ impl EmbeddedIdentityEngine {
         if claims.iat > claims.exp {
             return Ok(IntrospectionResponse::inactive());
         }
+        // RFC 7519 §4.1.5 — a token that is not yet valid is not active
+        // (audit 2026-08-28 §4.2#6, §4.19#10).
+        if let Some(nbf) = claims.nbf {
+            if now_secs < nbf - CLOCK_SKEW_SECS {
+                return Ok(IntrospectionResponse::inactive());
+            }
+        }
 
         // 4. Consult the JTI revocation blocklist on BOTH branches. A
         // session-bound OBO/delegation token carries a `jti` that delegation
@@ -2833,9 +2892,17 @@ impl EmbeddedIdentityEngine {
             return Ok(DecidePermissionResponse { allowed: false });
         }
 
-        // Expiry check.
+        // Expiry check. `nbf` joins it: RFC 7519 §4.1.5 says a token MUST NOT
+        // be accepted before its not-before time, and an authorization
+        // decision is an acceptance (audit 2026-08-28 §4.2#6, §4.19#10).
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         if now_secs >= claims.exp || claims.iat > now_secs + CLOCK_SKEW_SECS {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+        if claims
+            .nbf
+            .is_some_and(|nbf| now_secs < nbf - CLOCK_SKEW_SECS)
+        {
             return Ok(DecidePermissionResponse { allowed: false });
         }
 
@@ -3002,20 +3069,62 @@ impl EmbeddedIdentityEngine {
         let client_bytes = self
             .storage
             .get(realm_id, &client_key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidClient)?;
-        let client: OAuthClient =
-            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        let secret_hash = client
-            .client_secret_hash()
-            .ok_or(IdentityError::InvalidClientSecret)?;
-        let valid = credentials::verify_raw_secret(client_secret.as_bytes(), secret_hash)?;
-        if !valid {
+            .map_err(Self::storage_err)?;
+        // 22.25 (audit 2026-08-28 §4.25#3): this used to `?`-return on the
+        // missing client and again on the missing hash, both before any
+        // hashing. An unregistered `client_id` therefore answered in
+        // microseconds while a registered confidential one answered in
+        // Argon2id-milliseconds — a clean existence-and-type oracle over an
+        // unauthenticated endpoint. A secret was presented, so one
+        // verification runs on every arm before the answer is decided.
+        let existing: Option<OAuthClient> = client_bytes
+            .map(|bytes| {
+                serde_json::from_slice::<OAuthClient>(&bytes).map_err(|e| {
+                    IdentityError::Serialization {
+                        reason: e.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
+        let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
+        let matched = self.verify_presented_client_secret(realm_id, stored_hash, client_secret)?;
+        // Only now is the outcome decided — every arm has already paid for the
+        // same single verification.
+        let Some(client) = existing.as_ref() else {
+            return Err(IdentityError::InvalidClient);
+        };
+        if client.client_secret_hash().is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
         Ok(())
+    }
+
+    /// Verifies a **presented** client secret, doing the same amount of
+    /// Argon2id work whether or not `stored_hash` exists (22.25).
+    ///
+    /// When the client is unknown, or is a public client with no stored
+    /// secret, the verification runs against a dummy hash minted from this
+    /// realm's own `CredentialConfig` — same algorithm, same cost parameters,
+    /// same wall-clock cost as a real one — and the answer is `false`.
+    ///
+    /// Callers must decide the outcome *after* this returns; returning early
+    /// on a missing client or missing hash is exactly the bug this closes.
+    pub(super) fn verify_presented_client_secret(
+        &self,
+        realm_id: &RealmId,
+        stored_hash: Option<&str>,
+        presented: &str,
+    ) -> Result<bool, IdentityError> {
+        match stored_hash {
+            Some(hash) => credentials::verify_raw_secret(presented.as_bytes(), hash),
+            None => {
+                let dummy = self.dummy_hash_for_realm(realm_id);
+                // Result discarded on purpose: the work is the point, and a
+                // dummy hash can never match a caller-supplied secret.
+                let _ = credentials::verify_raw_secret(presented.as_bytes(), &dummy)?;
+                Ok(false)
+            }
+        }
     }
 
     pub(super) fn list_clients_inner(
@@ -3077,18 +3186,43 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         // Return InvalidClientSecret (not ClientNotFound) on any failure to
         // prevent client enumeration via error differentiation.
-        let client = self
-            .get_client(realm_id, client_id)?
-            .ok_or(IdentityError::InvalidClientSecret)?;
+        //
+        // 22.25 (audit 2026-08-28 §4.25#3): error *shape* was already uniform,
+        // but the amount of work was not. An unknown `client_id` and a public
+        // client both returned without hashing, while a registered confidential
+        // client paid for one Argon2id verification — so response time revealed
+        // both existence and type. The rule below is that hashing work is a
+        // function of the caller's own input (did it present a secret?) and
+        // never of what the lookup found:
+        //
+        //   * a secret was presented  → exactly one verification on every arm,
+        //     against the stored hash when there is one and against a
+        //     realm-parameterised dummy when there is not;
+        //   * no secret was presented → no verification on any arm.
+        //
+        // Costing the no-secret case nothing keeps the public-client token path
+        // — the common browser flow, which legitimately authenticates by
+        // `client_id` alone — off the Argon2id path entirely.
+        let client = self.get_client(realm_id, client_id)?;
 
-        if let Some(hash) = client.client_secret_hash() {
-            // Confidential client: secret is required and must match.
-            let secret = client_secret.ok_or(IdentityError::InvalidClientSecret)?;
-            if !credentials::verify_raw_secret(secret.as_bytes(), hash)? {
-                return Err(IdentityError::InvalidClientSecret);
-            }
+        let Some(secret) = client_secret else {
+            return match client.as_ref() {
+                // Public client: no secret needed, client_id alone suffices.
+                Some(c) if c.client_secret_hash().is_none() => Ok(()),
+                _ => Err(IdentityError::InvalidClientSecret),
+            };
+        };
+
+        let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
+        let is_public = client.is_some() && stored_hash.is_none();
+        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        if is_public {
+            // A stray secret on a public client is ignored, as before.
+            return Ok(());
         }
-        // Public client: no secret needed, client_id alone suffices.
+        if !matched {
+            return Err(IdentityError::InvalidClientSecret);
+        }
         Ok(())
     }
 

@@ -342,28 +342,9 @@ pub struct UpdateClientRequest {
     pub access_token_authorization: Option<AccessTokenAuthorization>,
 }
 
-/// A member of an organization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrgMember {
-    pub user_id: String,
-    pub org_id: String,
-    pub role: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub joined_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddOrgMemberRequest {
-    pub user_id: String,
-    #[serde(default)]
-    pub role: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UpdateOrgMemberRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-}
+// OrgMember, AddOrgMemberRequest and UpdateOrgMemberRequest were removed with
+// the org-membership methods: Hearth serves no organization route over HTTP
+// (audit 2026-08-28 §25.19).
 
 /// Result of [`crate::HearthClient::begin_login`].
 ///

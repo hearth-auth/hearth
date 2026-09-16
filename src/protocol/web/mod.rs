@@ -259,6 +259,20 @@ fn resolve_public_origin(issuer: Option<&str>, is_secure: bool, host: &str) -> S
 }
 
 impl WebState {
+    /// The operator's `security.allowed_return_to_origins` allowlist.
+    ///
+    /// Every `validate_return_to` call site used to pass `&[]`, so the key was
+    /// parsed, validated, documented — and never reached its consumer, which
+    /// is the exact defect class the start-up key registry exists to catch
+    /// (audit 2026-08-28 §1A item 5). Empty means same-origin paths only,
+    /// which is the previous behaviour and remains the default.
+    #[must_use]
+    pub fn allowed_return_to_origins(&self) -> &[String] {
+        self.config
+            .as_ref()
+            .map_or(&[], |c| c.security.allowed_return_to_origins.as_slice())
+    }
+
     /// Builds a new [`WebState`].
     #[must_use]
     pub fn new(
@@ -642,6 +656,32 @@ impl WebState {
         }
     }
 
+    /// Absolute federation callback URL for `realm_name`.
+    ///
+    /// This is the single seam that decides the `redirect_uri` Hearth sends
+    /// upstream **and** the callback URL the admin Identity Provider page
+    /// publishes for operators to paste into the upstream console. They are the
+    /// same string by construction so they cannot drift (audit 2026-08-28
+    /// §4.22#8): upstream IdPs compare `redirect_uri` byte-for-byte against the
+    /// registered value, so a published URL that differs from the transmitted
+    /// one makes every federated login fail with `redirect_uri_mismatch`.
+    ///
+    /// The URL is realm-scoped — a multi-realm deployment must not funnel every
+    /// realm's callback through the bare `/ui/federation/callback` route, which
+    /// resolves the *default* realm rather than the one the login started in.
+    #[must_use]
+    pub fn federation_callback_url(&self, realm_name: &str) -> String {
+        let base = self
+            .config
+            .as_ref()
+            .and_then(|c| c.onboarding.base_url.clone())
+            .unwrap_or_else(|| self.fallback_base_url());
+        format!(
+            "{}/ui/realms/{realm_name}/federation/callback",
+            base.trim_end_matches('/')
+        )
+    }
+
     /// Pins a realm as the "current" one for this process. Called by
     /// onboarding and the login handler so subsequent requests skip
     /// the `list_realms` walk.
@@ -787,6 +827,7 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/login` | GET/POST | Login form + submit |
 /// | `/ui` | GET | Signed-in dashboard (redirects to login when unauthenticated) |
 /// | `/ui/logout` | POST | Revoke session + clear cookies |
+/// | `/ui/mfa-otp-challenge` | GET/POST | SMS / email-OTP second factor after the password step |
 /// | `/ui/account` | GET | My-account page (password, MFA status) |
 /// | `/ui/account/password` | POST | Change password |
 /// | `/ui/account/totp` | GET | MFA enrol / disable page |
@@ -837,6 +878,15 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/mfa-challenge",
             axum::routing::get(handlers::mfa_challenge_form).post(handlers::mfa_challenge_submit),
+        )
+        .route(
+            // SMS / email-OTP second factor for the direct browser login. The
+            // TOTP-only `/mfa-challenge` cannot render either one, which is
+            // why those factors were invisible here (audit 2026-08-28
+            // §4.18#6).
+            "/mfa-otp-challenge",
+            axum::routing::get(handlers::mfa_otp_challenge_form)
+                .post(handlers::mfa_otp_challenge_submit),
         )
         .route(
             "/mfa-enroll-required",
@@ -1112,6 +1162,14 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/realms/{realm}/federation/callback",
             axum::routing::get(federation::callback_scoped).post(federation::callback_scoped_post),
+        )
+        // 22.19: realm-scoped confirm-to-link. The bare route above resolves
+        // the default realm; the ticket lives under the realm the login
+        // started in, so multi-realm deployments must land here.
+        .route(
+            "/realms/{realm}/federation/confirm-link",
+            axum::routing::get(federation::confirm_link_page_scoped)
+                .post(federation::confirm_link_submit_scoped),
         )
         // --- SAML 2.0 SP + IdP endpoints ---
         .route(
@@ -1715,6 +1773,13 @@ pub fn router(state: WebState) -> Router {
     // and `/ui/*`. Add a permanent redirect so bookmarks and old links
     // still work.
     let tls_enabled = shared.tls_enabled;
+    // 21.9 (audit §4.23#8): in the modal deployment TLS terminates at a proxy
+    // and `tls_enabled` is false, so HSTS was never emitted even though the
+    // browser reached Hearth over HTTPS. When the operator has declared a
+    // trusted proxy, believe its `X-Forwarded-Proto` for this decision — the
+    // same attestation `WebState::is_secure_request` already uses to set the
+    // `Secure` cookie attribute.
+    let hsts_on_forwarded_proto = shared.trust_forwarded_proto;
     // HEA-2072/HEA-2084: the reference-integration Playwright suite POSTs the
     // hosted login/consent forms back to the demo SPA's dev server. Advertise
     // those plaintext-http localhost origins in the CSP `form-action` directive
@@ -1803,6 +1868,7 @@ pub fn router(state: WebState) -> Router {
         .layer(security::SecurityHeadersLayer::new(
             security::SecurityConfig {
                 hsts_enabled: tls_enabled,
+                hsts_on_forwarded_proto,
                 coop_coep_enabled: true,
                 extra_form_action_origins,
             },

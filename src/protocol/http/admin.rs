@@ -2513,6 +2513,18 @@ struct AdminUpdateClientBody {
     /// Trust level for this client: `"first_party"` or `"third_party"`.
     /// Omit to leave unchanged.
     trust_level: Option<String>,
+    /// Base64url-encoded Ed25519 public key (32 bytes) used to verify this
+    /// client's signed assertions — RFC 7523 `private_key_jwt` client
+    /// authentication and the `urn:ietf:params:oauth:grant-type:jwt-bearer`
+    /// grant. `null` clears it; omit to leave unchanged.
+    ///
+    /// 22.15 (audit 2026-08-28 §4.22#7): the engine has read this key since
+    /// those features shipped, and `UpdateClientRequest` has carried the field
+    /// all along, but no protocol surface ever set it — every caller passed
+    /// `None`. Discovery advertised `private_key_jwt` and FAPI 2.0 Advanced
+    /// against a key an operator had no way to install.
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    assertion_public_key: Option<Option<String>>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -2585,6 +2597,10 @@ async fn admin_update_client(
         trust_level,
         mfa_required: body.mfa_required.map(Some),
         cors_origins: body.cors_origins,
+        // 22.15: the operator surface for `private_key_jwt` / `jwt-bearer`.
+        // `update_client_inner` validates the base64url decode and the 32-byte
+        // Ed25519 length before it writes.
+        assertion_public_key: body.assertion_public_key,
         ..Default::default()
     };
 

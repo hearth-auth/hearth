@@ -323,7 +323,8 @@ async fn update_password_completion_issues_session_and_redirects_to_ui() {
 
     // 2. POST /required-action/UPDATE_PASSWORD with the new password.
     let body = format!(
-        "new_password={}&confirm_password={}",
+        "current_password={}&new_password={}&confirm_password={}",
+        url_encode(PASSWORD),
         url_encode(NEW_PASSWORD),
         url_encode(NEW_PASSWORD),
     );
@@ -393,7 +394,8 @@ async fn update_password_completion_with_return_to_redirects_to_original_dest() 
 
     // Complete the required action.
     let body = format!(
-        "new_password={}&confirm_password={}",
+        "current_password={}&new_password={}&confirm_password={}",
+        url_encode(PASSWORD),
         url_encode(NEW_PASSWORD),
         url_encode(NEW_PASSWORD),
     );

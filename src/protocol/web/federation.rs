@@ -6,10 +6,12 @@
 //!   completes the round-trip. Outcome decides what happens next:
 //!   existing-link → new Hearth session; JIT → new user + session;
 //!   ConfirmLink → HMAC-bound cookie + redirect to confirm page.
-//! * `GET  /ui/federation/confirm-link?ticket={t}` — renders a page
-//!   asking the user to enter their local password.
-//! * `POST /ui/federation/confirm-link` — verifies the local password
-//!   and persists the link.
+//! * `GET  /ui/realms/{realm}/federation/confirm-link?ticket={t}` — renders a
+//!   page asking the user to enter their local password. The unscoped
+//!   `/ui/federation/confirm-link` twin resolves the default realm and exists
+//!   only for single-realm deployments (22.19).
+//! * `POST /ui/realms/{realm}/federation/confirm-link` — verifies the local
+//!   password and persists the link.
 //!
 //! Audit events are emitted on every state-changing path — login
 //! started, completed, account linked/unlinked, JIT provisioned.
@@ -104,13 +106,13 @@ pub async fn begin_scoped(
     Path(realm_name): Path<String>,
     Query(q): Query<BeginQuery>,
 ) -> Response {
-    let realm_id = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
-        Resolved::Realm(r) => r.id().clone(),
+    let (realm_id, realm_name) = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
+        Resolved::Realm(r) => (r.id().clone(), r.name().to_string()),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
-    begin_impl(state, &headers, realm_id, q).await
+    begin_impl(state, &headers, realm_id, &realm_name, q).await
 }
 
 /// `GET /ui/federation/begin?idp=...` (bare — resolves default realm).
@@ -119,40 +121,59 @@ pub async fn begin(
     headers: HeaderMap,
     Query(q): Query<BeginQuery>,
 ) -> Response {
-    let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
-        Resolved::Realm(r) => r.id().clone(),
+    let (realm_id, realm_name) = match realm_resolver::resolve(state.as_ref(), None) {
+        Resolved::Realm(r) => (r.id().clone(), r.name().to_string()),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
-    begin_impl(state, &headers, realm_id, q).await
+    begin_impl(state, &headers, realm_id, &realm_name, q).await
 }
 
 async fn begin_impl(
     state: Arc<WebState>,
     headers: &HeaderMap,
     realm_id: RealmId,
+    realm_name: &str,
     q: BeginQuery,
 ) -> Response {
-    let service = match build_service(&state) {
+    let service = match build_service(&state, realm_name) {
         Some(s) => s,
         None => return handlers_common::server_error(),
     };
     // A-52: validate return_to before storing in federation state bag.
     let return_to_raw = q.return_to.as_deref().unwrap_or("/ui/account");
-    let return_to =
-        validate_return_to(return_to_raw, &[]).unwrap_or_else(|| "/ui/account".to_string());
+    let return_to = validate_return_to(return_to_raw, state.allowed_return_to_origins())
+        .unwrap_or_else(|| "/ui/account".to_string());
     let now = Timestamp::from_micros(now_micros());
     match service.begin(&realm_id, &q.idp, &return_to, now) {
         Ok((url, state_token)) => {
             audit_federation_started(&state, &realm_id, &q.idp);
             // A-48: plant session-binding cookie.  SameSite=Lax is required
             // because the IdP redirect is a top-level cross-origin navigation.
+            //
+            // 22.23 (audit 2026-08-28 §4.22#15): connectors that answer with
+            // `response_mode=form_post` (Apple Sign In) come back as a
+            // cross-site **POST**, and a SameSite=Lax cookie is NOT sent on a
+            // cross-site POST — only on a top-level GET. With Lax the A-48
+            // check below could never pass, so `callback_post` /
+            // `callback_scoped_post` always bounced to
+            // `/ui/login?error=federation_failed`. Those connectors get
+            // `SameSite=None; Secure`, which browsers do send on a cross-site
+            // POST. `None` without `Secure` is rejected outright by every
+            // modern browser, so the flag is unconditional here — Apple
+            // mandates an HTTPS redirect URI anyway.
             let bind_mac = compute_federation_state_mac(cookie_secret_32(&state), &state_token);
             let secure = state.is_secure_request(headers);
-            let secure_flag = if secure { "; Secure" } else { "" };
+            let same_site = if uses_form_post_callback(&state, &realm_id, &q.idp) {
+                "None; Secure"
+            } else if secure {
+                "Lax; Secure"
+            } else {
+                "Lax"
+            };
             let bind_cookie = format!(
-                "{FED_BIND_COOKIE}={bind_mac}; HttpOnly; Path=/; SameSite=Lax; Max-Age=600{secure_flag}"
+                "{FED_BIND_COOKIE}={bind_mac}; HttpOnly; Path=/; SameSite={same_site}; Max-Age=600"
             );
             let mut resp = Redirect::to(url.as_str()).into_response();
             resp.headers_mut().insert(
@@ -179,14 +200,22 @@ pub async fn callback_scoped(
     Path(realm_name): Path<String>,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
-    let realm_id = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
-        Resolved::Realm(r) => r.id().clone(),
+    let (realm_id, realm_name) = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
+        Resolved::Realm(r) => (r.id().clone(), r.name().to_string()),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
     callback_impl(
-        state, headers, realm_id, q.state, q.code, q.error, q.iss, None,
+        state,
+        headers,
+        realm_id,
+        &realm_name,
+        q.state,
+        q.code,
+        q.error,
+        q.iss,
+        None,
     )
     .await
 }
@@ -197,14 +226,22 @@ pub async fn callback(
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
-    let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
-        Resolved::Realm(r) => r.id().clone(),
+    let (realm_id, realm_name) = match realm_resolver::resolve(state.as_ref(), None) {
+        Resolved::Realm(r) => (r.id().clone(), r.name().to_string()),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
     callback_impl(
-        state, headers, realm_id, q.state, q.code, q.error, q.iss, None,
+        state,
+        headers,
+        realm_id,
+        &realm_name,
+        q.state,
+        q.code,
+        q.error,
+        q.iss,
+        None,
     )
     .await
 }
@@ -216,14 +253,22 @@ pub async fn callback_scoped_post(
     Path(realm_name): Path<String>,
     Form(f): Form<CallbackForm>,
 ) -> Response {
-    let realm_id = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
-        Resolved::Realm(r) => r.id().clone(),
+    let (realm_id, realm_name) = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
+        Resolved::Realm(r) => (r.id().clone(), r.name().to_string()),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
     callback_impl(
-        state, headers, realm_id, f.state, f.code, f.error, None, f.user,
+        state,
+        headers,
+        realm_id,
+        &realm_name,
+        f.state,
+        f.code,
+        f.error,
+        None,
+        f.user,
     )
     .await
 }
@@ -234,14 +279,22 @@ pub async fn callback_post(
     headers: HeaderMap,
     Form(f): Form<CallbackForm>,
 ) -> Response {
-    let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
-        Resolved::Realm(r) => r.id().clone(),
+    let (realm_id, realm_name) = match realm_resolver::resolve(state.as_ref(), None) {
+        Resolved::Realm(r) => (r.id().clone(), r.name().to_string()),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
     callback_impl(
-        state, headers, realm_id, f.state, f.code, f.error, None, f.user,
+        state,
+        headers,
+        realm_id,
+        &realm_name,
+        f.state,
+        f.code,
+        f.error,
+        None,
+        f.user,
     )
     .await
 }
@@ -252,6 +305,7 @@ async fn callback_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
     realm_id: RealmId,
+    realm_name: &str,
     state_token: String,
     code: Option<String>,
     error: Option<String>,
@@ -290,7 +344,7 @@ async fn callback_impl(
     let Some(code) = code else {
         return handlers_common::bad_request("Missing code");
     };
-    let service = match build_service(&state) {
+    let service = match build_service(&state, realm_name) {
         Some(s) => s,
         None => return handlers_common::server_error(),
     };
@@ -327,6 +381,7 @@ async fn callback_impl(
         &state,
         &headers,
         &realm_id,
+        realm_name,
         &bag.idp_id,
         outcome,
         &bag.return_to,
@@ -348,6 +403,7 @@ pub(super) fn complete_federation_outcome(
     state: &Arc<WebState>,
     headers: &HeaderMap,
     realm_id: &RealmId,
+    realm_name: &str,
     bag_idp_id: &IdpId,
     outcome: FederationOutcome,
     return_to: &str,
@@ -454,7 +510,7 @@ pub(super) fn complete_federation_outcome(
             (
                 resp_headers,
                 Redirect::to(&format!(
-                    "/ui/federation/confirm-link?ticket={}",
+                    "/ui/realms/{realm_name}/federation/confirm-link?ticket={}",
                     ticket.ticket
                 )),
             )
@@ -483,6 +539,10 @@ pub struct ConfirmLinkForm {
 #[allow(clippy::struct_excessive_bools)]
 struct ConfirmLinkPage {
     ticket: String,
+    /// Absolute path the confirm form POSTs to. Realm-scoped when the page was
+    /// reached through `/ui/realms/{realm}/...` so the submit resolves the same
+    /// realm the ticket lives in (22.19).
+    form_action: String,
     external_email: String,
     idp_display_name: String,
     // Layout fields required by ui/_layout.html.
@@ -499,10 +559,36 @@ struct ConfirmLinkPage {
     inline_theme_css: Option<String>,
 }
 
-/// `GET /ui/federation/confirm-link?ticket=...`
+/// `GET /ui/realms/{realm}/federation/confirm-link?ticket=...`
+///
+/// 22.19 (audit 2026-08-28 §4.22#11): the confirm-to-link ticket is stored
+/// under the realm the federated login **started** in. The bare route below
+/// resolves the *default* realm, so on a multi-realm deployment the ticket
+/// lookup missed and every confirm-to-link hop bounced to `/ui/login`. The
+/// federation callback now redirects here, carrying the originating realm in
+/// the path.
+pub async fn confirm_link_page_scoped(
+    State(state): State<Arc<WebState>>,
+    Path(realm_name): Path<String>,
+    Query(q): Query<ConfirmLinkQuery>,
+    headers: HeaderMap,
+) -> Response {
+    confirm_link_page_impl(state, Some(realm_name), q, headers).await
+}
+
+/// `GET /ui/federation/confirm-link?ticket=...` (bare — resolves default realm).
 pub async fn confirm_link_page(
     State(state): State<Arc<WebState>>,
     Query(q): Query<ConfirmLinkQuery>,
+    headers: HeaderMap,
+) -> Response {
+    confirm_link_page_impl(state, None, q, headers).await
+}
+
+async fn confirm_link_page_impl(
+    state: Arc<WebState>,
+    realm_name: Option<String>,
+    q: ConfirmLinkQuery,
     headers: HeaderMap,
 ) -> Response {
     // Non-destructive read + cookie MAC check.
@@ -518,7 +604,7 @@ pub async fn confirm_link_page(
     // We don't know user_id yet (peek without consuming the engine
     // ticket). Peek by scanning — we want the user_id for MAC
     // verification, so read-through the engine.
-    let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
+    let realm_id = match realm_resolver::resolve(state.as_ref(), realm_name.as_deref()) {
         Resolved::Realm(r) => r.id().clone(),
         _ => return Redirect::to("/ui/login").into_response(),
     };
@@ -549,8 +635,19 @@ pub async fn confirm_link_page(
         .get_idp(&realm_id, &ticket_rec.identity.idp_id)
         .ok()
         .flatten();
+    let form_action = match realm_name.as_deref() {
+        Some(name) => format!("/ui/realms/{name}/federation/confirm-link"),
+        None => "/ui/federation/confirm-link".to_string(),
+    };
+    // 21.14 (audit 2026-08-28 §4.22#12): `ConfirmLinkForm` has always declared
+    // a `_csrf` field, but the page never filled it in and the POST handler
+    // never read it — the field parsed and was discarded. Mint a pre-auth CSRF
+    // cookie here, the same way the login and reset-password forms do, so
+    // `confirm_link_submit_impl` has something to compare against.
+    let (csrf_value, csrf_cookie) = auth::fresh_csrf_cookie(state.is_secure_request(&headers));
     let tmpl = ConfirmLinkPage {
         ticket: ticket_rec.ticket.clone(),
+        form_action,
         external_email: ticket_rec.identity.email.clone(),
         idp_display_name: idp
             .map(|c| c.display_name)
@@ -561,21 +658,56 @@ pub async fn confirm_link_page(
         is_admin: false,
         user_email: None,
         flash: None,
-        csrf: None,
+        csrf: Some(csrf_value),
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
         inline_theme_css: state.inline_theme_css(),
     };
-    render(&tmpl)
+    let mut resp = render(&tmpl);
+    if let Ok(v) = header::HeaderValue::from_str(&csrf_cookie) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    resp
 }
 
-/// `POST /ui/federation/confirm-link`
+/// `POST /ui/realms/{realm}/federation/confirm-link` (22.19).
+pub async fn confirm_link_submit_scoped(
+    State(state): State<Arc<WebState>>,
+    Path(realm_name): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<ConfirmLinkForm>,
+) -> Response {
+    confirm_link_submit_impl(state, Some(realm_name), headers, form).await
+}
+
+/// `POST /ui/federation/confirm-link` (bare — resolves default realm).
 pub async fn confirm_link_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Form(form): Form<ConfirmLinkForm>,
 ) -> Response {
+    confirm_link_submit_impl(state, None, headers, form).await
+}
+
+async fn confirm_link_submit_impl(
+    state: Arc<WebState>,
+    realm_name: Option<String>,
+    headers: HeaderMap,
+    form: ConfirmLinkForm,
+) -> Response {
+    // 21.14 (audit §4.22#12): double-submit CSRF check, before the ticket is
+    // consumed. The `_csrf` form field is compared in constant time against the
+    // `hearth_ui_csrf` cookie the GET page set. Until this existed the field
+    // deserialized and was thrown away, so a cross-origin form POST that
+    // replayed a ticket needed nothing but the cookie the browser sends
+    // anyway. Failing here does NOT burn the ticket — the user can reload the
+    // confirm page and resubmit.
+    match auth::csrf_cookie_value_from_headers(&headers) {
+        Some(cookie) if auth::csrf_token_eq(cookie, form.csrf.as_str()) => {}
+        _ => return auth::csrf_failure_response(),
+    }
+
     // Cookie + MAC check.
     let Some(cookie_val) = auth::cookie_value_from_headers(&headers, CONFIRM_LINK_COOKIE) else {
         return Redirect::to("/ui/login").into_response();
@@ -586,7 +718,7 @@ pub async fn confirm_link_submit(
     if ticket_cookie != form.ticket {
         return Redirect::to("/ui/login").into_response();
     }
-    let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
+    let realm_id = match realm_resolver::resolve(state.as_ref(), realm_name.as_deref()) {
         Resolved::Realm(r) => r.id().clone(),
         _ => return Redirect::to("/ui/login").into_response(),
     };
@@ -678,7 +810,7 @@ pub async fn confirm_link_submit(
 
 // ------ helpers ------
 
-pub(super) fn build_service(state: &WebState) -> Option<FederationService> {
+pub(super) fn build_service(state: &WebState, realm_name: &str) -> Option<FederationService> {
     // Tests inject a stub transport via `WebState::with_federation_http`.
     // Production builds leave it `None` and fall through to the ureq-
     // backed implementation.
@@ -686,23 +818,31 @@ pub(super) fn build_service(state: &WebState) -> Option<FederationService> {
         .federation_http
         .clone()
         .unwrap_or_else(|| Arc::new(crate::identity::federation::UreqFederationTransport));
-    // Reuse the onboarding base_url — the same "public URL of this
-    // Hearth server" that verification emails use. Federation callback
-    // URLs have the same requirement (must match exactly what's
-    // registered at the upstream IdP).
-    let redirect_uri = state
-        .config
-        .as_ref()
-        .and_then(|c| c.onboarding.base_url.clone())
-        .unwrap_or_else(|| "http://localhost:8080".to_string())
-        .trim_end_matches('/')
-        .to_string()
-        + "/ui/federation/callback";
+    // 22.16 (audit 2026-08-28 §4.22#8): the `redirect_uri` sent upstream is
+    // realm-scoped and comes from the same seam the admin Identity Provider
+    // page publishes, so the two strings cannot drift. Upstream IdPs compare
+    // `redirect_uri` byte-for-byte against the registered value.
+    let redirect_uri = state.federation_callback_url(realm_name);
     Some(FederationService::new(
         state.identity.clone(),
         http,
         redirect_uri,
     ))
+}
+
+/// Whether the named connector answers the authorization request with
+/// `response_mode=form_post` (a cross-site POST back to Hearth) rather than a
+/// redirect. Apple Sign In is the only such connector today.
+///
+/// Drives the `SameSite` attribute of the A-48 state-binding cookie: `Lax` is
+/// not sent on a cross-site POST, so a form_post connector needs
+/// `SameSite=None; Secure` or its callback can never authenticate (22.23).
+/// A lookup failure answers `false` — the stricter cookie.
+fn uses_form_post_callback(state: &WebState, realm_id: &RealmId, idp_name: &str) -> bool {
+    matches!(
+        state.identity.get_idp_by_name(realm_id, idp_name),
+        Ok(Some(cfg)) if cfg.kind == crate::identity::federation::IdpKind::Apple
+    )
 }
 
 fn complete_login(

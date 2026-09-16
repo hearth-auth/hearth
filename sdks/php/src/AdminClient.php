@@ -167,7 +167,7 @@ final class AdminClient
      */
     public function createClient(array $params): array
     {
-        return $this->post('/admin/clients', $params);
+        return $this->post('/admin/applications', $params);
     }
 
     /**
@@ -177,7 +177,7 @@ final class AdminClient
      */
     public function getClient(string $id): array
     {
-        return $this->get("/admin/clients/{$id}");
+        return $this->get("/admin/applications/{$id}");
     }
 
     /**
@@ -194,7 +194,7 @@ final class AdminClient
     /** Deletes an OAuth client by ID. */
     public function deleteClient(string $id): void
     {
-        $this->delete("/admin/clients/{$id}");
+        $this->delete("/admin/applications/{$id}");
     }
 
     /**
@@ -204,7 +204,7 @@ final class AdminClient
      */
     public function listClients(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        $data = $this->get('/admin/clients', $this->paginationQuery($limit, $cursor));
+        $data = $this->get('/admin/applications', $this->paginationQuery($limit, $cursor));
 
         return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
     }
@@ -318,58 +318,15 @@ final class AdminClient
     }
 
     // =========================================================================
-    // Organization Memberships
+    // Organization Memberships — removed
     // =========================================================================
-
-    /**
-     * Adds a member to an organization.
-     *
-     * @param array<string, mixed> $params (e.g. ['user_id' => '...', 'role' => 'member'])
-     * @return array<string, mixed>
-     */
-    public function addOrgMember(string $orgId, array $params): array
-    {
-        return $this->post("/admin/orgs/{$orgId}/members", $params);
-    }
-
-    /**
-     * Retrieves an organization member by user ID.
-     *
-     * @return array<string, mixed>
-     */
-    public function getOrgMember(string $orgId, string $userId): array
-    {
-        return $this->get("/admin/orgs/{$orgId}/members/{$userId}");
-    }
-
-    /**
-     * Updates an organization member's role.
-     *
-     * @param array<string, mixed> $params
-     * @return array<string, mixed>
-     */
-    public function updateOrgMember(string $orgId, string $userId, array $params): array
-    {
-        return $this->put("/admin/orgs/{$orgId}/members/{$userId}", $params);
-    }
-
-    /** Removes a member from an organization. */
-    public function removeOrgMember(string $orgId, string $userId): void
-    {
-        $this->delete("/admin/orgs/{$orgId}/members/{$userId}");
-    }
-
-    /**
-     * Lists organization members with optional pagination.
-     *
-     * @return PageResponse<array<string, mixed>>
-     */
-    public function listOrgMembers(string $orgId, ?int $limit = null, ?string $cursor = null): PageResponse
-    {
-        $data = $this->get("/admin/orgs/{$orgId}/members", $this->paginationQuery($limit, $cursor));
-
-        return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
-    }
+    //
+    // Hearth serves no organization route over HTTP: there is no /admin/orgs,
+    // no /admin/orgs/{id}/members and no per-member route anywhere in the
+    // router, so addOrgMember(), getOrgMember(), updateOrgMember(),
+    // removeOrgMember() and listOrgMembers() every one 404'd
+    // (audit 2026-08-28 §25.19). Organization membership is administered
+    // through the admin console, not the admin API.
 
     // =========================================================================
     // HTTP primitives
@@ -432,16 +389,8 @@ final class AdminClient
         return $this->sendJson('PATCH', $path, $body);
     }
 
-    /**
-     * Sends a PUT request with a JSON body.
-     *
-     * @param array<string, mixed> $body
-     * @return array<string, mixed>
-     */
-    private function put(string $path, array $body): array
-    {
-        return $this->sendJson('PUT', $path, $body);
-    }
+    // put() was removed with updateOrgMember(), its only caller: Hearth
+    // implements every admin mutation as PATCH (audit 2026-08-28 §25.4, §25.19).
 
     /**
      * Sends a JSON-bodied request with the given method.

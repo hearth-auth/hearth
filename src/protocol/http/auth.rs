@@ -148,8 +148,18 @@ pub(crate) fn extract_admin_auth(
 ///
 /// It runs as a layer rather than inside `extract_admin_auth` because the
 /// proof covers the request method and URI, and the extractor sees only
-/// headers. Applied with `route_layer` to the `/admin` and `/scim/v2` routers,
-/// so it never fires on an unmatched path.
+/// headers. Applied with `route_layer`, so it never fires on an unmatched path.
+///
+/// Mounted on every router whose handlers authenticate through
+/// `extract_admin_auth`: the `/admin` and `/scim/v2` nests (18.18), and — since
+/// task 25.17 — `users::routes()`, `oauth::admin_routes()`, `agents::routes()`,
+/// `approval::routes()` and `advanced::routes()`, which are merged at the
+/// router root rather than nested and were therefore missed the first time.
+/// `tool_invocation::routes()` is deliberately excluded: it validates the proof
+/// itself, and a second validation would record the proof's `jti` on the first
+/// pass and reject the second as a replay (RFC 9449 §11.1). The list of mount
+/// points lives in `router_with`; a new `extract_admin_auth` call site in a new
+/// router must be added there.
 ///
 /// Fail-open is deliberate for *unauthenticated* shapes only: a request with no
 /// bearer token, no realm header, or a token that does not validate is passed
@@ -809,6 +819,10 @@ pub(crate) fn identity_error_to_response(
         IdentityError::AuthMethodNotAllowed { .. } => {
             (StatusCode::FORBIDDEN, "authentication method not permitted")
         }
+        IdentityError::MfaMethodNotAllowed { .. } => (
+            StatusCode::FORBIDDEN,
+            "mfa method not offered by this realm",
+        ),
         IdentityError::PasswordExpired => (StatusCode::UNAUTHORIZED, "password expired"),
         IdentityError::PasswordReused => (
             StatusCode::UNPROCESSABLE_ENTITY,

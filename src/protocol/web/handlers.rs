@@ -43,6 +43,7 @@ use serde::Deserialize;
 
 use crate::abuse::device_approval::{DeviceApprovalDecision, DeviceApprovalGuard};
 use crate::abuse::runtime::PreAuthVerdict;
+use crate::core::RealmId;
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
@@ -516,6 +517,394 @@ impl MfaChallengeTemplate {
     }
 }
 
+/// OTP second-factor challenge shown by the direct browser login when the
+/// user's only usable factor is SMS or email OTP (audit 2026-08-28 §4.18#6).
+///
+/// `/ui/mfa-challenge` can only render a TOTP / recovery-code form, so the
+/// login page used to treat those users as having no factor at all.
+#[derive(Template)]
+#[template(path = "ui/mfa_otp_challenge.html")]
+struct MfaOtpChallengeTemplate {
+    error: Option<String>,
+    /// One line telling the user where the code went, e.g. the masked phone.
+    prompt: String,
+    /// `"sms"` or `"email_otp"` — echoed so the POST verifies the right factor.
+    factor: &'static str,
+    /// Opaque nonce returned by `issue_sms_otp` / `issue_email_otp`. The
+    /// pending record is keyed by it, so it is a server-side handle, not a
+    /// secret — the same shape the required-action OTP pages already use.
+    otp_nonce: String,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+impl MfaOtpChallengeTemplate {
+    fn new(
+        error: Option<String>,
+        prompt: String,
+        factor: &'static str,
+        otp_nonce: String,
+        product_name: String,
+        logo_url: String,
+    ) -> Self {
+        Self {
+            error,
+            prompt,
+            factor,
+            otp_nonce,
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: None,
+            narrow: true,
+            product_name,
+            logo_url,
+            realm_theme_url: None,
+            inline_theme_css: None,
+        }
+    }
+}
+
+/// Which OTP second factor a realm offers *and* this user actually holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum OtpFactor {
+    /// SMS OTP to the user's verified phone number.
+    Sms,
+    /// Email OTP to the user's address.
+    Email,
+}
+
+impl OtpFactor {
+    /// The wire name, matching the `mfa_methods` vocabulary.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sms => "sms",
+            Self::Email => "email_otp",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "sms" => Some(Self::Sms),
+            "email_otp" => Some(Self::Email),
+            _ => None,
+        }
+    }
+}
+
+/// Returns the OTP factor the browser login should challenge, if any.
+///
+/// Mirrors `IdentityEngine::has_second_factor` minus its TOTP arm: the realm
+/// must offer the method (`mfa_methods`), the user must have enrolled it, and
+/// the transport that delivers the code must be configured — a factor we
+/// cannot send a code for is not a factor we can challenge.
+pub(super) fn otp_factor_for(
+    state: &Arc<WebState>,
+    realm: &crate::identity::Realm,
+    user: &crate::identity::User,
+) -> Option<OtpFactor> {
+    let methods = realm.config().mfa_methods.clone().unwrap_or_default();
+    if methods.iter().any(|m| m == "sms") && user.phone_verified() && state.sms.is_some() {
+        return Some(OtpFactor::Sms);
+    }
+    if methods.iter().any(|m| m == "email_otp") && user.email_otp_enabled() && state.email.is_some()
+    {
+        return Some(OtpFactor::Email);
+    }
+    None
+}
+
+/// Issues an OTP for `factor` and returns `(nonce, prompt)`.
+fn issue_login_otp(
+    state: &Arc<WebState>,
+    realm_id: &RealmId,
+    user: &crate::identity::User,
+    factor: OtpFactor,
+) -> Result<(String, String), IdentityError> {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match factor {
+        OtpFactor::Sms => {
+            let sender = state.sms.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
+            let phone = user.phone_number().ok_or(IdentityError::MfaNotEnabled)?;
+            let key = super::required_action::sms_otp_hmac_key_bytes(state);
+            let nonce =
+                state
+                    .identity
+                    .issue_sms_otp(realm_id, phone, &key, sender.as_ref(), now_ts)?;
+            let masked = user
+                .masked_phone_number()
+                .unwrap_or_else(|| "your phone".to_string());
+            Ok((nonce, format!("We sent a 6-digit code to {masked}.")))
+        }
+        OtpFactor::Email => {
+            let email_service = state.email.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
+            let key = super::required_action::email_otp_hmac_key_bytes(state);
+            let nonce = state.identity.issue_email_otp(
+                realm_id,
+                user.email(),
+                &key,
+                email_service,
+                None,
+                now_ts,
+            )?;
+            Ok((
+                nonce,
+                "We sent a 6-digit code to your email address.".to_string(),
+            ))
+        }
+    }
+}
+
+/// Renders the OTP challenge after the password step (audit §4.18#6).
+///
+/// Requires the MFA pending cookie, which proves the password was verified.
+/// Issuing a fresh code on every render is deliberate: the page is the only
+/// way to request one, and the engine throttles resends.
+pub async fn mfa_otp_challenge_form(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
+        return Redirect::to("/ui/login").into_response();
+    };
+    let Some(pending) = parse_mfa_pending_cookie(&state.cookie_secret, raw) else {
+        return Redirect::to("/ui/login").into_response();
+    };
+
+    let (Ok(Some(realm)), Ok(Some(user))) = (
+        state.identity.get_realm(&pending.realm_id),
+        state.identity.get_user(&pending.realm_id, &pending.user_id),
+    ) else {
+        return Redirect::to("/ui/login").into_response();
+    };
+    let Some(factor) = otp_factor_for(&state, &realm, &user) else {
+        // The factor went away between login and here — start over rather
+        // than silently dropping the second-factor requirement.
+        return Redirect::to("/ui/login").into_response();
+    };
+
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_cookie) =
+        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+
+    let (nonce, prompt) = match issue_login_otp(&state, &pending.realm_id, &user, factor) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, factor = factor.as_str(), "mfa-otp-challenge: issue failed");
+            let tmpl = MfaOtpChallengeTemplate::new(
+                Some("We could not send a code right now. Please try again.".to_string()),
+                String::new(),
+                factor.as_str(),
+                String::new(),
+                state.product_name.clone(),
+                state.logo_url.clone(),
+            );
+            return render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let mut tmpl = MfaOtpChallengeTemplate::new(
+        None,
+        prompt,
+        factor.as_str(),
+        nonce,
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    tmpl.csrf = Some(csrf_value);
+    let mut resp = render(&tmpl);
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
+}
+
+/// Form body for `POST /ui/mfa-otp-challenge`.
+#[derive(Debug, Deserialize)]
+pub struct MfaOtpChallengeForm {
+    /// The 6-digit code the user typed.
+    #[serde(default)]
+    pub code: String,
+    /// `"sms"` or `"email_otp"`, echoed from the rendered form.
+    #[serde(default)]
+    pub factor: String,
+    /// Opaque handle for the pending OTP record.
+    #[serde(default)]
+    pub otp_nonce: String,
+    /// CSRF token echoed from the hidden `_csrf` field.
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
+}
+
+/// Verifies an SMS / email OTP and completes the login.
+///
+/// Carries the same three protections as `mfa_challenge_submit`: CSRF
+/// double-submit, single-use redemption of the pending-cookie nonce, and the
+/// engine's own per-OTP attempt budget.
+pub async fn mfa_otp_challenge_submit(
+    State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
+    headers: HeaderMap,
+    Form(form): Form<MfaOtpChallengeForm>,
+) -> Response {
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
+    let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+    };
+    let Some(pending) = parse_mfa_pending_cookie(&state.cookie_secret, raw) else {
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+    };
+
+    let Some(factor) = OtpFactor::parse(&form.factor) else {
+        return Redirect::to("/ui/mfa-otp-challenge").into_response();
+    };
+
+    let otp_err = |msg: &str, status: StatusCode| {
+        let tmpl = MfaOtpChallengeTemplate::new(
+            Some(msg.to_string()),
+            String::new(),
+            factor.as_str(),
+            String::new(),
+            state.product_name.clone(),
+            state.logo_url.clone(),
+        );
+        render_status(&tmpl, status)
+    };
+
+    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        return otp_err(
+            "Your session has expired. Please reload the page and try again.",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let code = form.code.trim();
+    let verified = match factor {
+        OtpFactor::Sms => state.identity.verify_sms_otp(
+            &pending.realm_id,
+            &form.otp_nonce,
+            code,
+            &super::required_action::sms_otp_hmac_key_bytes(&state),
+            now_ts,
+        ),
+        OtpFactor::Email => state.identity.verify_email_otp(
+            &pending.realm_id,
+            &form.otp_nonce,
+            code,
+            &super::required_action::email_otp_hmac_key_bytes(&state),
+            now_ts,
+        ),
+    };
+    if let Err(e) = verified {
+        tracing::debug!(error = %e, "mfa-otp-challenge: verification failed");
+        return otp_err("Invalid code. Please try again.", StatusCode::UNAUTHORIZED);
+    }
+
+    // Single-use pending cookie, exactly as `mfa_challenge_submit` does.
+    let exp_secs = now_ts.saturating_add(super::auth::MFA_PENDING_TTL_SECS);
+    match state
+        .identity
+        .redeem_mfa_nonce(&pending.realm_id, &pending.nonce, exp_secs)
+    {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+        }
+    }
+
+    let now_ra = crate::core::Timestamp::from_micros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_micros()).ok())
+            .unwrap_or(0),
+    );
+    if let Some(ra_response) = super::required_action::required_action_check_browser(
+        &state,
+        &pending.realm_id,
+        &pending.user_id,
+        pending.return_to.as_deref(),
+        &headers,
+        now_ra,
+    ) {
+        state.set_current_realm(pending.realm_id.clone());
+        return ra_response;
+    }
+
+    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+
+    // An OTP the realm delivered out of band and the user typed back is a
+    // proved second factor — the `mfa_required` gate reads exactly this
+    // (audit 2026-08-28 §4.18#3, §4.18#6).
+    let session_ctx = SessionContext {
+        mfa_proof: MfaProof::Proved,
+        ..session_ctx
+    };
+
+    match state
+        .identity
+        .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
+    {
+        Ok(session) => {
+            let secure = state.is_secure_request(&headers);
+            let IssuedCookies {
+                session_cookie,
+                csrf_cookie,
+            } = issue_auth_cookies(
+                &state.cookie_secret,
+                &pending.realm_id,
+                session.id(),
+                secure,
+            );
+            let location = pending.return_to.as_deref().unwrap_or("/ui");
+            let mut response = Redirect::to(location).into_response();
+            append_cookie(&mut response, &session_cookie);
+            append_cookie(&mut response, &csrf_cookie);
+            append_cookie(&mut response, &clear_mfa_pending_cookie(secure));
+            append_cookie(
+                &mut response,
+                &super::auth::last_realm_cookie(
+                    &super::auth::last_realm_value(state.identity.as_ref(), &pending.realm_id),
+                    secure,
+                ),
+            );
+            response
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "mfa-otp-challenge: create_session failed");
+            internal_error_response()
+        }
+    }
+}
+
 // ============================================================================
 // Setup form
 // ============================================================================
@@ -854,14 +1243,13 @@ fn login_form_impl(
     // the POST handler can verify the double-submit. If not, generate a fresh
     // token and set a new cookie on this response.
     let secure = state.is_secure_request(&headers);
-    let (csrf_value, fresh_cookie) =
-        match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
-            Some(existing) => (existing.to_string(), None),
-            None => {
-                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-                (val, Some(cookie))
-            }
-        };
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(&headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
     tmpl.csrf = Some(csrf_value);
 
     let mut resp = render(&tmpl);
@@ -1253,7 +1641,7 @@ fn login_prepare(
     // In production (dev_mode = false), an absent hearth_ui_csrf cookie is
     // treated as a CSRF failure (not a pass-through). In dev mode the bypass
     // is preserved so direct-POST tooling continues to work.
-    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(headers) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
@@ -1438,17 +1826,49 @@ fn login_finish(
     }
 
     // --- MFA gate ---
-    // `mfa_enabled` (TOTP) rather than `has_second_factor` because the only
-    // challenge this page can render is the TOTP/recovery form. A user whose
-    // sole factor is SMS or email OTP therefore takes the enrolment branch
-    // below. Neither branch decides whether the policy is met: the engine gate
-    // reads factor use from `SessionContext::mfa_proof` (audit §4.18#3).
+    // TOTP takes the inline form on this page; an SMS or email-OTP factor
+    // takes `/ui/mfa-otp-challenge`. Until 19.13 this gate asked `mfa_enabled`
+    // alone, so a user whose sole factor was SMS or email OTP was invisible
+    // to it: on an `mfa_required` realm they were pushed into forced TOTP
+    // enrolment as though they held nothing, and on any other realm their
+    // enrolled factor was skipped and the session issued straight away
+    // (audit 2026-08-28 §4.18#6). Neither branch decides whether the policy
+    // is met: the engine gate reads factor use from
+    // `SessionContext::mfa_proof` (§4.18#3).
     let mfa_on = state
         .identity
         .mfa_enabled(realm.id(), user.id())
         .unwrap_or(false);
+    let otp_factor = if mfa_on {
+        None
+    } else {
+        otp_factor_for(&state, &realm, &user)
+    };
     let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
+    // An absent `mfa_methods` restricts nothing, so TOTP is on offer.
+    let realm_offers_totp = realm
+        .config()
+        .mfa_methods
+        .as_ref()
+        .is_none_or(|m| m.iter().any(|x| x == "totp"));
     let secure = state.is_secure_request(&headers);
+    if let Some(factor) = otp_factor {
+        let cookie = issue_mfa_pending_cookie(
+            &state.cookie_secret,
+            realm.id(),
+            user.id(),
+            return_to.as_deref(),
+            secure,
+        );
+        state.set_current_realm(realm.id().clone());
+        tracing::debug!(
+            factor = factor.as_str(),
+            "login: routing to OTP second factor"
+        );
+        let mut response = Redirect::to("/ui/mfa-otp-challenge").into_response();
+        append_cookie(&mut response, &cookie);
+        return response;
+    }
     if mfa_on {
         let cookie = issue_mfa_pending_cookie(
             &state.cookie_secret,
@@ -1478,9 +1898,16 @@ fn login_finish(
         let mut response = render(&tmpl);
         append_cookie(&mut response, &cookie);
         return response;
-    } else if realm_requires_mfa {
+    } else if realm_requires_mfa && realm_offers_totp {
         // Realm mandates MFA but this user has none enrolled. Issue the same
         // pending cookie (proves identity) and redirect to forced enrollment.
+        //
+        // Only when the realm actually offers TOTP: since `mfa_methods`
+        // became a restriction (§4.18#10) a realm listing only `sms` or
+        // `email_otp` would have its forced-TOTP page refused by the engine.
+        // Those realms fall through to the required-action gate below, which
+        // injects the matching OTP enrolment. The engine's own `mfa_required`
+        // gate is the backstop if neither fires.
         let cookie = issue_mfa_pending_cookie(
             &state.cookie_secret,
             realm.id(),
@@ -1944,9 +2371,12 @@ fn passkey_complete_for_user(
 
     // The engine's own `mfa_required` gate reads this proof, so it must carry
     // what the ceremony proved rather than an assumption made before it ran.
+    // `ProvedWebAuthn` rather than the generic `Proved`: a realm that sets
+    // `webauthn_required` accepts only a WebAuthn assertion, and this is the
+    // one path that can produce it (audit 2026-08-28 §4.18#3, task 25.26).
     let mut session_ctx = session_ctx.clone();
     session_ctx.mfa_proof = if user_verified {
-        crate::identity::MfaProof::Proved
+        crate::identity::MfaProof::ProvedWebAuthn
     } else {
         crate::identity::MfaProof::None
     };
@@ -2019,14 +2449,13 @@ pub async fn mfa_challenge_form(
     };
 
     let secure = state.is_secure_request(&headers);
-    let (csrf_value, fresh_cookie) =
-        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
-            Some(existing) => (existing.to_string(), None),
-            None => {
-                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-                (val, Some(cookie))
-            }
-        };
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(&headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
 
     let mut tmpl = MfaChallengeTemplate::new(
         None,
@@ -2065,7 +2494,7 @@ pub async fn mfa_challenge_submit(
     };
 
     // F6: CSRF double-submit check — fail-closed in non-dev mode.
-    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(&headers) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
@@ -2285,11 +2714,24 @@ pub async fn mfa_enroll_required_form(
         }
     };
 
+    // The activation POST now carries a CSRF token, so the page that renders
+    // the form must mint one (audit 2026-08-28 §4.18#7). Reuse the visitor's
+    // existing token when they have one, exactly as `mfa_challenge_form` does.
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_csrf_cookie) =
+        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+
     match enroll_result {
         Ok(enrollment) => {
             use super::account::generate_qr_svg;
             let qr_svg = generate_qr_svg(&enrollment.provisioning_uri);
-            let tmpl = MfaEnrollRequiredTemplate::new(
+            let mut tmpl = MfaEnrollRequiredTemplate::new(
                 None,
                 enrollment.secret_base32,
                 enrollment.provisioning_uri,
@@ -2298,7 +2740,12 @@ pub async fn mfa_enroll_required_form(
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            render(&tmpl)
+            tmpl.csrf = Some(csrf_value);
+            let mut resp = render(&tmpl);
+            if let Some(cookie) = fresh_csrf_cookie {
+                append_cookie(&mut resp, &cookie);
+            }
+            resp
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
             // User somehow got here with MFA already set up — send to challenge.
@@ -2325,6 +2772,12 @@ pub async fn mfa_enroll_required_form(
 pub struct MfaEnrollRequiredForm {
     #[serde(default)]
     pub code: String,
+    /// CSRF token echoed from the hidden `_csrf` field. Mirrors
+    /// [`MfaChallengeForm`] — this route completes a login exactly as the
+    /// challenge does and had no CSRF check at all (audit 2026-08-28
+    /// §4.18#7).
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
 }
 
 /// Verifies the TOTP code during forced enrollment and completes the login.
@@ -2346,6 +2799,33 @@ pub async fn mfa_enroll_required_submit(
         return Redirect::to("/ui/login").into_response();
     };
 
+    // CSRF double-submit — fail-closed outside dev mode. This route ends in
+    // `create_session` exactly as `mfa_challenge_submit` does, and had no
+    // check of any kind: a cross-site POST that guessed the code completed
+    // someone else's forced enrolment and logged them in (audit 2026-08-28
+    // §4.18#7). Same mechanism as the sibling, same dev-mode carve-out.
+    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        let secure = state.is_secure_request(&headers);
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+        let mut tmpl = MfaEnrollRequiredTemplate::new(
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            state.product_name.clone(),
+            state.logo_url.clone(),
+        );
+        tmpl.csrf = Some(csrf_value);
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        return resp;
+    }
+
     let realm_id = pending.realm_id.clone();
     let user_id = pending.user_id.clone();
     let code = form.code.trim().to_string();
@@ -2363,7 +2843,7 @@ pub async fn mfa_enroll_required_submit(
         }
     };
 
-    let err_response = |msg: &str| {
+    let err_status = |msg: &str, status: StatusCode| {
         let tmpl = MfaEnrollRequiredTemplate::new(
             Some(msg.to_string()),
             String::new(),
@@ -2373,11 +2853,20 @@ pub async fn mfa_enroll_required_submit(
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
+        render_status(&tmpl, status)
     };
+    let err_response = |msg: &str| err_status(msg, StatusCode::UNPROCESSABLE_ENTITY);
 
     match verify_result {
         Ok(()) => {}
+        Err(IdentityError::RateLimited) => {
+            // `verify_totp_enrollment` now shares the challenge form's
+            // attempt budget (audit 2026-08-28 §4.18#7).
+            return err_status(
+                "Too many failed attempts. Please wait a few minutes and try again.",
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
         Err(IdentityError::InvalidMfaCode) => {
             return err_response("Invalid code. Please re-scan the QR code and try again.");
         }
@@ -2392,6 +2881,31 @@ pub async fn mfa_enroll_required_submit(
 
     // Enrollment confirmed — complete login.
     let secure = state.is_secure_request(&headers);
+
+    // Redeem the single-use pending-cookie nonce before a session exists, the
+    // way `mfa_challenge_submit` does. Without it one captured pending cookie
+    // could be replayed for as long as it lived, each replay minting another
+    // session (audit 2026-08-28 §4.18#7).
+    {
+        let exp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_add(super::auth::MFA_PENDING_TTL_SECS);
+        match state
+            .identity
+            .redeem_mfa_nonce(&pending.realm_id, &pending.nonce, exp_secs)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "forced enrol: nonce redemption failed");
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+        }
+    }
 
     // --- Required-action gate (D1 / HEA-1752) ---
     // Completing forced MFA enrollment satisfies the enrollment requirement but
@@ -3910,14 +4424,13 @@ fn register_form_impl(
 
     // Issue or reuse the CSRF cookie so the register form can double-submit.
     let secure = state.is_secure_request(headers);
-    let (csrf_value, fresh_cookie) =
-        match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
-            Some(existing) => (existing.to_string(), None),
-            None => {
-                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-                (val, Some(cookie))
-            }
-        };
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
     tmpl.csrf = Some(csrf_value);
     let mut resp = render(&tmpl);
     if let Some(cookie) = fresh_cookie {
@@ -4043,7 +4556,7 @@ fn register_pre_gate(
     let captcha_widget_html = state.captcha_provider.widget_html().to_string();
 
     // CSRF double-submit check — fail-closed in non-dev mode (HEA-1981 / F3).
-    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(headers) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode,
     };
@@ -5170,8 +5683,11 @@ pub async fn ra_verify_email_page(
 /// message indicating success or rate-limit.
 pub async fn ra_verify_email_resend(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<RaResendForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     let Some(realm_id) = realm_id_from_ra_token(&form.ra_token) else {
         return internal_error_response();
     };
@@ -5205,11 +5721,13 @@ pub async fn ra_verify_email_resend(
             &return_url,
             "Verification email sent. Check your inbox.",
             "success",
+            secure,
         ),
         Err(IdentityError::RateLimited) => super::templates::redirect_with_flash(
             &return_url,
             "Please wait a moment before requesting another email.",
             "error",
+            secure,
         ),
         Err(e) => {
             tracing::warn!(error = %e, "ra_verify_email_resend: request_email_verification failed");
@@ -5217,6 +5735,7 @@ pub async fn ra_verify_email_resend(
                 &return_url,
                 "Failed to send verification email. Please try again.",
                 "error",
+                secure,
             )
         }
     }

@@ -82,6 +82,14 @@ pub struct CleanupStats {
     /// Each sentinel only needs to outlive the assertion it guards; past that
     /// point the assertion's own `NotOnOrAfter` rejects any replay.
     pub saml_assertions_deleted: u64,
+    /// OIDC `nonce` replay sentinels (`oauth:nonce:`) swept (22.21).
+    ///
+    /// A sentinel only has to outlive the authorization code it guards: once
+    /// the code's TTL has passed, a replayed `/authorize` carrying the same
+    /// nonce cannot yield a usable code anyway. Before 22.21 the replay set
+    /// was an in-process `HashMap` swept on every `/authorize`; it is now
+    /// replicated storage swept here, once per cleanup pass.
+    pub oidc_nonces_deleted: u64,
     /// Revoked-JTI blocklist entries (`oauth:revjti:`) swept (22.13).
     ///
     /// A blocklist entry only has to outlive the revoked token it names: once
@@ -123,6 +131,7 @@ impl CleanupStats {
             + self.actor_jtis_deleted
             + self.saml_states_deleted
             + self.saml_assertions_deleted
+            + self.oidc_nonces_deleted
             + self.revoked_jtis_deleted
             + self.session_family_rows_deleted
             + self.rate_trackers_pruned
@@ -243,6 +252,13 @@ pub(crate) fn sweep_expired(
         &mut errors,
         "SAML replay-sentinel",
         sweep_saml_assertions(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.oidc_nonces_deleted,
+        &mut errors,
+        "OIDC nonce replay-sentinel",
+        sweep_oidc_nonces(realm_id, storage, now_secs),
     );
     record(
         realm_id,
@@ -620,6 +636,40 @@ pub(crate) fn sweep_saml_assertions(
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
     let prefix = keys::saml_assertion_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Reclaims expired OIDC `nonce` replay sentinels (`oauth:nonce:` — 22.21).
+///
+/// Each sentinel stores an 8-byte little-endian `i64` Unix-seconds expiry: the
+/// instant the authorization code the nonce guards would itself have expired.
+/// Past that point a replayed nonce buys the attacker nothing, so the sentinel
+/// is dead weight.
+///
+/// This replaces a full `retain` over an in-process map that ran on **every**
+/// `/authorize` call while holding a global mutex — the reclamation work is
+/// the same, but it now happens once per sweep instead of once per request,
+/// and off the request path entirely.
+pub(crate) fn sweep_oidc_nonces(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::oidc_nonce_scan_prefix();
     let end = keys::prefix_end(&prefix);
     let entries = storage.scan(realm_id, &prefix, &end)?;
 

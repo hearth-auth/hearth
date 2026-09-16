@@ -600,7 +600,8 @@ fn callback_confirm_mode_redirects_to_confirm_link_for_existing_user() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(
-        location.starts_with("/ui/federation/confirm-link?ticket="),
+        // 22.19: the redirect names the realm the login started in.
+        location.starts_with("/ui/realms/demo/federation/confirm-link?ticket="),
         "unexpected confirm redirect: {location}"
     );
     assert_eq!(
@@ -675,5 +676,573 @@ fn callback_disabled_mode_creates_separate_user_on_email_collision() {
     assert_eq!(
         created.email(),
         format!("ext-disabled-1@fed.{}.local", rig.idp_id.as_uuid())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 22.19 — confirm-to-link must resolve the realm the login started in
+// ---------------------------------------------------------------------------
+
+/// Creates a second realm so the bare (unscoped) resolver can no longer fall
+/// back to `demo` via the sole-realm shortcut.
+///
+/// `realm_resolver::resolve(state, None)` returns `Resolved::Realm` only when
+/// storage holds exactly one realm (or a `default_realm_name` is configured).
+/// With two realms and no declared default it returns `MustChoose`, which is
+/// the shape every real multi-realm deployment has.
+fn add_second_realm(rig: &Rig) {
+    rig.identity
+        .create_realm(&CreateRealmRequest {
+            name: "other".to_string(),
+            config: Some(RealmConfig::default()),
+        })
+        .expect("create second realm");
+}
+
+/// Pulls the `hearth_ui_fed_confirm` cookie out of a response's `Set-Cookie`.
+fn confirm_cookie_from(resp: &axum::http::Response<Body>) -> String {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hearth_ui_fed_confirm="))
+        .map(|v| v.split(';').next().unwrap_or("").to_string())
+        .expect("confirm-link cookie must be set")
+}
+
+/// Drives a Confirm-mode federation callback and returns
+/// `(confirm_redirect_location, confirm_cookie, local_user_id)`.
+fn start_confirm_link_flow(
+    rig: &Rig,
+    stub: &StubFederationTransport,
+) -> (String, String, hearth::core::UserId) {
+    set_link_mode(rig, LinkMode::Confirm);
+    let existing = rig
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: "scoped@example.com".to_string(),
+                display_name: "Scoped Local".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create local user");
+    seed_state(rig, "state-scoped", "nonce-scoped");
+    stub_successful_oidc_callback(
+        stub,
+        "code-scoped",
+        "nonce-scoped",
+        "ext-scoped-1",
+        "scoped@example.com",
+        true,
+    );
+
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .header("cookie", fed_bind_cookie("state-scoped"))
+            .uri("/ui/realms/demo/federation/callback?state=state-scoped&code=code-scoped")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let cookie = confirm_cookie_from(&resp);
+    (location, cookie, existing.id().clone())
+}
+
+/// The callback must send the browser to the realm-scoped confirm page.
+///
+/// Audit 2026-08-28 §4.22#11: it redirected to the bare
+/// `/ui/federation/confirm-link`, whose handler resolves the *default* realm.
+/// The ticket lives under the realm the login started in, so on any
+/// multi-realm deployment the lookup missed and the user was bounced to
+/// `/ui/login` with no way to finish linking.
+#[test]
+fn confirm_link_redirect_is_realm_scoped() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (location, _cookie, _user) = start_confirm_link_flow(&rig, &stub);
+    assert!(
+        location.starts_with("/ui/realms/demo/federation/confirm-link?ticket="),
+        "confirm redirect must name the originating realm, got: {location}"
+    );
+}
+
+/// Following that redirect renders the confirm page; the bare route — which
+/// cannot resolve a realm here — does not.
+#[test]
+fn scoped_confirm_page_renders_where_the_bare_route_cannot() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (location, cookie, _user) = start_confirm_link_flow(&rig, &stub);
+    let ticket = location
+        .split("ticket=")
+        .nth(1)
+        .expect("ticket")
+        .to_string();
+
+    // The scoped route resolves `demo` from the path and finds the ticket.
+    let scoped = send(
+        &rig.app,
+        Request::builder()
+            .header("cookie", cookie.clone())
+            .uri(&location)
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(
+        scoped.status(),
+        StatusCode::OK,
+        "the scoped confirm page must render"
+    );
+    let body = to_bytes(scoped.into_body(), usize::MAX);
+    let body = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(body)
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("/ui/realms/demo/federation/confirm-link"),
+        "the confirm form must POST back to the realm-scoped route"
+    );
+
+    // The bare route is what the old redirect used. It cannot resolve a realm
+    // on a multi-realm deployment, so it bounces — this is the failure users saw.
+    let bare = send(
+        &rig.app,
+        Request::builder()
+            .header("cookie", cookie)
+            .uri(format!("/ui/federation/confirm-link?ticket={ticket}"))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(bare.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        bare.headers().get("location").unwrap().to_str().unwrap(),
+        "/ui/login",
+        "the bare route cannot resolve the realm — which is why the callback \
+         must not send the user there"
+    );
+}
+
+/// The whole round trip completes: POST to the scoped route with the correct
+/// local password links the external identity.
+#[test]
+fn scoped_confirm_submit_links_the_external_identity() {
+    use hearth::identity::{CleartextPassword, UpdateUserRequest, UserStatus};
+
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (location, cookie, user_id) = start_confirm_link_flow(&rig, &stub);
+    let ticket = location
+        .split("ticket=")
+        .nth(1)
+        .expect("ticket")
+        .to_string();
+
+    rig.identity
+        .set_password(
+            &rig.realm_id,
+            &user_id,
+            &CleartextPassword::from_string("correct-horse-battery".to_string()),
+        )
+        .expect("set password");
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &user_id,
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate");
+
+    let body = format!("ticket={ticket}&password=correct-horse-battery");
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("cookie", cookie)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri("/ui/realms/demo/federation/confirm-link")
+            .body(Body::from(body))
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        rig.identity
+            .find_user_by_external_identity(&rig.realm_id, &rig.idp_id, "ext-scoped-1")
+            .expect("link lookup"),
+        Some(user_id),
+        "the confirm submit must persist the external-identity link"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 22.23 — Apple `form_post` callbacks must be able to authenticate
+// ---------------------------------------------------------------------------
+
+/// A syntactically valid P-256 PKCS#8 PEM. `AppleConnector::new` only needs
+/// the config to be present; the key is exercised at token-exchange time.
+const APPLE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----";
+
+/// Registers an Apple Sign In connector named `apple` in the rig's realm.
+fn register_apple_idp(rig: &Rig) {
+    use hearth::identity::federation::AppleConfig;
+
+    rig.identity
+        .register_idp(&IdpConfig {
+            id: IdpId::generate(),
+            realm_id: rig.realm_id.clone(),
+            name: "apple".to_string(),
+            kind: IdpKind::Apple,
+            display_name: "Apple".to_string(),
+            issuer: "https://appleid.apple.com".to_string(),
+            authorization_endpoint: "https://appleid.apple.com/auth/authorize".to_string(),
+            token_endpoint: "https://appleid.apple.com/auth/token".to_string(),
+            userinfo_endpoint: None,
+            jwks_uri: Some("https://appleid.apple.com/auth/keys".to_string()),
+            scopes: vec!["name".to_string(), "email".to_string()],
+            client_id: "com.example.service".to_string(),
+            client_secret: FederationSecret::new(String::new()),
+            claim_mappings: BTreeMap::new(),
+            leeway_seconds: IdpConfig::default_leeway_seconds(),
+            want_assertions_signed: false,
+            apple: Some(AppleConfig {
+                team_id: "A1B2C3D4E5".to_string(),
+                key_id: "ABCDE12345".to_string(),
+                private_key_pem: FederationSecret::new(APPLE_KEY_PEM.to_string()),
+            }),
+            created_at: Timestamp::from_micros(0),
+            updated_at: Timestamp::from_micros(0),
+        })
+        .expect("register apple idp");
+}
+
+/// Returns the `hearth_fed_bind` `Set-Cookie` line from a response.
+fn bind_cookie_header(resp: &axum::http::Response<Body>) -> String {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hearth_fed_bind="))
+        .map(str::to_string)
+        .expect("begin must plant the A-48 binding cookie")
+}
+
+/// 22.23 (audit 2026-08-28 §4.22#15): `callback_post` / `callback_scoped_post`
+/// could never succeed from a browser.
+///
+/// Apple answers with `response_mode=form_post`, i.e. a cross-site **POST**
+/// back to Hearth. A `SameSite=Lax` cookie is sent on a cross-site top-level
+/// GET but *not* on a cross-site POST, so the A-48 binding cookie never
+/// arrived and the handler always redirected to
+/// `/ui/login?error=federation_failed`. `SameSite=None; Secure` is the only
+/// setting a browser will send on that request.
+#[test]
+fn apple_begin_plants_a_cookie_a_browser_will_send_on_a_cross_site_post() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    register_apple_idp(&rig);
+
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .uri("/ui/realms/demo/federation/begin?idp=apple")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = bind_cookie_header(&resp);
+
+    assert!(
+        cookie.contains("SameSite=None"),
+        "a form_post connector needs SameSite=None or its callback can never \
+         authenticate; got: {cookie}"
+    );
+    assert!(
+        cookie.contains("Secure"),
+        "SameSite=None without Secure is rejected outright by browsers; got: {cookie}"
+    );
+    assert!(cookie.contains("HttpOnly"), "got: {cookie}");
+}
+
+/// Redirect-mode connectors keep `SameSite=Lax` — the change is scoped to the
+/// connectors that actually need the relaxation.
+#[test]
+fn redirect_mode_connectors_keep_samesite_lax() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .uri("/ui/realms/demo/federation/begin?idp=upstream")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = bind_cookie_header(&resp);
+    assert!(cookie.contains("SameSite=Lax"), "got: {cookie}");
+    assert!(
+        !cookie.contains("SameSite=None"),
+        "only form_post connectors get the relaxation; got: {cookie}"
+    );
+}
+
+/// The POST callback route reaches the same handler as the GET one: with a
+/// valid binding cookie it gets past A-48 and fails on the upstream exchange,
+/// not on the cookie check.
+#[test]
+fn form_post_callback_passes_the_binding_check_with_the_cookie_present() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    seed_state(&rig, "state-formpost", "nonce-formpost");
+
+    // Without the cookie the handler rejects before touching storage.
+    let no_cookie = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri("/ui/realms/demo/federation/callback")
+            .body(Body::from("state=state-formpost&code=c"))
+            .unwrap(),
+    );
+    assert_eq!(no_cookie.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        no_cookie
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "/ui/login?error=federation_failed"
+    );
+
+    // With the cookie the state bag is consumed, proving the POST route runs
+    // the same pipeline as the GET one once the cookie is actually delivered.
+    let with_cookie = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("cookie", fed_bind_cookie("state-formpost"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri("/ui/realms/demo/federation/callback")
+            .body(Body::from("state=state-formpost&code=c"))
+            .unwrap(),
+    );
+    assert_eq!(with_cookie.status(), StatusCode::SEE_OTHER);
+    assert!(
+        rig.identity
+            .take_federation_state(&rig.realm_id, "state-formpost")
+            .is_err(),
+        "the POST callback must have consumed the state bag — i.e. it got past \
+         the A-48 binding check rather than bouncing on it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 21.14 (audit 2026-08-28 §4.22#12) — the `_csrf` field on
+// `POST /ui/federation/confirm-link` was parsed and ignored
+// ---------------------------------------------------------------------------
+
+/// Reads a response body to a `String`, blocking on the shared helper runtime.
+fn body_text(resp: axum::http::Response<Body>) -> String {
+    let fut = to_bytes(resp.into_body(), usize::MAX);
+    let bytes = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// Pulls the `hearth_ui_csrf` cookie out of a response's `Set-Cookie` headers.
+fn csrf_cookie_from(resp: &axum::http::Response<Body>) -> String {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hearth_ui_csrf="))
+        .map(|v| v.split(';').next().unwrap_or("").to_string())
+        .expect("the confirm-link page must issue a CSRF cookie")
+}
+
+/// Extracts the hidden `_csrf` value the confirm-link form carries.
+fn csrf_field_from(html: &str) -> String {
+    let marker = r#"name="_csrf" value=""#;
+    let start = html
+        .find(marker)
+        .map(|i| i + marker.len())
+        .expect("the confirm-link form must carry a hidden _csrf field");
+    let end = start + html[start..].find('"').expect("unterminated _csrf value");
+    html[start..end].to_string()
+}
+
+/// Drives the flow up to a rendered confirm page and returns
+/// `(post_uri, cookie_header, csrf_field, ticket)`.
+fn confirm_page_context(
+    rig: &Rig,
+    stub: &StubFederationTransport,
+) -> (String, String, String, String) {
+    let (location, confirm_cookie, _user) = start_confirm_link_flow(rig, stub);
+    let ticket = location
+        .split("ticket=")
+        .nth(1)
+        .expect("ticket")
+        .to_string();
+
+    let page = send(
+        &rig.app,
+        Request::builder()
+            .header("cookie", confirm_cookie.clone())
+            .uri(&location)
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(page.status(), StatusCode::OK);
+    let csrf_cookie = csrf_cookie_from(&page);
+    let csrf_field = csrf_field_from(&body_text(page));
+    let cookie_header = format!("{confirm_cookie}; {csrf_cookie}");
+    (
+        "/ui/realms/demo/federation/confirm-link".to_string(),
+        cookie_header,
+        csrf_field,
+        ticket,
+    )
+}
+
+/// The page must both mint a CSRF cookie and echo the token into the form.
+/// Without one of the two there is nothing for the POST handler to compare.
+#[test]
+fn confirm_link_page_issues_a_csrf_token() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (_uri, cookie_header, csrf_field, _ticket) = confirm_page_context(&rig, &stub);
+    assert!(!csrf_field.is_empty(), "_csrf field must not be empty");
+    assert!(
+        cookie_header.contains(&format!("hearth_ui_csrf={csrf_field}")),
+        "the hidden _csrf field must equal the cookie the page set"
+    );
+}
+
+/// A POST with no `_csrf` — what a cross-origin form can send, since it
+/// cannot read the cookie — must be refused, and must NOT burn the ticket.
+#[test]
+fn confirm_link_submit_without_csrf_is_refused() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (uri, cookie_header, _csrf, ticket) = confirm_page_context(&rig, &stub);
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("cookie", cookie_header)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri(&uri)
+            .body(Body::from(format!("ticket={ticket}&password=irrelevant")))
+            .unwrap(),
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tokenless confirm-link POST must be refused"
+    );
+    assert!(
+        rig.identity
+            .take_confirm_link_ticket(&rig.realm_id, &ticket)
+            .is_ok(),
+        "a CSRF failure must not consume the ticket"
+    );
+}
+
+/// A forged token must not pass either — the check has to compare values, not
+/// merely notice that the field is present.
+#[test]
+fn confirm_link_submit_with_a_wrong_csrf_is_refused() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (uri, cookie_header, csrf, ticket) = confirm_page_context(&rig, &stub);
+    // Flip the last character to something it is not, keeping the length so
+    // the constant-time compare reaches the byte loop rather than short-
+    // circuiting on a length mismatch.
+    let last = csrf.chars().last().expect("non-empty token");
+    let flipped = if last == 'A' { 'B' } else { 'A' };
+    let forged = format!("{}{flipped}", &csrf[..csrf.len() - 1]);
+    assert_ne!(forged, csrf);
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("cookie", cookie_header)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri(&uri)
+            .body(Body::from(format!(
+                "ticket={ticket}&password=irrelevant&_csrf={forged}"
+            )))
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+/// The matching token still gets through, so the check is not a blanket deny.
+/// The password is wrong, so the handler bounces to the login page — that is
+/// the far side of the CSRF gate, which is what this pins.
+#[test]
+fn confirm_link_submit_with_the_matching_csrf_passes_the_gate() {
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    add_second_realm(&rig);
+
+    let (uri, cookie_header, csrf, ticket) = confirm_page_context(&rig, &stub);
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .method("POST")
+            .header("cookie", cookie_header)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri(&uri)
+            .body(Body::from(format!(
+                "ticket={ticket}&password=not-the-password&_csrf={csrf}"
+            )))
+            .unwrap(),
+    );
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a matching token must not be refused by the CSRF gate"
+    );
+    assert!(
+        rig.identity
+            .take_confirm_link_ticket(&rig.realm_id, &ticket)
+            .is_err(),
+        "passing the gate must reach the handler, which consumes the ticket"
     );
 }

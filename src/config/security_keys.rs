@@ -16,8 +16,11 @@
 //! # The mechanism
 //!
 //! [`SECURITY_KEYS`] names every leaf key an operator can write under
-//! `security:` and, for each, the module that actually reads it. Two checks
-//! hang off that table:
+//! `security:`, and `AUTH_KEYS` does the same for `auth:` (task 25.25 — the
+//! `security.*` boundary was arbitrary, and widening it immediately found
+//! `auth.session_ttl` reaching `RealmConfig` and being read by nothing). For
+//! each key the table names the module that actually reads it. Three checks
+//! hang off it:
 //!
 //! 1. **Start-up, fail closed** — [`liveness_issues`] walks the leaf keys the
 //!    operator actually wrote in their YAML. A key that is not in the registry,
@@ -29,6 +32,15 @@
 //!    (in this module's test block) re-derives the leaf key set from
 //!    `types.rs` and asserts it equals the registry. Adding a field without
 //!    naming its consumer fails the build.
+//! 3. **Test time, proven consumer** — `every_registered_consumer_still_exists`
+//!    and `every_registered_consumer_is_reachable_from_main`. The first rejects
+//!    a consumer entry that names only the config layer, or whose only mention
+//!    of the field is in a comment or behind `#[cfg(test)]`. The second walks a
+//!    symbol-reference graph from `fn main` and rejects an entry whose consumer
+//!    file nothing reachable refers to. Together these close the hole task
+//!    25.25 names: `security.ip_reputation.*` was registered against a file that
+//!    mentioned the field but whose provider nothing ever constructed, so the
+//!    registry asserted a liveness it had not verified.
 //!
 //! Secret-bearing keys additionally carry [`Sensitivity::Secret`], which makes
 //! an empty value a hard error rather than a credential that matches the empty
@@ -120,11 +132,18 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.allowed_return_to_origins",
-        "src/abuse/redirect.rs",
+        // The guard itself lives in `src/abuse/redirect.rs`, but it takes the
+        // allowlist as a parameter, and every call site passed `&[]` until the
+        // accessor below was added — the registry's old entry named a file that
+        // only mentioned the key in a doc comment.
+        "src/protocol/web/mod.rs (WebState::allowed_return_to_origins)",
     ),
     key(
         "security.backup.export_rate_limit",
-        "src/protocol/admin_auth.rs (ExportRateLimiter)",
+        // `ExportRateLimiter` lives in `src/protocol/admin_auth.rs`, but it is
+        // `src/main.rs` that reads the configured value and hands it over —
+        // naming only the type's file is not evidence the value is consumed.
+        "src/main.rs (ExportRateLimiter wiring), src/protocol/http/auth.rs",
     ),
     secret(
         "security.backup.verify_key",
@@ -138,7 +157,10 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "security.captcha.challenge_ttl_secs",
         "src/abuse/runtime.rs (IpChallengeStore, A-16)",
     ),
-    key("security.captcha.provider", "src/abuse/captcha/mod.rs"),
+    key(
+        "security.captcha.provider",
+        "src/abuse/captcha/mod.rs, src/main.rs",
+    ),
     key(
         "security.captcha.window_secs",
         "src/abuse/runtime.rs (IpChallengeStore, A-16)",
@@ -185,7 +207,7 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.dev_csp_form_action_origins",
-        "src/protocol/web/security.rs",
+        "src/protocol/web/security.rs, src/protocol/web/mod.rs",
     ),
     key(
         "security.distributed_attack_detector.enabled",
@@ -233,7 +255,7 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.ip_reputation.maxmind_db_path",
-        "src/abuse/ip_reputation/maxmind.rs",
+        "src/abuse/ip_reputation/maxmind.rs, src/abuse/runtime.rs",
     ),
     key(
         "security.ip_reputation.spamhaus.drop_url",
@@ -249,7 +271,7 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.jwks_rps_limit",
-        "src/protocol/admin_auth.rs (JwksRateLimiter)",
+        "src/protocol/admin_auth.rs (JwksRateLimiter), src/main.rs",
     ),
     secret(
         "security.key_encryption_key",
@@ -341,7 +363,7 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.rate_limiting.admin_per_minute",
-        "src/protocol/admin_auth.rs (AdminRateLimiter)",
+        "src/protocol/admin_auth.rs (AdminRateLimiter), src/main.rs",
     ),
     key(
         "security.rate_limiting.login_per_account.lockout_seconds",
@@ -361,7 +383,7 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.rate_limiting.token_per_minute",
-        "src/protocol/admin_auth.rs (TokenRateLimiter)",
+        "src/protocol/admin_auth.rs (TokenRateLimiter), src/main.rs",
     ),
     key("security.request_shaper.ip_rps", "src/abuse/shaper.rs"),
     key("security.request_shaper.realm_rps", "src/abuse/shaper.rs"),
@@ -403,7 +425,7 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.slug_cooldown_days",
-        "src/identity/keys.rs (slug reservation key TTL)",
+        "src/identity/keys.rs (slug reservation key TTL), src/main.rs",
     ),
     key(
         "security.tarpit.delay_ms",
@@ -418,7 +440,10 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/abuse/runtime.rs (TarpitStore, A-17)",
     ),
     key("security.tls.crl_paths", "src/protocol/tls.rs"),
-    key("security.tls.min_version", "src/protocol/tls.rs"),
+    key(
+        "security.tls.min_version",
+        "src/protocol/tls.rs, src/main.rs",
+    ),
 ];
 
 /// Secret-bearing keys outside the `security:` tree.
@@ -447,9 +472,78 @@ pub(crate) const SECRET_KEYS_OUTSIDE_SECURITY: &[&str] = &[
     "realms.*.federation.providers[].client_secret",
 ];
 
-/// Every registered `security.*` path, for external assertions.
+// ── `auth.*` (task 25.25) ────────────────────────────────────────────────────
+
+/// Every leaf key an operator can write under `auth:`.
+///
+/// The registry began at `security.*` because that is where the audit found its
+/// first dead knob. The boundary was arbitrary: `auth:` carries the session
+/// lifetime, the Argon2 cost parameters and the WebAuthn policy — controls an
+/// operator is at least as likely to set and just as unlikely to verify.
+/// Widening it here immediately found one: `auth.session_ttl` parsed,
+/// validated, reached `RealmConfig::session_ttl_micros` and was read by nothing,
+/// so every session expired on the compiled-in 24 h default. It is wired in
+/// `create_session` as part of this task; without the widening nothing would
+/// have asked.
+const AUTH_KEYS: &[SecurityKey] = &[
+    key(
+        "auth.session_ttl",
+        "src/config/types.rs -> src/identity/engine/mod.rs (create_session reads \
+         RealmConfig::session_ttl_micros)",
+    ),
+    key(
+        "auth.password_memory_cost",
+        "src/config/types.rs -> src/main.rs (base_credential_config)",
+    ),
+    key(
+        "auth.password_time_cost",
+        "src/config/types.rs -> src/main.rs (base_credential_config)",
+    ),
+    key(
+        "auth.mfa_required",
+        "src/config/types.rs -> src/identity/engine/mod.rs (create_session)",
+    ),
+    key(
+        "auth.mfa_methods",
+        "src/config/types.rs -> src/identity/engine/mod.rs (require_mfa_method gates \
+         TOTP, WebAuthn, SMS-OTP and email-OTP enrolment and presentation)",
+    ),
+    key(
+        "auth.passkey_requires_mfa",
+        "src/config/types.rs -> src/protocol/web/handlers.rs",
+    ),
+    key(
+        "auth.session_max_concurrent",
+        "src/config/types.rs -> src/identity/engine/mod.rs (max_concurrent_sessions)",
+    ),
+    key(
+        "auth.session_over_limit_policy",
+        "src/config/types.rs -> src/identity/engine/mod.rs (session_over_limit_policy)",
+    ),
+    key(
+        "auth.webauthn_required",
+        "src/config/types.rs -> src/identity/engine/mod.rs (create_session, use-time via \
+         MfaProof::satisfies_webauthn_required) + src/protocol/web/required_action.rs \
+         (inject_enroll_mfa_if_needed, enrolment-time)",
+    ),
+    key(
+        "auth.webauthn_resident_key",
+        "src/config/types.rs -> src/protocol/web/account.rs",
+    ),
+    key(
+        "auth.webauthn_user_verification",
+        "src/config/types.rs -> src/protocol/web/handlers.rs",
+    ),
+];
+
+/// Every registered path in every block, for external assertions.
 pub(crate) fn registered_paths() -> impl Iterator<Item = &'static str> {
-    SECURITY_KEYS.iter().map(|k| k.path)
+    SECURITY_KEYS.iter().chain(AUTH_KEYS.iter()).map(|k| k.path)
+}
+
+/// Looks a dotted path up in whichever block registry owns it.
+fn lookup_any(path: &str) -> Option<&'static SecurityKey> {
+    lookup_in(SECURITY_KEYS, path).or_else(|| lookup_in(AUTH_KEYS, path))
 }
 
 fn lookup_in<'a>(registry: &'a [SecurityKey], path: &str) -> Option<&'a SecurityKey> {
@@ -498,7 +592,9 @@ fn scalar_text(value: &serde_norway::Value) -> String {
 /// `validate_all` can surface them all at once; [`assert_wired`] turns the
 /// first into a hard error for the start-up path.
 pub(crate) fn liveness_issues(yaml: &str) -> Vec<ValidationIssue> {
-    liveness_issues_against(SECURITY_KEYS, yaml)
+    let mut issues = liveness_issues_against(SECURITY_KEYS, yaml);
+    issues.extend(liveness_issues_in_block(AUTH_KEYS, yaml, "auth"));
+    issues
 }
 
 /// [`liveness_issues`] against an explicit registry.
@@ -509,6 +605,19 @@ pub(crate) fn liveness_issues(yaml: &str) -> Vec<ValidationIssue> {
 /// moment that key was wired. That is exactly what happened when task 22.12
 /// wired `security.http2.*`.
 fn liveness_issues_against(registry: &[SecurityKey], yaml: &str) -> Vec<ValidationIssue> {
+    liveness_issues_in_block(registry, yaml, "security")
+}
+
+/// [`liveness_issues_against`] for an arbitrary top-level block.
+///
+/// The registry covers `security:` and — since task 25.25 — `auth:`. The block
+/// name is a parameter rather than two copies of the walk so a third block
+/// cannot be added with a subtly different rule.
+fn liveness_issues_in_block(
+    registry: &[SecurityKey],
+    yaml: &str,
+    block: &str,
+) -> Vec<ValidationIssue> {
     let Ok(root) = serde_norway::from_str::<serde_norway::Value>(yaml) else {
         // A YAML parse failure is reported by the caller's own parse; there is
         // nothing to walk here.
@@ -517,30 +626,30 @@ fn liveness_issues_against(registry: &[SecurityKey], yaml: &str) -> Vec<Validati
     let serde_norway::Value::Mapping(top) = &root else {
         return Vec::new();
     };
-    let Some(security) = top
+    let Some(section) = top
         .iter()
-        .find(|(k, _)| k.as_str() == Some("security"))
+        .find(|(k, _)| k.as_str() == Some(block))
         .map(|(_, v)| v)
     else {
         return Vec::new();
     };
-    if !matches!(security, serde_norway::Value::Mapping(_)) {
+    if !matches!(section, serde_norway::Value::Mapping(_)) {
         return Vec::new();
     }
 
     let mut leaves = Vec::new();
-    collect_leaves("security", security, &mut leaves);
+    collect_leaves(block, section, &mut leaves);
 
     let mut issues = Vec::new();
     for (path, _) in &leaves {
         match lookup_in(registry, path) {
             None => issues.push(ValidationIssue {
                 field: path.clone(),
-                reason: "is not a registered security key. Every key under `security:` must \
-                         name the module that consumes it in \
-                         `src/config/security_keys.rs::SECURITY_KEYS`; a key nobody reads is \
-                         a control the operator believes is on and is not."
-                    .to_string(),
+                reason: format!(
+                    "is not a registered configuration key. Every key under `{block}:` must \
+                     name the module that consumes it in `src/config/security_keys.rs`; a key \
+                     nobody reads is a control the operator believes is on and is not."
+                ),
             }),
             Some(k) if k.consumer == Consumer::None => issues.push(ValidationIssue {
                 field: path.clone(),
@@ -573,8 +682,7 @@ pub(crate) fn empty_secret_issues(yaml: &str) -> Vec<ValidationIssue> {
         if !text.is_empty() {
             continue;
         }
-        let is_secret = lookup_in(SECURITY_KEYS, path)
-            .is_some_and(|k| k.sensitivity == Sensitivity::Secret)
+        let is_secret = lookup_any(path).is_some_and(|k| k.sensitivity == Sensitivity::Secret)
             || SECRET_KEYS_OUTSIDE_SECURITY
                 .iter()
                 .any(|pat| matches_pattern(pat, path));
@@ -622,15 +730,18 @@ mod tests {
     #[test]
     fn registry_covers_every_security_leaf() {
         let source = include_str!("types.rs");
-        let derived = derive_security_leaves(source);
+        let mut derived = derive_leaves(source, "SecurityYaml", "security");
+        // Task 25.25 — `auth:` is registered on exactly the same terms.
+        derived.extend(derive_leaves(source, "AuthConfig", "auth"));
         let registered: BTreeSet<&str> = registered_paths().collect();
         let derived_refs: BTreeSet<&str> = derived.iter().map(String::as_str).collect();
 
         let missing: Vec<&&str> = derived_refs.difference(&registered).collect();
         assert!(
             missing.is_empty(),
-            "these `security:` keys exist in types.rs but are not registered in \
-             SECURITY_KEYS — add each one with the module that consumes it: {missing:?}"
+            "these `security:` / `auth:` keys exist in types.rs but are not registered in \
+             SECURITY_KEYS / AUTH_KEYS — add each one with the module that consumes it: \
+             {missing:?}"
         );
 
         let stale: Vec<&&str> = registered.difference(&derived_refs).collect();
@@ -644,15 +755,30 @@ mod tests {
     /// Every registered consumer must name a file that still exists, and at
     /// least one of the named files must still mention the field, so a key
     /// cannot keep a stale consumer after the code that read it is deleted.
+    ///
+    /// Task 25.25 tightened "mentions the field" three ways, because the loose
+    /// form was satisfiable without a consumer at all:
+    ///
+    /// * the mention must survive comment-stripping — a doc comment describing
+    ///   a knob is not a consumer of it;
+    /// * the mention must survive `#[cfg(test)]`-stripping — a test fixture is
+    ///   not a consumer either;
+    /// * at least one named file must live outside `src/config/`. Every key's
+    ///   own declaration is in `src/config/types.rs` and every validator in
+    ///   `src/config/validate.rs`, so an entry naming only those two provably
+    ///   proves nothing. No shipped entry named only config files when this
+    ///   rule was added, so it is a forward guard rather than a cleanup.
     #[test]
     fn every_registered_consumer_still_exists() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for k in SECURITY_KEYS {
+        let mut failures: Vec<String> = Vec::new();
+        for k in SECURITY_KEYS.iter().chain(AUTH_KEYS.iter()) {
             let Consumer::At(consumer) = k.consumer else {
                 continue;
             };
             let field = k.path.rsplit('.').next().unwrap_or(k.path);
             let mut named_any = false;
+            let mut named_outside_config = false;
             let mut mentions_field = false;
             // The consumer string may name several hops ("a -> b") and may
             // carry a parenthesised note; check every `src/...rs` token in it.
@@ -666,6 +792,9 @@ mod tests {
                     continue;
                 }
                 named_any = true;
+                if !file.starts_with("src/config/") {
+                    named_outside_config = true;
+                }
                 let path = repo_root.join(file);
                 assert!(
                     path.exists(),
@@ -674,19 +803,84 @@ mod tests {
                 );
                 let body = std::fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("{}: reading {file}: {e}", k.path));
-                if body.contains(field) {
+                if strip_tests(&strip_comments(&body)).contains(field) {
                     mentions_field = true;
                 }
             }
+            // Accumulate rather than failing at the first offender: a registry
+            // sweep is only useful if one run names EVERY key that lost its
+            // consumer, otherwise fixing them is a one-per-run grind.
+            if !named_any {
+                failures.push(format!(
+                    "{}: the consumer entry names no `src/**.rs` file",
+                    k.path
+                ));
+            } else if !named_outside_config {
+                failures.push(format!(
+                    "{}: the consumer entry names only files under `src/config/`. Every key is \
+                     declared in `src/config/types.rs` and checked in `src/config/validate.rs`, \
+                     so naming those is not evidence that anything reads the resolved value — \
+                     name the module that acts on it",
+                    k.path
+                ));
+            } else if !mentions_field {
+                failures.push(format!(
+                    "{}: no registered consumer file mentions `{field}` in live, non-test code \
+                     (comments and `#[cfg(test)]` blocks are stripped before this check) — the \
+                     key may have lost its consumer",
+                    k.path
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} registered key(s) have no live consumer:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        );
+    }
+
+    /// Every registered consumer file must be reachable from `fn main`.
+    ///
+    /// This is the check task 25.25 asks for: "a constructor is reachable from
+    /// `main`", not merely "a file mentions the field".
+    /// `security.ip_reputation.*` was registered against a file that mentioned
+    /// the field while nothing ever constructed its provider — the registry
+    /// asserted a liveness nobody had verified, which is worse than no registry,
+    /// because an operator reads a clean boot as proof the knob works.
+    ///
+    /// The graph is textual and deliberately over-approximating: a file A
+    /// reaches a file B when A's live code names any distinctive symbol that B
+    /// defines. Over-approximation means this test does not cry wolf; what it
+    /// still catches with certainty is the shape that matters — a consumer file
+    /// that **nothing reachable refers to at all**, which is what a constructor
+    /// nobody calls looks like from here. Its limits are real: it cannot see
+    /// that a reachable file calls a *different* function than the one that
+    /// reads the key, so it is a floor under the consumer claim and not a proof
+    /// of it.
+    #[test]
+    fn every_registered_consumer_is_reachable_from_main() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sources = live_sources(&repo_root.join("src"));
+        let reachable = reachable_from_main(&sources);
+        assert!(
+            reachable.len() > 10,
+            "the reachability walk found only {} files from `src/main.rs`; the graph is \
+             broken and every assertion below would pass vacuously",
+            reachable.len()
+        );
+
+        for k in SECURITY_KEYS.iter().chain(AUTH_KEYS.iter()) {
+            let Consumer::At(consumer) = k.consumer else {
+                continue;
+            };
+            let files = consumer_files(consumer);
             assert!(
-                named_any,
-                "{}: the consumer entry names no `src/**.rs` file",
-                k.path
-            );
-            assert!(
-                mentions_field,
-                "{}: none of the registered consumer files mention `{field}` any more — the \
-                 key may have lost its consumer",
+                files.iter().any(|f| reachable.contains(f)),
+                "{}: no registered consumer file is reachable from `fn main` \
+                 ({files:?}). Nothing in the live call graph refers to any symbol these \
+                 files define, so the key's consumer is dead code and setting the key does \
+                 nothing",
                 k.path
             );
         }
@@ -752,7 +946,9 @@ mod tests {
         // never registered.
         let issues = liveness_issues("security:\n  totally_made_up: true\n");
         assert_eq!(issues.len(), 1);
-        assert!(issues[0].reason.contains("not a registered security key"));
+        assert!(issues[0]
+            .reason
+            .contains("not a registered configuration key"));
     }
 
     #[test]
@@ -784,7 +980,242 @@ mod tests {
     /// Deliberately a source parse rather than a `serde` reflection: the whole
     /// point is to notice a field that was *added to the struct*, which no
     /// runtime value can tell us about.
-    fn derive_security_leaves(source: &str) -> Vec<String> {
+    // ── Task 25.25 — source analysis helpers ────────────────────────────────
+    //
+    // These are textual, and say so. A borrow-checked call graph is what
+    // `cargo` has and a test does not; the question here is narrower than a
+    // real one — "does anything live still refer to this file at all" — and
+    // text answers it well enough to catch a consumer nobody calls.
+
+    /// Extracts every `src/**.rs` file named in a consumer entry.
+    fn consumer_files(consumer: &str) -> Vec<String> {
+        consumer
+            .split_whitespace()
+            .filter_map(|token| {
+                let file = token.trim_matches(|c: char| !c.is_ascii_graphic());
+                let file = file.split("::").next().unwrap_or(file);
+                (file.starts_with("src/") && file.ends_with(".rs")).then(|| file.to_string())
+            })
+            .collect()
+    }
+
+    /// Removes line and block comments, leaving string literals intact.
+    ///
+    /// String awareness matters: `"https://example.com"` must not be truncated
+    /// at the `//`, or a field name later on that line disappears and the
+    /// consumer check fails for a consumer that is perfectly alive.
+    fn strip_comments(src: &str) -> String {
+        let b: Vec<char> = src.chars().collect();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                '/' if i + 1 < b.len() && b[i + 1] == '/' => {
+                    while i < b.len() && b[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                '/' if i + 1 < b.len() && b[i + 1] == '*' => {
+                    i += 2;
+                    while i + 1 < b.len() && !(b[i] == '*' && b[i + 1] == '/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(b.len());
+                    out.push(' ');
+                }
+                'r' if i + 1 < b.len() && (b[i + 1] == '"' || b[i + 1] == '#') => {
+                    let start = i;
+                    i += 1;
+                    let mut hashes = 0;
+                    while i < b.len() && b[i] == '#' {
+                        hashes += 1;
+                        i += 1;
+                    }
+                    if i >= b.len() || b[i] != '"' {
+                        // Not a raw string after all (`r` was an identifier).
+                        out.push(b[start]);
+                        i = start + 1;
+                        continue;
+                    }
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '"' && b[i + 1..].iter().take(hashes).all(|c| *c == '#') {
+                            i += 1 + hashes;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    out.extend(&b[start..i.min(b.len())]);
+                }
+                '"' => {
+                    let start = i;
+                    i += 1;
+                    while i < b.len() && b[i] != '"' {
+                        i += if b[i] == '\\' { 2 } else { 1 };
+                    }
+                    i = (i + 1).min(b.len());
+                    out.extend(&b[start..i]);
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Removes every `#[cfg(test)]` item, brace- or semicolon-delimited.
+    fn strip_tests(src: &str) -> String {
+        const MARKER: &str = "#[cfg(test)]";
+        let mut out = src.to_string();
+        while let Some(at) = out.find(MARKER) {
+            let rest = &out[at + MARKER.len()..];
+            let Some(end) = cfg_item_end(rest) else {
+                // Malformed tail: drop everything from the marker rather than
+                // loop forever, and let the caller's assertion speak.
+                out.truncate(at);
+                break;
+            };
+            out.replace_range(at..at + MARKER.len() + end, "");
+        }
+        out
+    }
+
+    /// Byte offset just past the `#[cfg(test)]` item that starts `rest`.
+    fn cfg_item_end(rest: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in rest.char_indices() {
+            match c {
+                ';' if depth == 0 => return Some(i + 1),
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Every `src/**.rs` file, keyed by repo-relative path, comment- and
+    /// test-stripped.
+    fn live_sources(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let Ok(body) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let Ok(rel) = path.strip_prefix(root) else {
+                        continue;
+                    };
+                    out.insert(
+                        rel.to_string_lossy().replace('\\', "/"),
+                        strip_tests(&strip_comments(&body)),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// Identifiers too generic to carry a file attribution.
+    ///
+    /// `new` is defined in almost every file, so treating a mention of it as an
+    /// edge would make every file reachable from every other and the test would
+    /// assert nothing.
+    const GENERIC_SYMBOLS: &[&str] = &[
+        "new", "default", "from", "into", "run", "get", "set", "build", "init", "next", "name",
+        "path", "value", "state", "config", "error", "Error", "Config", "State", "Value", "Result",
+        "tests", "main", "len", "push", "insert", "check", "parse", "clone", "Builder", "Request",
+        "Response", "Handler", "Entry", "Key", "Id",
+    ];
+
+    /// Collects the distinctive symbols each file defines.
+    fn symbol_defs(
+        sources: &std::collections::BTreeMap<String, String>,
+    ) -> std::collections::HashMap<String, Vec<String>> {
+        const KINDS: &[&str] = &[
+            "fn ", "struct ", "enum ", "trait ", "const ", "static ", "type ", "union ",
+        ];
+        let mut defs: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (file, body) in sources {
+            for line in body.lines() {
+                let t = line.trim_start();
+                for kind in KINDS {
+                    // `find` rather than `strip_prefix` so `pub(crate) async fn`,
+                    // `pub(super) const` and the rest are all covered by one rule.
+                    // The offset bound keeps a `fn ` deep inside a signature from
+                    // being read as a definition.
+                    let Some(rest) = t
+                        .find(kind)
+                        .filter(|i| *i < 40)
+                        .map(|i| &t[i + kind.len()..])
+                    else {
+                        continue;
+                    };
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if name.len() >= 4 && !GENERIC_SYMBOLS.contains(&name.as_str()) {
+                        defs.entry(name).or_default().push(file.clone());
+                    }
+                    break;
+                }
+            }
+        }
+        defs
+    }
+
+    /// Splits a source file into the identifiers it mentions.
+    fn identifiers(body: &str) -> std::collections::HashSet<&str> {
+        body.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| t.len() >= 4)
+            .collect()
+    }
+
+    /// Breadth-first file reachability from `src/main.rs`.
+    fn reachable_from_main(
+        sources: &std::collections::BTreeMap<String, String>,
+    ) -> std::collections::BTreeSet<String> {
+        let defs = symbol_defs(sources);
+        let mut reached: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut frontier = vec!["src/main.rs".to_string()];
+        reached.insert("src/main.rs".to_string());
+        while let Some(file) = frontier.pop() {
+            let Some(body) = sources.get(&file) else {
+                continue;
+            };
+            for ident in identifiers(body) {
+                let Some(owners) = defs.get(ident) else {
+                    continue;
+                };
+                for owner in owners {
+                    if reached.insert(owner.clone()) {
+                        frontier.push(owner.clone());
+                    }
+                }
+            }
+        }
+        reached
+    }
+
+    fn derive_leaves(source: &str, root_struct: &str, prefix: &str) -> Vec<String> {
         let lines: Vec<&str> = source.lines().collect();
         let mut structs: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
@@ -852,7 +1283,13 @@ mod tests {
         }
 
         let mut out = Vec::new();
-        walk(&structs, "SecurityYaml", "security", &mut out, 0);
+        walk(&structs, root_struct, prefix, &mut out, 0);
+        assert!(
+            !out.is_empty(),
+            "derive_leaves found no fields on `{root_struct}` — the struct was renamed or the \
+             parser no longer matches its declaration, which would make every assertion built \
+             on it pass vacuously"
+        );
         out
     }
 }

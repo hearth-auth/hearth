@@ -108,6 +108,17 @@ but consumes another. Hearth defends structurally:
   `SamlError::Parse` rejection for a multi-assertion `<Response>`, but on the SP
   path the `Signature` rejection fires first.
   (Test: `a29c_saml_multiple_assertions_rejected`.)
+- **Exactly one `<ds:Reference>`.** `<ds:SignedInfo>` MUST carry exactly one
+  `<ds:Reference>`; zero or more than one MUST be rejected with
+  `SamlError::Parse`. Hearth reads only the first reference's `URI` and
+  `DigestValue`, so an unchecked list would let every later entry — naming
+  some other part of the document, with a digest nobody computes — pass
+  unverified. The count is bounded: the scan stops on the second reference, so
+  a padded list cannot drive work proportional to its length.
+  (Tests: `second_reference_in_signed_info_rejected`,
+  `many_references_in_signed_info_rejected`,
+  `signed_info_with_no_reference_rejected`,
+  `single_reference_document_still_verifies`.)
 - **Reference-URI ↔ element-ID binding.** `verify_signed_element` extracts the
   signed element's `ID`, builds the expected `#<id>` URI, and requires the
   `<ds:Reference URI>` to match it. A moved or mismatched signature resolves to

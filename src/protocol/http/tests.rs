@@ -2946,3 +2946,93 @@ async fn dev_endpoints_accept_ipv4_mapped_loopback() {
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// ---------------------------------------------------------------------------
+// 21.10 (audit 2026-08-28 §4.23#9): browser-facing HTML on the API router —
+// `GET /docs` and the `GET /end_session` front-channel logout page — shipped
+// with no `Content-Security-Policy`, no `X-Frame-Options`, no `frame-ancestors`
+// and no `Cache-Control`. The web tree's `SecurityHeadersLayer` never reached
+// them: it is installed inside `protocol::web::router`, and these two routes
+// are registered on the API side.
+// ---------------------------------------------------------------------------
+
+/// Fetches `GET /docs` through the real router and returns its headers.
+async fn docs_response_headers() -> axum::http::HeaderMap {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(temp_dir.path());
+    let resp = router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/docs")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    resp.headers().clone()
+}
+
+#[tokio::test]
+async fn api_html_carries_frame_and_cache_protections() {
+    let headers = docs_response_headers().await;
+
+    assert_eq!(
+        headers
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_ascii_uppercase)
+            .as_deref(),
+        Some("DENY"),
+        "browser-facing HTML on the API router must refuse framing"
+    );
+    assert_eq!(
+        headers.get("cache-control").and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "browser-facing HTML on the API router must not be cached"
+    );
+}
+
+#[tokio::test]
+async fn api_html_carries_a_csp_with_frame_ancestors() {
+    let headers = docs_response_headers().await;
+    let csp = headers
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .expect("browser-facing API HTML must carry a Content-Security-Policy");
+    for directive in ["frame-ancestors 'none'", "object-src 'none'", "base-uri"] {
+        assert!(
+            csp.contains(directive),
+            "CSP on API HTML must contain `{directive}`, got: {csp}"
+        );
+    }
+}
+
+/// Machine responses keep their current shape: the HTML-only headers must not
+/// leak onto `application/json`, where `no-store` would defeat conditional
+/// caching and a CSP means nothing.
+#[tokio::test]
+async fn api_json_does_not_gain_the_html_only_headers() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(temp_dir.path());
+    let resp = router(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/openapi.json")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let headers = resp.headers();
+    assert!(!headers.contains_key("content-security-policy"));
+    assert!(!headers.contains_key("x-frame-options"));
+    assert_eq!(
+        headers.get("x-content-type-options").map(|v| v.as_bytes()),
+        Some(&b"nosniff"[..]),
+        "the pre-existing machine-API headers must still be applied"
+    );
+}

@@ -116,6 +116,10 @@ pub struct IdTokenClaims {
     /// Issued-at timestamp (Unix seconds).
     #[serde(default)]
     pub iat: Option<i64>,
+    /// Authorized party (OIDC Core §2). Names the client the token was
+    /// issued *for* when `aud` carries more than one value.
+    #[serde(default)]
+    pub azp: Option<String>,
     /// Replay-prevention nonce — must equal the `nonce` Hearth sent in
     /// the authorize request (echoed verbatim by compliant providers).
     #[serde(default)]
@@ -437,6 +441,8 @@ pub fn verify_id_token_claims(
     if !audience_contains(&claims.aud, &cfg.client_id) {
         return Err(IdentityError::FederationTokenVerificationFailed);
     }
+    // 22.20 (audit 2026-08-28 §4.22#13) — OIDC Core §3.1.3.7 steps 3-4.
+    verify_azp(&claims.aud, claims.azp.as_deref(), &cfg.client_id)?;
     // Configurable clock-skew allowance on both edges (default 60 s, max
     // 300 s — enforced at reconcile time). Operators with enterprise IdPs
     // that drift can raise this via `federation.<idp>.leeway_seconds`.
@@ -458,6 +464,31 @@ pub fn verify_id_token_claims(
         _ => return Err(IdentityError::FederationTokenVerificationFailed),
     }
     Ok(())
+}
+
+/// Enforces OIDC Core §3.1.3.7 steps 3-4 on the `azp` claim.
+///
+/// Step 3: when the ID token's `aud` holds more than one audience, `azp` MUST
+/// be present. Step 4: when `azp` is present it MUST equal our `client_id`.
+///
+/// Without this an ID token minted for a *different* relying party — one that
+/// merely lists Hearth's `client_id` among its audiences — verifies here and
+/// logs that RP's user into the Hearth realm. `aud` membership alone does not
+/// say the token was issued to us.
+pub(crate) fn verify_azp(
+    aud: &Option<serde_json::Value>,
+    azp: Option<&str>,
+    client_id: &str,
+) -> Result<(), IdentityError> {
+    let multi_valued = matches!(aud, Some(serde_json::Value::Array(xs)) if xs.len() > 1);
+    match azp {
+        // Step 4 — present, so it must name us, multi-valued or not.
+        Some(p) if p == client_id => Ok(()),
+        Some(_) => Err(IdentityError::FederationTokenVerificationFailed),
+        // Step 3 — absent is only legal for a single audience.
+        None if multi_valued => Err(IdentityError::FederationTokenVerificationFailed),
+        None => Ok(()),
+    }
 }
 
 fn audience_contains(aud: &Option<serde_json::Value>, client_id: &str) -> bool {
@@ -598,6 +629,7 @@ mod tests {
             iss: "https://accounts.google.com".to_string(),
             sub: "ext-sub-123".to_string(),
             aud: Some(serde_json::Value::String("client-abc".to_string())),
+            azp: None,
             nbf: None,
             exp: now + 600,
             iat: Some(now),
@@ -609,6 +641,85 @@ mod tests {
             family_name: None,
             picture: Some("https://pic/".to_string()),
         }
+    }
+
+    // ===== 22.20 — azp (OIDC Core §3.1.3.7 steps 3-4) =====
+
+    /// A single-audience token needs no `azp`. Unchanged behaviour.
+    #[test]
+    fn single_audience_without_azp_is_accepted() {
+        let cfg = sample_config();
+        let state = sample_state("n1", "v1");
+        let claims = sample_claims("n1", 1_000);
+        assert!(verify_id_token_claims(&claims, &cfg, &state, 1_000).is_ok());
+    }
+
+    /// The defect: a token minted for another relying party that merely lists
+    /// our `client_id` in `aud`. `aud` membership passes; `azp` names the
+    /// other RP, so step 4 must reject it.
+    #[test]
+    fn multi_audience_with_foreign_azp_is_rejected() {
+        let cfg = sample_config();
+        let state = sample_state("n1", "v1");
+        let mut claims = sample_claims("n1", 1_000);
+        claims.aud = Some(serde_json::json!(["client-abc", "other-rp"]));
+        claims.azp = Some("other-rp".to_string());
+        assert!(
+            matches!(
+                verify_id_token_claims(&claims, &cfg, &state, 1_000),
+                Err(IdentityError::FederationTokenVerificationFailed)
+            ),
+            "an ID token authorized to another party must not verify"
+        );
+    }
+
+    /// Step 3: multi-valued `aud` with no `azp` at all is a protocol error.
+    #[test]
+    fn multi_audience_without_azp_is_rejected() {
+        let cfg = sample_config();
+        let state = sample_state("n1", "v1");
+        let mut claims = sample_claims("n1", 1_000);
+        claims.aud = Some(serde_json::json!(["client-abc", "other-rp"]));
+        claims.azp = None;
+        assert!(matches!(
+            verify_id_token_claims(&claims, &cfg, &state, 1_000),
+            Err(IdentityError::FederationTokenVerificationFailed)
+        ));
+    }
+
+    /// Multi-valued `aud` naming us in `azp` is the legal case.
+    #[test]
+    fn multi_audience_with_our_azp_is_accepted() {
+        let cfg = sample_config();
+        let state = sample_state("n1", "v1");
+        let mut claims = sample_claims("n1", 1_000);
+        claims.aud = Some(serde_json::json!(["client-abc", "other-rp"]));
+        claims.azp = Some("client-abc".to_string());
+        assert!(verify_id_token_claims(&claims, &cfg, &state, 1_000).is_ok());
+    }
+
+    /// Step 4 binds even when `aud` is a bare string.
+    #[test]
+    fn single_audience_with_foreign_azp_is_rejected() {
+        let cfg = sample_config();
+        let state = sample_state("n1", "v1");
+        let mut claims = sample_claims("n1", 1_000);
+        claims.azp = Some("other-rp".to_string());
+        assert!(matches!(
+            verify_id_token_claims(&claims, &cfg, &state, 1_000),
+            Err(IdentityError::FederationTokenVerificationFailed)
+        ));
+    }
+
+    /// A one-element array is not "more than one audience".
+    #[test]
+    fn single_element_array_audience_needs_no_azp() {
+        let cfg = sample_config();
+        let state = sample_state("n1", "v1");
+        let mut claims = sample_claims("n1", 1_000);
+        claims.aud = Some(serde_json::json!(["client-abc"]));
+        claims.azp = None;
+        assert!(verify_id_token_claims(&claims, &cfg, &state, 1_000).is_ok());
     }
 
     // ===== Discovery document =====
@@ -782,6 +893,9 @@ mod tests {
         let state = sample_state("nnn", "vvv");
         let mut claims = sample_claims("nnn", 1_700_000_000);
         claims.aud = Some(serde_json::json!(["other", "client-abc"]));
+        // OIDC Core 3.1.3.7 step 3: a multi-valued `aud` REQUIRES `azp`, and
+        // step 4 requires it to equal our client id (task 22.20).
+        claims.azp = Some("client-abc".to_string());
         verify_id_token_claims(&claims, &cfg, &state, 1_700_000_000).expect("aud array ok");
     }
 

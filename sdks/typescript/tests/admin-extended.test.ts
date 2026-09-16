@@ -31,26 +31,27 @@ afterEach(() => vi.unstubAllGlobals());
 // ── OAuth Clients ──────────────────────────────────────────────────────────
 
 describe("AdminClient — OAuth Clients CRUD", () => {
-  it("createClient POSTs to /admin/clients", async () => {
+  it("createClient POSTs to /admin/applications", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ client_id: "cli1", client_name: "My App" }, 201));
     const admin = makeAdmin();
     const result = await admin.createClient({ client_name: "My App", redirect_uris: ["https://app.example.com/cb"] });
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${BASE}/admin/clients`);
+    expect(url).toBe(`${BASE}/admin/applications`);
     expect(init.method).toBe("POST");
     expect(result).toMatchObject({ client_id: "cli1" });
   });
 
-  it("getClient GETs /admin/clients/:id", async () => {
+  it("getClient GETs /admin/applications/:id", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ client_id: "cli1" }));
     await makeAdmin().getClient("cli1");
     const [url] = vi.mocked(fetch).mock.calls[0] as [string];
-    expect(url).toBe(`${BASE}/admin/clients/cli1`);
+    expect(url).toBe(`${BASE}/admin/applications/cli1`);
   });
 
-  // The server mounts the client-mutation route at /admin/applications/{id} and
-  // implements it as PATCH; /admin/clients/{id} is not a route at all
-  // (audit 2026-08-28 §25.4).
+  // The server mounts the whole client family at /admin/applications*: the
+  // mutation route is PATCH /admin/applications/{id}. /admin/clients* is not a
+  // route at all — every call to it 404s
+  // (audit 2026-08-28 §25.4, §25.18).
   it("updateClient PATCHes /admin/applications/:id", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ client_id: "cli1", client_name: "Updated" }));
     await makeAdmin().updateClient("cli1", { client_name: "Updated" });
@@ -59,19 +60,19 @@ describe("AdminClient — OAuth Clients CRUD", () => {
     expect(init.method).toBe("PATCH");
   });
 
-  it("deleteClient DELETEs /admin/clients/:id", async () => {
+  it("deleteClient DELETEs /admin/applications/:id", async () => {
     vi.mocked(fetch).mockResolvedValue(mockNoContent());
     await makeAdmin().deleteClient("cli1");
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${BASE}/admin/clients/cli1`);
+    expect(url).toBe(`${BASE}/admin/applications/cli1`);
     expect(init.method).toBe("DELETE");
   });
 
-  it("listClients GETs /admin/clients", async () => {
+  it("listClients GETs /admin/applications", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ items: [], next_cursor: null }));
     const result = await makeAdmin().listClients();
     const [url] = vi.mocked(fetch).mock.calls[0] as [string];
-    expect(url).toContain("/admin/clients");
+    expect(url).toContain("/admin/applications");
     expect(result).toMatchObject({ items: [] });
   });
 });
@@ -160,29 +161,19 @@ describe("AdminClient — Groups CRUD", () => {
   });
 });
 
-// ── Org Members ─────────────────────────────────────────────────────────────
+// ── Org Members — removed ───────────────────────────────────────────────────
+//
+// Hearth serves no organization route over HTTP: there is no /admin/orgs, no
+// /admin/orgs/:orgId/members and no per-member route anywhere in the router,
+// so addOrgMember, listOrgMembers and removeOrgMember every one 404'd
+// (audit 2026-08-28 §25.19). Organization membership is administered through
+// the admin console, not the admin API.
 
-describe("AdminClient — Org Members", () => {
-  it("addOrgMember POSTs to /admin/orgs/:orgId/members", async () => {
-    vi.mocked(fetch).mockResolvedValue(mockOk({ user_id: "usr1", role: "member" }, 201));
-    await makeAdmin().addOrgMember("org1", { user_id: "usr1", role: "member" });
-    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${BASE}/admin/orgs/org1/members`);
-    expect(init.method).toBe("POST");
-  });
-
-  it("listOrgMembers GETs /admin/orgs/:orgId/members", async () => {
-    vi.mocked(fetch).mockResolvedValue(mockOk({ items: [], next_cursor: null }));
-    await makeAdmin().listOrgMembers("org1");
-    const [url] = vi.mocked(fetch).mock.calls[0] as [string];
-    expect(url).toContain("/admin/orgs/org1/members");
-  });
-
-  it("removeOrgMember DELETEs /admin/orgs/:orgId/members/:userId", async () => {
-    vi.mocked(fetch).mockResolvedValue(mockNoContent());
-    await makeAdmin().removeOrgMember("org1", "usr1");
-    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${BASE}/admin/orgs/org1/members/usr1`);
-    expect(init.method).toBe("DELETE");
+describe("AdminClient — Org Members are removed", () => {
+  it("exposes no /admin/orgs method", () => {
+    const admin = makeAdmin() as unknown as Record<string, unknown>;
+    const dead = ["addOrgMember", "listOrgMembers", "removeOrgMember", "getOrgMember", "updateOrgMember"];
+    const present = dead.filter((name) => typeof admin[name] === "function");
+    expect(present).toEqual([]);
   });
 });

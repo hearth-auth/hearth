@@ -40,7 +40,6 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
         .route("/jwks", get(jwks))
         .route("/certs", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
-        .route("/clients", post(register_client))
         .route(
             "/register",
             post(register_client_dynamic)
@@ -84,6 +83,19 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             "/oauth/consents/{client_id}",
             axum::routing::delete(self_revoke_consent),
         )
+}
+
+/// The one administratively-authenticated route in the OAuth family.
+///
+/// `POST /clients` is the only handler here that goes through
+/// `extract_admin_auth`, so it is the only one that needs the DPoP
+/// sender-constraint layer (task 25.17). It is split out of [`routes`] rather
+/// than layered in place because the rest of that router must **not** get the
+/// layer: those handlers call `validate_user_token_with_dpop` themselves, and
+/// validating the proof twice would record its `jti` on the first pass and then
+/// reject the second as a replay (RFC 9449 §11.1).
+pub(super) fn admin_routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new().route("/clients", axum::routing::post(register_client))
 }
 
 /// Registers realm-scoped OAuth/OIDC routes (mounted under `/realms/{realm_name}`).

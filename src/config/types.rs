@@ -2086,6 +2086,14 @@ pub struct AuthConfig {
     /// Per-realm `auth.mfa_required` overrides this.
     #[serde(default)]
     pub mfa_required: Option<bool>,
+    /// Allowed MFA methods for every realm (global default).
+    ///
+    /// Per-realm `realms.<name>.auth.mfa_methods` overrides this wholesale —
+    /// a realm's list replaces the global one rather than merging with it, the
+    /// same way the other `auth.*` policies inherit. Absent at both levels
+    /// means no restriction.
+    #[serde(default)]
+    pub mfa_methods: Option<Vec<String>>,
     /// Whether passkey login still requires a TOTP challenge (global default).
     /// Per-realm `auth.passkey_requires_mfa` overrides this.
     #[serde(default)]
@@ -3130,6 +3138,28 @@ pub struct FederationProviderYaml {
     #[serde(default)]
     pub leeway_seconds: Option<u32>,
 
+    // --- Apple-specific fields (when `type: apple`) ---
+    /// Apple Developer Team ID (10 characters, e.g. `"A1B2C3D4E5"`).
+    ///
+    /// Required for `type: apple`. Sign In with Apple does not use a static
+    /// `client_secret`; each token-endpoint call presents an ES256
+    /// `private_key_jwt` assertion built from `apple_team_id`, `apple_key_id`
+    /// and `apple_private_key_pem`.
+    #[serde(default)]
+    pub apple_team_id: Option<String>,
+    /// Key ID of the Sign In with Apple key from the Apple Developer portal
+    /// (e.g. `"ABCDE12345"`). Required for `type: apple`.
+    #[serde(default)]
+    pub apple_key_id: Option<String>,
+    /// P-256 private key in PKCS#8 PEM form (`-----BEGIN PRIVATE KEY-----`),
+    /// downloaded once from the Apple Developer portal. Required for
+    /// `type: apple`.
+    ///
+    /// Treat this like any other signing key: prefer an `${ENV_VAR}`
+    /// indirection over an inline literal in `hearth.yaml`.
+    #[serde(default)]
+    pub apple_private_key_pem: Option<String>,
+
     // --- SAML-specific fields (when `type: saml`) ---
     /// SAML IdP entity ID (SAML issuer).
     #[serde(default)]
@@ -3170,6 +3200,9 @@ impl FederationProviderYaml {
             scopes: None,
             claim_mappings: None,
             leeway_seconds: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_pem: None,
             entity_id: None,
             sso_url: None,
             slo_url: None,
@@ -3349,7 +3382,10 @@ impl RealmYamlConfig {
             .map(sha256_hex);
 
         let mfa_required = auth.and_then(|a| a.mfa_required).or(global.mfa_required);
-        let mfa_methods = auth.and_then(|a| a.mfa_methods.clone());
+        // Realm wins over global, whole-list (audit 2026-08-28 §4.18#10).
+        let mfa_methods = auth
+            .and_then(|a| a.mfa_methods.clone())
+            .or_else(|| global.mfa_methods.clone());
         let allowed_auth_methods = auth.and_then(|a| a.allowed_auth_methods.clone());
         let passkey_requires_mfa = auth
             .and_then(|a| a.passkey_requires_mfa)
@@ -4163,6 +4199,7 @@ mod tests {
             password_memory_cost: Some(65536),
             password_time_cost: Some(3),
             mfa_required: None,
+            mfa_methods: None,
             passkey_requires_mfa: None,
             session_max_concurrent: None,
             session_over_limit_policy: None,

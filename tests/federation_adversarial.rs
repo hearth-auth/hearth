@@ -212,6 +212,7 @@ fn claims_with(iss: &str, aud: serde_json::Value, exp: i64, nonce: &str) -> IdTo
         iss: iss.to_string(),
         sub: "ext-sub".to_string(),
         aud: Some(aud),
+        azp: None,
         nbf: None,
         exp,
         iat: Some(exp - 60),

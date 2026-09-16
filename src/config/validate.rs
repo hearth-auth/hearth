@@ -81,7 +81,12 @@ const DEMO_FORBIDDEN_IN_PROD: &str =
      config.";
 
 /// Valid MFA method names.
-const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms"];
+/// Valid `auth.mfa_methods` entries.
+///
+/// `email_otp` was missing, so an operator following CONFIGURATION.md —
+/// which lists it, and which three code paths already read — got a hard
+/// config error for a documented value (audit 2026-08-28 §4.18#10).
+const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms", "email_otp"];
 
 /// Valid authentication method names.
 const VALID_AUTH_METHODS: &[&str] = &["password", "magic_link", "passkey"];
@@ -1526,13 +1531,10 @@ fn validate_branding_all(branding: &BrandingConfig, issues: &mut Vec<ValidationI
         }
     }
     if let Some(path) = &branding.custom_css {
-        if !std::fs::metadata(path)
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-        {
+        if let Err(e) = crate::protocol::web::themes::load_custom_css(path) {
             issues.push(ValidationIssue {
                 field: "branding.custom_css".to_string(),
-                reason: format!("file not found or not readable: {path}"),
+                reason: format!("{path}: {e}"),
             });
         }
     }
@@ -1559,13 +1561,10 @@ fn validate_realm_web_configs_all(
             }
         }
         if let Some(path) = &web.custom_css {
-            if !std::fs::metadata(path)
-                .map(|m| m.is_file())
-                .unwrap_or(false)
-            {
+            if let Err(e) = crate::protocol::web::themes::load_custom_css(path) {
                 issues.push(ValidationIssue {
                     field: format!("realms.{name}.web.custom_css"),
-                    reason: format!("file not found or not readable: {path}"),
+                    reason: format!("{path}: {e}"),
                 });
             }
         }

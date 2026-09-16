@@ -380,11 +380,39 @@ supported.
 
 ### HSTS (HTTP Strict Transport Security)
 
-When TLS is enabled, Hearth automatically sets:
+Hearth emits, on every `/ui/*` response:
 
 ```
 Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
 ```
+
+in exactly two situations:
+
+| Deployment | HSTS emitted? |
+|---|---|
+| TLS terminated **at Hearth** (`server.tls_cert_path` set) | Yes, on every response. |
+| TLS terminated **at a proxy**, with `server.trust_forwarded_proto: true` and a non-empty `server.trusted_proxies` | Yes, on requests the proxy marks `X-Forwarded-Proto: https`. |
+| TLS terminated **at a proxy**, `trust_forwarded_proto` unset | **No.** Hearth sees only plaintext and cannot tell that the browser used HTTPS. Set the header at the proxy. |
+
+The third row is the trap. Hearth behind a TLS-terminating reverse proxy sees a plaintext
+hop and has no way to know the browser's scheme unless the proxy tells it. If you do not
+set `trust_forwarded_proto`, **HSTS is your proxy's job** — add it there:
+
+```nginx
+# nginx
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+```
+
+```yaml
+# Envoy
+route_config:
+  response_headers_to_add:
+    - header:
+        key: Strict-Transport-Security
+        value: "max-age=31536000; includeSubDomains; preload"
+```
+
+Read the `preload` warning below before you add either one.
 
 This enforces HTTPS for one year on the domain and all subdomains, and includes the
 `preload` directive. **The `preload` directive opts your domain into browser HSTS preload
@@ -392,7 +420,7 @@ lists** (maintained by Chrome, Firefox, Safari, etc.). Once submitted and accept
 browsers will refuse plain HTTP connections to your domain even on first visit — this
 cannot be undone quickly (removal from preload lists takes months to propagate).
 
-**Operator actions required before enabling TLS:**
+**Operator actions required before enabling TLS (or before adding the header at your proxy):**
 
 1. Confirm that _all_ subdomains of your Hearth domain can serve HTTPS. The `includeSubDomains`
    directive means `*.auth.example.com` is also covered.

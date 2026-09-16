@@ -168,12 +168,16 @@ import io.hearth.sdk.spring.HearthJwtAuthenticationFilter
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
+import org.springframework.security.web.AuthenticationEntryPoint
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 import org.springframework.web.bind.annotation.*
 
 @Configuration
-class HearthSecurityConfig(private val hearthFilter: HearthJwtAuthenticationFilter) {
+class HearthSecurityConfig(
+    private val hearthFilter: HearthJwtAuthenticationFilter,
+    private val hearthEntryPoint: AuthenticationEntryPoint,   // auto-configured
+) {
     @Bean
     fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
         http
@@ -184,6 +188,10 @@ class HearthSecurityConfig(private val hearthFilter: HearthJwtAuthenticationFilt
                     .anyRequest().authenticated()
             }
             .addFilterBefore(hearthFilter, UsernamePasswordAuthenticationFilter::class.java)
+            // Required: a chain with no httpBasic/formLogin/oauth2ResourceServer gets
+            // Spring Security's Http403ForbiddenEntryPoint, so a request with no token
+            // is answered 403 instead of 401.
+            .exceptionHandling { it.authenticationEntryPoint(hearthEntryPoint) }
         return http.build()
     }
 }
@@ -381,10 +389,14 @@ import io.hearth.sdk.spring.HearthJwtAuthenticationFilter
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
+import org.springframework.security.web.AuthenticationEntryPoint
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 
 @Configuration
-class SecurityConfig(private val hearthFilter: HearthJwtAuthenticationFilter) {
+class SecurityConfig(
+    private val hearthFilter: HearthJwtAuthenticationFilter,
+    private val hearthEntryPoint: AuthenticationEntryPoint,   // auto-configured
+) {
     @Bean
     fun securityFilterChain(http: HttpSecurity) = http
         .csrf { it.disable() }
@@ -393,6 +405,8 @@ class SecurityConfig(private val hearthFilter: HearthJwtAuthenticationFilter) {
                 .anyRequest().authenticated()
         }
         .addFilterBefore(hearthFilter, UsernamePasswordAuthenticationFilter::class.java)
+        // Required, or a tokenless request is answered 403 rather than 401.
+        .exceptionHandling { it.authenticationEntryPoint(hearthEntryPoint) }
         .build()!!
 }
 

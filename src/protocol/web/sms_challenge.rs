@@ -105,17 +105,25 @@ struct SmsMfaState {
 ///
 /// Cookie value: `{b64_payload}.{b64_mac}` where the MAC covers
 /// `{user_id_bytes}|{b64_payload}`.
+///
+/// `secure` adds the `Secure` attribute — pass
+/// [`crate::protocol::web::WebState::is_secure_request`], the same predicate
+/// the session and CSRF cookies use. It was missing entirely before task 21.6
+/// (audit §4.23#5), so the MAC-signed pending-MFA state of a
+/// half-authenticated user was sent over plaintext on a downgrade.
 fn issue_sms_mfa_cookie(
     secret: &CookieSecret,
     user_id: &UserId,
     s: &SmsMfaState,
+    secure: bool,
 ) -> Option<String> {
     let json = serde_json::to_string(s).ok()?;
     let b64 = BASE64URL_NOPAD.encode(json.as_bytes());
     let mac = compute_sms_mac(secret, user_id, &b64);
     let value = format!("{b64}.{mac}");
+    let secure_attr = if secure { "; Secure" } else { "" };
     Some(format!(
-        "{SMS_MFA_COOKIE}={value}; HttpOnly; Path=/ui; SameSite=Lax; Max-Age={SMS_MFA_TTL_SECS}"
+        "{SMS_MFA_COOKIE}={value}; HttpOnly; Path=/ui; SameSite=Lax; Max-Age={SMS_MFA_TTL_SECS}{secure_attr}"
     ))
 }
 
@@ -147,8 +155,12 @@ fn compute_sms_mac(secret: &CookieSecret, user_id: &UserId, payload: &str) -> St
 }
 
 /// Builds the `Set-Cookie` header that clears the SMS MFA cookie.
-fn clear_sms_mfa_cookie() -> String {
-    format!("{SMS_MFA_COOKIE}=; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=0")
+///
+/// `secure` must match what [`issue_sms_mfa_cookie`] used, or the browser keeps
+/// a second copy of the cookie under the other security scope.
+fn clear_sms_mfa_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{SMS_MFA_COOKIE}=; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=0{secure_attr}")
 }
 
 // ---------------------------------------------------------------------------
@@ -172,10 +184,14 @@ pub fn sms_mfa_challenge_check(
     realm: &RealmId,
     user_id: &UserId,
     q: &AuthorizeQuery,
-    _headers: &axum::http::HeaderMap,
+    headers: &axum::http::HeaderMap,
     _now: Timestamp,
     via_par: bool,
 ) -> Option<Response> {
+    // Task 21.6: the pending-MFA cookie must carry `Secure` on a TLS request,
+    // like every other `/ui` cookie. `headers` was previously unused.
+    let secure = state.is_secure_request(headers);
+
     // 1. Is SMS MFA required for this realm?
     let realm_obj = state.identity.get_realm(realm).ok().flatten()?;
     let sms_required = realm_obj
@@ -254,7 +270,7 @@ pub fn sms_mfa_challenge_check(
                     via_par,
                 };
                 if let Some(cookie) =
-                    issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie)
+                    issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie, secure)
                 {
                     let mut resp = Redirect::to("/ui/sms-challenge").into_response();
                     append_cookie(&mut resp, &cookie);
@@ -284,7 +300,8 @@ pub fn sms_mfa_challenge_check(
         via_par,
     };
 
-    let Some(cookie) = issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie) else {
+    let Some(cookie) = issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie, secure)
+    else {
         return Some(handlers_common::server_error());
     };
 
@@ -464,7 +481,7 @@ pub async fn sms_challenge_post(
             );
 
             // Clear the SMS challenge cookie.
-            let clear = clear_sms_mfa_cookie();
+            let clear = clear_sms_mfa_cookie(state.is_secure_request(&headers));
 
             // Reconstruct PKCE and nonce params.
             let code_challenge = if sms_state.code_challenge.is_empty() {
@@ -573,6 +590,72 @@ fn build_oauth_error_redirect(
 mod tests {
     use super::*;
 
+    fn has_secure(cookie: &str) -> bool {
+        cookie
+            .split(';')
+            .any(|a| a.trim().eq_ignore_ascii_case("Secure"))
+    }
+
+    fn sample_state() -> SmsMfaState {
+        SmsMfaState {
+            realm_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            user_id: "00000000-0000-0000-0000-000000000003".to_string(),
+            otp_nonce: "n".to_string(),
+            masked_phone: "+1***-***-1234".to_string(),
+            client_id: "00000000-0000-0000-0000-000000000002".to_string(),
+            redirect_uri: "https://app.example.com/cb".to_string(),
+            scope: "openid".to_string(),
+            oauth_state: String::new(),
+            code_challenge: String::new(),
+            code_challenge_method: String::new(),
+            nonce: String::new(),
+            response_type: "code".to_string(),
+            via_par: false,
+        }
+    }
+
+    /// Task 21.6 / audit §4.23#5: `hearth_ui_sms_mfa` had no `Secure`
+    /// attribute on any code path. `issue_sms_mfa_cookie` and
+    /// `clear_sms_mfa_cookie` are the only two places it is ever written, so
+    /// these two cases are the whole surface. The value is the MAC-signed
+    /// pending-MFA state of a half-authenticated user.
+    #[test]
+    fn sms_mfa_cookie_carries_secure_over_tls() {
+        let secret = CookieSecret::from_bytes([42u8; 32]);
+        let user_id = UserId::generate();
+        let issued =
+            issue_sms_mfa_cookie(&secret, &user_id, &sample_state(), true).expect("cookie issued");
+        assert!(
+            has_secure(&issued),
+            "issued cookie omitted Secure: {issued}"
+        );
+        let cleared = clear_sms_mfa_cookie(true);
+        assert!(
+            has_secure(&cleared),
+            "cleared cookie omitted Secure: {cleared}"
+        );
+        assert!(
+            cleared.contains("Max-Age=0"),
+            "clearing cookie must still expire the value: {cleared}"
+        );
+    }
+
+    /// A plaintext deployment must NOT get `Secure`, or the browser drops the
+    /// cookie and the SMS challenge can never be completed.
+    #[test]
+    fn sms_mfa_cookie_omits_secure_over_plaintext() {
+        let secret = CookieSecret::from_bytes([42u8; 32]);
+        let user_id = UserId::generate();
+        let issued =
+            issue_sms_mfa_cookie(&secret, &user_id, &sample_state(), false).expect("cookie issued");
+        assert!(!has_secure(&issued), "issued cookie set Secure: {issued}");
+        let cleared = clear_sms_mfa_cookie(false);
+        assert!(
+            !has_secure(&cleared),
+            "cleared cookie set Secure: {cleared}"
+        );
+    }
+
     #[test]
     fn sms_mfa_cookie_roundtrip() {
         let secret = CookieSecret::from_bytes([42u8; 32]);
@@ -594,7 +677,7 @@ mod tests {
             via_par: false,
         };
 
-        let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s)
+        let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s, false)
             .expect("issue_sms_mfa_cookie should succeed");
         // Extract the cookie value from the Set-Cookie header string.
         let value = cookie_header
@@ -642,7 +725,7 @@ mod tests {
             via_par: false,
         };
 
-        let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s)
+        let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s, false)
             .expect("issue_sms_mfa_cookie should succeed");
         let value = cookie_header
             .strip_prefix(&format!("{SMS_MFA_COOKIE}="))

@@ -471,12 +471,15 @@ pub(crate) fn argon2_params_need_rehash(hash_str: &str, config: &CredentialConfi
         || p.map_or(false, |v| v != config.parallelism)
 }
 
-/// Process-wide count of [`verify_hash`] invocations.
+/// Process-wide count of Argon2/bcrypt/scrypt verification invocations —
+/// [`verify_hash`] (passwords) and [`verify_raw_secret`] (client secrets).
 ///
 /// Instrumentation only — never a security control. Timing-parity tests assert
 /// *structurally* that the account-exists, account-absent and account-locked
 /// arms of a login all perform the same number of hash verifications, rather
 /// than asserting a flaky wall-clock difference (audit §4.17#4, §4.17#5).
+/// 22.25 (§4.25#3) extends the same technique to client authentication, which
+/// is why `verify_raw_secret` counts too.
 static HASH_VERIFICATIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Returns the number of password-hash verifications performed since start-up.
@@ -622,7 +625,14 @@ pub(crate) fn hash_raw_secret(
 /// Verifies a raw secret against an Argon2id hash string.
 ///
 /// Returns `true` if the secret matches the hash.
+///
+/// Counted in [`hash_verification_count`] so timing-parity tests can assert
+/// that every arm of client authentication does the same amount of work
+/// (22.25). The Argon2 parameters come from the parsed PHC string, not from
+/// the `Argon2::default()` instance, so a dummy hash minted with the realm's
+/// own `CredentialConfig` costs exactly what a real one costs.
 pub(crate) fn verify_raw_secret(secret: &[u8], hash_str: &str) -> Result<bool, IdentityError> {
+    HASH_VERIFICATIONS.fetch_add(1, Ordering::Relaxed);
     let parsed = PasswordHash::new(hash_str).map_err(|e| IdentityError::InvalidInput {
         reason: format!("invalid hash format: {e}"),
     })?;

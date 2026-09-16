@@ -22,8 +22,8 @@ use crate::identity::federation::saml::types::{
 };
 use crate::identity::federation::saml::{
     build_authn_request_xml, build_idp_metadata, build_logout_response_xml, build_post_form_html,
-    build_redirect_url, build_response_xml, build_sp_metadata, parse_authn_request,
-    parse_logout_request, parse_post_form_saml, sign_element, verify_signed_element,
+    build_redirect_url, build_response_xml, build_sp_metadata, csp_nonce, parse_authn_request,
+    parse_logout_request, parse_post_form_saml, sign_element, url_origin, verify_signed_element,
     BuildLogoutResponseParams, IdpMetadataParams, SamlSpOutcome, SamlSpService, SpMetadataParams,
 };
 use crate::identity::federation::IdpKind;
@@ -239,10 +239,10 @@ pub async fn sp_acs(
             let return_to = bag
                 .return_to
                 .as_deref()
-                .and_then(|u| validate_return_to(u, &[]))
+                .and_then(|u| validate_return_to(u, state.allowed_return_to_origins()))
                 .unwrap_or_else(|| "/ui/account".to_string());
 
-            let Some(service) = super::federation::build_service(&state) else {
+            let Some(service) = super::federation::build_service(&state, &realm_name) else {
                 return (StatusCode::INTERNAL_SERVER_ERROR, "federation unavailable")
                     .into_response();
             };
@@ -279,6 +279,7 @@ pub async fn sp_acs(
                 &state,
                 &headers,
                 &realm,
+                &realm_name,
                 &bag.idp_id,
                 fed_outcome,
                 &return_to,
@@ -396,7 +397,7 @@ pub async fn sp_begin(
     let validated_return_to = q
         .return_to
         .as_deref()
-        .and_then(|u| validate_return_to(u, &[]));
+        .and_then(|u| validate_return_to(u, state.allowed_return_to_origins()));
     let bag = SamlStateBag {
         token: state_token.clone(),
         request_id: req_id.clone(),
@@ -668,13 +669,12 @@ async fn idp_complete_sso(
         },
     );
 
-    let html = build_post_form_html(
+    post_binding_response(
         &sp.acs_url,
         "SAMLResponse",
         &signed_xml,
         relay_state.as_deref(),
-    );
-    Html(html).into_response()
+    )
 }
 
 /// IdP-initiated SSO — admin launches a login at a registered SP.
@@ -755,8 +755,7 @@ pub async fn idp_sso_init(
         },
     );
 
-    let html = build_post_form_html(&sp.acs_url, "SAMLResponse", &signed_xml, None);
-    Html(html).into_response()
+    post_binding_response(&sp.acs_url, "SAMLResponse", &signed_xml, None)
 }
 
 // ============================================================================
@@ -892,13 +891,55 @@ async fn idp_complete_slo(
         },
     );
 
-    let html = build_post_form_html(&slo_url, "SAMLResponse", &signed, relay_state.as_deref());
-    Html(html).into_response()
+    post_binding_response(&slo_url, "SAMLResponse", &signed, relay_state.as_deref())
 }
 
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Renders a SAML HTTP-POST binding page with a CSP that actually permits it.
+///
+/// Every `/ui` response passes through `SecurityHeadersLayer`, whose policy is
+/// `script-src 'self'; form-action 'self'`. That policy breaks Hearth's *own*
+/// SAML HTTP-POST binding in both directions (audit §4.23#7, task 21.8):
+///
+/// * the auto-submit was an inline `onload=` attribute, which `script-src`
+///   blocks outright — no nonce or hash covers an event-handler attribute, so
+///   the flow stalls on a page the user must click through; and
+/// * the manual `<noscript>` fallback POSTs to the peer's ACS / SLO endpoint,
+///   which `form-action 'self'` blocks — so the click-through does nothing
+///   either, and the flow simply dies.
+///
+/// This builds a per-response policy instead: the submit runs from a
+/// `<script nonce>` element, and `form-action` names exactly the one
+/// destination this response targets. Nothing broader is opened — no
+/// `'unsafe-inline'`, and no wildcard `form-action`. The shared layer leaves
+/// this header alone because it only inserts its policy when absent.
+fn post_binding_response(
+    action: &str,
+    param_name: &str,
+    saml_xml: &[u8],
+    relay_state: Option<&str>,
+) -> Response {
+    let nonce = csp_nonce();
+    let html = build_post_form_html(action, param_name, saml_xml, relay_state, Some(&nonce));
+    // A destination we cannot parse an origin from is one the browser could not
+    // POST to either; fall back to a policy that permits nothing rather than
+    // emitting a malformed directive.
+    let form_action = url_origin(action).unwrap_or_else(|| "'none'".to_string());
+    let csp = format!(
+        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'none'; img-src 'none'; \
+         connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; \
+         form-action {form_action}"
+    );
+    let mut resp = Html(html).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&csp) {
+        resp.headers_mut()
+            .insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
+    }
+    resp
+}
 
 /// Rejects a request whose authenticated session belongs to a different
 /// realm than the one named in the path.
@@ -1116,6 +1157,29 @@ mod tests {
             origin.as_deref(),
             Some("http://localhost:8420"),
             "X-Forwarded-Host / -Proto must not steer the SAML origin"
+        );
+    }
+
+    /// 21.12 (audit §4.23#11): the unauthenticated IdP metadata document is
+    /// the same defect as §4.10#7 seen from the publishing side. `entityID`,
+    /// the SSO URL and the SLO URL are all built from
+    /// `realm_base_url_from_headers` → [`trusted_base_url`] → [`trusted_origin`],
+    /// so with `onboarding.base_url` and `oidc.issuer` both unset and a
+    /// non-loopback `Host`, a spoofed `X-Forwarded-Host` must produce no origin
+    /// at all — `idp_metadata` then answers `saml_origin_unconfigured()` rather
+    /// than publishing an attacker-chosen entityID to every anonymous caller.
+    #[test]
+    fn metadata_origin_refuses_a_spoofed_forwarded_host() {
+        let mut headers = headers_with_host("auth.company.example");
+        headers.insert(
+            "x-forwarded-host",
+            "evil.attacker.example".parse().expect("xfh header"),
+        );
+        headers.insert("x-forwarded-proto", "https".parse().expect("xfp header"));
+        assert_eq!(
+            trusted_origin(None, &headers),
+            None,
+            "SAML metadata must not derive entityID or the SSO/SLO URLs from X-Forwarded-Host"
         );
     }
 

@@ -97,26 +97,9 @@ internal suspend inline fun <reified Req, reified Res> OkHttpClient.patch(
     }
 }
 
-/**
- * Executes a PUT request to [url] with JSON-encoded [payload] and optional [headers].
- */
-internal suspend inline fun <reified Req, reified Res> OkHttpClient.put(
-    url: String,
-    payload: Req,
-    headers: Map<String, String> = emptyMap(),
-): Res {
-    val body = JSON.encodeToString(payload).toRequestBody(JSON_MEDIA_TYPE)
-    val request = Request.Builder().url(url).apply {
-        headers.forEach { (k, v) -> addHeader(k, v) }
-        put(body)
-    }.build()
-
-    executeAsync(request).use { resp ->
-        val bodyStr = resp.body?.string() ?: ""
-        if (!resp.isSuccessful) throw ApiError(resp.code, "HTTP ${resp.code}: $bodyStr")
-        return JSON.decodeFromString(bodyStr)
-    }
-}
+// The PUT helper was removed with its only caller, AdminClient.assignRole:
+// Hearth implements every admin mutation as PATCH or POST, never PUT
+// (audit 2026-08-28 §25.4, §25.19).
 
 /**
  * Executes a POST request to [url] with JSON-encoded [payload], discarding the

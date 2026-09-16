@@ -295,14 +295,14 @@ Audit: `federation_account_unlinked` with `metadata.via = "self"`.
 
 #### Scenario 7 — error paths
 
-- **Tamper the state.** On the `/ui/federation/callback?state=...` URL,
+- **Tamper the state.** On the `/ui/realms/demo/federation/callback?state=...` URL,
   change the `state` query parameter before letting Hearth process the
   callback. Result: 302 to `/ui/login?error=federation_failed`
   (state-bag take fails).
 - **Upstream denies consent.** oidc-provider's built-in UI doesn't
   expose a Deny button by default, but you can simulate the code path
   by manually hitting
-  `/ui/federation/callback?state=xxx&error=access_denied` — Hearth
+  `/ui/realms/demo/federation/callback?state=xxx&error=access_denied` — Hearth
   gracefully 302s to `/ui/login?error=federation_denied`.
 
 ---
@@ -343,7 +343,7 @@ realms:
 
 Register the OAuth 2.0 client at
 <https://console.cloud.google.com/apis/credentials> with redirect URI
-`http://localhost:8420/ui/federation/callback` (or your deployed
+`http://localhost:8420/ui/realms/demo/federation/callback` (or your deployed
 URL). Then set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in your
 shell before starting Hearth. The rest of the walkthrough — JIT,
 confirm-to-link, unlink — works identically.
@@ -364,7 +364,7 @@ web:
 staticClients:
 - id: hearth-demo
   redirectURIs:
-  - http://localhost:8420/ui/federation/callback
+  - http://localhost:8420/ui/realms/demo/federation/callback
   name: Hearth Demo
   secret: demo-secret-do-not-use-in-production
 enablePasswordDB: true
@@ -424,7 +424,7 @@ public https issuer and needs no tunnel.
   and check the Hearth startup log for `reconciled federation connector`.
 - **Redirect loop after signing in at the upstream**: the redirect URI
   registered at the upstream must exactly match
-  `http://localhost:8420/ui/federation/callback`. The IdP's error page
+  `http://localhost:8420/ui/realms/demo/federation/callback`. The IdP's error page
   will call out any mismatch.
 - **"Invalid federation state"**: the `fed:state:*` row was consumed or
   expired. Each state token is single-use and lives for 10 minutes —

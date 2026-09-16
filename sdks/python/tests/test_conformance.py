@@ -289,7 +289,7 @@ class TestAdminClients:
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
     def test_list_clients(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/clients").mock(
+        respx_mock.get("http://localhost:8420/admin/applications").mock(
             return_value=httpx.Response(200, json={"items": [
                 {"id": "c1", "name": "My App", "redirect_uris": [], "trust_level": "confidential"}
             ], "next_cursor": None})
@@ -299,7 +299,7 @@ class TestAdminClients:
         assert result.items[0].id == "c1"
 
     def test_get_client(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/clients/c1").mock(
+        respx_mock.get("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(200, json={
                 "id": "c1", "name": "My App", "redirect_uris": [], "trust_level": "confidential"
             })
@@ -309,7 +309,7 @@ class TestAdminClients:
 
     def test_create_client(self, respx_mock):
         from hearth.types import CreateClientRequest
-        respx_mock.post("http://localhost:8420/admin/clients").mock(
+        respx_mock.post("http://localhost:8420/admin/applications").mock(
             return_value=httpx.Response(201, json={
                 "id": "c2", "name": "New App", "redirect_uris": ["https://app/cb"],
                 "trust_level": "public"
@@ -331,7 +331,7 @@ class TestAdminClients:
         assert result.name == "Updated App"
 
     def test_delete_client(self, respx_mock):
-        respx_mock.delete("http://localhost:8420/admin/clients/c1").mock(
+        respx_mock.delete("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(204)
         )
         self._admin().delete_client("c1")  # no error = success
@@ -431,36 +431,33 @@ class TestAdminGroups:
         self._admin().delete_group("g1")
 
 
-class TestAdminOrgMembers:
-    def _admin(self):
+class TestAdminOrgMembersRemoved:
+    """Hearth serves no organization route over HTTP.
+
+    There is no ``/admin/orgs``, no ``/admin/orgs/{id}/members`` and no
+    per-member route anywhere in the axum router, so every one of these
+    methods 404'd. They were removed rather than repointed, because there is
+    nothing to repoint them at (audit 2026-08-28 §25.19).
+    """
+
+    def test_admin_client_exposes_no_org_member_methods(self):
         from hearth.admin import AdminClient
-        return AdminClient("http://localhost:8420", "tok", "realm-1")
 
-    def test_list_org_members(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/orgs/org_1/members").mock(
-            return_value=httpx.Response(200, json={"items": [
-                {"user_id": "u1", "org_id": "org_1", "role": "member"}
-            ], "next_cursor": None})
+        dead = ["list_org_members", "add_org_member", "remove_org_member",
+                "get_org_member", "update_org_member"]
+        present = [name for name in dead if hasattr(AdminClient, name)]
+        assert present == [], (
+            f"AdminClient still exposes dead /admin/orgs methods: {present}"
         )
-        result = self._admin().list_org_members("org_1")
-        assert len(result.items) == 1
-        assert result.items[0].user_id == "u1"
 
-    def test_add_org_member(self, respx_mock):
-        from hearth.types import AddOrgMemberRequest
-        respx_mock.post("http://localhost:8420/admin/orgs/org_1/members").mock(
-            return_value=httpx.Response(201, json={"user_id": "u2", "org_id": "org_1", "role": "admin"})
-        )
-        req = AddOrgMemberRequest(user_id="u2", role="admin")
-        result = self._admin().add_org_member("org_1", req)
-        assert result.user_id == "u2"
-        assert result.role == "admin"
+    def test_org_member_types_are_not_exported(self):
+        import hearth
 
-    def test_remove_org_member(self, respx_mock):
-        respx_mock.delete("http://localhost:8420/admin/orgs/org_1/members/u1").mock(
-            return_value=httpx.Response(204)
+        dead = ["OrgMember", "AddOrgMemberRequest", "UpdateOrgMemberRequest"]
+        present = [name for name in dead if hasattr(hearth, name)]
+        assert present == [], (
+            f"hearth still exports dead org-membership types: {present}"
         )
-        self._admin().remove_org_member("org_1", "u1")
 
 
 # ---------------------------------------------------------------------------

@@ -91,11 +91,11 @@ class AdminClient(
 
     /** Registers a new OAuth 2.0 client. */
     suspend fun registerClient(request: RegisterClientRequest): OAuthClient =
-        httpClient.post("$baseUrl/admin/clients", request, authHeaders())
+        httpClient.post("$baseUrl/admin/applications", request, authHeaders())
 
     /** Retrieves an OAuth client by [clientId]. */
     suspend fun getClient(clientId: String): OAuthClient =
-        httpClient.get("$baseUrl/admin/clients/$clientId", authHeaders())
+        httpClient.get("$baseUrl/admin/applications/$clientId", authHeaders())
 
     /** Updates an OAuth client. Only non-null fields are changed. */
     suspend fun updateClient(clientId: String, request: UpdateClientRequest): OAuthClient =
@@ -103,12 +103,12 @@ class AdminClient(
 
     /** Deletes an OAuth client permanently. */
     suspend fun deleteClient(clientId: String): Unit =
-        httpClient.delete("$baseUrl/admin/clients/$clientId", authHeaders())
+        httpClient.delete("$baseUrl/admin/applications/$clientId", authHeaders())
 
     /** Lists OAuth clients with optional pagination. */
     suspend fun listClients(limit: Int = 20, cursor: String? = null): PageResponse<OAuthClient> {
         val q = buildQueryString(mapOf("limit" to limit.toString(), "cursor" to cursor))
-        return httpClient.get("$baseUrl/admin/clients$q", authHeaders())
+        return httpClient.get("$baseUrl/admin/applications$q", authHeaders())
     }
 
     // ── Roles ──────────────────────────────────────────────────────────────────
@@ -136,19 +136,32 @@ class AdminClient(
     }
 
     /**
-     * Assigns [role] to [userId].
+     * Assigns [roleId] to [userId], realm-scoped unless [orgId] is supplied.
      *
-     * Implementation note: Hearth exposes role assignment via the user roles endpoint.
+     * The server registers `/admin/users/{id}/roles` as `GET`(list)`.POST`(assign)
+     * and deserialises `{ "role_id": ..., "org_id"?: ... }`. This method used to
+     * send `PUT` with a `{"roles":[...]}` body — a bare 405 from axum's method
+     * router, and a 422 from the `Json` extractor even once the verb was right
+     * (audit 2026-08-28 §25.19).
+     *
+     * A sub-admin may only assign a role whose permissions are a subset of their
+     * own; the server answers 403 otherwise.
      */
-    suspend fun assignRole(userId: String, role: String): User {
-        @kotlinx.serialization.Serializable
-        data class RoleRequest(val roles: List<String>)
-        return httpClient.put(
+    suspend fun assignRole(userId: String, roleId: String, orgId: String? = null): RoleAssignment =
+        httpClient.post(
             "$baseUrl/admin/users/$userId/roles",
-            RoleRequest(listOf(role)),
+            AssignRoleRequest(roleId = roleId, orgId = orgId),
             authHeaders(),
         )
-    }
+
+    /**
+     * Lists the role assignments held by [userId].
+     *
+     * The handler answers `{"items": [...]}` with no cursor, so this is a
+     * [PageResponse] with a permanently null `nextCursor`, not a bare list.
+     */
+    suspend fun listUserRoleAssignments(userId: String): PageResponse<RoleAssignment> =
+        httpClient.get("$baseUrl/admin/users/$userId/roles", authHeaders())
 
     // ── Groups ─────────────────────────────────────────────────────────────────
 
@@ -174,25 +187,13 @@ class AdminClient(
         return httpClient.get("$baseUrl/admin/groups$q", authHeaders())
     }
 
-    // ── Organization Memberships ───────────────────────────────────────────────
-
-    /** Adds [userId] to organization [orgId] with the given [role]. */
-    suspend fun addOrgMember(orgId: String, request: AddOrgMemberRequest): OrgMember =
-        httpClient.post("$baseUrl/admin/orgs/$orgId/members", request, authHeaders())
-
-    /** Removes [userId] from organization [orgId]. */
-    suspend fun removeOrgMember(orgId: String, userId: String): Unit =
-        httpClient.delete("$baseUrl/admin/orgs/$orgId/members/$userId", authHeaders())
-
-    /** Lists members of organization [orgId] with optional pagination. */
-    suspend fun listOrgMembers(
-        orgId: String,
-        limit: Int = 20,
-        cursor: String? = null,
-    ): PageResponse<OrgMember> {
-        val q = buildQueryString(mapOf("limit" to limit.toString(), "cursor" to cursor))
-        return httpClient.get("$baseUrl/admin/orgs/$orgId/members$q", authHeaders())
-    }
+    // ── Organization Memberships — removed ─────────────────────────────────────
+    //
+    // Hearth serves no organization route over HTTP: there is no /admin/orgs, no
+    // /admin/orgs/{id}/members and no per-member route anywhere in the router, so
+    // addOrgMember, removeOrgMember and listOrgMembers every one 404'd
+    // (audit 2026-08-28 §25.19). Organization membership is administered through
+    // the admin console, not the admin API.
 
     // ── SCIM-compatible bulk operations ────────────────────────────────────────
 

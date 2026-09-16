@@ -5,6 +5,12 @@
 #
 # Required env vars (export before `cargo run -- serve -c hearth.yaml`):
 #   HEARTH_MASTER_KEY                                  (envelope encryption)
+#   HEARTH_KEK                                         (security.key_encryption_key)
+#   HEARTH_DPOP_NONCE_SECRET                           (DPoP nonce HMAC)
+#   HEARTH_PASSWORD_PEPPER_KEY_HEX                     (active password pepper)
+#   HEARTH_PASSWORD_PEPPER_PREVIOUS_KEY_HEX            (previous password pepper)
+#   HEARTH_BACKUP_VERIFY_KEY                           (base64url Ed25519 pubkey)
+#   TURNSTILE_SECRET_KEY                               (CAPTCHA verification)
 #   HEARTH_SMS_OTP_HMAC_KEY                            (SMS OTP HMAC)
 #   HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET
 #   HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET
@@ -123,7 +129,60 @@ token:
   refresh_token_ttl: "7d"
   signing_key_rotation_grace_period: "24h"
 
+# ============================================================================
+# SECURITY — every leaf key in the `security.*` liveness registry
+# (src/config/security_keys.rs) appears below. A key that is absent here cannot
+# be discovered by an operator reading the "maximal" example, so
+# tests/config_maximal_coverage.rs fails the build when one goes missing.
+# Values are the shipped defaults unless a comment says otherwise.
+# ============================================================================
 security:
+  # --- Host / origin allowlists ---------------------------------------------
+  # Empty list = fail-open (any Host accepted). Listed hosts are matched
+  # verbatim against the request's Host header, port included.
+  allowed_hosts:
+    - "auth.example.com"
+    - "127.0.0.1:8420"
+    - "localhost:8420"
+  # Origins a `return_to` / post-logout redirect may point at.
+  allowed_return_to_origins:
+    - "https://app.example.com"
+    - "https://admin.example.com"
+  # Extra `form-action` CSP origins accepted ONLY while `--dev` is in force.
+  dev_csp_form_action_origins:
+    - "http://localhost:5173"
+    - "http://localhost:5399"
+
+  # --- Realm-slug abuse controls --------------------------------------------
+  # Omitting `reserved_slugs` entirely used to mean "[]" — i.e. the control off.
+  # Spell the list out so the intent is on the page.
+  reserved_slugs:
+    [admin, api, support, www, mail, help, status, blog, app, auth,
+     login, logout, signup, register, account, profile, settings,
+     dashboard, billing, security, webhook, callback, oauth, oidc,
+     saml, scim]
+  slug_cooldown_days: 30                    # re-registration cooldown
+
+  # --- Key material (all 64-char lowercase hex; openssl rand -hex 32) --------
+  key_encryption_key: "${HEARTH_KEK}"       # envelope-encryption KEK
+  dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"
+
+  # --- Public-endpoint throttles --------------------------------------------
+  jwks_rps_limit: 60                        # /.well-known/jwks.json, per IP
+  load_test_unthrottled: false              # NEVER true outside a private rig
+
+  grpc:
+    reflection_enabled: false               # keep the schema off the wire
+  http2:
+    max_concurrent_streams: 100             # CVE-2023-44487 rapid-reset caps
+    max_pending_reset_streams: 10
+  tls:
+    min_version: "1.2"                      # "1.2" | "1.3"
+    crl_paths: []                           # e.g. ["/etc/hearth/clients.crl"]
+  backup:
+    verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"   # base64url Ed25519 public key
+    export_rate_limit: 5                    # backup exports per hour per admin
+
   rate_limiting:
     login_per_ip:
       max_attempts: 10
@@ -131,15 +190,110 @@ security:
     login_per_account:
       max_failures: 5
       lockout_seconds: 300
+    admin_per_minute: 100                   # 0 disables — load rigs only
+    token_per_minute: 200                   # per (realm, client); 0 disables
+
+  request_shaper:
+    ip_rps: 100
+    realm_rps: 1000
+
+  password:
+    kdf:                                    # Argon2id admission control
+      max_in_flight: 8                      # null = host core count
+      max_queue_wait_ms: 250                # then 503 + Retry-After
+      admin_max_in_flight: 2                # reserved pool for admin login
+      admin_max_queue_wait_ms: 2000         # admin prefers queueing to shedding
+      retry_after_seconds: 1
+    pepper:                                 # keyed hash applied before Argon2id
+      version: 2
+      key_hex: "${HEARTH_PASSWORD_PEPPER_KEY_HEX}"
+      previous_version: 1                   # must differ from `version`
+      previous_key_hex: "${HEARTH_PASSWORD_PEPPER_PREVIOUS_KEY_HEX}"
+
+  ip_reputation:
+    enabled: true
+    action: log                             # block | challenge | log
+    maxmind_db_path: "/etc/hearth/GeoLite2-ASN.mmdb"
+    spamhaus:
+      drop_url: "https://www.spamhaus.org/drop/drop.txt"
+      dropv6_url: "https://www.spamhaus.org/drop/dropv6.txt"
+      refresh_interval_secs: 86400
+
+  captcha:
+    provider: turnstile                     # only adapter shipped today
+    challenge_threshold: 25                 # failures in `window_secs` per IP
+    window_secs: 60
+    challenge_ttl_secs: 1800
+    turnstile:
+      site_key: "1x00000000000000000000AA"  # Cloudflare's always-passes test key
+      secret_key: "${TURNSTILE_SECRET_KEY}"
+      verify_url: "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+  # --- Abuse guards constructed on the production path (audit §4.17#9) ------
+  tarpit:
+    threshold: 10                           # null disables the tarpit
+    window_secs: 60
+    delay_ms: 200                           # injected delay past the threshold
+  adaptive_backoff:
+    durations: ["1m", "5m", "30m", "24h"]   # nth offence -> nth duration
+    offense_cooldown: "7d"                  # clean streak that resets the ladder
+  distributed_attack_detector:
+    enabled: true
+    window: "300s"
+    username_per_ip_threshold: 20           # distinct usernames from one IP
+    ip_per_username_threshold: 20           # distinct IPs against one username
+  outbound_volume_shield:
+    enabled: true
+    window: "3600s"
+    email_soft_cap: 1000                    # soft = alert, hard = refuse
+    email_hard_cap: 5000
+    sms_soft_cap: 100
+    sms_hard_cap: 500
+  cross_realm_aggregation_cap:
+    enabled: true
+    window: "3600s"
+    alert_threshold: 3                      # realms breaching before an alert
+    email_realm_soft_cap: 5
+    email_realm_hard_cap: 10
+    sms_realm_soft_cap: 3
+    sms_realm_hard_cap: 6
+  risk_scorer:
+    enabled: true
+    step_up_threshold: 0.5                  # score at/above which MFA is forced
+    new_device_weight: 0.3
+    new_country_weight: 0.4
+    password_age_weight: 0.2
+    password_age_days_threshold: 365
+    breach_corpus_weight: 1.0
+    refresh_context_delta_weight: 0.35
+  providers:
+    bot_signal:
+      enabled: true
+      extra_ja3_blocklist:
+        - "deadbeef00000000deadbeef00000000"
+      extra_ja4_blocklist:
+        - "t13d1516h2_8daaf6152771_02713d6af862"
+    email_reputation:
+      enabled: true
+      extra_disposable_domains:
+        - "mailinator.com"
+        - "10minutemail.com"
 
 auth:
   session_ttl: "24h"
   password_memory_cost: 65536               # KiB
   password_time_cost: 3
   mfa_required: false
+  mfa_methods: [totp, webauthn]             # restricts BOTH enrolment and presentation
   passkey_requires_mfa: false
   session_max_concurrent: 5
   session_over_limit_policy: "reject_new"   # reject_new | evict_oldest
+  # Global WebAuthn defaults; every realm inherits these unless it overrides
+  # them under `realms.<name>.auth.webauthn_*`.
+  webauthn_required: false                  # true = every user must hold a passkey
+  webauthn_resident_key: "preferred"        # required | preferred | discouraged
+  webauthn_user_verification: "required"    # "required" is what makes a passkey a
+                                            # genuine second factor (audit B10)
 
 onboarding:
   enabled: true
@@ -177,6 +331,10 @@ realms:
       passkey_requires_mfa: false
       mfa_methods: [totp, webauthn]
       allowed_auth_methods: [password, magic_link, passkey]
+      # Per-realm WebAuthn policy; overrides the global `auth.webauthn_*`.
+      webauthn_required: false              # B2C realm: passkeys offered, not forced
+      webauthn_resident_key: "preferred"    # required | preferred | discouraged
+      webauthn_user_verification: "required"
       registration:
         mode: domain_restricted             # disabled | open | invite_only | domain_restricted
         allowed_domains: [example.com, partners.example.com]
@@ -352,6 +510,17 @@ realms:
           type: github
           client_id: "Iv1.github_client_id"
           client_secret: "${GITHUB_CLIENT_SECRET}"
+        apple:
+          # Sign In with Apple authenticates with an ES256 private_key_jwt
+          # assertion, not a static client_secret. All three apple_* fields are
+          # required for `type: apple`; startup fails naming any that is missing.
+          # `client_id` is the Services ID, not the App ID.
+          type: apple
+          display_name: "Sign in with Apple"
+          client_id: "com.acme.webapp.service"
+          apple_team_id: "${APPLE_TEAM_ID}"
+          apple_key_id: "${APPLE_KEY_ID}"
+          apple_private_key_pem: "${APPLE_PRIVATE_KEY_PEM}"
         okta-saml:
           type: saml
           display_name: "Sign in with Okta (SAML)"
@@ -387,11 +556,23 @@ realms:
         support_email: "it@example.com"
     scim:
       bearer_token: "${SCIM_BEARER_INTERNAL}"
+    # A-9 tenant-managed CIDR policy. Evaluation is deny-then-allow: a `deny`
+    # match rejects outright, and a NON-EMPTY `allow` rejects everything it does
+    # not contain — so `allow` is left empty here to keep the local demo usable.
+    security:
+      cidr_policy:
+        allow: []                           # e.g. ["10.0.0.0/8", "192.0.2.0/24"]
+        deny: ["198.51.100.0/24"]           # TEST-NET-2, a harmless worked example
     auth:
       mfa_required: true
       passkey_requires_mfa: true            # regulated: TOTP even after passkey
       mfa_methods: [totp, webauthn]
       allowed_auth_methods: [password, passkey]
+      # Regulated realm: a passkey is mandatory and must be discoverable +
+      # user-verified.
+      webauthn_required: true
+      webauthn_resident_key: "required"
+      webauthn_user_verification: "required"
       registration:
         mode: invite_only
       dcr:

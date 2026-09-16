@@ -579,7 +579,10 @@ pub async fn admin_app_edit_form(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, cid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     let client_id = match cid.parse::<uuid::Uuid>() {
         Ok(u) => ClientId::new(u),
         Err(_) => return super::handlers_common::not_found("Application not found"),
@@ -595,6 +598,7 @@ pub async fn admin_app_edit_form(
                     ),
                     "This application is managed by hearth.yaml and cannot be edited via the UI.",
                     "error",
+                    secure,
                 );
             }
             let realm_name = target.0.name().to_string();
@@ -647,8 +651,11 @@ pub async fn admin_app_edit_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, cid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<AppEditForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -668,6 +675,7 @@ pub async fn admin_app_edit_submit(
                 ),
                 "This application is managed by hearth.yaml and cannot be edited via the UI.",
                 "error",
+                secure,
             );
         }
     }
@@ -793,8 +801,11 @@ pub async fn admin_app_delete(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, cid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -825,6 +836,7 @@ pub async fn admin_app_delete(
             ),
             "This application is managed by hearth.yaml and cannot be deleted via the UI.",
             "error",
+            secure,
         ),
         Err(e) => {
             tracing::warn!(error = %e, "delete_client failed");

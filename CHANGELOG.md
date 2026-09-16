@@ -20,6 +20,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   that could not succeed against any Hearth server. The request payload types
   (`UpdateRealmRequest`/`UpdateRealmParams`) are retained for callers that model a
   realm patch locally.
+- **Organization-membership methods removed from all seven SDKs** — `addOrgMember`,
+  `getOrgMember`, `updateOrgMember`, `removeOrgMember` and `listOrgMembers` (26 methods
+  and 10 request/response types) addressed `/admin/orgs/{id}/members`. Hearth serves no
+  organization route over HTTP at all, so every call 404'd and there is nothing to repoint
+  them at. Organization membership is administered through the admin console (25.19).
 ### Added
 - **Hot-tier evictions and promotions can be read per realm (audit 2026-08-28 §4.9#6)** — the hot
   tier is one cache shared by every tenant, and its eviction and promotion counters carried no
@@ -97,6 +102,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   sets it now intercepts a user with no passkey through the `ENROLL_MFA` required action. An
   unrecognised `residentKey` / `userVerification` preference is refused at start-up instead of being
   silently ignored by the browser.
+
+- **Operators can install a client's assertion public key (audit 2026-08-28 §4.22#7)** —
+  `PATCH /admin/applications/{id}` accepts `assertion_public_key`, a base64url-encoded
+  Ed25519 public key (32 bytes); `null` clears it. The engine has read this key since
+  `private_key_jwt` client authentication and the
+  `urn:ietf:params:oauth:grant-type:jwt-bearer` grant shipped, but no protocol surface
+  ever wrote it — every caller passed `None` — so both features, and the FAPI 2.0
+  Advanced profile that depends on `private_key_jwt`, were advertised in discovery
+  against a key an operator had no way to install. Existing clients are unaffected
+  until a key is set.
+- **`type: apple` federation connectors accept the Apple signing key (audit 2026-08-28
+  §4.22#3)** — three new `federation.<name>` keys, `apple_team_id`, `apple_key_id` and
+  `apple_private_key_pem`, carry the Sign In with Apple credentials. Apple authenticates
+  with an ES256 `private_key_jwt` assertion rather than a static `client_secret`, so all
+  three are required for `type: apple` and start-up now fails with a named field if one
+  is missing or the PEM is not a `-----BEGIN PRIVATE KEY-----` block. Previously a
+  `type: apple` connector was silently rewritten to a generic OIDC connector and could
+  never complete a login.
+- **Webhook deliveries carry a signed timestamp (audit 2026-08-28 §4.6#5)** — every
+  delivery now sends `X-Hearth-Signature: t=<unix_secs>,v1=<hex>` alongside the existing
+  `X-Hearth-Signature-256`, plus a bare `X-Hearth-Timestamp`. `v1` is
+  `HMAC-SHA256(secret, "<t>.<raw body>")`, so `t` is authenticated and a receiver can
+  reject anything outside a five-minute window. `X-Hearth-Signature-256` is unchanged and
+  existing body-only verifiers keep working; see `src/webhook/dispatcher.rs` for the
+  verification recipe.
+- **SMS-OTP and email-OTP are second factors the browser login can actually challenge (audit
+  2026-08-28 §4.18#6)** — `POST /ui/login` chose its MFA branch on TOTP enrolment alone, so a
+  user whose only factor was an SMS or email OTP was invisible to it: on an `mfa_required` realm
+  they were marched through *forced TOTP enrolment* as though they held nothing, and on any other
+  realm the login skipped their factor and issued the session. A new page,
+  `GET`/`POST /ui/mfa-otp-challenge`, delivers a code over the factor the realm offers and the
+  user holds, verifies it, and completes the login with a proved second factor. It carries the
+  same CSRF double-submit, single-use pending-cookie nonce and attempt budget as
+  `/ui/mfa-challenge`.
+- **`auth.mfa_methods` can be set globally (audit 2026-08-28 §4.18#10)** — the list existed only
+  per realm. A global `auth.mfa_methods` now supplies the default; a realm's own list replaces it
+  wholesale. Absent at both levels still means no restriction.
+- **`email_otp` is accepted in `auth.mfa_methods` (audit 2026-08-28 §4.18#10)** — the value is
+  documented in CONFIGURATION.md and read by three code paths, but the config validator's
+  allow-list omitted it, so a realm configured exactly as the manual describes failed to start.
+
 
 ### Changed
 - **BREAKING: `POST /realms/{realm}/introspect` and `/revoke` now require client authentication
@@ -183,7 +229,92 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   and now **refuse** a `cnf`-bound token with `UNAUTHENTICATED` — use the REST admin surface with
   such a token.
 
+- **BREAKING: the federation `redirect_uri` is realm-scoped (audit 2026-08-28 §4.22#8)** —
+  Hearth transmitted `{base_url}/ui/federation/callback` to upstream IdPs, which resolves
+  the *default* realm, while the admin Identity Provider page published
+  `/realms/{realm}/federation/callback` — a relative path missing the `/ui` prefix that
+  matched no route at all. Both now come from one seam and read
+  `{base_url}/ui/realms/{realm}/federation/callback`. **Re-register this URL at each
+  upstream provider (Google, Microsoft, Apple, GitHub, and any generic OIDC IdP) before
+  upgrading**, or federated logins fail with `redirect_uri_mismatch`. The admin detail
+  page shows the exact string to paste.
+- **OIDC `nonce` replay detection is replicated and no longer sweeps on the request path
+  (audit 2026-08-28 §4.22#14)** — used nonces were held in a process-local map, so a nonce
+  burned on one node was unknown to every other node and to the same node after a restart.
+  They are now stored per realm and client alongside the other replay sentinels, so the
+  guard holds across a cluster and across restarts. The full `retain` sweep that ran under
+  a global mutex on **every** `/authorize` is gone; reclamation moved to the periodic
+  cleanup pass, which reports the count as `oidc_nonces_deleted`.
+- **`auth.mfa_methods` now restricts which factors may be enrolled and presented (audit
+  2026-08-28 §4.18#10)** — the key is documented as "only the listed methods are offered for
+  enrollment and challenge; methods not in the list are rejected", but it was only ever read as a
+  *positive* trigger: inject an OTP enrolment required-action, fire the OIDC SMS interceptor. A
+  realm listing `["webauthn"]` still let every user enrol TOTP and log in with it. TOTP enrolment
+  and activation, TOTP and recovery-code verification, WebAuthn *registration*, and both OTP
+  issue/verify pairs now refuse a method the realm does not list, with
+  `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). **Operators who set `mfa_methods` should check the
+  list names every factor their users actually hold before upgrading** — a factor dropped from
+  the list stops working for users who already enrolled it. Passkey *authentication* is not
+  gated here: passwordless sign-in is governed by `auth.allowed_auth_methods`.
+- **`nbf` is enforced on every token-accepting path (audit 2026-08-28 §4.2#6, §4.19#10)** —
+  `TokenClaims.nbf` documented "the token MUST NOT be accepted before this time" and no validator
+  implemented it, so a realm-signed token minted to become valid later authorized the moment it
+  was signed. `validate_token`, RFC 7662 introspection and the authorization decision endpoint
+  now reject a not-yet-valid token, with the same 60-second clock-skew allowance the `iat` check
+  uses. Tokens without `nbf` — which is every token Hearth issues — are unaffected.
+- **SDK OAuth-client methods repointed to `/admin/applications`** — `createClient`,
+  `getClient`, `deleteClient` and `listClients` addressed `/admin/clients*`, which has never
+  been a route; every call 404'd. All seven SDKs now address `/admin/applications*`,
+  completing the repoint that had covered only `updateClient` (25.18).
+- **Kotlin `AdminClient.assignRole` now sends `POST` with a `role_id` body** — it sent
+  `PUT /admin/users/{id}/roles` with `{"roles":[...]}`, which the server answers `405`; even
+  with the verb corrected that body is a `422` from the `Json` extractor. It is now `POST`
+  with `{"role_id": ..., "org_id"?: ...}` and returns `RoleAssignment`, and
+  `listUserRoleAssignments(userId)` was added for `GET /admin/users/{id}/roles`.
+  **Breaking:** the second parameter is a role ID and the return type changed from `User`
+  (25.19).
+- **Kotlin Spring adapter answers `401` for a missing bearer token by default** — it shipped
+  no `AuthenticationEntryPoint` and no default `SecurityFilterChain`, so a zero-config
+  integration fell through to Spring Boot's default chain, challenged for HTTP Basic and
+  rejected valid Hearth tokens; a chain copied from the adapter's own README answered `403`
+  with no `WWW-Authenticate` header. It now registers `HearthAuthenticationEntryPoint`
+  (`401` + `WWW-Authenticate: Bearer`, `error="invalid_token"` when a token was presented)
+  and a stateless bearer-token chain, each replaceable by declaring your own bean (25.22).
+- **A realm's `session_ttl` now sets its session lifetime** — `auth.session_ttl` and
+  `realms.<name>.session_ttl` parsed, validated and reached `RealmConfig`, and nothing read
+  them: every session expired on the compiled-in 24-hour default. Widening the start-up
+  configuration-liveness registry from `security.*` to `auth.*` is what found it (25.25).
+- **The `auth:` block is covered by the start-up configuration-liveness registry** — a key
+  under `auth:` that no module consumes is now refused at start-up, on the same terms as
+  `security:` since task 20.17 (25.25).
+
+
 ### Fixed
+- **DPoP sender-constraint reaches the whole administrative surface** — the guard was mounted
+  on the `/admin` and `/scim/v2` nests only, so a stolen `cnf`-bound admin token was still
+  replayable as a plain `Bearer` against `POST /users`, `POST /clients` and every
+  `/v1/agents`, `/v1/approval-requests` and `/v1/aats` route, all of which are merged at the
+  router root rather than nested (25.17).
+- **Start-up names every cross-realm trust policy that gates the operator** — a stored policy
+  naming the system realm as its source inside a tenant realm predates the guard that would
+  now refuse to write it, and silently narrows what the platform operator may do in that
+  realm. Each one is now logged at `WARN` with its realm, policy id and capability list
+  (25.15).
+- **Forced-enrolment activation has the CSRF check, nonce redemption and rate limit its sibling
+  has (audit 2026-08-28 §4.18#7)** — `POST /ui/mfa-enroll-required/activate` completes a login
+  exactly as `POST /ui/mfa-challenge` does, and carried none of the three: no CSRF double-submit,
+  so a cross-site POST that landed on the right code logged the victim in; no redemption of the
+  single-use MFA pending-cookie nonce, so one captured cookie was replayable for its whole life;
+  and no attempt budget, so the pending TOTP secret could be guessed at line rate. All three are
+  now in place, reusing the same mechanisms. `verify_totp_enrollment` shares the MFA attempt
+  budget, so a burst of wrong activation codes now answers `429`.
+- **DPoP `alg` and the JWK's `kty`/`crv` must agree (audit 2026-08-28 §4.2#5)** — `alg` selected
+  the signature verifier and `kty` selected the RFC 7638 thumbprint form, and nothing compared
+  them. An `alg: EdDSA` proof declaring `kty: "EC"` was verified against `x` alone — the Ed25519
+  branch never reads `y` — and then fingerprinted over `{crv,kty,x,y}`, so the holder of one
+  Ed25519 key could vary the unauthenticated `y` and mint an unbounded family of distinct `jkt`
+  values from it, none of which a `jkt` kill-switch entry binds. A mismatched proof is now
+  rejected before either step.
 - **The system operator reaches realm config and required-actions cross-realm (audit 2026-08-28
   §4.1#6)** — `PATCH /admin/realms/{realm_id}/config` and
   `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions` each hand-rolled their own
@@ -521,6 +652,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   user and an audit entry saying so, while the user's refresh token kept minting tokens. The call
   now returns the error. The user record is already persisted at that point, so a retry completes
   the revocation rather than short-circuiting as a no-op.
+
+- **Every link on the admin Identity Providers list resolves (audit 2026-08-28 §4.22#10)** —
+  the list rendered each provider's id in its prefixed `idp_<uuid>` display form while the
+  detail handler parsed a bare UUID, so clicking any provider name returned 404. The list
+  now emits the bare UUID and the handler accepts both spellings.
+- **Confirm-to-link resolves the realm the login started in (audit 2026-08-28 §4.22#11)** —
+  `/ui/federation/confirm-link` resolved the default realm, but the confirm ticket is stored
+  under the realm the federated login began in, so on a multi-realm deployment the lookup
+  missed and the user was bounced to `/ui/login` with no explanation. The federation callback
+  now redirects to `/ui/realms/{realm}/federation/confirm-link`; the bare route is kept for
+  single-realm deployments.
+- **Apple Sign In `form_post` callbacks can complete (audit 2026-08-28 §4.22#15)** — the A-48
+  state-binding cookie was set `SameSite=Lax`, which browsers do not send on the cross-site
+  POST that `response_mode=form_post` produces, so `POST /ui/federation/callback` and its
+  realm-scoped twin always failed the binding check and redirected to
+  `/ui/login?error=federation_failed`. Connectors that use `form_post` now get
+  `SameSite=None; Secure`; every other connector keeps `Lax`.
+- **A phone number with a non-ASCII character no longer panics the required-action handler
+  (audit 2026-08-28 §4.4#2)** — the SMS-enrolment verify page masks the number for display,
+  and the masking indexed the string by byte offset in three places. A multi-byte character
+  landing on a slice boundary, or a number with no digit near the start, aborted the request.
+  The masking is character-based and total for any input, and a number that fails E.164
+  validation is no longer echoed into that page at all.
+
 
 ### Security
 - **The reserved system realm is read-only for RBAC writes on the public APIs (audit 2026-08-28
@@ -1288,6 +1443,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   token presented to the SDK could be signed with. `hearth-node`'s `JwksVerifier` and
   Next.js edge middleware and `@hearth/sdk`'s `JwksClient` now pass
   `algorithms: ["EdDSA"]`.
+- **Custom CSS files are validated before they are served (audit 2026-08-28 §4.23#12, task 21.13)** —
+  `branding.custom_css` and `realms.<name>.web.custom_css` name a path whose raw bytes Hearth
+  loads at startup and returns to every unauthenticated caller of `GET /ui/static/theme.css` and
+  `GET /ui/static/realm-theme/{id}`. The only gate was `read_to_string`, so a typo or a copied
+  deployment template could publish a private key, an `.env` file or `/etc/passwd` to the
+  internet, and a large file stayed memory-resident for the life of the process. The file must
+  now be a regular file, end in `.css`, be at most 256 KiB, decode as UTF-8, and contain a CSS
+  declaration block with no control characters or markup. Config validation reports the reason
+  at startup; at runtime a refused file yields an empty override and a `WARN` naming the path.
+- **CSRF token required on `POST /ui/federation/confirm-link` (audit 2026-08-28 §4.22#12, task
+  21.14)** — the form struct declared a `_csrf` field, the page never filled it in and the
+  handler never read it, so the token parsed and was discarded. The confirm page now issues a
+  pre-auth `hearth_ui_csrf` cookie and echoes the value into the form; the POST compares the two
+  in constant time before the ticket is consumed and answers `403` on a mismatch. A refused
+  request does not burn the ticket.
+- **Browser-facing HTML on the API router carries frame, cache and CSP protections (audit
+  2026-08-28 §4.23#9, task 21.10)** — `GET /docs` and the `GET /end_session` front-channel logout
+  page are rendered outside the `/ui` tree, so the web router's security-header layer never
+  reached them and they shipped with no `Content-Security-Policy`, no `X-Frame-Options`, no
+  `frame-ancestors` and no `Cache-Control`. Any `text/html` response on the API router now gains
+  `X-Frame-Options: DENY`, `Cache-Control: no-store` and
+  `object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`, each only
+  when the handler did not already set it. Machine (`application/json`) responses are unchanged.
+- **HSTS is emitted behind a TLS-terminating proxy (audit 2026-08-28 §4.23#8, §4.5, task 21.9)** —
+  `Strict-Transport-Security` was gated on `server.tls_cert_path`, so the modal deployment (TLS
+  terminated at nginx/Envoy/an ALB, plaintext on the hop to Hearth) never emitted it, while
+  `docs/guides/security-hardening.md` told the operator it was automatic "when TLS is enabled".
+  With `server.trust_forwarded_proto: true` — which production validation already requires a
+  non-empty `server.trusted_proxies` alongside — Hearth now emits HSTS on requests the trusted
+  proxy marks `X-Forwarded-Proto: https`. Without that setting the header is ignored entirely,
+  and the hardening guide now says plainly that HSTS is the proxy's job in that deployment and
+  shows the nginx and Envoy directives.
+
 ### Fixed
 - **SP-initiated SAML SSO now signs the user in (audit 2026-08-28 §4.10#6, §4.22#4, task 19.5)** —
   the assertion consumer validated the assertion, wrote a `saml_login_completed` audit event and
@@ -3483,6 +3671,91 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   every failure at a severity taken from the action's own `AuditFailurePolicy` — `ERROR` for
   destructive and security-sensitive actions, `WARN` otherwise — naming the realm, action and
   resource whose trail has a hole in it.
+
+- **The browser JAR authorize path no longer redirects to an unvalidated `redirect_uri`
+  (audit 2026-08-28 §4.3#5)** — when a request carried a signed request object (JAR,
+  RFC 9101) containing its own `redirect_uri`, the engine validated *that* URI against the
+  client's registration and the outer query parameter was never checked — yet the 302 was
+  built from the outer value. A client permitted to use JAR could therefore have `code` and
+  `state` delivered to any URI it chose. The authorization response now carries the
+  effective, validated URI and every caller redirects to it. This also fixes the token
+  exchange, which is bound to the same URI.
+- **Upstream ID tokens are checked for `azp` (audit 2026-08-28 §4.22#13)** — federation
+  verified only that the configured `client_id` appeared somewhere in the ID token's `aud`.
+  Per OIDC Core §3.1.3.7, a multi-valued `aud` requires `azp`, and `azp` when present must
+  name us. Without those checks an ID token minted for a *different* relying party that
+  merely listed Hearth's `client_id` among its audiences verified here and logged that
+  party's user into the realm. Enforced for generic OIDC and for Apple Sign In.
+- **Magic-link redemption honours `registration_policy` (audit 2026-08-28 §4.24#11)** —
+  redeeming a magic link for an address with no account created one unconditionally, so a
+  realm set to `disabled`, `domain_restricted` or `invite_only` still grew an account for
+  any address that could receive a link. The policy is now consulted before the account is
+  created: `open` allows, `domain_restricted` allows only an allowed domain, and `disabled`
+  and `invite_only` refuse.
+- **Client authentication does the same work for unregistered clients (audit 2026-08-28
+  §4.25#3)** — an unknown `client_id`, and a public client, both returned without hashing
+  while a registered confidential client paid for an Argon2id verification, so response
+  time on an unauthenticated endpoint revealed whether a client existed and whether it held
+  a secret. Hashing work is now a function of the caller's own input: presenting a secret
+  costs exactly one verification on every arm — against a realm-parameterised dummy hash
+  when there is no stored one — and presenting no secret costs none, which keeps the public
+  client token path off Argon2id entirely.
+- **Outbound webhook deliveries are bounded and replay-limited (audit 2026-08-28 §4.6#5)** —
+  `X-Hearth-Signature-256` covers the body alone, so a captured delivery stayed valid
+  forever; the new timestamped `X-Hearth-Signature` gives receivers an authenticated `t` to
+  bound. Delivery tasks were also spawned per subscription per event with no limit; at most
+  64 webhook HTTP requests are now in flight process-wide, and the permit is never held
+  across a retry backoff so one dead endpoint cannot starve the rest.
+- **The double-submit CSRF token is no longer forgeable by cookie tossing (audit 2026-08-28
+  §4.23#3)** — the server read the *first* `hearth_ui_csrf` cookie in the request. A host on the
+  same registrable domain (`evil.example.com` when Hearth runs at `admin.example.com`) can set a
+  `Domain=.example.com` cookie of the same name, and RFC 6265 lets it control the serialisation
+  order, so the double-submit check compared an attacker-chosen value against itself. Every
+  reader — the `_csrf` form field, the `X-CSRF-Token` header, and the token echoed into each
+  page — now requires **exactly one** `hearth_ui_csrf` cookie and fails closed when a duplicate
+  is present, counted across split `Cookie` headers.
+- **CSRF enforcement on eight further `/ui/admin` JSON mutations (audit 2026-08-28 §4.23#1b)** —
+  `PUT /ui/admin/api/realms/{realm}/audit/config`, `PATCH /ui/admin/realms/{realm}/config`,
+  `PATCH /ui/admin/realms/{realm}/users/{id}/required-actions`,
+  `POST /ui/admin/realms/{realm}/webhooks/test-ping` and the four
+  `POST /ui/admin/settings/editor/visual/*` routes — including the one that rewrites the whole
+  of `hearth.yaml` — accepted the session cookie alone. All eight now require a matching
+  `X-CSRF-Token` header. The admin console already sent it; only the server never read it.
+- **`POST /required-action/UPDATE_PASSWORD` requires a CSRF token and the current password
+  (audit 2026-08-28 §4.23#2)** — the handler set a new password given nothing but the
+  required-action cookie. It now verifies a double-submit token (fail-closed outside `--dev`,
+  matching the login form) and verifies the existing password through the shared KDF admission
+  gate before applying the change. A user with no password credential at all — federated or
+  passkey-only, forced to set one — is unaffected. **Integrators driving this endpoint directly
+  must add `current_password` and `_csrf` to the form body.**
+- **`hearth_ui_sms_mfa` and `hearth_ui_flash` carry `Secure` over TLS (audit 2026-08-28
+  §4.23#5)** — both cookies hard-coded their attribute list with no `Secure` on any path,
+  neither when set nor when cleared, so the MAC-signed pending-MFA state of a half-authenticated
+  user was sent over plaintext on a downgrade. Both now take the same `is_secure_request`
+  decision the session, CSRF and required-action cookies already used.
+- **The config editor refuses an apply that would silently archive live realms (audit 2026-08-28
+  §4.23#4)** — `POST /ui/admin/settings/editor/visual/apply` answered `{"ok":true}` as soon as
+  the file hit disk, while the hot-reload it triggered archived every realm absent from the
+  submitted document. The endpoint now answers **409 Conflict** naming the realms at risk in
+  `would_archive`, writes nothing, and proceeds only with `?confirm_archive=true` — in which
+  case the success body reports `archived_realms` rather than a bare `ok:true`. A document with
+  no `realms:` section archives nothing and is not gated.
+- **The `/ui` CSP no longer blocks Hearth's own SAML HTTP-POST binding (audit 2026-08-28
+  §4.23#7)** — `script-src 'self'` killed the binding page's inline `onload=` auto-submit (no
+  nonce or hash can cover an event-handler attribute) and `form-action 'self'` killed the
+  `<noscript>` manual fallback, which POSTs to the peer's ACS URL — so SAML SSO and SLO stalled
+  on a Continue button that did nothing. The binding page now auto-submits from a
+  `<script nonce>` element under a per-response policy whose `form-action` names exactly the one
+  destination origin. No `'unsafe-inline'`, no wildcard, and every other `/ui` response keeps the
+  strict shared policy.
+- **`/docs` Swagger UI is served from this origin under a CSP (audit 2026-08-28 §4.23#6)** — the
+  page loaded `swagger-ui-dist` from `unpkg.com` with no Subresource Integrity and no CSP, on an
+  unauthenticated endpoint sharing the admin console's origin. The assets are now vendored and
+  served from `/docs/assets/*`, the bootstrap lives in its own file so no inline script is
+  needed, and `/docs` carries `default-src 'none'; script-src 'self'; ... frame-ancestors 'none'`.
+  **Air-gapped and CSP-restricted deployments no longer need an outbound allowance for
+  `unpkg.com`.**
+
 
 ## [1.0.0] — 2026-06-21
 

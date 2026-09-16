@@ -1052,7 +1052,15 @@ pub(super) fn issue_code_and_redirect(
         via_par,
     ) {
         Ok(resp) => {
-            let location = build_authorization_redirect(redirect_uri, &resp);
+            // 22.3 (audit 2026-08-28 §4.3#5): redirect to the URI the engine
+            // actually validated and bound the code to, not to our own outer
+            // `redirect_uri`. A JAR (RFC 9101) may carry its own
+            // `redirect_uri`; when it does, the engine validates *that* one
+            // against the client registration and the outer parameter is never
+            // checked — building the 302 from the outer value delivered `code`
+            // and `state` to an attacker-chosen URI. It is also the URI the
+            // code is bound to, so the token exchange only succeeds here.
+            let location = build_authorization_redirect(resp.redirect_uri(), &resp);
             Redirect::to(&location).into_response()
         }
         Err(e) => {
@@ -1322,6 +1330,7 @@ mod tests {
             "https://as.example.com".to_string(),
             "eyJhbGci.payload.sig".to_string(),
             ResponseMode::QueryJwt,
+            "https://app/cb".to_string(),
         );
         let location = build_authorization_redirect("https://app/cb", &resp);
         assert!(
@@ -1340,6 +1349,7 @@ mod tests {
             "https://as.example.com".to_string(),
             "eyJhbGci.payload.sig".to_string(),
             ResponseMode::FragmentJwt,
+            "https://app/cb".to_string(),
         );
         let location = build_authorization_redirect("https://app/cb", &resp);
         assert!(
@@ -1355,6 +1365,7 @@ mod tests {
             "authcode".to_string(),
             "mystate".to_string(),
             "https://as.example.com".to_string(),
+            "https://app/cb".to_string(),
         );
         let location = build_authorization_redirect("https://app/cb", &resp);
         assert!(location.contains("code=authcode"), "got: {location}");
@@ -1377,6 +1388,7 @@ mod tests {
             "https://as.example.com".to_string(),
             "jwt.tok.en".to_string(),
             ResponseMode::Jwt,
+            "https://app/cb".to_string(),
         );
         let location = build_authorization_redirect("https://app/cb", &resp);
         assert!(

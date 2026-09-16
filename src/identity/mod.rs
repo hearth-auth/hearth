@@ -80,6 +80,7 @@ pub use email::{
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
     SharedEmailSender, StubHttpTransport,
 };
+pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
     EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
 };
@@ -534,6 +535,12 @@ pub trait IdentityEngine: Send + Sync {
     /// `IdentityError::MfaRequired` unless `context.mfa_proof` says a second
     /// factor was used in this authentication. Enrolment alone does not pass
     /// the gate (audit 2026-08-28 §4.18#3).
+    ///
+    /// When the realm sets `webauthn_required`, the same refusal applies
+    /// unless that second factor was a WebAuthn assertion that proved user
+    /// verification (`MfaProof::ProvedWebAuthn`). A TOTP code, a recovery code
+    /// or an OTP does not pass, however many passkeys the account holds
+    /// (task 25.26).
     fn create_session(
         &self,
         realm_id: &RealmId,

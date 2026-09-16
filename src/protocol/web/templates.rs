@@ -57,21 +57,31 @@ pub const FLASH_COOKIE_TTL_SECS: u64 = 10;
 /// `success` or `error` at construction time so the cookie cannot be
 /// used to inject arbitrary text into the rendered page beyond the
 /// allowed CSS classes.
+///
+/// Pass `secure = true` when the request arrived over TLS (directly or via a
+/// trusted proxy) — use [`crate::protocol::web::WebState::is_secure_request`],
+/// the same predicate the session, CSRF and required-action cookies use. The
+/// attribute was missing entirely before task 21.6 (audit §4.23#5).
 #[must_use]
-pub fn set_flash_cookie(message: &str, kind: &str) -> String {
+pub fn set_flash_cookie(message: &str, kind: &str, secure: bool) -> String {
     use data_encoding::BASE64URL_NOPAD;
     let kind = if kind == "error" { "error" } else { "success" };
     let encoded = BASE64URL_NOPAD.encode(message.as_bytes());
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{FLASH_COOKIE}={encoded}.{kind}; HttpOnly; Path=/ui; SameSite=Strict; Max-Age={FLASH_COOKIE_TTL_SECS}"
+        "{FLASH_COOKIE}={encoded}.{kind}; HttpOnly; Path=/ui; SameSite=Strict; Max-Age={FLASH_COOKIE_TTL_SECS}{secure_attr}"
     )
 }
 
 /// Builds a `Set-Cookie` value that clears the flash cookie. Emitted
 /// alongside the rendered page so the next refresh starts clean.
+///
+/// `secure` must match what [`set_flash_cookie`] used, or the browser keeps a
+/// second copy of the cookie under the other security scope.
 #[must_use]
-pub fn clear_flash_cookie() -> String {
-    format!("{FLASH_COOKIE}=; HttpOnly; Path=/ui; SameSite=Strict; Max-Age=0")
+pub fn clear_flash_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{FLASH_COOKIE}=; HttpOnly; Path=/ui; SameSite=Strict; Max-Age=0{secure_attr}")
 }
 
 /// Reads a flash banner from the request cookies.
@@ -108,9 +118,9 @@ pub fn take_flash_cookie(headers: &HeaderMap) -> Option<Flash> {
 /// callers that compose URLs with realm context should keep only the
 /// realm param.
 #[must_use]
-pub fn redirect_with_flash(url: &str, message: &str, kind: &str) -> Response {
+pub fn redirect_with_flash(url: &str, message: &str, kind: &str, secure: bool) -> Response {
     let mut response = Redirect::to(url).into_response();
-    if let Ok(value) = HeaderValue::from_str(&set_flash_cookie(message, kind)) {
+    if let Ok(value) = HeaderValue::from_str(&set_flash_cookie(message, kind, secure)) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
     response
@@ -232,4 +242,53 @@ fn internal_error_fallback() -> Response {
     let mut response = Html(body).into_response();
     *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
     response
+}
+
+#[cfg(test)]
+mod flash_cookie_tests {
+    use super::{clear_flash_cookie, set_flash_cookie};
+
+    fn has_secure(cookie: &str) -> bool {
+        cookie
+            .split(';')
+            .any(|a| a.trim().eq_ignore_ascii_case("Secure"))
+    }
+
+    /// Task 21.6 / audit §4.23#5: `hearth_ui_flash` had no `Secure` attribute on
+    /// any code path. `set_flash_cookie` and `clear_flash_cookie` are the only
+    /// two places the cookie is ever written, so these two cases are the whole
+    /// surface.
+    #[test]
+    fn flash_cookie_carries_secure_over_tls() {
+        let set = set_flash_cookie("saved", "success", true);
+        assert!(
+            has_secure(&set),
+            "set_flash_cookie(true) omitted Secure: {set}"
+        );
+        let cleared = clear_flash_cookie(true);
+        assert!(
+            has_secure(&cleared),
+            "clear_flash_cookie(true) omitted Secure: {cleared}"
+        );
+        assert!(
+            cleared.contains("Max-Age=0"),
+            "clearing cookie must still expire the value: {cleared}"
+        );
+    }
+
+    /// A plaintext deployment must NOT get `Secure`, or the browser drops the
+    /// cookie and every flash banner silently disappears.
+    #[test]
+    fn flash_cookie_omits_secure_over_plaintext() {
+        let set = set_flash_cookie("saved", "success", false);
+        assert!(
+            !has_secure(&set),
+            "set_flash_cookie(false) set Secure: {set}"
+        );
+        let cleared = clear_flash_cookie(false);
+        assert!(
+            !has_secure(&cleared),
+            "clear_flash_cookie(false) set Secure: {cleared}"
+        );
+    }
 }

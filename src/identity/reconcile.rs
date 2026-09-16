@@ -1519,11 +1519,16 @@ fn build_idp_config(
     // Resolve the preset (if any) and derive defaults, letting explicit
     // YAML fields override.
     let preset = preset_lookup(&provider.kind);
-    let kind = match provider.kind.as_str() {
-        "oidc" => IdpKind::Oidc,
-        "google" | "microsoft" | "apple" => IdpKind::Oidc,
-        "github" => IdpKind::GitHub,
-        other => {
+    // 22.22 (audit 2026-08-28 §4.22#3): the kind comes from the preset when
+    // there is one. This used to hard-code `apple => IdpKind::Oidc`, which
+    // silently downgraded the Apple preset to `GenericOidcConnector` — no
+    // `private_key_jwt` client assertion, no `response_mode=form_post`, so
+    // Sign In with Apple could never complete. `presets.rs` already declared
+    // `kind: IdpKind::Apple`; only this mapping disagreed.
+    let kind = match (preset, provider.kind.as_str()) {
+        (Some(p), _) => p.kind,
+        (None, "oidc") => IdpKind::Oidc,
+        (None, other) => {
             return Err(IdentityError::InvalidInput {
                 reason: format!(
                     "unknown federation provider type '{other}' \
@@ -1583,6 +1588,12 @@ fn build_idp_config(
             ]
         });
 
+    let apple_cfg = if kind == IdpKind::Apple {
+        build_apple_config(idp_name, provider)?
+    } else {
+        None
+    };
+
     let now = Timestamp::from_micros(0); // engine persists as-is; reconcile uses epoch
 
     Ok(IdpConfig {
@@ -1603,10 +1614,59 @@ fn build_idp_config(
         leeway_seconds: cap_federation_leeway(provider.leeway_seconds),
         // Non-SAML connectors don't consume this flag.
         want_assertions_signed: false,
-        apple: None,
+        apple: apple_cfg,
         created_at: now,
         updated_at: now,
     })
+}
+
+/// Builds the Apple-specific half of an [`IdpConfig`] for `type: apple`.
+///
+/// Returns `Ok(None)` for every other connector kind. `AppleConnector::new`
+/// refuses an `IdpConfig` whose `apple` is `None`, so all three fields are
+/// required here rather than silently producing a connector that fails at the
+/// first token exchange (22.22).
+fn build_apple_config(
+    idp_name: &str,
+    provider: &FederationProviderYaml,
+) -> Result<Option<crate::identity::federation::AppleConfig>, IdentityError> {
+    use crate::identity::federation::{AppleConfig, FederationSecret};
+
+    let missing = |field: &str| IdentityError::InvalidInput {
+        reason: format!(
+            "federation connector '{idp_name}' has `type: apple` but is missing `{field}` \
+             (Sign In with Apple authenticates with an ES256 private_key_jwt assertion, \
+             not a static client_secret)"
+        ),
+    };
+    let team_id = provider
+        .apple_team_id
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| missing("apple_team_id"))?;
+    let key_id = provider
+        .apple_key_id
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| missing("apple_key_id"))?;
+    let private_key_pem = provider
+        .apple_private_key_pem
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| missing("apple_private_key_pem"))?;
+    if !private_key_pem.contains("-----BEGIN") {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "federation connector '{idp_name}': `apple_private_key_pem` is not PEM \
+                 (expected a `-----BEGIN PRIVATE KEY-----` block)"
+            ),
+        });
+    }
+    Ok(Some(AppleConfig {
+        team_id,
+        key_id,
+        private_key_pem: FederationSecret::new(private_key_pem),
+    }))
 }
 
 fn build_saml_idp_config(
@@ -2360,4 +2420,143 @@ pub fn load_orphaned_realms(storage: &dyn StorageEngine) -> Vec<OrphanRecord> {
         .into_iter()
         .filter_map(|entry| serde_json::from_slice(&entry.value).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod apple_connector_tests {
+    use super::build_idp_config;
+    use crate::config::FederationProviderYaml;
+    use crate::core::{IdpId, RealmId};
+    use crate::identity::federation::IdpKind;
+    use crate::identity::IdentityError;
+
+    fn apple_yaml() -> FederationProviderYaml {
+        FederationProviderYaml {
+            kind: "apple".to_string(),
+            client_id: Some("com.example.service".to_string()),
+            apple_team_id: Some("A1B2C3D4E5".to_string()),
+            apple_key_id: Some("ABCDE12345".to_string()),
+            apple_private_key_pem: Some(
+                "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----".to_string(),
+            ),
+            ..FederationProviderYaml::default_oidc()
+        }
+    }
+
+    fn build(
+        provider: &FederationProviderYaml,
+    ) -> Result<crate::identity::federation::IdpConfig, IdentityError> {
+        build_idp_config(
+            &RealmId::new(uuid::Uuid::nil()),
+            &IdpId::new(uuid::Uuid::nil()),
+            "apple",
+            provider,
+        )
+    }
+
+    /// 22.22 (§4.22#3): `type: apple` must reach `AppleConnector`.
+    ///
+    /// The kind mapping hard-coded `"apple" => IdpKind::Oidc`, so the preset's
+    /// own `kind: IdpKind::Apple` was overruled and every Apple connector was
+    /// built as a generic OIDC one — no ES256 `private_key_jwt` assertion, no
+    /// `response_mode=form_post`, so the login could never complete.
+    #[test]
+    fn apple_type_yields_the_apple_kind() {
+        let cfg = build(&apple_yaml()).expect("apple config");
+        assert_eq!(
+            cfg.kind,
+            IdpKind::Apple,
+            "apple must not become generic OIDC"
+        );
+    }
+
+    /// The Apple credentials reach the stored config; `AppleConnector::new`
+    /// refuses an `IdpConfig` whose `apple` is `None`.
+    #[test]
+    fn apple_signing_key_reaches_the_config() {
+        let cfg = build(&apple_yaml()).expect("apple config");
+        let apple = cfg.apple.as_ref().expect("apple block must be populated");
+        assert_eq!(apple.team_id, "A1B2C3D4E5");
+        assert_eq!(apple.key_id, "ABCDE12345");
+        assert!(apple
+            .private_key_pem
+            .expose_secret()
+            .contains("BEGIN PRIVATE KEY"));
+    }
+
+    /// The connector the service will actually build accepts this config.
+    #[test]
+    fn apple_config_constructs_an_apple_connector() {
+        use crate::identity::federation::{AppleConnector, StubFederationTransport};
+        use std::sync::Arc;
+
+        let cfg = build(&apple_yaml()).expect("apple config");
+        AppleConnector::new(
+            cfg,
+            Arc::new(StubFederationTransport::new()),
+            "https://auth.example.com/ui/realms/demo/federation/callback".to_string(),
+        )
+        .expect("AppleConnector must accept a reconciled apple IdpConfig");
+    }
+
+    /// Each missing credential is refused by name at start-up rather than
+    /// producing a connector that fails at the first token exchange.
+    #[test]
+    fn missing_apple_credentials_are_named() {
+        for (field, mutate) in [
+            ("apple_team_id", 0usize),
+            ("apple_key_id", 1),
+            ("apple_private_key_pem", 2),
+        ] {
+            let mut y = apple_yaml();
+            match mutate {
+                0 => y.apple_team_id = None,
+                1 => y.apple_key_id = None,
+                _ => y.apple_private_key_pem = None,
+            }
+            let err = build(&y).expect_err("missing credential must be refused");
+            let msg = err.to_string();
+            assert!(msg.contains(field), "error must name `{field}`, got: {msg}");
+        }
+    }
+
+    /// A non-PEM value is refused too — it would only fail later, inside the
+    /// first ES256 assertion.
+    #[test]
+    fn non_pem_apple_key_is_refused() {
+        let mut y = apple_yaml();
+        y.apple_private_key_pem = Some("not-a-pem-blob".to_string());
+        let err = build(&y).expect_err("non-PEM key must be refused");
+        assert!(err.to_string().contains("PEM"), "got: {err}");
+    }
+
+    /// Non-Apple presets are untouched by the new mapping.
+    #[test]
+    fn other_presets_keep_their_kinds() {
+        for (kind, expected) in [
+            ("google", IdpKind::Oidc),
+            ("microsoft", IdpKind::Oidc),
+            ("github", IdpKind::GitHub),
+        ] {
+            let y = FederationProviderYaml {
+                kind: kind.to_string(),
+                client_id: Some("cid".to_string()),
+                ..FederationProviderYaml::default_oidc()
+            };
+            let cfg = build(&y).unwrap_or_else(|e| panic!("{kind} config: {e}"));
+            assert_eq!(cfg.kind, expected, "{kind}");
+            assert!(cfg.apple.is_none(), "{kind} must carry no apple block");
+        }
+    }
+
+    /// An unknown type is still refused with the documented message.
+    #[test]
+    fn unknown_type_is_still_refused() {
+        let y = FederationProviderYaml {
+            kind: "facebook".to_string(),
+            ..FederationProviderYaml::default_oidc()
+        };
+        let err = build(&y).expect_err("unknown type must be refused");
+        assert!(err.to_string().contains("unknown federation provider type"));
+    }
 }

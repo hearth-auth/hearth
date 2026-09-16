@@ -482,8 +482,9 @@ async fn mfa_required_passkey_satisfies_policy() {
     // A passkey ceremony that proved user verification (possession + PIN or
     // biometric) is two factors, so it must bypass the TOTP enrollment gate
     // even when the realm sets mfa_required = true. The web handler sets
-    // `mfa_proof: Proved` only for such a ceremony (audit B10); this test
-    // exercises the engine gate with that proof already established.
+    // `mfa_proof: ProvedWebAuthn` only for such a ceremony (audit B10, task
+    // 25.26); either proved variant clears `mfa_required`, so this test
+    // exercises the engine gate with a proof already established.
     let harness = common::TestHarness::embedded().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,

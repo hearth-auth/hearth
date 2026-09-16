@@ -1795,6 +1795,33 @@ async fn run_serve(
         storage.as_ref(),
     );
 
+    // Task 25.15 — name every stored cross-realm policy whose source is the
+    // system realm in a realm that is not the system realm.
+    //
+    // 25.11 refuses to *author* one unless a system-realm actor writes it, but
+    // that guard is write-side only: a policy stored before it shipped is still
+    // consulted by `check_cross_realm_policy` and still silently narrows what
+    // the platform operator may do inside that realm. An operator who finds
+    // themselves locked out of a tenant realm had nothing to look at. Warn,
+    // never refuse: such a policy may be deliberate, and refusing to boot would
+    // strand the operator who needs the server up to delete it (task 25.14's
+    // `DELETE /admin/realms/{id}/cross-realm-policies/{policy_id}`).
+    for legacy in
+        hearth::identity::find_system_sourced_cross_realm_policies(identity_engine.as_ref())
+    {
+        tracing::warn!(
+            realm_id = %legacy.target_realm_id.as_uuid(),
+            realm_name = %legacy.target_realm_name,
+            policy_id = %legacy.policy_id,
+            allowed_capabilities = ?legacy.allowed_capabilities,
+            "cross-realm trust policy names the system realm as its source in a \
+             tenant realm. It gates what the platform operator may do inside that \
+             realm and predates the guard that would now refuse to write it. \
+             Review it, and if it was not intended delete it with DELETE \
+             /admin/realms/<realm_id>/cross-realm-policies/<policy_id>."
+        );
+    }
+
     // Load migration history for the admin UI.
     let migration_records = hearth::identity::reconcile::load_migration_records(storage.as_ref());
 
@@ -2563,13 +2590,18 @@ async fn run_serve(
     // Build global theme CSS: named theme base + optional operator custom CSS file.
     let named_theme = config.branding.theme.as_deref().unwrap_or("ember");
     let theme_base_css = web::themes::theme_css(named_theme);
+    // 21.13 (audit 2026-08-28 §4.23#12): these bytes are served verbatim to
+    // unauthenticated clients at `GET /ui/static/theme.css`. Validate the
+    // content type and the size before they become resident, and fail soft to
+    // an empty override rather than publishing whatever the path happened to
+    // point at.
     let global_custom_css = config
         .branding
         .custom_css
         .as_deref()
         .map(|path| {
-            std::fs::read_to_string(path).unwrap_or_else(|e| {
-                warn!(path = %path, error = %e, "failed to read branding custom CSS file");
+            web::themes::load_custom_css(path).unwrap_or_else(|e| {
+                warn!(path = %path, error = %e, "refusing branding.custom_css");
                 String::new()
             })
         })
@@ -2613,12 +2645,15 @@ async fn run_serve(
             }
         }
         let base = web_cfg.theme.as_deref().map_or("", web::themes::theme_css);
+        // Same gate as `branding.custom_css` above (21.13, §4.23#12): the
+        // per-realm block is served at `GET /ui/static/realm-theme/{id}`,
+        // which is equally unauthenticated.
         let custom = web_cfg
             .custom_css
             .as_deref()
             .map(|path| {
-                std::fs::read_to_string(path).unwrap_or_else(|e| {
-                    warn!(path = %path, name = %realm_name, error = %e, "failed to read realm custom CSS file");
+                web::themes::load_custom_css(path).unwrap_or_else(|e| {
+                    warn!(path = %path, name = %realm_name, error = %e, "refusing realm custom CSS");
                     String::new()
                 })
             })

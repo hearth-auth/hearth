@@ -92,7 +92,7 @@ func (a *AdminClient) DeleteRealm(ctx context.Context, realmID string) error {
 // CreateClient creates an OAuth client via the admin API.
 func (a *AdminClient) CreateClient(ctx context.Context, req CreateClientRequest) (*OAuthClient, error) {
 	var result OAuthClient
-	if err := a.post(ctx, "/admin/clients", req, &result); err != nil {
+	if err := a.post(ctx, "/admin/applications", req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -101,7 +101,7 @@ func (a *AdminClient) CreateClient(ctx context.Context, req CreateClientRequest)
 // GetClient retrieves an OAuth client by ID via the admin API.
 func (a *AdminClient) GetClient(ctx context.Context, clientID string) (*OAuthClient, error) {
 	var result OAuthClient
-	if err := a.get(ctx, fmt.Sprintf("/admin/clients/%s", clientID), &result); err != nil {
+	if err := a.get(ctx, fmt.Sprintf("/admin/applications/%s", clientID), &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -118,12 +118,12 @@ func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req Upd
 
 // DeleteClient deletes an OAuth client via the admin API.
 func (a *AdminClient) DeleteClient(ctx context.Context, clientID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/clients/%s", clientID), nil, nil)
+	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/applications/%s", clientID), nil, nil)
 }
 
 // ListClients lists OAuth clients with optional cursor-based pagination.
 func (a *AdminClient) ListClients(ctx context.Context, opts ListOptions) (*PageResponse[OAuthClient], error) {
-	path := buildListPath("/admin/clients", opts)
+	path := buildListPath("/admin/applications", opts)
 	var result PageResponse[OAuthClient]
 	if err := a.get(ctx, path, &result); err != nil {
 		return nil, err
@@ -220,48 +220,12 @@ func (a *AdminClient) ListGroups(ctx context.Context, opts ListOptions) (*PageRe
 }
 
 // ─── Organization Memberships ─────────────────────────────────────────────────
-
-// AddOrgMember adds a user to an organization via the admin API.
-func (a *AdminClient) AddOrgMember(ctx context.Context, orgID string, req AddOrgMemberRequest) (*OrgMember, error) {
-	var result OrgMember
-	if err := a.post(ctx, fmt.Sprintf("/admin/orgs/%s/members", orgID), req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// GetOrgMember retrieves an organization membership by user ID via the admin API.
-func (a *AdminClient) GetOrgMember(ctx context.Context, orgID, userID string) (*OrgMember, error) {
-	var result OrgMember
-	if err := a.get(ctx, fmt.Sprintf("/admin/orgs/%s/members/%s", orgID, userID), &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// UpdateOrgMember updates an organization membership via the admin API.
-func (a *AdminClient) UpdateOrgMember(ctx context.Context, orgID, userID string, req UpdateOrgMemberRequest) (*OrgMember, error) {
-	var result OrgMember
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/orgs/%s/members/%s", orgID, userID), req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// RemoveOrgMember removes a user from an organization via the admin API.
-func (a *AdminClient) RemoveOrgMember(ctx context.Context, orgID, userID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/orgs/%s/members/%s", orgID, userID), nil, nil)
-}
-
-// ListOrgMembers lists members of an organization with optional cursor-based pagination.
-func (a *AdminClient) ListOrgMembers(ctx context.Context, orgID string, opts ListOptions) (*PageResponse[OrgMember], error) {
-	path := buildListPath(fmt.Sprintf("/admin/orgs/%s/members", orgID), opts)
-	var result PageResponse[OrgMember]
-	if err := a.get(ctx, path, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
+//
+// Removed. Hearth exposes no organization routes over HTTP at all: there is no
+// /admin/orgs, no /admin/orgs/{id}/members and no per-member route anywhere in
+// the router, so AddOrgMember, GetOrgMember, UpdateOrgMember, RemoveOrgMember
+// and ListOrgMembers every one 404'd (audit 2026-08-28 §25.19). Organization
+// membership is administered through the admin console, not the admin API.
 
 // buildListPath appends limit and cursor query parameters to base when provided.
 func buildListPath(base string, opts ListOptions) string {

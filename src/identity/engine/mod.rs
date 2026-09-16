@@ -610,14 +610,6 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard released before method returns; no .await in scope.
     mfa_dek_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
-    /// Used nonces for replay protection (when nonce enforcement is enabled).
-    ///
-    /// Maps nonce value to the timestamp it was first seen. Entries are swept
-    /// on every insertion: any nonce older than `authorization_code_ttl_secs`
-    /// is removed, bounding the set to at most one TTL window of activity.
-    ///
-    // INVARIANT: guard released before method returns; all callers are non-async helpers.
-    used_nonces: Mutex<HashMap<String, crate::core::Timestamp>>,
     /// Per-email magic link rate trackers.
     ///
     /// Limits the number of magic link requests per email per hour.
@@ -1219,7 +1211,6 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
-            used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
             // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
@@ -1780,7 +1771,6 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
-            used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
             // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
@@ -1958,10 +1948,11 @@ impl EmbeddedIdentityEngine {
     ///
     /// - System-realm scans — `sys:global:key`, `realm:key:*`,
     ///   `realm:retiring:*` and `realm:saml_key:*`.
-    /// - A realm walk — `agt:dpop:nonce-secret` and `mfa:dek:key`, which are
-    ///   written into each tenant realm's own namespace and therefore cannot
-    ///   be reached by a system-realm scan (audit 2026-08-28 §25.9). Two
-    ///   point reads per realm, not a scan of tenant data.
+    /// - A realm walk — `agt:dpop:nonce-secret`, `mfa:dek:key` and the audit
+    ///   chain's HMAC key, which are written into each tenant realm's own
+    ///   namespace and therefore cannot be reached by a system-realm scan
+    ///   (audit 2026-08-28 §25.9, §25.21). Three point reads per realm, not a
+    ///   scan of tenant data.
     ///
     /// Runs before `Self` exists, hence the `&Arc<dyn StorageEngine>`
     /// argument. A no-op when no KEK is configured or the store is already
@@ -2020,17 +2011,23 @@ impl EmbeddedIdentityEngine {
         // Per-realm key material. Unlike the signing keys these are written
         // into the tenant realm's own namespace, so a system-realm scan never
         // sees them and they stayed in plaintext forever once a KEK was
-        // switched on over an existing store (§25.9). Both are single,
-        // well-known keys, so this is two point reads per realm.
-        // Per-realm key material. Unlike the signing keys these are written
-        // into the tenant realm's own namespace, so a system-realm scan never
-        // sees them and they stayed in plaintext forever once a KEK was
-        // switched on over an existing store (§25.9). Both are single,
-        // well-known keys, so this is two point reads per realm.
+        // switched on over an existing store (§25.9, §25.21). Each is a
+        // single well-known key, so this is three point reads per realm.
+        //
+        // The audit chain HMAC key belongs here for the same reason the DPoP
+        // nonce secret does, and it is load-bearing: both audit read paths
+        // now use `unwrap_key_strict` (§25.21), so leaving a legacy plaintext
+        // chain key out of the sweep would make every append and every
+        // integrity verification fail on a store that enabled a KEK after the
+        // fact.
         let realms = storage
             .list_realms()
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-        let per_realm_keys = [keys::dpop_nonce_secret_key(), keys::mfa_dek_key()];
+        let per_realm_keys = [
+            keys::dpop_nonce_secret_key(),
+            keys::mfa_dek_key(),
+            crate::audit::keys::audit_hmac_key(),
+        ];
         for realm in &realms {
             for storage_key in &per_realm_keys {
                 let Some(raw) = storage
@@ -2419,6 +2416,35 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Checks whether the given user is currently MFA-rate-limited.
+    /// Refuses a second factor the realm's `mfa_methods` does not offer.
+    ///
+    /// `mfa_methods` is documented as restricting which factors may be
+    /// enrolled *and* presented, with an absent list meaning "all methods
+    /// allowed" (CONFIGURATION.md). Nothing read it that way: it was only
+    /// ever a positive trigger — inject an enrolment required-action, fire the
+    /// OIDC SMS interceptor — so a realm that listed `["webauthn"]` still let
+    /// every user enrol TOTP and log in with it (audit 2026-08-28 §4.18#10).
+    ///
+    /// A realm that cannot be loaded, or that sets no list, restricts nothing.
+    fn require_mfa_method(
+        &self,
+        realm_id: &RealmId,
+        method: &'static str,
+    ) -> Result<(), IdentityError> {
+        let Some(realm) = self.get_realm(realm_id)? else {
+            return Ok(());
+        };
+        let config = realm.config();
+        let Some(methods) = config.mfa_methods.as_ref() else {
+            return Ok(());
+        };
+        if methods.iter().any(|m| m == method) {
+            Ok(())
+        } else {
+            Err(IdentityError::MfaMethodNotAllowed { method })
+        }
+    }
+
     fn check_mfa_rate_limit(
         &self,
         realm_id: &RealmId,
@@ -3151,6 +3177,60 @@ impl EmbeddedIdentityEngine {
             .flatten()
             .and_then(|r| r.config().magic_link_ttl_micros)
             .unwrap_or(MAGIC_LINK_EXPIRY_MICROS)
+    }
+
+    /// Refuses just-in-time account creation when the realm's
+    /// [`RegistrationPolicy`] does not permit a new account for `email`.
+    ///
+    /// 22.24 (audit 2026-08-28 §4.24#11). Flows that mint an account as a side
+    /// effect of proving control of an email address — magic-link redemption
+    /// is the one that had no check at all — must respect the same policy
+    /// `register_user` enforces, or the policy is advisory.
+    ///
+    /// The mapping is the policy's plain reading, minus the arm that cannot
+    /// apply:
+    ///
+    /// * `Disabled` — no self-service account may appear. Refuse.
+    /// * `Open` — allow.
+    /// * `DomainRestricted` — allow only an address in an allowed domain.
+    /// * `InviteOnly` — an invitation token is the precondition, and these
+    ///   flows carry none. Refuse; the operator invites the user instead.
+    ///
+    /// The realm is re-read here rather than threaded in: this runs once, on
+    /// the account-creation branch only, well off any hot path.
+    fn require_jit_registration_allowed(
+        &self,
+        realm_id: &RealmId,
+        email: &str,
+    ) -> Result<(), IdentityError> {
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let policy = realm
+            .config()
+            .registration_policy
+            .clone()
+            .unwrap_or_default();
+        match &policy {
+            RegistrationPolicy::Open => Ok(()),
+            RegistrationPolicy::Disabled => Err(IdentityError::RegistrationDisabled),
+            RegistrationPolicy::InviteOnly => Err(IdentityError::RegistrationRequiresInvitation),
+            RegistrationPolicy::DomainRestricted(allowed) => {
+                let at = email
+                    .rfind('@')
+                    .ok_or_else(|| IdentityError::InvalidInput {
+                        reason: "email must contain '@'".to_string(),
+                    })?;
+                let domain = &email[at + 1..];
+                if allowed.iter().any(|d| d.eq_ignore_ascii_case(domain)) {
+                    Ok(())
+                } else {
+                    Err(IdentityError::RegistrationDomainNotAllowed {
+                        domain: domain.to_string(),
+                    })
+                }
+            }
+        }
     }
 
     /// Returns the timing-defence dummy hash used when no real credential is
@@ -7154,6 +7234,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        // Enforce `webauthn_required` on factor **use** too (audit 2026-08-28
+        // §4.18#3, task 25.26). Task 20.14 wired the key only into the
+        // enrolment interceptor (`inject_enroll_mfa_if_needed`), which asks
+        // whether the account *holds* a passkey. Once it did, the login could
+        // still be completed with TOTP, a recovery code or an OTP, so an
+        // operator who turned the key on after a phishing incident got a
+        // passkey sitting unused in the account and no phishing resistance on
+        // the wire. Only `MfaProof::ProvedWebAuthn` — a WebAuthn assertion
+        // that proved user verification — clears this.
+        if !context.mfa_proof.satisfies_webauthn_required() {
+            if let Ok(Some(realm)) = self.get_realm(realm_id) {
+                if realm.config().webauthn_required.unwrap_or(false) {
+                    return Err(IdentityError::MfaRequired);
+                }
+            }
+        }
+
         // Ensure the user exists and is permitted to start a session.
         // Unverified users must complete the email-verification flow first;
         // disabled users are blocked entirely (distinguished from
@@ -7255,14 +7352,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // Capture per-realm lifecycle timeouts once and embed them in the
         // session record so hot-path get_session avoids a realm lookup (A-18).
-        let (idle_timeout_secs, absolute_timeout_secs) =
+        //
+        // `session_ttl_micros` is captured in the same lookup (task 25.25). It
+        // is the landing field for `auth.session_ttl` and
+        // `realms.<name>.session_ttl`, both of which parsed, validated, reached
+        // `RealmConfig` — and were then never read: every session expired on
+        // the compiled-in 24 h `SessionConfig::default()`, which `main.rs` never
+        // overrides either. An operator who shortened a realm's session
+        // lifetime got a clean boot, a clean `config validate` and 24 h
+        // sessions. Widening the liveness registry to `auth.*` is what found it.
+        let (idle_timeout_secs, absolute_timeout_secs, realm_session_ttl_micros) =
             if let Ok(Some(realm)) = self.get_realm(realm_id) {
                 (
                     realm.config().idle_timeout_secs,
                     realm.config().absolute_timeout_secs,
+                    realm.config().session_ttl_micros,
                 )
             } else {
-                (None, None)
+                (None, None, None)
             };
 
         // Generate session
@@ -7274,7 +7381,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // storage keys, cookie encoding, and the wire shape are unchanged.
         let session_id = SessionId::new(crate::core::random_secret_uuid());
         let now = self.clock.now();
-        let expires_at = now.add_micros(self.config.session.ttl_micros);
+        // A realm's own `session_ttl` wins; the engine-wide default is the
+        // fallback. A non-positive stored value is ignored rather than honoured:
+        // it would expire the session before it was written.
+        let ttl_micros = realm_session_ttl_micros
+            .filter(|t| *t > 0)
+            .unwrap_or(self.config.session.ttl_micros);
+        let expires_at = now.add_micros(ttl_micros);
         let session = Session::new(
             session_id.clone(),
             user_id.clone(),
@@ -8051,6 +8164,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if claims.iat > claims.exp {
             return Err(IdentityError::InvalidToken);
         }
+        // RFC 7519 §4.1.5 — `nbf`. `TokenClaims::nbf` documents "the token
+        // MUST NOT be accepted before this time" and this validator did not
+        // implement it, so a token minted to become valid later was accepted
+        // the moment it was signed (audit 2026-08-28 §4.2#6, §4.19#10).
+        // Enforced here rather than withdrawn from the docs: it is one
+        // integer comparison on already-decoded claims — no allocation, no
+        // syscall, no lock, no yield — so the hot-path budget is unchanged.
+        if let Some(nbf) = claims.nbf {
+            if now_secs < nbf - CLOCK_SKEW_SECS {
+                return Err(IdentityError::InvalidToken);
+            }
+        }
 
         // Zero-alloc realm binding check: parse tid as a RealmId (stack-only
         // Uuid parse, no heap) and compare against the caller's realm_id.
@@ -8524,6 +8649,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        // The realm must offer TOTP (audit 2026-08-28 §4.18#10).
+        self.require_mfa_method(realm_id, "totp")?;
         // Ensure user exists
         let user = self
             .get_user(realm_id, user_id)?
@@ -8584,6 +8711,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        self.require_mfa_method(realm_id, "totp")?;
+
+        // Activation guesses a live TOTP code exactly as `verify_totp` does,
+        // so it gets the same budget. Without it the forced-enrolment
+        // activation route was an unthrottled oracle against a pending secret
+        // (audit 2026-08-28 §4.18#7). Same mechanism, same counters: a burst
+        // spent here also throttles the challenge form.
+        self.check_mfa_rate_limit(realm_id, user_id)?;
 
         // Activation is the same read-modify-write on the MFA state record that
         // redemption is, so it takes the same per-user lock: two concurrent
@@ -8625,6 +8760,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             state.recovery_code_hashes = recovery_hashes;
             state.pending_recovery_codes = None;
             self.save_mfa_state(realm_id, user_id, &state)?;
+            self.clear_mfa_attempts(realm_id, user_id);
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -8637,6 +8773,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )?;
             Ok(())
         } else {
+            self.record_mfa_failed_attempt(realm_id, user_id);
+            self.emit_mfa_failed_audit(realm_id, user_id, "totp_enrollment");
             Err(IdentityError::InvalidMfaCode)
         }
     }
@@ -8648,6 +8786,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         code: &str,
     ) -> Result<(), IdentityError> {
+        // A factor the realm no longer offers may not be presented
+        // (audit 2026-08-28 §4.18#10).
+        self.require_mfa_method(realm_id, "totp")?;
+
         // Rate limit check
         self.check_mfa_rate_limit(realm_id, user_id)?;
 
@@ -8703,6 +8845,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         code: &str,
     ) -> Result<(), IdentityError> {
+        // Recovery codes are TOTP's fallback, so they follow TOTP's
+        // availability (audit 2026-08-28 §4.18#10).
+        self.require_mfa_method(realm_id, "totp")?;
+
         // Rate limit check — same budget as TOTP to prevent recovery-code brute-force.
         self.check_mfa_rate_limit(realm_id, user_id)?;
 
@@ -8924,6 +9070,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         options: &RegistrationOptions,
     ) -> Result<Vec<u8>, IdentityError> {
+        // The realm must offer passkeys (audit 2026-08-28 §4.18#10).
+        self.require_mfa_method(realm_id, "webauthn")?;
         // Ensure user exists
         self.get_user(realm_id, user_id)?
             .ok_or(IdentityError::UserNotFound)?;
@@ -8959,6 +9107,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        self.require_mfa_method(realm_id, "webauthn")?;
         // Extract challenge from clientDataJSON to look up pending
         let client_data: serde_json::Value =
             serde_json::from_slice(client_data_json).map_err(|e| {
@@ -9070,6 +9219,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: Option<&UserId>,
         options: &AuthenticationOptions,
     ) -> Result<Vec<u8>, IdentityError> {
+        // Deliberately NOT gated on `mfa_methods`. The same ceremony serves
+        // passwordless passkey *login*, which is governed by
+        // `allowed_auth_methods` — gating it here would make
+        // `mfa_methods: ["totp"]` silently disable passkey sign-in, a policy
+        // the operator expressed through a different key. `mfa_methods`
+        // restricts which factors may be enrolled, and which second-factor
+        // challenges a login offers (audit 2026-08-28 §4.18#10).
         // If user_id provided, verify user exists
         if let Some(uid) = user_id {
             self.get_user(realm_id, uid)?
@@ -9100,6 +9256,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         params: &CompleteAuthenticationParams<'_>,
     ) -> Result<WebAuthnAuthResult, IdentityError> {
+        // See `start_webauthn_authentication`: this ceremony is also the
+        // passwordless login path, so `allowed_auth_methods` governs it, not
+        // `mfa_methods` (audit 2026-08-28 §4.18#10).
         let credential_id = params.credential_id;
         let client_data_json = params.client_data_json;
         let authenticator_data = params.authenticator_data;
@@ -9489,7 +9648,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 })?;
             Ok(UserId::new(uuid))
         } else {
-            // Email not registered at request time — create user now
+            // Email not registered at request time — create the user now, but
+            // only if the realm's registration policy actually allows a new
+            // account to appear (22.24, audit 2026-08-28 §4.24#11). This branch
+            // used to call `create_user` unconditionally, so a magic link was a
+            // complete bypass of `registration_policy`: a realm set to
+            // `disabled` or `invite_only` still grew an account for any address
+            // that could receive one link.
+            self.require_jit_registration_allowed(realm_id, &stored.email)?;
             let request = crate::identity::types::CreateUserRequest {
                 email: stored.email.clone(),
                 display_name: stored.email.clone(),
@@ -14484,6 +14650,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<String, IdentityError> {
         use crate::identity::sms::otp::{self as otp_mod, StoredResendCount};
 
+        // 0. The realm must offer SMS as a factor (audit 2026-08-28 §4.18#10).
+        self.require_mfa_method(realm_id, "sms")?;
+
         // 1. Per-phone resend throttle check.
         let resend_suffix = otp_mod::phone_resend_key_suffix(phone);
         let resend_key = keys::encode_sms_resend_count(&resend_suffix);
@@ -14565,6 +14734,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         use crate::identity::sms::otp::StoredOtp;
 
+        self.require_mfa_method(realm_id, "sms")?;
         let otp_key = keys::encode_sms_pending_otp(nonce);
 
         // 0. Single-use under concurrency: hold the per-nonce lock across the
@@ -14645,6 +14815,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS,
         };
 
+        // The realm must offer email OTP (audit 2026-08-28 §4.18#10).
+        self.require_mfa_method(realm_id, "email_otp")?;
+
         let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
             Ok(Some(realm)) => {
                 let cfg = realm.config();
@@ -14689,6 +14862,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         use crate::identity::sms::otp::StoredOtp;
 
+        self.require_mfa_method(realm_id, "email_otp")?;
         let otp_key = keys::encode_email_pending_otp(nonce);
 
         // Single-use under concurrency: hold the per-nonce lock across the
@@ -17245,6 +17419,311 @@ mod tests {
             .expect("a fast_for_testing engine must not enforce the production floor");
     }
 
+    // ----- 22.25: client-authentication timing parity (§4.25#3) -----
+    //
+    // Measured by COUNTING Argon2 verifications, never by wall clock. The
+    // property is structural: how much hashing happens must depend only on
+    // whether the caller presented a secret, never on whether the client
+    // exists or what type it is.
+
+    /// Registers a confidential client (one with a stored secret hash).
+    fn register_confidential_client(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+        secret: &str,
+    ) -> OAuthClient {
+        engine
+            .register_client(
+                realm,
+                &RegisterClientRequest {
+                    client_name: "Confidential App".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: Some(secret.to_string()),
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: true,
+                    client_logo_url: None,
+                    ..Default::default()
+                },
+            )
+            .expect("register confidential client")
+    }
+
+    /// Runs `f` and returns how many hash verifications it performed.
+    fn hashes_during(f: impl FnOnce()) -> u64 {
+        let before = credentials::hash_verification_count();
+        f();
+        credentials::hash_verification_count() - before
+    }
+
+    /// The defect: an unknown `client_id` returned before any hashing while a
+    /// registered confidential client paid for one Argon2id verification, so
+    /// response time over an unauthenticated endpoint said whether the client
+    /// existed.
+    #[test]
+    fn unknown_and_registered_clients_hash_the_same_number_of_times() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let known = register_confidential_client(&engine, &realm, "the-real-secret");
+        let unknown = ClientId::generate();
+
+        let known_hashes = hashes_during(|| {
+            let r = engine.authenticate_client(&realm, known.client_id(), Some("wrong-secret"));
+            assert!(r.is_err(), "wrong secret must fail");
+        });
+        let unknown_hashes = hashes_during(|| {
+            let r = engine.authenticate_client(&realm, &unknown, Some("wrong-secret"));
+            assert!(r.is_err(), "unknown client must fail");
+        });
+
+        assert_eq!(known_hashes, 1, "a presented secret costs one verification");
+        assert_eq!(
+            unknown_hashes, known_hashes,
+            "an unregistered client_id must cost the same hashing work as a              registered one, or response time enumerates clients"
+        );
+    }
+
+    /// A public client (no stored secret) must not be distinguishable from a
+    /// confidential one by how long a presented secret takes to reject.
+    #[test]
+    fn public_and_confidential_clients_hash_the_same_number_of_times() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let public = register_test_client(&engine, &realm); // client_secret: None
+        let confidential = register_confidential_client(&engine, &realm, "s3cret");
+
+        let public_hashes = hashes_during(|| {
+            drop(engine.authenticate_client(&realm, public.client_id(), Some("x")))
+        });
+        let conf_hashes = hashes_during(|| {
+            drop(engine.authenticate_client(&realm, confidential.client_id(), Some("x")));
+        });
+
+        assert_eq!(
+            public_hashes, conf_hashes,
+            "client type must not be readable from hashing work"
+        );
+        assert_eq!(public_hashes, 1);
+    }
+
+    /// The other half of the rule: presenting no secret costs no hashing on
+    /// any arm, so the public-client token path stays off Argon2id.
+    #[test]
+    fn omitting_the_secret_costs_no_hashing_on_any_arm() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let public = register_test_client(&engine, &realm);
+        let confidential = register_confidential_client(&engine, &realm, "s3cret");
+        let unknown = ClientId::generate();
+
+        for (label, id) in [
+            ("public", public.client_id()),
+            ("confidential", confidential.client_id()),
+            ("unknown", &unknown),
+        ] {
+            let n = hashes_during(|| drop(engine.authenticate_client(&realm, id, None)));
+            assert_eq!(n, 0, "{label}: no secret presented must cost no hashing");
+        }
+    }
+
+    /// The dummy hash used on the no-stored-hash arms costs what the realm's
+    /// real client secrets cost — otherwise the parity is only in the count.
+    #[test]
+    fn client_auth_dummy_hash_uses_the_realms_argon2_parameters() {
+        let (_dir, engine, _clock) = setup_engine();
+        let tuned = realm_with_argon2(&engine, 2048, 3);
+        let (m, t, _p) = argon2_params_of(&engine.dummy_hash_for_realm(&tuned));
+        assert_eq!((m, t), (2048, 3));
+    }
+
+    /// Correct credentials still authenticate, and wrong ones still do not —
+    /// the equalisation must not have loosened the decision.
+    #[test]
+    fn equalised_client_auth_still_decides_correctly() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_confidential_client(&engine, &realm, "correct-horse");
+        let public = register_test_client(&engine, &realm);
+        let unknown = ClientId::generate();
+
+        assert!(engine
+            .authenticate_client(&realm, client.client_id(), Some("correct-horse"))
+            .is_ok());
+        assert!(matches!(
+            engine.authenticate_client(&realm, client.client_id(), Some("wrong")),
+            Err(IdentityError::InvalidClientSecret)
+        ));
+        assert!(matches!(
+            engine.authenticate_client(&realm, client.client_id(), None),
+            Err(IdentityError::InvalidClientSecret)
+        ));
+        assert!(matches!(
+            engine.authenticate_client(&realm, &unknown, Some("anything")),
+            Err(IdentityError::InvalidClientSecret)
+        ));
+        assert!(matches!(
+            engine.authenticate_client(&realm, &unknown, None),
+            Err(IdentityError::InvalidClientSecret)
+        ));
+        // Public client: client_id alone suffices, and a stray secret is
+        // ignored exactly as before.
+        assert!(engine
+            .authenticate_client(&realm, public.client_id(), None)
+            .is_ok());
+        assert!(engine
+            .authenticate_client(&realm, public.client_id(), Some("stray"))
+            .is_ok());
+    }
+
+    // ----- 22.24: magic-link redemption honours registration_policy -----
+
+    /// Creates a realm whose `registration_policy` is `policy`.
+    fn realm_with_registration_policy(
+        engine: &EmbeddedIdentityEngine,
+        policy: RegistrationPolicy,
+    ) -> RealmId {
+        engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("reg-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    registration_policy: Some(policy),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone()
+    }
+
+    /// Requests a magic link for an address with no account and returns the
+    /// raw token.
+    fn magic_link_for_unknown_address(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+        email: &str,
+    ) -> String {
+        engine
+            .request_magic_link(realm, email)
+            .expect("request magic link")
+            .token()
+            .to_string()
+    }
+
+    /// The defect (§4.24#11): redeeming a magic link for an unknown address
+    /// created an account with no policy check at all, so a realm set to
+    /// `disabled` still grew accounts for anyone who could receive a link.
+    #[test]
+    fn magic_link_does_not_create_an_account_when_registration_is_disabled() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = realm_with_registration_policy(&engine, RegistrationPolicy::Disabled);
+        let email = "stranger@example.com";
+        let token = magic_link_for_unknown_address(&engine, &realm, email);
+
+        assert!(
+            matches!(
+                engine.validate_magic_link(&realm, &token),
+                Err(IdentityError::RegistrationDisabled)
+            ),
+            "a disabled realm must not gain an account through a magic link"
+        );
+        assert!(
+            engine
+                .get_user_by_email(&realm, email)
+                .expect("lookup")
+                .is_none(),
+            "no user may have been created"
+        );
+    }
+
+    /// `invite_only` carries no invitation token through a magic link, so the
+    /// account must not appear either.
+    #[test]
+    fn magic_link_does_not_create_an_account_under_invite_only() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = realm_with_registration_policy(&engine, RegistrationPolicy::InviteOnly);
+        let email = "stranger@example.com";
+        let token = magic_link_for_unknown_address(&engine, &realm, email);
+
+        assert!(matches!(
+            engine.validate_magic_link(&realm, &token),
+            Err(IdentityError::RegistrationRequiresInvitation)
+        ));
+        assert!(engine
+            .get_user_by_email(&realm, email)
+            .expect("lookup")
+            .is_none());
+    }
+
+    /// `domain_restricted` admits an allowed domain and refuses the rest.
+    #[test]
+    fn magic_link_respects_domain_restriction() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = realm_with_registration_policy(
+            &engine,
+            RegistrationPolicy::DomainRestricted(vec!["allowed.example".to_string()]),
+        );
+
+        let denied = "nope@blocked.example";
+        let denied_token = magic_link_for_unknown_address(&engine, &realm, denied);
+        assert!(matches!(
+            engine.validate_magic_link(&realm, &denied_token),
+            Err(IdentityError::RegistrationDomainNotAllowed { .. })
+        ));
+        assert!(engine
+            .get_user_by_email(&realm, denied)
+            .expect("lookup")
+            .is_none());
+
+        let allowed = "yes@allowed.example";
+        let allowed_token = magic_link_for_unknown_address(&engine, &realm, allowed);
+        engine
+            .validate_magic_link(&realm, &allowed_token)
+            .expect("an allowed domain must still provision");
+        assert!(engine
+            .get_user_by_email(&realm, allowed)
+            .expect("lookup")
+            .is_some());
+    }
+
+    /// `open` keeps the documented just-in-time behaviour.
+    #[test]
+    fn magic_link_still_provisions_under_an_open_policy() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = realm_with_registration_policy(&engine, RegistrationPolicy::Open);
+        let email = "newcomer@example.com";
+        let token = magic_link_for_unknown_address(&engine, &realm, email);
+
+        let user_id = engine
+            .validate_magic_link(&realm, &token)
+            .expect("open realm must provision");
+        let user = engine
+            .get_user_by_email(&realm, email)
+            .expect("lookup")
+            .expect("user exists");
+        assert_eq!(user.id(), &user_id);
+    }
+
+    /// An *existing* user's magic link is unaffected by the policy — the
+    /// policy governs account creation, not sign-in.
+    #[test]
+    fn magic_link_for_an_existing_user_ignores_the_registration_policy() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = realm_with_registration_policy(&engine, RegistrationPolicy::Disabled);
+        let user = create_test_user(&engine, &realm);
+        let email = user.email().to_string();
+        let token = engine
+            .request_magic_link(&realm, &email)
+            .expect("request magic link")
+            .token()
+            .to_string();
+
+        assert_eq!(
+            engine
+                .validate_magic_link(&realm, &token)
+                .expect("existing user must still sign in"),
+            *user.id()
+        );
+    }
+
     // ----- 19.9 -----
 
     #[test]
@@ -19417,11 +19896,10 @@ mod tests {
             assert!(engine.authorize(&realm, &req).is_ok());
         }
 
-        // Batch A nonces are present.
-        {
-            let nonces = engine.used_nonces.lock().expect("nonce lock");
-            assert_eq!(nonces.len(), 5, "5 nonces after batch A");
-        }
+        // Batch A nonces are present — in *storage*, not a process-local map.
+        // 22.21: the sentinel must be a replicated row, or a replay simply
+        // moves to another node.
+        assert_eq!(count_nonce_sentinels(&engine, &realm), 5, "5 after batch A");
 
         // Advance past TTL — batch A nonces are now stale.
         clock.advance(ttl_micros);
@@ -19447,16 +19925,38 @@ mod tests {
             assert!(engine.authorize(&realm, &req).is_ok());
         }
 
-        // Only batch B nonces remain; batch A was evicted.
-        {
-            let nonces = engine.used_nonces.lock().expect("nonce lock");
-            assert_eq!(
-                nonces.len(),
-                3,
-                "set must contain only batch B nonces after TTL sweep, got {}",
-                nonces.len()
-            );
-        }
+        // 22.21: `/authorize` does NOT sweep. The old implementation ran a
+        // full `retain` over the whole set under a global mutex on every
+        // single authorization request; reclamation belongs to the periodic
+        // cleanup pass, so all 8 rows are still here.
+        assert_eq!(
+            count_nonce_sentinels(&engine, &realm),
+            8,
+            "authorize must not sweep the nonce store on the request path"
+        );
+
+        // The periodic sweep is what reclaims batch A.
+        let now_secs = clock.now().as_micros() / 1_000_000;
+        let deleted =
+            crate::identity::cleanup::sweep_oidc_nonces(&realm, engine.storage.as_ref(), now_secs)
+                .expect("sweep");
+        assert_eq!(deleted, 5, "sweep must reclaim exactly the expired batch A");
+        assert_eq!(
+            count_nonce_sentinels(&engine, &realm),
+            3,
+            "only batch B nonces survive the sweep"
+        );
+    }
+
+    /// Counts live `oauth:nonce:` replay sentinels in a realm.
+    fn count_nonce_sentinels(engine: &EmbeddedIdentityEngine, realm: &RealmId) -> usize {
+        let prefix = keys::oidc_nonce_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        engine
+            .storage
+            .scan(realm, &prefix, &end)
+            .expect("scan nonce sentinels")
+            .len()
     }
 
     // ===== Session simulation tests — see simulation/ crate =====
@@ -22414,6 +22914,223 @@ mod tests {
         assert!(
             !response.active,
             "forged token introspection must return inactive"
+        );
+    }
+
+    // =====================================================================
+    // 18.3 (audit 2026-08-28 §4.2#6, §4.19#10) — `TokenClaims::nbf`.
+    //
+    // The field documents "the token MUST NOT be accepted before this time"
+    // and no token-accepting path read it, so a realm-signed token minted to
+    // become valid in an hour authorized the moment it was signed. The claim
+    // is enforced rather than withdrawn: it is one integer comparison on
+    // already-decoded claims, which costs the hot path nothing.
+    // =====================================================================
+
+    /// Re-signs `base` with the realm's own signing key, so the resulting
+    /// token differs from a genuine one only in the claims the caller changed.
+    fn resign_for_realm(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+    ) -> String {
+        let key = engine
+            .get_or_load_realm_signing_key(realm_id)
+            .expect("realm signing key");
+        key.issue_token(claims).expect("re-issue token")
+    }
+
+    /// Mints a realm-signed access token whose `nbf` is `offset_secs` away
+    /// from the engine's current time, and returns it with a control token
+    /// carrying the identical claims minus the `nbf`.
+    fn nbf_token_pair(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        session_id: &SessionId,
+        offset_secs: i64,
+    ) -> (String, String) {
+        let tokens = engine
+            .issue_tokens(realm_id, user_id, session_id)
+            .expect("issue tokens");
+        let base = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        let now_secs = engine.clock.now().as_micros() / 1_000_000;
+        let control = resign_for_realm(engine, realm_id, &base);
+        let with_nbf = TokenClaims {
+            nbf: Some(now_secs + offset_secs),
+            ..base
+        };
+        (control, resign_for_realm(engine, realm_id, &with_nbf))
+    }
+
+    #[test]
+    fn validate_token_rejects_a_token_that_is_not_yet_valid() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let (control, not_yet) = nbf_token_pair(&engine, &realm_id, user.id(), session.id(), 3600);
+
+        // Control first: the same claims re-signed without an `nbf` validate,
+        // so the rejection below is the `nbf` and not the re-signing.
+        engine
+            .validate_token(&realm_id, &control)
+            .expect("a re-signed token with no nbf must still validate");
+
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &not_yet),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a token whose nbf is an hour away must not be accepted yet"
+        );
+    }
+
+    /// The tolerance is the same `CLOCK_SKEW_SECS` the `iat` check uses: an
+    /// `nbf` a few seconds ahead is NTP drift, not a future-dated token.
+    #[test]
+    fn validate_token_accepts_nbf_within_clock_skew() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let (_control, barely_ahead) = nbf_token_pair(
+            &engine,
+            &realm_id,
+            user.id(),
+            session.id(),
+            CLOCK_SKEW_SECS - 1,
+        );
+
+        engine
+            .validate_token(&realm_id, &barely_ahead)
+            .expect("an nbf inside the clock-skew window must be accepted");
+    }
+
+    /// Introspection is a token-accepting path too: RFC 7662 `active` must be
+    /// false for a token that has not yet become valid.
+    #[test]
+    fn introspection_reports_a_not_yet_valid_token_inactive() {
+        use crate::identity::oidc::TokenIntrospectionRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let (control, not_yet) = nbf_token_pair(&engine, &realm_id, user.id(), session.id(), 3600);
+
+        let introspect = |token: &str| {
+            engine
+                .introspect_token(
+                    &realm_id,
+                    &TokenIntrospectionRequest {
+                        token: token.to_string(),
+                        token_type_hint: Some("access_token".to_string()),
+                        introspecting_client_id: None,
+                    },
+                )
+                .expect("introspection")
+                .active
+        };
+
+        assert!(
+            introspect(&control),
+            "control token must introspect active, or the assertion below is vacuous"
+        );
+        assert!(
+            !introspect(&not_yet),
+            "a token whose nbf has not arrived must introspect inactive"
+        );
+    }
+
+    /// The authorization decision endpoint is the third acceptance path.
+    #[test]
+    fn decide_refuses_a_not_yet_valid_token() {
+        use crate::identity::oidc::DecidePermissionRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let tokens = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        // `decide` resolves permissions through the RBAC engine; it does NOT
+        // read the token's `permissions` claim. Injecting one into the claims
+        // therefore leaves the control `false` and the test vacuous, so grant
+        // the permission for real.
+        let role = engine
+            .rbac
+            .create_role(
+                &realm_id,
+                &crate::rbac::CreateRoleRequest {
+                    name: "nbf-decide-role".to_string(),
+                    description: None,
+                    permissions: vec![
+                        crate::rbac::Permission::new("docs.read").expect("valid permission")
+                    ],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("create role");
+        engine
+            .rbac
+            .assign_role(
+                &realm_id,
+                &crate::rbac::AssignRoleRequest {
+                    subject: crate::rbac::Subject::User(user.id().clone()),
+                    role_id: role.id.clone(),
+                    scope: crate::rbac::Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign role");
+
+        let base = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        let now_secs = engine.clock.now().as_micros() / 1_000_000;
+        let permitted = base;
+        let control = resign_for_realm(&engine, &realm_id, &permitted);
+        let not_yet = resign_for_realm(
+            &engine,
+            &realm_id,
+            &TokenClaims {
+                nbf: Some(now_secs + 3600),
+                ..permitted
+            },
+        );
+
+        let decide = |token: &str| {
+            engine
+                .decide_token_permission(
+                    &realm_id,
+                    &DecidePermissionRequest {
+                        token: token.to_string(),
+                        permission: "docs.read".to_string(),
+                        organization_id: None,
+                        resource: None,
+                    },
+                )
+                .expect("decide")
+                .allowed
+        };
+
+        assert!(
+            decide(&control),
+            "control token must be allowed, or the assertion below is vacuous"
+        );
+        assert!(
+            !decide(&not_yet),
+            "a token whose nbf has not arrived must not authorize"
         );
     }
 

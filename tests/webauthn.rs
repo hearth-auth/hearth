@@ -1785,3 +1785,244 @@ async fn authentication_challenge_is_refused_at_a_registration_redemption() {
         creds.len()
     );
 }
+
+// ============================================================================
+// §4.18#3 / task 25.26 — `webauthn_required` must gate factor USE
+//
+// `realms.<name>.auth.webauthn_required` was enforced only at enrolment: the
+// user had to possess a passkey, after which any second factor — a TOTP code,
+// a recovery code, an OTP — satisfied the login. An operator who turns the key
+// on after a phishing incident is asking for a phishing-resistant factor on
+// every ceremony, not for a passkey to sit unused in the account.
+// ============================================================================
+
+/// A realm that demands a passkey, and a user who owns one.
+///
+/// Returns the realm, the activated user and the authenticator holding the
+/// registered credential. The passkey is registered, so the enrolment-time
+/// gate (`inject_enroll_mfa_if_needed`) is satisfied and only the use-time
+/// gate can refuse anything.
+fn realm_requiring_webauthn_with_enrolled_user(
+    harness: &common::TestHarness,
+    webauthn_required: Option<bool>,
+) -> (RealmId, User, webauthn_helper::TestAuthenticator) {
+    let realm_id = create_realm_with_config(
+        harness,
+        hearth::identity::RealmConfig {
+            mfa_required: Some(true),
+            webauthn_required,
+            ..hearth::identity::RealmConfig::default()
+        },
+    );
+    let user = create_user(harness, &realm_id);
+    harness
+        .identity()
+        .update_user(
+            &realm_id,
+            user.id(),
+            &hearth::identity::UpdateUserRequest {
+                status: Some(hearth::identity::UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate user");
+    let authenticator = register_discoverable(
+        harness,
+        &realm_id,
+        &user,
+        "example.com",
+        "http://example.com",
+        true,
+    );
+    (realm_id, user, authenticator)
+}
+
+/// The defect: the account holds a passkey, so enrolment is satisfied, and the
+/// login is then completed with TOTP. `MfaProof::Proved` is exactly what the
+/// `/ui/mfa-challenge` handler and the step-up MFA grant set after a TOTP or a
+/// recovery code. A realm that set `webauthn_required` must refuse it.
+#[tokio::test]
+async fn webauthn_required_refuses_a_totp_second_factor() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let (realm_id, user, _authenticator) =
+        realm_requiring_webauthn_with_enrolled_user(&harness, Some(true));
+
+    let err = harness
+        .identity()
+        .create_session(
+            &realm_id,
+            user.id(),
+            &hearth::identity::SessionContext {
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..hearth::identity::SessionContext::default()
+            },
+        )
+        .expect_err("a non-WebAuthn factor must not satisfy webauthn_required");
+    assert!(
+        matches!(err, IdentityError::MfaRequired),
+        "expected MfaRequired for a TOTP second factor under webauthn_required, got: {err}"
+    );
+}
+
+/// The counterpart: the same realm and the same user, completing with a
+/// WebAuthn assertion that proved user verification. Without this the guard
+/// above could pass by refusing every login.
+#[tokio::test]
+async fn webauthn_required_accepts_a_webauthn_assertion() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let (realm_id, user, _authenticator) =
+        realm_requiring_webauthn_with_enrolled_user(&harness, Some(true));
+
+    let session = harness
+        .identity()
+        .create_session(
+            &realm_id,
+            user.id(),
+            &hearth::identity::SessionContext {
+                mfa_proof: hearth::identity::MfaProof::ProvedWebAuthn,
+                ..hearth::identity::SessionContext::default()
+            },
+        )
+        .expect("a user-verified WebAuthn assertion satisfies webauthn_required");
+    assert_eq!(
+        session.user_id(),
+        user.id(),
+        "session must be bound to the authenticating user"
+    );
+}
+
+/// The control: the realm still requires MFA but never asked for a passkey,
+/// so TOTP remains a valid second factor. Proves the new guard is not a
+/// blanket ban on non-WebAuthn factors.
+#[tokio::test]
+async fn a_realm_without_webauthn_required_still_accepts_totp() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let (realm_id, user, _authenticator) =
+        realm_requiring_webauthn_with_enrolled_user(&harness, None);
+
+    let session = harness
+        .identity()
+        .create_session(
+            &realm_id,
+            user.id(),
+            &hearth::identity::SessionContext {
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..hearth::identity::SessionContext::default()
+            },
+        )
+        .expect("TOTP still satisfies a realm that did not ask for a passkey");
+    assert_eq!(session.user_id(), user.id());
+}
+
+/// Drives the browser passkey login to completion and returns the
+/// `Set-Cookie` values plus the response body.
+async fn passkey_browser_login(
+    app: &axum::Router,
+    realm_name: &str,
+    user: &User,
+    authenticator: &webauthn_helper::TestAuthenticator,
+) -> (Vec<String>, String) {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use tower::ServiceExt as _;
+
+    let origin = "http://example.com";
+    let begin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/realms/{realm_name}/login/passkey-begin"))
+                .header("host", "example.com")
+                .body(Body::empty())
+                .expect("build begin request"),
+        )
+        .await
+        .expect("begin response");
+    assert_eq!(begin.status(), StatusCode::OK, "passkey-begin must succeed");
+    let begin_bytes = axum::body::to_bytes(begin.into_body(), 64 * 1024)
+        .await
+        .expect("read begin body");
+    let begin_json: serde_json::Value =
+        serde_json::from_slice(&begin_bytes).expect("begin body is JSON");
+    let challenge = URL_SAFE_NO_PAD
+        .decode(begin_json["challenge"].as_str().expect("challenge"))
+        .expect("challenge is base64url");
+
+    let (cdj, auth_data, sig, _) = authenticator.build_verified_authentication_response(
+        &challenge,
+        origin,
+        1,
+        Some(&user.id().as_uuid().to_string()),
+    );
+    let body = serde_json::json!({
+        "credential_id": URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
+        "client_data_json": URL_SAFE_NO_PAD.encode(&cdj),
+        "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_data),
+        "signature": URL_SAFE_NO_PAD.encode(&sig),
+        "user_handle": URL_SAFE_NO_PAD.encode(user.id().as_uuid().to_string().as_bytes()),
+    });
+    let complete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/realms/{realm_name}/login/passkey-complete"))
+                .header("host", "example.com")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build complete request"),
+        )
+        .await
+        .expect("complete response");
+
+    let cookies: Vec<String> = complete
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_string)
+        .collect();
+    let body_bytes = axum::body::to_bytes(complete.into_body(), 64 * 1024)
+        .await
+        .expect("read complete body");
+    (cookies, String::from_utf8_lossy(&body_bytes).into_owned())
+}
+
+/// End to end through the browser router: the passkey handler must label the
+/// ceremony `ProvedWebAuthn`, not the generic `Proved`, or the realm's own
+/// `webauthn_required` gate locks out the very factor it demands.
+#[tokio::test]
+async fn webauthn_required_realm_issues_a_session_for_a_passkey_login() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let (realm_id, user, authenticator) =
+        realm_requiring_webauthn_with_enrolled_user(&harness, Some(true));
+    let realm_name = harness
+        .identity()
+        .get_realm(&realm_id)
+        .expect("get realm")
+        .expect("realm exists")
+        .name()
+        .to_string();
+    let app = build_web_app(&harness);
+    let (cookies, body_text) =
+        passkey_browser_login(&app, &realm_name, &user, &authenticator).await;
+
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("hearth_ui_session=") && !c.starts_with("hearth_ui_session=;")),
+        "a user-verified passkey must open a session on a webauthn_required realm: \
+         cookies={cookies:?} body={body_text}"
+    );
+}

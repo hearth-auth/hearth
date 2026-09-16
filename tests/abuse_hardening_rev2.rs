@@ -133,6 +133,7 @@ fn make_id_token_claims(
     IdTokenClaims {
         iss: iss.to_string(),
         aud: Some(serde_json::Value::String(aud.to_string())),
+        azp: None,
         sub: "u1".to_string(),
         exp,
         nbf,

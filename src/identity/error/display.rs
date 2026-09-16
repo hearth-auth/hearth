@@ -164,6 +164,9 @@ impl fmt::Display for IdentityError {
                 f,
                 "authentication method '{method}' is not permitted by realm policy"
             ),
+            Self::MfaMethodNotAllowed { method } => {
+                write!(f, "MFA method '{method}' is not offered by this realm")
+            }
             Self::WebhookNotFound => write!(f, "webhook not found"),
             Self::PasswordCompromised => {
                 write!(f, "password has appeared in a known data breach")

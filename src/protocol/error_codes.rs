@@ -98,6 +98,8 @@ pub const PASSWORD_REUSED: &str = "HEARTH_PASSWORD_REUSED";
 pub const PASSWORD_COMPROMISED: &str = "HEARTH_PASSWORD_COMPROMISED";
 /// Authentication method is not permitted by realm policy.
 pub const AUTH_METHOD_NOT_ALLOWED: &str = "HEARTH_AUTH_METHOD_NOT_ALLOWED";
+/// Second factor is not listed in the realm's `auth.mfa_methods`.
+pub const MFA_METHOD_NOT_ALLOWED: &str = "HEARTH_MFA_METHOD_NOT_ALLOWED";
 
 // ── Resource not found ────────────────────────────────────────────────────────
 

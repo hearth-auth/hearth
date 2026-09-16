@@ -355,7 +355,7 @@ Global UI and email branding. Controls the product name, logo, and visual theme 
 | `product_name` | string | `"Hearth"` | Shown in logo alt text, page titles, and email subjects. |
 | `logo_url` | string | built-in Hearth SVG | Logo image URL. Can be a remote URL (used directly in `<img>`) or a local file path (read at startup, served at `/ui/static/custom-logo`). Supported formats: SVG, PNG, JPEG. |
 | `theme` | string | `"ember"` | Named UI theme. See [Themes](#themes) below. |
-| `custom_css` | string | — | Path to a CSS file appended after the named theme. Use this to override `--ht-*` CSS variables without forking a theme. Read once at startup. |
+| `custom_css` | string | — | Path to a CSS file appended after the named theme. Use this to override `--ht-*` CSS variables without forking a theme. Read once at startup. **Validated:** must be a regular file whose name ends in `.css`, at most 256 KiB, valid UTF-8, and recognisable as CSS (a declaration block, no control characters, no markup). Its bytes are served to unauthenticated clients at `GET /ui/static/theme.css`, so a file that fails any of these is refused at startup rather than published. |
 
 #### Themes
 
@@ -563,8 +563,9 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
 | `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
 | `mfa_required` | bool | `false` | Whether MFA is required for all users. Per-realm `auth.mfa_required` overrides. |
+| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. See the per-realm key for what restriction means. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
-| `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action. A TOTP secret does **not** satisfy it. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
+| `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
 | `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
 | `webauthn_user_verification` | string | — | Global default `userVerification` preference: `"required"`, `"preferred"` or `"discouraged"`. `"required"` is what makes a passkey a genuine second factor. Per-realm `realms.<name>.auth.webauthn_user_verification` overrides. |
 
@@ -1277,7 +1278,7 @@ realms:
 | Field | Type | Description |
 |-------|------|-------------|
 | `theme` | string | Named theme override for this realm's UI sessions. |
-| `custom_css` | string | Path to a CSS file for this realm's UI sessions. |
+| `custom_css` | string | Path to a CSS file for this realm's UI sessions. Same validation as `branding.custom_css`; served at `GET /ui/static/realm-theme/{realm_id}`. |
 
 ### `realms.<name>.auth`
 
@@ -1287,9 +1288,9 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `mfa_required` | bool | `false` | Whether MFA is required for all users in this realm. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
-| `mfa_methods` | list | — | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods are offered for enrollment and challenge; methods not in the list are rejected. Absent = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
+| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
-| `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action. A TOTP secret does **not** satisfy it — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
+| `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey **and** use it. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action, and `create_session` refuses any authentication whose second factor was not a user-verified WebAuthn assertion. A TOTP secret does **not** satisfy it, at enrolment or at use — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
 | `webauthn_resident_key` | string | inherits `auth.webauthn_resident_key` | `residentKey` preference sent in `authenticatorSelection` during registration: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup — the browser would silently ignore it and fall back to `"preferred"`. |
 | `webauthn_user_verification` | string | inherits `auth.webauthn_user_verification` | `userVerification` preference sent during registration and authentication: `"required"`, `"preferred"` or `"discouraged"`. Set `"required"` to make a passkey a genuine second factor; a ceremony that proves user *presence* only is possession alone. |
 | `password_policy` | object | — | Password complexity requirements (see below). |
@@ -1562,6 +1563,27 @@ Each entry under `providers` declares one external identity provider. The `type`
 | `scopes` | list | preset default | OAuth scopes to request. Defaults to `["openid", "email", "profile"]` for OIDC types. |
 | `claim_mappings` | map | — | Per-claim renames for IdPs that use non-standard claim names. Maps a Hearth field name (e.g. `"email"`) to the upstream claim name the IdP sends (e.g. `"upn"`). Useful for Azure AD (`"email": "upn"`) and custom Okta apps. |
 | `leeway_seconds` | integer | `60` | Clock-skew allowance in seconds applied to OIDC ID-token `exp` and `nbf` checks. The default (60 s) follows standard OIDC RP tolerance. Raise only for enterprise IdPs with known clock drift; **maximum 300 s**. |
+| `apple_team_id` | string | — | **Required for `type: apple`.** Apple Developer Team ID (10 characters, e.g. `A1B2C3D4E5`). |
+| `apple_key_id` | string | — | **Required for `type: apple`.** Key ID of the Sign In with Apple key from the Apple Developer portal. |
+| `apple_private_key_pem` | string | — | **Required for `type: apple`.** The P-256 private key in PKCS#8 PEM form (`-----BEGIN PRIVATE KEY-----`) downloaded once from the Apple Developer portal. Use `${ENV_VAR}` substitution — never commit the key. |
+
+> **Sign In with Apple** does not use a static `client_secret`: every token-endpoint
+> call presents an ES256 `private_key_jwt` assertion built from the three
+> `apple_*` fields, and Apple returns the authorization response as a
+> cross-site `POST` (`response_mode=form_post`). All three fields are required
+> for `type: apple`; the server refuses to start naming the missing one.
+
+#### Callback URL
+
+The `redirect_uri` Hearth sends upstream is **realm-scoped**:
+
+```
+{onboarding.base_url}/ui/realms/{realm}/federation/callback
+```
+
+Register that exact string at each upstream provider. The admin Identity
+Provider detail page (`/ui/admin/realms/{realm}/identity-providers/{id}`)
+displays the value to paste, built from the same code path that transmits it.
 
 ```yaml
 realms:
@@ -1573,6 +1595,12 @@ realms:
           type: google
           client_id: "${GOOGLE_CLIENT_ID}"
           client_secret: "${GOOGLE_CLIENT_SECRET}"
+        apple:
+          type: apple
+          client_id: "com.example.service"      # the Services ID, not the App ID
+          apple_team_id: "${APPLE_TEAM_ID}"
+          apple_key_id: "${APPLE_KEY_ID}"
+          apple_private_key_pem: "${APPLE_PRIVATE_KEY_PEM}"
         corp-sso:
           type: oidc
           display_name: "Corp SSO"

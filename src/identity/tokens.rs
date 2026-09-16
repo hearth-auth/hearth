@@ -435,9 +435,17 @@ pub struct Jwk {
     pub use_: String,
     /// Algorithm — `"EdDSA"`, `"RS256"`, or `"ES256"`.
     pub alg: String,
-    /// Non-standard informational role hint. Values:
-    /// `"access-token-signing"` (EdDSA), `"saml-signing"` (RSA),
-    /// `"ecdsa-compat"` (EC). Omitted by keys that predate this field.
+    /// Non-standard informational role hint.
+    ///
+    /// `"access-token-signing"` is the only value any JWKS Hearth publishes
+    /// has carried since the RSA and EC entries were withdrawn (audit
+    /// 2026-08-28 §4.2#4). The `"saml-signing"` and `"ecdsa-compat"` values
+    /// are still set by [`RsaSigningKey::to_jwk`] and
+    /// [`EcdsaSigningKey::to_jwk`], but neither is assembled into a published
+    /// document — SAML signing uses X.509 in the SAML metadata, not a JWK, so
+    /// a client MUST NOT branch on seeing those roles (§4.2#6, §4.19#10).
+    ///
+    /// Omitted by keys that predate this field.
     #[serde(
         rename = "x-key-role",
         default,

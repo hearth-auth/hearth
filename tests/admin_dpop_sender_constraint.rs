@@ -434,3 +434,136 @@ async fn grpc_admin_refuses_a_sender_constrained_token() {
     ok_md.insert("x-realm-id", f.realm.as_uuid().to_string().parse().unwrap());
     authenticate_admin(&ok_md, &state).expect("an unbound admin token must still authenticate");
 }
+
+// ── Task 25.17 — the admin surface outside the `/admin` and `/scim/v2` nests ──
+//
+// 18.18 mounted `enforce_admin_dpop` with `route_layer` on exactly two routers:
+// the `/admin` nest and the `/scim/v2` nest. Every *other* handler that
+// authenticates through `extract_admin_auth` was left behind, and there are
+// five files' worth of them merged at the router root rather than nested:
+// `users.rs` (`POST /users`), `oauth.rs` (`POST /clients`), `agents.rs`,
+// `approval.rs` and `advanced.rs`. A stolen `cnf`-bound admin token was still
+// replayable as a plain `Bearer` against all of them — the same defect 18.18
+// closed one nest at a time.
+//
+// `tool_invocation.rs` is deliberately NOT in this list. It reaches the same
+// token through `extract_bearer_token` and already calls `validate_dpop_if_bound`
+// itself, so layering the guard over it would validate the proof twice and the
+// second call would burn the first's `jti` in the replay cache — turning a
+// correct request into a false `invalid_token`.
+
+/// Every route outside the two nests whose handler calls `extract_admin_auth`,
+/// as `(method, uri, body)`.
+const NON_NESTED_ADMIN_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/users"),
+    ("POST", "/clients"),
+    ("GET", "/v1/agents"),
+    ("GET", "/v1/approval-requests"),
+    ("POST", "/v1/aats"),
+];
+
+/// Builds the router with the three agent capabilities on, so the `agents.rs`,
+/// `approval.rs` and `advanced.rs` routers are actually registered. With the
+/// defaults they are absent from the table and every assertion below would
+/// measure a 404 instead of the guard.
+fn app_with_agent_capabilities(f: &Fixture) -> axum::Router {
+    router(Arc::new(
+        AppState::new(
+            f.harness.identity_arc(),
+            f.harness.rbac_arc(),
+            f.harness.audit_arc(),
+        )
+        .with_agent_identity(true)
+        .with_agent_approval(true)
+        .with_agent_advanced(true),
+    ))
+}
+
+fn admin_req(
+    method: &str,
+    uri: &str,
+    token: &str,
+    realm: &RealmId,
+    proof: Option<&str>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("x-realm-id", realm.as_uuid().to_string());
+    if let Some(proof) = proof {
+        builder = builder.header("dpop", proof);
+    }
+    builder.body(Body::from("{}")).unwrap()
+}
+
+/// Asserts the response is *not* the DPoP layer's rejection.
+///
+/// Deliberately weaker than asserting a specific success status: these handlers
+/// answer 403 (no permission) or 422 (empty body) once past the layer, and the
+/// only thing under test is that the sender-constraint guard let the request
+/// through.
+async fn assert_not_dpop_rejected(resp: axum::response::Response, what: &str) {
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let dpop_rejection = status == StatusCode::UNAUTHORIZED
+        && json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("DPoP"));
+    assert!(
+        !dpop_rejection,
+        "{what}: the sender-constraint layer must not reject this request; got {status} {json}"
+    );
+}
+
+#[tokio::test]
+async fn non_nested_admin_routes_reject_a_bound_token_replayed_as_plain_bearer() {
+    let f = setup().await;
+    for (method, uri) in NON_NESTED_ADMIN_ROUTES {
+        let resp = app_with_agent_capabilities(&f)
+            .oneshot(admin_req(method, uri, &f.bound_token, &f.realm, None))
+            .await
+            .unwrap();
+        assert_dpop_rejected(resp, &format!("{method} {uri}")).await;
+    }
+}
+
+#[tokio::test]
+async fn non_nested_admin_routes_accept_a_bound_token_with_a_valid_proof() {
+    let f = setup().await;
+    for (method, uri) in NON_NESTED_ADMIN_ROUTES {
+        let htu = format!("{}{uri}", f.issuer);
+        let proof = make_resource_dpop_proof(&f.dpop_key, method, &htu, &f.bound_token);
+        let resp = app_with_agent_capabilities(&f)
+            .oneshot(admin_req(
+                method,
+                uri,
+                &f.bound_token,
+                &f.realm,
+                Some(&proof),
+            ))
+            .await
+            .unwrap();
+        assert_not_dpop_rejected(resp, &format!("{method} {uri} with a valid proof")).await;
+    }
+}
+
+#[tokio::test]
+async fn non_nested_admin_routes_still_accept_an_unbound_admin_token() {
+    let f = setup().await;
+    for (method, uri) in NON_NESTED_ADMIN_ROUTES {
+        let resp = app_with_agent_capabilities(&f)
+            .oneshot(admin_req(
+                method,
+                uri,
+                &f.unbound_admin_token,
+                &f.realm,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_not_dpop_rejected(resp, &format!("{method} {uri} with an unbound token")).await;
+    }
+}

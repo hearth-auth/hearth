@@ -1527,6 +1527,7 @@ pub struct UpdateAuditRetentionBody {
 pub async fn admin_api_audit_config_put(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
     axum::Json(body): axum::Json<UpdateAuditRetentionBody>,
@@ -1960,6 +1961,7 @@ pub async fn admin_config_editor_export(
 /// in read-only / container environments where "Apply" cannot write to disk.
 pub async fn admin_config_editor_visual_export(
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     axum::Json(json): axum::Json<serde_json::Value>,
 ) -> Response {
     match editor_json_to_yaml(&json) {
@@ -2076,6 +2078,7 @@ fn editor_json_to_yaml(json: &serde_json::Value) -> Result<String, String> {
 pub async fn admin_config_editor_visual_preview(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     axum::Json(json): axum::Json<serde_json::Value>,
 ) -> Response {
     let new_yaml = match editor_json_to_yaml(&json) {
@@ -2125,6 +2128,7 @@ pub async fn admin_config_editor_visual_preview(
 pub async fn admin_config_editor_visual_validate(
     State(_state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     axum::Json(json): axum::Json<serde_json::Value>,
 ) -> Response {
     let new_yaml = match editor_json_to_yaml(&json) {
@@ -2178,34 +2182,40 @@ pub async fn admin_config_editor_visual_validate(
     .into_response()
 }
 
-/// `POST /ui/admin/settings/editor/visual/apply` — JSON-based apply.
+/// Query string for `POST /ui/admin/settings/editor/visual/apply`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct VisualApplyQuery {
+    /// Operator acknowledgement that the submitted document archives realms
+    /// that are currently live. Required whenever the apply would archive
+    /// anything (task 21.5). Kept in the query string so the request body stays
+    /// a pure config document.
+    #[serde(default)]
+    pub confirm_archive: bool,
+}
+
+/// Converts the visual editor's JSON document to YAML and validates it.
 ///
-/// Accepts the visual editor's config state as JSON, converts to YAML,
-/// validates (collecting all errors), writes to disk, and triggers a
-/// hot-reload.
-pub async fn admin_config_editor_visual_apply(
-    State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
-    axum::Json(json): axum::Json<serde_json::Value>,
-) -> Response {
+/// Returns `(yaml, parsed config)` on success, or the `ok:false` JSON response
+/// the caller should return verbatim. Extracted from
+/// [`admin_config_editor_visual_apply`] so that handler stays under the
+/// `clippy::too_many_lines` bar.
+#[allow(clippy::result_large_err)] // `Response` is the handler's own return type
+fn editor_document_to_config(json: &serde_json::Value) -> Result<(String, Config), Response> {
     // Convert JSON → YAML
-    let new_yaml = match editor_json_to_yaml(&json) {
-        Ok(y) => y,
-        Err(e) => {
-            return axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": e,
-            }))
-            .into_response();
-        }
-    };
+    let new_yaml = editor_json_to_yaml(json).map_err(|e| {
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        }))
+        .into_response()
+    })?;
 
     // HEA control-liveness 10.2: never write a config file to disk that
     // arms dev_mode — see the matching guard in
     // admin_config_editor_visual_validate for why this cannot be left to
     // validate_all().
     if crate::config::validate::yaml_declares_dev_mode(&new_yaml) {
-        return axum::response::Json(serde_json::json!({
+        return Err(axum::response::Json(serde_json::json!({
             "ok": false,
             "error": "dev_mode cannot be set from the config editor",
             "errors": [{
@@ -2213,34 +2223,130 @@ pub async fn admin_config_editor_visual_apply(
                 "reason": "cannot be set from the config editor; use `hearth serve --dev` instead",
             }],
         }))
-        .into_response();
+        .into_response());
     }
 
     // Parse without validation so we can run validate_all()
-    let config = match Config::from_yaml_str_unchecked(&new_yaml) {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            let field = field_from_parse_error(&msg);
-            return axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": format!("Parse error: {msg}"),
-                "errors": [{ "field": field, "reason": msg }],
-            }))
-            .into_response();
-        }
-    };
+    let config = Config::from_yaml_str_unchecked(&new_yaml).map_err(|e| {
+        let msg = e.to_string();
+        let field = field_from_parse_error(&msg);
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": format!("Parse error: {msg}"),
+            "errors": [{ "field": field, "reason": msg }],
+        }))
+        .into_response()
+    })?;
 
     // Run full validation and report all issues
     let issues: Vec<ValidationIssue> = config.validate_all();
     if !issues.is_empty() {
         let count = issues.len();
-        return axum::response::Json(serde_json::json!({
+        return Err(axum::response::Json(serde_json::json!({
             "ok": false,
             "error": format!("{count} validation error(s)"),
             "errors": issues,
         }))
-        .into_response();
+        .into_response());
+    }
+
+    Ok((new_yaml, config))
+}
+
+/// Realms that would be archived by reconciling `yaml` against storage.
+///
+/// `reconcile_declared_realms` archives every storage realm whose name is
+/// absent from `realms:` in the YAML. The visual editor submits its *whole*
+/// in-memory document, so a browser tab opened before a realm existed — or an
+/// editor that simply never loaded the `realms:` section — silently deletes
+/// every realm the operator did not re-list. `apply` then returned
+/// `{"ok":true}` because it only checks that the file was written; the archiving
+/// happens later, in the hot-reload, with no channel back to the caller
+/// (audit §4.23#4, task 21.5).
+///
+/// Returns an empty vector when the document omits `realms:` entirely, because
+/// `reconcile_realms` then skips realm reconciliation altogether.
+fn realms_archived_by(state: &Arc<WebState>, config: &Config) -> Vec<String> {
+    let Some(declared) = config.realms.as_ref() else {
+        return Vec::new();
+    };
+    let mut doomed = Vec::new();
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let Ok(page) = state
+            .identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+        else {
+            // Storage unavailable: report nothing rather than inventing names.
+            // The apply still refuses below only on a non-empty list, so a
+            // read failure cannot silently *enable* a destructive apply — it
+            // degrades to the pre-existing behaviour.
+            return doomed;
+        };
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            if realm.status() != crate::identity::RealmStatus::Archived
+                && !declared.contains_key(realm.name())
+            {
+                doomed.push(realm.name().to_string());
+            }
+        }
+        if n == 0 || offset + n >= page.total {
+            break;
+        }
+        offset += n;
+    }
+    doomed.sort();
+    doomed
+}
+
+/// `POST /ui/admin/settings/editor/visual/apply` — JSON-based apply.
+///
+/// Accepts the visual editor's config state as JSON, converts to YAML,
+/// validates (collecting all errors), writes to disk, and triggers a
+/// hot-reload.
+///
+/// Refuses with `409 Conflict` when the submitted document would archive realms
+/// that are currently live, unless `?confirm_archive=true` is supplied
+/// (task 21.5). Nothing is written on the refusal path.
+pub async fn admin_config_editor_visual_apply(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
+    Query(q): Query<VisualApplyQuery>,
+    axum::Json(json): axum::Json<serde_json::Value>,
+) -> Response {
+    let (new_yaml, config) = match editor_document_to_config(&json) {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    // Destructive-apply gate (task 21.5). The reconcile that the hot-reload
+    // below kicks off archives every storage realm the submitted document does
+    // not re-list, and the caller never hears about it — the old code answered
+    // `{"ok":true}` the moment the file landed on disk. Compute the casualties
+    // BEFORE writing, and refuse unless the operator has acknowledged them.
+    let would_archive = realms_archived_by(&state, &config);
+    if !would_archive.is_empty() && !q.confirm_archive {
+        let count = would_archive.len();
+        tracing::warn!(
+            realms = ?would_archive,
+            "config editor apply refused: would archive live realms"
+        );
+        return (
+            StatusCode::CONFLICT,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "requires_confirmation": true,
+                "error": format!(
+                    "This configuration does not list {count} realm(s) that exist now. \
+                     Applying it archives them. Re-submit with ?confirm_archive=true to proceed."
+                ),
+                "would_archive": would_archive,
+            })),
+        )
+            .into_response();
     }
 
     // Write to disk
@@ -2268,9 +2374,18 @@ pub async fn admin_config_editor_visual_apply(
 
     tracing::info!("config file updated via visual editor, reload triggered");
 
+    let message = if would_archive.is_empty() {
+        "Configuration applied successfully".to_string()
+    } else {
+        format!(
+            "Configuration applied. {} realm(s) will be archived by the reload.",
+            would_archive.len()
+        )
+    };
     axum::response::Json(serde_json::json!({
         "ok": true,
-        "message": "Configuration applied successfully",
+        "message": message,
+        "archived_realms": would_archive,
     }))
     .into_response()
 }
@@ -2650,6 +2765,7 @@ pub struct PatchRealmConfigBody {
 pub async fn admin_api_realm_config_patch(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
     // Deserialize the raw object first so an unknown or misspelled key comes

@@ -54,7 +54,7 @@ pub enum FederationOutcome {
     /// The external identity matched an existing user under
     /// `LinkMode::Confirm`. The ticket must be persisted in a HMAC-bound
     /// cookie (see [`super::state::compute_confirm_ticket_mac`]) and the
-    /// user redirected to `/ui/federation/confirm-link`.
+    /// user redirected to `/ui/realms/{realm}/federation/confirm-link`.
     ConfirmLinkRequired(ConfirmLinkTicket),
     /// Under `LinkMode::Auto`, the external identity was silently linked
     /// to an existing user on the fly.

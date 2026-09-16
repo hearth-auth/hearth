@@ -28,7 +28,13 @@ SDKs **must** auto-discover all endpoint URLs from `{issuer_url}/.well-known/ope
 
 **Required algorithm:** Ed25519 (`alg: "EdDSA"`, `kty: "OKP"`). Hearth exclusively issues tokens signed with Ed25519; SDKs **must** support OKP key verification.
 
-> **Federation exception:** Hearth may relay tokens from third-party identity providers (e.g., enterprise SSO) that use RS256 or ES256. SDKs _should_ accept these algorithms when the corresponding key is present in the JWKS and the token's `alg` header matches, but RS256/ES256 are **never issued by Hearth itself**.
+> **There is no federation exception.** An earlier revision of this section told SDKs they _should_ accept
+> RS256 and ES256 "when the corresponding key is present in the JWKS", on the theory that Hearth relays
+> third-party IdP tokens. It does not: a federated login is exchanged for a Hearth-issued token, and the
+> JWKS has never carried a third-party key. The RS256 and ES256 entries it once published were Hearth's
+> own — one signing nothing, one whose private half was discarded on every restart — and both were
+> withdrawn. SDKs **must reject** any `alg` other than `EdDSA`; accepting more only widens the set of keys
+> an attacker can steer a verifier onto.
 
 **OKP (Ed25519) JWKS key format:**
 
@@ -51,7 +57,10 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
 3. On cache miss for a `kid`: re-fetch once before returning an error.
 4. On HTTP 401 from a protected resource: re-fetch JWKS once, then retry the verification.
 5. Maximum cache age: 24 hours regardless of Cache-Control.
-6. When parsing a cached JWKS, skip (do not error on) any key with an unrecognized `kty`; Hearth may add new key types for federation keys without a version bump.
+6. When parsing a cached JWKS, skip (do not error on) any key with an unrecognized `kty` — forward
+   compatibility only. Every key Hearth publishes today is `OKP`/`Ed25519`, and the non-standard
+   `x-key-role` hint on those keys is always `"access-token-signing"`. Do not branch on `x-key-role`:
+   the `"saml-signing"` and `"ecdsa-compat"` roles named in older notes are not published in any JWKS.
 
 **JWT validation steps (mandatory, in order):**
 1. Verify signature against cached JWKS.
@@ -59,6 +68,9 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
 3. Verify `iss` matches configured `issuer_url`.
 4. Verify `aud` contains the configured `client_id` (server SDKs only; configurable).
 5. Verify `iat` is not in the future (allow up to 5s clock skew).
+6. Verify `nbf`, when present: reject with `TokenNotYetValidError` while `now < nbf` beyond the clock-skew
+   allowance. Hearth enforces the same claim server-side on `validate_token`, introspection and the
+   authorization decision endpoint, so an SDK that skips it is more permissive than the server.
 
 **Rejected tokens must return a typed error** (see Section 5), not a bare string or generic exception.
 
@@ -180,7 +192,7 @@ Introspection results **must not be cached** (RFC 7662 §2.1 — the token state
 
 ### Mode Discovery and Configuration
 
-The `access_token_authorization` mode is set by the operator at client registration (via `POST /admin/clients` or YAML `clients:` config). It is **not** advertised in the OIDC discovery document or embedded in the token — resource servers receive their mode through operator documentation or configuration management.
+The `access_token_authorization` mode is set by the operator at client registration (via `POST /admin/applications` or YAML `clients:` config). It is **not** advertised in the OIDC discovery document or embedded in the token — resource servers receive their mode through operator documentation or configuration management.
 
 SDKs **MAY** expose a `token_authorization_mode` constructor parameter so operators can explicitly declare the expected mode. When declared:
 
@@ -525,13 +537,23 @@ Only the read paths and archived-realm deletion are exposed.
 | `deleteRealm(id)` | `DELETE /admin/realms/{id}` (archived realms only) |
 | `listRealms(options)` | `GET /admin/realms?limit=N&cursor=C` |
 
-#### OAuth Clients, Roles, Groups, Organization Memberships
+#### OAuth Clients, Roles, Groups
 
 These entities follow the same CRUD + list pattern targeting:
-- `/admin/clients` — OAuth 2.0 client registrations
+- `/admin/applications` — OAuth 2.0 client registrations. **Note the path**: the server
+  has never served `/admin/clients`, and an SDK that addresses it 404s on every call
+  (audit 2026-08-28 §25.4, §25.18). The mutation verb is `PATCH`, not `PUT`.
 - `/admin/roles` — realm-level role definitions
 - `/admin/groups` — realm-level group definitions
-- `/admin/orgs/{orgId}/members` — organization membership management
+
+Role assignment is not CRUD-shaped: `POST /admin/users/{id}/roles` with a
+`{ "role_id": ..., "org_id"?: ... }` body creates an assignment,
+`GET /admin/users/{id}/roles` lists them, and `DELETE /admin/assignments/{id}` removes one.
+
+**Organization memberships are not an SDK surface.** Hearth serves no organization route
+over HTTP — there is no `/admin/orgs`, no `/admin/orgs/{id}/members` and no per-member
+route in the router — so no SDK may expose org-membership methods (audit 2026-08-28
+§25.19). Membership is administered through the admin console.
 
 ### Pagination
 

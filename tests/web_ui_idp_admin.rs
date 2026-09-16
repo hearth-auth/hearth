@@ -288,3 +288,174 @@ async fn get_detail_unknown_returns_404() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// Test 3 — 22.18: the list emits the prefixed `idp_<uuid>` display form
+// ---------------------------------------------------------------------------
+
+/// The link the list page renders must resolve at the detail handler.
+///
+/// Audit 2026-08-28 §4.22#10: `IdpRow::id` was `IdpId::to_string()`, whose
+/// `Display` is the prefixed `idp_<uuid>` form, while `admin_idp_detail`
+/// parsed a bare `uuid::Uuid`. Every provider name on the list page 404'd.
+#[tokio::test]
+async fn list_link_target_resolves_at_the_detail_handler() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-list-link");
+
+    // 1. Render the list and pull the href the template actually emitted.
+    let list = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{}/identity-providers",
+                    rig.realm_name
+                ))
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    let marker = format!("/ui/admin/realms/{}/identity-providers/", rig.realm_name);
+    let href = text
+        .split(&marker)
+        .nth(1)
+        .map(|rest| {
+            let end = rest.find('"').unwrap_or(rest.len());
+            rest[..end].to_string()
+        })
+        .expect("list page must link to a provider detail page");
+    assert!(!href.is_empty(), "provider link had an empty id segment");
+
+    // 2. Follow it. This is the assertion that was failing: 404, not 200.
+    let detail = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("{marker}{href}"))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        detail.status(),
+        StatusCode::OK,
+        "the list's own link ({href}) must reach the detail page"
+    );
+}
+
+/// The detail handler accepts the prefixed display form as well as the bare
+/// UUID, so a link built from either spelling resolves (22.18).
+#[tokio::test]
+async fn detail_accepts_the_prefixed_idp_id_form() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-prefixed");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{}/identity-providers/idp_{}",
+                    rig.realm_name,
+                    rig.idp_id.as_uuid()
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// A prefixed id that is not a UUID is still a 404, not a 500 (22.18).
+#[tokio::test]
+async fn detail_rejects_a_prefixed_non_uuid() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-junk");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{}/identity-providers/idp_not-a-uuid",
+                    rig.realm_name
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 — 22.16: the published callback URL must be the one sent upstream
+// ---------------------------------------------------------------------------
+
+/// The detail page publishes the absolute, realm-scoped callback URL that
+/// `build_service` transmits as `redirect_uri` (audit §4.22#8).
+///
+/// The old value was `/realms/{realm}/federation/callback` — relative, and
+/// missing the `/ui` prefix, so it matched neither a real Hearth route nor the
+/// `redirect_uri` the connector actually sent. An operator pasting it into
+/// Google's console got `redirect_uri_mismatch` on every login.
+#[tokio::test]
+async fn detail_publishes_the_callback_url_that_is_sent_upstream() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-callback");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{}/identity-providers/{}",
+                    rig.realm_name,
+                    rig.idp_id.as_uuid()
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    let expected = format!(
+        "http://localhost/ui/realms/{}/federation/callback",
+        rig.realm_name
+    );
+    assert!(
+        text.contains(&expected),
+        "detail page must publish the absolute realm-scoped callback URL ({expected})"
+    );
+    // The old, unroutable relative form must be gone.
+    assert!(
+        !text.contains(&format!(">/realms/{}/federation/callback<", rig.realm_name)),
+        "the relative `/realms/.../federation/callback` form is not a real route"
+    );
+}

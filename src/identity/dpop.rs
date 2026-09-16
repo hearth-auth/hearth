@@ -149,6 +149,51 @@ pub fn compute_jwk_thumbprint(jwk: &DPopJwk) -> Result<String, IdentityError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.as_ref()))
 }
 
+// ===== alg / kty agreement =====
+
+/// Cross-checks the proof header's `alg` against the JWK's `kty` and `crv`
+/// (audit 2026-08-28 §4.2#5).
+///
+/// `alg` selects the verifier in [`verify_dpop_signature`] while `kty` selects
+/// the canonical form in [`compute_jwk_thumbprint`], and nothing compared the
+/// two. An `alg: "EdDSA"` proof carrying `kty: "EC"` is therefore verified
+/// against `x` alone — the Ed25519 branch never looks at `y` — and then
+/// fingerprinted over `{"crv","kty","x","y"}`. The holder of one Ed25519
+/// private key can vary `y` freely and mint an unbounded family of distinct
+/// `jkt` values from it, so a `cnf.jkt` kill-switch entry binds none of the
+/// others and two bindings that name "the same key" may disagree.
+///
+/// Each algorithm Hearth verifies has exactly one key shape, so requiring
+/// agreement removes no supported case.
+fn check_alg_matches_jwk(alg: &str, jwk: &DPopJwk) -> Result<(), IdentityError> {
+    let (want_kty, want_crv) = match alg {
+        "ES256" => ("EC", "P-256"),
+        "EdDSA" => ("OKP", "Ed25519"),
+        other => {
+            return Err(IdentityError::InvalidDPopProof {
+                reason: format!("unsupported DPoP algorithm: {other}"),
+            })
+        }
+    };
+    if jwk.kty != want_kty {
+        return Err(IdentityError::InvalidDPopProof {
+            reason: format!(
+                "alg {alg} requires kty {want_kty}, got {got}",
+                got = jwk.kty
+            ),
+        });
+    }
+    match jwk.crv.as_deref() {
+        Some(crv) if crv == want_crv => Ok(()),
+        Some(crv) => Err(IdentityError::InvalidDPopProof {
+            reason: format!("alg {alg} requires crv {want_crv}, got {crv}"),
+        }),
+        None => Err(IdentityError::InvalidDPopProof {
+            reason: format!("alg {alg} requires crv {want_crv}, but the JWK has none"),
+        }),
+    }
+}
+
 // ===== Signature verification =====
 
 fn verify_dpop_signature(
@@ -240,6 +285,7 @@ pub fn normalize_htu(htu: &str) -> Result<String, IdentityError> {
 /// Checks (in order):
 /// 1. JWT structure (3 parts, valid base64url)
 /// 2. Header: `typ == "dpop+jwt"`, supported `alg`, valid `jwk`, no private key
+/// 2b. `alg` agrees with the JWK's `kty`/`crv` (§4.2#5)
 /// 3. Signature verifies against `jwk`
 /// 4. Claims: `jti` non-empty, `htm` matches, `htu` matches (after normalisation)
 /// 5. `iat` within clock skew + max age window
@@ -287,6 +333,12 @@ pub fn validate_dpop_proof(
             reason: "JWK in header must not contain private key material".to_string(),
         });
     }
+
+    // 2b. `alg` and `kty`/`crv` must name the same key family before either is
+    //     used: `alg` picks the verifier, `kty` picks the thumbprint, and a
+    //     proof that mixes them is authenticated as one key and identified as
+    //     another (audit 2026-08-28 §4.2#5).
+    check_alg_matches_jwk(&header.alg, &header.jwk)?;
 
     // 3. Verify signature
     verify_dpop_signature(header_b64, payload_b64, sig_b64, &header.jwk, &header.alg)?;
@@ -593,6 +645,148 @@ mod tests {
             normalize_htu("https://server.example.com/token").expect("normalize"),
             "https://server.example.com/token"
         );
+    }
+
+    // ==================================================================
+    // 18.2 (audit 2026-08-28 §4.2#5) — `alg` selects the verifier and `kty`
+    // selects the thumbprint, so the two must agree.
+    // ==================================================================
+
+    /// Fixed instant used by the `alg`/`kty` proofs below, so `iat` is always
+    /// inside the acceptance window.
+    const PROOF_NOW: i64 = 1_700_000_000;
+
+    /// Generates an Ed25519 key and returns it with its base64url `x`.
+    fn ed25519_key() -> (signature::Ed25519KeyPair, String) {
+        use ring::rand::SystemRandom;
+        use ring::signature::KeyPair as _;
+        let rng = SystemRandom::new();
+        let pkcs8 = signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
+        let kp = signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(kp.public_key().as_ref());
+        (kp, x)
+    }
+
+    /// Builds a DPoP proof genuinely signed by `kp`, with a caller-chosen
+    /// header `alg` and a caller-chosen `jwk` object.
+    fn signed_proof(kp: &signature::Ed25519KeyPair, alg: &str, jwk: &serde_json::Value) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = serde_json::json!({ "typ": "dpop+jwt", "alg": alg, "jwk": jwk });
+        let claims = serde_json::json!({
+            "jti": "jti-alg-kty",
+            "htm": "POST",
+            "htu": "https://rs.example/resource",
+            "iat": PROOF_NOW,
+        });
+        let h = b64.encode(serde_json::to_vec(&header).expect("header json"));
+        let c = b64.encode(serde_json::to_vec(&claims).expect("claims json"));
+        let msg = format!("{h}.{c}");
+        let sig = b64.encode(kp.sign(msg.as_bytes()).as_ref());
+        format!("{msg}.{sig}")
+    }
+
+    fn validate_fixture(proof: &str) -> Result<ValidatedDPopProof, IdentityError> {
+        validate_dpop_proof(
+            proof,
+            "POST",
+            "https://rs.example/resource",
+            PROOF_NOW,
+            None,
+            None,
+        )
+    }
+
+    /// Control: `alg: EdDSA` with a matching `kty: OKP` JWK is accepted, so
+    /// the rejection tests below cannot pass vacuously.
+    #[test]
+    fn eddsa_proof_with_okp_jwk_is_accepted() {
+        let (kp, x) = ed25519_key();
+        let jwk = serde_json::json!({ "crv": "Ed25519", "kty": "OKP", "x": x });
+        let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+        assert!(
+            res.is_ok(),
+            "a well-formed EdDSA/OKP proof must be accepted, got {res:?}"
+        );
+    }
+
+    /// §4.2#5: an `alg: EdDSA` proof whose JWK claims `kty: "EC"` verifies on
+    /// `x` alone but is fingerprinted over `{crv,kty,x,y}`. The `y` is never
+    /// authenticated, so the same private key yields a different `jkt` for
+    /// every `y` the holder picks. Refuse the mismatch.
+    #[test]
+    fn eddsa_proof_with_ec_jwk_is_rejected() {
+        let (kp, x) = ed25519_key();
+        let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
+        let jwk = serde_json::json!({ "crv": "P-256", "kty": "EC", "x": x, "y": y });
+        let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+        assert!(
+            matches!(res, Err(IdentityError::InvalidDPopProof { .. })),
+            "an EdDSA proof carrying an EC JWK must be refused, got {res:?}"
+        );
+    }
+
+    /// The consequence the check removes: two proofs from one Ed25519 key,
+    /// differing only in the unauthenticated `y`, once produced two distinct
+    /// thumbprints. Both must now be refused — a single key must not be able
+    /// to present two identities.
+    #[test]
+    fn one_key_cannot_mint_two_thumbprints_via_unauthenticated_y() {
+        let (kp, x) = ed25519_key();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let first = serde_json::json!({
+            "crv": "P-256", "kty": "EC", "x": x.clone(), "y": b64.encode([1u8; 32]),
+        });
+        let second = serde_json::json!({
+            "crv": "P-256", "kty": "EC", "x": x, "y": b64.encode([2u8; 32]),
+        });
+        // Establish the premise: the two JWKs really do fingerprint apart.
+        let jkt1 = compute_jwk_thumbprint(&serde_json::from_value(first.clone()).expect("jwk"))
+            .expect("thumbprint");
+        let jkt2 = compute_jwk_thumbprint(&serde_json::from_value(second.clone()).expect("jwk"))
+            .expect("thumbprint");
+        assert_ne!(jkt1, jkt2, "fixture must vary the thumbprint");
+
+        for jwk in [first, second] {
+            let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+            assert!(
+                matches!(res, Err(IdentityError::InvalidDPopProof { .. })),
+                "each variant must be refused, got {res:?}"
+            );
+        }
+    }
+
+    /// §4.2#5, the other direction: `alg: ES256` with an OKP JWK would be
+    /// fingerprinted in OKP form while the ES256 verifier reads EC
+    /// coordinates. Refused on the `kty` disagreement, before the signature
+    /// step reports a missing `y`.
+    #[test]
+    fn es256_proof_with_okp_jwk_is_rejected_on_kty() {
+        let (kp, x) = ed25519_key();
+        let jwk = serde_json::json!({ "crv": "Ed25519", "kty": "OKP", "x": x });
+        let res = validate_fixture(&signed_proof(&kp, "ES256", &jwk));
+        match res {
+            Err(IdentityError::InvalidDPopProof { reason }) => assert!(
+                reason.contains("kty"),
+                "the kty disagreement must be what refuses this, got {reason}"
+            ),
+            other => panic!("an ES256 proof carrying an OKP JWK must be refused, got {other:?}"),
+        }
+    }
+
+    /// The curve is part of the key's identity: `alg: EdDSA` with
+    /// `kty: "OKP", crv: "X25519"` is a key-agreement key, not a signing key.
+    #[test]
+    fn eddsa_proof_with_wrong_curve_is_rejected() {
+        let (kp, x) = ed25519_key();
+        let jwk = serde_json::json!({ "crv": "X25519", "kty": "OKP", "x": x });
+        let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+        match res {
+            Err(IdentityError::InvalidDPopProof { reason }) => assert!(
+                reason.contains("crv"),
+                "the crv disagreement must be what refuses this, got {reason}"
+            ),
+            other => panic!("an EdDSA proof on a non-Ed25519 curve must be refused, got {other:?}"),
+        }
     }
 
     #[test]

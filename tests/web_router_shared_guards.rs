@@ -424,3 +424,44 @@ async fn request_duration_metric_records_ui_routes() {
         "the request-duration histogram must record /ui/* requests"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §4.23#10 / task 21.11 — the tenant-existence oracle is rate-limited
+// ---------------------------------------------------------------------------
+
+/// The audit's §4.23#10 finding has two halves: a real and a non-existent realm
+/// are distinguishable across the pre-auth `/ui/realms/{r}/*` shapes, and there
+/// is **no rate limit on the oracle**. Task 21.1 moved the browser tree under
+/// the API guard stack, so the per-IP request shaper now reaches those routes.
+/// This pins the second half: probing realm names is budgeted like every other
+/// `/ui/*` request, so enumeration cannot be driven at line rate.
+///
+/// The first half — byte-identity between a real and a fabricated realm — is
+/// measured by `tests/tenant_enumeration_oracle.rs`.
+#[tokio::test]
+async fn rate_cap_reaches_realm_scoped_pre_auth_probes() {
+    let app = app(|s| s.with_request_shaper(shaper_of_one()));
+
+    let first = app
+        .clone()
+        .oneshot(get("/ui/realms/does-not-exist/login"))
+        .await
+        .unwrap();
+    assert_ne!(
+        first.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "control: the first probe inside the window must pass"
+    );
+
+    // A different fabricated name — an enumerator never repeats a guess, so the
+    // cap has to be per-IP, not per-path.
+    let second = app
+        .oneshot(get("/ui/realms/also-not-real/login"))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "realm-name probes must spend the per-IP budget regardless of the name guessed"
+    );
+}
