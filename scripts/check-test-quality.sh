@@ -34,7 +34,10 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# REPO_ROOT is overridable so scripts/tests/check-test-quality.test.sh can point
+# the lint at a fixture tree. Unset (the CI and `make test-quality` case) it is
+# this script's own repository, exactly as before.
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO_ROOT"
 
 if [ -t 1 ]; then
@@ -157,12 +160,26 @@ scan_with_escape_hatch \
   tests simulation
 
 # ---------------------------------------------------------------------------
-# Check I — #[ignore] without an HEA-#### tracking issue (FAIL).
+# Check I — #[ignore] without a tracking reference (FAIL).
 #                 stale "not yet implemented" reason (WARN).
 #
 # Ignored tests rot when nothing tracks why they're disabled. Every #[ignore]
-# message must reference an HEA-#### issue describing the unblock work.
+# message must name the work that unblocks it: either an `HEA-####` issue or an
+# OpenSpec task (`openspec:<change-id>#<task>`), which is how the remediation
+# programme tracks its own backlog.
 # Audit cleanup: HEA-568 (commit 69d9065).
+#
+# Two precision rules, both added under production-readiness task 24.4. A gate
+# that cries wolf gets switched off, and a gate switched off is the fail-open
+# this task exists to prevent:
+#
+#   * The match is anchored to the START of the trimmed line, so it fires on an
+#     actual attribute and not on prose that merely mentions one. Before this,
+#     a comment in src/rbac/resolution_cache.rs saying a test must NOT be
+#     `#[ignore]`-d was itself reported as an untracked ignore.
+#   * A line-continuation backslash means the attribute spans several source
+#     lines; the tracking reference may appear on any of them, so the whole
+#     attribute is joined before matching.
 # ---------------------------------------------------------------------------
 ignore_out="$TMP/ignore.violations"
 ignore_warn_out="$TMP/ignore.warnings"
@@ -177,14 +194,24 @@ done
 if [ ${#ignore_roots[@]} -gt 0 ]; then
   while IFS= read -r f; do
     awk -v file="$f" -v fail_out="$ignore_out" -v warn_out="$ignore_warn_out" '
-      /#\[ignore/ {
+      {
         line = $0
         sub(/^[ \t]+/, "", line)
-        if ($0 !~ /HEA-[0-9]+/) {
-          print file ":" NR ": " line >> fail_out
+      }
+      line ~ /^#\[ignore/ {
+        start = NR
+        attr = line
+        # A trailing backslash continues the attribute onto the next source
+        # line; the tracking reference may live on any of them.
+        while (attr ~ /\\[ \t]*$/ && (getline cont) > 0) {
+          sub(/^[ \t]+/, "", cont)
+          attr = attr " " cont
         }
-        if (tolower($0) ~ /not yet implemented/) {
-          print file ":" NR ": " line >> warn_out
+        if (attr !~ /(HEA-[0-9]+|openspec:[A-Za-z0-9._-]+#[0-9]+(\.[0-9]+)*)/) {
+          print file ":" start ": " line >> fail_out
+        }
+        if (tolower(attr) ~ /not yet implemented/) {
+          print file ":" start ": " line >> warn_out
         }
       }
     ' "$f"
@@ -194,11 +221,13 @@ fi
 if [ -s "$ignore_out" ]; then
   count=$(wc -l < "$ignore_out" | tr -d ' ')
   echo
-  printf "%s%s✗ #[ignore] without an HEA-#### tracking issue (%d):%s\n" \
+  printf "%s%s✗ #[ignore] without a tracking reference (%d):%s\n" \
     "$RED" "$BLD" "$count" "$RST"
   sed 's/^/  /' "$ignore_out"
-  printf "  %sfix:%s reference the tracking issue in the ignore message:\n" "$YEL" "$RST"
+  printf "  %sfix:%s name the work that unblocks it in the ignore message:\n" "$YEL" "$RST"
   printf "        %s#[ignore = \"HEA-1234: <why this test is disabled>\"]%s\n" "$BLD" "$RST"
+  printf "        %s#[ignore = \"openspec:my-change#3.4: <why this test is disabled>\"]%s\n" \
+    "$BLD" "$RST"
   VIOLATIONS=$((VIOLATIONS + count))
 fi
 

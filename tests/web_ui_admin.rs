@@ -276,6 +276,82 @@ async fn non_admin_user_gets_403_on_admin_pages() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+/// A **system-realm** session without `hearth.admin` must still be refused.
+///
+/// `RequireAdmin` has two independent gates: the session must live in the
+/// system realm, and the user must resolve `hearth.admin` against the RBAC
+/// engine. `non_admin_user_gets_403_on_admin_pages` above only reaches the
+/// first — its cookie names a tenant realm, so the request is rejected before
+/// the permission lookup happens.
+///
+/// The mutation spot-check found that (production-readiness task 24.3,
+/// `ci/mutations.toml` entry `admin-console-requires-hearth-admin`): with
+/// `if is_admin` short-circuited to always-true, the whole admin console opened
+/// to any system-realm session and every existing test still passed. This test
+/// is the one that notices. Do not fold it into the test above — a single test
+/// that trips the realm gate can never exercise the permission gate behind it.
+#[tokio::test]
+async fn system_realm_user_without_admin_permission_gets_403() {
+    let rig = build_rig();
+
+    // A user in the system realm who was never assigned `realm.admin`.
+    let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
+    let plain_user = rig
+        .identity
+        .create_admin_user(&CreateUserRequest {
+            email: "nobody@hearth.test".to_string(),
+            display_name: "Nobody".to_string(),
+            first_name: String::new(),
+            last_name: String::new(),
+            attributes: Default::default(),
+        })
+        .expect("create system-realm user");
+    rig.identity
+        .update_user(
+            &system_realm,
+            plain_user.id(),
+            &UpdateUserRequest {
+                email: None,
+                display_name: None,
+                status: Some(UserStatus::Active),
+                first_name: None,
+                last_name: None,
+                ..Default::default()
+            },
+        )
+        .expect("activate system-realm user");
+    let session = rig
+        .identity
+        .create_session(
+            &system_realm,
+            plain_user.id(),
+            &hearth::identity::SessionContext::default(),
+        )
+        .expect("create session");
+
+    let cookie = auth_cookie(session.id(), &system_realm, "csrf-plain");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "a system-realm session without hearth.admin must be refused by the \
+         permission gate, not merely by the realm gate"
+    );
+}
+
 #[tokio::test]
 async fn unauthenticated_user_redirects_to_login() {
     let rig = build_rig();

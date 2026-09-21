@@ -243,8 +243,8 @@ async fn distinguishing_shapes() -> Vec<String> {
 /// The other half of §4.23#10 — "no rate limit on the oracle" — is closed and
 /// pinned by `rate_cap_reaches_realm_scoped_pre_auth_probes` in
 /// `tests/web_router_shared_guards.rs`.
-#[ignore = "21.11: byte-identity across pre-auth realm shapes is not implemented yet; \
-            this test is the acceptance criterion for it"]
+#[ignore = "openspec:production-readiness-remediation#21.11: byte-identity across pre-auth \
+            realm shapes is not implemented yet; this test is the acceptance criterion for it"]
 #[tokio::test]
 async fn real_and_fabricated_realms_are_indistinguishable_pre_auth() {
     let leaks = distinguishing_shapes().await;

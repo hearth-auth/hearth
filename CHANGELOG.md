@@ -167,9 +167,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **`email_otp` is accepted in `auth.mfa_methods` (audit 2026-08-28 §4.18#10)** — the value is
   documented in CONFIGURATION.md and read by three code paths, but the config validator's
   allow-list omitted it, so a realm configured exactly as the manual describes failed to start.
-
-
-### Changed
+- **Mutation spot-check in CI (audit 2026-08-28 §9 item 3)** — the audit could not say whether this
+  test suite can fail at all. `ci/mutations.toml` now names four security-critical checks (WAL
+  `fsync`-before-ack, the CSRF header on JSON `/ui/admin` mutations, the admin-console permission
+  gate, and realm-bounded storage scans) together with the one test each must make go red.
+  `scripts/mutation-spot-check.sh` runs the test unmutated, deletes the check, re-runs it, and
+  restores the file from a byte snapshot with a SHA-256 comparison; a guard that survives its own
+  deletion fails the run by name. The full run is nightly
+  (`.github/workflows/mutation-spot-check.yml`); manifest validation is PR-blocking (24.3).
+- **Red-test merge gate (audit 2026-08-28 §9 item 3)** — `scripts/check-red-test-gate.sh` runs on
+  every PR and refuses the five ways a red test has reached `main` here: a test-selection filter on
+  the workspace gate, prerequisite chaining in `make check`, a `continue-on-error` step on the
+  required path, a piped `cargo nextest` with no `pipefail`, and a `required-summary` results loop
+  that denylists `failure` instead of allowlisting `success` (24.4).
 - **BREAKING: `POST /realms/{realm}/introspect` and `/revoke` now require client authentication
   (audit 2026-08-28 §4.1#3, §4.19#2, §4.22#1, §4.25#1)** — the realm-scoped routes read no client
   credentials at all, so an anonymous internet caller got `active: true` with the token's subject
@@ -319,6 +329,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   throws `TokenInvalidError` for any `alg` other than `EdDSA`, matching the other six SDKs.
   `docs/specs/SDK_SURFACE.md` §C-04 and §6.1, which still prescribed the fallback as normative,
   were corrected to match `docs/specs/SDK.md` §2 (18.3).
+- **`required-summary` allowlists job results instead of denylisting two of them** — the gate failed
+  only on `failure` and `cancelled`, so any other result, including an empty string from an
+  expression that did not evaluate, read as "fine". Only `success` and `skipped` now pass (24.4).
+- **The `#[ignore]` rule in `make test-quality` no longer fires on prose** — it matched the literal
+  text `#[ignore` anywhere on a line, so a comment explaining that a test must *not* be ignored
+  reported itself as a violation and left this merge gate red at HEAD. The rule now matches an
+  actual attribute, joins line continuations before looking for the tracking reference, and accepts
+  an `openspec:<change>#<task>` reference alongside `HEA-####` (24.4).
 
 
 ### Fixed

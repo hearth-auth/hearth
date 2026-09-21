@@ -394,6 +394,45 @@ jobs:
       - name: Nextest profile is live — guard self-test
         run: bash scripts/tests/check-nextest-profile-live.test.sh
 
+      # Audit §9 item 3 / task 24.4: "Two regression tests for data-integrity
+      # defects were committed red and stayed red." A red test reaches main when
+      # something between `cargo nextest` and the one required context swallows
+      # its exit code. This guard holds shut the five mechanisms this repository
+      # has already been bitten by — a filter on the gate's own command,
+      # prerequisite chaining in `make check`, a continue-on-error step on the
+      # required path, a `| tee` with no pipefail, and a results loop that
+      # denylists failure instead of allowlisting success. Pure text, ~1 s.
+      - name: Red-test gate (check-red-test-gate.sh)
+        run: bash scripts/check-red-test-gate.sh
+
+      # Proof the guard can go red: it must reject each of those five shapes,
+      # and must NOT fire on the comment in the quality job that explains why
+      # the audited continue-on-error step was removed.
+      - name: Red-test gate — guard self-test
+        run: bash scripts/tests/check-red-test-gate.test.sh
+
+      # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
+      # positive: it matched the literal text `#[ignore` anywhere on a line, so
+      # prose saying a test must NOT be ignored reported itself. A gate that
+      # cries wolf gets switched off, and a merge gate switched off is the
+      # fail-open task 24.4 exists to prevent.
+      - name: Test-quality #[ignore] rule — guard self-test
+        run: bash scripts/tests/check-test-quality.test.sh
+
+      # Audit §9 item 3 / task 24.3: the cheap half of the mutation spot-check.
+      # Refuses a manifest whose anchor string has moved, become ambiguous, or
+      # whose test has been renamed away — the ways a mutation manifest rots.
+      # Builds nothing; the expensive half runs nightly in
+      # .github/workflows/mutation-spot-check.yml.
+      - name: Mutation manifest is live (mutation-spot-check.sh --check)
+        run: bash scripts/mutation-spot-check.sh --check
+
+      # Proof the runner can report a failure: it must refuse a guard that
+      # survives its own mutation, a test that is already red at HEAD, and a
+      # mutation that does not compile — and must restore every file it touched.
+      - name: Mutation spot-check runner — self-test
+        run: bash scripts/tests/mutation-spot-check.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and
@@ -1390,10 +1429,19 @@ jobs:
           SECURITY: ${{ needs.security.result }}
         run: |
           echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY"
+          # ALLOWLIST, not a denylist (production-readiness task 24.4). This
+          # loop used to fail only on "failure" or "cancelled". That is
+          # fail-open by construction: any result GitHub adds, and any empty
+          # string from an expression that did not evaluate, would have been
+          # read as "fine". `success` and `skipped` are the only two results
+          # that may pass; everything else — including "" — blocks the merge.
           for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY"; do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              echo "A required job failed or was cancelled."
-              exit 1
-            fi
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "A required job reported '${result:-<empty>}' — not success or skipped."
+                exit 1
+                ;;
+            esac
           done
           echo "All jobs passed or were legitimately skipped."
