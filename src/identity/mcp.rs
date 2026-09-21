@@ -61,6 +61,29 @@ pub fn is_mcp_scope(scope: &str) -> bool {
     scope.starts_with("mcp:")
 }
 
+/// Validates a declared scope vocabulary against AGENT_AUTH.md §2.6.
+///
+/// Only `mcp:`-prefixed scopes are subject to the three-component rule — §2.6
+/// governs *MCP* scope strings, and plain OAuth scopes such as `openid` are one
+/// component by design. Used when a realm registers or updates a protected
+/// resource (an MCP tool server), which is where the vocabulary is declared.
+///
+/// Before this was wired, §2.6's MUST was enforced nowhere: `intersect_scopes`
+/// splits on whitespace and compares string equality, so `mcp:tools` or
+/// `mcp:tools:invoke:extra` travelled straight through to a minted token's
+/// `scope` claim (audit finding A-10, 2026-09-21).
+///
+/// # Errors
+/// Returns a human-readable message naming the first offending scope.
+pub fn validate_mcp_scope_vocabulary(scopes: &[String]) -> Result<(), String> {
+    for scope in scopes {
+        if is_mcp_scope(scope) {
+            validate_mcp_scope_string(scope)?;
+        }
+    }
+    Ok(())
+}
+
 /// Computes the intersection of two space-delimited scope strings.
 ///
 /// The result is a sorted, deduplicated, space-delimited scope string

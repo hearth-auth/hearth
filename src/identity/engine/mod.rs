@@ -13705,12 +13705,46 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
-        // 2. Cascade: purge RBAC role assignments and group memberships.
-        // Agents share the RBAC subject namespace with users via the same UUID.
-        let agent_subject_id = UserId::new(*agent_id.as_uuid());
-        let _ = self.rbac.purge_user_from_realm(realm_id, &agent_subject_id);
+        // 2. Cascade: delete the SPIFFE workload-identity mapping, if any.
+        // A SPIFFE mapping is a credential: the SVID keeps presenting and the
+        // mapping keeps resolving to an agent UUID whose record is gone.
+        let spiffe_index_key = keys::encode_spiffe_agent_index(agent_id);
+        if let Some(spiffe_id_bytes) = self
+            .storage
+            .get(realm_id, &spiffe_index_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(spiffe_id) = std::str::from_utf8(&spiffe_id_bytes) {
+                self.storage
+                    .delete(realm_id, &keys::encode_spiffe_mapping(spiffe_id))
+                    .map_err(Self::storage_err)?;
+            }
+            self.storage
+                .delete(realm_id, &spiffe_index_key)
+                .map_err(Self::storage_err)?;
+        }
 
-        // 3. Delete primary record and owner index atomically
+        // 3. Cascade: purge RBAC role assignments and group memberships.
+        // Agents share the RBAC subject namespace with users via the same UUID.
+        //
+        // A-2: this `Result` used to be discarded. A failed purge then produced
+        // a `204 No Content` over a surviving set of role assignments keyed by
+        // a UUID whose primary record had just been deleted — success reported
+        // for work that was never done.
+        let agent_subject_id = UserId::new(*agent_id.as_uuid());
+        self.rbac
+            .purge_user_from_realm(realm_id, &agent_subject_id)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("rbac cascade failed during delete_agent: {e}"),
+            })?;
+
+        // 4. Delete the owner index, then the primary record.
+        //
+        // A-2 / audit §4.20#8: the primary record is the only handle the rest
+        // of the cascade can be addressed by, so it is removed LAST and every
+        // earlier step propagates its failure. A partial delete then leaves the
+        // agent still resolvable and the operation retryable, instead of
+        // stranding orphan rows under an unresolvable UUID.
         let id_key = keys::encode_agent_id(agent_id);
         let owner_index_key = keys::encode_agent_owner_index(
             agent.owner().storage_tag(),
@@ -13718,10 +13752,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             agent_id,
         );
         self.storage
+            .delete(realm_id, &owner_index_key)
+            .map_err(Self::storage_err)?;
+        self.storage
             .delete(realm_id, &id_key)
             .map_err(Self::storage_err)?;
-        // Owner index deletion is best-effort; primary is gone.
-        let _ = self.storage.delete(realm_id, &owner_index_key);
 
         let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
             actor: crate::audit::Actor::User(uid.clone()),
@@ -13831,6 +13866,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         agent_id: &AgentId,
         caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5). `revoke_agent` and `delete_agent` have
+        // always had this guard; suspend/reactivate did not, and task 26.11
+        // exposed both over HTTP.
+        self.require_active_realm(realm_id)?;
         let mut agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -13871,6 +13911,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         agent_id: &AgentId,
         caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5). Reactivation is the more dangerous half
+        // of the pair — it restores a live agent inside a frozen realm.
+        self.require_active_realm(realm_id)?;
         let mut agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -15405,6 +15449,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: "resource_uri must be an absolute URI with a scheme".to_string(),
             });
         }
+        // AGENT_AUTH.md §2.6: a realm declares its MCP scope vocabulary here,
+        // and every `mcp:`-prefixed scope in it MUST be
+        // `{namespace}:{category}:{action}`. This is the enforcement point the
+        // validator was written for and had never been wired to (A-10).
+        crate::identity::mcp::validate_mcp_scope_vocabulary(&request.scopes)
+            .map_err(|reason| IdentityError::InvalidInput { reason })?;
         let uri_key = keys::encode_resource_server_uri_index(&request.resource_uri);
         if self
             .storage
@@ -15521,6 +15571,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             resource.display_name = name.clone();
         }
         if let Some(scopes) = &request.scopes {
+            crate::identity::mcp::validate_mcp_scope_vocabulary(scopes)
+                .map_err(|reason| IdentityError::InvalidInput { reason })?;
             resource.scopes = scopes.clone();
         }
         if let Some(claims) = &request.required_claims {
@@ -15721,22 +15773,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 (actor_sub, actor_scope, subject_claims.permissions.clone())
             };
 
-        // G3: a revoked agent must not participate in a delegation chain —
-        // neither as the immediate actor nor anywhere in the subject's existing
-        // `act` chain. Previously a revoked actor resolved to `None` in
-        // `resolve_agent_max_depth`, which fell back to the loosest global
-        // ceiling (fail-open) instead of blocking the exchange. Reject outright.
-        if self.agent_sub_is_revoked(realm_id, &actor_sub) {
+        // G3 / A-8: an agent that is not Active must not participate in a
+        // delegation chain — neither as the immediate actor nor anywhere in the
+        // subject's existing `act` chain. Previously a revoked actor resolved
+        // to `None` in `resolve_agent_max_depth`, which fell back to the
+        // loosest global ceiling (fail-open) instead of blocking the exchange;
+        // and `Suspended` — the status the abuse monitor applies automatically
+        // — was not matched at all. Reject any non-Active agent outright.
+        if self.agent_sub_is_not_active(realm_id, &actor_sub)? {
             return Err(IdentityError::TokenExchangeRejected {
-                reason: "actor is a revoked agent".to_string(),
+                reason: "actor is not an active agent".to_string(),
                 oauth_error: "invalid_grant",
             });
         }
         let mut chain_entry = subject_claims.act.as_ref();
         while let Some(act) = chain_entry {
-            if self.agent_sub_is_revoked(realm_id, &act.sub) {
+            if self.agent_sub_is_not_active(realm_id, &act.sub)? {
                 return Err(IdentityError::TokenExchangeRejected {
-                    reason: "act chain contains a revoked agent".to_string(),
+                    reason: "act chain contains an agent that is not active".to_string(),
                     oauth_error: "invalid_grant",
                 });
             }
@@ -15754,10 +15808,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // This prevents an intermediate agent with a loose limit from
         // extending a chain beyond what the original delegator permitted.
         let actor_ceiling = self
-            .resolve_agent_max_depth(realm_id, &actor_sub)
+            .resolve_agent_max_depth(realm_id, &actor_sub)?
             .unwrap_or(crate::abuse::MAX_ACT_CHAIN_DEPTH as u8);
         let chain_ceiling =
-            self.chain_depth_ceiling(realm_id, subject_claims.act.as_ref(), actor_ceiling);
+            self.chain_depth_ceiling(realm_id, subject_claims.act.as_ref(), actor_ceiling)?;
 
         if new_depth as u8 > chain_ceiling {
             return Err(IdentityError::DelegationDepthExceeded {
@@ -16149,45 +16203,76 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 impl EmbeddedIdentityEngine {
     /// Resolves the `max_delegation_depth` for an actor subject string.
     ///
-    /// Returns `None` when the actor is not a registered agent in this realm,
-    /// signalling that the global ceiling (`MAX_ACT_CHAIN_DEPTH`) applies.
-    fn resolve_agent_max_depth(&self, realm_id: &RealmId, actor_sub: &str) -> Option<u8> {
+    /// Returns `Ok(None)` when the actor is not a registered agent in this
+    /// realm, signalling that the global ceiling (`MAX_ACT_CHAIN_DEPTH`)
+    /// applies.
+    ///
+    /// A-8: the storage read is propagated rather than swallowed with `.ok()?`.
+    /// Answering `None` on an I/O fault meant "not a registered agent", which
+    /// selects the *loosest* ceiling — the original G3 fail-open, one layer
+    /// down from the one that was fixed.
+    fn resolve_agent_max_depth(
+        &self,
+        realm_id: &RealmId,
+        actor_sub: &str,
+    ) -> Result<Option<u8>, IdentityError> {
         // Accept bare UUID, "agt_<uuid>", or "agent:agt_<uuid>" forms.
         let raw = actor_sub
             .strip_prefix("agent:agt_")
             .or_else(|| actor_sub.strip_prefix("agt_"))
             .unwrap_or(actor_sub);
-        let uuid = uuid::Uuid::parse_str(raw).ok()?;
+        let Ok(uuid) = uuid::Uuid::parse_str(raw) else {
+            return Ok(None);
+        };
         let agent_id = crate::core::AgentId::new(uuid);
-        let agent = self.get_agent(realm_id, &agent_id).ok()??;
-        if matches!(agent.status(), AgentStatus::Revoked) {
-            return None;
+        let Some(agent) = self.get_agent(realm_id, &agent_id)? else {
+            return Ok(None);
+        };
+        if !matches!(agent.status(), AgentStatus::Active) {
+            return Ok(None);
         }
-        Some(agent.max_delegation_depth())
+        Ok(Some(agent.max_delegation_depth()))
     }
 
-    /// Returns `true` when `sub` resolves to a registered agent whose status is
-    /// [`AgentStatus::Revoked`].
+    /// Returns `true` when `sub` names an agent that must not participate in a
+    /// delegation chain.
     ///
-    /// Non-agent subjects (plain clients, unparseable IDs, or unknown agents)
-    /// return `false` — only an explicitly revoked agent record blocks
-    /// delegation. Used by token exchange to reject any chain that names a
-    /// revoked agent as the actor or as a prior delegator (G3). Without this a
-    /// revoked actor resolved to `None` in [`Self::resolve_agent_max_depth`],
-    /// which fell back to the loosest global ceiling (fail-open).
-    fn agent_sub_is_revoked(&self, realm_id: &RealmId, sub: &str) -> bool {
+    /// That is any registered agent whose status is not
+    /// [`AgentStatus::Active`], plus a subject explicitly shaped as an agent
+    /// (`agt_…` / `agent:agt_…`) that no longer resolves to a record in this
+    /// realm — the state a deleted agent leaves behind.
+    ///
+    /// Plain clients and users (bare UUIDs that resolve to no agent) and
+    /// unparseable IDs return `false`; this gate never speaks for non-agent
+    /// subjects.
+    ///
+    /// A-8: the predicate used to match only [`AgentStatus::Revoked`], while
+    /// `Suspended` is the state the abuse monitor applies *automatically* when
+    /// an agent trips the credential rate limit. The automatic response to
+    /// credential abuse therefore did not stop the abused agent from
+    /// performing token exchange or from continuing to delegate. The storage
+    /// error is propagated for the same reason as in
+    /// [`Self::resolve_agent_max_depth`] — an I/O fault must not read as
+    /// "allowed".
+    fn agent_sub_is_not_active(
+        &self,
+        realm_id: &RealmId,
+        sub: &str,
+    ) -> Result<bool, IdentityError> {
+        let explicit_agent = sub.starts_with("agent:agt_") || sub.starts_with("agt_");
         let raw = sub
             .strip_prefix("agent:agt_")
             .or_else(|| sub.strip_prefix("agt_"))
             .unwrap_or(sub);
         let Ok(uuid) = uuid::Uuid::parse_str(raw) else {
-            return false;
+            return Ok(false);
         };
         let agent_id = crate::core::AgentId::new(uuid);
-        matches!(
-            self.get_agent(realm_id, &agent_id),
-            Ok(Some(agent)) if matches!(agent.status(), AgentStatus::Revoked)
-        )
+        match self.get_agent(realm_id, &agent_id)? {
+            Some(agent) => Ok(!matches!(agent.status(), AgentStatus::Active)),
+            // An `agt_`-shaped subject with no record is a deleted agent.
+            None => Ok(explicit_agent),
+        }
     }
 
     /// Returns the effective delegation depth ceiling for the new token.
@@ -16201,16 +16286,16 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         existing_act: Option<&crate::identity::tokens::ActClaim>,
         actor_ceiling: u8,
-    ) -> u8 {
+    ) -> Result<u8, IdentityError> {
         let mut ceiling = actor_ceiling;
         let mut cur = existing_act;
         while let Some(act) = cur {
-            if let Some(depth) = self.resolve_agent_max_depth(realm_id, &act.sub) {
+            if let Some(depth) = self.resolve_agent_max_depth(realm_id, &act.sub)? {
                 ceiling = ceiling.min(depth);
             }
             cur = act.act.as_deref();
         }
-        ceiling
+        Ok(ceiling)
     }
 }
 
@@ -24556,7 +24641,9 @@ mod tests {
 
         // A new actor arrives with a much looser limit (10).
         // The ceiling should be min(10, agent_a.max_delegation_depth=2) = 2.
-        let ceiling = engine.chain_depth_ceiling(&realm, Some(&existing_act), 10);
+        let ceiling = engine
+            .chain_depth_ceiling(&realm, Some(&existing_act), 10)
+            .expect("chain ceiling");
         assert_eq!(
             ceiling, 2,
             "strict prior delegator (max=2) must cap the ceiling even when new actor allows 10"
@@ -24594,7 +24681,9 @@ mod tests {
         };
 
         // New actor has a tighter ceiling (3) — that should be the result.
-        let ceiling = engine.chain_depth_ceiling(&realm, Some(&existing_act), 3);
+        let ceiling = engine
+            .chain_depth_ceiling(&realm, Some(&existing_act), 3)
+            .expect("chain ceiling");
         assert_eq!(
             ceiling, 3,
             "new actor ceiling (3) must win when it is stricter than the chain agent (10)"
@@ -24607,7 +24696,9 @@ mod tests {
         let realm = create_test_realm(&engine);
 
         // With no prior act chain, the ceiling equals the actor's own limit.
-        let ceiling = engine.chain_depth_ceiling(&realm, None, 5);
+        let ceiling = engine
+            .chain_depth_ceiling(&realm, None, 5)
+            .expect("chain ceiling");
         assert_eq!(
             ceiling, 5,
             "no prior act chain: ceiling must equal actor's own max_delegation_depth"
@@ -24619,42 +24710,91 @@ mod tests {
     // resolved to `None` in `resolve_agent_max_depth`, which fell back to the
     // loosest global ceiling (fail-open) and was silently ignored in the chain.
 
+    // A-8 (2026-09-21) widened this predicate from `Revoked` to "not Active"
+    // and made a deleted agent's `agt_`-shaped subject non-participating.
     #[test]
-    fn agent_sub_is_revoked_distinguishes_active_revoked_and_nonagent() {
+    fn agent_sub_is_not_active_distinguishes_every_status_and_nonagent() {
         use crate::identity::{AgentOwner, CreateAgentRequest};
 
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let owner = create_test_user(&engine, &realm);
-        let agent = engine
-            .create_agent(
-                &realm,
-                &CreateAgentRequest {
-                    display_name: "revocable-agent".to_string(),
-                    description: None,
-                    owner: AgentOwner::User(owner.id().clone()),
-                    capabilities: vec![],
-                    max_delegation_depth: 5,
-                },
-                None,
-            )
-            .expect("create agent");
+        let make = |name: &str| {
+            engine
+                .create_agent(
+                    &realm,
+                    &CreateAgentRequest {
+                        display_name: name.to_string(),
+                        description: None,
+                        owner: AgentOwner::User(owner.id().clone()),
+                        capabilities: vec![],
+                        max_delegation_depth: 5,
+                    },
+                    None,
+                )
+                .expect("create agent")
+        };
+
+        let agent = make("revocable-agent");
         let agent_sub = format!("{}", agent.id());
 
         assert!(
-            !engine.agent_sub_is_revoked(&realm, &agent_sub),
-            "active agent must not be flagged revoked"
+            !engine
+                .agent_sub_is_not_active(&realm, &agent_sub)
+                .expect("status lookup"),
+            "active agent must not be flagged"
         );
         assert!(
-            !engine.agent_sub_is_revoked(&realm, &uuid::Uuid::new_v4().to_string()),
-            "a non-agent subject must never be flagged revoked"
+            !engine
+                .agent_sub_is_not_active(&realm, &uuid::Uuid::new_v4().to_string())
+                .expect("status lookup"),
+            "a bare-UUID non-agent subject must never be flagged"
+        );
+
+        // Suspended — the status the abuse monitor applies automatically —
+        // must be flagged just like Revoked.
+        let suspended = make("suspended-agent");
+        let suspended_sub = format!("{}", suspended.id());
+        engine
+            .suspend_agent(&realm, suspended.id(), None)
+            .expect("suspend agent");
+        assert!(
+            engine
+                .agent_sub_is_not_active(&realm, &suspended_sub)
+                .expect("status lookup"),
+            "suspended agent must be flagged"
+        );
+        engine
+            .reactivate_agent(&realm, suspended.id(), None)
+            .expect("reactivate agent");
+        assert!(
+            !engine
+                .agent_sub_is_not_active(&realm, &suspended_sub)
+                .expect("status lookup"),
+            "reactivation must restore delegation"
+        );
+
+        // A deleted agent leaves an `agt_`-shaped subject that resolves to
+        // nothing; that must not read as "an unknown non-agent, allow".
+        let deleted = make("deleted-agent");
+        let deleted_sub = format!("{}", deleted.id());
+        engine
+            .delete_agent(&realm, deleted.id(), None)
+            .expect("delete agent");
+        assert!(
+            engine
+                .agent_sub_is_not_active(&realm, &deleted_sub)
+                .expect("status lookup"),
+            "a deleted agent's agt_-shaped subject must be flagged"
         );
 
         engine
             .revoke_agent(&realm, agent.id(), None)
             .expect("revoke agent");
         assert!(
-            engine.agent_sub_is_revoked(&realm, &agent_sub),
+            engine
+                .agent_sub_is_not_active(&realm, &agent_sub)
+                .expect("status lookup"),
             "revoked agent must be flagged"
         );
     }
@@ -24750,7 +24890,7 @@ mod tests {
             matches!(
                 after,
                 Err(IdentityError::TokenExchangeRejected { ref reason, .. })
-                    if reason.contains("revoked agent")
+                    if reason.contains("not active")
             ),
             "a revoked agent in the act chain must reject the exchange, got: {after:?}"
         );

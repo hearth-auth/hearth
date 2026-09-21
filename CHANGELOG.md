@@ -77,6 +77,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   the request's `Host` header; the old literal survives only as the fallback for a request that sends
   no `Host`.
 
+- **Deleting an agent no longer reports a cascade it did not perform (task 26.12)** — `DELETE
+  /v1/agents/{id}` answered `204 No Content` whether or not the RBAC half of the cascade succeeded:
+  the result of the role-and-group purge was discarded, so a failed purge left every role assignment
+  and group membership in place under a UUID whose primary record had already been deleted. The
+  primary record was also removed *first*, which is what made those leftovers unaddressable — there
+  was no handle left to retry the delete with. The cascade now removes the primary record last, every
+  step propagates its failure (a partial delete answers `500` and the agent is still there to retry),
+  and the agent's SPIFFE workload-identity mapping — a live credential that kept resolving to a
+  deleted agent — is deleted with it.
+
 ### Security
 - **The first admin's email-verification token is no longer written to the production log
   (task 26.25)** — it was logged in full at `WARN`, so anyone with log read access could finish the
@@ -161,6 +171,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   server's output. `src/protocol/redact.rs` already names `reset_url` as a field that must always
   be redacted, and the sibling site in `forgot_password` already redacted it. Now wrapped in
   `Redact`, matching that site.
+
+- **Token exchange now refuses a *suspended* agent, not only a revoked one (task 26.18)** — the
+  RFC 8693 status gate matched `Revoked` and nothing else, while `Suspended` is the state the abuse
+  monitor applies **automatically** when an agent trips the credential rate limit. The automatic
+  response to agent credential abuse therefore did not stop that agent from performing token exchange
+  or from continuing to delegate. Any non-`Active` agent is now refused, as an actor and anywhere in
+  the `act` chain, and an `agt_`-shaped subject whose record no longer exists (a deleted agent) is
+  refused too. Reactivation restores delegation, so the reversible half of the state machine is
+  unchanged. Two storage reads on the same path — the status lookup and the delegation-depth ceiling
+  — now propagate their errors instead of resolving to "not a registered agent", which selected the
+  loosest global ceiling.
+
+- **`/v1/tools/invoke` no longer burns a DPoP proof's replay slot before checking its key binding
+  (task 26.20)** — the JTI was recorded first, so a proof that failed the `cnf.jkt` binding check had
+  already consumed its one-shot slot. The JTI store is durable and realm-wide, so the rightful holder's
+  own use of that proof was then answered `DPoP proof replay` at every endpoint in the realm. The order
+  now matches `auth.rs` and the capability-token path: binding first, then the JTI.
+
+- **Archived realms now freeze agent suspension and reactivation (task 26.28)** — `revoke_agent`,
+  `delete_agent` and every other agent mutator refused a non-active realm; `suspend_agent` and
+  `reactivate_agent` did not, and both are now reachable over HTTP. Reactivation was the dangerous
+  half: it put a live agent back inside a frozen tenant. Both now answer the same refusal as the rest
+  of the surface.
+
+- **MCP scope strings registered on a protected resource are now validated (task 26.19)** —
+  `AGENT_AUTH.md` §2.6 makes `{namespace}:{category}:{action}` a MUST, and the validator implementing
+  it had no production caller, so the rule was enforced nowhere. A realm could register `mcp:tools` or
+  `mcp:tools:invoke:extra` as part of an MCP server's scope vocabulary and the string travelled
+  unchanged into a minted token's `scope` claim. Registering or updating a protected resource now
+  rejects a malformed `mcp:`-prefixed scope with `invalid input`. Non-MCP scopes such as `openid` are
+  unaffected — §2.6 governs MCP scope strings only.
 
 ### Changed
 - **`docs/STATUS.md` no longer lists LDAP / Active Directory federation as shipped (task 23.8)** —
