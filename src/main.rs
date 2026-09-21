@@ -1405,14 +1405,13 @@ async fn run_serve(
     );
     let identity_engine: Arc<dyn IdentityEngine> = raw_identity_engine;
 
-    // Build the PermissionRegistry from the initial config and wrap it in an
-    // ArcSwap for zero-downtime hot-swap on SIGHUP.  The registry is rebuilt
+    // Build the PermissionRegistry from the initial config and wrap it in a
+    // SwapCell for zero-downtime hot-swap on SIGHUP.  The registry is rebuilt
     // and atomically swapped inside `run_config_reconciliation` every time the
     // operator sends SIGHUP or triggers a programmatic reload.
-    let permission_registry: Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>> =
-        Arc::new(arc_swap::ArcSwap::from_pointee(build_permission_registry(
-            &config,
-        )));
+    let permission_registry: RegistrySwap = Arc::new(hearth::core::SwapCell::from_pointee(
+        build_permission_registry(&config),
+    ));
 
     // Base URL for email links and onboarding (computed once, reused).
     let base_url = config.onboarding.base_url.clone().unwrap_or_else(|| {
@@ -3490,7 +3489,7 @@ async fn wait_for_shutdown_signal() {
 /// truncated shutdown exits non-zero without skipping the memtable flush
 /// (audit 2026-08-28 §4.11#10).
 /// Registry type alias used for hot-swap on SIGHUP.
-type RegistrySwap = Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>>;
+type RegistrySwap = Arc<hearth::core::SwapCell<hearth::rbac::registry::PermissionRegistry>>;
 
 #[allow(clippy::too_many_arguments)]
 async fn run_serve_tls(
@@ -3699,13 +3698,13 @@ fn load_config(
 /// crash the server — the previous config remains in effect.
 ///
 /// After successful reconciliation the `PermissionRegistry` is rebuilt from
-/// the new config and atomically swapped in via `ArcSwap`.
+/// the new config and atomically swapped in via `SwapCell`.
 fn run_config_reconciliation(
     engine: &dyn IdentityEngine,
     rbac: &dyn RbacEngine,
     config_path: Option<&std::path::Path>,
     dev: bool,
-    registry: &arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>,
+    registry: &hearth::core::SwapCell<hearth::rbac::registry::PermissionRegistry>,
 ) {
     let config = match load_config(dev, config_path) {
         Ok(cfg) => cfg,
@@ -3763,7 +3762,7 @@ fn run_config_reconciliation(
 /// Each declared realm's YAML config is compiled into a
 /// [`RealmPermissionRegistry`] and assembled into the global snapshot.
 /// Realms whose config fails validation are skipped with a `warn` log;
-/// the previous registry entry (if any) is preserved by the `ArcSwap`
+/// the previous registry entry (if any) is preserved by the `SwapCell`
 /// caller.
 fn build_permission_registry(config: &Config) -> hearth::rbac::registry::PermissionRegistry {
     use hearth::rbac::registry::PermissionRegistry;

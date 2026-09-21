@@ -1,20 +1,21 @@
 //! TLS termination for the Hearth protocol layer.
 //!
 //! Provides PEM certificate/key loading, hot-reloadable TLS configuration via
-//! [`ArcSwap`], and server config construction for `rustls`. The
+//! [`SwapCell`], and server config construction for `rustls`. The
 //! [`ReloadableResolver`] implements [`rustls::server::ResolvesServerCert`] and
 //! atomically swaps certificates on SIGHUP without dropping existing connections.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer};
 use tracing::info;
+
+use crate::core::SwapCell;
 
 /// Errors originating from TLS configuration and certificate handling.
 #[derive(Debug)]
@@ -198,13 +199,19 @@ fn build_certified_key(cert_path: &Path, key_path: &Path) -> Result<Arc<Certifie
 
 /// Hot-reloadable TLS configuration.
 ///
-/// Stores the current [`CertifiedKey`] in an [`ArcSwap`] for wait-free reads
-/// during TLS handshakes. Calling [`reload`](Self::reload) re-reads PEM files
-/// from disk and atomically swaps the certificate. On reload failure, the
-/// previous certificate is preserved.
+/// Stores the current [`CertifiedKey`] in a [`SwapCell`], read once per TLS
+/// handshake (rustls calls [`ResolvesServerCert::resolve`] from the
+/// `ClientHello` path, not per request). Calling [`reload`](Self::reload)
+/// re-reads PEM files from disk and atomically swaps the certificate. On
+/// reload failure, the previous certificate is preserved.
+///
+/// This is **not** the hot path — the hot path is `validate_token`,
+/// `lookup_session` and `lookup_user` — so the read lock a [`SwapCell`] load
+/// takes is permitted here. It replaced `ArcSwap` in task 26.5; see
+/// [`SwapCell`] for why.
 pub struct ReloadableTlsConfig {
     /// Atomically-swappable current certificate + signing key.
-    certified_key: Arc<ArcSwap<CertifiedKey>>,
+    certified_key: Arc<SwapCell<CertifiedKey>>,
     /// Path to the PEM certificate file.
     cert_path: PathBuf,
     /// Path to the PEM private key file.
@@ -220,7 +227,7 @@ impl ReloadableTlsConfig {
         let certified_key = build_certified_key(&cert_path, &key_path)?;
 
         Ok(Self {
-            certified_key: Arc::new(ArcSwap::from(certified_key)),
+            certified_key: Arc::new(SwapCell::from_arc(certified_key)),
             cert_path,
             key_path,
         })
@@ -239,7 +246,7 @@ impl ReloadableTlsConfig {
     }
 
     /// Creates a [`ReloadableResolver`] that reads from this config's
-    /// [`ArcSwap`].
+    /// [`SwapCell`].
     pub fn resolver(&self) -> ReloadableResolver {
         ReloadableResolver {
             certified_key: Arc::clone(&self.certified_key),
@@ -247,19 +254,20 @@ impl ReloadableTlsConfig {
     }
 }
 
-/// A [`ResolvesServerCert`] implementation backed by [`ArcSwap`].
+/// A [`ResolvesServerCert`] implementation backed by [`SwapCell`].
 ///
-/// Performs a single atomic pointer load per TLS handshake — no locks,
-/// no allocations, no syscalls. Safe for the hot path.
+/// Performs a single `Arc` clone per TLS handshake — no syscalls, no
+/// certificate parsing. Readers never block readers; the only exclusive
+/// window is the pointer store inside [`ReloadableTlsConfig::reload`].
 #[derive(Debug)]
 pub struct ReloadableResolver {
     /// Shared pointer to the current certificate.
-    certified_key: Arc<ArcSwap<CertifiedKey>>,
+    certified_key: Arc<SwapCell<CertifiedKey>>,
 }
 
 impl ResolvesServerCert for ReloadableResolver {
     fn resolve(&self, _client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.certified_key.load_full())
+        Some(self.certified_key.load())
     }
 }
 
@@ -513,7 +521,7 @@ mod tests {
         let config =
             ReloadableTlsConfig::load(cert_path.clone(), key_path.clone()).expect("load A");
 
-        // Capture cert A's DER via the ArcSwap directly
+        // Capture cert A's DER via the SwapCell directly
         let der_a = {
             let guard = config.certified_key.load();
             guard.cert[0].as_ref().to_vec()
@@ -730,5 +738,85 @@ mod tests {
         };
         let display2 = format!("{err2}");
         assert!(display2.contains("invalid private key"), "got: {display2}");
+    }
+
+    /// `reload` must publish every certificate it loads while handshakes
+    /// resolve concurrently, with the last reload winning (task 26.5 — the
+    /// `SwapCell` migration).
+    ///
+    /// A lost update leaves the server serving a superseded certificate after
+    /// a successful rotation — the exact failure an operator rotating an
+    /// expiring cert is trying to avoid. Every observed certificate must be
+    /// one of the two that were actually written.
+    #[test]
+    fn concurrent_handshakes_never_miss_a_reload() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = TempDir::new().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let (pem_a, der_a) = self_signed_pem();
+        let (pem_b, der_b) = self_signed_pem();
+        fs::write(&cert_path, &pem_a.0).expect("write cert A");
+        fs::write(&key_path, &pem_a.1).expect("write key A");
+
+        let config = Arc::new(
+            ReloadableTlsConfig::load(cert_path.clone(), key_path.clone()).expect("load A"),
+        );
+        let resolver = Arc::new(config.resolver());
+        let stop = Arc::new(AtomicBool::new(false));
+        let known = Arc::new([der_a.clone(), der_b.clone()]);
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let resolver = Arc::clone(&resolver);
+                let stop = Arc::clone(&stop);
+                let known = Arc::clone(&known);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let key = resolver.certified_key.load();
+                        let der = key.cert[0].as_ref();
+                        assert!(
+                            known.iter().any(|k| k.as_slice() == der),
+                            "handshake observed a certificate that was never written"
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for i in 0..40 {
+            let pem = if i % 2 == 0 { &pem_a } else { &pem_b };
+            fs::write(&cert_path, &pem.0).expect("write cert");
+            fs::write(&key_path, &pem.1).expect("write key");
+            config.reload().expect("reload");
+        }
+        // 40 iterations, last index 39 is odd => cert B was loaded last. B is
+        // deliberately *not* the certificate the config started on, so a
+        // `reload` that computes the new key but never publishes it leaves A
+        // in place and fails the final assertion.
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            r.join().expect("reader thread");
+        }
+
+        // What `ResolvesServerCert::resolve` returns, read the same way it
+        // reads it.
+        let final_key = resolver.certified_key.load();
+        assert_eq!(
+            final_key.cert[0].as_ref(),
+            der_b.as_slice(),
+            "the last reload was lost"
+        );
+    }
+
+    /// Generates a self-signed cert, returning `((cert_pem, key_pem), der)`.
+    fn self_signed_pem() -> ((String, String), Vec<u8>) {
+        let kp = rcgen::KeyPair::generate().expect("keygen");
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("params");
+        let cert = params.self_signed(&kp).expect("sign");
+        let der = cert.der().as_ref().to_vec();
+        ((cert.pem(), kp.serialize_pem()), der)
     }
 }

@@ -22,6 +22,9 @@
 //! | `arc_swap::ArcSwap` 1.9.2 | **3** — two `SIGSEGV`, one `free(): invalid size` |
 //! | [`SwapCell`] (this file) | 0 |
 //!
+//! [`SwapCell`] now lives in [`crate::core`] so the other non-hot call sites
+//! can share it (task 26.5); its full rationale is documented there.
+//!
 //! This module is 100% safe Rust and contains no `unsafe`, so a heap
 //! corruption here cannot originate in it. The traced abort ran the shard
 //! map's destructor from a reader's guard drop while the writer still held it.
@@ -65,59 +68,10 @@
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-use std::sync::{Arc, PoisonError, RwLock};
 
-use crate::core::{OrganizationId, RealmId, UserId};
+use crate::core::{OrganizationId, RealmId, SwapCell, UserId};
 
 use super::types::ResolvedPermissions;
-
-/// A cell holding an `Arc<T>` that readers clone and writers replace wholesale.
-///
-/// The read-copy-update shape `ArcSwap` provides, without `ArcSwap`. See the
-/// module docs for why (task 26.1).
-///
-/// A reader takes the read lock only long enough to bump a refcount, so readers
-/// never block readers and never hold the lock across any work. A writer builds
-/// the next value *before* taking the write lock in `rcu`, so the exclusive
-/// window is one pointer store.
-#[derive(Debug)]
-pub(crate) struct SwapCell<T> {
-    inner: RwLock<Arc<T>>,
-}
-
-impl<T> SwapCell<T> {
-    /// Creates a cell owning `value`.
-    fn from_pointee(value: T) -> Self {
-        Self {
-            inner: RwLock::new(Arc::new(value)),
-        }
-    }
-
-    /// Returns the current value.
-    ///
-    /// A poisoned lock is recovered rather than propagated: every entry in this
-    /// cache is re-derivable from storage, so the worst case of reading past a
-    /// panic is a stale-versioned entry, which the version equality check
-    /// already rejects. Refusing to read would turn an unrelated panic into a
-    /// permanent authorization outage.
-    fn load(&self) -> Arc<T> {
-        Arc::clone(&self.inner.read().unwrap_or_else(PoisonError::into_inner))
-    }
-
-    /// Replaces the value with `f(current)`.
-    ///
-    /// Unlike `ArcSwap::rcu` this is not a compare-and-swap retry loop: the
-    /// write lock makes the read-modify-write atomic outright, so `f` runs
-    /// exactly once and no update can be lost.
-    fn rcu<F>(&self, f: F)
-    where
-        F: FnOnce(&Arc<T>) -> T,
-    {
-        let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let next = Arc::new(f(&guard));
-        *guard = next;
-    }
-}
 
 /// Upper bound on cached resolutions across all realms and shards. When a shard
 /// exceeds its share the shard is cleared wholesale (coarse eviction — always
@@ -145,8 +99,8 @@ type Entry = (u64, ResolvedPermissions);
 /// Sharded, lock-free decision cache. See the module docs for the correctness
 /// model — this is a security boundary, edit with that in mind.
 pub(crate) struct ShardedResolutionCache {
-    /// Per-realm graph version, bumped on every mutation. Wait-free reads via
-    /// `ArcSwap::load`; a bump is a rare (off-hot-path) `rcu`. The realm count is
+    /// Per-realm graph version, bumped on every mutation. Reads are one
+    /// `SwapCell::load`; a bump is a rare (off-hot-path) `rcu`. The realm count is
     /// small, so cloning this map on bump is cheap; it is deliberately *not*
     /// sharded to keep the invalidation boundary a single, auditable atomic.
     generations: SwapCell<HashMap<RealmId, u64>>,

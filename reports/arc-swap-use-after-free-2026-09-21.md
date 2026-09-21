@@ -1,11 +1,18 @@
-# The `arc-swap` heap corruption, and what to do about the other twelve sites
+# The `arc-swap` heap corruption, and what to do about the remaining sites
 
-Task 26.1 (audit 2026-08-28, raised by 25.16 · **CRITICAL**).
+Tasks 26.1 and 26.5 (audit 2026-08-28, raised by 25.16 · **CRITICAL**).
 
 `arc-swap` 1.9.2 corrupts the heap under the `load` + `rcu` pattern this
-codebase uses in thirteen places. This report records how that was pinned to the
-crate rather than to our code, what was fixed on 2026-09-21, and what each
-remaining call site needs.
+codebase used in thirteen places. This report records how that was pinned to the
+crate rather than to our code, what has been fixed, and what each remaining call
+site needs.
+
+**Status at 2026-09-21.** Five of the thirteen sites are off the crate: the
+authorization decision cache (26.1) and the four non-hot sites (26.5). The
+remaining eight are all on the hot path and are deliberately untouched — a read
+lock is forbidden there, and the epoch-based reclamation they need is a new
+dependency with its own justification. `arc-swap` is therefore still a
+dependency of this crate.
 
 ## What was measured
 
@@ -84,7 +91,7 @@ Both checked against the vendored crate source, not the issue tracker.
 
 So the remedy cannot be a dependency bump. It is to move off the crate.
 
-## What shipped on 2026-09-21
+## What shipped in 26.1
 
 `src/rbac/resolution_cache.rs` now uses a local `SwapCell<T>` — a documented
 `RwLock<Arc<T>>` with `load` and `rcu` — instead of `ArcSwap`.
@@ -102,26 +109,68 @@ strictly stronger than `ArcSwap::rcu` — a write lock makes the
 read-modify-write atomic outright, so the closure runs once instead of in a
 compare-and-swap retry loop.
 
-## The remaining twelve sites
+## What shipped in 26.5
 
-Nothing here is fixed. Each row says what the site is and what it needs.
+`SwapCell` moved out of `src/rbac/resolution_cache.rs` to **`src/core/swap_cell.rs`**
+(`hearth::core::SwapCell`) when the second consumer arrived. `core` is the one
+module every layer may depend on, and the consumers now span `protocol`, `rbac`,
+`abuse` and the binary; `SwapCell` is a shared generic container with no domain
+logic and no I/O, in the same family as the primitives already in
+`core::secrets` and the atomic-backed `FakeClock` in `core::time`.
 
-### Not on the hot path — `SwapCell` is sufficient
+All four non-hot sites moved with it. Each was re-derived against the hot-path
+definition in `CLAUDE.md` — `validate_token`, `lookup_session`, `lookup_user`,
+and *not* authorization — before being migrated:
 
-| Site | What it holds | Read frequency |
+| Site | What moved | Off the hot path because |
 |---|---|---|
-| `src/protocol/tls.rs:207,257` | the certified key | per TLS handshake, not per request |
-| `src/abuse/ip_reputation/spamhaus.rs:108` | a CIDR filter | per reputation check, off the auth path |
-| `src/abuse/ip_reputation/mod.rs`, `src/abuse/cidr.rs` | the same filter behind the same `Arc` | as above |
-| `src/main.rs:1416,3428,3643` | the permission registry | read at issue time, reloaded on SIGHUP |
-| `src/rbac/registry.rs`, `src/rbac/engine.rs` | the same registry | as above |
+| `src/protocol/tls.rs` | `ReloadableTlsConfig::certified_key`, `ReloadableResolver::certified_key` | `ResolvesServerCert::resolve` is called by rustls from the `ClientHello` path — **once per handshake, not per request**, and not at all on a resumed session. It is upstream of every auth call, never inside one. |
+| `src/abuse/ip_reputation/spamhaus.rs` | `SpamhausDropProvider::filter` | `IpReputationProvider::check` runs on the abuse/reputation path at connection admission. It is not reached by `validate_token`, `lookup_session` or `lookup_user`. |
+| `src/abuse/ip_reputation/mod.rs`, `src/abuse/cidr.rs` | documentation only — neither file ever named `arc_swap` in code; both described the call-site pattern | same path as above |
+| `src/main.rs` (with `src/rbac/registry.rs`, `src/rbac/engine.rs`) | `RegistrySwap` — the `PermissionRegistry` hot-swap | The registry is built at startup and re-stored on SIGHUP by `run_config_reconciliation`. In `main.rs` it is **write-only**: there is no `load` of it on any request path. |
 
-These can move to `SwapCell` mechanically. `SwapCell` should move out of
-`src/rbac/resolution_cache.rs` to a shared module when the second consumer
-arrives.
+Two of the five rows the previous revision listed were doc-comment references
+rather than code, so the real code change in 26.5 is three sites, not four;
+`src/rbac/registry.rs` and `src/rbac/engine.rs` were likewise comment-only.
+
+`SwapCell` gained `store(Arc<T>)` and `from_arc(Arc<T>)` for the TLS and
+Spamhaus reload paths, which already hold an `Arc` and replace it wholesale
+rather than deriving the next value from the current one.
+
+### Guards added
+
+One concurrent reader/writer test per migrated update path, each
+mutation-proven by removing the publish and confirming exactly that test goes
+red:
+
+* `core::swap_cell::tests::concurrent_rcu_never_loses_an_update` — 4 writers ×
+  250 `rcu` increments against 4 spinning readers; the final count must be
+  exactly 1,000. Covers every `rcu` consumer, including the resolution cache.
+* `core::swap_cell::tests::concurrent_store_publishes_the_last_value` — 2,000
+  stores against 4 spinning readers. This is the guard for the `main.rs`
+  registry site, which mutates only through `store`.
+* `protocol::tls::tests::concurrent_handshakes_never_miss_a_reload` — 40
+  alternating certificate reloads against 4 threads reading the resolver's
+  cell. The last reload deliberately lands on a certificate the config did
+  *not* start on, so a reload that builds the key but never publishes it leaves
+  the old certificate live and fails.
+* `abuse::ip_reputation::spamhaus::tests::concurrent_checks_never_miss_a_reload`
+  — 200 alternating list reloads against 4 threads calling `check`. One address
+  is blocklisted under both lists and one under neither, so a torn or empty
+  snapshot breaks a per-snapshot assertion; the final list is deliberately not
+  the starting list, so a lost store fails.
+
+## The remaining eight sites — all hot
+
+### Not on the hot path — nothing left
+
+All five non-hot sites are done (26.1 and 26.5 above). Outside `src/identity/`
+and `src/storage/` no file imports or calls `arc_swap` any more; what is left
+there and in `benches/`/`examples/` is prose recording the history.
 
 ### On the hot path — a read lock is NOT allowed
 
+Nothing here is fixed, and 26.5 deliberately did not touch any of it.
 `CLAUDE.md` forbids locks on the read path of `validate_token`,
 `lookup_session` and `lookup_user`. These need epoch-based reclamation, which
 `CLAUDE.md` already names as the sanctioned mechanism.
@@ -141,7 +190,7 @@ arrives.
 prescribes ("Use epoch-based reclamation"), it is what `arc-swap` implements a
 variant of, and it carries far more production mileage. Adding it needs a
 dependency-policy justification per `CLAUDE.md` — licence, `cargo-audit`, and a
-written reason — which is why this half is not done here.
+written reason — which is why this half is still not done.
 
 **Sequencing.** `sharded_cache.rs` is the leverage point: four of the eight hot
 sites go through it or copy its shape. Convert that one first, behind the same
@@ -152,6 +201,9 @@ call sites.
 crashed there, but nothing observed had crashed in the resolution cache either
 until the allocator was told to check. Any of them can be probed the same way:
 a concurrent reader/writer test, `MALLOC_CHECK_=3`, several copies at once.
+
+**`arc-swap` stays in `Cargo.toml`** until these eight are converted. Removing
+the dependency is the closing act of that work, not of 26.5.
 
 ## Regression guard
 

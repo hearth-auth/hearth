@@ -7,10 +7,12 @@
 //!   definitely-hostile infrastructure.
 //! - **EDROP** (`dropv6.txt`) — the Spamhaus "Extended DROP" IPv6 equivalent.
 //!
-//! Both lists are parsed into a single [`CidrFilter`] held behind an
-//! [`arc_swap::ArcSwap`].  Hot-path lookups call `ArcSwap::load()` (lock-free,
-//! allocation-free on the read path) and then do a linear scan over the
-//! in-memory CIDR list.
+//! Both lists are parsed into a single [`CidrFilter`] held behind a
+//! [`SwapCell`].  A lookup clones one `Arc` and then does a linear scan over
+//! the in-memory CIDR list.  This is a reputation check on the abuse path,
+//! not the auth hot path (`validate_token` / `lookup_session` /
+//! `lookup_user`), so the read lock a [`SwapCell`] load takes is permitted.
+//! It replaced `arc_swap::ArcSwap` in task 26.5; see [`SwapCell`] for why.
 //!
 //! # Background refresh
 //!
@@ -46,11 +48,11 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use tracing::{debug, warn};
 
 use crate::abuse::cidr::{Cidr, CidrFilter};
 use crate::abuse::ip_reputation::{IpReputationProvider, IpReputationVerdict};
+use crate::core::SwapCell;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -103,9 +105,9 @@ impl Default for SpamhausDropConfig {
 /// provider.spawn_refresh(SpamhausDropConfig::default());
 /// ```
 pub struct SpamhausDropProvider {
-    /// Arc-swapped CIDR filter.  Lock-free on the read path; replaced atomically
-    /// on each successful refresh.
-    filter: Arc<ArcSwap<CidrFilter>>,
+    /// Swappable CIDR filter.  Readers never block readers; replaced
+    /// atomically on each successful refresh.
+    filter: Arc<SwapCell<CidrFilter>>,
 }
 
 impl SpamhausDropProvider {
@@ -125,7 +127,7 @@ impl SpamhausDropProvider {
     pub fn from_text(drop_text: &str, dropv6_text: &str) -> Self {
         let filter = build_filter(drop_text, dropv6_text);
         Self {
-            filter: Arc::new(ArcSwap::from_pointee(filter)),
+            filter: Arc::new(SwapCell::from_pointee(filter)),
         }
     }
 
@@ -136,7 +138,7 @@ impl SpamhausDropProvider {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            filter: Arc::new(ArcSwap::from_pointee(CidrFilter::empty())),
+            filter: Arc::new(SwapCell::from_pointee(CidrFilter::empty())),
         }
     }
 
@@ -183,8 +185,8 @@ impl SpamhausDropProvider {
 impl IpReputationProvider for SpamhausDropProvider {
     /// Checks whether `ip` falls within any Spamhaus DROP or EDROP CIDR.
     ///
-    /// Lock-free: loads the current filter snapshot via [`ArcSwap::load`] and
-    /// performs a linear scan.  Returns a clean verdict if the filter is empty
+    /// Loads the current filter snapshot via [`SwapCell::load`] and performs a
+    /// linear scan.  Returns a clean verdict if the filter is empty
     /// (fail-open) or if the IP does not match any CIDR.
     fn check(&self, ip: IpAddr) -> IpReputationVerdict {
         use crate::abuse::cidr::CidrOutcome;
@@ -270,9 +272,41 @@ async fn refresh_once(provider: &SpamhausDropProvider, config: &SpamhausDropConf
     }
 }
 
+/// Connect timeout for a DROP-list refresh.
+const SPAMHAUS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Total request timeout for a DROP-list refresh.
+///
+/// Longer than the provider-egress default because the DROP lists are a few
+/// hundred kilobytes and this runs on a background refresh, not a request.
+const SPAMHAUS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Builds the `ureq` config for a DROP-list refresh.
+///
+/// # Task 26.37
+///
+/// This used bare `ureq::get`, and ureq 3.3.0's `Timeouts::default()` leaves
+/// every field `None` except `await_100`.
+///
+/// Milder than its siblings, and worth saying why rather than implying
+/// equivalence: this runs inside `spawn_blocking`, so a hung endpoint occupies
+/// a blocking-pool thread rather than a Tokio *worker*. It still leaks one
+/// thread per refresh interval, permanently, and the refresh loop's
+/// "retaining previous list" recovery never fires because the call never
+/// returns to report a failure.
+fn spamhaus_agent_config() -> ureq::config::Config {
+    ureq::config::Config::builder()
+        .timeout_connect(Some(SPAMHAUS_CONNECT_TIMEOUT))
+        .timeout_global(Some(SPAMHAUS_REQUEST_TIMEOUT))
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build()
+}
+
 /// Blocking HTTP GET using `ureq`.  Must be called inside `spawn_blocking`.
 fn fetch_url(url: &str) -> Result<String, String> {
-    let resp = ureq::get(url)
+    let agent = ureq::Agent::new_with_config(spamhaus_agent_config());
+    let resp = agent
+        .get(url)
         .call()
         .map_err(|e| format!("HTTP GET {url} failed: {e}"))?;
 
@@ -350,5 +384,77 @@ mod tests {
     fn empty_provider_fails_open() {
         let p = SpamhausDropProvider::empty();
         assert!(p.check(v4(1, 10, 16, 1)).is_clean());
+    }
+
+    /// Shares `192.0.2.0/24` with [`SAMPLE_DROP`] and differs everywhere else,
+    /// so one IP is blocklisted under *both* lists (a per-snapshot invariant a
+    /// single `check` can assert) and two more distinguish which list is live.
+    const OTHER_DROP: &str = "\
+; Spamhaus DROP List
+192.0.2.0/24 ; SBL000002
+203.0.113.0/24 ; SBL000003
+";
+
+    /// `reload` must publish every list it is handed while `check` calls race
+    /// it, with the last reload winning (task 26.5 — the `SwapCell` migration).
+    ///
+    /// A lost update leaves the provider answering from a superseded list,
+    /// which is a silent policy regression: an operator who reloads a widened
+    /// blocklist would keep admitting the addresses it added.
+    #[test]
+    fn concurrent_checks_never_miss_a_reload() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let provider = Arc::new(SpamhausDropProvider::from_text(SAMPLE_DROP, ""));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let provider = Arc::clone(&provider);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        // Each assertion reads exactly one snapshot, so a
+                        // reload landing mid-loop cannot make it spuriously
+                        // fail. `192.0.2.1` is blocklisted under both lists and
+                        // `8.8.8.8` under neither, so a torn or empty snapshot
+                        // breaks one of them.
+                        assert!(
+                            provider.check(v4(192, 0, 2, 1)).is_blocklisted,
+                            "a snapshot dropped an entry both lists declare"
+                        );
+                        assert!(
+                            provider.check(v4(8, 8, 8, 8)).is_clean(),
+                            "a snapshot blocklisted an address neither list declares"
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for i in 0..200 {
+            if i % 2 == 0 {
+                provider.reload(SAMPLE_DROP, "");
+            } else {
+                provider.reload(OTHER_DROP, "");
+            }
+        }
+        // 200 iterations, last index 199 is odd => OTHER_DROP was stored last.
+        // OTHER_DROP is deliberately *not* the list the provider started on, so
+        // a `reload` that builds the new filter but never publishes it leaves
+        // SAMPLE_DROP live and fails the final assertions.
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            r.join().expect("reader thread");
+        }
+
+        assert!(
+            provider.check(v4(203, 0, 113, 1)).is_blocklisted,
+            "the last reload was lost"
+        );
+        assert!(
+            provider.check(v4(1, 10, 16, 1)).is_clean(),
+            "a superseded list is still live"
+        );
     }
 }

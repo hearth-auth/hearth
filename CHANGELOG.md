@@ -172,7 +172,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   0 in 150 after the change. There is no release to upgrade to and no production-reachable
   alternative strategy in the crate. The permission-resolution cache now uses an internal
   `RwLock<Arc<T>>` cell; its 64-way sharding is unchanged, so readers still never block readers.
-  Twelve other call sites still use `arc-swap` and are enumerated, with what each needs, in
+  Four more call sites moved off it in task 26.5 (below); the eight hot-path sites still use
+  `arc-swap` and are enumerated, with what each needs, in
   `reports/arc-swap-use-after-free-2026-09-21.md`.
 - **New `trust_asserted_email` SAML connector key, and SAML account linking now works at all (task 25.27)** —
   SAML carries no `email_verified` signal, so Hearth hard-coded the asserted address as unverified.
@@ -284,6 +285,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `LdapError::InvalidAttributeName` variant reports the first. An empty `base_dn` is also now
   refused. The connector is still not operator-reachable (task 26.6), so this is hardening that must
   be in place before it is wired, not a live exposure.
+
+- **Removed `arc-swap` from every remaining non-hot-path call site (task 26.5)** — the TLS
+  certificate resolver, the Spamhaus IP-reputation CIDR filter, and the `PermissionRegistry`
+  SIGHUP hot-swap now use the same `SwapCell` cell that task 26.1 introduced, moved to
+  `hearth::core::SwapCell` so all four consumers share it. These carried the same latent heap
+  corruption as the authorization cache: a certificate resolved during a handshake, or a
+  reputation filter read during a check, could have its refcount dropped to zero by a reader
+  while a reload still owned it. Behaviour is unchanged — readers never block readers, and a
+  reload is still one pointer store. The eight hot-path sites (session, token-claims and
+  realm-status caches; memtable, SST readers, hot tier and block cache) are deliberately
+  untouched: a read lock is forbidden there, and they need epoch-based reclamation instead.
 
 ### Changed
 - **`docs/STATUS.md` no longer lists LDAP / Active Directory federation as shipped (task 23.8)** —

@@ -43,8 +43,8 @@ pub struct EmbeddedRbacEngine {
     /// Memoizes full permission resolutions to collapse the per-issuance N+1
     /// storage fan-out (HEA-1770). Invalidated per-realm on every mutation.
     ///
-    /// Sharded and lock-free (HEA-1906): reads are wait-free `ArcSwap` loads with
-    /// no mutex, fixing the −0.549 `permission_check` scaling the single
+    /// Sharded (HEA-1906): a read is two `SwapCell` loads rather than one
+    /// global mutex, fixing the −0.549 `permission_check` scaling the single
     /// `Mutex<ResolutionCache>` caused under saturation (HEA-1875 C7).
     resolution_cache: ShardedResolutionCache,
 }
