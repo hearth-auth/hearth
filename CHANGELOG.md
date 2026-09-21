@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **The Kotlin SDK's publish job succeeded while publishing nothing (task 26.53)** — the `publishing` block
+  declared a publication and **no repository**, so `gradle publish` had zero targets, did no work and exited
+  `0`. Forty-three `sdk-kotlin-v*` tags produced forty-three green workflow runs and no artifact: `io.hearth`
+  is absent from Maven Central, and the OSSRH credentials the workflow passed in were read by nothing. The
+  OSSRH repository is now declared, the POM carries the `developers` block Maven Central requires, and a tag
+  build fails if the credentials are missing or if the publish task graph has no repository target. **Not
+  verified end to end** — that needs the release credentials.
+- **The PHP SDK's publish job announced a Packagist sync that cannot happen (task 26.53)** — measured against
+  the Packagist API, `hearth-auth/php-sdk` is registered against a **separate** repository and serves only
+  `dev-main`, so a tag pushed to this monorepo reaches it never. The step said "Packagist will sync
+  automatically" and exited `0`; it now reports the real state and points at the open task.
+
 - **`POST /admin/users/{id}/roles` refuses an organisation that does not exist (task 26.45)** — it parsed
   `org_id` into a scope and wrote the assignment without asking whether the organisation was real, so a typo
   answered `201` and created an assignment that could never grant anything: the administrator was told the
