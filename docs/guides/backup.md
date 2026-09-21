@@ -7,22 +7,26 @@ Hearth ships a built-in backup CLI that exports realm data to a self-contained `
 > a live instance and it exits `2` with
 > `data directory '…' is already locked by another process`.
 
-> **Known gap — the CLI cannot export a KEK-encrypted store (verified at `cfb6c4f5`).**
-> Production requires a key-encryption key, and `hearth backup create` against a
-> store written under one fails with:
+> **Exporting a KEK-encrypted store.** Production requires a key-encryption key,
+> and every CLI subcommand that opens the data directory needs it too — otherwise
+> the export hits an `HKEY` envelope it cannot open. Supply it either way:
 >
-> ```
-> error: signing error: key material has HKEY envelope but no key_encryption_key
->        is configured — set security.key_encryption_key in hearth.yaml or the
->        HEARTH_KEK environment variable
+> ```bash
+> # Either: the environment variable (takes precedence)
+> export HEARTH_KEK=$(cat /etc/hearth/kek.hex)
+> hearth backup create --data-dir /var/lib/hearth/data
+>
+> # Or: point the command at the config file that carries it
+> hearth backup create --data-dir /var/lib/hearth/data --config /etc/hearth/hearth.yaml
 > ```
 >
-> The message is misleading: the failure occurs **with** `HEARTH_KEK` exported,
-> **with** `security.key_encryption_key` set in a `./hearth.yaml`, and there is no
-> `--config` flag to point the command at a config file. The CLI backup path does
-> not read the key by any route. Until this is fixed, use the HTTP export
-> (`POST /admin/backup`, below) against the running server, which does have the
-> key in memory. Dev and other non-KEK stores are unaffected.
+> `--config` reads only `security.key_encryption_key`; it does **not** run the
+> full production validator, so a config that has drifted elsewhere still lets
+> you take a backup. `HEARTH_MASTER_KEY` must also be set, as it is for `serve`.
+>
+> Until task 26.21 this was impossible by any route: the command read neither the
+> environment variable nor a config file, and there was no `--config` flag, while
+> the error it printed named both.
 
 > **A mistyped `--data-dir` does not fail.** `backup create` *creates* a missing
 > directory, exports zero realms, prints only `warning: no realms found to export`,
@@ -105,6 +109,7 @@ hearth backup create [OPTIONS]
 | `--include-audit` | off | Include audit events in the export (can be very large) |
 | `--encrypt` | off | Protect the signing-key DEK with an interactively-prompted passphrase |
 | `--data-dir` | `data` | Path to the Hearth data directory |
+| `--config`, `-c` | none | Path to `hearth.yaml`, read for `security.key_encryption_key`. Needed for a KEK-encrypted store unless `HEARTH_KEK` is exported |
 
 **Examples:**
 

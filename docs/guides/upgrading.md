@@ -24,7 +24,15 @@ Work through this list for every upgrade, including patch releases.
   > take the backup, install the new binary, start. Budget the backup into your
   > downtime window rather than treating it as a pre-flight step.
 
+  > **Give it the key-encryption key.** A production store's signing keys are
+  > encrypted at rest, and the command cannot read them without the KEK. Export
+  > `HEARTH_KEK`, or pass `--config` pointing at the `hearth.yaml` that carries
+  > `security.key_encryption_key`. `HEARTH_MASTER_KEY` must be set as well, just
+  > as it is for `serve`.
+
   ```bash
+  export HEARTH_KEK=$(cat /etc/hearth/kek.hex)
+
   hearth backup create \
     --data-dir /var/lib/hearth/data \
     --include-audit \

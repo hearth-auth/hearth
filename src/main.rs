@@ -154,6 +154,14 @@ enum BackupAction {
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
+
+        /// Path to `hearth.yaml`, read for `security.key_encryption_key`.
+        ///
+        /// Needed whenever the data directory's signing keys are encrypted at
+        /// rest, which production requires. `HEARTH_KEK` takes precedence and
+        /// makes this flag unnecessary (task 26.21).
+        #[arg(long, short)]
+        config: Option<PathBuf>,
     },
     /// Restore realm data from a `.hearth-backup` archive.
     Restore {
@@ -192,6 +200,14 @@ enum BackupAction {
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
+
+        /// Path to `hearth.yaml`, read for `security.key_encryption_key`.
+        ///
+        /// Needed whenever the data directory's signing keys are encrypted at
+        /// rest, which production requires. `HEARTH_KEK` takes precedence and
+        /// makes this flag unnecessary (task 26.21).
+        #[arg(long, short)]
+        config: Option<PathBuf>,
     },
     /// Verify archive integrity by recomputing SHA-256 checksums.
     ///
@@ -556,6 +572,7 @@ async fn main() {
                     include_audit,
                     encrypt,
                     data_dir,
+                    config,
                 } => {
                     match run_backup_create(
                         output.as_deref(),
@@ -563,6 +580,7 @@ async fn main() {
                         include_audit,
                         encrypt,
                         &data_dir,
+                        config.as_deref(),
                     ) {
                         Ok(()) => 0,
                         Err(e) => {
@@ -578,6 +596,7 @@ async fn main() {
                     dry_run,
                     allow_missing_signing_key,
                     data_dir,
+                    config,
                 } => {
                     match run_backup_restore(
                         &input,
@@ -586,6 +605,7 @@ async fn main() {
                         dry_run,
                         allow_missing_signing_key,
                         &data_dir,
+                        config.as_deref(),
                     ) {
                         Ok(had_errors) => i32::from(had_errors),
                         Err(e) => {
@@ -1245,32 +1265,8 @@ async fn run_serve(
 
     // Resolve the storage key-encryption key (KEK). Env var takes precedence.
     // Accepted format: 64 lowercase hex characters (32 bytes / AES-256).
-    let storage_kek: Option<hearth::identity::key_encryption::StorageKek> = {
-        let hex_opt = std::env::var("HEARTH_KEK")
-            .ok()
-            .or_else(|| config.security.key_encryption_key.clone());
-        match hex_opt {
-            None => None,
-            Some(hex) => {
-                if hex == "0".repeat(64) {
-                    return Err(
-                        "security.key_encryption_key / HEARTH_KEK must not be the all-zero key \
-                         — generate a random 32-byte (64 hex char) value"
-                            .into(),
-                    );
-                }
-                let bytes = hex::decode(&hex).map_err(|e| {
-                    format!("security.key_encryption_key / HEARTH_KEK is not valid hex: {e}")
-                })?;
-                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-                    "security.key_encryption_key / HEARTH_KEK must be exactly 64 hex characters \
-                     (32 bytes / AES-256)"
-                        .to_string()
-                })?;
-                Some(hearth::identity::key_encryption::StorageKek::new(arr))
-            }
-        }
-    };
+    let storage_kek: Option<hearth::identity::key_encryption::StorageKek> =
+        resolve_storage_kek(config.security.key_encryption_key.as_deref())?;
 
     // Capture KEK bytes for the audit engine before storage_kek is consumed
     // by identity_config (it is moved on the non-dev_mode path).
@@ -4141,6 +4137,66 @@ fn run_migrate_rotate_pepper(
 /// Tuning comes from the `[storage]` defaults, so a CLI run behaves like a
 /// default-configured server. A migration importer's throwaway temp directory
 /// keeps the dev config on purpose: nothing in it outlives the command.
+/// Resolves the storage key-encryption key (KEK) from the environment or config.
+///
+/// `HEARTH_KEK` wins; `config_kek` is `security.key_encryption_key`. Accepted
+/// format: 64 lowercase hex characters (32 bytes / AES-256).
+///
+/// This is the ONE place the KEK is resolved (task 26.21). `serve` had this
+/// logic inline and no CLI subcommand had it at all, so `hearth backup create`
+/// opened a KEK-encrypted store with no key and failed telling the operator to
+/// set the very things it never read.
+fn resolve_storage_kek(
+    config_kek: Option<&str>,
+) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
+    let hex_opt = std::env::var("HEARTH_KEK")
+        .ok()
+        .or_else(|| config_kek.map(str::to_string));
+    let Some(hex) = hex_opt else {
+        return Ok(None);
+    };
+    if hex == "0".repeat(64) {
+        return Err(
+            "security.key_encryption_key / HEARTH_KEK must not be the all-zero key \
+                    — generate a random 32-byte (64 hex char) value"
+                .into(),
+        );
+    }
+    let bytes = hex::decode(&hex)
+        .map_err(|e| format!("security.key_encryption_key / HEARTH_KEK is not valid hex: {e}"))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        "security.key_encryption_key / HEARTH_KEK must be exactly 64 hex characters \
+         (32 bytes / AES-256)"
+            .to_string()
+    })?;
+    Ok(Some(hearth::identity::key_encryption::StorageKek::new(arr)))
+}
+
+/// Resolves the KEK for a one-shot CLI subcommand.
+///
+/// `HEARTH_KEK` first, then `security.key_encryption_key` from `config_path`
+/// when one was given. A config that will not parse is an error, not a silent
+/// fall-through to "no KEK" — that would reproduce the original defect with a
+/// friendlier symptom.
+fn resolve_cli_kek(
+    config_path: Option<&std::path::Path>,
+) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
+    if std::env::var_os("HEARTH_KEK").is_some() {
+        return resolve_storage_kek(None);
+    }
+    let Some(path) = config_path else {
+        return Ok(None);
+    };
+    // `from_file_unchecked` on purpose: this command needs exactly one key out
+    // of the file, and running the full production validator here would mean a
+    // config that has drifted — a missing TLS path, say — blocks the backup.
+    // That is the same class of blocker task 26.21 exists to remove.
+    let config = Config::from_file_unchecked(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let kek = config.security.key_encryption_key.clone();
+    resolve_storage_kek(kek.as_deref())
+}
+
 fn cli_storage_config(data_dir: &std::path::Path) -> StorageConfig {
     let defaults = StorageSection::default();
     let hot_tier_capacity = defaults.hot_tier_capacity.unwrap_or_else(|| {
@@ -4164,6 +4220,7 @@ fn run_backup_create(
     include_audit: bool,
     encrypt: bool,
     data_dir: &std::path::Path,
+    config_path: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
     use hearth::core::RealmId;
@@ -4172,8 +4229,10 @@ fn run_backup_create(
     std::fs::create_dir_all(data_dir)?;
     let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, audit, rbac) =
-        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+    let (identity, audit, rbac) = build_all_engines(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        resolve_cli_kek(config_path)?,
+    )?;
 
     // Resolve output path — default: `./hearth-backup-<unix_secs>.hearth-backup`
     let out_path = match output {
@@ -4311,6 +4370,7 @@ fn run_backup_restore(
     dry_run: bool,
     allow_missing_signing_key: bool,
     data_dir: &std::path::Path,
+    config_path: Option<&std::path::Path>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupImporter, ImportOptions, RestoreMode};
 
@@ -4325,8 +4385,10 @@ fn run_backup_restore(
     std::fs::create_dir_all(data_dir)?;
     let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, audit, rbac) =
-        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+    let (identity, audit, rbac) = build_all_engines(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        resolve_cli_kek(config_path)?,
+    )?;
 
     let importer = BackupImporter::new(identity, rbac, audit);
     let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
@@ -4500,6 +4562,7 @@ type AllEngines = (
 /// Uses production-mode credential settings since backup operates on live data.
 fn build_all_engines(
     storage: Arc<dyn StorageEngine>,
+    key_encryption_key: Option<hearth::identity::key_encryption::StorageKek>,
 ) -> Result<AllEngines, Box<dyn std::error::Error>> {
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
     let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
@@ -4514,7 +4577,10 @@ fn build_all_engines(
     let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
-        IdentityConfig::default(),
+        IdentityConfig {
+            key_encryption_key,
+            ..IdentityConfig::default()
+        },
         Arc::clone(&rbac),
         Arc::clone(&audit),
     )?);
@@ -5043,6 +5109,136 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── Backup against a KEK-encrypted store (task 26.21) ─────────────────
+
+    /// `hearth backup create` must export a store whose signing keys are
+    /// KEK-encrypted.
+    ///
+    /// It could not, by any route. `run_backup_create` built its engines with
+    /// `IdentityConfig::default()`, which carries no key-encryption key, so the
+    /// export hit an `HKEY` envelope it had no key for and failed with
+    /// *"set security.key_encryption_key in hearth.yaml or the HEARTH_KEK
+    /// environment variable"* — while both were set. There was no `--config`
+    /// flag and nothing read the environment variable, so the error named two
+    /// remedies and neither existed.
+    ///
+    /// Production requires a KEK, which made the pre-upgrade backup that
+    /// `docs/guides/upgrading.md` calls mandatory impossible on every
+    /// production deployment.
+    #[test]
+    fn backup_create_exports_a_kek_encrypted_store() {
+        use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let kek_hex = "a1".repeat(32);
+        // The production storage config needs its own master key; it is
+        // unrelated to the KEK under test and just has to be present.
+        std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
+
+        // Write a realm whose signing key is wrapped with the KEK.
+        {
+            std::fs::create_dir_all(&data_dir).expect("data dir");
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let kek = resolve_storage_kek(Some(&kek_hex))
+                .expect("valid kek")
+                .expect("kek present");
+            let (identity, ..) =
+                build_all_engines(Arc::clone(&storage), Some(kek)).expect("engines");
+            let realm = identity
+                .create_realm(&CreateRealmRequest {
+                    name: "kek-realm".to_string(),
+                    config: None,
+                })
+                .expect("create realm");
+            let user = identity
+                .create_user(
+                    realm.id(),
+                    &CreateUserRequest {
+                        email: "kek@example.test".to_string(),
+                        display_name: "Kek".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .expect("create user");
+            let session = identity
+                .create_session(realm.id(), user.id(), &SessionContext::default())
+                .expect("session");
+            // Minting a token is what forces the realm's signing key into
+            // storage inside an HKEY envelope.
+            identity
+                .issue_tokens(realm.id(), user.id(), session.id())
+                .expect("issue tokens");
+        }
+
+        // Each invocation gets its own copy of the store. The engines
+        // `build_all_engines` wires hold one another, so the data-directory
+        // lock is not released until the process exits — harmless for a
+        // one-shot CLI, fatal for three calls inside one test.
+        let copy_of = |name: &str| {
+            let dst = dir.path().join(name);
+            copy_dir_recursive(&data_dir, &dst).expect("copy data dir");
+            dst
+        };
+
+        // Control: with no KEK anywhere, the export must still FAIL. Without
+        // this, a store whose keys were never encrypted would pass the
+        // assertions below and prove nothing.
+        std::env::remove_var("HEARTH_KEK");
+        let out0 = dir.path().join("out0.hearth-backup");
+        assert!(
+            run_backup_create(Some(&out0), None, false, false, &copy_of("d0"), None).is_err(),
+            "sanity: this store really is KEK-encrypted, so an export with no \
+             KEK must fail"
+        );
+
+        // The environment variable the error message names.
+        let out = dir.path().join("out.hearth-backup");
+        std::env::set_var("HEARTH_KEK", &kek_hex);
+        run_backup_create(Some(&out), None, false, false, &copy_of("d1"), None)
+            .expect("HEARTH_KEK must make the export work — the error says so");
+        assert!(out.exists(), "the archive must be written");
+        std::env::remove_var("HEARTH_KEK");
+
+        // And the other remedy the error message names: a config file.
+        let cfg_path = dir.path().join("hearth.yaml");
+        std::fs::write(
+            &cfg_path,
+            format!("security:\n  key_encryption_key: \"{kek_hex}\"\n"),
+        )
+        .expect("write config");
+        let out2 = dir.path().join("out2.hearth-backup");
+        run_backup_create(
+            Some(&out2),
+            None,
+            false,
+            false,
+            &copy_of("d2"),
+            Some(cfg_path.as_path()),
+        )
+        .expect("--config must make the export work — the error says so too");
+        assert!(out2.exists(), "the archive must be written");
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    /// Copies `src` to `dst` recursively. Test-only.
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let to = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir_recursive(&entry.path(), &to)?;
+            } else {
+                std::fs::copy(entry.path(), to)?;
+            }
+        }
+        Ok(())
+    }
 
     // ── CLI storage config (audit 2026-08-28 §4.11#13) ────────────────────
 

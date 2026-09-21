@@ -635,7 +635,7 @@ hearth migrate rotate-pepper --data-dir <path> [--summary-only]
 hearth config validate [<path>]            # defaults to ./hearth.yaml
 hearth config example [-o <path>]          # print an annotated hearth.yaml
 hearth config reload [--url <url>] [--pid-file <path>]   # hot reload: POST, or SIGHUP via PID file
-hearth backup create  [-o <archive>] [--realm <name|uuid>] [--include-audit] [--encrypt] [--data-dir <path>]
+hearth backup create  [-o <archive>] [--realm <name|uuid>] [--include-audit] [--encrypt] [--data-dir <path>] [--config <hearth.yaml>]
 hearth backup restore -i <archive> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run]
                       [--allow-missing-signing-key] [--data-dir <path>]
 hearth backup verify  -i <archive>

@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **`hearth backup create` can now export a production store (task 26.21)** — production requires a
+  key-encryption key, and the CLI read it from nowhere: not the `HEARTH_KEK` environment variable,
+  not a config file, and there was no `--config` flag. It failed with *"set
+  `security.key_encryption_key` in hearth.yaml or the `HEARTH_KEK` environment variable"* while both
+  were set, which made the pre-upgrade backup `docs/guides/upgrading.md` calls mandatory impossible
+  on every production deployment. `backup create` and `backup restore` now read `HEARTH_KEK`, and
+  both take a new `--config` / `-c` flag. `--config` reads only
+  `security.key_encryption_key` and does not run the full production validator, so a config that has
+  drifted elsewhere still lets you take a backup. The KEK is now resolved in one shared place, which
+  is why `serve` and the CLI can no longer disagree about it.
+
 - **Approval webhooks are now actually retried (task 26.13)** — `AGENT_AUTH.md` promises durable
   at-least-once delivery of approval notifications, and the outbox flush that provides it had no
   caller at all. Delivery was at-most-once: an endpoint that refused a notification never saw it
