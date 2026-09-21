@@ -72,12 +72,10 @@ jobs:
       sdks-typescript: ${{ steps.filter.outputs.sdks-typescript }}
       sdks-any: ${{ steps.filter.outputs.sdks-any }}
       proto: ${{ steps.filter.outputs.proto }}
-      fuzz-targets: ${{ steps.filter.outputs.fuzz-targets }}
-      bench-targets: ${{ steps.filter.outputs.bench-targets }}
+      loadtest: ${{ steps.filter.outputs.loadtest }}
       docs-only: ${{ steps.filter.outputs.docs-only }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
       ldap: ${{ steps.filter.outputs.ldap }}
-      deny: ${{ steps.filter.outputs.deny }}
 
     steps:
       - name: Checkout
@@ -186,14 +184,25 @@ jobs:
               - 'sdks/go/generated/**'
               - 'Makefile'
               - '.github/workflows/ci.yml'
-            fuzz-targets:
-              - 'fuzz/**'
+            # Reproduces loadtest-smoke.yml's old pull_request paths exactly,
+            # now that its PR entry point is ci.yml's `loadtest-smoke` job
+            # (production-readiness task 26.29).
+            loadtest:
+              - 'loadtest/**'
               - 'src/**'
+              - 'Cargo.toml'
               - 'Cargo.lock'
-            bench-targets:
-              - 'src/storage/**'
-              - 'benches/**'
-              - 'Cargo.lock'
+              - 'Makefile'
+              - '.github/workflows/loadtest-smoke.yml'
+            # NOTE (production-readiness task 26.33): there were once
+            # `fuzz-targets` and `bench-targets` filters here. No job ever read
+            # them — they were computed, printed into the summary table, and
+            # discarded. Worse, printing them next to the real gates suggested
+            # fuzz and bench were wired into `required-summary`; they are
+            # deliberately NOT (fuzz.yml:9-31, bench-regression.yml:27-46, each
+            # with its own paths trigger, its own reasons and a named owner).
+            # Deleted rather than wired: wiring them would fold an advisory
+            # workflow into the required check against an explicit decision.
             docs-only:
               - 'docs/**'
               - '**.md'
@@ -209,11 +218,11 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
-            deny:
-              - 'deny.toml'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
+            # The `deny` filter was deleted with the same reasoning (task 26.33,
+            # real count: THREE dead outputs, not the two the finding named).
+            # cargo-deny was deliberately un-gated by audit §4.8#7 — "an advisory
+            # can arrive with no diff at all" — so the leftover output told a
+            # reader the job was path-gated when it runs on every PR.
 
       - name: Summarize filter results
         run: |
@@ -227,12 +236,10 @@ jobs:
             echo "| sdks-node | ${{ steps.filter.outputs.sdks-node }} |"
             echo "| sdks-any | ${{ steps.filter.outputs.sdks-any }} |"
             echo "| proto | ${{ steps.filter.outputs.proto }} |"
-            echo "| fuzz-targets | ${{ steps.filter.outputs.fuzz-targets }} |"
-            echo "| bench-targets | ${{ steps.filter.outputs.bench-targets }} |"
+            echo "| loadtest | ${{ steps.filter.outputs.loadtest }} |"
             echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
             echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
-            echo "| deny | ${{ steps.filter.outputs.deny }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -410,6 +417,35 @@ jobs:
       # the audited continue-on-error step was removed.
       - name: Red-test gate — guard self-test
         run: bash scripts/tests/check-red-test-gate.test.sh
+
+      # Task 26.30 / audit reports/subsystem-audit-fuzz-loadtest-2026-09-21.md
+      # F-7: `cargo fuzz run <target> "$SEEDS"` made the TRACKED seed corpus
+      # libFuzzer's write directory — two 2 000-run passes left 14-364
+      # generated files in each seed directory, and the documented local
+      # command dirtied the repository. The rule is argument ORDER, so it is
+      # pure text and builds nothing.
+      - name: Fuzz corpus write path (check-fuzz-corpus-paths.sh)
+        run: bash scripts/check-fuzz-corpus-paths.sh
+
+      # Proof the guard can go red: it must reject "$SEEDS" first, a literal
+      # seeds path first, no corpus at all, a fuzz workflow whose invocation
+      # has vanished, an un-gitignored corpus, and the wrong fix of
+      # gitignoring the reviewed seeds instead.
+      - name: Fuzz corpus write path — guard self-test
+        run: bash scripts/tests/check-fuzz-corpus-paths.test.sh
+
+      # Task 26.27 / audit reports/cold-first-run-2026-09-21.md C-7: the
+      # `quickstart` block POST /admin/bootstrap hands a brand-new operator
+      # hard-coded port 8420 and cited docs/guides/getting-started.md, which
+      # does not exist (it is .mdx). The first commands a stranger copies.
+      - name: Bootstrap quickstart is runnable (check-bootstrap-quickstart.sh)
+        run: bash scripts/check-bootstrap-quickstart.sh
+
+      # Proof the guard can go red: a hard-coded host:port, a snippet with no
+      # runtime host at all, a cited path that does not exist, and a renamed
+      # generator — while NOT firing on the Rust-side fallback literal.
+      - name: Bootstrap quickstart — guard self-test
+        run: bash scripts/tests/check-bootstrap-quickstart.test.sh
 
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so
@@ -1385,6 +1421,19 @@ jobs:
       security-events: write
       actions: read
 
+  loadtest-smoke:
+    name: loadtest-smoke
+    needs: [filter]
+    # Old trigger: loadtest/**, src/**, Cargo.toml, Cargo.lock, Makefile and
+    # the workflow file itself — reproduced by the `loadtest` filter output.
+    # Task 26.29: it ran on its own pull_request trigger and so could not fail
+    # a merge, however red it went. Worth folding in only now that `run_load`
+    # returns a real exit code instead of a bare Ok(()).
+    if: (needs.filter.result == 'success' && needs.filter.outputs.loadtest == 'true') || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/loadtest-smoke.yml
+    permissions:
+      contents: read
+
   # ADVISORY — deliberately absent from required-summary's needs below.
   # HEA-2106 holds the switch until the false-positive rate against stacked PRs
   # is measured clean, and the job itself is still `continue-on-error: true`.
@@ -1399,7 +1448,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv, commit-lint, proto-governance, sdk-smoke, security]
+    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1427,15 +1476,16 @@ jobs:
           PROTO_GOVERNANCE: ${{ needs.proto-governance.result }}
           SDK_SMOKE: ${{ needs.sdk-smoke.result }}
           SECURITY: ${{ needs.security.result }}
+          LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

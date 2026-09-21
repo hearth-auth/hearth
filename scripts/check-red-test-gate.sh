@@ -35,6 +35,19 @@
 #       suite went. GitHub Actions runs `bash -e {0}`, which does NOT include
 #       pipefail.
 #
+#   R6  `make loadtest-check` — the ONLY gate over the `loadtest` crate, which
+#       the root Cargo.toml `exclude`s from the workspace — runs clippy with
+#       `-D warnings`. Production-readiness task 26.32 / audit
+#       reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7: `make clippy`
+#       is `--all-targets` over the WORKSPACE, so it never reached an excluded
+#       crate, and `loadtest-check` ran only `cargo check` + `nextest`. Nothing
+#       in the repository had ever linted it. The command was red at HEAD with
+#       three `dead_code` errors, one of them `SeedClient::revoke` — the
+#       zero-caller function behind a `--revoked-frac` CLI parameter that was
+#       stamped into every report's `dataset_shape` and revoked nothing. This
+#       is R1's concern ("a crate outside the default members is ungated") for
+#       the lint channel rather than the test channel.
+#
 #   R5  `required-summary`'s results loop is an ALLOWLIST — `success` and
 #       `skipped` pass, everything else fails. A denylist of `failure` and
 #       `cancelled` is fail-open by construction: an empty expression result,
@@ -106,6 +119,18 @@ else
         fail "R2: \`make check\` never exits non-zero; a failing gate would be reported and then ignored."
     else
         pass "R2: \`make check\` runs every gate and exits non-zero if any failed."
+    fi
+
+    # ── R6 — the out-of-workspace loadtest crate is linted by its own gate ───
+    loadtest_recipe="$(make_recipe loadtest-check)"
+    if [[ -z "$loadtest_recipe" ]]; then
+        fail "R6: no \`loadtest-check:\` target in ${MAKEFILE}. The loadtest crate is excluded from the workspace, so this is the only gate that can reach it."
+    elif ! grep -q 'cargo clippy' <<<"$loadtest_recipe"; then
+        fail "R6: \`make loadtest-check\` does not run clippy. The crate is in the root Cargo.toml's \`exclude\` list, so \`make clippy --workspace\` never reaches it and NOTHING in the repository lints it (task 26.32 / audit L-7)."
+    elif ! grep -qE -- '-D warnings' <<<"$loadtest_recipe"; then
+        fail "R6: \`make loadtest-check\` runs clippy without \`-D warnings\`. Advisory lint output does not fail a gate; the dead_code error that named \`SeedClient::revoke\` would print and the job would still be green."
+    else
+        pass "R6: \`make loadtest-check\` lints the excluded loadtest crate with -D warnings."
     fi
 fi
 
@@ -203,5 +228,5 @@ if [[ $failures -gt 0 ]]; then
     echo "✗ red-test gate: ${failures} rule(s) failed — a red test could reach main."
     exit 1
 fi
-echo "✓ red-test gate: a red test cannot reach main through any of the five audited paths."
+echo "✓ red-test gate: a red test cannot reach main through any of the six audited paths."
 exit 0

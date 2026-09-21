@@ -10,6 +10,8 @@
 #   case 4  a folded workflow that regains a pull_request trigger
 #   case 5  a folded workflow with no workflow_call trigger
 #   case 6  ci.yml no longer calling a folded workflow
+#   case 7  R5 — a filter output computed and read by nothing (task 26.33)
+#   case 8  R5 — the same output, once a job actually reads it
 #
 # Usage: bash scripts/tests/check-required-summary-coverage.test.sh
 
@@ -24,7 +26,7 @@ trap 'rm -rf "$TMP"' EXIT
 failures=0
 case_n=0
 
-FOLDED="commit-lint proto sdk-smoke security pr-head-ancestor-guard"
+FOLDED="commit-lint proto sdk-smoke security pr-head-ancestor-guard loadtest-smoke"
 
 # write_folded <dir> [extra-trigger]
 # Writes every folded workflow in its correct (reusable) shape.
@@ -152,8 +154,8 @@ EOF
     echo "ok: ${name}"
 }
 
-FULL_NEEDS="filter, quality, sdk-kotlin, commit-lint, proto, sdk-smoke, security"
-FULL_LOOP='"$QUALITY" "$SDK_KOTLIN" "$COMMIT_LINT" "$PROTO" "$SDK_SMOKE" "$SECURITY"'
+FULL_NEEDS="filter, quality, sdk-kotlin, commit-lint, proto, sdk-smoke, security, loadtest-smoke"
+FULL_LOOP='"$QUALITY" "$SDK_KOTLIN" "$COMMIT_LINT" "$PROTO" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"'
 
 # 1 — the remediated shape passes.
 run_case "every job reaches the required check" 0 "$FULL_NEEDS" "$FULL_LOOP" "" "" "" \
@@ -162,13 +164,13 @@ run_case "every job reaches the required check" 0 "$FULL_NEEDS" "$FULL_LOOP" "" 
 # 2 — THE REGRESSION (§4.12#12, first half): a ci.yml job outside needs:.
 #     This is sdk-kotlin / sdk-go / sdk-typescript, byte for byte.
 run_case "a ci.yml job absent from needs: is rejected" 1 \
-    "filter, quality, commit-lint, proto, sdk-smoke, security" \
-    '"$QUALITY" "$COMMIT_LINT" "$PROTO" "$SDK_SMOKE" "$SECURITY"' "" "" "" \
+    "filter, quality, commit-lint, proto, sdk-smoke, security, loadtest-smoke" \
+    '"$QUALITY" "$COMMIT_LINT" "$PROTO" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"' "" "" "" \
     "job 'sdk-kotlin' is not in required-summary's needs:"
 
 # 3 — THE FAIL-OPEN the fix itself could introduce: waited on, never read.
 run_case "a job in needs: but not in the loop is rejected" 1 \
-    "$FULL_NEEDS" '"$QUALITY" "$COMMIT_LINT" "$PROTO" "$SDK_SMOKE" "$SECURITY"' "" "" "" \
+    "$FULL_NEEDS" '"$QUALITY" "$COMMIT_LINT" "$PROTO" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"' "" "" "" \
     "is not read by the loop"
 
 # 4 — THE REGRESSION (§4.12#12, second half): a folded workflow that gets its
@@ -184,11 +186,76 @@ run_case "a folded workflow with no workflow_call is rejected" 1 \
 
 # 6 — dropping the call leaves the workflow running on no pull request at all.
 run_case "ci.yml not calling a folded workflow is rejected" 1 \
-    "filter, quality, sdk-kotlin, commit-lint, proto, security" \
-    '"$QUALITY" "$SDK_KOTLIN" "$COMMIT_LINT" "$PROTO" "$SECURITY"' "sdk-smoke" "" "" \
+    "filter, quality, sdk-kotlin, commit-lint, proto, security, loadtest-smoke" \
+    '"$QUALITY" "$SDK_KOTLIN" "$COMMIT_LINT" "$PROTO" "$SECURITY" "$LOADTEST_SMOKE"' "sdk-smoke" "" "" \
     "nothing calls sdk-smoke.yml"
 
-# 7 — the checked-in ci.yml passes.
+# ── R5 (task 26.33): a filter output nothing reads ───────────────────────────
+#
+# THE DEFECT: ci.yml declared `fuzz-targets`, `bench-targets` and `deny`,
+# defined their paths, printed all three into the job summary table, and no job
+# ever read `needs.filter.outputs.<name>`. The summary row sits next to the real
+# gates, so a reader concludes the workflow it names is path-gated by the
+# required check. fuzz.yml and bench-regression.yml are deliberately advisory;
+# cargo-deny deliberately runs unconditionally (§4.8#7).
+#
+# r5_case <name> <expected-exit> <consumer-line> [expect]
+r5_case() {
+    local name="$1" want="$2" consumer="$3" expect="${4:-}"
+    case_n=$((case_n + 1))
+    local dir="$TMP/case-${case_n}/.github/workflows"
+    mkdir -p "$dir"
+    write_folded "$dir"
+    write_ci "$dir" "$FULL_NEEDS" "$FULL_LOOP"
+
+    # Give the filter job an outputs block with one dead output, and optionally
+    # a consumer for it.
+    python3 - "$dir/ci.yml" "$consumer" <<'PY'
+import sys
+path, consumer = sys.argv[1], sys.argv[2]
+src = open(path).read()
+src = src.replace(
+    "  filter:\n    runs-on: ubuntu-latest\n",
+    "  filter:\n    runs-on: ubuntu-latest\n    outputs:\n"
+    "      rust: ${{ steps.filter.outputs.rust }}\n"
+    "      fuzz-targets: ${{ steps.filter.outputs.fuzz-targets }}\n",
+    1,
+)
+if consumer:
+    src = src.replace("  quality:\n", "  quality:\n    if: " + consumer + "\n", 1)
+open(path, "w").write(src)
+PY
+
+    local out got=0
+    out="$(WORKFLOW_DIR="$dir" bash "$CHECK" 2>&1)" || got=$?
+    if [[ "$got" -ne "$want" ]]; then
+        echo "FAIL: ${name} — expected exit ${want}, got ${got}"
+        echo "$out" | sed 's/^/    /'
+        failures=$((failures + 1))
+        return
+    fi
+    if [[ -n "$expect" && "$out" != *"$expect"* ]]; then
+        echo "FAIL: ${name} — output missing expected text: ${expect}"
+        echo "$out" | sed 's/^/    /'
+        failures=$((failures + 1))
+        return
+    fi
+    echo "ok: ${name}"
+}
+
+# 7 — `rust` is read, `fuzz-targets` is not: the guard must name the dead one.
+r5_case "a filter output no job reads is rejected" 1 \
+    "needs.filter.outputs.rust == 'true'" \
+    "filter output 'fuzz-targets' is computed but no job reads"
+
+# 8 — wiring it to a job clears the rule. Deleting it would too; the point is
+#     that the guard distinguishes consumed from unconsumed, not that it
+#     prefers one remedy.
+r5_case "a filter output a job reads is accepted" 0 \
+    "needs.filter.outputs.rust == 'true' || needs.filter.outputs.fuzz-targets == 'true'" \
+    "OK: every verification job reaches the one required check"
+
+# 9 — the checked-in ci.yml passes.
 out="$(cd "$REPO_ROOT" && bash "$CHECK" 2>&1)"; rc=$?
 if [[ "$rc" == "0" ]]; then
     echo "ok: the repository's own ci.yml passes"

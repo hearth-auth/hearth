@@ -3327,6 +3327,33 @@ fn dev_system_admin_token(state: &AppState) -> Option<String> {
     }
 }
 
+/// Builds the `quickstart` snippet returned by `POST /admin/bootstrap`.
+///
+/// Production-readiness task 26.27 (`reports/cold-first-run-2026-09-21.md`
+/// C-7): the snippet used to hard-code `http://127.0.0.1:8420`, so an instance
+/// bound to any other port handed the operator commands that could not run,
+/// and it cited `docs/guides/getting-started.md` — the file is `.mdx`. The host
+/// now comes from the request's `Host` header (the address the caller actually
+/// reached); the literal is only a fallback for a request with no `Host`.
+#[cfg(feature = "dev-endpoints")]
+fn bootstrap_quickstart(headers: &HeaderMap, access_token: &str, realm_id: &str) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1:8420");
+    format!(
+        r#"# 1. Register an OAuth application
+curl -fsS -X POST http://{host}/clients \
+  -H "Authorization: Bearer {access_token}" \
+  -H "X-Realm-ID: {realm_id}" \
+  -H "Content-Type: application/json" \
+  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
+
+# 2. Full PKCE flow — see docs/guides/getting-started.mdx"#
+    )
+}
+
 /// POST /admin/bootstrap — creates a realm, admin user, session, assigns
 /// the admin role, and issues tokens. Returns everything needed for SDK tests.
 ///
@@ -3467,16 +3494,7 @@ pub(super) async fn admin_bootstrap(
             };
             let rid_str = rid.as_uuid().to_string();
             let at_str = tokens.access_token().to_string();
-            let qs = format!(
-                r#"# 1. Register an OAuth application
-curl -fsS -X POST http://127.0.0.1:8420/clients \
-  -H "Authorization: Bearer {at_str}" \
-  -H "X-Realm-ID: {rid_str}" \
-  -H "Content-Type: application/json" \
-  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
-
-# 2. Full PKCE flow — see docs/guides/getting-started.md"#
-            );
+            let qs = bootstrap_quickstart(&headers, &at_str, &rid_str);
             // Re-bootstrap: do not modify existing password (HEA-1670). Still
             // mint a fresh cross-realm system token (HEA-2087).
             dev_seed_system_admin(&state);
@@ -3590,16 +3608,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 
     let realm_id_str = realm_id.as_uuid().to_string();
     let access_token_str = tokens.access_token().to_string();
-    let quickstart = format!(
-        r#"# 1. Register an OAuth application
-curl -fsS -X POST http://127.0.0.1:8420/clients \
-  -H "Authorization: Bearer {access_token_str}" \
-  -H "X-Realm-ID: {realm_id_str}" \
-  -H "Content-Type: application/json" \
-  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
-
-# 2. Full PKCE flow — see docs/guides/getting-started.md"#
-    );
+    let quickstart = bootstrap_quickstart(&headers, &access_token_str, &realm_id_str);
 
     let admin_password = dev_seed_system_admin(&state).unwrap_or_default();
     // Cross-realm system-realm admin token (HEA-2087) — the dev-realm

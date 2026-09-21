@@ -69,6 +69,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a member's role inside a suspended organization is refused. Removing a member stays available so
   a frozen tenant can still be offboarded.
 
+- **The bootstrap `quickstart` now targets the address you reached, and cites a file that exists
+  (task 26.27)** — the `quickstart` block returned by `POST /admin/bootstrap` hard-coded
+  `http://127.0.0.1:8420`, so a server bound to any other port handed a brand-new operator a `curl`
+  command that could not run, and its closing line pointed at `docs/guides/getting-started.md` — the
+  file is `getting-started.mdx`. Both are the first thing a stranger copies. The host now comes from
+  the request's `Host` header; the old literal survives only as the fallback for a request that sends
+  no `Host`.
+
 ### Security
 - **The first admin's email-verification token is no longer written to the production log
   (task 26.25)** — it was logged in full at `WARN`, so anyone with log read access could finish the

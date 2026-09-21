@@ -32,6 +32,21 @@
 #       does NOT declare its own `pull_request:` trigger. A pull_request trigger
 #       there is a run that cannot fail the required check.
 #   R4  ci.yml calls each folded workflow with `uses: ./.github/workflows/<f>`.
+#   R5  Every output the `filter` job declares is consumed by at least one
+#       `needs.filter.outputs.<name>` expression. Production-readiness task
+#       26.33: ci.yml computed `fuzz-targets`, `bench-targets` and `deny`,
+#       printed all three into the job summary table, and no job read any of
+#       them. That is the same shape as R2 one layer down — a value computed,
+#       displayed, and discarded — and it is worse than inert, because a filter
+#       row sitting next to the real gates in the summary makes a later reader
+#       believe fuzz, bench and cargo-deny are path-gated by the required check.
+#       fuzz.yml and bench-regression.yml are deliberately advisory with their
+#       own triggers; cargo-deny deliberately runs unconditionally (§4.8#7).
+#
+# loadtest-smoke.yml joined FOLDED_WORKFLOWS for task 26.29: it ran on its own
+# pull_request trigger, so it could not fail a merge however red it went — the
+# defect R3 exists to catch. It was worth folding in only once `run_load`
+# stopped ending in a bare `Ok(())` and the job could actually go red.
 #
 # Usage:  bash scripts/check-required-summary-coverage.sh
 # Env:    WORKFLOW_DIR  directory to scan (default .github/workflows)
@@ -47,7 +62,7 @@ CI_FILE="${WORKFLOW_DIR}/ci.yml"
 ADVISORY_JOBS="pr-head-ancestor-guard"
 
 # Workflows whose pull_request entry point moved into ci.yml (§4.12#12).
-FOLDED_WORKFLOWS="commit-lint.yml proto.yml sdk-smoke.yml security.yml pr-head-ancestor-guard.yml"
+FOLDED_WORKFLOWS="commit-lint.yml proto.yml sdk-smoke.yml security.yml pr-head-ancestor-guard.yml loadtest-smoke.yml"
 
 failures=0
 fail() {
@@ -151,6 +166,26 @@ for wf in $FOLDED_WORKFLOWS; do
     # this is not built from WORKFLOW_DIR (which the self-test overrides).
     grep -qF "uses: ./.github/workflows/${wf}" "$CI_FILE" \
         || fail "${CI_FILE}: nothing calls ${wf}. It now runs on no pull request at all."
+done
+
+# ── R5: no filter output is computed and then ignored. ───────────────────────
+# The `outputs:` block of the `filter` job, one key per line.
+mapfile -t FILTER_OUTPUTS < <(awk '
+    /^  filter:[[:space:]]*$/ { in_job = 1; next }
+    in_job && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { in_job = 0 }
+    in_job && /^    outputs:[[:space:]]*$/ { in_out = 1; next }
+    in_out && /^    [A-Za-z]/ { in_out = 0 }
+    in_out && /^      [A-Za-z0-9_-]+:/ { k = $1; sub(/:$/, "", k); print k }
+' "$CI_FILE")
+
+for out in "${FILTER_OUTPUTS[@]}"; do
+    if ! grep -qF "needs.filter.outputs.${out}" "$CI_FILE"; then
+        fail "${CI_FILE}: filter output '${out}' is computed but no job reads" \
+            $'\n      `needs.filter.outputs.'"${out}"$'`. It is printed into the summary' \
+            $'\n      table next to the real gates, which tells a later reader the' \
+            $'\n      workflow it names is path-gated by the required check when it is' \
+            $'\n      not. Wire it to the job it was meant to gate, or delete it (26.33).'
+    fi
 done
 
 echo ""

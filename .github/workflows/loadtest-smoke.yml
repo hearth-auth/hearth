@@ -10,16 +10,24 @@ name: loadtest-smoke
 # Scale is kept deliberately small (corpus=500 users, USERS=20, 15 s) so the
 # job completes in under 5 minutes on a standard GitHub runner.
 
+# FOLDED INTO ci.yml (production-readiness task 26.29, audit
+# reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-1).
+#
+# `required-summary` in ci.yml is the ONLY required context on main
+# (scripts/check-branch-protection.sh asserts exactly that), and GitHub cannot
+# express `needs:` across workflows. While this workflow ran on its own
+# `pull_request:` trigger it reported a check no ruleset required — so however
+# red it went, it could not fail a merge. That mattered little while `run_load`
+# ended in a bare `Ok(())` and the job could not go red at all; now that the
+# harness returns a real exit code, the gate has to be able to block.
+#
+# The pull_request entry point is therefore ci.yml's `loadtest-smoke` job, which
+# calls this file via `workflow_call` and is listed in `required-summary`'s
+# `needs:` AND in its results loop. `scripts/check-required-summary-coverage.sh`
+# holds all of that shut. The push trigger stays: ci.yml has no equivalent for
+# the post-merge run on main.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'loadtest/**'
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Makefile'
-      - '.github/workflows/loadtest-smoke.yml'
+  workflow_call:
   push:
     branches: [main]
     paths:
@@ -30,7 +38,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Literal prefix, not ${{ github.workflow }}: when ci.yml calls this workflow,
+  # github.workflow is "CI", and a shared group would cancel ci.yml's own run.
+  group: loadtest-smoke-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -49,6 +59,8 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
+          # `make loadtest-check` runs clippy as of task 26.32.
+          components: clippy
 
       - name: Cache cargo registry + target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -72,7 +84,9 @@ jobs:
         with:
           tool: nextest
 
-      - name: loadtest-check (typecheck + unit tests)
+      # Clippy is part of this target as of task 26.32: the crate is excluded
+      # from the workspace, so nothing else in the repository lints it.
+      - name: loadtest-check (typecheck + clippy + unit tests)
         run: make loadtest-check
         env:
           PROTOC: protoc

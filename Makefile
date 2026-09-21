@@ -85,11 +85,21 @@ else
 	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- $(ARGS)
 endif
 
-## Check the loadtest crate: typecheck + unit tests.
+## Check the loadtest crate: typecheck + clippy + unit tests.
 ## Unit tests cover LoadContext construction and scenario weights — a pure
 ## cargo check cannot catch runtime "no live tokens" aborts (HEA-1991).
+##
+## Clippy is NOT optional here (production-readiness task 26.32, audit
+## reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7). The crate is in the
+## root Cargo.toml's `exclude` list, so `make clippy --all-targets` over the
+## workspace never reaches it and for its whole life nothing in the repo linted
+## it. `cargo clippy --manifest-path loadtest/Cargo.toml --all-targets -- -D
+## warnings` was red at HEAD with three dead_code errors — one of which was
+## `SeedClient::revoke`, the zero-caller function behind L-5's phantom
+## `--revoked-frac` parameter. The lint would have named the defect outright.
 loadtest-check:
 	PROTOC=$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo clippy --manifest-path loadtest/Cargo.toml --all-targets $(CARGO_FLAGS) -- -D warnings
 	PROTOC=$(PROTOC) cargo nextest run --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
 
 ## Run a short loadtest smoke against a fresh dev instance (CI gate, HEA-1991).

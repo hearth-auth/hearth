@@ -15,6 +15,9 @@
 #   case 7  R3 — prose mentioning continue-on-error must NOT trip the rule
 #   case 8  R4 — a piped `cargo nextest` with no pipefail (the `| tee` mask)
 #   case 9  R5 — required-summary's denylist of failure/cancelled
+#   case 10 R6 — `make loadtest-check` never runs clippy (the audited L-7 shape)
+#   case 11 R6 — clippy without -D warnings, so the lint cannot fail the gate
+#   case 12 R6 — no loadtest-check target at all
 #
 # Usage: bash scripts/tests/check-red-test-gate.test.sh
 
@@ -38,6 +41,14 @@ GOOD_CHECK_TARGET='check:
 	  if $(MAKE) --no-print-directory $$gate; then :; else failed="$$failed $$gate"; fi; \
 	done; \
 	if [ -n "$$failed" ]; then exit 1; fi
+'
+
+# R6: the loadtest crate is excluded from the workspace, so this target is the
+# only thing in the repository that can lint it.
+GOOD_LOADTEST_TARGET='loadtest-check:
+	PROTOC=$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml
+	PROTOC=$(PROTOC) cargo clippy --manifest-path loadtest/Cargo.toml --all-targets -- -D warnings
+	PROTOC=$(PROTOC) cargo nextest run --manifest-path loadtest/Cargo.toml
 '
 
 GOOD_CI='name: CI
@@ -68,6 +79,12 @@ run_case() {
     case_n=$((case_n + 1))
     local dir="${TMP}/case-${case_n}"
     mkdir -p "${dir}/.github/workflows"
+    # Every fixture gets a compliant loadtest-check target unless the case is
+    # about R6 and supplies its own, so the rules stay independently testable.
+    if [[ "$makefile" != *"loadtest-check"* ]]; then
+        makefile="${makefile}
+${GOOD_LOADTEST_TARGET}"
+    fi
     printf '%s' "$makefile" > "${dir}/Makefile"
     printf '%s' "$ci"       > "${dir}/.github/workflows/ci.yml"
 
@@ -247,6 +264,40 @@ jobs:
           done
 ' \
     "DENYLIST"
+
+# 10 — R6: THE AUDITED SHAPE (L-7). `loadtest-check` ran cargo check + nextest
+#      only. The crate is excluded from the workspace, so `make clippy` never
+#      reached it and nothing in the repository ever linted it — which is why
+#      `SeedClient::revoke` could sit with zero callers behind a documented CLI
+#      flag that revoked nothing.
+run_case "R6 rejects a loadtest gate that never runs clippy" 1 \
+    "${GOOD_TEST_TARGET}
+${GOOD_CHECK_TARGET}
+loadtest-check:
+	PROTOC=\$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml
+	PROTOC=\$(PROTOC) cargo nextest run --manifest-path loadtest/Cargo.toml
+" "$GOOD_CI" \
+    "does not run clippy"
+
+# 11 — R6: clippy that cannot fail. Without -D warnings the dead_code finding
+#      prints and the gate stays green — the same fail-open shape as R3.
+run_case "R6 rejects clippy without -D warnings" 1 \
+    "${GOOD_TEST_TARGET}
+${GOOD_CHECK_TARGET}
+loadtest-check:
+	PROTOC=\$(PROTOC) cargo clippy --manifest-path loadtest/Cargo.toml --all-targets
+	PROTOC=\$(PROTOC) cargo nextest run --manifest-path loadtest/Cargo.toml
+" "$GOOD_CI" \
+    "without \`-D warnings\`"
+
+# 12 — R6: deleting the target removes the crate's only gate entirely.
+run_case "R6 rejects a missing loadtest-check target" 1 \
+    "${GOOD_TEST_TARGET}
+${GOOD_CHECK_TARGET}
+loadtest-check-renamed:
+	@echo nothing
+" "$GOOD_CI" \
+    "no \`loadtest-check:\` target"
 
 echo ""
 if [[ $failures -gt 0 ]]; then
