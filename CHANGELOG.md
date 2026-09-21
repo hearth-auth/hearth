@@ -93,7 +93,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   and the agent's SPIFFE workload-identity mapping — a live credential that kept resolving to a
   deleted agent — is deleted with it.
 
+- **LDAP delta sync no longer reports a clean run it did not have (task 26.8)** — entries the
+  directory returned but whose attributes could not be mapped (most often a missing `mail`) were
+  dropped with a log line and nothing else: `DeltaSyncResult.skipped` was the literal `0`, so a run
+  that silently discarded ten thousand accounts was indistinguishable from a perfect one. `skipped`
+  now carries the real count, the count is persisted on the sync checkpoint as
+  `last_skipped_count`, and a non-zero count is logged at WARN. The cursor still advances past
+  dropped entries — deliberately, and now documented: refusing to advance would turn a single
+  permanently unmappable entry into a permanently stalled sync. Callers must treat a non-zero
+  `skipped` as an incomplete run. `LdapSyncCheckpoint` gained one field, defaulted so checkpoints
+  written by an earlier version still load.
+
+- **The LDAP module no longer documents configuration that does not exist (task 26.6)** —
+  `LdapConfig` said it corresponded to a `hearth.yaml` `ldap:` block, or a per-realm
+  `realms.<name>.ldap:` block. Neither exists: the connector has exactly one reference anywhere
+  outside `src/identity/ldap/`, the `pub mod` declaration, and no operator can reach it. The module
+  now carries a status banner saying so, and the checkpoint storage-key format is described as the
+  bytes it actually writes. `docs/STATUS.md` was corrected under task 23.8; this is the same claim
+  where a library integrator would read it.
+
 ### Security
+- **bcrypt, argon2 and scrypt work factors are bounded too (task 26.36)** — task 26.31 bounded PBKDF2;
+  leaving its siblings unbounded was the same defect. Measured against the pinned crate sources: bcrypt
+  0.19.3 allows cost up to 31 (2^31 rounds — hours per attempt), argon2 0.5 sets both `MAX_M_COST` and
+  `MAX_T_COST` to `u32::MAX` (a 4 TiB allocation request), and scrypt 0.11 allows `log_n` below 64. All
+  are now refused before the derivation runs, at ceilings far above every published recommendation:
+  bcrypt cost 17, argon2 `m=1048576,t=64,p=16`, scrypt `ln=20,r=32,p=16`. OWASP 2023 recommends bcrypt
+  cost 10, argon2id `m=19456,t=2,p=1` and scrypt `ln=17`.
+
 - **PBKDF2 verification no longer lets the stored hash choose the server's CPU cost (task 26.31)** —
   the iteration count is read out of the hash string, and only a non-zero check stood between it and
   the KDF, so a record carrying `i=4294967295` made every login attempt for that account spend 4.3

@@ -494,6 +494,98 @@ pub(crate) fn hash_verification_count() -> u64 {
 /// Verifies a password against a hash string.
 ///
 /// Dispatches to the correct algorithm based on the hash prefix.
+/// Ceilings on the work factors a stored hash may ask this server to spend.
+///
+/// # Task 26.36 (extends 26.31)
+///
+/// Every verifier reads its cost parameters out of the hash string, so the
+/// stored record — not the operator — decides how much CPU and memory a single
+/// login attempt costs. Task 26.31 bounded PBKDF2; these are its siblings, and
+/// leaving them unbounded is the validation asymmetry this codebase keeps
+/// finding. Measured against the crate sources at the pinned versions:
+///
+/// | Algorithm | What the crate enforces | What that allows |
+/// |---|---|---|
+/// | bcrypt 0.19.3 | cost 4..=31 | cost 31 is 2^31 rounds — hours per attempt |
+/// | argon2 0.5 | `MAX_M_COST` and `MAX_T_COST` are both `u32::MAX` | a 4 TiB allocation request |
+/// | scrypt 0.11 | `log_n < 64` | `ln=30` with `r=8` is ~1 TiB |
+///
+/// The ceilings below sit far above every published recommendation, so no real
+/// deployment is affected. OWASP 2023 recommends bcrypt cost 10, argon2id
+/// `m=19456,t=2,p=1`, and scrypt `ln=17`.
+mod work_factor {
+    /// bcrypt cost. 17 is 2^17 rounds — roughly 128 times OWASP's cost 10.
+    pub(super) const MAX_BCRYPT_COST: u32 = 17;
+    /// argon2 memory in KiB. 1 GiB, about 55 times OWASP's 19 MiB.
+    pub(super) const MAX_ARGON2_M: u32 = 1_048_576;
+    /// argon2 passes. 64, about 32 times OWASP's 2.
+    pub(super) const MAX_ARGON2_T: u32 = 64;
+    /// argon2 lanes.
+    pub(super) const MAX_ARGON2_P: u32 = 16;
+    /// scrypt `log2(N)`. 20 is N = 1,048,576 — 8 times OWASP's `ln=17`.
+    pub(super) const MAX_SCRYPT_LN: u32 = 20;
+    /// scrypt block size.
+    pub(super) const MAX_SCRYPT_R: u32 = 32;
+    /// scrypt parallelism.
+    pub(super) const MAX_SCRYPT_P: u32 = 16;
+}
+
+/// Reads `name` out of a PHC parameter string and refuses it above `max`.
+///
+/// An absent parameter is not an error: the algorithm's own default applies,
+/// and a default is by definition not attacker-chosen. A parameter that will
+/// not parse as a decimal is left to the verifier, which rejects the hash.
+fn phc_param_within(
+    parsed: &PasswordHash<'_>,
+    name: &str,
+    max: u32,
+    algorithm: &str,
+) -> Result<(), IdentityError> {
+    let Some(value) = parsed.params.get(name) else {
+        return Ok(());
+    };
+    let Ok(n) = value.decimal() else {
+        return Ok(());
+    };
+    if n > max {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "{algorithm} parameter {name}={n} exceeds the maximum this server will \
+                 verify ({max}); the stored hash chooses the work factor, so an unbounded \
+                 one lets it choose the server's CPU and memory cost"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a bcrypt hash whose cost is above [`work_factor::MAX_BCRYPT_COST`].
+///
+/// The cost is the two digits after the version tag: `$2b$<cost>$<salt+hash>`.
+/// A hash this cannot parse is left to `bcrypt::verify`, which rejects it.
+fn bcrypt_cost_within_limit(hash_str: &str) -> Result<(), IdentityError> {
+    let Some(rest) = hash_str.get(4..) else {
+        return Ok(());
+    };
+    let Some((cost_str, _)) = rest.split_once('$') else {
+        return Ok(());
+    };
+    let Ok(cost) = cost_str.parse::<u32>() else {
+        return Ok(());
+    };
+    if cost > work_factor::MAX_BCRYPT_COST {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "bcrypt cost {cost} exceeds the maximum this server will verify ({}); \
+                 the stored hash chooses the work factor, so an unbounded one lets it \
+                 choose the server's CPU cost",
+                work_factor::MAX_BCRYPT_COST
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_hash(
     password: &CleartextPassword,
     hash_str: &str,
@@ -503,6 +595,8 @@ pub(crate) fn verify_hash(
     // "$2y$" is a PHP-introduced cosmetic variant, functionally identical to "$2b$".
     if hash_str.starts_with("$2b$") || hash_str.starts_with("$2a$") || hash_str.starts_with("$2y$")
     {
+        // Refuse BEFORE the KDF runs — the point is not to compute it (26.36).
+        bcrypt_cost_within_limit(hash_str)?;
         return Ok(bcrypt::verify(password.as_bytes(), hash_str).unwrap_or(false));
     }
 
@@ -521,10 +615,20 @@ pub(crate) fn verify_hash(
     // Dispatch based on algorithm identifier in the PHC string
     let alg_id = parsed.algorithm;
     if alg_id == argon2::ARGON2ID_IDENT {
+        // Refuse BEFORE the KDF runs (26.36). `m` is memory in KiB, so an
+        // unbounded one is an allocation request, not merely slow.
+        phc_param_within(&parsed, "m", work_factor::MAX_ARGON2_M, "argon2")?;
+        phc_param_within(&parsed, "t", work_factor::MAX_ARGON2_T, "argon2")?;
+        phc_param_within(&parsed, "p", work_factor::MAX_ARGON2_P, "argon2")?;
         Ok(Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
     } else if alg_id == scrypt::ALG_ID {
+        // Refuse BEFORE the KDF runs (26.36). scrypt's memory is
+        // 128 * 2^ln * r bytes, so both parameters are allocation inputs.
+        phc_param_within(&parsed, "ln", work_factor::MAX_SCRYPT_LN, "scrypt")?;
+        phc_param_within(&parsed, "r", work_factor::MAX_SCRYPT_R, "scrypt")?;
+        phc_param_within(&parsed, "p", work_factor::MAX_SCRYPT_P, "scrypt")?;
         Ok(scrypt::Scrypt
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
@@ -954,6 +1058,76 @@ mod tests {
             STANDARD_NO_PAD.encode(salt),
             STANDARD_NO_PAD.encode(derived),
         )
+    }
+
+    /// Task 26.36 — the PBKDF2 ceiling's three siblings.
+    ///
+    /// Every verifier reads its cost parameters out of the hash string, so
+    /// bounding only PBKDF2 would have been the validation asymmetry this
+    /// codebase keeps finding. Measured against the pinned crate sources:
+    /// bcrypt 0.19.3 allows cost up to 31 (2^31 rounds — hours per attempt),
+    /// argon2 0.5 sets both `MAX_M_COST` and `MAX_T_COST` to `u32::MAX` (a
+    /// 4 TiB allocation request), and scrypt 0.11 allows `log_n` below 64.
+    ///
+    /// Each refusal must happen BEFORE the KDF runs, which is why these use
+    /// absurd parameters that would otherwise never return.
+    #[test]
+    fn sibling_verifiers_refuse_an_absurd_work_factor() {
+        let pw = CleartextPassword::from_string("pw".to_string());
+
+        // bcrypt: cost 31 is inside the crate's own range and still ruinous.
+        let err = verify_hash(
+            &pw,
+            "$2b$31$abcdefghijklmnopqrstuvwxyz012345678901234567890123",
+        )
+        .expect_err("bcrypt cost 31 must be refused");
+        assert!(err.to_string().contains("bcrypt cost 31"), "got: {err}");
+
+        // argon2: `m` is memory in KiB, so this asks for four terabytes.
+        let err = verify_hash(
+            &pw,
+            "$argon2id$v=19$m=4294967295,t=2,p=1$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ",
+        )
+        .expect_err("a four-terabyte argon2 memory parameter must be refused");
+        assert!(err.to_string().contains("argon2 parameter m"), "got: {err}");
+
+        // scrypt: memory is 128 * 2^ln * r bytes.
+        let err = verify_hash(
+            &pw,
+            "$scrypt$ln=40,r=8,p=1$c29tZXNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ",
+        )
+        .expect_err("an absurd scrypt ln must be refused");
+        assert!(
+            err.to_string().contains("scrypt parameter ln"),
+            "got: {err}"
+        );
+    }
+
+    /// Controls — every published recommendation must still verify.
+    ///
+    /// Without these, a check that refused every hash would satisfy the test
+    /// above while locking out every account in the realm. These are OWASP's
+    /// 2023 figures and the defaults each crate ships.
+    #[test]
+    fn sibling_verifiers_still_accept_recommended_parameters() {
+        let pw = CleartextPassword::from_string("correct horse".to_string());
+
+        // Round-trip through the real hasher: whatever it produces by default
+        // must remain verifiable, which no hard-coded fixture proves.
+        let stored = hash_password(&pw, &CredentialConfig::default(), 0).expect("hash");
+        assert!(
+            verify_hash(&pw, &stored.hash).expect("verify"),
+            "the default argon2 parameters must still verify"
+        );
+
+        // bcrypt at OWASP's recommended cost 10, and at a hardened 14.
+        for cost in [10u32, 14] {
+            let h = bcrypt::hash(pw.as_bytes(), cost).expect("bcrypt hash");
+            assert!(
+                verify_hash(&pw, &h).expect("bcrypt verify must be attempted, not refused"),
+                "bcrypt cost {cost} must still verify"
+            );
+        }
     }
 
     /// Task 26.31 — the stored hash must not choose the server's CPU cost.
