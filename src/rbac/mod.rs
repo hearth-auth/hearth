@@ -29,11 +29,11 @@ pub use registry::RegistryError;
 pub use seed::seed_permission_description;
 pub use types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
-    GroupId, GroupMember, GroupMembership, Page, Permission, PermissionDefinition,
-    PermissionRecord, PermissionStatus, ProtectedResource, ResolvedPermissions, Role,
-    RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeBundle,
-    ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest,
-    UserPermissionGrant,
+    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission,
+    PermissionDefinition, PermissionRecord, PermissionStatus, ProtectedResource,
+    ResolvedPermissions, Role, RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus,
+    RoleSubject, Scope, ScopeBundle, ScopeExport, ScopeSpec, Subject, TraversalKind,
+    UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 
 use crate::core::{ImportOutcome, OrganizationId, PageRequest, PagedResult, RealmId, Uri, UserId};
@@ -443,6 +443,17 @@ pub trait RbacEngine: Send + Sync {
     /// Returns all role-assignment records in a realm for backup export.
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
 
+    /// Returns every group-membership edge in a realm for backup export.
+    ///
+    /// Groups and the role assignments bound to them already round-trip; the
+    /// edges between a group and its members did not, so a restored realm
+    /// presented a correct-looking RBAC graph that resolved to nothing
+    /// (OpenSpec 26.40).
+    fn export_all_group_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<GroupMembershipEdge>, RbacError>;
+
     // ------- Backup import helpers -------
     //
     // These restore records **verbatim**, preserving the record's own ID and
@@ -496,6 +507,19 @@ pub trait RbacEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         scope: &ScopeExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores a group-membership edge, writing **both** index entries.
+    ///
+    /// The reverse (`member → group`) entry is the one permission resolution
+    /// scans; an implementation that wrote only the forward entry would
+    /// restore memberships that are visible in a member listing and invisible
+    /// to authorization.
+    fn import_group_membership(
+        &self,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
         overwrite: bool,
     ) -> Result<ImportOutcome, RbacError>;
 }

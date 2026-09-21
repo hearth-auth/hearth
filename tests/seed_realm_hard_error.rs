@@ -21,10 +21,10 @@ use hearth::protocol::proto::identity::v1::{
 };
 use hearth::rbac::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, Group, GroupId,
-    GroupMember, GroupMembership, Page, Permission, PermissionRecord, ProtectedResource,
-    RbacEngine, RbacError, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec,
-    RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest, UpdateRoleRequest,
-    UserPermissionGrant,
+    GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission, PermissionRecord,
+    ProtectedResource, RbacEngine, RbacError, ResolvedPermissions, Role, RoleAssignment, RoleId,
+    RoleSpec, RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest,
+    UpdateRoleRequest, UserPermissionGrant,
 };
 use tonic::Request;
 
@@ -237,6 +237,23 @@ impl RbacEngine for FailSeedRbac {
     ) -> Result<Page<GroupMember>, RbacError> {
         self.inner
             .list_group_members(realm_id, group_id, cursor, limit)
+    }
+
+    fn export_all_group_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<GroupMembershipEdge>, RbacError> {
+        self.inner.export_all_group_memberships(realm_id)
+    }
+
+    fn import_group_membership(
+        &self,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
+        overwrite: bool,
+    ) -> Result<hearth::core::ImportOutcome, RbacError> {
+        self.inner
+            .import_group_membership(realm_id, edge, overwrite)
     }
 
     fn resolve_role_permissions(

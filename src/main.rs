@@ -1403,6 +1403,23 @@ async fn run_serve(
         .with_kek(audit_kek),
     );
 
+    // The identity engine writes on a cold data directory. In cluster mode
+    // that is a Raft proposal, so it must not be attempted before the cluster
+    // can accept one — otherwise every node of a cold cluster exits with
+    // `raft: not the leader` before `POST /admin/cluster/bootstrap` can be
+    // reached (task 26.46). A no-op in single-node mode.
+    if config.cluster.is_some() {
+        if let Err(e) = EmbeddedIdentityEngine::await_cold_start_window(
+            &storage,
+            std::time::Duration::from_secs(120),
+        )
+        .await
+        {
+            report_startup_fatal(&format!("cluster start-up window never opened: {e}"));
+            return Err(e.into());
+        }
+    }
+
     let raw_identity_engine = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
@@ -4476,10 +4493,8 @@ fn run_backup_create(
 /// `restore` fails closed on an *unrecognized* member but has nothing to say
 /// about a *missing category*: the importer's allowlist is the union of what
 /// the exporter writes, so a family nobody exports is a family nobody misses
-/// (audit re-run 23.5). Ten families are in that position, group memberships
-/// worst of all — groups restore EMPTY, so a realm's RBAC graph comes back
-/// looking correct and resolving to nothing, and a restore that counted groups
-/// would call it a success.
+/// (audit re-run 23.5). Group memberships, organization memberships and
+/// consents have since been closed; the families still listed are what remains.
 ///
 /// Until each family round-trips this is the only thing standing between an
 /// operator and a silent loss, so both `create` and `restore` say it out loud.
@@ -4621,9 +4636,12 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.roles.errored > 0
         || report.permissions.errored > 0
         || report.groups.errored > 0
+        || report.group_memberships.errored > 0
         || report.assignments.errored > 0
         || report.scopes.errored > 0
         || report.organizations.errored > 0
+        || report.organization_memberships.errored > 0
+        || report.consents.errored > 0
         || report.audit_events.errored > 0
 }
 
@@ -4714,7 +4732,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 11] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 14] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -4722,9 +4740,12 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("roles", &report.roles),
         ("permissions", &report.permissions),
         ("groups", &report.groups),
+        ("group members", &report.group_memberships),
         ("assignments", &report.assignments),
         ("scopes", &report.scopes),
         ("orgs", &report.organizations),
+        ("org members", &report.organization_memberships),
+        ("consents", &report.consents),
         ("audit", &report.audit_events),
     ];
     tracing::info!("Realm '{slug}':");

@@ -52,9 +52,12 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/roles.ndjson` | RBAC role definitions |
 | `realms/<slug>/permissions.ndjson` | Permission definitions |
 | `realms/<slug>/groups.ndjson` | Group definitions |
+| `realms/<slug>/group_memberships.ndjson` | Group-to-member edges (users and nested groups) |
 | `realms/<slug>/assignments.ndjson` | Role/group assignment records |
 | `realms/<slug>/scopes.ndjson` | OAuth 2.0 scope definitions |
 | `realms/<slug>/organizations.ndjson` | Organization records |
+| `realms/<slug>/organization_memberships.ndjson` | Organization membership records, with each member's role |
+| `realms/<slug>/consents.ndjson` | OAuth consent records |
 | `realms/<slug>/signing_key.json` | Realm signing key (AES-256-GCM encrypted with the DEK) |
 | `realms/<slug>/audit.ndjson` | Audit events (**only when `--include-audit` is passed**) |
 | `realms/<slug>/audit_chain.json` | The audit chain key and anchor for those events (AES-256-GCM encrypted with the DEK) |
@@ -64,7 +67,7 @@ The NDJSON format (one JSON object per line) enables streaming reads during larg
 ### What a backup does not carry
 
 **Read this before you treat a restore as a complete recovery.** The list above
-is the *whole* archive. Eleven entity families are not in it, and because the
+is the *whole* archive. Eight entity families are not in it, and because the
 importer's allowlist is the union of what the exporter writes, a family nobody
 exports is a family nobody misses: restore fails closed on an *unrecognized*
 member but has nothing to say about a *missing category*. `hearth backup
@@ -73,22 +76,27 @@ it cannot be missed.
 
 | Not carried | What a restore loses |
 |---|---|
-| **Group memberships** | Groups restore **empty**. Every permission a user held *through* a group is gone, while the role-to-group assignment survives — so the RBAC graph comes back looking correct and resolving to nothing. A check that only counts groups will not see this. |
-| **Organization memberships** | Organizations restore with no members. |
 | **Identity providers and federation links** | Federated-login configuration and every user-to-IdP binding are lost. A federated user cannot sign in until the IdP is recreated. |
 | **Webhooks** | Event delivery stops silently after the restore. |
 | **Agents and agent credentials** | All agent-authorization state is lost. |
 | **SAML service providers** | Every SP must re-federate. |
 | **SCIM external-id mappings** | The next SCIM sync re-creates users instead of updating them. |
-| **User consents** | Every user is re-prompted. Benign. |
 | **Organization invitations** | Outstanding invitation links stop working. |
 | **Retiring signing keys** | Only the *current* key is exported, so a backup taken during a rotation grace window drops the outgoing key and invalidates tokens the origin would still have accepted. |
-| **Sessions** | Every access and refresh token issued before the backup is dead after the restore, even though the signing key survives. This one is deliberate — a session is per-node live state, and restoring sessions would resurrect revoked ones. Note that `--allow-missing-signing-key`'s help text implies the converse; it is wrong. Pre-restore tokens stop validating either way. |
+| **Sessions** | Every access and refresh token issued before the backup is dead after the restore, even though the signing key survives. **This one is deliberate and stays that way.** A session is per-node live state carrying a session version and a device binding, and a revocation recorded *after* the backup is not in the archive — so restoring sessions would resurrect exactly the sessions an operator revoked. Treat a restore as a re-authentication event. Note that `--allow-missing-signing-key`'s help text implies the converse; it is wrong. Pre-restore tokens stop validating either way. |
 
-Plan recovery of these families separately. In practice that means: re-apply
-group and organization memberships from your provisioning source of truth (SCIM,
-Terraform, or whatever created them), re-register IdPs, SAML SPs and webhooks
-from configuration, and expect every user and every device to re-authenticate.
+Group memberships, organization memberships and user consents **do** round-trip
+as of the archive members listed above. Group memberships were the sharpest of
+the three: before `group_memberships.ndjson` existed, groups restored empty
+while every record count matched, so a restore could report total success over a
+realm whose group-derived permissions had silently vanished. Both index
+directions are rebuilt on import, including the reverse (`member -> group`)
+index that permission resolution actually scans.
+
+Plan recovery of the remaining families separately. In practice that means:
+re-register IdPs, SAML SPs and webhooks from configuration, re-create agents,
+re-issue outstanding invitations, and expect every user and every device to
+re-authenticate.
 
 Empty sections are omitted from the archive, so an absent member means "there
 were none of these" — which is also why a *deleted* member used to be

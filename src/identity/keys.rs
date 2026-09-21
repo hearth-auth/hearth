@@ -1065,6 +1065,16 @@ pub(crate) fn oauth_consent_scan_prefix() -> Vec<u8> {
     OAUTH_CONSENT_PREFIX.as_bytes().to_vec()
 }
 
+/// Returns `true` iff `key` is inside the consent key space.
+///
+/// The backup importer writes consent records back at the exact key the
+/// exporter read them from, because neither the legacy nor the extended key
+/// shape is recoverable from the record's own fields. This guard is what stops
+/// a hand-edited archive using that member to write anywhere else in the realm.
+pub(crate) fn is_oauth_consent_key(key: &str) -> bool {
+    key.starts_with(OAUTH_CONSENT_PREFIX) && key.len() > OAUTH_CONSENT_PREFIX.len()
+}
+
 /// Encodes the extended consent key for a `(user, client, org_key, resource_key)` tuple.
 ///
 /// Format: `oauth:consent:{user_uuid}:{client_uuid}:{org_key}:{resource_key}`
@@ -1185,7 +1195,6 @@ pub(crate) fn membership_by_user_prefix(user_id: &UserId) -> Vec<u8> {
 /// Returns the scan prefix for all membership-by-org entries (realm-wide).
 ///
 /// Format: `orgm:org:`
-#[allow(dead_code)]
 pub(crate) fn membership_org_scan_prefix() -> Vec<u8> {
     ORGM_ORG_PREFIX.as_bytes().to_vec()
 }

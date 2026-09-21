@@ -1756,3 +1756,253 @@ async fn restore_carries_passkey_factor() {
         "restored passkey must keep its credential ID"
     );
 }
+
+// ── 18. group memberships round-trip (OpenSpec 26.40) ─────────────────────────
+
+/// A user whose *only* route to a permission is a group membership must still
+/// hold that permission after a restore.
+///
+/// This is deliberately an **effective-permission** assertion, not a row count:
+/// before `group_memberships.ndjson` existed the group record and the
+/// role-to-group assignment both restored fine, so every count matched while
+/// the permission the group granted had silently vanished.
+#[tokio::test]
+async fn restore_carries_group_memberships_and_the_permissions_they_grant() {
+    use hearth::rbac::{
+        AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupMember, Permission, Scope,
+        Subject,
+    };
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    src.rbac()
+        .reconcile_permissions(&realm, &["docs.publish".to_string()])
+        .expect("reconcile permission");
+    let role = src
+        .rbac()
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: "docs.publisher".to_string(),
+                description: None,
+                permissions: vec![Permission::new("docs.publish").expect("perm")],
+                ..Default::default()
+            },
+        )
+        .expect("create role");
+    let group = src
+        .rbac()
+        .create_group(
+            &realm,
+            &CreateGroupRequest {
+                name: "Editors".to_string(),
+                slug: "editors".to_string(),
+                description: None,
+            },
+        )
+        .expect("create group");
+    // The role is bound to the GROUP, never to the user directly.
+    src.rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::Group(group.id.clone()),
+                role_id: role.id.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role to group");
+    src.rbac()
+        .add_group_member(&realm, &group.id, &GroupMember::User(user.id().clone()))
+        .expect("add group member");
+
+    let want = Permission::new("docs.publish").expect("perm");
+    let src_resolved = src
+        .rbac()
+        .resolve_permissions(user.id(), &realm, None, None)
+        .expect("resolve source permissions");
+    assert!(
+        src_resolved.permissions.contains(&want),
+        "fixture is vacuous: the source user must hold docs.publish through the group, got {:?}",
+        src_resolved.permissions
+    );
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let report = make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+
+    let dst_resolved = dst
+        .rbac()
+        .resolve_permissions(user.id(), &restored_realm, None, None)
+        .expect("resolve restored permissions");
+    assert!(
+        dst_resolved.permissions.contains(&want),
+        "the permission this user held ONLY through group '{}' vanished on restore: {:?}",
+        group.slug,
+        dst_resolved.permissions
+    );
+    assert!(
+        dst_resolved.groups.contains(&group.slug),
+        "restored resolution must still place the user in group '{}', got {:?}",
+        group.slug,
+        dst_resolved.groups
+    );
+    assert_eq!(
+        report.group_memberships.created, 1,
+        "the restore report must account for the membership edge"
+    );
+}
+
+// ── 19. organization memberships round-trip (OpenSpec 26.40) ──────────────────
+
+/// Organizations restored with no members is the same silent-loss shape as
+/// empty groups. Both index directions must come back: the org→user index is
+/// what member listings scan and the user→org index is what "my organizations"
+/// scans, so an importer that wrote only one would half-restore.
+#[tokio::test]
+async fn restore_carries_organization_memberships_in_both_directions() {
+    use hearth::identity::{CreateOrganizationRequest, OrganizationRole};
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+    let org = src
+        .identity()
+        .create_organization(
+            &realm,
+            &CreateOrganizationRequest {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("create org");
+    src.identity()
+        .add_member(&realm, org.id(), user.id(), OrganizationRole::Admin)
+        .expect("add org member");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let report = make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+
+    let membership = dst
+        .identity()
+        .get_membership(&restored_realm, org.id(), user.id())
+        .expect("get restored membership")
+        .expect("membership must survive the restore");
+    assert_eq!(
+        membership.role(),
+        OrganizationRole::Admin,
+        "the member's role must round-trip, not be reset to the default tier"
+    );
+
+    let members = dst
+        .identity()
+        .list_members(&restored_realm, org.id(), None, 100)
+        .expect("list restored members");
+    assert_eq!(members.items.len(), 1, "org→user index must be restored");
+
+    let orgs = dst
+        .identity()
+        .list_user_organizations(&restored_realm, user.id(), None, 100)
+        .expect("list restored user organizations");
+    assert_eq!(orgs.items.len(), 1, "user→org index must be restored");
+    assert_eq!(orgs.items[0].org_id(), org.id());
+
+    assert_eq!(
+        report.organization_memberships.created, 1,
+        "the restore report must account for the membership"
+    );
+}
+
+// ── 20. OAuth consents round-trip (OpenSpec 26.40) ────────────────────────────
+
+/// A restored user must not be re-prompted for consent they already granted.
+#[tokio::test]
+async fn restore_carries_user_consents() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+    let client = src
+        .identity()
+        .register_client(
+            &realm,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "Consent Client".to_string(),
+                redirect_uris: vec!["https://app.example/cb".to_string()],
+                client_secret: Some("super-secret-value-123!".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: true,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let granted = vec!["openid".to_string(), "profile".to_string()];
+    src.identity()
+        .grant_consent(&realm, user.id(), client.client_id(), &granted)
+        .expect("grant consent");
+    let src_consent = src
+        .identity()
+        .get_consent(&realm, user.id(), client.client_id())
+        .expect("get source consent")
+        .expect("source consent must exist");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let report = make_importer(&dst)
+        .import_realm(&slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    let restored_realm: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+
+    let dst_consent = dst
+        .identity()
+        .get_consent(&restored_realm, user.id(), client.client_id())
+        .expect("get restored consent")
+        .expect("consent must survive the restore or every user is re-prompted");
+    assert_eq!(
+        dst_consent, src_consent,
+        "the consent record must round-trip field-for-field, digest included"
+    );
+    assert!(
+        dst_consent.covers(&granted),
+        "the restored consent must still cover the scopes the user approved"
+    );
+    assert_eq!(
+        report.consents.created, 1,
+        "the restore report must account for the consent"
+    );
+}

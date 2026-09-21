@@ -138,6 +138,27 @@ pub(crate) fn gm_forward_scan_prefix(group_id: &GroupId) -> Vec<u8> {
     format!("{GM_GROUP_PREFIX}{}:member:", group_id.as_uuid()).into_bytes()
 }
 
+/// Scan prefix over every forward membership edge in a realm.
+pub(crate) fn gm_forward_realm_scan_prefix() -> Vec<u8> {
+    GM_GROUP_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers the owning [`GroupId`] from a forward-index key.
+///
+/// The forward value stores only the [`GroupMember`], so a realm-wide export
+/// has to read the group back out of the key. This is the exact inverse of
+/// [`encode_gm_forward`] — the round-trip is asserted in this module's tests
+/// for both member kinds, so the two cannot drift apart silently.
+///
+/// Returns `None` for any key that is not a forward membership key or whose
+/// group segment is not a UUID.
+pub(crate) fn decode_gm_forward_group(key: &[u8]) -> Option<GroupId> {
+    let text = std::str::from_utf8(key).ok()?;
+    let rest = text.strip_prefix(GM_GROUP_PREFIX)?;
+    let (group_part, _) = rest.split_once(":member:")?;
+    Some(GroupId::new(uuid::Uuid::parse_str(group_part).ok()?))
+}
+
 /// `rba:gm:member:{member_type}:{member_id}:group:{group_id}` (reverse index)
 pub(crate) fn encode_gm_reverse(member: &GroupMember, group_id: &GroupId) -> Vec<u8> {
     let (mtype, mid) = member_parts(member);
@@ -476,6 +497,32 @@ mod tests {
         let other_member = GroupMember::Group(GroupId::generate());
         let rev2 = encode_gm_reverse(&other_member, &gid);
         assert_ne!(rev, rev2);
+    }
+
+    #[test]
+    fn decode_gm_forward_group_inverts_encode_for_both_member_kinds() {
+        let gid = GroupId::generate();
+        for member in [
+            GroupMember::User(UserId::generate()),
+            GroupMember::Group(GroupId::generate()),
+        ] {
+            let key = encode_gm_forward(&gid, &member);
+            assert_eq!(
+                decode_gm_forward_group(&key),
+                Some(gid.clone()),
+                "the backup exporter recovers the owning group from the key; it must \
+                 invert encode_gm_forward exactly"
+            );
+            assert!(key.starts_with(&gm_forward_realm_scan_prefix()));
+        }
+
+        // A reverse key is not a forward key and must not decode as one.
+        let rev = encode_gm_reverse(&GroupMember::User(UserId::generate()), &gid);
+        assert_eq!(decode_gm_forward_group(&rev), None);
+        assert_eq!(
+            decode_gm_forward_group(b"rba:gm:group:not-a-uuid:member:user:x"),
+            None
+        );
     }
 
     #[test]

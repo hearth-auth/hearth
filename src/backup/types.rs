@@ -35,10 +35,23 @@ pub struct RecordCounts {
     pub permissions: u64,
     /// Number of RBAC group records.
     pub groups: u64,
+    /// Number of group-membership edges (OpenSpec 26.40). Zero for archives
+    /// created before `group_memberships.ndjson` existed — in those, every
+    /// group restores empty.
+    #[serde(default)]
+    pub group_memberships: u64,
     /// Number of role-assignment records.
     pub assignments: u64,
     /// Number of organization records.
     pub organizations: u64,
+    /// Number of organization-membership records (OpenSpec 26.40). Zero for
+    /// archives created before `organization_memberships.ndjson` existed.
+    #[serde(default)]
+    pub organization_memberships: u64,
+    /// Number of OAuth consent records (OpenSpec 26.40). Zero for archives
+    /// created before `consents.ndjson` existed.
+    #[serde(default)]
+    pub consents: u64,
     /// Number of OAuth scope definitions.
     pub scopes: u64,
     /// Number of audit events exported (0 when audit export was omitted).

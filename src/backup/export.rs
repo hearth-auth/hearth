@@ -212,8 +212,9 @@ impl BackupExporter {
     /// Exports all entities for `realm_id` into `writer`.
     ///
     /// Writes one encrypted JSON/NDJSON file per entity type (users, credentials,
-    /// MFA factors, clients, roles, groups, permissions, scopes, assignments,
-    /// organizations) plus an AES-256-GCM encrypted `signing_key.json` and, when
+    /// MFA factors, clients, roles, groups, group memberships, permissions,
+    /// scopes, assignments, organizations, organization memberships, consents)
+    /// plus an AES-256-GCM encrypted `signing_key.json` and, when
     /// `opts.include_audit` is true, an encrypted `audit.ndjson` file.
     ///
     /// ALL sections are encrypted with `dek`. The DEK itself must be wrapped
@@ -389,6 +390,51 @@ impl BackupExporter {
             let data = to_ndjson(&organizations)?;
             let encrypted = encrypt_bytes(&data, dek)?;
             writer.add_file(&format!("{prefix}/organizations.ndjson"), &encrypted)?;
+        }
+
+        // group_memberships.ndjson — the edges between a group and its
+        // members. Without this, groups restore EMPTY: the group record and
+        // the role-to-group assignment both come back, so every count matches
+        // while the permissions the group granted silently vanish
+        // (OpenSpec 26.40).
+        let group_memberships = self
+            .rbac
+            .export_all_group_memberships(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.group_memberships = group_memberships.len() as u64;
+        if !group_memberships.is_empty() {
+            let data = to_ndjson(&group_memberships)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/group_memberships.ndjson"), &encrypted)?;
+        }
+
+        // organization_memberships.ndjson — same shape as group memberships:
+        // organizations used to restore with nobody in them.
+        let org_memberships = self
+            .identity
+            .export_all_organization_memberships(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.organization_memberships = org_memberships.len() as u64;
+        if !org_memberships.is_empty() {
+            let data = to_ndjson(&org_memberships)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(
+                &format!("{prefix}/organization_memberships.ndjson"),
+                &encrypted,
+            )?;
+        }
+
+        // consents.ndjson — a restored user must not be re-prompted for
+        // consent they already granted.
+        let consents = self
+            .identity
+            .export_all_consents(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.consents = consents.len() as u64;
+        if !consents.is_empty() {
+            let data = to_ndjson(&consents)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/consents.ndjson"), &encrypted)?;
         }
 
         // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)

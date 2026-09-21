@@ -284,15 +284,15 @@ use crate::identity::tokens::{
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
     Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, BulkResult,
-    ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse,
-    CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest,
-    CreateUserRequest, DemoSeedOutcome, DemoSeedSpec, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, ListAgentsQuery, Organization, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource, Realm, RealmStatus,
-    RegisterProtectedResourceRequest, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session, SessionContext,
-    SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
+    ConsentExport, ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest,
+    CreateAgentApiKeyResponse, CreateAgentRequest, CreateInvitationRequest,
+    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, DemoSeedOutcome,
+    DemoSeedSpec, ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery,
+    Organization, OrganizationInvitation, OrganizationMembership, OrganizationRole,
+    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource,
+    Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session,
+    SessionContext, SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
@@ -2131,6 +2131,71 @@ impl EmbeddedIdentityEngine {
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
 
         Ok(signing_key)
+    }
+
+    /// Blocks until this node may run the engine's start-up write set, or the
+    /// set is already present because another node ran it (task 26.46).
+    ///
+    /// [`Self::with_rbac`] and [`Self::new`] write on a cold data directory:
+    /// the KEK-enrolment marker, the global signing key, and the system-realm
+    /// row. In cluster mode each is a Raft proposal, so a node that is not the
+    /// leader cannot perform any of them — and on a cold three-node cluster no
+    /// node is the leader at the moment `serve` reaches this point, so every
+    /// node died with `raft: not the leader; redirect to unknown` before
+    /// `POST /admin/cluster/bootstrap` could ever be called.
+    ///
+    /// Two outcomes end the wait, and between them they cover every node:
+    ///
+    /// * [`StorageEngine::accepts_writes`] is true — this node is the Raft
+    ///   leader (or storage is local), so the write set will succeed.
+    /// * The system-realm row is readable — some other node has already
+    ///   completed the whole set and it has replicated here, so the
+    ///   constructor will read every value and write nothing. The system-realm
+    ///   row is the *last* of the three writes, so its presence implies the
+    ///   other two.
+    ///
+    /// Exactly one node in a cluster is the leader and it never waits, so this
+    /// cannot deadlock. A read error is treated as "not ready yet" rather than
+    /// fatal: a follower's reads are fenced while replication lag exceeds
+    /// `cluster.read_lag_threshold_ms`, which is precisely the state this is
+    /// waiting out.
+    ///
+    /// Returns an error if neither condition holds before `timeout`.
+    pub async fn await_cold_start_window(
+        storage: &Arc<dyn StorageEngine>,
+        timeout: std::time::Duration,
+    ) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let realm_key = keys::encode_realm_id(&sys_realm);
+        let deadline = std::time::Instant::now() + timeout;
+        let mut announced = false;
+        loop {
+            if storage.accepts_writes() {
+                return Ok(());
+            }
+            if matches!(storage.get(&sys_realm, &realm_key), Ok(Some(_))) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Self::storage_err(crate::storage::StorageError::Io(
+                    std::io::Error::other(
+                        "cluster did not become writable within the start-up window: no Raft \
+                         leader was elected and no peer completed the start-up write set. \
+                         Check that every node lists the same membership under `cluster.peers`, \
+                         that the peer addresses are reachable, and that the mTLS material is \
+                         signed by the same CA",
+                    ),
+                )));
+            }
+            if !announced {
+                tracing::info!(
+                    "waiting for the cluster to elect a leader before start-up writes; \
+                     this node is not the leader and the system realm has not replicated yet"
+                );
+                announced = true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
     }
 
     /// Returns a reference to the signing key.
@@ -11998,6 +12063,116 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     (slug_key, org.id().as_uuid().as_bytes().to_vec()),
                 ],
             )
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_organization_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<OrganizationMembership>, IdentityError> {
+        // The org->user index is authoritative; the user->org index stores the
+        // same bytes and is rebuilt from the record on import.
+        let prefix = keys::membership_org_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Ok(membership) = serde_json::from_slice::<OrganizationMembership>(&entry.value)
+            else {
+                continue;
+            };
+            out.push(membership);
+        }
+        Ok(out)
+    }
+
+    fn import_organization_membership(
+        &self,
+        realm_id: &RealmId,
+        membership: &OrganizationMembership,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let fwd_key = keys::encode_membership_by_org(membership.org_id(), membership.user_id());
+        let exists = self
+            .storage
+            .get(realm_id, &fwd_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let bytes = serde_json::to_vec(membership).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        let rev_key = keys::encode_membership_by_user(membership.user_id(), membership.org_id());
+        self.storage
+            .put_batch(realm_id, &[(fwd_key, bytes.clone()), (rev_key, bytes)])
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_consents(&self, realm_id: &RealmId) -> Result<Vec<ConsentExport>, IdentityError> {
+        let prefix = keys::oauth_consent_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Ok(storage_key) = String::from_utf8(entry.key.clone()) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<ConsentRecord>(&entry.value) else {
+                continue;
+            };
+            out.push(ConsentExport {
+                storage_key,
+                record,
+            });
+        }
+        Ok(out)
+    }
+
+    fn import_consent(
+        &self,
+        realm_id: &RealmId,
+        consent: &ConsentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        if !keys::is_oauth_consent_key(&consent.storage_key) {
+            return Err(IdentityError::Serialization {
+                reason: "consent record carries a storage key outside the consent key space"
+                    .to_string(),
+            });
+        }
+        let key = consent.storage_key.as_bytes().to_vec();
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let bytes =
+            serde_json::to_vec(&consent.record).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
         Ok(if exists {
             ImportOutcome::Overwritten

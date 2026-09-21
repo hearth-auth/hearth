@@ -15,8 +15,11 @@
 //! realms/<realm-slug>/roles.ndjson
 //! realms/<realm-slug>/permissions.ndjson
 //! realms/<realm-slug>/groups.ndjson
+//! realms/<realm-slug>/group_memberships.ndjson
 //! realms/<realm-slug>/assignments.ndjson
 //! realms/<realm-slug>/organizations.ndjson
+//! realms/<realm-slug>/organization_memberships.ndjson
+//! realms/<realm-slug>/consents.ndjson
 //! realms/<realm-slug>/scopes.ndjson
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
 //! realms/<realm-slug>/audit.ndjson       (optional)
@@ -102,18 +105,6 @@ pub struct UnexportedFamily {
 /// list and the archive still agree.
 pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[
     UnexportedFamily {
-        family: "group memberships",
-        member: "group_memberships.ndjson",
-        consequence: "groups restore EMPTY. Every permission a user held through a group is \
-                      gone, while the role-to-group assignment survives — the RBAC graph \
-                      restores looking correct and resolving to nothing.",
-    },
-    UnexportedFamily {
-        family: "organization memberships",
-        member: "organization_memberships.ndjson",
-        consequence: "organizations restore with no members.",
-    },
-    UnexportedFamily {
         family: "identity providers and federation links",
         member: "identity_providers.ndjson",
         consequence: "federated login configuration and every user-to-IdP binding are lost; a \
@@ -140,11 +131,6 @@ pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[
         consequence: "the next SCIM sync re-creates users rather than updating them.",
     },
     UnexportedFamily {
-        family: "user consents",
-        member: "consents.ndjson",
-        consequence: "every user is re-prompted for consent. Benign.",
-    },
-    UnexportedFamily {
         family: "organization invitations",
         member: "invitations.ndjson",
         consequence: "outstanding invitation links stop working.",
@@ -160,9 +146,12 @@ pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[
         family: "sessions",
         member: "sessions.ndjson",
         consequence: "every access and refresh token issued before the backup is dead after the \
-                      restore, even though the signing key survives. This one is deliberate: a \
-                      session is per-node live state and restoring them would resurrect revoked \
-                      ones.",
+                      restore, even though the signing key survives. DELIBERATE, and reaffirmed \
+                      by OpenSpec 26.40: a session is per-node live state carrying a session \
+                      version and a device binding, and a revocation recorded after the backup \
+                      is not in the archive — so restoring sessions would resurrect exactly the \
+                      sessions an operator revoked. The right fix is documentation, not export: \
+                      a restore is a re-authentication event.",
     },
 ];
 

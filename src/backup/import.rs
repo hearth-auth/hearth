@@ -13,10 +13,13 @@ use tracing::{debug, warn};
 use crate::audit::{AuditEngine, AuditEvent};
 use crate::core::{ClientId, ImportOutcome, RealmId};
 use crate::identity::{
-    ClientTrustLevel, CreateRealmRequest, IdentityEngine, IdentityError, ImportClientRequest,
-    ImportUserRequest, MfaFactorExport, Organization, RawCredential, Realm, User,
+    ClientTrustLevel, ConsentExport, CreateRealmRequest, IdentityEngine, IdentityError,
+    ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationMembership,
+    RawCredential, Realm, User,
 };
-use crate::rbac::{Group, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport};
+use crate::rbac::{
+    Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
+};
 
 use zeroize::Zeroizing;
 
@@ -37,9 +40,12 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "roles.ndjson",
     "permissions.ndjson",
     "groups.ndjson",
+    "group_memberships.ndjson",
     "assignments.ndjson",
     "scopes.ndjson",
     "organizations.ndjson",
+    "organization_memberships.ndjson",
+    "consents.ndjson",
     "signing_key.json",
     "audit.ndjson",
     "audit_chain.json",
@@ -147,12 +153,20 @@ pub struct ImportReport {
     pub permissions: EntityCounts,
     /// Outcome counts for RBAC group records.
     pub groups: EntityCounts,
+    /// Outcome counts for group-membership edges (OpenSpec 26.40). Before
+    /// this member existed, groups restored empty and every permission a user
+    /// held *through* a group silently vanished.
+    pub group_memberships: EntityCounts,
     /// Outcome counts for role-assignment records.
     pub assignments: EntityCounts,
     /// Outcome counts for OAuth scope records.
     pub scopes: EntityCounts,
     /// Outcome counts for organization records.
     pub organizations: EntityCounts,
+    /// Outcome counts for organization-membership records (OpenSpec 26.40).
+    pub organization_memberships: EntityCounts,
+    /// Outcome counts for OAuth consent records (OpenSpec 26.40).
+    pub consents: EntityCounts,
     /// Outcome counts for restored audit events.
     pub audit_events: EntityCounts,
     /// Whether the archive's audit hashes were checked against the source
@@ -621,6 +635,49 @@ impl BackupImporter {
             |this, assignment: &RoleAssignment| {
                 this.rbac
                     .import_assignment(&restored_realm_id, assignment, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // Group memberships come AFTER groups and users so the records they
+        // reference already exist. `import_group_membership` writes both the
+        // forward and the reverse index; the reverse one is what permission
+        // resolution scans (OpenSpec 26.40).
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/group_memberships.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.group_memberships,
+            |this, edge: &GroupMembershipEdge| {
+                this.rbac
+                    .import_group_membership(&restored_realm_id, edge, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/organization_memberships.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.organization_memberships,
+            |this, membership: &OrganizationMembership| {
+                this.identity
+                    .import_organization_membership(&restored_realm_id, membership, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/consents.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.consents,
+            |this, consent: &ConsentExport| {
+                this.identity
+                    .import_consent(&restored_realm_id, consent, overwrite)
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;

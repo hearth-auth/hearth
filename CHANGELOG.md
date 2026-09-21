@@ -196,6 +196,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   listener is on a different port), so the very first instruction Hearth gives after a production
   boot sent plaintext at a TLS socket and failed to connect. Found while running the OpenID
   Foundation conformance suite; see `reports/conformance-suite-run-2026-09-21.md`.
+- **Group memberships, organization memberships and OAuth consents now survive a restore (OpenSpec 26.40)** —
+  a `.hearth-backup` archive carried group *records* but not the edges between a group and its members, so
+  a restored realm came back with every group empty. The role-to-group assignment survived, so the RBAC
+  graph looked correct, every record count in the restore summary matched, and the permissions those groups
+  granted had silently vanished: an authorization loss no row count could see. Organizations restored with
+  nobody in them and every user was re-prompted for consent, for the same reason. The archive now carries
+  `group_memberships.ndjson`, `organization_memberships.ndjson` and `consents.ndjson`, and the restore
+  summary and exit code account for all three. Both index directions are rebuilt on import — including the
+  reverse (`member -> group`) index that permission resolution scans. **Archives taken before this release
+  do not contain these members**; a realm restored from one still needs its memberships re-applied from your
+  provisioning source of truth. Eight entity families remain unexported and `backup create` and
+  `backup restore` still print them; sessions stay on that list deliberately, because a revocation recorded
+  after the backup is not in the archive and restoring sessions would resurrect exactly what an operator
+  revoked.
 
 ### Security
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one

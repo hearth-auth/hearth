@@ -118,7 +118,7 @@ pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, ApprovalWebhookConfig, AttributeDefinition,
     AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, CidrPolicy,
-    ConsentDecision, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
+    ConsentDecision, ConsentExport, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
     CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
     CredentialExport, DcrPolicy, DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest,
     ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization,
@@ -2335,6 +2335,43 @@ pub trait IdentityEngine: Send + Sync {
         factor: &MfaFactorExport,
         overwrite: bool,
     ) -> Result<crate::core::ImportOutcome, IdentityError>;
+
+    /// Returns every organization-membership record in a realm for backup
+    /// export (OpenSpec 26.40).
+    ///
+    /// Organizations already round-tripped; their members did not, so a
+    /// restored realm held every org with nobody in it.
+    fn export_all_organization_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<OrganizationMembership>, IdentityError>;
+
+    /// Restores one organization membership, writing **both** index entries
+    /// (org->user and user->org) exactly as `add_member` writes them.
+    ///
+    /// Unlike [`add_member`](Self::add_member) this performs no org-status,
+    /// user-existence or member-limit checks: the archive is the authority and
+    /// its records are written verbatim.
+    fn import_organization_membership(
+        &self,
+        realm_id: &RealmId,
+        membership: &OrganizationMembership,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every OAuth consent record in a realm for backup export,
+    /// paired with the exact storage key it was read from (OpenSpec 26.40).
+    fn export_all_consents(&self, realm_id: &RealmId) -> Result<Vec<ConsentExport>, IdentityError>;
+
+    /// Restores one OAuth consent record at its original storage key.
+    ///
+    /// Rejects any key outside the `oauth:consent:` key space.
+    fn import_consent(
+        &self,
+        realm_id: &RealmId,
+        consent: &ConsentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
 
     /// Returns the raw PKCS#8 DER bytes for a realm's Ed25519 signing key.
     ///

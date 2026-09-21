@@ -86,6 +86,25 @@ pub fn canonicalize_scopes(mut scopes: Vec<String>) -> Vec<String> {
     scopes
 }
 
+/// One persisted consent record plus the exact storage key it was read from,
+/// for backup export.
+///
+/// A consent lives under one of two key shapes — a legacy
+/// `oauth:consent:{user}:{client}` record and the extended
+/// `oauth:consent:{user}:{client}:{org_key}:{resource_key}` form, whose
+/// `resource_key` is a caller-supplied resource indicator. Neither shape is
+/// recoverable from the record's fields alone, so the archive carries the key
+/// verbatim and the importer writes it back byte-for-byte. The importer
+/// re-checks the `oauth:consent:` prefix, so an archive cannot use this member
+/// to write anywhere else in the realm.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsentExport {
+    /// The full storage key, including the `oauth:consent:` prefix.
+    pub storage_key: String,
+    /// The consent record stored at that key.
+    pub record: ConsentRecord,
+}
+
 /// Listing entry for consents shown to the user or to an admin.
 ///
 /// Joins the `ConsentRecord` with human-readable fields from the OAuth

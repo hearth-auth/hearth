@@ -339,6 +339,21 @@ pub struct GroupMembership {
     pub added_by: Option<UserId>,
 }
 
+/// A group-membership edge as it exists **at rest**, for backup export.
+///
+/// Deliberately narrower than [`GroupMembership`]: storage keeps only the
+/// `(group, member)` pair (the forward index value is the member, the reverse
+/// index value is the group). `added_at` and `added_by` are returned by
+/// `add_group_member` but never persisted, so an archive that carried them
+/// would be inventing provenance it cannot restore.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMembershipEdge {
+    /// The owning group.
+    pub group_id: GroupId,
+    /// The user or nested group that belongs to it.
+    pub member: GroupMember,
+}
+
 /// Subject of a role assignment: either a user or a group.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "id", rename_all = "lowercase")]

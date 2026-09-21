@@ -23,10 +23,10 @@ use super::resolve::{self, Resolver};
 use super::seed::{self, StoredScope};
 use super::types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
-    GroupId, GroupMember, GroupMembership, Page, Permission, PermissionRecord, PermissionStatus,
-    ProtectedResource, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleStatus,
-    RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest,
-    UpdateRoleRequest, UserPermissionGrant,
+    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission, PermissionRecord,
+    PermissionStatus, ProtectedResource, ResolvedPermissions, Role, RoleAssignment, RoleId,
+    RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind,
+    UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 use super::{RbacEngine, SvBumper};
 
@@ -1858,6 +1858,29 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(out)
     }
 
+    fn export_all_group_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<GroupMembershipEdge>, RbacError> {
+        let prefix = keys::gm_forward_realm_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            // The forward value holds the member; the owning group lives only
+            // in the key (see `decode_gm_forward_group`, which is asserted to
+            // invert `encode_gm_forward`).
+            let Some(group_id) = keys::decode_gm_forward_group(&entry.key) else {
+                continue;
+            };
+            let Ok(member) = Self::de::<GroupMember>(&entry.value) else {
+                continue;
+            };
+            out.push(GroupMembershipEdge { group_id, member });
+        }
+        Ok(out)
+    }
+
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
         let prefix = keys::ASSIGN_PRI_PREFIX.as_bytes().to_vec();
         let end = keys::prefix_end(&prefix);
@@ -1996,6 +2019,36 @@ impl RbacEngine for EmbeddedRbacEngine {
             permissions: scope.permissions.clone(),
         };
         self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn import_group_membership(
+        &self,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let forward = keys::encode_gm_forward(&edge.group_id, &edge.member);
+        let exists = self.storage.get(realm_id, &forward)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Both entries, exactly as `add_group_member` writes them: the reverse
+        // index is what permission resolution scans.
+        let reverse = keys::encode_gm_reverse(&edge.member, &edge.group_id);
+        self.write_put_batch(
+            realm_id,
+            &[
+                (forward, Self::ser(&edge.member)?),
+                (reverse, Self::ser(&edge.group_id)?),
+            ],
+        )?;
+        // No session-version bump: import writes verbatim into a target that
+        // has no sessions of its own, matching the other `import_*` helpers.
         Ok(if exists {
             ImportOutcome::Overwritten
         } else {
