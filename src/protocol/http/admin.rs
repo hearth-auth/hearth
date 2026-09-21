@@ -5183,6 +5183,23 @@ async fn admin_backup_restore(
                 .map_err(|(_, body)| (StatusCode::BAD_REQUEST, format!("{}", body.0)))?;
         }
 
+        // Task 26.42: verify the archive against its manifest BEFORE importing.
+        //
+        // Neither restore path ran this check, so an archive `hearth backup
+        // verify` rejected with exit 3 imported cleanly, and an archive with a
+        // member deleted from it imported a realm with zero users and reported
+        // success (audit re-run 23.5, B-3 and B-7). Unlike the CLI this route
+        // has no opt-out: an archive arriving over HTTP was uploaded by
+        // somebody, and there is no "it is too large to re-read" case worth the
+        // risk here. It runs before `import_realm_record` writes the realm
+        // record, which is the first write a restore performs.
+        reader.verify_checksums().map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("archive failed integrity verification, nothing was restored: {e}"),
+            )
+        })?;
+
         let importer = BackupImporter::new(identity, rbac, Arc::clone(&state.audit));
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
             let mk = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {

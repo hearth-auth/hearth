@@ -54,6 +54,43 @@ pub enum BackupError {
         path: String,
     },
 
+    /// `manifest.json` lists a checksum for a file the archive does not carry.
+    ///
+    /// `verify_checksums` used to walk the entries **present in the tar** and
+    /// check the ones that also appeared in the manifest's checksum map. A file
+    /// that was not there was never iterated, so its absence was not an error:
+    /// deleting `users.ndjson` from an archive left `backup verify` answering
+    /// *"OK — all checksums match"* and `backup restore` exiting 0 over a realm
+    /// with every client, role and group intact and zero users (audit re-run
+    /// 23.5, B-3). The manifest is now the authority on what the archive must
+    /// contain.
+    #[error(
+        "archive is incomplete: {count} file(s) listed in manifest.json are missing from the \
+         archive ({paths}). The archive has been truncated, edited, or repacked since it was \
+         written; it cannot be restored without silently losing the data those files held."
+    )]
+    MissingMembers {
+        /// How many checksummed paths were absent.
+        count: usize,
+        /// The absent paths, comma-separated and sorted.
+        paths: String,
+    },
+
+    /// The archive carries a file `manifest.json` does not checksum.
+    ///
+    /// The writer records a checksum for every member it appends, so an
+    /// unlisted member was added after the archive was sealed. Verifying it is
+    /// impossible, and the importer would read it as though the producer had
+    /// written it (audit re-run 23.5, B-3).
+    #[error(
+        "archive member '{path}' is not listed in manifest.json — its contents cannot be \
+         verified against anything. The archive was modified after it was written."
+    )]
+    UnchecksummedMember {
+        /// Archive-relative path of the unlisted member.
+        path: String,
+    },
+
     /// The archive carries no restorable signing key for the realm (the archive
     /// is unencrypted, predates signing-key export, or was opened without the
     /// DEK). Restoring anyway would generate a fresh key and invalidate every

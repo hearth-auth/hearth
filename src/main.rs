@@ -187,6 +187,19 @@ enum BackupAction {
         #[arg(long)]
         dry_run: bool,
 
+        /// Skip the SHA-256 integrity check restore now runs before it writes.
+        ///
+        /// Restore verifies the archive against `manifest.json` first — the
+        /// same check `hearth backup verify` runs — and refuses an archive
+        /// whose contents do not match, whose files are missing, or which
+        /// carries a member the manifest does not list. It used to do none of
+        /// that, so an archive `verify` rejected restored cleanly (audit re-run
+        /// 23.5, B-7). Pass this only when re-reading a very large archive is
+        /// genuinely too expensive and it has already been verified out of
+        /// band; a corrupt archive will then be applied without warning.
+        #[arg(long)]
+        skip_verify: bool,
+
         /// Proceed even when the archive carries no restorable signing key.
         ///
         /// By default restore REFUSES an archive with no usable signing key
@@ -594,6 +607,7 @@ async fn main() {
                     realm,
                     mode,
                     dry_run,
+                    skip_verify,
                     allow_missing_signing_key,
                     data_dir,
                     config,
@@ -603,6 +617,7 @@ async fn main() {
                         realm.as_deref(),
                         &mode,
                         dry_run,
+                        skip_verify,
                         allow_missing_signing_key,
                         &data_dir,
                         config.as_deref(),
@@ -4330,6 +4345,49 @@ fn run_backup_create(
                 }
                 offset += n;
             }
+
+            // Task 26.39: `list_realms` deliberately hides the system realm
+            // (the nil UUID), so an unfiltered "full" backup contained no
+            // operator-console account at all. Proven by A/B login in audit
+            // re-run 23.5 (B-1): the origin answered 200 at `/ui`, the
+            // instance restored from its own full backup answered 401. The
+            // datacenter-burns runbook therefore produced an archive nobody
+            // could log in to, and neither `create`, `restore` nor `inspect`
+            // said a word about the omission. Named explicitly with `--realm
+            // 00000000-…` the same store exported it fine, so this was an
+            // enumeration gap, not a capability gap.
+            //
+            // Exporting it does put operator identities in the file. That is
+            // already true of every other realm's `credentials.ndjson` and
+            // signing key, and `backup create` refuses to write an archive at
+            // all without `HEARTH_MASTER_KEY` or `--encrypt`: every section is
+            // AES-256-GCM encrypted under a DEK wrapped with Argon2id from
+            // that passphrase. Withholding the system realm bought no
+            // confidentiality the other realms did not already spend, and cost
+            // the restore its only way back in. `--realm <name>` still exports
+            // exactly one realm, so an operator who does not want it in a given
+            // archive can still say so.
+            //
+            // Guarded on `ids` being non-empty, and that guard is load-bearing:
+            // the system realm is seeded during engine construction, so it
+            // exists in *every* store the CLI opens — including a store that
+            // was just created by pointing `--data-dir` at an empty directory.
+            // Appending it unconditionally would make `realms_to_export` never
+            // empty and silently disable the 26.26 refusal below, turning a
+            // mistyped path back into an exit-0 archive holding one
+            // freshly-seeded, userless realm. A store with no tenant realm is
+            // not a store worth backing up.
+            let system_id = RealmId::new(Uuid::nil());
+            if !ids.is_empty()
+                && !ids.contains(&system_id)
+                && identity
+                    .get_realm(&system_id)
+                    .map_err(|e| format!("get_realm(system): {e}"))?
+                    .is_some()
+            {
+                ids.push(system_id);
+            }
+
             ids
         };
 
@@ -4403,7 +4461,31 @@ fn run_backup_create(
     }
 
     tracing::info!("Backup written to: {}", out_path.display());
+    warn_unexported_families("This archive does NOT contain");
     Ok(())
+}
+
+/// Prints every entity family the archive format does not carry (task 26.40).
+///
+/// `restore` fails closed on an *unrecognized* member but has nothing to say
+/// about a *missing category*: the importer's allowlist is the union of what
+/// the exporter writes, so a family nobody exports is a family nobody misses
+/// (audit re-run 23.5). Ten families are in that position, group memberships
+/// worst of all — groups restore EMPTY, so a realm's RBAC graph comes back
+/// looking correct and resolving to nothing, and a restore that counted groups
+/// would call it a success.
+///
+/// Until each family round-trips this is the only thing standing between an
+/// operator and a silent loss, so both `create` and `restore` say it out loud.
+fn warn_unexported_families(lead: &str) {
+    tracing::warn!("{lead} the following, which a restore will NOT bring back:");
+    for family in hearth::backup::UNEXPORTED_FAMILIES {
+        tracing::warn!("  - {}: {}", family.family, family.consequence);
+    }
+    tracing::warn!(
+        "  See docs/guides/backup.md § 'What a backup does not carry'. Plan recovery of \
+         these families separately; do not treat a restore as a complete recovery."
+    );
 }
 
 /// Runs `hearth backup restore`.
@@ -4415,6 +4497,7 @@ fn run_backup_restore(
     realm_slug: Option<&str>,
     mode_str: &str,
     dry_run: bool,
+    skip_verify: bool,
     allow_missing_signing_key: bool,
     data_dir: &std::path::Path,
     config_path: Option<&std::path::Path>,
@@ -4428,6 +4511,39 @@ fn run_backup_restore(
     };
 
     let reader = BackupArchive::open(input)?;
+
+    // Task 26.42: verify BEFORE anything is written.
+    //
+    // `run_backup_restore` used to open the archive and import. It never called
+    // `verify_checksums`, so an archive `hearth backup verify` rejected with
+    // exit 3 — one checksum in the manifest set to 64 zeros — restored with
+    // exit 0 and `users — created: 3` (audit re-run 23.5, B-7). Corruption
+    // detection was opt-in and out of band, while `docs/guides/backup.md`
+    // presented `verify` as *the* integrity gate without saying restore skips
+    // it.
+    //
+    // The placement is load-bearing, not incidental. This runs before
+    // `create_dir_all`, before the storage engine opens, and therefore before
+    // `import_realm_record` writes the realm and its signing key. A restore is
+    // NOT transactional (B-6): a fatal error partway through leaves whatever
+    // was already applied, and the realm record is the first thing written, so
+    // the target was left holding a realm with the archive's signing key and no
+    // users. Making every integrity failure fatal *here* moves the entire class
+    // the report demonstrated — flipped bytes, tampered checksums, elided
+    // members — in front of the first write, which is the property an operator
+    // actually needs. What remains non-atomic is an engine failure mid-import,
+    // and the honest remedy for that is to restore into a fresh data directory;
+    // `docs/guides/backup.md` says so.
+    if skip_verify {
+        tracing::warn!(
+            "--skip-verify: restoring '{}' WITHOUT checking its checksums. A corrupt or \
+             edited archive will be applied without warning.",
+            input.display()
+        );
+    } else {
+        let verified = reader.verify_checksums()?;
+        tracing::info!("integrity OK — {verified} files verified before restore");
+    }
 
     std::fs::create_dir_all(data_dir)?;
     let storage_config = cli_storage_config(data_dir);
@@ -4478,6 +4594,7 @@ fn run_backup_restore(
             had_errors = true;
         }
     }
+    warn_unexported_families("This restore did NOT bring back");
     Ok(had_errors)
 }
 
@@ -4513,7 +4630,12 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
     use hearth::backup::BackupArchive;
 
     let reader = BackupArchive::open(input)?;
-    reader.verify_checksums()?;
+    // Task 26.41: the count printed below is the number of files this call
+    // actually read, not `manifest.checksums.len()`. Those differed whenever a
+    // member had been deleted from the archive — `verify` reported "(15 files
+    // verified)" over fourteen — which is precisely the case in which the
+    // number mattered.
+    let verified = reader.verify_checksums()?;
     // Task 26.26: "all checksums match" over zero checksums is vacuously true,
     // and it printed `OK — all checksums match (0 files verified)` and exited
     // 0. An operator reading that has been told their backup is good when the
@@ -4526,10 +4648,7 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
         )
         .into());
     }
-    tracing::info!(
-        "OK — all checksums match ({} files verified)",
-        reader.manifest.checksums.len()
-    );
+    tracing::info!("OK — all checksums match ({verified} files verified)");
     Ok(())
 }
 
@@ -5314,6 +5433,256 @@ mod tests {
             "a failed `backup create` must not leave a file at the operator's \
              --output path"
         );
+    }
+
+    /// Rewrites the archive at `src` into `dst`, dropping `drop_member`.
+    ///
+    /// `manifest.json` is copied through untouched, so the result is an archive
+    /// whose manifest still checksums a file that is no longer there — exactly
+    /// what the audit re-run produced by hand with `tar`.
+    fn repack_without(src: &std::path::Path, dst: &std::path::Path, drop_member: &str) {
+        use std::io::Read as _;
+
+        let decoder = zstd::Decoder::new(std::fs::File::open(src).expect("open src")).expect("dec");
+        let mut archive = tar::Archive::new(decoder);
+        let encoder =
+            zstd::Encoder::new(std::fs::File::create(dst).expect("create dst"), 0).expect("enc");
+        let mut builder = tar::Builder::new(encoder);
+        let mut dropped = false;
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let path = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read");
+            if path == drop_member {
+                dropped = true;
+                continue;
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &path, bytes.as_slice())
+                .expect("append");
+        }
+        builder
+            .into_inner()
+            .expect("into_inner")
+            .finish()
+            .expect("finish");
+        assert!(
+            dropped,
+            "the member '{drop_member}' was not in the archive — the mutation \
+             this test depends on did not happen"
+        );
+    }
+
+    /// An unfiltered `backup create` must export the system realm (task 26.39).
+    ///
+    /// `list_realms` deliberately hides the nil-UUID system realm, and the
+    /// unfiltered export enumerated realms through it — so a "full" backup
+    /// contained no operator-console account. The audit re-run proved it by
+    /// A/B login: the origin answered 200 at `/ui`, an instance restored from
+    /// its own full backup answered 401 (23.5, B-1). Nothing in `create`,
+    /// `restore` or `inspect` mentioned that the realm holding the only
+    /// administrative identity had been skipped.
+    #[test]
+    fn backup_create_exports_the_system_realm_in_a_full_export() {
+        use hearth::identity::{CreateRealmRequest, CreateUserRequest};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let master_key = "c3".repeat(32);
+        std::env::set_var("HEARTH_MASTER_KEY", &master_key);
+
+        let system_id = hearth::core::RealmId::new(uuid::Uuid::nil());
+        {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, ..) = build_all_engines(Arc::clone(&storage), None).expect("engines");
+            // Engine construction seeds the system realm. A tenant realm beside
+            // it makes "full" mean more than one realm, so the assertion below
+            // cannot pass just because the export found *something*.
+            identity
+                .create_realm(&CreateRealmRequest {
+                    name: "tenant".to_string(),
+                    config: None,
+                })
+                .expect("tenant realm");
+            // `create_admin_user` is the only path into the system realm —
+            // plain `create_user` answers `SystemRealmProtected` there. This is
+            // exactly the account an operator signs in to `/ui/admin` with.
+            identity
+                .create_admin_user(&CreateUserRequest {
+                    email: "operator@hearth.test".to_string(),
+                    display_name: "Operator".to_string(),
+                    ..Default::default()
+                })
+                .expect("operator account in the system realm");
+        }
+
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
+        let out = dir.path().join("full.hearth-backup");
+        run_backup_create(Some(&out), None, false, false, &copy, None).expect("full export");
+
+        let reader = hearth::backup::BackupArchive::open(&out).expect("open archive");
+        let expected_id = system_id.to_string();
+        let system = reader
+            .realms()
+            .iter()
+            .find(|r| r.realm_id == expected_id)
+            .expect(
+                "an unfiltered backup must carry the system realm — it holds every \
+                 operator-console account, and a restore without it leaves nobody \
+                 able to log in",
+            );
+        assert!(
+            reader.realms().len() >= 2,
+            "the tenant realm must still be exported too"
+        );
+
+        // The manifest's count is a claim. Decrypt the member and read the
+        // account out of it, so this proves the DATA round-trips rather than
+        // that the exporter did not error.
+        let dek = hearth::backup::unwrap_dek(
+            reader
+                .manifest
+                .wrapped_dek_b64
+                .as_deref()
+                .expect("wrapped DEK"),
+            reader
+                .manifest
+                .dek_wrapping_params
+                .as_ref()
+                .expect("DEK wrapping params"),
+            &secrecy::SecretString::from(master_key.clone()),
+        )
+        .expect("unwrap DEK");
+        let member = format!("realms/{}/users.ndjson", system.slug);
+        let raw = reader
+            .read_file(&member)
+            .expect("read member")
+            .expect("the system realm's users.ndjson must be in the archive");
+        let plain = hearth::backup::decrypt_bytes(&raw, &dek).expect("decrypt");
+        let text = String::from_utf8_lossy(&plain);
+        assert!(
+            text.contains("operator@hearth.test"),
+            "the operator account must be IN the archive, not merely counted"
+        );
+
+        // The system realm is seeded during engine construction, so it exists
+        // in EVERY store the CLI opens — including one the operator just
+        // created by mistyping `--data-dir` at an empty directory. Including it
+        // must therefore not make `realms_to_export` unconditionally non-empty
+        // and silently disable task 26.26's refusal.
+        let empty_store = dir.path().join("empty-store");
+        std::fs::create_dir_all(&empty_store).expect("empty store");
+        let out_empty = dir.path().join("empty.hearth-backup");
+        let err = run_backup_create(Some(&out_empty), None, false, false, &empty_store, None)
+            .expect_err("a store with no tenant realm must still be refused");
+        assert!(
+            err.to_string().contains("nothing to export"),
+            "the system realm must not resurrect the empty-archive defect; got: {err}"
+        );
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    /// `backup restore` must verify the archive before it writes (task 26.42).
+    ///
+    /// It opened the archive and imported. It never called `verify_checksums`,
+    /// so an archive `hearth backup verify` rejected with exit 3 restored with
+    /// exit 0 (audit re-run 23.5, B-7). Worse, `import_realm_record` writes the
+    /// realm and its signing key first, so a fatal failure later left the
+    /// target holding a realm with no users (B-6). Verification now runs before
+    /// the data directory is even created, so an integrity failure cannot leave
+    /// a partial realm behind.
+    #[test]
+    fn restore_verifies_the_archive_before_writing_anything() {
+        use hearth::identity::{CreateRealmRequest, CreateUserRequest};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        std::env::set_var("HEARTH_MASTER_KEY", "e5".repeat(32));
+
+        {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, ..) = build_all_engines(Arc::clone(&storage), None).expect("engines");
+            let realm = identity
+                .create_realm(&CreateRealmRequest {
+                    name: "tenant".to_string(),
+                    config: None,
+                })
+                .expect("realm");
+            identity
+                .create_user(
+                    realm.id(),
+                    &CreateUserRequest {
+                        email: "someone@example.test".to_string(),
+                        display_name: "Someone".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .expect("user");
+        }
+
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
+        let good = dir.path().join("good.hearth-backup");
+        run_backup_create(Some(&good), None, false, false, &copy, None).expect("export");
+
+        // Control: the unmodified archive restores. Without this the assertion
+        // below could pass because the archive was never restorable at all.
+        let control_target = dir.path().join("control-target");
+        run_backup_restore(
+            &good,
+            Some("tenant"),
+            "skip",
+            true, // dry run — do not take the data-directory lock for real
+            false,
+            true,
+            &control_target,
+            None,
+        )
+        .expect("the control archive must restore");
+
+        // Now delete a member and leave its checksum in the manifest — the
+        // `elide-users` mutation from the report, which `verify` called
+        // "OK — all checksums match" and `restore` applied with exit 0.
+        let elided = dir.path().join("elided.hearth-backup");
+        repack_without(&good, &elided, "realms/tenant/users.ndjson");
+
+        let target = dir.path().join("target");
+        let err = run_backup_restore(
+            &elided,
+            Some("tenant"),
+            "skip",
+            false,
+            false,
+            true,
+            &target,
+            None,
+        )
+        .expect_err("a restore must refuse an archive that fails verification");
+        assert!(
+            err.to_string().contains("users.ndjson"),
+            "the refusal must name the missing member; got: {err}"
+        );
+        assert!(
+            !target.exists(),
+            "the refusal must land BEFORE the target data directory is created, \
+             or a fatal restore leaves a partial realm behind"
+        );
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
     }
 
     /// The restore exit code must account for every entity bucket.

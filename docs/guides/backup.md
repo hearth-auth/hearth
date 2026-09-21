@@ -47,6 +47,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/realm.json` | Realm configuration record |
 | `realms/<slug>/users.ndjson` | User records (one JSON object per line) |
 | `realms/<slug>/credentials.ndjson` | Hashed credentials |
+| `realms/<slug>/mfa_factors.ndjson` | TOTP secrets, recovery codes and WebAuthn passkeys |
 | `realms/<slug>/clients.ndjson` | OAuth 2.0 application registrations |
 | `realms/<slug>/roles.ndjson` | RBAC role definitions |
 | `realms/<slug>/permissions.ndjson` | Permission definitions |
@@ -59,6 +60,59 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/audit_chain.json` | The audit chain key and anchor for those events (AES-256-GCM encrypted with the DEK) |
 
 The NDJSON format (one JSON object per line) enables streaming reads during large restores without loading the full file into memory.
+
+### What a backup does not carry
+
+**Read this before you treat a restore as a complete recovery.** The list above
+is the *whole* archive. Eleven entity families are not in it, and because the
+importer's allowlist is the union of what the exporter writes, a family nobody
+exports is a family nobody misses: restore fails closed on an *unrecognized*
+member but has nothing to say about a *missing category*. `hearth backup
+create` and `hearth backup restore` both print this list at the end of a run so
+it cannot be missed.
+
+| Not carried | What a restore loses |
+|---|---|
+| **Group memberships** | Groups restore **empty**. Every permission a user held *through* a group is gone, while the role-to-group assignment survives — so the RBAC graph comes back looking correct and resolving to nothing. A check that only counts groups will not see this. |
+| **Organization memberships** | Organizations restore with no members. |
+| **Identity providers and federation links** | Federated-login configuration and every user-to-IdP binding are lost. A federated user cannot sign in until the IdP is recreated. |
+| **Webhooks** | Event delivery stops silently after the restore. |
+| **Agents and agent credentials** | All agent-authorization state is lost. |
+| **SAML service providers** | Every SP must re-federate. |
+| **SCIM external-id mappings** | The next SCIM sync re-creates users instead of updating them. |
+| **User consents** | Every user is re-prompted. Benign. |
+| **Organization invitations** | Outstanding invitation links stop working. |
+| **Retiring signing keys** | Only the *current* key is exported, so a backup taken during a rotation grace window drops the outgoing key and invalidates tokens the origin would still have accepted. |
+| **Sessions** | Every access and refresh token issued before the backup is dead after the restore, even though the signing key survives. This one is deliberate — a session is per-node live state, and restoring sessions would resurrect revoked ones. Note that `--allow-missing-signing-key`'s help text implies the converse; it is wrong. Pre-restore tokens stop validating either way. |
+
+Plan recovery of these families separately. In practice that means: re-apply
+group and organization memberships from your provisioning source of truth (SCIM,
+Terraform, or whatever created them), re-register IdPs, SAML SPs and webhooks
+from configuration, and expect every user and every device to re-authenticate.
+
+Empty sections are omitted from the archive, so an absent member means "there
+were none of these" — which is also why a *deleted* member used to be
+indistinguishable from an empty one. See
+[`hearth backup verify`](#hearth-backup-verify).
+
+### The system realm is included
+
+An unfiltered `hearth backup create` exports the **system realm** (the nil-UUID
+realm that holds every operator-console account) alongside the realms
+`GET /admin/realms` lists. It did not until task 26.39: the unfiltered export
+enumerated realms through `list_realms`, which deliberately hides the system
+realm, so a "full" backup contained no administrative identity at all. An
+instance restored from its own full backup answered `401` at `/ui` while the
+origin answered `200` — and neither `create`, `restore` nor `inspect` mentioned
+the omission.
+
+That does mean operator credentials (Argon2id hashes) and the system realm's
+signing key are in the file. They are protected exactly as every other realm's
+already were: `backup create` refuses to write an archive at all without
+`HEARTH_MASTER_KEY` or `--encrypt`, and every section is AES-256-GCM encrypted
+under a DEK wrapped with Argon2id from that passphrase. Treat the archive and
+the passphrase as you would the data directory itself. If you want an archive
+without it, name a single realm with `--realm <name>`.
 
 ### Audit chain verification
 
@@ -151,6 +205,7 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--realm` | all realms | Restore only this realm (by archive slug) |
 | `--mode` | `skip` | Conflict resolution: `skip` keeps existing records. `overwrite` is **refused** when the target realm is already present — see below |
 | `--dry-run` | off | Parse and report without writing anything |
+| `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band |
 | `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
 | `--data-dir` | `data` | Path to the target data directory |
 
@@ -194,11 +249,43 @@ hearth backup restore \
 
 **Exit codes:** `0` success · `1` partial (some records skipped/failed) · `2` fatal error.
 
+> **Restore verifies the archive first (task 26.42).** Restore now runs the same
+> SHA-256 integrity check as `hearth backup verify` *before* it creates the
+> target data directory, and refuses an archive that fails it. Until this
+> change it never verified at all: an archive `hearth backup verify` rejected
+> with exit `3` — one checksum in the manifest set to 64 zeros — restored with
+> exit `0` and `users — created: 3`. Corruption detection was opt-in and out of
+> band while this guide presented `verify` as *the* integrity gate.
+> `POST /admin/backup/restore` verifies too, and has **no** `--skip-verify`
+> equivalent.
+>
+> **A restore is not transactional.** `import_realm_record` writes the realm and
+> its signing key before any user, so a fatal error partway through used to
+> leave the target holding a realm with the archive's signing key and no users,
+> and the archive's realm config could never be re-applied afterwards because
+> the partial realm already occupied the id. Verifying first moves the whole
+> demonstrated class of fatal failures — flipped bytes, tampered checksums,
+> elided members — in front of the *first* write, so an integrity failure now
+> leaves the target untouched. What remains non-atomic is an engine failure
+> mid-import. **Always restore into a fresh, empty data directory**, so that if
+> a restore aborts you can delete the directory and start again rather than
+> reasoning about what was already applied.
+
 ---
 
 ### `hearth backup verify`
 
-Recomputes SHA-256 checksums of all files in the archive and compares them against `manifest.json`. Detects silent corruption or tampering.
+Recomputes SHA-256 checksums of all files in the archive, compares them against `manifest.json`, and reconciles the manifest's file list against the archive's contents **in both directions**. Detects silent corruption, tampering, a member deleted from the archive, and a member added to it.
+
+> **A deleted member used to be invisible (task 26.41).** Verification walked the
+> entries *present* in the tar and checked the ones that also appeared in the
+> manifest, so a file that was not there was never iterated and its absence was
+> not an error. Deleting `users.ndjson` from an archive left `verify` printing
+> `OK — all checksums match (15 files verified)` over fourteen files, and
+> `restore` then exited `0` with `users — created: 0`: two commands in a row
+> reporting success over a realm nobody can log in to. The manifest is now the
+> authority on what the archive must contain, and the file count printed is the
+> number of files actually read.
 
 ```
 hearth backup verify --input <archive>
@@ -399,6 +486,10 @@ For cluster mode, after the restore completes, bootstrap the new node into the c
 ---
 
 ## What is NOT backed up
+
+For the entity families inside a realm that do not round-trip, see
+[What a backup does not carry](#what-a-backup-does-not-carry) — that list is the
+one that costs you data.
 
 | Excluded | Why |
 |---|---|

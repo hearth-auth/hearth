@@ -966,3 +966,134 @@ async fn backup_restore_refuses_archive_naming_a_peer_realm() {
         "the refused restore must not have deleted the peer realm"
     );
 }
+
+// ===== POST /admin/backup/restore — integrity (task 26.42) =====
+
+/// Rewrites a `.hearth-backup` blob with one member deleted, leaving
+/// `manifest.json` — and therefore that member's checksum — untouched.
+fn archive_without_member(archive: &[u8], drop_member: &str) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let src = tempfile::NamedTempFile::new().expect("src tempfile");
+    std::fs::write(src.path(), archive).expect("write src");
+    let dst = tempfile::NamedTempFile::new().expect("dst tempfile");
+
+    let decoder =
+        zstd::Decoder::new(std::fs::File::open(src.path()).expect("open src")).expect("dec");
+    let mut tar_in = tar::Archive::new(decoder);
+    let encoder =
+        zstd::Encoder::new(std::fs::File::create(dst.path()).expect("create dst"), 0).expect("enc");
+    let mut builder = tar::Builder::new(encoder);
+    let mut dropped = false;
+    for entry in tar_in.entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let path = entry.path().expect("path").to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("read");
+        if path.ends_with(drop_member) {
+            dropped = true;
+            continue;
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, &path, bytes.as_slice())
+            .expect("append");
+    }
+    builder
+        .into_inner()
+        .expect("into_inner")
+        .finish()
+        .expect("finish");
+    assert!(
+        dropped,
+        "'{drop_member}' was not in the archive — the mutation this helper exists \
+         to make did not happen"
+    );
+    std::fs::read(dst.path()).expect("read dst")
+}
+
+/// The HTTP restore must verify the archive before importing anything.
+///
+/// It opened the archive and imported. Nothing called `verify_checksums`, so an
+/// archive with a member deleted from it — which `hearth backup verify` also
+/// called "OK", because verification walked the tar rather than the manifest —
+/// imported a realm with zero users and answered 200 (audit re-run 23.5, B-3
+/// and B-7). Unlike the CLI this route has no opt-out.
+#[tokio::test]
+async fn backup_restore_refuses_an_archive_that_fails_verification() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+
+    h.identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "integrity@backup-test.example".into(),
+                display_name: "Integrity".into(),
+                first_name: "In".into(),
+                last_name: "Tegrity".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let archive = export_archive(&h, &realm, &token).await;
+
+    // Control: the unmodified archive is accepted, so the refusal below is
+    // attributable to the elision and not to the export or the multipart body.
+    let (ct, body_bytes) = multipart_body(&archive);
+    let ok = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        ok.status(),
+        StatusCode::OK,
+        "control: an untouched archive must restore"
+    );
+
+    let elided = archive_without_member(&archive, "users.ndjson");
+    let (ct, body_bytes) = multipart_body(&elided);
+    let resp = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an archive missing a member the manifest checksums must be refused"
+    );
+    let body = String::from_utf8_lossy(&resp_bytes(resp).await).into_owned();
+    assert!(
+        body.contains("integrity") && body.contains("users.ndjson"),
+        "the refusal must say what is wrong and name the missing member; got: {body}"
+    );
+}

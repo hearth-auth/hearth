@@ -742,7 +742,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   organization, role and invited address in metadata. Revocation is recorded under the
   fail-the-operation policy every other revocation in Hearth uses, so the control cannot be
   applied without a record of it.
-
+- **`hearth backup restore --skip-verify`** — restore now verifies the archive's SHA-256
+  checksums before it writes anything; pass this flag to skip that check when re-reading a very
+  large archive is genuinely too expensive and it has already been verified out of band. A
+  corrupt archive will then be applied without warning (task 26.42).
 
 ### Fixed
 - **Organization invitations no longer report "sent" when no email went out (subsystem audit

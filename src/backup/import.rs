@@ -28,7 +28,7 @@ use super::{decrypt_bytes, unwrap_dek, ArchiveReader, BackupError};
 ///
 /// Keep in sync with the members written by
 /// [`BackupExporter::export_realm`](super::BackupExporter::export_realm).
-const RECOGNIZED_MEMBERS: &[&str] = &[
+pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "realm.json",
     "users.ndjson",
     "credentials.ndjson",
