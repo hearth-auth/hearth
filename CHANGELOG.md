@@ -252,6 +252,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   rejects a malformed `mcp:`-prefixed scope with `invalid input`. Non-MCP scopes such as `openid` are
   unaffected — §2.6 governs MCP scope strings only.
 
+- **Email and SMS provider API calls now have a timeout (task 26.10)** — both `UreqTransport`
+  implementations called bare `ureq::post`, which uses ureq's default configuration; in ureq 3.3.0
+  that leaves *every* timeout unset. The call runs inside `tokio::task::block_in_place`, so it
+  occupies a Tokio worker thread rather than a blocking-pool thread: a provider that completed the
+  TCP handshake and then stopped responding cost one core's worth of runtime capacity permanently,
+  with sends queueing behind it and no timeout ever firing. Both paths now use the same egress
+  configuration as the federation transport — 5 s connect, 10 s total, `https_only`, and the shared
+  redirect cap. Every provider endpoint is a hard-coded `https://` constant, so `https_only` changes
+  nothing an operator can configure; a provider that answers a send with a redirect will now fail
+  that send rather than follow it. Four server-side `ureq` egress paths remain unbounded and are
+  *not* covered by this entry: `identity/approval_notifier.rs` (builds a config but sets no
+  timeout), `identity/hibp.rs`, `abuse/captcha/mod.rs` and `abuse/ip_reputation/spamhaus.rs`.
+
+- **LDAP search filters validate the values concatenated into them (task 26.7)** — the module
+  documented RFC 4515 escaping as preventing filter injection "in any user-controlled input", but
+  the escaper was applied only to assertion values, while the configured `user_filter` and every
+  attribute name from `attribute_map` were interpolated into the filter skeleton unchecked. A `)` in
+  an attribute name, or a `user_filter` of `(objectClass=*))(uid=admin`, rewrote the filter. Escaping
+  is the wrong guard for both — an escaped attribute name matches nothing, and an escaped filter
+  fragment is not a filter — so both are now validated instead: attribute names against the RFC 4512
+  attribute-descriptor grammar, `user_filter` as a single balanced RFC 4515 expression. The checks
+  run both at `EmbeddedLdapConnector::new` and in the three filter builders, and a new
+  `LdapError::InvalidAttributeName` variant reports the first. An empty `base_dn` is also now
+  refused. The connector is still not operator-reachable (task 26.6), so this is hardening that must
+  be in place before it is wired, not a live exposure.
+
 ### Changed
 - **`docs/STATUS.md` no longer lists LDAP / Active Directory federation as shipped (task 23.8)** —
   `src/identity/ldap/` is a complete connector and is exercised against a real OpenLDAP container by

@@ -44,6 +44,19 @@ pub enum LdapError {
         /// Name of the attribute that failed to decode.
         attribute: String,
     },
+    /// A configured LDAP attribute name is not a well-formed RFC 4512
+    /// attribute descriptor.
+    ///
+    /// Attribute names are concatenated into search filters, so a name
+    /// carrying `(`, `)` or `=` would change the filter's structure. Escaping
+    /// is not an option — an escaped descriptor names no attribute — so a
+    /// malformed name is refused outright.
+    InvalidAttributeName {
+        /// The attribute name that was rejected.
+        attribute: String,
+        /// Why it was rejected.
+        reason: String,
+    },
     /// The LDAP filter string is syntactically invalid.
     InvalidFilter {
         /// The filter string that was rejected.
@@ -83,6 +96,13 @@ impl fmt::Display for LdapError {
             }
             Self::AttributeEncoding { attribute } => {
                 write!(f, "LDAP attribute '{attribute}' is not valid UTF-8")
+            }
+            Self::InvalidAttributeName { attribute, reason } => {
+                write!(
+                    f,
+                    "LDAP attribute name '{attribute}' is not a valid RFC 4512 \
+                     attribute descriptor: {reason}"
+                )
             }
             Self::InvalidFilter { filter, reason } => {
                 write!(f, "LDAP filter '{filter}' is invalid: {reason}")

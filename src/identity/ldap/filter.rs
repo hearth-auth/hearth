@@ -1,7 +1,23 @@
 //! LDAP filter construction helpers.
 //!
-//! Provides safe filter-building primitives that escape special characters per
-//! RFC 4515 § 3, preventing LDAP filter injection from user-controlled values.
+//! Three different kinds of string reach a search filter, and exactly one of
+//! them is made safe by escaping. Conflating them is finding L-4 (task 26.7):
+//! the module doc claimed escaping covered "any user-controlled input", while
+//! the only two values it was applied to were assertion values and the values
+//! that are *string-concatenated* into the filter skeleton were not checked at
+//! all.
+//!
+//! | Kind | Example | Guard |
+//! |---|---|---|
+//! | Assertion value | the delta-sync cursor | [`escape_assertion_value`] — RFC 4515 § 3 |
+//! | Attribute descriptor | `entryUUID`, `uSNChanged` | [`validate_attribute_descriptor`] — RFC 4512 § 2.5 |
+//! | Filter fragment | the configured `user_filter` | [`validate_user_filter`] — must be one balanced expression |
+//! | Distinguished name | `base_dn`, a user's DN | none needed here: `ldap3` sends a DN as a protocol parameter, BER-encoded, never concatenated into a filter |
+//!
+//! Escaping is *wrong* for the middle two: an escaped attribute descriptor
+//! names no attribute, and an escaped `user_filter` is a literal string rather
+//! than a filter. They have to be validated instead, and rejected outright
+//! when they are not well-formed.
 
 use crate::identity::ldap::error::LdapError;
 
@@ -33,21 +49,142 @@ pub(crate) fn escape_assertion_value(value: &str) -> String {
     out
 }
 
+/// True for an RFC 4512 § 1.4 `keychar`: `ALPHA / DIGIT / HYPHEN`.
+fn is_keychar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
+}
+
+/// True for an RFC 4512 § 1.4 `keystring`: `leadkeychar *keychar`, where
+/// `leadkeychar` is an `ALPHA`.
+fn is_keystring(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    match bytes.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    bytes.all(is_keychar)
+}
+
+/// True for an RFC 4512 § 1.4 `numericoid`: `number 1*( DOT number )`, where a
+/// `number` is a single digit or a non-zero-leading digit run.
+fn is_numericoid(value: &str) -> bool {
+    let mut count = 0usize;
+    for arc in value.split('.') {
+        count += 1;
+        let ok = !arc.is_empty()
+            && arc.bytes().all(|b| b.is_ascii_digit())
+            && (arc.len() == 1 || !arc.starts_with('0'));
+        if !ok {
+            return false;
+        }
+    }
+    count >= 2
+}
+
+/// Validates an attribute descriptor before it is concatenated into a filter.
+///
+/// An attribute descriptor is `attributetype *( SEMI option )` (RFC 4512
+/// § 2.5), where `attributetype` is a `keystring` or a `numericoid` and each
+/// option is `1*keychar`. None of those alphabets contains `(`, `)`, `*`, `\`,
+/// `=` or whitespace, so a descriptor that passes this check cannot close the
+/// parenthesis it was interpolated into or start a new assertion.
+///
+/// This is deliberately *not* [`escape_assertion_value`]: escaping a
+/// descriptor would produce a name that matches no attribute in the directory,
+/// which is a silent empty result rather than a refusal. The only safe
+/// handling for a malformed descriptor is to reject it.
+pub(crate) fn validate_attribute_descriptor(name: &str) -> Result<(), LdapError> {
+    let mut parts = name.split(';');
+    let base = parts.next().unwrap_or("");
+    if !(is_keystring(base) || is_numericoid(base)) {
+        return Err(LdapError::InvalidAttributeName {
+            attribute: name.to_string(),
+            reason: "attribute type must be an RFC 4512 keystring \
+                     (ALPHA *(ALPHA / DIGIT / HYPHEN)) or a numeric OID"
+                .to_string(),
+        });
+    }
+    for option in parts {
+        if option.is_empty() || !option.bytes().all(is_keychar) {
+            return Err(LdapError::InvalidAttributeName {
+                attribute: name.to_string(),
+                reason: "each ';' option must be a non-empty run of \
+                         ALPHA / DIGIT / HYPHEN"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validates the operator-configured `user_filter` before it is concatenated
+/// into a larger filter.
+///
+/// The configured value is a filter *fragment*, so it cannot be escaped — it
+/// has to parse as one balanced, parenthesised RFC 4515 expression. Requiring
+/// a single top-level expression is what stops a fragment from closing the
+/// `(&…)` it is embedded in and appending a clause of its own: `(a=b))(cn=*` is
+/// rejected here rather than becoming `(&(a=b))(cn=*(entryUUID=*))` at the
+/// call site.
+///
+/// Counting raw parentheses is sound because RFC 4515 § 3 requires a literal
+/// parenthesis inside an assertion value to appear in `\28` / `\29` hex form,
+/// so every unescaped `(` or `)` in a well-formed filter is structural.
+pub(crate) fn validate_user_filter(user_filter: &str) -> Result<(), LdapError> {
+    let reject = |reason: &str| {
+        Err(LdapError::InvalidFilter {
+            filter: user_filter.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+
+    if user_filter.is_empty() {
+        return reject("user_filter must not be empty");
+    }
+    if user_filter.contains('\0') {
+        return reject("user_filter must not contain a NUL byte");
+    }
+    if !user_filter.starts_with('(') || !user_filter.ends_with(')') {
+        return reject("user_filter must be a single parenthesised RFC 4515 expression");
+    }
+
+    let mut depth: i32 = 0;
+    for (index, byte) in user_filter.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return reject("user_filter closes a parenthesis it never opened");
+                }
+                if depth == 0 && index + 1 != user_filter.len() {
+                    return reject(
+                        "user_filter must be a single expression, not several \
+                         concatenated ones",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return reject("user_filter has an unclosed parenthesis");
+    }
+    Ok(())
+}
+
 /// Builds the LDAP search filter used for the initial full load.
 ///
 /// Combines the configured base `user_filter` (e.g. `(objectClass=person)`)
 /// with an `AND` clause requiring the presence of the `external_id` attribute.
-/// Returns an `LdapError::InvalidFilter` if `user_filter` is empty.
+/// Both concatenated values are validated first — see
+/// [`validate_user_filter`] and [`validate_attribute_descriptor`].
 pub(crate) fn build_full_sync_filter(
     user_filter: &str,
     external_id_attr: &str,
 ) -> Result<String, LdapError> {
-    if user_filter.is_empty() {
-        return Err(LdapError::InvalidFilter {
-            filter: user_filter.to_string(),
-            reason: "user_filter must not be empty".to_string(),
-        });
-    }
+    validate_user_filter(user_filter)?;
+    validate_attribute_descriptor(external_id_attr)?;
     // Ensure external_id attribute is present on every returned entry.
     Ok(format!("(&{user_filter}({external_id_attr}=*))"))
 }
@@ -63,12 +200,9 @@ pub(crate) fn build_modify_timestamp_filter(
     external_id_attr: &str,
     cursor: &str,
 ) -> Result<String, LdapError> {
-    if user_filter.is_empty() {
-        return Err(LdapError::InvalidFilter {
-            filter: user_filter.to_string(),
-            reason: "user_filter must not be empty".to_string(),
-        });
-    }
+    validate_user_filter(user_filter)?;
+    validate_attribute_descriptor(modify_ts_attr)?;
+    validate_attribute_descriptor(external_id_attr)?;
     let escaped_cursor = escape_assertion_value(cursor);
     Ok(format!(
         "(&{user_filter}({modify_ts_attr}>={escaped_cursor})({external_id_attr}=*))"
@@ -85,12 +219,9 @@ pub(crate) fn build_usn_changed_filter(
     external_id_attr: &str,
     last_usn: &str,
 ) -> Result<String, LdapError> {
-    if user_filter.is_empty() {
-        return Err(LdapError::InvalidFilter {
-            filter: user_filter.to_string(),
-            reason: "user_filter must not be empty".to_string(),
-        });
-    }
+    validate_user_filter(user_filter)?;
+    validate_attribute_descriptor(usn_attr)?;
+    validate_attribute_descriptor(external_id_attr)?;
     // For AD USN we use >= (last_usn + 1) to exclude the already-seen entry.
     let next_usn: u64 = last_usn.parse().map_err(|_| LdapError::InvalidFilter {
         filter: last_usn.to_string(),
@@ -155,6 +286,136 @@ mod tests {
     fn escape_hex_escapes_control_characters() {
         let escaped = escape_assertion_value("a\tb\u{7f}");
         assert_eq!(escaped, r"a\09b\7f");
+    }
+
+    // ── 26.7 / finding L-4 ────────────────────────────────────────────────
+    //
+    // The escaper had no user-controlled call site while the values that ARE
+    // concatenated into the filter skeleton — the configured `user_filter` and
+    // every attribute descriptor — were interpolated with no check at all.
+    // Escaping is the wrong guard for both; these are the right ones.
+
+    #[test]
+    fn attribute_descriptor_accepts_the_shapes_directories_actually_use() {
+        for name in [
+            "cn",
+            "entryUUID",
+            "uSNChanged",
+            "sAMAccountName",
+            "x-custom-attr",
+            "userCertificate;binary",
+            "description;lang-en;x-alt",
+            "2.5.4.3",
+        ] {
+            validate_attribute_descriptor(name)
+                .unwrap_or_else(|e| panic!("{name} must be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn attribute_descriptor_rejects_a_name_that_can_close_the_filter() {
+        // The break-out the module doc's claim was supposed to prevent:
+        // `(&(objectClass=person)(entryUUID)(uid=*)=*))` if this were let through.
+        let err = validate_attribute_descriptor("entryUUID)(uid=*")
+            .expect_err("a ')' in an attribute name must be refused");
+        assert!(matches!(err, LdapError::InvalidAttributeName { .. }));
+    }
+
+    #[test]
+    fn attribute_descriptor_rejects_malformed_names() {
+        for name in [
+            "",              // empty
+            "1cn",           // must not start with a digit
+            "cn mail",       // whitespace
+            "cn=*",          // an assertion, not a descriptor
+            "cn*",           // wildcard
+            "cn;",           // empty option
+            "cn;bad option", // whitespace in the option
+            "2.5.",          // trailing dot
+            "2",             // a numeric OID needs at least two arcs
+            "2.05.4",        // leading zero in an arc
+            "cn\u{0}",       // NUL
+        ] {
+            assert!(
+                validate_attribute_descriptor(name).is_err(),
+                "{name:?} must be refused as an attribute descriptor"
+            );
+        }
+    }
+
+    #[test]
+    fn user_filter_accepts_a_single_balanced_expression() {
+        for filter in [
+            "(objectClass=person)",
+            "(&(objectClass=person)(!(memberOf=cn=disabled,dc=x)))",
+            "(|(uid=a)(uid=b))",
+        ] {
+            validate_user_filter(filter)
+                .unwrap_or_else(|e| panic!("{filter} must be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn user_filter_rejects_a_fragment_that_escapes_its_enclosing_expression() {
+        // Embedded in `(&{user_filter}(entryUUID=*))` this would produce
+        // `(&(objectClass=*))(uid=admin)(entryUUID=*))` — a filter matching
+        // everything, followed by a trailing clause the server may ignore.
+        let err = validate_user_filter("(objectClass=*))(uid=admin")
+            .expect_err("a fragment that closes its own parenthesis must be refused");
+        assert!(matches!(err, LdapError::InvalidFilter { .. }));
+    }
+
+    #[test]
+    fn user_filter_rejects_concatenated_expressions_and_unbalanced_parens() {
+        for filter in [
+            "(a=b)(c=d)",         // two top-level expressions
+            "(objectClass=",      // unclosed
+            "objectClass=person", // not parenthesised
+            "(a=b))",             // closes one it never opened
+            "((a=b)",             // unclosed outer
+            "(a=b\u{0})",         // NUL
+            "",                   // empty
+        ] {
+            assert!(
+                validate_user_filter(filter).is_err(),
+                "{filter:?} must be refused as a user_filter"
+            );
+        }
+    }
+
+    #[test]
+    fn builders_refuse_a_malformed_attribute_descriptor() {
+        let err = build_full_sync_filter("(objectClass=person)", "entryUUID)(uid=*")
+            .expect_err("full-sync builder must refuse a malformed descriptor");
+        assert!(matches!(err, LdapError::InvalidAttributeName { .. }));
+
+        let err = build_modify_timestamp_filter(
+            "(objectClass=person)",
+            "modifyTimestamp)(uid=*",
+            "entryUUID",
+            "20240101120000Z",
+        )
+        .expect_err("delta builder must refuse a malformed sync attribute");
+        assert!(matches!(err, LdapError::InvalidAttributeName { .. }));
+
+        let err = build_usn_changed_filter(
+            "(objectClass=person)",
+            "uSNChanged",
+            "objectGUID)(uid=*",
+            "1",
+        )
+        .expect_err("USN builder must refuse a malformed external-id attribute");
+        assert!(matches!(err, LdapError::InvalidAttributeName { .. }));
+    }
+
+    #[test]
+    fn builders_refuse_a_user_filter_that_breaks_out() {
+        let broken = "(objectClass=*))(uid=admin";
+        assert!(build_full_sync_filter(broken, "entryUUID").is_err());
+        assert!(
+            build_modify_timestamp_filter(broken, "modifyTimestamp", "entryUUID", "2024").is_err()
+        );
+        assert!(build_usn_changed_filter(broken, "uSNChanged", "objectGUID", "1").is_err());
     }
 
     #[test]

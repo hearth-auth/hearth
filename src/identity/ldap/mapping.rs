@@ -75,6 +75,32 @@ pub(crate) fn map_entry(
     })
 }
 
+/// Maps one page of search results, returning the users that mapped and the
+/// number of entries that were dropped because mapping failed.
+///
+/// Split out of `EmbeddedLdapConnector::search_paged` for task 26.8 (finding
+/// L-5): the drop count existed only as a `warn!` per entry and was never
+/// added up, which is why `DeltaSyncResult.skipped` could be a hard-coded `0`.
+/// Keeping the loop here as a pure function makes the count observable without
+/// a live directory.
+pub(crate) fn map_page(
+    entries: &[(String, HashMap<String, Vec<String>>)],
+    attr_map: &LdapAttributeMap,
+) -> (Vec<LdapUser>, u64) {
+    let mut users = Vec::with_capacity(entries.len());
+    let mut skipped: u64 = 0;
+    for (dn, attrs) in entries {
+        match map_entry(dn, attrs, attr_map) {
+            Ok(user) => users.push(user),
+            Err(e) => {
+                skipped += 1;
+                tracing::warn!(error = %e, "LDAP entry skipped: attribute mapping failed");
+            }
+        }
+    }
+    (users, skipped)
+}
+
 /// Collects all attribute names requested by the configured mapping.
 ///
 /// Used to build the attribute list passed to `ldap3`'s `search()` call so
@@ -220,6 +246,62 @@ mod tests {
             .expect("entry with absent optional extra attribute should map successfully");
         // Extra attribute absent from LDAP entry — must not appear in user.extra
         assert!(!user.extra.contains_key("phone"));
+    }
+
+    // 26.8 / finding L-5: the per-entry `warn!` was the only record that an
+    // entry had been dropped — nothing counted them, which is how
+    // `DeltaSyncResult.skipped` could be a hard-coded `0`.
+    #[test]
+    fn map_page_counts_the_entries_it_drops() {
+        let good = |dn: &str, mail: &str| {
+            (
+                dn.to_string(),
+                make_attrs(&[
+                    ("mail", mail),
+                    ("cn", "Someone"),
+                    ("entryUUID", dn),
+                    ("modifyTimestamp", "20240101120000Z"),
+                ]),
+            )
+        };
+        // No `mail` — the exact failure the finding's 10,000-account scenario
+        // describes.
+        let unmappable = (
+            "uid=nomail,dc=example,dc=com".to_string(),
+            make_attrs(&[
+                ("cn", "No Mail"),
+                ("entryUUID", "uuid-nomail"),
+                ("modifyTimestamp", "20240101130000Z"),
+            ]),
+        );
+
+        let page = vec![
+            good("uid=a,dc=example,dc=com", "a@example.com"),
+            unmappable,
+            good("uid=b,dc=example,dc=com", "b@example.com"),
+        ];
+        let (users, skipped) = map_page(&page, &default_attr_map());
+        assert_eq!(users.len(), 2, "both mappable entries must be returned");
+        assert_eq!(
+            skipped, 1,
+            "the dropped entry must be counted, not just logged"
+        );
+    }
+
+    #[test]
+    fn map_page_reports_zero_skipped_when_every_entry_maps() {
+        let page = vec![(
+            "uid=a,dc=example,dc=com".to_string(),
+            make_attrs(&[
+                ("mail", "a@example.com"),
+                ("cn", "A"),
+                ("entryUUID", "uuid-a"),
+                ("modifyTimestamp", "20240101120000Z"),
+            ]),
+        )];
+        let (users, skipped) = map_page(&page, &default_attr_map());
+        assert_eq!(users.len(), 1);
+        assert_eq!(skipped, 0);
     }
 
     #[test]
