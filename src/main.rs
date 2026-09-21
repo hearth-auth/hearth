@@ -4298,91 +4298,109 @@ fn run_backup_create(
         realm_filter: filter_id.as_ref().map(|id| vec![id.clone()]),
     };
 
-    let mut writer = BackupArchive::create(&out_path)?;
-    let mut realm_manifests = Vec::new();
+    // Task 23.5: everything from `BackupArchive::create` onward runs inside
+    // this closure so a failure can delete the file it already created. Each
+    // `?` below used to abandon a partial — usually zero-byte — archive at the
+    // operator's chosen `--output` path. `backup create` with no
+    // `HEARTH_MASTER_KEY`, for instance, exits 2 *after* writing every entity
+    // file, leaving `prod-2026-09-21.hearth-backup` sitting in the backup
+    // directory at 0 bytes. A cron job that only checks "did a file appear"
+    // then reports a healthy backup history over nothing.
+    let build = || -> Result<(), Box<dyn std::error::Error>> {
+        let mut writer = BackupArchive::create(&out_path)?;
+        let mut realm_manifests = Vec::new();
 
-    // Enumerate realms to export.
-    let realms_to_export: Vec<RealmId> = if let Some(id) = filter_id {
-        vec![id]
-    } else {
-        let mut ids = Vec::new();
-        let batch = hearth::core::MAX_PAGE_LIMIT;
-        let mut offset = 0u64;
-        loop {
-            let page = identity
-                .list_realms(&hearth::core::PageRequest::new(offset, batch))
-                .map_err(|e| format!("list_realms: {e}"))?;
-            let n = page.items.len() as u64;
-            for realm in &page.items {
-                ids.push(realm.id().clone());
+        // Enumerate realms to export.
+        let realms_to_export: Vec<RealmId> = if let Some(id) = filter_id {
+            vec![id]
+        } else {
+            let mut ids = Vec::new();
+            let batch = hearth::core::MAX_PAGE_LIMIT;
+            let mut offset = 0u64;
+            loop {
+                let page = identity
+                    .list_realms(&hearth::core::PageRequest::new(offset, batch))
+                    .map_err(|e| format!("list_realms: {e}"))?;
+                let n = page.items.len() as u64;
+                for realm in &page.items {
+                    ids.push(realm.id().clone());
+                }
+                if n == 0 || offset + n >= page.total {
+                    break;
+                }
+                offset += n;
             }
-            if n == 0 || offset + n >= page.total {
-                break;
-            }
-            offset += n;
-        }
-        ids
-    };
+            ids
+        };
 
-    // Task 26.26: an archive with no realms in it is not a backup. This used to
-    // print `warning:` and exit 0, so a typo'd `--data-dir` produced a file
-    // that `backup verify` then called "OK — all checksums match (0 files
-    // verified)". Two commands in a row reported success over nothing.
-    if realms_to_export.is_empty() {
-        return Err(match realm_filter {
-            Some(name) => format!(
-                "no realm named '{name}' in '{}' — nothing to export",
-                data_dir.display()
-            ),
-            None => format!(
-                "no realms found in '{}' — nothing to export. Check --data-dir points at the \
+        // Task 26.26: an archive with no realms in it is not a backup. This used to
+        // print `warning:` and exit 0, so a typo'd `--data-dir` produced a file
+        // that `backup verify` then called "OK — all checksums match (0 files
+        // verified)". Two commands in a row reported success over nothing.
+        if realms_to_export.is_empty() {
+            return Err(match realm_filter {
+                Some(name) => format!(
+                    "no realm named '{name}' in '{}' — nothing to export",
+                    data_dir.display()
+                ),
+                None => format!(
+                    "no realms found in '{}' — nothing to export. Check --data-dir points at the \
                  store you meant.",
-                data_dir.display()
-            ),
+                    data_dir.display()
+                ),
+            }
+            .into());
         }
-        .into());
-    }
 
-    for realm_id in &realms_to_export {
-        let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek)?;
-        tracing::info!(
-            "  exported '{}': {} users, {} clients",
-            realm_manifest.slug,
-            realm_manifest.record_counts.users,
-            realm_manifest.record_counts.clients,
-        );
-        realm_manifests.push(realm_manifest);
-    }
+        for realm_id in &realms_to_export {
+            let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek)?;
+            tracing::info!(
+                "  exported '{}': {} users, {} clients",
+                realm_manifest.slug,
+                realm_manifest.record_counts.users,
+                realm_manifest.record_counts.clients,
+            );
+            realm_manifests.push(realm_manifest);
+        }
 
-    // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
-    let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
-        if mk.is_empty() {
-            return Err("HEARTH_MASTER_KEY is set but empty".into());
-        }
-        mk
-    } else if encrypt {
-        let p = rpassword::prompt_password("Enter backup passphrase: ")?;
-        let c = rpassword::prompt_password("Confirm passphrase: ")?;
-        if p != c {
-            return Err("passphrases do not match".into());
-        }
-        if p.is_empty() {
-            return Err("passphrase must not be empty".into());
-        }
-        p
-    } else {
-        return Err(
-            "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
-        );
+        // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
+        let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
+            if mk.is_empty() {
+                return Err("HEARTH_MASTER_KEY is set but empty".into());
+            }
+            mk
+        } else if encrypt {
+            let p = rpassword::prompt_password("Enter backup passphrase: ")?;
+            let c = rpassword::prompt_password("Confirm passphrase: ")?;
+            if p != c {
+                return Err("passphrases do not match".into());
+            }
+            if p.is_empty() {
+                return Err("passphrase must not be empty".into());
+            }
+            p
+        } else {
+            return Err(
+                "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
+            );
+        };
+        let passphrase = secrecy::SecretString::from(passphrase_str);
+        let (wrapped_dek_b64, wrapping_params) =
+            BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
+        let mut manifest = BackupManifest::new(realm_manifests);
+        manifest.sections_encrypted = true;
+        manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+        manifest.dek_wrapping_params = Some(wrapping_params);
+        writer.finish(manifest)?;
+        Ok(())
     };
-    let passphrase = secrecy::SecretString::from(passphrase_str);
-    let (wrapped_dek_b64, wrapping_params) =
-        BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
-    let mut manifest = BackupManifest::new(realm_manifests);
-    manifest.sections_encrypted = true;
-    manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
-    manifest.dek_wrapping_params = Some(wrapping_params);
-    writer.finish(manifest)?;
+
+    if let Err(e) = build() {
+        // Leave no half-written archive behind. `remove_file` is best-effort:
+        // if it fails the original error is still the one the operator needs.
+        let _ = std::fs::remove_file(&out_path);
+        return Err(e);
+    }
 
     tracing::info!("Backup written to: {}", out_path.display());
     Ok(())
@@ -4456,11 +4474,34 @@ fn run_backup_restore(
     for slug in &slugs {
         let report = importer.import_realm(slug, &reader, &opts)?;
         print_import_report(slug, &report);
-        if report.users.errored > 0 || report.clients.errored > 0 || report.realms.errored > 0 {
+        if import_report_had_errors(&report) {
             had_errors = true;
         }
     }
     Ok(had_errors)
+}
+
+/// Returns `true` when any entity bucket of `report` recorded a failed import.
+///
+/// The exit-code check used to name three buckets — `users`, `clients` and
+/// `realms` — out of the eleven [`ImportReport`](hearth::backup::ImportReport)
+/// carries. Every role, permission, group, role-assignment, scope,
+/// organization and audit event could fail to import and `hearth backup
+/// restore` still exited 0, having printed nothing about any of them. A
+/// disaster-recovery runbook that trusts the exit code would bring a realm
+/// back with no RBAC at all and be told it succeeded (audit re-run 23.5).
+fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
+    report.realms.errored > 0
+        || report.users.errored > 0
+        || report.mfa_factors.errored > 0
+        || report.clients.errored > 0
+        || report.roles.errored > 0
+        || report.permissions.errored > 0
+        || report.groups.errored > 0
+        || report.assignments.errored > 0
+        || report.scopes.errored > 0
+        || report.organizations.errored > 0
+        || report.audit_events.errored > 0
 }
 
 /// Runs `hearth backup verify`.
@@ -4540,36 +4581,37 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 }
 
 /// Prints an [`ImportReport`](hearth::backup::ImportReport) as a human-readable summary.
+///
+/// Every bucket the report carries is printed, including the zero ones. The
+/// summary used to name four — realms, users, mfa and clients — so a restore
+/// that dropped all ten roles, both groups and every role assignment showed
+/// the operator nothing but `users created: 3` and exited 0 (audit re-run
+/// 23.5). A restore report that hides seven of its eleven entity types is
+/// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
+    let buckets: [(&str, &hearth::backup::EntityCounts); 11] = [
+        ("realms", &report.realms),
+        ("users", &report.users),
+        ("mfa", &report.mfa_factors),
+        ("clients", &report.clients),
+        ("roles", &report.roles),
+        ("permissions", &report.permissions),
+        ("groups", &report.groups),
+        ("assignments", &report.assignments),
+        ("scopes", &report.scopes),
+        ("orgs", &report.organizations),
+        ("audit", &report.audit_events),
+    ];
     tracing::info!("Realm '{slug}':");
-    tracing::info!(
-        "  realms   — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.realms.created,
-        report.realms.skipped,
-        report.realms.overwritten,
-        report.realms.errored
-    );
-    tracing::info!(
-        "  users    — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.users.created,
-        report.users.skipped,
-        report.users.overwritten,
-        report.users.errored
-    );
-    tracing::info!(
-        "  mfa      — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.mfa_factors.created,
-        report.mfa_factors.skipped,
-        report.mfa_factors.overwritten,
-        report.mfa_factors.errored
-    );
-    tracing::info!(
-        "  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.clients.created,
-        report.clients.skipped,
-        report.clients.overwritten,
-        report.clients.errored
-    );
+    for (name, counts) in buckets {
+        tracing::info!(
+            "  {name:<12} — created: {}, skipped: {}, overwritten: {}, errored: {}",
+            counts.created,
+            counts.skipped,
+            counts.overwritten,
+            counts.errored
+        );
+    }
     if !report.conflicts.is_empty() {
         tracing::info!("  conflicts ({}):", report.conflicts.len());
         for c in &report.conflicts {
@@ -4611,10 +4653,17 @@ fn build_all_engines(
         Arc::clone(&clock),
     ));
     let rbac = Arc::clone(&raw_rbac) as Arc<dyn hearth::rbac::RbacEngine>;
-    let audit = Arc::new(EmbeddedAuditEngine::new(
-        Arc::clone(&storage),
-        Arc::clone(&clock),
-    )) as Arc<dyn hearth::audit::AuditEngine>;
+    // The audit engine needs the SAME KEK as the identity engine: per-realm
+    // audit HMAC keys are HKEY-enveloped at rest exactly like signing keys.
+    // Task 26.21 threaded the KEK into `EmbeddedIdentityEngine` here and
+    // stopped, so on a KEK-encrypted store `hearth backup create
+    // --include-audit` died at `audit HMAC key unwrap failed: ... no
+    // key_encryption_key is configured` — while the very same command without
+    // `--include-audit` succeeded (audit re-run 23.5).
+    let audit_kek = key_encryption_key.as_ref().map(|k| *k.as_bytes());
+    let audit = Arc::new(
+        EmbeddedAuditEngine::new(Arc::clone(&storage), Arc::clone(&clock)).with_kek(audit_kek),
+    ) as Arc<dyn hearth::audit::AuditEngine>;
     let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
@@ -5225,6 +5274,161 @@ mod tests {
             "the command must not CREATE the directory it was asked to read"
         );
         assert!(!out.exists(), "no archive may be written");
+    }
+
+    // ── Audit re-run 23.5: backup create / restore failure reporting ──────
+
+    /// A failed `backup create` must not leave its half-written archive behind.
+    ///
+    /// `BackupArchive::create` opens the output file before a single realm is
+    /// read, and every `?` after it returned without touching that file. The
+    /// mandatory-encryption gate is the worst case: it fires *after* every
+    /// entity file has been written, so `hearth backup create -o
+    /// /backups/nightly.hearth-backup` with no `HEARTH_MASTER_KEY` exits 2 and
+    /// leaves a zero-byte `nightly.hearth-backup` in the backup directory. A
+    /// cron wrapper that checks only "did a file appear" reports a healthy
+    /// backup history over nothing.
+    #[test]
+    fn backup_create_removes_the_partial_archive_when_it_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let out = dir.path().join("partial.hearth-backup");
+
+        // The master key MUST be set, or the store never opens and the
+        // archive is never created — which would make this test vacuous. With
+        // it set, `BackupArchive::create` opens `out`, the realm enumeration
+        // finds nothing, and the error is raised with the file already there.
+        std::env::set_var("HEARTH_MASTER_KEY", "d4".repeat(32));
+        let err = run_backup_create(Some(&out), None, false, false, &data_dir, None)
+            .expect_err("the export must fail");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        assert!(
+            err.to_string().contains("nothing to export"),
+            "the failure must be the one raised AFTER the archive file is \
+             opened, or this test proves nothing; got: {err}"
+        );
+        assert!(
+            !out.exists(),
+            "a failed `backup create` must not leave a file at the operator's \
+             --output path"
+        );
+    }
+
+    /// The restore exit code must account for every entity bucket.
+    ///
+    /// It named three of the eleven, so a restore in which every role,
+    /// permission, group, assignment, scope and organization failed still
+    /// exited 0.
+    #[test]
+    fn restore_exit_code_counts_every_entity_bucket() {
+        use hearth::backup::{EntityCounts, ImportReport};
+
+        let errored = EntityCounts {
+            created: 0,
+            skipped: 0,
+            overwritten: 0,
+            errored: 1,
+        };
+        /// Names one bucket and the setter that fills it.
+        type BucketSetter = (&'static str, fn(&mut ImportReport, EntityCounts));
+
+        // One bucket at a time, so a fix that only widens the check partially
+        // still fails here.
+        let mutators: Vec<BucketSetter> = vec![
+            ("realms", |r, c| r.realms = c),
+            ("users", |r, c| r.users = c),
+            ("mfa_factors", |r, c| r.mfa_factors = c),
+            ("clients", |r, c| r.clients = c),
+            ("roles", |r, c| r.roles = c),
+            ("permissions", |r, c| r.permissions = c),
+            ("groups", |r, c| r.groups = c),
+            ("assignments", |r, c| r.assignments = c),
+            ("scopes", |r, c| r.scopes = c),
+            ("organizations", |r, c| r.organizations = c),
+            ("audit_events", |r, c| r.audit_events = c),
+        ];
+
+        let clean = ImportReport::default();
+        assert!(
+            !import_report_had_errors(&clean),
+            "a report with no failures must not report errors"
+        );
+
+        for (name, set) in mutators {
+            let mut report = ImportReport::default();
+            set(&mut report, errored.clone());
+            assert!(
+                import_report_had_errors(&report),
+                "a restore whose `{name}` bucket errored must set the partial \
+                 exit code; it was reported as a clean success"
+            );
+        }
+    }
+
+    /// `build_all_engines` must hand the audit engine the same KEK as identity.
+    ///
+    /// Per-realm audit HMAC keys are HKEY-enveloped at rest exactly like
+    /// signing keys. The audit engine was constructed without the KEK, so on a
+    /// KEK-encrypted store `hearth backup create --include-audit` died with
+    /// `audit HMAC key unwrap failed: ... no key_encryption_key is configured`
+    /// — while the same command without `--include-audit` succeeded, which is
+    /// why it went unnoticed.
+    #[test]
+    fn build_all_engines_gives_the_audit_engine_the_kek() {
+        use hearth::audit::{AuditAction, AuditEngine, CreateAuditEvent, EmbeddedAuditEngine};
+        use hearth::core::{Clock, RealmId, SystemClock};
+        use hearth::identity::key_encryption::StorageKek;
+        use hearth::storage::{EmbeddedStorageEngine, StorageEngine};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let kek_bytes = [7u8; 32];
+        let realm = RealmId::new(uuid::Uuid::from_u128(0x2305));
+
+        // `cli_storage_config` opens a PRODUCTION store, which wraps its
+        // on-disk key registry under the host master key. nextest gives each
+        // test its own process, so setting it here cannot leak sideways.
+        std::env::set_var("HEARTH_MASTER_KEY", "c3".repeat(32));
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(cli_storage_config(dir.path())).expect("open store"),
+        );
+
+        // Seed an ENVELOPED audit chain key with an engine that definitely has
+        // the KEK, so the assertion below cannot pass by both sides agreeing
+        // on "no KEK at all".
+        {
+            let seeder = EmbeddedAuditEngine::new(
+                Arc::clone(&storage) as Arc<dyn StorageEngine>,
+                Arc::new(SystemClock) as Arc<dyn Clock>,
+            )
+            .with_kek(Some(kek_bytes));
+            seeder
+                .append(&CreateAuditEvent {
+                    realm_id: realm.clone(),
+                    actor: "user_seed".to_string(),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: "user_seed".to_string(),
+                    metadata: None,
+                })
+                .expect("seed one audit event under the KEK");
+        }
+
+        let (_identity, audit, _rbac) = build_all_engines(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Some(StorageKek::new(kek_bytes)),
+        )
+        .expect("build engines");
+
+        // This is exactly what `backup create --include-audit` calls.
+        let material = audit
+            .export_chain_material(&realm)
+            .expect("the audit engine must be able to unwrap its own chain key");
+        assert!(
+            material.is_some(),
+            "the seeded realm has an audit chain; export must return it"
+        );
     }
 
     /// An existing but empty store must fail too.

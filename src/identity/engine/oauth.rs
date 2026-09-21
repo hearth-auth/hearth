@@ -2165,7 +2165,13 @@ impl EmbeddedIdentityEngine {
         Ok(crate::identity::oidc::DeviceAuthorizationResponse {
             device_code,
             user_code,
-            verification_uri: format!("{}/device", self.config.oidc.issuer),
+            // The end-user verification page is `handlers::device_approve_form`,
+            // registered on the web router, which `router_with` mounts under the
+            // `/ui` nest. Advertising `{issuer}/device` therefore handed every
+            // RFC 8628 client a URL that answers 404 — the user-facing half of
+            // the device grant was unreachable at the URI the server itself
+            // printed (audit re-run 23.7).
+            verification_uri: format!("{}/ui/device", self.config.oidc.issuer),
             expires_in,
             interval,
         })

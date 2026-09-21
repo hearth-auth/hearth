@@ -111,6 +111,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   now carries a status banner saying so, and the checkpoint storage-key format is described as the
   bytes it actually writes. `docs/STATUS.md` was corrected under task 23.8; this is the same claim
   where a library integrator would read it.
+- **`hearth backup create --include-audit` could not read a KEK-encrypted store (audit re-run 23.5)** —
+  `build_all_engines` gave the identity engine the resolved key-encryption key and constructed the
+  audit engine without one, so the exporter could not unwrap the per-realm audit HMAC key and the
+  command died with *"audit HMAC key unwrap failed: ... no key_encryption_key is configured"*. The
+  same export without `--include-audit` succeeded, which is why it went unnoticed. Production
+  requires a KEK and `--include-audit` is what a compliance-driven operator passes.
+- **`hearth backup restore` reported a clean success when most of a realm failed to import
+  (audit re-run 23.5)** — the summary printed four of the eleven entity buckets the import report
+  carries and the partial-failure exit code named three of them. Every role, permission, group,
+  role-assignment, scope, organization and audit event could fail to import and the command still
+  printed nothing about them and exited `0`. All eleven are now printed and all eleven move the
+  exit code.
+- **A failed `hearth backup create` no longer leaves a partial archive at `--output`
+  (audit re-run 23.5)** — the output file was opened before the first realm was read, so any later
+  failure — most visibly the mandatory-encryption gate, which fires after the whole export is
+  written — abandoned a zero-byte file at the operator's chosen path. A backup wrapper that checks
+  only whether tonight's file appeared reported a healthy history over nothing.
+- **The device-authorization response advertised a `verification_uri` that answered 404
+  (audit re-run 23.7)** — the RFC 8628 approval page is served under the `/ui` nest, but the
+  response named `{issuer}/device`. Every device client displayed that URL to a human and the human
+  got a 404, so the end-user half of the device grant could not be completed at the URI the
+  authorization server itself printed. It is now `{issuer}/ui/device`.
 
 ### Security
 - **Five outbound HTTP paths had no timeouts at all; all five are bounded now (task 26.37)** — ureq 3.3.0's

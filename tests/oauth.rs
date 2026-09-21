@@ -741,6 +741,17 @@ async fn conformance_rfc8628_device_authorization() {
         "RFC 8628 §3.2: verification_uri REQUIRED"
     );
 
+    // ...and it must point at a page this server actually serves. The approval
+    // page is registered on the web router, which is mounted under the `/ui`
+    // nest, so `{issuer}/device` is a 404 and the end-user half of the device
+    // grant is unreachable at the URI the server prints (audit re-run 23.7).
+    assert!(
+        device_resp.verification_uri.ends_with("/ui/device"),
+        "verification_uri must name the routed approval page (`/ui/device`), \
+         not an unrouted path; got {}",
+        device_resp.verification_uri
+    );
+
     // expires_in: REQUIRED, positive
     assert!(
         device_resp.expires_in > 0,
