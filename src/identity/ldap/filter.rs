@@ -227,7 +227,12 @@ pub(crate) fn build_usn_changed_filter(
         filter: last_usn.to_string(),
         reason: "USN cursor must be a decimal integer".to_string(),
     })?;
-    let escaped_next = escape_assertion_value(&(next_usn + 1).to_string());
+    // `saturating_add`, not `+` (task 26.38). `last_usn` is the directory's own
+    // `uSNChanged` value read back from a checkpoint, so it is directory-
+    // supplied, and `u64::MAX + 1` panics in a debug build. Saturating leaves
+    // the filter asking for entries at or above `u64::MAX`, which is the
+    // correct meaning of "everything after the last possible USN": nothing.
+    let escaped_next = escape_assertion_value(&next_usn.saturating_add(1).to_string());
     Ok(format!(
         "(&{user_filter}({usn_attr}>={escaped_next})({external_id_attr}=*))"
     ))
@@ -444,6 +449,29 @@ mod tests {
         .expect("valid modify-timestamp filter should build successfully");
         assert!(f.contains("modifyTimestamp>=20240101120000Z"));
         assert!(f.contains("entryUUID=*"));
+    }
+
+    #[test]
+    /// Task 26.38 — a directory-supplied cursor must not be able to panic us.
+    ///
+    /// `last_usn` is the directory's own `uSNChanged`, read back from a
+    /// checkpoint, so it is not a value Hearth chose. `next_usn + 1` panics in
+    /// a debug build at `u64::MAX`; saturating leaves the filter asking for
+    /// entries at or above `u64::MAX`, which is the right meaning of
+    /// "everything after the last possible USN".
+    #[test]
+    fn build_usn_changed_filter_saturates_at_the_maximum_cursor() {
+        let f = build_usn_changed_filter(
+            "(objectClass=user)",
+            "uSNChanged",
+            "objectGUID",
+            &u64::MAX.to_string(),
+        )
+        .expect("a maximum cursor must build a filter, not panic");
+        assert!(
+            f.contains(&format!("uSNChanged>={}", u64::MAX)),
+            "the saturated cursor must appear in the filter; got: {f}"
+        );
     }
 
     #[test]
