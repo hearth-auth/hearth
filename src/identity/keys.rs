@@ -632,6 +632,22 @@ pub(crate) fn encode_realm_key_epoch(realm_id: &RealmId) -> Vec<u8> {
     format!("realm:keygen:{}", realm_id.as_uuid()).into_bytes()
 }
 
+/// Storage key for the cluster-wide **control epoch**.
+///
+/// A single `u64` row under the system realm, bumped whenever a node asserts a
+/// control whose enforcement lives in an authoritative process-local cache:
+/// realm suspend/archive, token revocation, and the DPoP key blocklist. Every
+/// other node observes the bump on its next validation and reloads those
+/// caches from storage (audit 2026-08-28 §4.1 objection, §4.16#5, §4.19#12).
+///
+/// It is an ordinary storage row on purpose: it replicates through Raft with
+/// the rows it describes, needing no new transport. A `StorageEngine` trait
+/// default would silently no-op, because `serve` always installs a
+/// `ClusterStorageAdapter`.
+pub(crate) fn encode_control_epoch() -> Vec<u8> {
+    b"sys:control:epoch".to_vec()
+}
+
 /// Storage key for the KEK enrolment marker.
 ///
 /// Written once, the first time a KEK-configured process opens a store. Its
