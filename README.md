@@ -160,7 +160,7 @@ The bootstrap call returns a realm, an admin user, and a signed JWT — everythi
 }
 ```
 
-`admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns an empty `admin_password`.
+`admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns `"admin_password": null` (JSON null, not `""` — `jq -r .admin_password` prints the string `null`).
 
 > **No Docker, no Postgres, no config required** — `--dev` mode is fully self-contained. The bootstrap endpoint is disabled in production (`404 Not Found`).
 
@@ -342,7 +342,9 @@ cargo build --release
 ./target/release/hearth serve --dev
 ```
 
-Dev mode uses in-memory storage in a temp directory, `debug` logging, `fsync` disabled, and enables the `/admin/bootstrap` endpoint. The server binds to `127.0.0.1:8420`.
+Dev mode uses `debug` logging, `fsync` disabled, and enables the `/admin/bootstrap` endpoint. The server binds to `127.0.0.1:8420`.
+
+Storage is still a real WAL + SST store, not a RAM-only mode — it just lives in a throwaway location. The effective directory follows a three-level rule: `HEARTH_DEV_DATA_DIR` if set, else an explicit non-default `storage.data_dir`, else a temp directory removed on exit. Bare `./target/release/hearth serve --dev` takes the third branch, so nothing survives a restart; **`make dev` takes the first** (it sets `HEARTH_DEV_DATA_DIR=./data/dev`, which is gitignored) and therefore **does** persist across restarts — `make dev-reset` wipes it. See [`docs/specs/CONFIGURATION.md`](docs/specs/CONFIGURATION.md#--dev-mode-and-hearth_dev_data_dir).
 
 ### 3. Verify
 
@@ -393,9 +395,45 @@ Response (JSON):
 }
 ```
 
-`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return an empty string. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap.
+`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return JSON `null` for that field. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap; without it the call answers `401`.
+
+Bootstrap creates **two** admin identities that share the returned `admin_password`:
+
+| Identity | Realm | Used for |
+|---|---|---|
+| `admin@dev.local` | the `dev-realm` it just created | the REST/OIDC walkthrough below — this is the `sub` behind `access_token` |
+| `admin@hearth.test` | the system realm (`00000000-…-0000`) | the browser admin console at `/ui/admin/login` |
+
+Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
+
+Every `/admin/*` JSON route is realm-scoped and requires an **`X-Realm-ID` header** alongside the bearer token. Without it the call answers `400 {"error":"missing X-Realm-ID header"}`, not `401`:
+
+```bash
+curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: $REALM_ID" \
+     http://127.0.0.1:8420/admin/realms | jq .
+```
 
 In production mode the endpoint returns `404 Not Found`.
+
+### Creating the first admin outside `--dev`
+
+`/admin/bootstrap` does not exist in production. A fresh production data directory has no admin at all, and the server logs a `WARN` on every boot until one exists:
+
+```
+WARN first-run setup required: open this URL and supply the token from the
+     token file in the data directory  setup_url=https://auth.example.com/ui/setup
+     token_file=".setup_token"
+```
+
+The token itself is deliberately **not** logged in production. Read it from the data directory and append it as a query parameter — `/ui/setup` with no `token` answers `404`, by design, so the flow is not discoverable:
+
+```bash
+SETUP_TOKEN=$(cat /var/lib/hearth/data/.setup_token)
+echo "https://auth.example.com/ui/setup?token=$SETUP_TOKEN"
+```
+
+Open that URL once and create the operator account. The token is single-use and the admin lands in the system realm. Set `onboarding.enabled: false` afterwards to close the flow permanently.
 
 ---
 
@@ -410,9 +448,23 @@ In production mode the endpoint returns `404 Not Found`.
 
 CLI flags `--port` and `--bind` override any of the above.
 
-YAML files support `${VAR_NAME}` environment variable substitution (`src/config/env.rs`); a missing variable is a hard error.
+YAML files support `${VAR_NAME}` environment variable substitution (`src/config/env.rs`); a missing variable is a hard error. Substitution runs over the **raw file text before the YAML parse**, so a `${VAR}` inside a `#` comment is expanded too and an unset variable there fails the whole config. Delete commented-out `${…}` placeholders you are not using, or write them as `${VAR:-}` to declare the empty value intentional.
 
-Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Every section is `#[serde(default)]`, so you can omit anything you don't want to change.
+Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Every section is `#[serde(default)]`, so you can omit anything you don't want to change — but the example is a **catalogue, not a starting config**: it is not valid as copied, because of the commented `${…}` placeholders above and because production requires a KEK and an HTTPS decision. Run `hearth config validate hearth.yaml` after editing and work through the errors; the smallest config that validates is:
+
+```yaml
+server:
+  bind_address: "0.0.0.0"
+  port: 443
+  tls_cert_path: "/etc/hearth/tls/server.crt"   # or trust_forwarded_proto + trusted_proxies
+  tls_key_path:  "/etc/hearth/tls/server.key"
+storage:
+  data_dir: "/var/lib/hearth/data"
+oidc:
+  issuer: "https://auth.example.com"
+```
+
+plus `HEARTH_KEK` and `HEARTH_MASTER_KEY` in the environment. **`hearth config validate` does not check either environment variable**, so a config it calls valid can still abort `serve` with `HEARTH_MASTER_KEY is not set and auto-generation is disabled in production mode`. Validate, then do a real `serve` on the target host before cutting over.
 
 ### Config reference
 
@@ -458,7 +510,7 @@ Secrets are supplied through the environment rather than the YAML file so they n
 
 | Variable | Required? | Format | Generate | Purpose |
 |---|---|---|---|---|
-| `HEARTH_MASTER_KEY` | Recommended | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup fails** (auto-generation happens only under `--dev`). Set it so the key is not stored beside the data. |
+| `HEARTH_MASTER_KEY` | **Required in production** | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup aborts** with `HEARTH_MASTER_KEY is not set and auto-generation is disabled in production mode` (auto-generation happens only under `--dev`). `hearth config validate` does not check for it. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so the existing KEKs in `hearth.keys` can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
 | `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
 | `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). Under the `log` transport (dev or production) it is optional and a deterministic dev key is substituted. |
@@ -553,7 +605,7 @@ make dev          # cargo run -- serve --dev
 cargo run -- serve --dev
 ```
 
-`--dev` binds to `http://127.0.0.1:8420`, uses in-memory storage, and auto-enables the built-in **mailcatcher** email transport. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
+`--dev` binds to `http://127.0.0.1:8420` and auto-enables the built-in **mailcatcher** email transport. `make dev` keeps its store in `./data/dev`, so data survives restarts; `make dev-reset` wipes it. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
 
 The inbox password is printed to the terminal at startup:
 
@@ -574,16 +626,33 @@ Production deployment (containerised, persistent storage, real email) lives in [
 ## CLI Reference
 
 ```text
-hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>]
+hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>] [-v] [--allow-reflection-in-prod]
 hearth realm create
-hearth app create --server <url> --realm_id <uuid> --name <name> --redirect_uri <url>
+hearth app create --server <url> --realm-id <uuid> --name <name> --redirect-uri <url> --token <admin-bearer-token>
 hearth migrate keycloak --file <export.json> [--data-dir <path>] [--realm <uuid>] [--dry-run]
+hearth migrate auth0 --file <bundle.json> [--data-dir <path>] [--realm <uuid>] [--dry-run]
+hearth migrate rotate-pepper --data-dir <path> [--summary-only]
+hearth config validate [<path>]            # defaults to ./hearth.yaml
+hearth config example [-o <path>]          # print an annotated hearth.yaml
+hearth config reload [--url <url>] [--pid-file <path>]   # hot reload: POST, or SIGHUP via PID file
+hearth backup create  [-o <archive>] [--realm <name|uuid>] [--include-audit] [--encrypt] [--data-dir <path>]
+hearth backup restore -i <archive> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run]
+                      [--allow-missing-signing-key] [--data-dir <path>]
+hearth backup verify  -i <archive>
+hearth backup inspect -i <archive>
+hearth rbac orphans list  [--realm <name|uuid>] [--data-dir <path>]
+hearth rbac orphans purge [--realm <name|uuid>] [--data-dir <path>] [--dry-run]
+hearth completions <bash|elvish|fish|powershell|zsh>
 ```
 
-- **`serve`** starts the HTTP(S) server. `--dev` implies in-memory storage, relaxed validation, and the bootstrap endpoint.
+Run `hearth <command> --help` for the authoritative flag list; the block above is the full set of subcommands as of this revision.
+
+- **`serve`** starts the HTTP(S) server. `--dev` implies a throwaway data directory, relaxed validation, and the bootstrap endpoint.
 - **`realm create`** prints `{"realm_id": "<uuid>"}` on stdout. It's a pure UUID generator and does not require a running server.
-- **`app create`** registers an OAuth 2.0 client by POSTing to `/clients` on a running Hearth server. The server URL must be reachable over HTTP.
-- **`migrate keycloak`** imports a Keycloak realm export directly into the embedded store. Operates on the data directory offline (no running server needed) — see [Migrating from Keycloak](#migrating-from-keycloak).
+- **`app create`** registers an OAuth 2.0 client by POSTing to `/clients` on a running Hearth server. The server URL must be reachable over HTTP. `--token` is **mandatory** — client registration is a privileged operation, so pass an admin bearer token carrying `hearth.clients.admin` (or `hearth.admin`); in dev mode, the `access_token` from `POST /admin/bootstrap`.
+- **`migrate keycloak` / `migrate auth0`** import a realm export directly into the embedded store. Both operate on the data directory offline (no running server needed) — see [Migrating from Keycloak](#migrating-from-keycloak).
+- **`config validate`** parses the YAML and validates every realm's permission registry without starting the server; exits 1 on any error. It does **not** check the `HEARTH_*` environment prerequisites — a config it accepts can still be refused by `serve` (for example when `HEARTH_MASTER_KEY` is unset on a fresh production data directory).
+- **`backup` / `rbac orphans` / `migrate`** all take `--data-dir` and open the store directly, so the server **must be stopped first** — the data directory carries an exclusive `LOCK`. See the [Backup guide](docs/guides/backup.md).
 
 ---
 

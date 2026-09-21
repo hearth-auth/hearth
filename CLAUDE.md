@@ -137,13 +137,20 @@ SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
 | Email    | `admin@hearth.test`                        |
 | Password | the `admin_password` from first bootstrap  |
 
-A successful login drops you at the admin dashboard (`/admin`).
+A successful login answers `303` to `/ui` (the dashboard). `/ui/admin` redirects on to
+`/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API
+and answers `404` in a browser. Note the two bootstrap admins are different accounts:
+`admin@hearth.test` lives in the system realm and is the one the console accepts;
+`admin@dev.local` is the dev-realm identity behind `access_token` and `401`s at this form.
 
 **API usage with the tokens:**
 
 ```bash
-# Dev-realm operations (most admin API calls)
+# Dev-realm operations (most admin API calls).
+# X-Realm-ID is MANDATORY on every /admin/* route — without it the call answers
+# 400 {"error":"missing X-Realm-ID header"}, not 401.
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
   http://127.0.0.1:8420/admin/realms | jq .
 
 # Cross-realm operations (e.g. rotate a non-dev realm's signing key)

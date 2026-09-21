@@ -81,6 +81,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   the `ldap-integration` CI job, but it is not reachable by an operator: there is no `ldap:` block in
   `hearth.yaml`, no admin API, and no caller anywhere in `src/` outside the module.
   `docs/guides/federation.md` always said "wiring in progress"; the status table said "Shipped".
+- **The load-test harness now exits non-zero when a journey blows its error budget (task 23.14)** —
+  `hearth-loadtest run` returned success unconditionally: it computed a pass/fail verdict, printed it
+  and wrote it to `report.json`, then discarded it, so the `loadtest-smoke` CI gate could only prove
+  the binary did not crash. Archived runs in `loadtest/reports/` show the consequence — several carry
+  `"failure_rate": 1.0` and still exited 0. A **latency** breach remains advisory (the sub-ms budgets
+  are documented to breach on a dev box); a failure rate above 5% now fails the process.
+- **A load-test journey with no latency budget can no longer pass while erroring (task 23.14)** —
+  `budget_for` returns `None` for the compound revoke sub-requests, and the overall verdict read that
+  as a pass. A run in which every `revoke_revalidate` reported `active: true` — revocation silently
+  not taking effect — reported `"pass": true`.
+- **Load-test ceiling attribution now tests the failure rate before the latency breach (task 23.14)** —
+  a run whose requests were mostly client-side timeouts was labelled `ceiling: "server"` ("server
+  latency is the limiter") off percentiles computed entirely from those timeouts. It now reports
+  `generator_saturated`, matching what `loadtest/README.md` already said in prose about the same runs.
 
 ### Removed
 - **`createRealm` removed from all SDKs (HEA-2171)** — the Go, Kotlin, Node, PHP,
@@ -729,6 +743,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   unattributed `OrgUpdated` event, leaving a record that an organization changed with no acting
   administrator named. The event now carries the acting admin and the new status, and an unmapped
   operation is logged instead of dropped (task 23.10).
+- **The documented first-run path now matches the software (tasks 23.19, 23.6)** — a cold run from
+  the README found ten documentation defects an operator hits before their first successful boot.
+  `hearth app create` was documented with `--realm_id` / `--redirect_uri` (the flags are
+  `--realm-id` / `--redirect-uri`) and without the **mandatory** `--token`, so the published command
+  could not run; four subcommands (`config`, `rbac`, `backup`, `completions`) and two `migrate`
+  variants were missing from the CLI reference entirely. Every documented `/admin/*` example omitted
+  the mandatory `X-Realm-ID` header and therefore answered `400`. Re-bootstrap returns JSON `null`
+  for `admin_password`, not `""`. `hearth.example.yaml` advertised itself as a working starting
+  config and as valid when empty; it is neither, because environment substitution expands
+  placeholders inside YAML comments — the header now says so, and `HEARTH_MASTER_KEY` and
+  `server.trusted_proxies` have been added to its production checklist. There was no documented way
+  to create the first admin outside `--dev`; the `.setup_token` procedure is now in the README.
+  `docs/guides/upgrading.md` placed the mandatory pre-upgrade backup *before* stopping the server,
+  which the data-directory lock makes impossible, and its `backup inspect` sample was two fields
+  stale. Full transcript and the code defects found but not fixed:
+  [`reports/cold-first-run-2026-09-21.md`](reports/cold-first-run-2026-09-21.md).
 ### Fixed
 - **`hearth backup` says what happened (audit 2026-08-28 §4.9#8, §4.14#6)** — `create`, `restore`,
   `verify` and `inspect` installed no tracing subscriber, so every diagnostic those paths emit was

@@ -2,6 +2,34 @@
 
 Hearth ships a built-in backup CLI that exports realm data to a self-contained `.hearth-backup` archive and restores from it without a running server. The backup engine reads directly from the embedded storage engine, so no HTTP server needs to be running during the operation.
 
+> **The server must in fact be stopped, not merely unnecessary.** The data
+> directory carries an exclusive `LOCK`. Run any `--data-dir` subcommand against
+> a live instance and it exits `2` with
+> `data directory '…' is already locked by another process`.
+
+> **Known gap — the CLI cannot export a KEK-encrypted store (verified at `cfb6c4f5`).**
+> Production requires a key-encryption key, and `hearth backup create` against a
+> store written under one fails with:
+>
+> ```
+> error: signing error: key material has HKEY envelope but no key_encryption_key
+>        is configured — set security.key_encryption_key in hearth.yaml or the
+>        HEARTH_KEK environment variable
+> ```
+>
+> The message is misleading: the failure occurs **with** `HEARTH_KEK` exported,
+> **with** `security.key_encryption_key` set in a `./hearth.yaml`, and there is no
+> `--config` flag to point the command at a config file. The CLI backup path does
+> not read the key by any route. Until this is fixed, use the HTTP export
+> (`POST /admin/backup`, below) against the running server, which does have the
+> key in memory. Dev and other non-KEK stores are unaffected.
+
+> **A mistyped `--data-dir` does not fail.** `backup create` *creates* a missing
+> directory, exports zero realms, prints only `warning: no realms found to export`,
+> and exits `0`; `backup verify` then reports `OK — all checksums match
+> (0 files verified)` and also exits `0`. Confirm the realm list with
+> `hearth backup inspect` before trusting any archive.
+
 ---
 
 ## Archive format

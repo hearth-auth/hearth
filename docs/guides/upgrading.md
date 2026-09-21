@@ -17,12 +17,25 @@ Work through this list for every upgrade, including patch releases.
 - [ ] **Read the CHANGELOG.** Check `CHANGELOG.md` for your target version. Look for `### Changed`, `### Removed`, and `### Security` entries that affect your configuration or integration. Breaking changes are prefixed `**Breaking:**`.
 - [ ] **Take a backup.** Run this immediately before the upgrade — even if you took one last night.
 
+  > **Stop the server first.** `hearth backup create` opens the store directly and
+  > the data directory carries an exclusive `LOCK`. Against a running instance it
+  > exits `2` with `data directory '…' is already locked by another process`. So the
+  > real order is: stop the service (step 1 of the [upgrade procedure](#upgrade-procedure)),
+  > take the backup, install the new binary, start. Budget the backup into your
+  > downtime window rather than treating it as a pre-flight step.
+
   ```bash
   hearth backup create \
     --data-dir /var/lib/hearth/data \
     --include-audit \
     --output /backups/pre-upgrade-$(date +%Y%m%d-%H%M%S).hearth-backup
   ```
+
+  > **Check the path, and check the output.** `backup create` **creates** a missing
+  > `--data-dir` rather than refusing it, so a typo'd path produces an empty archive,
+  > prints only `warning: no realms found to export`, and **exits 0**. `backup verify`
+  > then reports `OK — all checksums match (0 files verified)` and also exits 0. Always
+  > read the realm list from `backup inspect` (below) before trusting an archive.
 
   Verify it was written cleanly:
 
@@ -43,16 +56,25 @@ Work through this list for every upgrade, including patch releases.
   hearth backup inspect \
     --input /backups/pre-upgrade-<timestamp>.hearth-backup
   # Archive:           /backups/pre-upgrade-<timestamp>.hearth-backup
-  #   format version : 1
-  #   hearth version : 1.6.9        ← the binary that wrote the archive
-  #   created at     : 2026-08-11T20:45:16Z
-  #   signing key DEK: absent       ← "present (passphrase-protected)" if --encrypt was used
+  #   format version : 2
+  #   hearth version : 1.6.11-143-gcfb6c4f5   ← the binary that wrote the archive
+  #   created at     : 2026-09-21T16:57:00Z
+  #   signing key DEK: present (passphrase-protected)
   #   checksummed files: 42
   #   realms (2): …
   ```
 
-  If `signing key DEK` reports `present (passphrase-protected)`, you will be prompted for the
-  passphrase on restore — make sure you still have it before relying on this archive for rollback.
+  `format version` is the **archive** format (currently `2`) and is unrelated to the WAL format
+  version checked below.
+
+  The `signing key DEK` line reports `present (passphrase-protected)` on every archive this
+  build writes, whether or not `--encrypt` was passed — it is not a reliable signal for "was
+  this archive encrypted". You are prompted for a passphrase on restore only when the archive
+  was actually created with `--encrypt`; if you used that flag, make sure you still have the
+  passphrase before relying on this archive for rollback.
+
+  **`checksummed files: 0` or an empty `realms` list means the archive is empty** — re-check the
+  `--data-dir` path and take it again.
 
 - [ ] **Check the WAL format version.** The WAL header layout is `[4B magic "HWAL"][2B version, little-endian]`. Read the current version directly:
 
@@ -264,8 +286,13 @@ Run these checks immediately after bringing the new binary up, regardless of dep
 
   ```bash
   curl -fsS -H "Authorization: Bearer <admin-token>" \
+    -H "X-Realm-ID: <realm-uuid>" \
     http://localhost:8420/admin/realms | jq .
   ```
+
+  `X-Realm-ID` is mandatory on every `/admin/*` route. Omit it and the call answers
+  `400 {"error":"missing X-Realm-ID header"}` — which is easy to misread as an upgrade
+  regression when it is a missing header.
 
 - [ ] **No unexpected WARN or ERROR lines in the log** since startup. On systemd:
 
