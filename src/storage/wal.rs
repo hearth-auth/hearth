@@ -2332,9 +2332,16 @@ mod tests {
     /// NOTE: this is a *persistence-across-reopen* check, not a proof of
     /// fsync-before-ack. Both writer and reader live in the same process, so the
     /// bytes would be served from the OS page cache even if `fsync` were never
-    /// called. The fsync-before-ack durability invariant (surviving a real
-    /// `kill -9` where the page cache is lost) is exercised by the
-    /// `hearth-simulation` crate's `wal_crash` real-thread/tempfile crash loop.
+    /// called.
+    ///
+    /// The fsync-before-ack invariant is proved by
+    /// `hearth-simulation`'s `wal_fsync_before_ack` module, which arms the
+    /// filesystem so the next sync fails and asserts the append is REFUSED — a
+    /// WAL that acknowledged first, or that ignored what `sync_data` returned,
+    /// answers `Ok` there. This doc comment previously cited a `wal_crash`
+    /// "crash loop" as the proof; no such loop exists, and every test in that
+    /// module runs under `SyncMode::None`, so none of them could distinguish
+    /// fsync-before-ack from no fsync at all (audit 2026-08-28 §4.11#11).
     #[test]
     fn wal_data_persists_across_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
