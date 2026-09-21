@@ -535,6 +535,59 @@ pub(crate) fn verify_hash(
     }
 }
 
+/// Upper bound on the PBKDF2 iteration count this server will verify against.
+///
+/// # Task 26.31
+///
+/// The iteration count is read out of the stored hash string, and only a
+/// non-zero check stood between it and the KDF. A record carrying
+/// `i=4294967295` therefore made every login attempt for that account spend
+/// 4.3 billion HMAC rounds — the attacker chooses how much CPU the server
+/// burns, once per attempt, for as long as the record exists.
+///
+/// Such a record does not have to be forged over the wire. `hearth migrate`
+/// imports hash strings verbatim from a Keycloak or Auth0 export, which is a
+/// file, and a file is not a trusted input just because an operator handed it
+/// over.
+///
+/// The ceiling is set well above anything a real exporter produces: Keycloak's
+/// current default is 210,000, its historical one 27,500, and OWASP's 2023
+/// recommendation for PBKDF2-HMAC-SHA256 is 600,000. Two million is over three
+/// times the OWASP figure and costs roughly two seconds, which bounds the
+/// damage while leaving room for a deployment that deliberately hardened its
+/// own parameters.
+const PBKDF2_MAX_ITERATIONS: u32 = 2_000_000;
+
+/// Parses and bounds the `i=<n>` parameter of a PBKDF2 PHC string.
+///
+/// Separate from the verifier so the bound can be tested without deriving
+/// anything: a test that ran two million rounds to prove two million rounds
+/// are allowed would be the denial of service it is guarding against.
+fn pbkdf2_iterations(params: &str) -> Result<u32, IdentityError> {
+    let iterations = params
+        .strip_prefix("i=")
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or_else(|| IdentityError::InvalidInput {
+            reason: format!("invalid pbkdf2 iterations: {params}"),
+        })?;
+    if iterations == 0 {
+        return Err(IdentityError::InvalidInput {
+            reason: "pbkdf2 iterations must be non-zero".to_string(),
+        });
+    }
+    // Refuse BEFORE the KDF runs — the point is not to compute it (task 26.31).
+    if iterations > PBKDF2_MAX_ITERATIONS {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "pbkdf2 iterations {iterations} exceeds the maximum this server will \
+                 verify ({PBKDF2_MAX_ITERATIONS}); the stored hash chooses the work \
+                 factor, so an unbounded one lets it choose the server's CPU cost"
+            ),
+        });
+    }
+    Ok(iterations)
+}
+
 /// Verifies a password against a PBKDF2-HMAC-SHA256 PHC string.
 ///
 /// Format: `$pbkdf2-sha256$i=<iterations>$<salt-b64>$<hash-b64>`.
@@ -559,17 +612,7 @@ fn verify_pbkdf2_sha256(password: &[u8], hash_str: &str) -> Result<bool, Identit
     let params = parts.next().ok_or_else(|| IdentityError::InvalidInput {
         reason: "invalid pbkdf2 hash: missing parameters".to_string(),
     })?;
-    let iterations = params
-        .strip_prefix("i=")
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or_else(|| IdentityError::InvalidInput {
-            reason: format!("invalid pbkdf2 iterations: {params}"),
-        })?;
-    if iterations == 0 {
-        return Err(IdentityError::InvalidInput {
-            reason: "pbkdf2 iterations must be non-zero".to_string(),
-        });
-    }
+    let iterations = pbkdf2_iterations(params)?;
     let salt_b64 = parts.next().ok_or_else(|| IdentityError::InvalidInput {
         reason: "invalid pbkdf2 hash: missing salt".to_string(),
     })?;
@@ -911,6 +954,58 @@ mod tests {
             STANDARD_NO_PAD.encode(salt),
             STANDARD_NO_PAD.encode(derived),
         )
+    }
+
+    /// Task 26.31 — the stored hash must not choose the server's CPU cost.
+    ///
+    /// `iterations` was read straight out of the hash string with only a
+    /// non-zero check between it and the KDF. A record carrying `i=4294967295`
+    /// made every login attempt for that account spend 4.3 billion HMAC
+    /// rounds, once per attempt, for as long as the record existed.
+    ///
+    /// It does not have to be forged over the wire: `hearth migrate` imports
+    /// these strings verbatim from a Keycloak or Auth0 export, and a file is
+    /// not trusted input just because an operator handed it over.
+    #[test]
+    fn pbkdf2_iterations_are_bounded() {
+        let err = pbkdf2_iterations(&format!("i={}", u32::MAX))
+            .expect_err("an absurd work factor must be refused");
+        assert!(
+            err.to_string().contains("exceeds the maximum"),
+            "the refusal must say what is wrong; got: {err}"
+        );
+
+        let err = pbkdf2_iterations(&format!("i={}", PBKDF2_MAX_ITERATIONS + 1))
+            .expect_err("one over the ceiling must be refused");
+        assert!(err.to_string().contains("exceeds the maximum"));
+    }
+
+    /// Controls — the ceiling is inclusive, and real-world counts still pass.
+    ///
+    /// Without these, a check that refused every PBKDF2 hash would satisfy the
+    /// test above while locking out every migrated account. Keycloak's current
+    /// default is 210,000 and its historical one 27,500; OWASP recommends
+    /// 600,000. All three must remain verifiable.
+    #[test]
+    fn pbkdf2_iterations_still_accepts_real_world_counts() {
+        assert_eq!(
+            pbkdf2_iterations(&format!("i={PBKDF2_MAX_ITERATIONS}")).expect("ceiling is inclusive"),
+            PBKDF2_MAX_ITERATIONS
+        );
+        for n in [27_500u32, 210_000, 600_000] {
+            assert_eq!(
+                pbkdf2_iterations(&format!("i={n}"))
+                    .unwrap_or_else(|e| panic!("{n} must verify: {e}")),
+                n
+            );
+        }
+    }
+
+    /// The pre-existing zero check must survive the refactor.
+    #[test]
+    fn pbkdf2_iterations_still_refuses_zero() {
+        assert!(pbkdf2_iterations("i=0").is_err());
+        assert!(pbkdf2_iterations("nonsense").is_err());
     }
 
     #[test]

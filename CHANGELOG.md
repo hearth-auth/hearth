@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **`hearth config validate` reports a missing storage host key instead of failing on it (task 26.23)** —
+  it answered `✓` on a configuration `hearth serve` then refused with *"HEARTH_MASTER_KEY is not set and
+  auto-generation is disabled in production mode"*. The successful output now says so on its own line.
+  It is a warning rather than an error because the host key is a property of the machine, not of the
+  file: validating a config on a laptop or in CI, with the key in a secrets manager, is legitimate.
+
 - **`${VAR}` is no longer substituted inside YAML comments (task 26.22)** — the scan had no idea what a
   comment was, so commented-out lines documenting what an operator *could* set were substituted and, when
   the variable was unset, warned about. `hearth config validate` reports those warnings as errors, so
@@ -88,6 +94,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   deleted agent — is deleted with it.
 
 ### Security
+- **PBKDF2 verification no longer lets the stored hash choose the server's CPU cost (task 26.31)** —
+  the iteration count is read out of the hash string, and only a non-zero check stood between it and
+  the KDF, so a record carrying `i=4294967295` made every login attempt for that account spend 4.3
+  billion HMAC rounds. `hearth migrate` imports these strings verbatim from a Keycloak or Auth0
+  export. Counts above 2,000,000 are now refused before any derivation runs — over three times OWASP's
+  2023 recommendation of 600,000 and roughly ten times Keycloak's current default of 210,000, so no
+  real exporter is affected.
+
 - **A suspended organisation now stops granting over gRPC too (task 26.34)** —
   `RbacAdminService.ResolveEffectivePermissions` took a caller-supplied `org_id` straight off the wire
   and resolved against it without checking the organisation's status, so the fifth path was missed when

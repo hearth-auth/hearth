@@ -19,11 +19,39 @@ mod common;
 
 use hearth::core::{OrganizationId, RealmId, UserId};
 use hearth::identity::{
-    decode_claims_unverified, AccessTokenAuthorization, CreateRealmRequest, CreateUserRequest,
-    DecidePermissionRequest, RegisterClientRequest, SessionContext, TokenIntrospectionRequest,
-    TokenIssuanceContext, UpdateClientRequest,
+    decode_claims_unverified, AccessTokenAuthorization, CreateOrganizationRequest,
+    CreateRealmRequest, CreateUserRequest, DecidePermissionRequest, OrganizationConfig,
+    RegisterClientRequest, SessionContext, TokenIntrospectionRequest, TokenIssuanceContext,
+    UpdateClientRequest,
 };
 use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+
+/// Creates a real organisation and returns its id.
+///
+/// These tests used `OrganizationId::generate()` and never created the record,
+/// so they asserted that a token could claim org-scoped authority for an
+/// organisation that does not exist. Task 26.16 made `active_org_context` fail
+/// closed on an unknown organisation — correctly: `organization_id` arrives
+/// from the caller on the decision endpoint, and a deleted organisation's
+/// leftover role assignments must not keep granting. The fixture was the thing
+/// that was wrong, and creating the record also makes these tests exercise the
+/// path production actually takes.
+fn make_org(h: &common::TestHarness, realm: &RealmId, slug: &str) -> OrganizationId {
+    h.identity()
+        .create_organization(
+            realm,
+            &CreateOrganizationRequest {
+                name: slug.to_string(),
+                slug: slug.to_string(),
+                description: None,
+                config: Some(OrganizationConfig { max_members: None }),
+                ..Default::default()
+            },
+        )
+        .expect("create organization")
+        .id()
+        .clone()
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -254,7 +282,7 @@ async fn org_scoping_no_cross_org_bleed() {
     let user = make_user(&h, &realm);
 
     // Grant permission scoped to one org.
-    let org_a = OrganizationId::generate();
+    let org_a = make_org(&h, &realm, "org-a");
     let perm_obj = Permission::new("billing.view").expect("valid perm");
     let role = h
         .rbac()
@@ -283,7 +311,7 @@ async fn org_scoping_no_cross_org_bleed() {
         )
         .expect("assign role to org A");
 
-    let org_b = OrganizationId::generate();
+    let org_b = make_org(&h, &realm, "org-b");
 
     // Decision endpoint: org A context → allowed.
     let client = register_client(&h, &realm, AccessTokenAuthorization::Decision);
@@ -561,7 +589,7 @@ async fn decision_endpoint_org_scoping() {
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
 
-    let org = OrganizationId::generate();
+    let org = make_org(&h, &realm, "decision-org");
     let perm_obj = Permission::new("team.manage").expect("valid perm");
     let role = h
         .rbac()
