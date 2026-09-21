@@ -14240,6 +14240,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok((stats.evicted, stats.active))
     }
 
+    fn flush_approval_webhook_outbox(&self, realm_id: &RealmId) -> (u64, u64) {
+        self.flush_approval_webhook_outbox_inner(realm_id)
+    }
+
     // ===== SAML =====
 
     fn get_or_create_saml_signing_key(

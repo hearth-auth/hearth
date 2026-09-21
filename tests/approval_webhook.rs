@@ -464,3 +464,130 @@ async fn approval_webhook_ssrf_blocked_at_delivery() {
     // API level (outbox persists for retry) and is not observable through a public
     // return value here — the guard is exercised in the production transport path.
 }
+
+// ─── Task 26.13: the RETRY half of "durable at-least-once" ───────────────────
+
+/// A transport that refuses every delivery until it is told to stop.
+///
+/// The capture transport above always succeeds, which is why every test in
+/// this file passed while the retry path had no caller at all: a delivery that
+/// never fails never needs retrying.
+#[derive(Clone)]
+struct FlakyApprovalTransport {
+    failing: Arc<std::sync::atomic::AtomicBool>,
+    attempts: Arc<Mutex<Vec<String>>>,
+}
+
+impl FlakyApprovalTransport {
+    fn new() -> Self {
+        Self {
+            failing: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            attempts: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recover(&self) {
+        self.failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn delivered(&self) -> Vec<String> {
+        self.attempts.lock().expect("lock").clone()
+    }
+}
+
+impl ApprovalWebhookTransport for FlakyApprovalTransport {
+    fn send(
+        &self,
+        _url: &str,
+        _body: &[u8],
+        _event_type: &str,
+        delivery_id: &str,
+        _signature: Option<&str>,
+    ) -> Result<(), String> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("endpoint down".to_string());
+        }
+        self.attempts
+            .lock()
+            .expect("lock")
+            .push(delivery_id.to_string());
+        Ok(())
+    }
+}
+
+/// Task 26.13 — a webhook the endpoint refused must be redelivered later.
+///
+/// `flush_approval_webhook_outbox_inner` existed, was correct, and had **zero
+/// callers**; `#[allow(dead_code)]` kept the compiler quiet. Its own doc
+/// comment named "the startup recovery scan and the periodic background task",
+/// and neither existed. So this file's header claim of "durable at-least-once
+/// delivery" was at-MOST-once: a refused notification was never retried, and
+/// its outbox row leaked forever, because only a successful delivery deletes
+/// it.
+///
+/// The test drives the real sequence: refuse the first attempt, bring the
+/// endpoint back, flush, and require the notification to arrive.
+#[tokio::test]
+async fn a_refused_approval_webhook_is_redelivered_by_the_outbox_flush() {
+    let transport = Arc::new(FlakyApprovalTransport::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&transport) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, None);
+
+    let created = h
+        .identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id,
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::json!({"reason": "endpoint is down"}),
+                delegation_chain: vec![],
+                expires_in_secs: None,
+            },
+        )
+        .expect("creating the request must succeed even when the webhook does not");
+
+    assert!(
+        transport.delivered().is_empty(),
+        "sanity: the endpoint refused, so nothing was delivered yet"
+    );
+
+    // Still refusing: the flush must report the entry as outstanding, not
+    // quietly drop it. Without this, a flush that deleted rows on failure
+    // would pass the assertion below and lose the notification for good.
+    let (delivered, remaining) = h.identity().flush_approval_webhook_outbox(&realm_id);
+    assert_eq!(
+        (delivered, remaining),
+        (0, 1),
+        "a still-failing endpoint must leave the outbox entry in place"
+    );
+
+    transport.recover();
+    let (delivered, remaining) = h.identity().flush_approval_webhook_outbox(&realm_id);
+
+    assert_eq!(
+        (delivered, remaining),
+        (1, 0),
+        "once the endpoint is back, the flush must deliver the entry and clear it"
+    );
+    assert_eq!(
+        transport.delivered(),
+        vec![format!("approval:{}", created.request_id)],
+        "the redelivery must carry the same stable delivery id as the first attempt"
+    );
+
+    // And the row is gone, so it cannot be delivered a third time on the next
+    // tick — the outbox must drain, not accumulate.
+    let (delivered, remaining) = h.identity().flush_approval_webhook_outbox(&realm_id);
+    assert_eq!(
+        (delivered, remaining),
+        (0, 0),
+        "a drained outbox must stay drained"
+    );
+}

@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Approval webhooks are now actually retried (task 26.13)** — `AGENT_AUTH.md` promises durable
+  at-least-once delivery of approval notifications, and the outbox flush that provides it had no
+  caller at all. Delivery was at-most-once: an endpoint that refused a notification never saw it
+  again, and the outbox row leaked permanently, because only a successful delivery deletes it. A
+  background task now drains every realm's outbox on the `cleanup.interval_secs` cadence, with an
+  immediate first tick so a request outstanding at shutdown is retried at start-up.
+
 ### Security
 - **gRPC reflection now requires a valid admin token, not merely an `Authorization` header (task 26.9)** —
   the gate checked only that the value started with `Bearer ` and was longer than that, so `Bearer x`

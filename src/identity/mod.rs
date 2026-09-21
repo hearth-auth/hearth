@@ -2233,6 +2233,20 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
     ) -> Result<crate::identity::cleanup::CleanupStats, IdentityError>;
 
+    /// Redelivers every approval webhook still sitting in `realm_id`'s outbox.
+    ///
+    /// An approval request writes its outbox row BEFORE the delivery attempt
+    /// and deletes it only once the endpoint has answered 2xx, so a row that
+    /// survives is a notification nobody received. This is the retry half of
+    /// the "durable at-least-once" guarantee `AGENT_AUTH.md` states: without a
+    /// caller the delivery is at-MOST-once, and the row leaks permanently
+    /// (task 26.13).
+    ///
+    /// Returns `(delivered, remaining)`. Best-effort: a realm with no webhook
+    /// configured, or a storage error, returns `(0, 0)` rather than failing —
+    /// this runs on a background tick and must not take the task down.
+    fn flush_approval_webhook_outbox(&self, realm_id: &RealmId) -> (u64, u64);
+
     /// Proactively evicts expired device-fingerprint entries from `realm_id`.
     ///
     /// Scans all `dfp:user:*` keys and deletes any whose 8-byte LE i64 expiry

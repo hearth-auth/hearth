@@ -1981,6 +1981,72 @@ async fn run_serve(
         });
     }
 
+    // Background approval-webhook outbox flush (task 26.13).
+    //
+    // An approval request writes its outbox row BEFORE it attempts delivery and
+    // deletes it only on a 2xx, so a surviving row is a notification nobody
+    // received. `flush_approval_webhook_outbox` is the retry half of the
+    // "durable at-least-once" guarantee in `AGENT_AUTH.md`; until this task
+    // existed it had NO caller, which made delivery at-MOST-once and leaked one
+    // row per undelivered request, permanently.
+    //
+    // Unlike the sweeps above, the first tick is NOT skipped: the first tick is
+    // the start-up recovery scan, and a request that was outstanding when the
+    // process died is exactly the one a warm-up delay keeps waiting.
+    //
+    // It runs under `spawn_blocking` because the flush throttles itself with a
+    // 100 ms sleep per entry; on the async runtime that would park a worker.
+    if cleanup_enabled && cleanup_interval_secs > 0 {
+        let outbox_engine = Arc::clone(&identity_engine);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
+            loop {
+                interval.tick().await;
+                let engine = Arc::clone(&outbox_engine);
+                let joined = tokio::task::spawn_blocking(move || {
+                    let batch = hearth::core::MAX_PAGE_LIMIT;
+                    let mut offset = 0u64;
+                    let (mut delivered, mut remaining) = (0u64, 0u64);
+                    loop {
+                        let page =
+                            match engine.list_realms(&hearth::core::PageRequest::new(offset, batch))
+                            {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    warn!(error = %e, "approval_outbox: realm enumeration failed, retrying next tick");
+                                    break;
+                                }
+                            };
+                        let n = page.items.len() as u64;
+                        for realm in &page.items {
+                            let (d, r) = engine.flush_approval_webhook_outbox(realm.id());
+                            delivered += d;
+                            remaining += r;
+                        }
+                        if n == 0 || offset + n >= page.total {
+                            break;
+                        }
+                        offset += n;
+                    }
+                    (delivered, remaining)
+                })
+                .await;
+                match joined {
+                    Ok((delivered, remaining)) if delivered > 0 || remaining > 0 => {
+                        info!(
+                            delivered,
+                            remaining, "approval_outbox: redelivered pending approval webhooks",
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "approval_outbox: flush task panicked, retrying next tick");
+                    }
+                }
+            }
+        });
+    }
+
     // Background SST compaction: a periodic full sweep and/or a count-triggered
     // partial (size-tiered) merge (HEA-1885). Both run off the write path via
     // `spawn_blocking`; the partial merge is woken by the storage engine's
