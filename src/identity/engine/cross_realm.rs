@@ -129,13 +129,16 @@ impl EmbeddedIdentityEngine {
         // Best-effort index cleanup (ignore error if already absent).
         let _ = self.storage.delete(realm_id, &from_index_key);
 
-        let _ = self.record_audit(
+        // `CrossRealmTrustRevoked` is a `FailOperation` action (task 24.1):
+        // tearing down a trust relationship without a durable record of it
+        // must fail the call rather than answer `Ok(())`.
+        self.record_audit(
             realm_id,
             None,
             AuditAction::CrossRealmTrustRevoked,
             "cross_realm_policy",
             policy_id,
-        );
+        )?;
 
         Ok(())
     }

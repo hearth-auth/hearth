@@ -3453,7 +3453,20 @@ impl EmbeddedIdentityEngine {
             // cascade (§4.16#2), and `std::sync::Mutex` is not reentrant —
             // release before calling it.
             drop(rotation_guard);
-            let _ = self.revoke_session(realm_id, session_id);
+            // The caller is already being refused below, and the
+            // grant family was marked revoked durably above, so the stolen
+            // token is dead either way. The session cascade is the extra
+            // blast-radius step; swapping `TokenRevoked` for a storage error
+            // would tell the client the wrong thing about why it was refused.
+            // A failure here is loud rather than silent (task 24.1).
+            if let Err(e) = self.revoke_session(realm_id, session_id) {
+                tracing::error!(
+                    error = %e,
+                    session_id = %session_id.as_uuid(),
+                    "refresh-token theft detected, but the session cascade \
+                     failed; the session may still be live"
+                );
+            }
             return Err(IdentityError::TokenRevoked);
         }
 
@@ -4920,6 +4933,10 @@ impl EmbeddedIdentityEngine {
                     "lockout_duration_micros": lockout_micros,
                 })),
             };
+            // DISCARD-OK: this whole function is the audit helper for a failed
+            // login; it returns `()` and has no operation to abort. The lockout
+            // itself is already durable in the attempt tracker. `record_audit`
+            // has logged the loss at `error` before returning here (task 24.1).
             let _ = self.record_audit(
                 realm_id,
                 Some(&locked_ctx),
@@ -7038,6 +7055,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 match self.hibp.is_pwned(password.as_bytes(), api_key) {
                     Ok(true) => {
                         // Compromised — reject and audit (AC-1).
+                        //
+                        // DISCARD-OK: the next line returns `Err`, so the
+                        // operation the `FailOperation` policy would abort is
+                        // already aborted. Propagating the audit error instead
+                        // would replace `PasswordCompromised` with a storage
+                        // error and tell the caller the wrong thing about why
+                        // their password was refused (task 24.1).
                         let _ = self.record_audit(
                             realm_id,
                             None,
@@ -7436,7 +7460,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 let active = live.len() as u32;
 
                 if active >= limit {
-                    let evicted = match &policy {
+                    // `evicted` is the count that actually succeeded, and
+                    // `required` the count the limit needs (task 24.1). They
+                    // used to be the same number: the loop below discarded
+                    // every `revoke_session` error, audited the number of
+                    // *attempts* as `"evicted"`, and let the new session
+                    // through. A failing revocation therefore took the realm
+                    // over `max_concurrent_sessions` while the audit log said
+                    // the limit had been enforced.
+                    let (evicted, required) = match &policy {
                         SessionLimitPolicy::RejectNew => {
                             let ctx = AuditContext {
                                 actor: Actor::User(user_id.clone()),
@@ -7459,10 +7491,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         SessionLimitPolicy::EvictOldest => {
                             let to_evict = (active + 1 - limit) as usize;
                             live.sort_by_key(|s| s.created_at());
+                            let mut evicted = 0u32;
                             for s in live.iter().take(to_evict) {
-                                let _ = self.revoke_session(realm_id, s.id());
+                                match self.revoke_session(realm_id, s.id()) {
+                                    Ok(()) => evicted += 1,
+                                    Err(e) => tracing::error!(
+                                        error = %e,
+                                        session_id = %s.id().as_uuid(),
+                                        user_id = %user_id.as_uuid(),
+                                        "session-limit eviction failed; the new \
+                                         session will be refused rather than \
+                                         admitted over the limit"
+                                    ),
+                                }
                             }
-                            to_evict as u32
+                            (evicted, u32::try_from(to_evict).unwrap_or(u32::MAX))
                         }
                     };
 
@@ -7475,6 +7518,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                             "limit": limit,
                         })),
                     };
+                    // DISCARD-OK: `SessionLimitEnforced` is a `LogOnly` action,
+                    // so `record_audit` has already applied the policy — it
+                    // logged the loss at `warn` and returned `Ok`.
                     let _ = self.record_audit(
                         realm_id,
                         Some(&ctx),
@@ -7482,6 +7528,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         "session",
                         &user_id.as_uuid().to_string(),
                     );
+
+                    // Fail closed. Admitting the new session here is the whole
+                    // defect: the limit exists to cap concurrent sessions, and
+                    // an eviction that did not happen does not make room.
+                    if evicted < required {
+                        return Err(IdentityError::SessionLimitExceeded { limit, active });
+                    }
                 }
             }
         }
@@ -7920,13 +7973,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     "count": revoked,
                 })),
             };
-            let _ = self.record_audit(
+            // `SessionsRevoked` is a `FailOperation` action (task 24.1). A
+            // bulk revocation is how a disable, a password change and an
+            // email change are enforced; answering `Ok(revoked)` with no
+            // durable record of it reports an enforcement that nobody can
+            // later prove happened.
+            self.record_audit(
                 realm_id,
                 Some(&ctx),
                 AuditAction::SessionsRevoked,
                 "user",
                 &user_id.as_uuid().to_string(),
-            );
+            )?;
         }
 
         Ok(revoked)

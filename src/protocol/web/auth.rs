@@ -577,6 +577,12 @@ pub fn revoke_prior_session_cookie(
 ) {
     if let Some(raw) = cookie_value_from_headers(headers, SESSION_COOKIE) {
         if let Some((session_id, realm_id)) = parse_session_cookie(secret, raw) {
+            // DISCARD-OK: this function returns `()` and has no operation to
+            // abort, and the doc comment above states the invariant — the
+            // security property comes from the freshness of the *new* session,
+            // not from confirmed deletion of the old one. The cookie may name a
+            // session that is expired, already revoked, or from a prior server
+            // instance (task 24.1).
             let _ = engine.revoke_session(&realm_id, &session_id);
         }
     }

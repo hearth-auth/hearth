@@ -657,3 +657,177 @@ fn disabling_a_user_fails_when_the_session_revocation_fails() {
          reported success would have been a lie"
     );
 }
+
+/// A storage double that refuses one exact key's writes.
+///
+/// [`SessionWriteFailStorage`] refuses every `ses:id:` write, which is too
+/// blunt for the session-limit test below: the new session's own record shares
+/// that prefix, so arming it would fail the call for the wrong reason. This
+/// one is armed with a single key, so only the eviction fails.
+struct OneKeyWriteFailStorage {
+    inner: Arc<dyn StorageEngine>,
+    needle: Mutex<Option<Vec<u8>>>,
+}
+
+impl OneKeyWriteFailStorage {
+    fn new(inner: Arc<dyn StorageEngine>) -> Self {
+        Self {
+            inner,
+            needle: Mutex::new(None),
+        }
+    }
+
+    fn arm(&self, key: &[u8]) {
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: test-only double; a poisoned mutex here fails the test loudly.
+        self.needle.lock().unwrap().replace(key.to_vec());
+    }
+
+    fn refuses(&self, key: &[u8]) -> bool {
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: test-only double; a poisoned mutex here fails the test loudly.
+        self.needle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|n| n == key)
+    }
+}
+
+impl StorageEngine for OneKeyWriteFailStorage {
+    fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(realm_id, key)
+    }
+
+    fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        if self.refuses(key) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected eviction failure",
+            )));
+        }
+        self.inner.put(realm_id, key, value)
+    }
+
+    fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(realm_id, key)
+    }
+
+    fn scan(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<ScanEntry>, StorageError> {
+        self.inner.scan(realm_id, start, end)
+    }
+
+    fn put_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), StorageError> {
+        if entries.iter().any(|(k, _)| self.refuses(k)) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected eviction failure",
+            )));
+        }
+        self.inner.put_batch(realm_id, entries)
+    }
+
+    fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+        self.inner.list_realms()
+    }
+
+    fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+        self.inner.begin_snapshot_restore(snapshot_id)
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
+}
+
+/// Task 24.1 — an eviction that did not happen must not make room.
+///
+/// `SessionLimitPolicy::EvictOldest` discarded every `revoke_session` result,
+/// audited the number of *attempts* as `"evicted"`, and admitted the new
+/// session regardless. A failing revocation therefore took the realm over
+/// `max_concurrent_sessions` while the audit log recorded the limit as
+/// enforced — the same "reports success it never achieved" shape as the
+/// swallowed `/revoke` above.
+#[test]
+fn session_limit_eviction_that_fails_refuses_the_new_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(dir.path().to_path_buf());
+    let real =
+        Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+    let failing = Arc::new(OneKeyWriteFailStorage::new(real));
+    let storage = Arc::clone(&failing) as Arc<dyn StorageEngine>;
+
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let audit = Arc::new(crate::audit::EmbeddedAuditEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    ));
+    let engine = EmbeddedIdentityEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+        audit as Arc<dyn AuditEngine>,
+    )
+    .expect("engine creation");
+
+    let realm_id = engine
+        .create_realm(&CreateRealmRequest {
+            name: format!("evict-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                max_concurrent_sessions: Some(1),
+                session_over_limit_policy: SessionLimitPolicy::EvictOldest,
+                ..RealmConfig::default()
+            }),
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+    let user = create_test_user(&engine, &realm_id);
+
+    let first = engine
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("the first session is under the limit");
+
+    // Control: with nothing armed, the eviction succeeds and the new session
+    // is admitted — so the assertion below cannot pass merely because this
+    // realm refuses every second session.
+    let second = engine
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("an unarmed eviction must admit the new session");
+    assert!(
+        engine
+            .get_session(&realm_id, first.id())
+            .expect("lookup")
+            .is_none(),
+        "sanity: the control run must actually have evicted the first session"
+    );
+
+    // Arm the eviction of `second` only, then ask for a third session.
+    failing.arm(format!("ses:id:{}", second.id().as_uuid()).as_bytes());
+    let third = engine.create_session(&realm_id, user.id(), &SessionContext::default());
+
+    assert!(
+        matches!(third, Err(IdentityError::SessionLimitExceeded { .. })),
+        "an eviction that failed does not make room; admitting the new session \
+         takes the realm over max_concurrent_sessions while the audit log says \
+         the limit was enforced. Got: {third:?}"
+    );
+    assert!(
+        engine
+            .get_session(&realm_id, second.id())
+            .expect("lookup")
+            .is_some(),
+        "sanity: the injected failure did leave the older session live, so \
+         admitting a new one really would have exceeded the limit"
+    );
+}

@@ -202,7 +202,10 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &key, b"1")
             .map_err(Self::storage_err)?;
 
-        let _ = self.record_audit(realm_id, None, AuditAction::AatRevoked, "aat", jti);
+        // `AatRevoked` is a `FailOperation` action (task 24.1): losing the
+        // record of a terminal security action must fail the call, not be
+        // absorbed into the `Ok(())` below.
+        self.record_audit(realm_id, None, AuditAction::AatRevoked, "aat", jti)?;
         Ok(())
     }
 }

@@ -2671,12 +2671,23 @@ impl EmbeddedIdentityEngine {
                             .map_err(Self::storage_err)?;
                     }
                 }
-                // Also revoke session if present
+                // Also revoke the session if present.
+                //
+                // Task 24.1: this used to discard the result, so `POST /revoke`
+                // answered 200 while the session behind the refresh token
+                // stayed live. It is the same defect the access-token arm above
+                // carried, and RFC 7009's "silent success" applies to an
+                // *unknown* token, not to a revocation the server failed to
+                // perform. `SessionNotFound` is still success — the session is
+                // gone, which is what the caller asked for.
                 if claims.sid != "none" {
                     let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
                     if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
                         let session_id = SessionId::new(uuid);
-                        let _ = self.revoke_session(realm_id, &session_id);
+                        match self.revoke_session(realm_id, &session_id) {
+                            Ok(()) | Err(IdentityError::SessionNotFound) => {}
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
             }
