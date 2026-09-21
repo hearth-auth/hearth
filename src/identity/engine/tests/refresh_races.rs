@@ -667,6 +667,13 @@ fn disabling_a_user_fails_when_the_session_revocation_fails() {
 struct OneKeyWriteFailStorage {
     inner: Arc<dyn StorageEngine>,
     needle: Mutex<Option<Vec<u8>>>,
+    /// A key whose DELETE is refused while its writes still succeed.
+    ///
+    /// Separate from `needle` on purpose (task 26.44). Arming both at once on
+    /// the device-code key made the test fail on the poll-rate `put` that runs
+    /// before the consume, so it passed whatever the consume did — the mutation
+    /// proof caught it, which is what mutation proofs are for.
+    delete_needle: Mutex<Option<Vec<u8>>>,
 }
 
 impl OneKeyWriteFailStorage {
@@ -674,7 +681,24 @@ impl OneKeyWriteFailStorage {
         Self {
             inner,
             needle: Mutex::new(None),
+            delete_needle: Mutex::new(None),
         }
+    }
+
+    fn arm_delete(&self, key: &[u8]) {
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: test-only double; a poisoned mutex here fails the test loudly.
+        self.delete_needle.lock().unwrap().replace(key.to_vec());
+    }
+
+    fn refuses_delete(&self, key: &[u8]) -> bool {
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: test-only double; a poisoned mutex here fails the test loudly.
+        self.delete_needle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|n| n == key)
     }
 
     fn arm(&self, key: &[u8]) {
@@ -699,6 +723,17 @@ impl StorageEngine for OneKeyWriteFailStorage {
         self.inner.get(realm_id, key)
     }
 
+    fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        // Task 26.44 needs a refused DELETE while writes to the same key still
+        // succeed, so this reads its own needle.
+        if self.refuses_delete(key) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected delete failure",
+            )));
+        }
+        self.inner.delete(realm_id, key)
+    }
+
     fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         if self.refuses(key) {
             return Err(StorageError::Io(std::io::Error::other(
@@ -706,10 +741,6 @@ impl StorageEngine for OneKeyWriteFailStorage {
             )));
         }
         self.inner.put(realm_id, key, value)
-    }
-
-    fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
-        self.inner.delete(realm_id, key)
     }
 
     fn scan(
@@ -829,5 +860,104 @@ fn session_limit_eviction_that_fails_refuses_the_new_session() {
             .is_some(),
         "sanity: the injected failure did leave the older session live, so \
          admitting a new one really would have exceeded the limit"
+    );
+}
+
+/// Task 26.44 — a device code whose delete fails must not mint tokens.
+///
+/// `poll_device_token_inner` was the one single-use redemption path with no
+/// advisory lock: `exchange_authorization_code` takes `code_exchange_lock` and
+/// deletes as its FIRST write, and refresh-token redemption takes
+/// `token_redemption_lock`, but this one read the code, checked its status,
+/// created a session, issued a token pair, and only then deleted — with
+/// `let _ =`.
+///
+/// Two failures in one shape. The race: two concurrent polls of an approved
+/// code could both pass the status check and both be served, each with its own
+/// session. And the discard: a delete that failed returned a live token pair
+/// over a device code that stayed redeemable, so the caller was told the flow
+/// had completed and the code could be spent again.
+///
+/// The race is now closed by construction — the same lock as the sibling path,
+/// held across the read and the consume. This test covers the half that can be
+/// proven without forcing an interleaving: the consume must be propagated.
+#[test]
+fn a_device_code_that_cannot_be_consumed_does_not_mint_tokens() {
+    use crate::identity::oidc::{DeviceAuthorizationRequest, RegisterClientRequest};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(dir.path().to_path_buf());
+    let real =
+        Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+    let failing = Arc::new(OneKeyWriteFailStorage::new(real));
+    let storage = Arc::clone(&failing) as Arc<dyn StorageEngine>;
+
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let audit = Arc::new(crate::audit::EmbeddedAuditEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    ));
+    let engine = EmbeddedIdentityEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+        audit as Arc<dyn AuditEngine>,
+    )
+    .expect("engine creation");
+
+    let realm_id = create_test_realm(&engine);
+    let user = create_test_user(&engine, &realm_id);
+    let client = engine
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "device-client".to_string(),
+                redirect_uris: vec![],
+                client_secret: None,
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                require_consent: false,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let issue = |engine: &EmbeddedIdentityEngine| {
+        let resp = engine
+            .device_authorize(
+                &realm_id,
+                &DeviceAuthorizationRequest {
+                    client_id: client.client_id().clone(),
+                    scope: Some("openid".to_string()),
+                },
+            )
+            .expect("device authorize");
+        engine
+            .approve_device(&realm_id, &resp.user_code, user.id())
+            .expect("approve device");
+        resp.device_code
+    };
+
+    // Control: with nothing armed the approved code redeems, so the assertion
+    // below cannot pass merely because this fixture never works.
+    let good = issue(&engine);
+    engine
+        .poll_device_token(&realm_id, &good, client.client_id())
+        .expect("an unarmed approved device code must redeem");
+
+    // Arm the delete of the SECOND code's storage key only.
+    let doomed = issue(&engine);
+    let hash = EmbeddedIdentityEngine::sha256_hex(doomed.as_bytes());
+    failing.arm_delete(&keys::encode_device_code(&hash));
+
+    let result = engine.poll_device_token(&realm_id, &doomed, client.client_id());
+    assert!(
+        result.is_err(),
+        "a device code that could not be consumed must not mint a token pair — \
+         returning one hands the caller a live session over a code that is \
+         still redeemable. Got: {result:?}"
     );
 }

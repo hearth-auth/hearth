@@ -134,7 +134,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   got a 404, so the end-user half of the device grant could not be completed at the URI the
   authorization server itself printed. It is now `{issuer}/ui/device`.
 
+- **A "full" backup omitted the system realm, so a restore left nobody able to log in (task 26.39)** —
+  an unfiltered `hearth backup create` enumerated realms through `list_realms`, which deliberately
+  hides the nil-UUID system realm where every operator-console account lives. An instance restored
+  from its own full backup answered `401` at `/ui` while the origin answered `200`, and neither
+  `create`, `restore` nor `inspect` mentioned the omission. The system realm is now exported
+  alongside the realms `GET /admin/realms` lists, whenever the store holds at least one tenant
+  realm. Operator credential hashes are protected exactly as every other realm's already were:
+  `backup create` refuses to write an archive at all without `HEARTH_MASTER_KEY` or `--encrypt`.
+  Use `--realm <name>` for an archive without it.
+- **`backup verify` reported OK over an archive with a file deleted from it (task 26.41)** —
+  verification walked the entries present in the tar and checked the ones that also appeared in
+  `manifest.json`, so a file that was not there was never iterated and its absence was not an
+  error. Deleting `users.ndjson` left `verify` printing `OK — all checksums match (15 files
+  verified)` over fourteen files, and `restore` then exited `0` with `users — created: 0`. The
+  manifest is now the authority on the archive's contents in both directions — a checksummed file
+  that is absent and an archive member the manifest does not list are both integrity failures —
+  and the file count printed is the number of files actually read.
+- **`backup restore` never ran the integrity check `backup verify` runs (task 26.42)** — an
+  archive `verify` rejected with exit `3` restored with exit `0`. Both the CLI and
+  `POST /admin/backup/restore` now verify the archive against its manifest before writing
+  anything. The placement also bounds the partial-restore problem: verification runs before the
+  target data directory is created and therefore before `import_realm_record` writes the realm
+  and its signing key, so an integrity failure no longer leaves a realm with no users behind. A
+  restore is still not transactional against an engine failure mid-import — restore into a fresh,
+  empty data directory.
+- **A restore silently lost eleven entity families (task 26.40, partial)** — group memberships,
+  organization memberships, identity providers and federation links, webhooks, agents, SAML
+  service providers, SCIM mappings, consents, invitations, retiring signing keys and sessions are
+  not exported, and because the importer's member allowlist is the union of what the exporter
+  writes, a family nobody exports is a family nobody misses. Group memberships are the worst:
+  groups restore **empty**, so every permission a user held through a group is gone while the
+  role-to-group assignment survives, and the RBAC graph comes back looking correct and resolving
+  to nothing. The families still do not round-trip; `backup create` and `backup restore` now print
+  what the archive does not hold and what a restore therefore loses, and
+  `docs/guides/backup.md` documents each one.
+
 ### Security
+- **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one
+  single-use path with no advisory lock: the authorization-code exchange takes `code_exchange_lock` and
+  deletes as its first write, refresh-token redemption takes `token_redemption_lock`, and this path read the
+  code, checked its status, created a session, issued a token pair, and only then deleted — discarding the
+  result. Two concurrent polls of an approved code could both be served, each with its own session; and a
+  delete that failed returned a live token pair over a code that stayed redeemable. The code is now consumed
+  as the first write under the same lock, before any session or token exists, and the delete is propagated.
+
 - **Five outbound HTTP paths had no timeouts at all; all five are bounded now (task 26.37)** — ureq 3.3.0's
   `Timeouts::default()` leaves every field `None` except `await_100`. Four of the five run inside
   `tokio::task::block_in_place`, so an upstream that completes the TCP handshake and then stops responding

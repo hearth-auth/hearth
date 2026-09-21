@@ -2252,9 +2252,28 @@ impl EmbeddedIdentityEngine {
     ) -> Result<OidcTokenResponse, IdentityError> {
         use crate::identity::oidc::DeviceCodeStatus;
 
-        // 1. Look up device code by hash
+        // 1. Look up device code by hash, under the same per-code advisory lock
+        //    the authorization-code exchange uses (task 26.44).
+        //
+        // Device-code redemption was the one single-use path with no lock at
+        // all. `exchange_authorization_code` takes `code_exchange_lock` and
+        // deletes as its FIRST write, so a second concurrent caller finds the
+        // key gone; refresh-token redemption takes `token_redemption_lock`.
+        // This path read the code, checked its status, created a session,
+        // issued a token pair, and only then deleted — so two concurrent polls
+        // of an approved code could both pass the status check and both be
+        // served, each with its own session.
+        //
+        // The lock is held across the read, the poll-rate update and, on the
+        // approved arm, the delete. Everything expensive — session creation and
+        // token issuance — happens after it is released.
+        //
+        // INVARIANT: outer map guard is released inside `code_exchange_lock()`;
+        // the inner per-code guard is held only across this sync block (no .await).
         let dc_hash = Self::sha256_hex(device_code.as_bytes());
         let dc_key = keys::encode_device_code(&dc_hash);
+        let lock = self.code_exchange_lock(&dc_hash);
+        let poll_guard = lock.lock().expect("code_exchange_lock poisoned");
         let dc_bytes = self
             .storage
             .get(realm_id, &dc_key)
@@ -2301,6 +2320,32 @@ impl EmbeddedIdentityEngine {
             DeviceCodeStatus::Denied => Err(IdentityError::DeviceCodeDenied),
             DeviceCodeStatus::Expired => Err(IdentityError::DeviceCodeExpired),
             DeviceCodeStatus::Approved { user_id } => {
+                // Consume as the FIRST write, exactly as the authorization-code
+                // exchange does, and still under the lock — a second concurrent
+                // poll then finds nothing (task 26.44).
+                //
+                // The delete is PROPAGATED, not discarded. It used to be
+                // `let _ = self.storage.delete(..)` after the tokens had
+                // already been minted, so a failed delete returned a live token
+                // pair over a device code that stayed redeemable: the caller
+                // was told the flow completed, and the code could be redeemed
+                // again, and again.
+                self.storage
+                    .delete(realm_id, &dc_key)
+                    .map_err(Self::storage_err)?;
+                let uc_key = keys::encode_user_code(&stored.user_code);
+                // The user-code index is a secondary pointer to the device code
+                // that has just gone. A stale entry resolves to nothing, so it
+                // cannot grant anything; log rather than fail a completed
+                // authorization over it.
+                if let Err(e) = self.storage.delete(realm_id, &uc_key) {
+                    tracing::warn!(
+                        error = %e,
+                        "device code consumed but its user-code index entry was not removed"
+                    );
+                }
+                drop(poll_guard);
+
                 // Issue tokens like exchange_authorization_code (device flow — no browser context).
                 // The MFA proof is inherited: the device code reached `Approved`
                 // only because a browser user approved it from a live session,
@@ -2351,11 +2396,6 @@ impl EmbeddedIdentityEngine {
                         reason: format!("failed to issue ID token: {e}"),
                     }
                 })?;
-
-                // Clean up device code and user code
-                let _ = self.storage.delete(realm_id, &dc_key);
-                let uc_key = keys::encode_user_code(&stored.user_code);
-                let _ = self.storage.delete(realm_id, &uc_key);
 
                 Ok(OidcTokenResponse::new(
                     token_pair.access_token().to_string(),
