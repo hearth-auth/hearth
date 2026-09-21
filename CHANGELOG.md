@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **`${VAR}` is no longer substituted inside YAML comments (task 26.22)** — the scan had no idea what a
+  comment was, so commented-out lines documenting what an operator *could* set were substituted and, when
+  the variable was unset, warned about. `hearth config validate` reports those warnings as errors, so
+  `hearth.example.yaml` — the file `hearth config example` itself emits — failed validation. Measured on
+  the shipped example: **15 errors before, 3 after**, and all three that remain are genuine (the template
+  legitimately carries no key-encryption key, no TLS paths and no host key). A comment runs from an
+  unquoted `#` to end of line, and quote state is tracked across newlines so a `#` inside a multi-line
+  quoted scalar is not mistaken for one.
+
 - **A backup of nothing no longer reports success (task 26.26)** — `hearth backup create` ran
   `create_dir_all` on its `--data-dir`, so a typo built a brand-new empty store, exported zero realms,
   printed only `warning: no realms found to export` and **exited 0**; `hearth backup verify` then

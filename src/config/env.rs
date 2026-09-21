@@ -58,12 +58,55 @@ impl EnvVarWarning {
 /// prevents the server from crashing before tracing initialises.
 ///
 /// Literal `${}` sequences (empty variable name) are left unchanged.
+///
+/// # YAML comments are not substituted (task 26.22)
+///
+/// The scan used to be a plain character walk with no idea what a comment was,
+/// so a `${VAR}` inside a `#` comment was substituted and, when the variable
+/// was unset, warned about. `hearth config validate` reported those warnings as
+/// errors: `hearth.example.yaml` — which is also what `hearth config example`
+/// emits — failed with 22 errors, **20 of them raised by commented-out lines**
+/// that document what an operator *could* set.
+///
+/// A comment runs from an unquoted `#` (at the start of a line, or preceded by
+/// whitespace, as YAML requires) to the end of that line. Quote state is
+/// tracked across newlines so a `#` inside a multi-line quoted scalar is not
+/// mistaken for one.
 pub(crate) fn substitute_env_vars(input: &str) -> (String, Vec<EnvVarWarning>) {
     let mut result = String::with_capacity(input.len());
     let mut warnings = Vec::new();
     let mut chars = input.chars().peekable();
 
+    // YAML lexical state, minimal but enough to find a comment (task 26.22).
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_comment = false;
+    // A `#` only opens a comment at the start of a line or after whitespace.
+    let mut prev_was_space = true;
+
     while let Some(ch) = chars.next() {
+        if ch == '\n' {
+            in_comment = false;
+            prev_was_space = true;
+            result.push(ch);
+            continue;
+        }
+        if in_comment {
+            result.push(ch);
+            continue;
+        }
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double && prev_was_space => {
+                in_comment = true;
+                result.push(ch);
+                continue;
+            }
+            _ => {}
+        }
+        prev_was_space = ch.is_whitespace();
+
         if ch == '$' && chars.peek() == Some(&'{') {
             // Consume the '{'
             chars.next();
@@ -571,5 +614,70 @@ mod tests {
         let err = load_dotenv(&dotenv).expect_err("empty key should error");
         let display = format!("{err}");
         assert!(display.contains("key must not be empty"), "got: {display}");
+    }
+}
+
+#[cfg(test)]
+mod comment_substitution_tests {
+    use super::*;
+
+    /// Task 26.22 — a `${VAR}` inside a YAML comment must be left alone.
+    ///
+    /// The scan had no idea what a comment was, so commented-out lines that
+    /// document what an operator *could* set were substituted and warned about.
+    /// `hearth config validate` reports those warnings as errors, so
+    /// `hearth.example.yaml` — the file `hearth config example` itself emits —
+    /// failed with 22 errors, 20 of them raised by comments.
+    #[test]
+    fn a_variable_in_a_comment_is_neither_substituted_nor_warned_about() {
+        std::env::remove_var("HEARTH_TEST_26_22_UNSET");
+        let input =
+            "server:\n  # port: ${HEARTH_TEST_26_22_UNSET}\n  bind_address: \"127.0.0.1\"\n";
+
+        let (out, warnings) = substitute_env_vars(input);
+
+        assert_eq!(out, input, "a comment must pass through byte for byte");
+        assert!(
+            warnings.is_empty(),
+            "a commented-out variable is documentation, not configuration: {warnings:?}"
+        );
+    }
+
+    /// Control — a real value on the same line still substitutes.
+    ///
+    /// Without this, a change that skipped everything after the first `#`
+    /// anywhere would pass the test above while breaking every config that
+    /// uses a trailing comment.
+    #[test]
+    fn a_variable_before_a_trailing_comment_still_substitutes() {
+        std::env::set_var("HEARTH_TEST_26_22_SET", "8443");
+        let (out, warnings) =
+            substitute_env_vars("server:\n  port: ${HEARTH_TEST_26_22_SET}  # the TLS port\n");
+        std::env::remove_var("HEARTH_TEST_26_22_SET");
+
+        assert!(
+            out.contains("port: 8443"),
+            "the value before the comment must still be substituted; got: {out}"
+        );
+        assert!(out.contains("# the TLS port"), "the comment must survive");
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    /// Control — a `#` inside a quoted scalar is not a comment.
+    ///
+    /// Quote state is tracked across newlines for exactly this case; treating
+    /// it as a comment would silently stop substituting the rest of the file.
+    #[test]
+    fn a_hash_inside_a_quoted_value_does_not_open_a_comment() {
+        std::env::set_var("HEARTH_TEST_26_22_QUOTED", "indigo");
+        let (out, _) = substitute_env_vars(
+            "theme:\n  accent: \"#ff0000 is not a comment\"\n  name: ${HEARTH_TEST_26_22_QUOTED}\n",
+        );
+        std::env::remove_var("HEARTH_TEST_26_22_QUOTED");
+
+        assert!(
+            out.contains("name: indigo"),
+            "a '#' inside quotes must not stop substitution for the rest of the file; got: {out}"
+        );
     }
 }
