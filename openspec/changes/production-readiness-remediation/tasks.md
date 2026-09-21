@@ -290,7 +290,7 @@ found it, the audit piece, and the report's severity.
 
 - [ ] 23.1 Re-run P21, cluster-mode GA-readiness, to a passing critic: systematic cache enumeration, failover and split-brain test count, operator-documentation walkthrough (§7.2, §8.1 item 1)
 - [ ] 23.2 Re-run P30, public claim verification and performance methodology; 413 distinct citation pairs resolved cleanly, and it failed on one non-reproducing repro and two false negative results (§7.2, §8.1 item 2)
-- [ ] 23.3 Re-run P29, test-suite quality and the mutation spot-check; we cannot currently say whether this test suite can fail (§7.2, §8.1 item 3)
+- [x] 23.3 Re-run P29, test-suite quality and the mutation spot-check; we cannot currently say whether this test suite can fail (§7.2, §8.1 item 3)
 - [x] 23.4 Re-run P28, the seven SDKs: produce the per-SDK verify-or-decode-and-trust matrix; an SDK that decodes without verifying would be a critical finding (§7.2, §8.1 item 4)
 - [ ] 23.5 Re-run P20, backup round-trip and on-disk format versioning: round-trip diff, restore into a different version, truncated and corrupted backups (§7.2, §8.1 item 5)
 - [x] 23.6 Re-run P31, day-2 upgrade and the cold first-run; whether v1.6.x data can be read by the current build is unknown (§7.2, §8.1 item 6)
@@ -302,7 +302,7 @@ found it, the audit piece, and the report's severity.
 - [x] 23.12 Audit the email transports beyond the config and recovery paths (§7.3)
 - [x] 23.13 Audit the fuzz targets (§7.3)
 - [x] 23.14 Audit the load-test harness (§7.3)
-- [ ] 23.15 Run the mutation spot-check against a green baseline — §8.3's highest-value action (§8.3)
+- [x] 23.15 Run the mutation spot-check against a green baseline — §8.3's highest-value action (§8.3)
 - [ ] 23.16 Stand up a three-node cluster and enumerate every cache the state machine bypasses (§8.3)
 - [x] 23.17 Produce the per-SDK verify/decode matrix (§8.3)
 - [ ] 23.18 Run one official conformance suite — OIDC, SCIM or SAML (§8.3)
@@ -396,4 +396,4 @@ found it, the audit piece, and the report's severity.
 - [x] 26.33 `ci.yml` computes `fuzz-targets` and `bench-targets` filter outputs that no job reads (23.13 finding)
 - [x] 26.34 The gRPC RBAC admin path (`src/protocol/grpc/rbac_admin.rs`) still accepts a caller-supplied organisation context without checking the organisation's status, so a suspended organisation keeps its authority over gRPC while 26.16 closed the four HTTP/engine paths (26.16 follow-up)
 - [ ] 26.35 `validate_capability_token_inner` does not check agent status, so a capability token minted before an agent was deleted or revoked stays valid for its 5-minute tail. Documented as an explicit exception in `AGENT_AUTH.md` §1.2 rather than silently claimed as full revocation; close the gap or keep the exception deliberately (23.11 · finding A-6)
-- [ ] 26.36 The sibling password verifiers may carry the same unbounded-work-factor hole 26.31 closed for PBKDF2: `bcrypt::verify` takes its cost from the hash (the format allows up to 31, i.e. 2^31 rounds), and argon2/scrypt take `m=`/`ln=` from the PHC string, where a huge memory parameter is an allocation vector. NOT MEASURED — reasoned from the parsing path only. Measure each with an absurd parameter before deciding whether a ceiling is needed, and apply the same one-place treatment if so (26.31 follow-up)
+- [x] 26.36 The sibling password verifiers may carry the same unbounded-work-factor hole 26.31 closed for PBKDF2: `bcrypt::verify` takes its cost from the hash (the format allows up to 31, i.e. 2^31 rounds), and argon2/scrypt take `m=`/`ln=` from the PHC string, where a huge memory parameter is an allocation vector. NOT MEASURED — reasoned from the parsing path only. Measure each with an absurd parameter before deciding whether a ceiling is needed, and apply the same one-place treatment if so (26.31 follow-up)
