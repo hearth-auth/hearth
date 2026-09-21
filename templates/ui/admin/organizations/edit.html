@@ -52,7 +52,7 @@
       <select id="status" name="status"
               class="mt-1 input">
         <option value="Active" {% if form_status == "Active" %}selected{% endif %}>Active — members can sign in and the org accepts invitations.</option>
-        <option value="Suspended" {% if form_status == "Suspended" %}selected{% endif %}>Suspended — members are blocked from signing in via this org.</option>
+        <option value="Suspended" {% if form_status == "Suspended" %}selected{% endif %}>Suspended — org-scoped roles and permissions stop being granted, and no member can be added, promoted or invited. Realm-level access is unaffected.</option>
       </select>
     </div>
 

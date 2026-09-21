@@ -283,6 +283,30 @@ pub(crate) fn encode_org_extra_role(
     .into_bytes()
 }
 
+/// Scan prefix for every extra org role row in an organization, across all
+/// users. Used by the `delete_organization` cascade, which must sweep rows
+/// belonging to users who are no longer in the membership index
+/// (subsystem audit 2026-09-21, finding O-1).
+pub(crate) fn org_extra_role_org_scan_prefix(
+    realm_id: &RealmId,
+    org_id: &OrganizationId,
+) -> Vec<u8> {
+    format!(
+        "{ORG_ROLE_PREFIX}{}:{}:",
+        realm_id.as_uuid(),
+        org_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Scan prefix for every extra org role row in a realm, across all orgs and
+/// users. The key layout puts the org ahead of the user, so a realm-wide
+/// purge for one user cannot be expressed as a prefix and must scan and
+/// filter (subsystem audit 2026-09-21, finding O-1).
+pub(crate) fn org_extra_role_realm_scan_prefix(realm_id: &RealmId) -> Vec<u8> {
+    format!("{ORG_ROLE_PREFIX}{}:", realm_id.as_uuid()).into_bytes()
+}
+
 /// Scan prefix for all extra org roles for a user within a specific org.
 pub(crate) fn org_extra_role_scan_prefix(
     realm_id: &RealmId,

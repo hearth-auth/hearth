@@ -8074,6 +8074,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let org_slug_owned: Option<String> = if let Some(oid_str) = oid_ref {
             match oid_str.parse::<crate::core::OrganizationId>() {
                 Ok(org_id) => match self.get_organization(realm_id, &org_id) {
+                    // Suspension is a kill switch, not a hiring freeze: the
+                    // console promises that a suspended organisation blocks
+                    // its members from signing in through it, so refuse to
+                    // mint a token carrying this `oid` at all
+                    // (subsystem audit 2026-09-21, finding O-2).
+                    Ok(Some(org)) if org.status() != OrganizationStatus::Active => {
+                        return Err(IdentityError::OrganizationSuspended);
+                    }
                     Ok(Some(org)) => Some(org.slug().to_string()),
                     Ok(None) => {
                         tracing::warn!(
@@ -11895,7 +11903,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // 6. Delete org record
+        // 6. Cascade: sweep every extra org-scoped role row in this org.
+        //    Scanned by org rather than per-member so rows belonging to users
+        //    who are no longer in the membership index go too
+        //    (subsystem audit 2026-09-21, finding O-1).
+        self.rbac
+            .purge_org_roles_for_org(realm_id, org_id)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("rbac cascade failed during delete_organization: {e}"),
+            })?;
+
+        // 7. Delete org record
         let id_key = keys::encode_org_id(org_id);
         self.storage
             .delete(realm_id, &id_key)
@@ -12107,6 +12125,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .delete(realm_id, &rev_key)
             .map_err(Self::storage_err)?;
 
+        // Cascade: drop the member's extra org-scoped roles. `resolve_full`
+        // expands `rba:org_role:` rows without consulting membership, so a row
+        // left behind here is silently restored the moment the same `UserId`
+        // is re-added (subsystem audit 2026-09-21, finding O-1).
+        self.rbac
+            .purge_org_roles_for_user(realm_id, org_id, user_id)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("rbac cascade failed during remove_member: {e}"),
+            })?;
+
         self.record_audit(
             realm_id,
             None,
@@ -12128,6 +12156,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
+        // A suspended organisation must not hand out more authority than its
+        // members already hold. Removal stays available so an operator can
+        // still offboard people from a frozen tenant
+        // (subsystem audit 2026-09-21, finding O-2).
+        let org = self
+            .get_organization(realm_id, org_id)?
+            .ok_or(IdentityError::OrganizationNotFound)?;
+        if org.status() != OrganizationStatus::Active {
+            return Err(IdentityError::OrganizationSuspended);
+        }
         let fwd_key = keys::encode_membership_by_org(org_id, user_id);
         let membership_bytes = self
             .storage
@@ -12412,6 +12450,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &list_key, &[])
             .map_err(Self::storage_err)?;
 
+        // The invitation is the door into the organisation: record who opened
+        // it, for which address and at which role. Without this the only trace
+        // an accepted invitation leaves is a `GroupMemberAdded` event that
+        // names neither the inviter nor the invited address
+        // (subsystem audit 2026-09-21, finding O-4).
+        let ctx = AuditContext {
+            actor: Actor::User(request.invited_by.clone()),
+            metadata: Some(serde_json::json!({
+                "org_id": request.org_id.as_uuid().to_string(),
+                "email": email,
+                "role": format!("{:?}", request.role),
+                "expires_at_micros": expires_at.as_micros(),
+            })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::InvitationCreated,
+            "org_invitation",
+            &invitation_id.as_uuid().to_string(),
+        )?;
+
         Ok((invitation, plaintext_token))
     }
 
@@ -12473,7 +12533,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // Find or create user by email
-        let user = if let Some(u) = self.get_user_by_email(realm_id, invitation.email())? {
+        let existing_user = self.get_user_by_email(realm_id, invitation.email())?;
+        let user_created = existing_user.is_none();
+        let user = if let Some(u) = existing_user {
             u
         } else {
             // Auto-create user for unknown email
@@ -12504,6 +12566,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .write_batch(realm_id, &[(inv_key, updated_bytes)], &[dedup_key])
             .map_err(Self::storage_err)?;
+
+        // Record the redemption against the invitation, attributed to the user
+        // who now holds the membership — including the one auto-created above
+        // for an address that had no account (subsystem audit 2026-09-21,
+        // finding O-4).
+        let ctx = AuditContext {
+            actor: Actor::User(user.id().clone()),
+            metadata: Some(serde_json::json!({
+                "org_id": invitation.org_id().as_uuid().to_string(),
+                "role": format!("{:?}", invitation.role()),
+                "user_id": user.id().as_uuid().to_string(),
+                "user_created": user_created,
+            })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::InvitationAccepted,
+            "org_invitation",
+            &invitation_id.as_uuid().to_string(),
+        )?;
 
         Ok(membership)
     }
@@ -12546,6 +12629,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &dedup_key)
             .map_err(Self::storage_err)?;
+
+        // Revocation is a security control, so its record is mandatory:
+        // `InvitationRevoked` is `FailOperation` and this `?` is what honours
+        // that (subsystem audit 2026-09-21, finding O-4).
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "org_id": invitation.org_id().as_uuid().to_string(),
+                "role": format!("{:?}", invitation.role()),
+            })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::InvitationRevoked,
+            "org_invitation",
+            &invitation_id.as_uuid().to_string(),
+        )?;
 
         Ok(())
     }

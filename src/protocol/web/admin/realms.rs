@@ -443,6 +443,9 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::OrgCreated => "Organization Created",
         A::OrgUpdated => "Organization Updated",
         A::OrgDeleted => "Organization Deleted",
+        A::InvitationCreated => "Invitation Created",
+        A::InvitationAccepted => "Invitation Accepted",
+        A::InvitationRevoked => "Invitation Revoked",
         A::GroupCreated => "Group Created",
         A::GroupUpdated => "Group Updated",
         A::GroupDeleted => "Group Deleted",
@@ -592,6 +595,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         A::OrgCreated
         | A::OrgUpdated
         | A::OrgDeleted
+        | A::InvitationCreated
+        | A::InvitationAccepted
+        | A::InvitationRevoked
         | A::GroupCreated
         | A::GroupUpdated
         | A::GroupDeleted

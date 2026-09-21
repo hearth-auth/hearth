@@ -160,6 +160,34 @@ pub trait RbacEngine: Send + Sync {
         user_id: &UserId,
     ) -> Result<Vec<String>, RbacError>;
 
+    /// Deletes every extra org-scoped role row for one user in one
+    /// organization, returning how many rows were removed.
+    ///
+    /// Called by the identity layer from `remove_member`. Without it an
+    /// offboarded member's extra roles survive removal and are silently
+    /// restored the moment the same `UserId` is re-added, because
+    /// `resolve_permissions` expands the rows without consulting membership
+    /// (subsystem audit 2026-09-21, finding O-1). Idempotent.
+    fn purge_org_roles_for_user(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<usize, RbacError>;
+
+    /// Deletes every extra org-scoped role row in an organization, for every
+    /// user, returning how many rows were removed.
+    ///
+    /// Called by the identity layer from `delete_organization`. Sweeps the
+    /// whole org rather than iterating the membership index, so rows left
+    /// behind for users who are no longer members are removed too.
+    /// Idempotent.
+    fn purge_org_roles_for_org(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+    ) -> Result<usize, RbacError>;
+
     // ------- Roles -------
 
     /// Creates a new role in the given realm.
@@ -297,8 +325,9 @@ pub trait RbacEngine: Send + Sync {
         limit: usize,
     ) -> Result<Page<RoleSubject>, RbacError>;
 
-    /// Removes all role assignments where this user is the subject, and removes
-    /// the user from all groups within the realm.
+    /// Removes all role assignments where this user is the subject, removes
+    /// the user from all groups within the realm, and deletes every extra
+    /// org-scoped role row the user holds in any organization of the realm.
     ///
     /// Called by the identity layer during `delete_user` to keep RBAC state
     /// consistent. Idempotent: calling on a user with no assignments is a no-op.

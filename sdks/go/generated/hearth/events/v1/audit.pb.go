@@ -163,6 +163,10 @@ const (
 	// MFA lifecycle
 	AuditAction_AUDIT_ACTION_MFA_ENABLED  AuditAction = 117
 	AuditAction_AUDIT_ACTION_MFA_DISABLED AuditAction = 118
+	// Organization invitation lifecycle
+	AuditAction_AUDIT_ACTION_INVITATION_CREATED  AuditAction = 119
+	AuditAction_AUDIT_ACTION_INVITATION_ACCEPTED AuditAction = 120
+	AuditAction_AUDIT_ACTION_INVITATION_REVOKED  AuditAction = 121
 )
 
 // Enum value maps for AuditAction.
@@ -287,6 +291,9 @@ var (
 		116: "AUDIT_ACTION_AUDIT_LOG_PRUNED",
 		117: "AUDIT_ACTION_MFA_ENABLED",
 		118: "AUDIT_ACTION_MFA_DISABLED",
+		119: "AUDIT_ACTION_INVITATION_CREATED",
+		120: "AUDIT_ACTION_INVITATION_ACCEPTED",
+		121: "AUDIT_ACTION_INVITATION_REVOKED",
 	}
 	AuditAction_value = map[string]int32{
 		"AUDIT_ACTION_UNSPECIFIED":                     0,
@@ -408,6 +415,9 @@ var (
 		"AUDIT_ACTION_AUDIT_LOG_PRUNED":                116,
 		"AUDIT_ACTION_MFA_ENABLED":                     117,
 		"AUDIT_ACTION_MFA_DISABLED":                    118,
+		"AUDIT_ACTION_INVITATION_CREATED":              119,
+		"AUDIT_ACTION_INVITATION_ACCEPTED":             120,
+		"AUDIT_ACTION_INVITATION_REVOKED":              121,
 	}
 )
 
@@ -914,7 +924,7 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x12broken_at_event_id\x18\x02 \x01(\tH\x00R\x0fbrokenAtEventId\x88\x01\x01\x12\x1f\n" +
 	"\vevent_count\x18\x03 \x01(\x04R\n" +
 	"eventCountB\x15\n" +
-	"\x13_broken_at_event_id*\x8f#\n" +
+	"\x13_broken_at_event_id*\xff#\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19AUDIT_ACTION_USER_CREATED\x10\x01\x12\x1d\n" +
@@ -1035,7 +1045,10 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	" AUDIT_ACTION_SPIFFE_AUTH_SUCCESS\x10s\x12!\n" +
 	"\x1dAUDIT_ACTION_AUDIT_LOG_PRUNED\x10t\x12\x1c\n" +
 	"\x18AUDIT_ACTION_MFA_ENABLED\x10u\x12\x1d\n" +
-	"\x19AUDIT_ACTION_MFA_DISABLED\x10v2\xda\x01\n" +
+	"\x19AUDIT_ACTION_MFA_DISABLED\x10v\x12#\n" +
+	"\x1fAUDIT_ACTION_INVITATION_CREATED\x10w\x12$\n" +
+	" AUDIT_ACTION_INVITATION_ACCEPTED\x10x\x12#\n" +
+	"\x1fAUDIT_ACTION_INVITATION_REVOKED\x10y2\xda\x01\n" +
 	"\fAuditService\x12b\n" +
 	"\n" +
 	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/audit\x12f\n" +

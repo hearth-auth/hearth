@@ -109,6 +109,53 @@ impl EmbeddedRbacEngine {
         Ok(())
     }
 
+    /// Deletes every `rba:org_role:` row under `prefix`, optionally keeping
+    /// only those whose key names `only_user`, and returns the row count.
+    ///
+    /// The key layout is `rba:org_role:{realm}:{org}:{user}:{role}`, so a scan
+    /// over one org (or one org + user) is a plain prefix, while a realm-wide
+    /// purge for a single user has to filter the user segment out of each key.
+    /// Shared by the three cascade entry points
+    /// (subsystem audit 2026-09-21, finding O-1).
+    fn purge_org_role_rows(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        only_user: Option<&UserId>,
+    ) -> Result<usize, RbacError> {
+        let end = keys::prefix_end(prefix);
+        let entries = self.storage.scan(realm_id, prefix, &end)?;
+        let mut removed = 0usize;
+        for entry in &entries {
+            if let Some(user_id) = only_user {
+                if !Self::org_role_key_names_user(&entry.key, user_id) {
+                    continue;
+                }
+            }
+            self.write_delete(realm_id, &entry.key)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// True when `key` is an `rba:org_role:{realm}:{org}:{user}:{role}` row
+    /// whose `{user}` segment is `user_id`. Anything that does not parse is
+    /// reported as "not this user" so a malformed row is never deleted by a
+    /// user-scoped purge.
+    fn org_role_key_names_user(key: &[u8], user_id: &UserId) -> bool {
+        let Ok(text) = std::str::from_utf8(key) else {
+            return false;
+        };
+        let Some(rest) = text.strip_prefix(keys::ORG_ROLE_PREFIX) else {
+            return false;
+        };
+        // `{realm}:{org}:{user}:{role}` — role names may themselves contain
+        // `:`, so bound the split at four parts and read the third.
+        let mut parts = rest.splitn(4, ':');
+        let (_realm, _org, user) = (parts.next(), parts.next(), parts.next());
+        user.is_some_and(|u| u == user_id.as_uuid().to_string())
+    }
+
     /// Injects the [`SvBumper`] implementation. Called once at startup after
     /// the identity engine is fully constructed. Subsequent calls are silently
     /// ignored (OnceLock semantics).
@@ -789,6 +836,25 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(out)
     }
 
+    fn purge_org_roles_for_user(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<usize, RbacError> {
+        let prefix = keys::org_extra_role_scan_prefix(realm_id, org_id, user_id);
+        self.purge_org_role_rows(realm_id, &prefix, None)
+    }
+
+    fn purge_org_roles_for_org(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+    ) -> Result<usize, RbacError> {
+        let prefix = keys::org_extra_role_org_scan_prefix(realm_id, org_id);
+        self.purge_org_role_rows(realm_id, &prefix, None)
+    }
+
     // ---------- Roles ----------
 
     fn create_role(&self, realm_id: &RealmId, req: &CreateRoleRequest) -> Result<Role, RbacError> {
@@ -1404,6 +1470,13 @@ impl RbacEngine for EmbeddedRbacEngine {
                 .delete(realm_id, &keys::encode_gm_forward(&group_id, &member))?;
             self.write_delete(realm_id, &e.key)?;
         }
+
+        // Remove every extra org-scoped role the user holds anywhere in the
+        // realm. Without this the rows outlive the user and are silently
+        // reactivated when the same `UserId` is re-imported
+        // (subsystem audit 2026-09-21, finding O-1).
+        let org_role_prefix = keys::org_extra_role_realm_scan_prefix(realm_id);
+        self.purge_org_role_rows(realm_id, &org_role_prefix, Some(user_id))?;
 
         Ok(())
     }

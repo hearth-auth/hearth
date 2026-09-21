@@ -85,6 +85,30 @@ impl EmbeddedIdentityEngine {
 impl EmbeddedIdentityEngine {
     // ===== OAuth / OIDC trait method implementations =====
 
+    /// Narrows a caller-supplied org context to `None` unless the
+    /// organisation exists and is `Active`.
+    ///
+    /// Suspension is a kill switch, not a label: a frozen organisation must
+    /// stop granting its org-scoped assignments and extra roles through the
+    /// live-RBAC paths (`/introspect`, `POST /oauth/authorize`), exactly as
+    /// it stops minting org-context tokens. Realm-scoped authority is
+    /// untouched — the control kills the organisation, not the member's
+    /// account. Fails closed on an unknown org or a storage error
+    /// (subsystem audit 2026-09-21, finding O-2).
+    pub(crate) fn active_org_context(
+        &self,
+        realm_id: &RealmId,
+        org_id: Option<crate::core::OrganizationId>,
+    ) -> Option<crate::core::OrganizationId> {
+        let org_id = org_id?;
+        match self.get_organization(realm_id, &org_id) {
+            Ok(Some(org)) if org.status() == crate::identity::OrganizationStatus::Active => {
+                Some(org_id)
+            }
+            _ => None,
+        }
+    }
+
     // ===== OIDC / OAuth 2.0 =====
 
     pub(super) fn register_client_inner(
@@ -2848,12 +2872,14 @@ impl EmbeddedIdentityEngine {
                 let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
                 if let Ok(user_uuid) = uuid::Uuid::parse_str(user_uuid_str) {
                     let user_id = crate::core::UserId::new(user_uuid);
-                    let org_id: Option<crate::core::OrganizationId> =
+                    let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
+                        realm_id,
                         claims.oid.as_deref().and_then(|o| {
                             uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
                                 .ok()
                                 .map(crate::core::OrganizationId::new)
-                        });
+                        }),
+                    );
                     let resolved_live = self
                         .rbac
                         .resolve_permissions(&user_id, realm_id, org_id.as_ref(), None)
@@ -2966,12 +2992,14 @@ impl EmbeddedIdentityEngine {
         };
 
         // Parse optional org scoping.
-        let org_id: Option<crate::core::OrganizationId> =
+        let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
+            realm_id,
             request.organization_id.as_deref().and_then(|o| {
                 uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
                     .ok()
                     .map(crate::core::OrganizationId::new)
-            });
+            }),
+        );
 
         // Apply scope narrowing from the token if present.
         let scope_str = claims.scope.as_deref();

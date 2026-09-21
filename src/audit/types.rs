@@ -449,6 +449,27 @@ pub enum AuditAction {
     /// Emitted from `disable_mfa`. All existing sessions are revoked
     /// immediately after this event.
     MfaDisabled,
+    /// An organization invitation was issued to an email address.
+    ///
+    /// Emitted from `create_invitation`. `resource_id` is the invitation ID;
+    /// metadata carries `org_id`, `email` and `role`. Failure policy:
+    /// `LogOnly` — an invitation is a pending grant, and this matches every
+    /// other grant in this table (subsystem audit 2026-09-21, finding O-4).
+    InvitationCreated,
+    /// An organization invitation was redeemed and the invitee became a member.
+    ///
+    /// Emitted from `accept_invitation`. `resource_id` is the invitation ID;
+    /// metadata carries `org_id`, `role`, `user_id` and `user_created`, the
+    /// last of which is `true` when the address had no account and one was
+    /// provisioned. Failure policy: `LogOnly`.
+    InvitationAccepted,
+    /// A pending organization invitation was revoked before it was accepted.
+    ///
+    /// Emitted from `revoke_invitation`. `resource_id` is the invitation ID;
+    /// metadata carries `org_id`. Failure policy: `FailOperation` — like
+    /// every other revocation here, a security control must not be applied
+    /// without a record of it.
+    InvitationRevoked,
 }
 
 impl AuditAction {
@@ -514,6 +535,9 @@ impl AuditAction {
             Self::GroupMemberAdded,
             Self::GroupMemberRemoved,
             Self::GroupMemberRoleChanged,
+            Self::InvitationCreated,
+            Self::InvitationAccepted,
+            Self::InvitationRevoked,
             Self::RoleAssigned,
             Self::RoleRevoked,
             Self::OrphanedReferenceSkipped,
@@ -618,6 +642,9 @@ impl AuditAction {
             Self::OrgCreated => "org_created",
             Self::OrgUpdated => "org_updated",
             Self::OrgDeleted => "org_deleted",
+            Self::InvitationCreated => "invitation_created",
+            Self::InvitationAccepted => "invitation_accepted",
+            Self::InvitationRevoked => "invitation_revoked",
             Self::GroupCreated => "group_created",
             Self::GroupUpdated => "group_updated",
             Self::GroupDeleted => "group_deleted",
@@ -748,6 +775,9 @@ impl std::str::FromStr for AuditAction {
             "org_created" => Ok(Self::OrgCreated),
             "org_updated" => Ok(Self::OrgUpdated),
             "org_deleted" => Ok(Self::OrgDeleted),
+            "invitation_created" => Ok(Self::InvitationCreated),
+            "invitation_accepted" => Ok(Self::InvitationAccepted),
+            "invitation_revoked" => Ok(Self::InvitationRevoked),
             "group_created" => Ok(Self::GroupCreated),
             "group_updated" => Ok(Self::GroupUpdated),
             "group_deleted" => Ok(Self::GroupDeleted),
@@ -900,6 +930,11 @@ impl AuditAction {
             | Self::GroupUpdated
             | Self::GroupMemberAdded
             | Self::GroupMemberRoleChanged
+            // An invitation is a pending grant and an acceptance is a
+            // membership grant; every other grant here is LogOnly and the
+            // membership write has already landed by the time we append.
+            | Self::InvitationCreated
+            | Self::InvitationAccepted
             | Self::BulkUsersCreated
             | Self::ConsentGranted
             | Self::FederationLoginStarted
@@ -978,6 +1013,9 @@ impl AuditAction {
             | Self::OrgDeleted
             | Self::GroupDeleted
             | Self::GroupMemberRemoved
+            // Revoking an invitation is a security control; this table makes
+            // every revocation mandatory to record.
+            | Self::InvitationRevoked
             | Self::BulkUsersDisabled
             | Self::ConsentRevoked
             | Self::ConsentDenied

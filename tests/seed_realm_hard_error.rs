@@ -346,6 +346,24 @@ impl RbacEngine for FailSeedRbac {
         self.inner.purge_user_from_realm(realm_id, user_id)
     }
 
+    fn purge_org_roles_for_user(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<usize, RbacError> {
+        self.inner
+            .purge_org_roles_for_user(realm_id, org_id, user_id)
+    }
+
+    fn purge_org_roles_for_org(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+    ) -> Result<usize, RbacError> {
+        self.inner.purge_org_roles_for_org(realm_id, org_id)
+    }
+
     fn import_role(
         &self,
         realm_id: &RealmId,

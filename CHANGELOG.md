@@ -39,6 +39,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   background task now drains every realm's outbox on the `cleanup.interval_secs` cadence, with an
   immediate first tick so a request outstanding at shutdown is retried at start-up.
 
+- **Organization extra roles no longer outlive the membership that carried them (task 26.15)** —
+  an org-scoped extra role granted to a member was never deleted by anything: not removing the
+  member, not deleting the organization, not deleting the user. Permission resolution expands
+  those rows purely on `(realm, org, user)` and never checks that the user is still a member, so
+  an offboarded contractor silently regained every extra role they had held the moment the same
+  account was re-added — while the console showed only the new, lower role. Removing a member now
+  purges their extra roles for that org, deleting an organization sweeps every extra-role row it
+  holds (including rows for users no longer in its membership index), and deleting a user removes
+  their extra roles in every organization of the realm.
+
+- **Suspending an organization is now a kill switch (task 26.16)** — the admin console describes
+  `Suspended` as "members are blocked from signing in via this org", but the status was read in
+  exactly two places (`add_member` and `create_invitation`). A suspended tenant kept minting
+  org-context access tokens, kept answering `allowed: true` for its org-scoped permissions at
+  `POST /oauth/authorize` and `/introspect`, and kept reporting them at
+  `GET /me/permissions?org_id=…`; only new members and new invitations were stopped. Token
+  issuance carrying a non-`Active` `oid` is now refused with `OrganizationSuspended`, live RBAC
+  resolution drops a non-`Active` org context (realm-scoped authority is untouched), and changing
+  a member's role inside a suspended organization is refused. Removing a member stays available so
+  a frozen tenant can still be offboarded.
+
 ### Security
 - **The first admin's email-verification token is no longer written to the production log
   (task 26.25)** — it was logged in full at `WARN`, so anyone with log read access could finish the
@@ -481,6 +502,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   record, and audits (`agent_suspended`, `agent_reactivated`, `agent_revoked`). Revocation is
   terminal: reactivating a revoked agent answers `403`, and re-revoking one answers `200`. The
   realm comes from the caller's own credential, so naming an agent in another realm answers `404`.
+
+- **Organization invitations are now audited (task 26.17)** — the whole invitation lifecycle was
+  invisible: `create_invitation`, `accept_invitation` and `revoke_invitation` emitted no audit
+  event at all, so nothing recorded who invited which address at which role, that an invitation
+  was redeemed (auto-creating an account when the address was unknown), or that one was revoked.
+  Three new audit actions — `invitation_created`, `invitation_accepted` and `invitation_revoked` —
+  are filterable in the admin audit log, exposed over gRPC as `AUDIT_ACTION_INVITATION_CREATED`,
+  `AUDIT_ACTION_INVITATION_ACCEPTED` and `AUDIT_ACTION_INVITATION_REVOKED`, and carry the
+  organization, role and invited address in metadata. Revocation is recorded under the
+  fail-the-operation policy every other revocation in Hearth uses, so the control cannot be
+  applied without a record of it.
 
 
 ### Fixed
