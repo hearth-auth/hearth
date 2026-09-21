@@ -774,3 +774,81 @@ async fn create_approval_request_rejected_for_unknown_agent() {
         "expected AgentNotFound, got {err:?}"
     );
 }
+
+/// Task 26.35 (subsystem audit 2026-09-21, finding A-6) — a capability token
+/// must stop working the moment its agent does.
+///
+/// `validate_capability_token_inner` verified the signature, the audience, the
+/// expiry, the tool, the action, the caller binding and the single-use JTI —
+/// and never asked whether the agent still exists. Every sibling path does:
+/// AAT issue, AAT validate, AAT derive, approval create, approval approve,
+/// SPIFFE validation, both transaction-token subjects and both token-exchange
+/// subjects all refuse a non-`Active` agent.
+///
+/// So revoking an agent stopped everything except the one credential that is
+/// already a standing permission to act, for the rest of its five-minute life.
+/// `AGENT_AUTH.md` §1.2 documented that as a known exception rather than
+/// claiming full revocation, which was the honest thing to do — and this
+/// closes it, so the exception goes too.
+///
+/// The check sits BEFORE the `put_if_absent` that burns the JTI, for the same
+/// reason task 26.20 moved the DPoP binding check ahead of its JTI write: a
+/// token refused on a check must not spend its one-shot slot, or refusing it
+/// becomes a way to deny the rightful holder.
+#[tokio::test]
+async fn a_revoked_agents_capability_token_stops_working() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+    let agent_sub = agent_id.as_uuid().to_string();
+
+    // Two tokens from two approved requests: one to prove the flow works at
+    // all, one to use after the revocation. A single token could not
+    // distinguish "refused because revoked" from "refused because spent".
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let created = h
+            .identity()
+            .create_approval_request(
+                &realm_id,
+                &CreateApprovalRequestInput {
+                    agent_id: agent_id.clone(),
+                    tool: "send_email".to_string(),
+                    action: "invoke".to_string(),
+                    context: serde_json::json!({}),
+                    delegation_chain: vec![],
+                    expires_in_secs: None,
+                },
+            )
+            .expect("create approval request");
+        let response = h
+            .identity()
+            .approve_approval_request(&realm_id, &created.request_id, None)
+            .expect("approve");
+        tokens.push(response.capability_token.expect("capability token").token);
+    }
+
+    // Control: while the agent is active, the first token works.
+    assert!(
+        h.identity()
+            .validate_capability_token(&realm_id, &tokens[0], "send_email", "invoke", &agent_sub)
+            .is_ok(),
+        "precondition: an active agent's capability token must be honoured"
+    );
+
+    h.identity()
+        .revoke_agent(&realm_id, &agent_id, None)
+        .expect("revoke agent");
+
+    let after = h.identity().validate_capability_token(
+        &realm_id,
+        &tokens[1],
+        "send_email",
+        "invoke",
+        &agent_sub,
+    );
+    assert!(
+        matches!(after, Err(IdentityError::ToolApprovalRequired { ref tool }) if tool == "send_email"),
+        "a revoked agent's unspent capability token must be refused; got: {after:?}"
+    );
+}

@@ -660,6 +660,23 @@ impl EmbeddedIdentityEngine {
         let agent_uuid = uuid::Uuid::parse_str(&claims.sub).map_err(|_| deny())?;
         let agent_id = AgentId::new(agent_uuid);
 
+        // Task 26.35 (audit finding A-6): the agent must still be Active.
+        //
+        // Every sibling path already asks — AAT issue, validate and derive,
+        // approval create and approve, SPIFFE validation, both transaction-token
+        // subjects and both token-exchange subjects. This one did not, so
+        // revoking an agent stopped everything except the one credential that
+        // is already a standing permission to act, for the rest of its
+        // five-minute life. `AGENT_AUTH.md` §1.2 documented that as a known
+        // exception rather than claiming full revocation; this closes it.
+        //
+        // It sits BEFORE the `put_if_absent` below for the same reason task
+        // 26.20 moved the DPoP binding check ahead of its JTI write: a token
+        // refused on a check must not spend its one-shot slot, or refusing it
+        // becomes a way to deny the rightful holder.
+        self.require_active_agent(realm_id, &agent_id)
+            .map_err(|_| deny())?;
+
         // Single-use enforcement (M1 — TOCTOU hardening, HEA-1757): the previous
         // implementation did a `get` existence check followed by a later `put`,
         // leaving a window where two concurrent invocations of the same token

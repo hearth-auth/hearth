@@ -113,6 +113,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   where a library integrator would read it.
 
 ### Security
+- **A revoked agent's capability token stops working immediately (task 26.35)** — `validate_capability_token`
+  checked the signature, audience, expiry, tool, action, caller binding and single-use JTI, and never asked
+  whether the agent still existed. Every sibling path did, so revoking an agent stopped everything except the
+  one credential that is already a standing permission to act, for the rest of its five-minute life. The check
+  runs before the single-use JTI is burned, so a token refused this way does not spend its one-shot slot.
+  `AGENT_AUTH.md` §1.2 documented this as a known exception; the exception is withdrawn.
+
 - **bcrypt, argon2 and scrypt work factors are bounded too (task 26.36)** — task 26.31 bounded PBKDF2;
   leaving its siblings unbounded was the same defect. Measured against the pinned crate sources: bcrypt
   0.19.3 allows cost up to 31 (2^31 rounds — hours per attempt), argon2 0.5 sets both `MAX_M_COST` and
