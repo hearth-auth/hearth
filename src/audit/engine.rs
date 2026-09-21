@@ -544,6 +544,46 @@ impl EmbeddedAuditEngine {
 }
 
 impl AuditEngine for EmbeddedAuditEngine {
+    /// Drops this realm's cached chain head when the persisted head arrives
+    /// from another node (task 26.47).
+    ///
+    /// `try_lock`, not `lock`, and both branches are deliberate. Contention on
+    /// the realm's chain lock means an append is in flight *on this node* — so
+    /// this node is the leader and the row applying is its own write coming
+    /// back. Skipping it is correct: the cache is already ahead of the row.
+    /// Blocking instead would stall the Raft apply loop behind an fsync.
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
+        if key != keys::chain_head_key() {
+            return;
+        }
+        // Look the lock up without creating one: a realm this node has never
+        // appended for has nothing cached to invalidate.
+        let Ok(map) = self.chain_locks.lock() else {
+            return;
+        };
+        let Some(lock) = map.get(realm_id).map(Arc::clone) else {
+            return;
+        };
+        drop(map);
+        if let Ok(mut cached) = lock.try_lock() {
+            *cached = None;
+        }
+        drop(lock);
+    }
+
+    fn on_replicated_snapshot(&self) {
+        let Ok(map) = self.chain_locks.lock() else {
+            return;
+        };
+        let locks: Vec<Arc<Mutex<Option<ChainHead>>>> = map.values().map(Arc::clone).collect();
+        drop(map);
+        for lock in locks {
+            if let Ok(mut cached) = lock.try_lock() {
+                *cached = None;
+            }
+        }
+    }
+
     fn append(&self, request: &CreateAuditEvent) -> Result<AuditEvent, AuditError> {
         // Delegate to `with_pending_append`, passing a closure that enqueues only
         // the audit KV pairs (no merged caller data). This preserves the original
@@ -1304,6 +1344,110 @@ mod tests {
         );
         let realm_id = RealmId::generate();
         (engine, realm_id, clock)
+    }
+
+    // === Task 26.47: a replicated chain head drops the cached one ===========
+
+    /// Two engines over one storage engine stand in for two cluster nodes
+    /// whose state machines share a replicated key-space. It is deliberately
+    /// the weaker shape — one storage handle cannot distinguish "the row
+    /// replicated" from "there was nothing to replicate" — but the property
+    /// under test is purely about cache invalidation, and this is the shape
+    /// that isolates it.
+    fn two_engines_over_one_store() -> (
+        EmbeddedAuditEngine,
+        EmbeddedAuditEngine,
+        RealmId,
+        tempfile::TempDir,
+    ) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let a = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let b =
+            EmbeddedAuditEngine::new(storage as Arc<dyn StorageEngine>, clock as Arc<dyn Clock>);
+        (a, b, RealmId::generate(), temp_dir)
+    }
+
+    fn append_n(engine: &EmbeddedAuditEngine, realm_id: &RealmId, n: usize) {
+        for _ in 0..n {
+            engine
+                .append(&CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: "system".to_string(),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: uuid::Uuid::new_v4().to_string(),
+                    metadata: None,
+                })
+                .expect("append");
+        }
+    }
+
+    /// B-6 / task 26.47 — `chain_locks` caches each realm's signed
+    /// `ChainHead` and the append path prefers the cache, loading the
+    /// persisted head only when the cache is `None`. So once a node has
+    /// appended for a realm it never re-reads the head.
+    ///
+    /// Leadership flapping then forks the chain: node A leads and reaches
+    /// sequence N, leadership moves to B which advances the persisted head to
+    /// N+k, leadership returns to A — whose cache still says N — and A chains
+    /// its next event off a stale `prev_hash` with a sequence number that is
+    /// already taken.
+    ///
+    /// `on_replicated_row` is what the node's replicated-write observer calls
+    /// when the head row arrives from elsewhere; it drops the cache so the
+    /// next append reloads.
+    #[test]
+    fn a_replicated_chain_head_invalidates_this_node_s_cached_head() {
+        let (a, b, realm_id, _dir) = two_engines_over_one_store();
+
+        // A leads: its cache is now warm at sequence 2.
+        append_n(&a, &realm_id, 2);
+        // B leads: the persisted head advances well past what A cached.
+        append_n(&b, &realm_id, 5);
+
+        // The head row reaches A by replication.
+        a.on_replicated_row(&realm_id, &keys::chain_head_key());
+
+        // A leads again.
+        append_n(&a, &realm_id, 1);
+
+        assert!(
+            a.verify_integrity(&realm_id, None, None)
+                .expect("verify_integrity"),
+            "the chain does not verify: the event A appended after regaining leadership \
+             chained off a ChainHead five events stale, forking the HMAC chain and \
+             re-using sequence numbers that were already taken (task 26.47)"
+        );
+        assert_eq!(
+            a.count_events(&realm_id).expect("count_events"),
+            8,
+            "every appended event must survive exactly once"
+        );
+    }
+
+    /// A snapshot install replaces the whole key-space, so every cached head
+    /// must go — not just the realms whose head row happened to be observed.
+    #[test]
+    fn a_snapshot_install_drops_every_cached_chain_head() {
+        let (a, b, realm_id, _dir) = two_engines_over_one_store();
+
+        append_n(&a, &realm_id, 2);
+        append_n(&b, &realm_id, 5);
+
+        a.on_replicated_snapshot();
+        append_n(&a, &realm_id, 1);
+
+        assert!(
+            a.verify_integrity(&realm_id, None, None)
+                .expect("verify_integrity"),
+            "a cached ChainHead survived a snapshot install (task 26.47)"
+        );
     }
 
     // === Scenario: Security-critical mutations emit structured audit events ===

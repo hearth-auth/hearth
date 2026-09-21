@@ -5095,6 +5095,53 @@ fn config_validate_host_key_warning(config: &Config) -> Option<String> {
     ))
 }
 
+/// Describes the `HEARTH_MASTER_KEY` requirement a MULTI-NODE config carries
+/// that a single-node one does not (task 26.51).
+///
+/// Returns `None` for a single-node configuration, and a one-line note
+/// otherwise.
+///
+/// The key and the KEK wrap data that **replicates**, so every node of a
+/// cluster must hold a byte-identical `HEARTH_MASTER_KEY`. Provisioning three
+/// hosts independently — the obvious reading of "each node gets its own
+/// `hearth.yaml`" — produces three different master keys and a cluster whose
+/// nodes cannot decrypt one another's replicated rows. The string `HEARTH` did
+/// not occur in `docs/guides/clustering.md` at all; the guide has been
+/// corrected, and this closes the same gap in the validator.
+///
+/// [`config_validate_host_key_warning`] does not cover it. That check is
+/// satisfied by an existing `{data_dir}/hearth.host_key`, which is exactly the
+/// per-node, auto-generated key that is *wrong* in a cluster — so on a node
+/// that has already run once it stays silent on the very configuration that
+/// will fail.
+///
+/// A warning rather than an error, for the reason task 26.23 established: the
+/// key is a property of the machine, not of the file being validated, and
+/// validating a cluster config on a laptop is legitimate. Nor can this check
+/// compare the value against the other nodes' — which is why the note is
+/// emitted even when the variable *is* set.
+fn config_validate_cluster_master_key_warning(config: &Config) -> Option<String> {
+    let cluster = config.cluster.as_ref()?;
+    if cluster.peers.is_empty() {
+        return None;
+    }
+    let node_count = cluster.peers.len() + 1;
+    if std::env::var_os("HEARTH_MASTER_KEY").is_some() {
+        return Some(format!(
+            "HEARTH_MASTER_KEY is set, and this is a {node_count}-node cluster configuration. \
+             The master key and the KEK wrap data that REPLICATES, so the value must be \
+             byte-identical on every node — this check can only see the local one."
+        ));
+    }
+    Some(format!(
+        "HEARTH_MASTER_KEY is unset and this is a {node_count}-node cluster configuration. \
+         A cluster node must NOT auto-generate its own host key: the master key and the KEK \
+         wrap data that replicates, so a node with a different key cannot decrypt rows its \
+         peers wrote. Set one value for HEARTH_MASTER_KEY and export the SAME value on every \
+         node before starting any of them."
+    ))
+}
+
 /// Checks TLS cert/key/CA file existence and appends issues when files are missing.
 fn config_validate_tls_files(config: &Config, issues: &mut Vec<ValidationIssue>) {
     for (field, path_opt) in [
@@ -5141,6 +5188,13 @@ fn config_validate_print_summary(config: &Config) {
     if let Some(warning) = config_validate_host_key_warning(config) {
         println!();
         println!("  ! storage host key: {warning}");
+    }
+
+    // Task 26.51: a multi-node config carries a requirement a single-node one
+    // does not, and the host-key check above cannot see it.
+    if let Some(warning) = config_validate_cluster_master_key_warning(config) {
+        println!();
+        println!("  ! cluster master key: {warning}");
     }
 }
 
@@ -5911,6 +5965,91 @@ mod tests {
         assert!(
             warning.is_none(),
             "an existing hearth.host_key must satisfy it: {warning:?}"
+        );
+    }
+
+    // ── Cluster master key (task 26.51) ───────────────────────────────────
+
+    fn cluster_config_with_peers(n_peers: usize) -> hearth::config::ClusterConfig {
+        hearth::config::ClusterConfig {
+            node_id: 1,
+            peer_address: "10.0.0.1:8421".to_string(),
+            peers: (0..n_peers)
+                .map(|i| hearth::config::PeerConfig {
+                    id: (i + 2) as u64,
+                    address: format!("10.0.0.{}:8421", i + 2),
+                })
+                .collect(),
+            tls_cert_path: std::path::PathBuf::from("/etc/hearth/node.crt"),
+            tls_key_path: std::path::PathBuf::from("/etc/hearth/node.key"),
+            tls_ca_cert_path: std::path::PathBuf::from("/etc/hearth/ca.crt"),
+            read_lag_threshold_ms: None,
+        }
+    }
+
+    /// A multi-node config with no master key must be reported — and reported
+    /// even though an existing `hearth.host_key` satisfies the single-node
+    /// check, because a per-node auto-generated host key is precisely what is
+    /// wrong in a cluster.
+    #[test]
+    fn config_validate_reports_a_missing_cluster_master_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        std::fs::write(dir.path().join("hearth.host_key"), [0u8; 72]).expect("write host key");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+        config.cluster = Some(cluster_config_with_peers(2));
+
+        assert!(
+            config_validate_host_key_warning(&config).is_none(),
+            "fixture broken: the single-node check must be satisfied here, otherwise this \
+             test does not show the cluster-specific gap"
+        );
+        let warning = config_validate_cluster_master_key_warning(&config)
+            .expect("a multi-node config without a shared master key must be reported");
+        assert!(
+            warning.contains("HEARTH_MASTER_KEY") && warning.contains("SAME value on every"),
+            "the report must name the variable and the identical-across-nodes rule; got: \
+             {warning}"
+        );
+    }
+
+    /// Set is not the same as shared: the note still has to say so, because
+    /// nothing local can compare this node's value against its peers'.
+    #[test]
+    fn config_validate_still_notes_the_identical_key_rule_when_it_is_set() {
+        std::env::set_var("HEARTH_MASTER_KEY", "ab".repeat(32));
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.cluster = Some(cluster_config_with_peers(2));
+
+        let warning = config_validate_cluster_master_key_warning(&config);
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        let warning = warning.expect("a multi-node config must still carry the shared-key note");
+        assert!(
+            warning.contains("byte-identical on every node"),
+            "got: {warning}"
+        );
+    }
+
+    /// Control — a single-node config carries no such requirement.
+    #[test]
+    fn config_validate_does_not_mention_a_cluster_master_key_without_peers() {
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+
+        assert!(
+            config_validate_cluster_master_key_warning(&config).is_none(),
+            "a config with no cluster section must not be told about cluster keys"
+        );
+
+        config.cluster = Some(cluster_config_with_peers(0));
+        assert!(
+            config_validate_cluster_master_key_warning(&config).is_none(),
+            "a cluster section with no peers replicates to nobody"
         );
     }
 

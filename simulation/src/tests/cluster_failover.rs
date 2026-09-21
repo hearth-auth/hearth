@@ -480,6 +480,41 @@ async fn simulation_partition_and_convergence() {
         last_idx = cluster.write_kv(&[i], &[i * 10]).await;
     }
 
+    // ── The assertion that makes the partition load-bearing (task 26.48) ─────
+    //
+    // Without this the test proved nothing: it partitioned, wrote, healed and
+    // asserted convergence — and convergence holds just as well when no
+    // partition was ever injected. Rewriting `InMemoryPeer::is_partitioned` to
+    // return `false` unconditionally left it passing (`1 test run: 1 passed`).
+    //
+    // While the partition holds, the isolated follower cannot have received
+    // the post-partition entries: `append_entries` to it is refused at the
+    // network layer, and Raft followers never forward to one another. So this
+    // is deterministic, not a race — and it is exactly what a vacuous
+    // `is_partitioned()` breaks, because the entries would then arrive.
+    let isolated_applied = cluster.nodes[follower_idx]
+        .raft()
+        .metrics()
+        .borrow()
+        .last_applied
+        .as_ref()
+        .map(|id| id.index)
+        .unwrap_or(0);
+    assert!(
+        isolated_applied < last_idx,
+        "AC-1 FAIL: the partition is not being injected — the isolated follower \
+         (node {follower_id}) applied index {isolated_applied}, which has already reached the \
+         leader's {last_idx}. Check InMemoryPeer::is_partitioned"
+    );
+    for i in 5u8..10 {
+        assert_eq!(
+            cluster.read_from(follower_idx, &[i]),
+            None,
+            "AC-1 FAIL: key={i} was written after the partition yet is readable on the \
+             isolated follower (node {follower_id}) — the partition is not being injected"
+        );
+    }
+
     // Heal partition.
     cluster.heal(leader_id, follower_id);
 
@@ -518,6 +553,142 @@ async fn simulation_partition_and_convergence() {
             got,
             Some(vec![i * 10]),
             "AC-1 FAIL: token key={i} missing on follower (node {follower_id}) after heal"
+        );
+    }
+}
+
+// ── Split-brain: a minority leader cannot commit ─────────────────────────────
+
+/// Task 26.48 — before this test the repository contained **zero** split-brain
+/// tests. `simulation_partition_and_convergence` partitions the leader from
+/// *one* follower, so the leader keeps quorum throughout and the two halves
+/// never disagree about anything.
+///
+/// This isolates the leader into a **minority** — cut off from both followers
+/// of a three-node cluster — and asserts the three properties that together
+/// say "no split brain":
+///
+/// 1. The isolated leader cannot commit. Its write neither succeeds nor lands
+///    on the majority side.
+/// 2. The majority side elects a new leader, and it does so at a **strictly
+///    higher term** than the isolated node's. Two nodes may each believe they
+///    lead, but never in the same term — which is what makes the stale one's
+///    writes unable to commit.
+/// 3. After the partition heals, the isolated node's uncommitted entry is gone
+///    everywhere, overwritten by the real leader's log.
+#[tokio::test]
+async fn simulation_minority_leader_cannot_commit_and_terms_never_collide() {
+    let cluster = TestCluster::new(3, SnapshotPolicy::Never).await;
+
+    // Committed baseline, visible on all three nodes.
+    let mut baseline_idx = 0u64;
+    for i in 0u8..3 {
+        baseline_idx = cluster.write_kv(&[i], &[i * 10]).await;
+    }
+    cluster
+        .wait_applied(baseline_idx, Duration::from_secs(10))
+        .await;
+
+    let old_leader_pos = cluster.leader_idx().expect("leader");
+    let old_leader_id = cluster.nodes[old_leader_pos].id;
+    let old_term = cluster.nodes[old_leader_pos]
+        .raft()
+        .metrics()
+        .borrow()
+        .current_term;
+    let majority: Vec<usize> = (0..3).filter(|&i| i != old_leader_pos).collect();
+
+    // Isolate the leader from BOTH followers: it is now a minority of one.
+    for &pos in &majority {
+        cluster.partition(old_leader_id, cluster.nodes[pos].id);
+    }
+
+    // ── Property 1: the minority leader cannot commit ────────────────────────
+    const STALE_KEY: &[u8] = b"written-while-isolated";
+    let stale_write = tokio::time::timeout(
+        Duration::from_secs(3),
+        cluster.nodes[old_leader_pos]
+            .raft()
+            .client_write(RaftCommand::Put {
+                leader_timestamp: 0,
+                realm: cluster.realm.clone(),
+                key: STALE_KEY.to_vec(),
+                value: b"never-committed".to_vec(),
+            }),
+    )
+    .await;
+    assert!(
+        !matches!(stale_write, Ok(Ok(_))),
+        "SPLIT-BRAIN FAIL: a leader isolated from every peer committed a write \
+         (node {old_leader_id}) — a minority of one cannot reach quorum, so either the \
+         partition is not being injected or quorum is not being enforced"
+    );
+
+    // ── Property 2: the majority elects a new leader at a higher term ────────
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let new_leader_pos = loop {
+        if let Some(pos) = cluster.leader_idx_excluding(&[old_leader_id]) {
+            break pos;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "SPLIT-BRAIN FAIL: the majority side never elected a replacement leader \
+             within 10 s after the leader was isolated"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await; // AUDIT: justified-sleep: polling Raft leader election, no event-driven alternative
+    };
+    let new_leader_id = cluster.nodes[new_leader_pos].id;
+    let new_term = cluster.nodes[new_leader_pos]
+        .raft()
+        .metrics()
+        .borrow()
+        .current_term;
+    assert_ne!(
+        new_leader_id, old_leader_id,
+        "SPLIT-BRAIN FAIL: the isolated node is still being reported as leader by the \
+         majority side"
+    );
+    assert!(
+        new_term > old_term,
+        "SPLIT-BRAIN FAIL: the replacement leader (node {new_leader_id}) holds term \
+         {new_term}, which is not above the isolated node's term {old_term} — two nodes \
+         would then be leader for the same term"
+    );
+
+    // The uncommitted write never reached the majority side.
+    for &pos in &majority {
+        assert_eq!(
+            cluster.read_from(pos, STALE_KEY),
+            None,
+            "SPLIT-BRAIN FAIL: an uncommitted write from the isolated leader is readable \
+             on node {} of the majority side",
+            cluster.nodes[pos].id
+        );
+    }
+
+    // ── Property 3: healing erases the minority's uncommitted entry ──────────
+    for &pos in &majority {
+        cluster.heal(old_leader_id, cluster.nodes[pos].id);
+    }
+    let after_heal_idx = cluster
+        .write_kv_excluding(b"after-heal", b"committed", &[])
+        .await;
+    cluster
+        .wait_applied(after_heal_idx, Duration::from_secs(10))
+        .await;
+    for pos in 0..3 {
+        assert_eq!(
+            cluster.read_from(pos, STALE_KEY),
+            None,
+            "SPLIT-BRAIN FAIL: the isolated leader's uncommitted write survived the heal \
+             on node {}",
+            cluster.nodes[pos].id
+        );
+        assert_eq!(
+            cluster.read_from(pos, b"after-heal"),
+            Some(b"committed".to_vec()),
+            "SPLIT-BRAIN FAIL: node {} did not converge on the post-heal write",
+            cluster.nodes[pos].id
         );
     }
 }

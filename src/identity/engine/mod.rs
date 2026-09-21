@@ -885,6 +885,12 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // The identity engine is the node's single replicated-write observer,
         // so it forwards the row; the RBAC engine decides whether it cares.
         self.rbac.on_replicated_row(realm_id, key);
+        // The audit engine caches each realm's signed chain head and prefers
+        // it over the persisted one, so leader-to-follower-to-leader flapping
+        // forks the HMAC chain (task 26.47). Same shape as the RBAC forward:
+        // the identity engine is this node's single observer and the audit
+        // engine decides whether it cares about the key.
+        self.audit.on_replicated_row(realm_id, key);
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
@@ -903,6 +909,7 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // A role unassignment reaches a follower as a delete, not a put, so
         // this arm carries the same forward as `on_replicated_put`.
         self.rbac.on_replicated_row(realm_id, key);
+        self.audit.on_replicated_row(realm_id, key);
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
@@ -913,6 +920,7 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
 
     fn on_replicated_reset(&self) {
         self.rbac.on_replicated_snapshot();
+        self.audit.on_replicated_snapshot();
         if let Err(e) = self.populate_revoked_jti_cache() {
             tracing::error!(
                 error = %e,
@@ -2258,7 +2266,11 @@ impl EmbeddedIdentityEngine {
             "last_failure_micros": last,
         });
         if let Ok(bytes) = serde_json::to_vec(&blob) {
-            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+            // Node-local: per-node counters must persist on followers too
+            // (task 26.49).
+            if let Err(e) = self.storage.put_node_local(realm_id, &wal_key, &bytes) {
+                tracing::warn!(error = %e, "failed to persist rate-limit tracker");
+            }
         }
 
         count
@@ -2274,7 +2286,10 @@ impl EmbeddedIdentityEngine {
         drop(trackers);
 
         let wal_key = keys::encode_attempt_tracker(user_id);
-        let _ = self.storage.delete(realm_id, &wal_key);
+        // Node-local: see the matching persist call (task 26.49).
+        if let Err(e) = self.storage.delete_node_local(realm_id, &wal_key) {
+            tracing::warn!(error = %e, "failed to clear persisted rate-limit tracker");
+        }
     }
 
     /// Returns the effective `(max_attempts, lockout_micros)` for the given
@@ -2429,7 +2444,11 @@ impl EmbeddedIdentityEngine {
             "last_failure_micros": now,
         });
         if let Ok(bytes) = serde_json::to_vec(&blob) {
-            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+            // Node-local: per-node counters must persist on followers too
+            // (task 26.49).
+            if let Err(e) = self.storage.put_node_local(realm_id, &wal_key, &bytes) {
+                tracing::warn!(error = %e, "failed to persist rate-limit tracker");
+            }
         }
 
         if new_count == self.config.rate_limit.ip_max_attempts {
@@ -2586,7 +2605,11 @@ impl EmbeddedIdentityEngine {
             "last_failure_micros": now,
         });
         if let Ok(bytes) = serde_json::to_vec(&blob) {
-            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+            // Node-local: per-node counters must persist on followers too
+            // (task 26.49).
+            if let Err(e) = self.storage.put_node_local(realm_id, &wal_key, &bytes) {
+                tracing::warn!(error = %e, "failed to persist rate-limit tracker");
+            }
         }
     }
 
@@ -2597,7 +2620,10 @@ impl EmbeddedIdentityEngine {
         trackers.remove(&key);
         drop(trackers);
         let wal_key = keys::encode_mfa_tracker(user_id);
-        let _ = self.storage.delete(realm_id, &wal_key);
+        // Node-local: see the matching persist call (task 26.49).
+        if let Err(e) = self.storage.delete_node_local(realm_id, &wal_key) {
+            tracing::warn!(error = %e, "failed to clear persisted rate-limit tracker");
+        }
     }
 
     // ===== Magic link rate limiting helpers =====
@@ -2669,7 +2695,11 @@ impl EmbeddedIdentityEngine {
             "last_failure_micros": now,
         });
         if let Ok(bytes) = serde_json::to_vec(&blob) {
-            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+            // Node-local: per-node counters must persist on followers too
+            // (task 26.49).
+            if let Err(e) = self.storage.put_node_local(realm_id, &wal_key, &bytes) {
+                tracing::warn!(error = %e, "failed to persist rate-limit tracker");
+            }
         }
     }
 
@@ -2739,7 +2769,11 @@ impl EmbeddedIdentityEngine {
             "last_failure_micros": now,
         });
         if let Ok(bytes) = serde_json::to_vec(&blob) {
-            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+            // Node-local: per-node counters must persist on followers too
+            // (task 26.49).
+            if let Err(e) = self.storage.put_node_local(realm_id, &wal_key, &bytes) {
+                tracing::warn!(error = %e, "failed to persist rate-limit tracker");
+            }
         }
     }
 
@@ -2841,7 +2875,11 @@ impl EmbeddedIdentityEngine {
             "last_failure_micros": now,
         });
         if let Ok(bytes) = serde_json::to_vec(&blob) {
-            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+            // Node-local: per-node counters must persist on followers too
+            // (task 26.49).
+            if let Err(e) = self.storage.put_node_local(realm_id, &wal_key, &bytes) {
+                tracing::warn!(error = %e, "failed to persist rate-limit tracker");
+            }
         }
 
         if let Some(ip) = client_ip {

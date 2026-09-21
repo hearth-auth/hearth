@@ -10,26 +10,50 @@ Hearth includes a partial Raft consensus implementation (`src/cluster/` via `ope
 
 ## Known Defects in Experimental Cluster Mode
 
-### G-1 — A cold cluster cannot be bootstrapped
+### G-1 — A cold cluster could not be bootstrapped (FIXED)
 
 `serve` builds the identity engine over the cluster storage adapter, and that
-constructor **writes** the global signing key on a cold `data_dir`. In cluster
-mode the write is a Raft proposal, and a cluster that has not been bootstrapped
-has no leader, so the write returns `NotLeader` and start-up is fatal:
+constructor **writes** on a cold `data_dir` — the KEK-enrolment marker, the
+global signing key and the system-realm row. In cluster mode each is a Raft
+proposal, and a cluster that has not been bootstrapped has no leader, so the
+first one returned `NotLeader` and start-up was fatal on every node:
 
 ```text
 ERROR hearth: error: storage error: storage I/O error:
               raft: not the leader; redirect to unknown
 ```
 
-**Consequence:** the [Bootstrap Sequence](#bootstrap-sequence) below cannot be
-performed. Step 1 (start all nodes) never completes, so step 3 (POST
-`/admin/cluster/bootstrap`) is unreachable. This applies to every node of a
-fresh cluster, including the designated bootstrap node.
+The consequence was that the Bootstrap Sequence could not be performed at all:
+step 1 (start all nodes) never completed, so step 3 (POST
+`/admin/cluster/bootstrap`) was unreachable — including on the designated
+bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
+`reports/cluster-ga-readiness-2026-09-21.md`.
 
-Verified on three nodes on 2026-09-21; the transcript is in
-`reports/cluster-ga-readiness-2026-09-21.md`, and the defect is pinned by
-`tests/cluster_three_node_control_coherence.rs::identity_engine_construction_fails_on_an_unbootstrapped_cluster_node`.
+**Fixed in two halves** (task 26.46), both covered by
+`tests/cluster_three_node_control_coherence.rs::a_cold_three_node_cluster_starts_every_node_without_a_manual_bootstrap`:
+
+* **Self-initialisation.** The node with the **lowest node ID** in the
+  membership its own `cluster.peers` names initialises Raft at start-up, so a
+  leader is elected without an HTTP call. The other nodes stay pristine and
+  adopt the membership from the first `AppendEntries` they receive. Nothing new
+  is trusted — the membership, peer addresses and mTLS material all come from
+  that node's own `hearth.yaml`.
+* **A start-up write window.** Before building the identity engine, a node
+  waits until either it is the leader (its writes will land) or the
+  system-realm row has replicated to it (the leader finished the write set, so
+  there is nothing left to write). If neither happens within 120 s, start-up
+  fails with a message naming the likely causes.
+
+**Operational consequences.**
+
+* A cold cluster forms on its own. `POST /admin/cluster/bootstrap` still works
+  and now answers `409` on an already-initialised cluster; it remains the
+  escape hatch when the lowest-ID node is the one that is down.
+* Provision the lowest-ID node first, or at least start it alongside the
+  others. If it never starts, the remaining nodes wait out the 120 s window and
+  exit — bootstrap one of them explicitly instead.
+* A `cluster:` section with an empty `peers` list does **not** self-initialise;
+  there is nothing to replicate to. Use the endpoint.
 
 ### C-5 — Followers do not invalidate RBAC or session caches
 
@@ -103,9 +127,16 @@ Before enabling cluster mode in a test environment:
    | `security.key_encryption_key` (or `HEARTH_KEK`) | YAML or environment | **Yes** |
    | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` with a non-empty `server.trusted_proxies` | YAML | No — per node |
 
-   `HEARTH_MASTER_KEY` is **not** reported by `hearth config validate`, which
-   only checks the YAML. A configuration that validates clean can still fail at
-   start-up on the missing master key.
+   `hearth config validate` reports this on the success path for any
+   configuration with a non-empty `cluster.peers` — both when
+   `HEARTH_MASTER_KEY` is unset and, because nothing local can compare one
+   node's value against its peers', when it is set (task 26.51). It is a
+   warning, not an error: the key is a property of the machine, not of the file
+   being validated, so validating a cluster config on a laptop stays legal.
+   Note that the single-node host-key check is satisfied by an existing
+   `{data_dir}/hearth.host_key` — which is exactly the per-node, auto-generated
+   key that is *wrong* in a cluster — so the cluster note is emitted
+   independently of it.
 
 ---
 
@@ -201,11 +232,12 @@ cluster:
 
 ### Bootstrap Sequence
 
-> **⚠ This sequence does not currently work.** See
-> [G-1](#g-1--a-cold-cluster-cannot-be-bootstrapped): every node exits during
-> start-up with `raft: not the leader; redirect to unknown`, so step 3 is never
-> reached. The sequence below is the intended design, retained so the fix has a
-> target to restore.
+> **Usually unnecessary.** As of task 26.46 the lowest-ID node in the
+> configured membership initialises the cluster itself at start-up — see
+> [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). Follow this
+> sequence when that node is unavailable, or when you want to form the cluster
+> from a different node's membership. On an already-initialised cluster the
+> endpoint answers `409`.
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 

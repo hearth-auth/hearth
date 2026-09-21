@@ -35,7 +35,6 @@ pub fn registered_security_key_paths() -> impl Iterator<Item = &'static str> {
     security_keys::registered_paths()
 }
 pub use types::parse_duration_to_micros;
-pub use types::ClusterConfig;
 pub use types::{
     AbuseProvidersYaml, AdaptiveBackoffYaml, BotSignalYaml, CidrPolicyYaml, CrossRealmAggCapYaml,
     DistributedAttackDetectorYaml, EmailReputationProviderYaml, OutboundVolumeShieldYaml,
@@ -57,5 +56,6 @@ pub use types::{
     StorageSection, TlsMinVersionYaml, TokenYamlConfig, TurnstileYaml, TwilioConfig,
 };
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
+pub use types::{ClusterConfig, PeerConfig};
 pub use types::{Config, ValidationIssue};
 pub use validate::deferred_server_warnings;

@@ -28,11 +28,12 @@ use std::time::{Duration, Instant};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::cluster::{serve, ClusterEngine, ClusterStorageAdapter, HearthNode};
-use hearth::config::ClusterConfig;
+use hearth::config::{ClusterConfig, PeerConfig};
 use hearth::core::{Clock, FakeClock, RealmId, SessionId, Timestamp, UserId};
 use hearth::identity::{
-    CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
-    IdentityConfig, IdentityEngine, RealmConfig, RealmStatus, SessionContext, UpdateRealmRequest,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
+    EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, RealmConfig, RealmStatus,
+    SessionContext, UpdateRealmRequest,
 };
 use hearth::rbac::{
     AssignRoleRequest, CreateRoleRequest, EmbeddedRbacEngine, Permission, RbacEngine, RoleId,
@@ -108,11 +109,21 @@ struct ThreeNodeCluster {
 
 /// Builds the RBAC + identity stack over one node's Raft engine, exactly as
 /// `main.rs` does (including the `ReplicatedWriteObserver` wiring).
-fn app_stack_over(
-    cluster: &Arc<ClusterEngine>,
-    clock: &Arc<FakeClock>,
-) -> (Arc<EmbeddedRbacEngine>, Arc<EmbeddedIdentityEngine>) {
+type AppStack = (Arc<EmbeddedRbacEngine>, Arc<EmbeddedIdentityEngine>);
+
+fn app_stack_over(cluster: &Arc<ClusterEngine>, clock: &Arc<FakeClock>) -> AppStack {
     let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::clone(cluster)));
+    app_stack_over_storage(cluster, &storage, clock)
+}
+
+/// Same, over an already-built storage handle, so a caller that had to consult
+/// the handle first (`await_cold_start_window`) does not build a second one.
+fn app_stack_over_storage(
+    cluster: &Arc<ClusterEngine>,
+    storage: &Arc<dyn StorageEngine>,
+    clock: &Arc<FakeClock>,
+) -> AppStack {
+    let storage = Arc::clone(storage);
     let clock_dyn = Arc::clone(clock) as Arc<dyn Clock>;
     let rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
@@ -554,71 +565,114 @@ async fn assert_realm_suspension_binds(
     }
 }
 
-// ── Test 2: the documented bootstrap sequence cannot start a node ────────────
+// ── Test 2: a cold cluster starts every node with no manual bootstrap ────────
 
-/// `docs/guides/clustering.md` § Bootstrap Sequence says: start every node,
-/// wait for them to listen, then POST `/admin/cluster/bootstrap` to one of
-/// them. No node survives to step 3.
+/// The three-node start-up sequence, with the guide's bootstrap step removed
+/// on purpose — because before task 26.46 that step could never be reached.
 ///
 /// `serve` builds `EmbeddedIdentityEngine` over the `ClusterStorageAdapter`,
-/// and the constructor's first act is `load_or_persist_global_signing_key`,
-/// which **writes** on a cold data dir. In cluster mode that write is a Raft
-/// proposal, and before bootstrap there is no leader, so it returns
-/// `NotLeader` and start-up is fatal. Observed on all three nodes of a real
-/// three-node run:
+/// and that constructor **writes** on a cold data directory: the KEK-enrolment
+/// marker, the global signing key, and the system-realm row. In cluster mode
+/// each is a Raft proposal, and before bootstrap there is no leader, so the
+/// first one returned `NotLeader` and start-up was fatal on all three nodes —
+/// before `POST /admin/cluster/bootstrap`, which is served by a router that
+/// does not exist until the identity engine has been built, could be called:
 ///
 /// ```text
 /// ERROR hearth: error: storage error: storage I/O error:
 ///               raft: not the leader; redirect to unknown
 /// ```
 ///
-/// This is a characterisation test, not an approval: it pins the defect at
-/// the smallest reproducer (one un-bootstrapped node) so that a fix — lazy
-/// key creation, auto-initialisation from `cluster.peers`, or deferring the
-/// identity engine until a leader exists — flips it red and has to say so.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn identity_engine_construction_fails_on_an_unbootstrapped_cluster_node() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let tempdir = tempfile::tempdir().unwrap();
-    let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), 1);
-    let ports = pick_free_loopback_ports(1);
-    let data_dir = tempdir.path().join("node-1-data");
-    std::fs::create_dir_all(&data_dir).unwrap();
-    let storage_cfg = StorageConfig::dev(data_dir);
-    let inner = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
-    let cluster_cfg = ClusterConfig {
-        node_id: 1,
-        peer_address: format!("127.0.0.1:{}", ports[0]),
-        peers: vec![],
-        tls_cert_path: leaf_certs[0].0.clone(),
-        tls_key_path: leaf_certs[0].1.clone(),
-        tls_ca_cert_path: ca_path,
-        read_lag_threshold_ms: Some(30_000),
-    };
-    // Built, never bootstrapped — exactly the state every node is in between
-    // step 1 and step 3 of the documented sequence.
-    let cluster = Arc::new(
-        ClusterEngine::build_clustered(inner, &cluster_cfg, &storage_cfg)
-            .await
-            .unwrap(),
-    );
+/// The fix has two halves and this test fails if either is removed:
+///
+/// * `ClusterEngine::build_clustered` self-initialises a pristine node from
+///   the membership its own `cluster.peers` names, so a leader is elected
+///   without any HTTP call.
+/// * `EmbeddedIdentityEngine::await_cold_start_window` holds a node at the
+///   point `serve` reaches that constructor until either this node is the
+///   leader (its writes will land) or the system-realm row has replicated
+///   here (the leader did the write set and there is nothing left to do).
+///
+/// Three cold nodes, real `cluster.peers`, real mTLS gRPC, **no call to
+/// `initialize_cluster` anywhere**. The three start-up sequences run
+/// concurrently, as three processes would, so nothing depends on the eventual
+/// leader happening to be constructed first.
+/// Builds `n` cold cluster-mode nodes, each naming the same membership in its
+/// own `cluster.peers`, and starts each one's Raft peer server. Nothing
+/// bootstraps them.
+async fn cold_cluster_nodes(
+    tempdir: &TempDir,
+    n: usize,
+) -> (Vec<Arc<ClusterEngine>>, Vec<tokio::task::JoinHandle<()>>) {
+    let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), n);
+    let ports = pick_free_loopback_ports(n);
+    let addrs: Vec<String> = ports.iter().map(|p| format!("127.0.0.1:{p}")).collect();
 
-    let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(cluster));
-    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
-        1_700_000_000_000_000,
-    ))) as Arc<dyn Clock>;
+    let mut engines: Vec<Arc<ClusterEngine>> = Vec::with_capacity(n);
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let node_id = (i + 1) as u64;
+        let data_dir = tempdir.path().join(format!("node-{node_id}-data"));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage_cfg = StorageConfig::dev(data_dir);
+        let inner = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
+        // Every node names the same membership — itself plus the others —
+        // exactly as the guide's per-node YAML does.
+        let peers: Vec<PeerConfig> = (0..n)
+            .filter(|j| *j != i)
+            .map(|j| PeerConfig {
+                id: (j + 1) as u64,
+                address: addrs[j].clone(),
+            })
+            .collect();
+        let cluster_cfg = ClusterConfig {
+            node_id,
+            peer_address: addrs[i].clone(),
+            peers,
+            tls_cert_path: leaf_certs[i].0.clone(),
+            tls_key_path: leaf_certs[i].1.clone(),
+            tls_ca_cert_path: ca_path.clone(),
+            read_lag_threshold_ms: Some(30_000),
+        };
+        let engine = Arc::new(
+            ClusterEngine::build_clustered(inner, &cluster_cfg, &storage_cfg)
+                .await
+                .unwrap(),
+        );
+        let serve_engine = Arc::clone(&engine);
+        let serve_cfg = cluster_cfg.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = serve(&serve_cfg, serve_engine).await;
+        }));
+        engines.push(engine);
+    }
+    (engines, handles)
+}
+
+/// The start-up sequence `serve` performs on one node: wait until the cluster
+/// can accept this node's start-up writes, then build the app stack over the
+/// cluster adapter. Returns the global signing key's ID.
+async fn serve_start_sequence(
+    node_id: usize,
+    engine: &Arc<ClusterEngine>,
+    clock: &Arc<FakeClock>,
+) -> Result<String, String> {
+    let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::clone(engine)));
+    EmbeddedIdentityEngine::await_cold_start_window(&storage, Duration::from_secs(25))
+        .await
+        .map_err(|e| format!("node {node_id}: cold-start window never opened: {e}"))?;
+    let clock_dyn = Arc::clone(clock) as Arc<dyn Clock>;
     let rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
-        Arc::clone(&clock),
+        Arc::clone(&clock_dyn),
     ));
     let audit = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage),
-        Arc::clone(&clock),
+        Arc::clone(&clock_dyn),
     )) as Arc<dyn AuditEngine>;
-
-    let err = EmbeddedIdentityEngine::with_rbac(
+    let identity = EmbeddedIdentityEngine::with_rbac(
         storage,
-        clock,
+        clock_dyn,
         IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
             ..IdentityConfig::default()
@@ -626,17 +680,62 @@ async fn identity_engine_construction_fails_on_an_unbootstrapped_cluster_node() 
         rbac as Arc<dyn RbacEngine>,
         audit,
     )
-    .expect_err(
-        "identity-engine construction unexpectedly SUCCEEDED on an un-bootstrapped \
-         cluster node — if the global signing key is no longer written eagerly, the \
-         documented bootstrap sequence may now work; re-run the three-node walkthrough \
-         in reports/cluster-ga-readiness-2026-09-21.md and update this test",
+    .map_err(|e| format!("node {node_id}: identity engine construction failed: {e}"))?;
+    Ok(identity.signing_key().key_id().to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_cold_three_node_cluster_starts_every_node_without_a_manual_bootstrap() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tempdir = tempfile::tempdir().unwrap();
+    let (engines, handles) = cold_cluster_nodes(&tempdir, 3).await;
+
+    // Deliberately absent: the guide's step 3. Nothing calls
+    // `initialize_cluster` or `POST /admin/cluster/bootstrap`.
+
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let mut starts = Vec::with_capacity(3);
+    for (i, engine) in engines.iter().enumerate() {
+        let engine = Arc::clone(engine);
+        let clock = Arc::clone(&clock);
+        starts.push(tokio::spawn(async move {
+            serve_start_sequence(i + 1, &engine, &clock).await
+        }));
+    }
+
+    let mut key_ids = Vec::with_capacity(3);
+    for start in starts {
+        match start.await.expect("start-up task panicked") {
+            Ok(kid) => key_ids.push(kid),
+            Err(e) => {
+                for h in handles {
+                    h.abort();
+                }
+                panic!(
+                    "a cold cluster node could not complete `serve`'s start-up sequence \
+                     without a manual bootstrap: {e}"
+                );
+            }
+        }
+    }
+
+    // One global signing key, not three: every node either wrote it as leader
+    // or read the leader's replicated copy. A "make that write local-only"
+    // fix would produce three different key IDs and silently fork JWKS.
+    assert_eq!(
+        key_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1,
+        "the three nodes disagree on the global signing key: {key_ids:?}"
     );
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("not the leader"),
-        "expected the constructor's storage write to fail with NotLeader, got: {rendered}"
-    );
+
+    for h in handles {
+        h.abort();
+    }
 }
 
 // ── Test 3: the cache the analytical pass missed ─────────────────────────────
@@ -720,6 +819,103 @@ async fn an_rbac_grant_revoked_on_the_leader_stops_resolving_on_both_followers()
             node.id()
         );
     }
+
+    cluster.shutdown();
+}
+
+// ── Test 4: a follower can persist and clear its own trackers (task 26.49) ──
+
+/// The rate-limit trackers are per-node by design — each node counts what it
+/// saw — but their durable rehydration rows were written with
+/// `self.storage.put(...)` / `self.storage.delete(...)` and discarded with
+/// `let _ =`. In cluster mode both are Raft proposals, so on a follower both
+/// fail with `NotLeader` and the discard hides it: the follower can persist
+/// nothing, and — the dangerous half — a lockout row that reached it by
+/// replication can never be deleted there, so the next restart of that node
+/// rehydrates a lockout for a user who has already proved their password.
+///
+/// `put_node_local` / `delete_node_local` write straight to the node's own
+/// engine, which is what per-node state needed all along. The row no longer
+/// replicates at all, so the stale-lockout case cannot arise either.
+///
+/// Both directions are asserted, and each has its own mutation: reverting the
+/// persist to `storage.put` fails the first assertion, reverting the clear to
+/// `storage.delete` fails the second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_persists_and_clears_its_own_rate_limit_tracker_rows() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let cluster = ThreeNodeCluster::build(&clock).await;
+
+    let leader = cluster.leader();
+    let realm = leader
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: "lockout-clear".to_string(),
+            config: Some(RealmConfig::default()),
+        })
+        .unwrap();
+    let realm_id = realm.id().clone();
+    let user = leader
+        .identity
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: "lockout@clear.test".to_string(),
+                display_name: "Lockout".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let good = CleartextPassword::new(b"correct-horse-battery-staple".to_vec());
+    leader
+        .identity
+        .set_password(&realm_id, user.id(), &good)
+        .unwrap();
+    cluster.converge().await;
+
+    // `keys::encode_attempt_tracker` is `pub(crate)`; this mirrors its
+    // documented `rl:user:{user_uuid}` format. Drift makes the first assertion
+    // fail loudly rather than quietly asserting about a key nobody writes.
+    let tracker_key = format!("rl:user:{}", user.id().as_uuid()).into_bytes();
+
+    let follower = cluster.followers()[0];
+    let follower_id = follower.id();
+
+    // Two failed verifications served by the follower must persist there.
+    let bad = CleartextPassword::new(b"wrong-horse-battery-staple".to_vec());
+    for _ in 0..2 {
+        let _ = follower
+            .identity
+            .verify_password(&realm_id, user.id(), &bad);
+    }
+    let persisted = follower.cluster.get(&realm_id, &tracker_key).await.unwrap();
+    assert!(
+        persisted.is_some(),
+        "node {follower_id} counted two failed verifications but persisted nothing: the \
+         rehydration row is proposed through Raft and a follower is answered NotLeader, \
+         so the durable half of the rate limiter does not exist off the leader (26.49)"
+    );
+
+    // A successful verification on the same follower must clear it there.
+    assert!(
+        follower
+            .identity
+            .verify_password(&realm_id, user.id(), &good)
+            .unwrap(),
+        "the correct password did not verify on the follower"
+    );
+    assert_eq!(
+        follower.cluster.get(&realm_id, &tracker_key).await.unwrap(),
+        None,
+        "the durable lockout row on node {follower_id} survived a successful verification \
+         — a restart of that node would rehydrate a lockout for a user who has already \
+         authenticated (26.49)"
+    );
 
     cluster.shutdown();
 }

@@ -196,6 +196,11 @@ async fn test_destructive_delete_fails_when_audit_down() {
 
     struct FailingAuditEngine;
     impl hearth::audit::AuditEngine for FailingAuditEngine {
+        // Task 26.47: this double owns no chain-head cache, so there is
+        // nothing to invalidate.
+        fn on_replicated_row(&self, _realm_id: &hearth::core::RealmId, _key: &[u8]) {}
+        fn on_replicated_snapshot(&self) {}
+
         fn append(
             &self,
             _event: &hearth::audit::CreateAuditEvent,

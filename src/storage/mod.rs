@@ -88,6 +88,50 @@ pub trait StorageEngine: Send + Sync {
     /// Deletes a key for the given realm.
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError>;
 
+    /// Whether a write proposed on this handle right now would be accepted.
+    ///
+    /// Local storage always accepts one, hence the `true` default. In cluster
+    /// mode every write is a Raft proposal, so only the current leader accepts
+    /// one — a follower, or any node before a leader has been elected, answers
+    /// `NotLeader`. Start-up paths that would otherwise write on a cold data
+    /// directory consult this before attempting the write; see
+    /// [`crate::identity::EmbeddedIdentityEngine::await_cold_start_window`].
+    ///
+    /// This is advisory, not a lock: the leader can change between the check
+    /// and the write. It exists so start-up does not *begin* a write set that
+    /// cannot possibly succeed, not to make writes infallible.
+    fn accepts_writes(&self) -> bool {
+        true
+    }
+
+    /// Writes a row that belongs to **this node only** and must not replicate.
+    ///
+    /// Defaults to [`Self::put`], which is correct for local storage: there is
+    /// exactly one node. In cluster mode the cluster adapter overrides it to
+    /// write straight to the node's own engine instead of proposing through
+    /// Raft.
+    ///
+    /// Use it only for state that is per-node *by design* — the rehydration
+    /// rows behind the in-memory rate-limit trackers are the case this exists
+    /// for. Proposing those through Raft makes them fail with `NotLeader` on
+    /// every follower, which silently breaks both directions: a failure a
+    /// follower counted is never persisted, and a lockout row the leader
+    /// replicated can never be cleared by the follower that later sees the
+    /// successful attempt.
+    fn put_node_local(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), StorageError> {
+        self.put(realm_id, key, value)
+    }
+
+    /// Deletes a row written by [`Self::put_node_local`]. Same contract.
+    fn delete_node_local(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        self.delete(realm_id, key)
+    }
+
     /// Scans a range of keys for the given realm (half-open interval `[start, end)`).
     ///
     /// Returns entries sorted by key. Merges data across memtable and SST layers.

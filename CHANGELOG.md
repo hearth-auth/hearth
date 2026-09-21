@@ -230,6 +230,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   after the backup is not in the archive and restoring sessions would resurrect exactly what an operator
   revoked.
 
+- **A cold multi-node cluster starts without a manual bootstrap (task 26.46)** — `serve` built the identity
+  engine over the cluster storage adapter, and that constructor writes on a cold `data_dir` (the
+  KEK-enrolment marker, the global signing key, the system-realm row). In cluster mode each is a Raft
+  proposal, so on a cluster that has not been bootstrapped every node exited with `raft: not the leader;
+  redirect to unknown` — **before** `POST /admin/cluster/bootstrap`, which is served by a router that does
+  not exist until the identity engine is built, could ever be reached. Following `docs/guides/clustering.md`
+  exactly, a three-node cluster could not be started at all. The node with the lowest ID in the membership
+  its own `cluster.peers` names now initialises Raft at start-up, and every node waits until either it is
+  the leader or the system-realm row has replicated to it before running the start-up write set. The
+  bootstrap endpoint still works and answers `409` on an already-initialised cluster; it remains the escape
+  hatch when the lowest-ID node is down. Single-node mode takes none of these paths.
+
+- **A follower can persist and clear its own rate-limit lockout rows (task 26.49)** — the durable rows
+  behind the in-memory rate-limit trackers were written with `storage.put`/`storage.delete` and the result
+  discarded with `let _ =`. In cluster mode both are Raft proposals, so on a follower both failed with
+  `NotLeader` and the discard hid it: a failure the follower counted was never persisted, and a lockout row
+  the leader had replicated could never be cleared there — so after a successful authentication served by a
+  follower, the next restart of that node rehydrated a lockout for a user who had already proved their
+  password. These rows are per-node state by design and are now written to the node's own engine instead of
+  through Raft, with failures logged rather than dropped.
+
+- **Leadership changes no longer fork the audit hash chain (task 26.47)** — `EmbeddedAuditEngine` caches
+  each realm's signed chain head and the append path prefers the cache, so once a node had appended for a
+  realm it never re-read the persisted head. Node A leads to sequence N, leadership moves to B which
+  advances the head to N+k, leadership returns to A — whose cache still says N — and A chained its next
+  event off a stale `prev_hash` with sequence numbers already taken, so `audit verify` failed on the realm.
+  The cached head is now dropped when the head row arrives from another node, and when a snapshot install
+  replaces the key-space.
+
+- **`hearth config validate` reports the cluster master-key requirement (task 26.51)** — a multi-node
+  configuration needs a `HEARTH_MASTER_KEY` that is byte-identical on every node, because the master key and
+  the KEK wrap data that replicates. Nothing said so: the existing host-key check is satisfied by an
+  existing `{data_dir}/hearth.host_key`, which is precisely the per-node auto-generated key that is wrong in
+  a cluster. The success path now carries a note for any config with a non-empty `cluster.peers`, both when
+  the variable is unset and when it is set. A warning, not an error, following task 26.23 — the key is a
+  property of the machine, not of the file being validated.
+
 ### Security
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one
   single-use path with no advisory lock: the authorization-code exchange takes `code_exchange_lock` and

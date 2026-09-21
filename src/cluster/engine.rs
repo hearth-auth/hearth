@@ -204,6 +204,71 @@ impl ClusterEngine {
             );
         }
 
+        // ── Cold-cluster self-initialisation (task 26.46) ────────────────────
+        //
+        // `serve` builds the identity engine over this handle, and that
+        // constructor *writes* on a cold data directory (the KEK-enrolment
+        // marker, the global signing key, the system-realm row). In cluster
+        // mode each of those is a Raft proposal, so it needs a leader — and
+        // the only way to elect one was `POST /admin/cluster/bootstrap`, which
+        // is served by a router that does not exist until the identity engine
+        // has been built. Every node therefore died with
+        // `raft: not the leader; redirect to unknown` before the documented
+        // bootstrap step could be reached.
+        //
+        // Exactly ONE node self-initialises: the lowest node ID in the
+        // membership this node's own config names. That is the same shape as
+        // the documented "call bootstrap on one designated node", with the
+        // designation made deterministically from configuration instead of by
+        // an HTTP call that cannot be served yet. The other nodes stay
+        // pristine and adopt the membership from the first `AppendEntries`
+        // they receive — exactly what they do today under manual bootstrap.
+        //
+        // Having *every* node initialise is the obvious alternative and is
+        // worse twice over. openraft warns that concurrent `initialize()`
+        // with a *different* config "will result in split brain condition",
+        // so one node's `cluster.peers` typo would fork the cluster instead
+        // of merely failing to join. And even with identical config it makes
+        // the first election contested — three candidates, three terms — and
+        // a leader elected in that churn can be deposed part-way through the
+        // start-up write set it is serving. Measured: with all three
+        // initialising, this test hung on two runs in five.
+        //
+        // Nothing is trusted here that was not already trusted: the
+        // membership, the peer addresses and the mTLS material all come from
+        // this node's own configuration file, and no network surface is
+        // exposed to do it. `initialize_cluster` — and the
+        // `POST /admin/cluster/bootstrap` handler over it — still works, and
+        // is the escape hatch when the designated node is the one that is
+        // down.
+        //
+        // Skipped when `peers` is empty: that is a degenerate cluster-mode
+        // configuration with nothing to replicate to, and
+        // `initialize_cluster` remains the way to form it explicitly.
+        let designated_initialiser = initial_members.keys().copied().min();
+        if !config.peers.is_empty() && designated_initialiser == Some(config.node_id) {
+            match raft.is_initialized().await {
+                Ok(false) => match raft.initialize(initial_members.clone()).await {
+                    Ok(()) => info!(
+                        node_id = config.node_id,
+                        members = initial_members.len(),
+                        "cold cluster: Raft membership initialised from cluster.peers"
+                    ),
+                    Err(e) => warn!(
+                        node_id = config.node_id,
+                        error = %e,
+                        "cold cluster: self-initialisation refused; the cluster may need an \
+                         explicit POST /admin/cluster/bootstrap"
+                    ),
+                },
+                Ok(true) => {}
+                Err(e) => warn!(
+                    error = %e,
+                    "could not read Raft initialisation state; skipping self-initialisation"
+                ),
+            }
+        }
+
         info!(
             node_id = config.node_id,
             peer_address = %config.peer_address,
@@ -255,6 +320,21 @@ impl ClusterEngine {
     /// This node's own Raft node ID. `None` in single-node mode.
     pub fn node_id(&self) -> Option<u64> {
         self.self_node_id
+    }
+
+    /// Whether a replicated write proposed on this node right now would be
+    /// accepted.
+    ///
+    /// Always `true` in single-node mode. In cluster mode only the current
+    /// Raft leader accepts one — every other node, and every node before an
+    /// election has completed, answers [`ClusterError::NotLeader`]. Advisory
+    /// only: leadership can move between this call and the write.
+    pub fn accepts_writes(&self) -> bool {
+        let Some(raft) = self.raft.as_ref() else {
+            return true;
+        };
+        let metrics = raft.metrics().borrow().clone();
+        metrics.current_leader == Some(metrics.id)
     }
 
     /// Initial cluster membership map built from config at startup.
@@ -808,6 +888,37 @@ fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
 }
 
 impl StorageEngine for ClusterStorageAdapter {
+    fn accepts_writes(&self) -> bool {
+        self.engine.accepts_writes()
+    }
+
+    /// Bypasses Raft: the row is this node's own and must not replicate.
+    ///
+    /// The identity engine's rate-limit trackers are per-node by design — each
+    /// node counts what it saw — so their rehydration rows have to be writable
+    /// on a follower. Proposing them broke both directions silently: a
+    /// follower could persist nothing, and a lockout row the leader had
+    /// replicated could never be deleted by a follower that later saw the
+    /// successful attempt, so the next restart rehydrated a lockout for a user
+    /// who had already authenticated (task 26.49).
+    fn put_node_local(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.engine.inner.put(realm_id, key, value)
+    }
+
+    /// Bypasses Raft; see [`Self::put_node_local`].
+    fn delete_node_local(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.engine.inner.delete(realm_id, key)
+    }
+
     fn get(
         &self,
         realm_id: &RealmId,
