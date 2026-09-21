@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Security
+- **gRPC reflection now requires a valid admin token, not merely an `Authorization` header (task 26.9)** —
+  the gate checked only that the value started with `Bearer ` and was longer than that, so `Bearer x`
+  passed: no token lookup, no realm, no permission check. Reflection publishes the full service and
+  message schema of every admin RPC. It now runs the same check the admin RPCs run, so it needs an
+  `x-realm-id` header and an unexpired token carrying `hearth.admin`.
 - **Removed `arc-swap` from the authorization decision cache (task 26.1, CRITICAL)** — `arc-swap`
   1.9.2 corrupts the heap under the `load`+`rcu` pattern: a reader's guard drop can run a map's
   destructor while a writer still owns it. Measured in `src/rbac/resolution_cache.rs` at 3 failures

@@ -84,28 +84,35 @@ fn extract_grpc_peer_ip(req: &tonic::Request<()>) -> Option<IpAddr> {
     req.remote_addr().map(|a| a.ip())
 }
 
-/// WEB-009: gRPC interceptor requiring `Authorization: Bearer <token>` for
-/// reflection requests. Applied to the reflection service using
+/// WEB-009: gRPC interceptor requiring a **valid admin token** for reflection
+/// requests. Applied to the reflection service using
 /// `tonic::service::interceptor::InterceptedService` so only reflection RPC
 /// calls are gated; health, admin, and OAuth services are unaffected.
 ///
 /// Reflection is already production-gated by `--allow-reflection-in-prod`.
 /// This gate prevents anonymous schema enumeration on staging/debug instances.
+///
+/// # Task 26.9 — it used to check the header, not the token
+///
+/// The whole check was that the `authorization` value starts with `"Bearer "`
+/// and is longer than that, so `Bearer x` passed. Nothing looked the token up,
+/// no realm was consulted and no permission was checked — which is exactly the
+/// "anonymous schema enumeration" the doc comment above says the gate prevents.
+/// Reflection publishes the full service and message schema of every admin RPC,
+/// so it is a reconnaissance surface.
+///
+/// It now runs the same [`super::auth::authenticate_admin`] the admin RPCs run,
+/// which means reflection needs an `x-realm-id` header and an unexpired token
+/// carrying `hearth.admin` — and, as everywhere else on this surface, refuses a
+/// DPoP-bound token it cannot verify a proof for.
+///
+/// Returns a closure rather than being one, because the check needs the engine.
 pub fn grpc_reflection_auth_interceptor(
-    req: tonic::Request<()>,
-) -> Result<tonic::Request<()>, tonic::Status> {
-    let has_bearer = req
-        .metadata()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.starts_with("Bearer ") && v.len() > "Bearer ".len())
-        .unwrap_or(false);
-    if has_bearer {
+    state: GrpcState,
+) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
+    move |req: tonic::Request<()>| {
+        super::auth::authenticate_admin(req.metadata(), &state)?;
         Ok(req)
-    } else {
-        Err(tonic::Status::unauthenticated(
-            "reflection requires Authorization: Bearer <token>",
-        ))
     }
 }
 
@@ -325,7 +332,7 @@ where
             .build_v1()?;
         Some(tonic::service::interceptor::InterceptedService::new(
             svc,
-            grpc_reflection_auth_interceptor,
+            grpc_reflection_auth_interceptor(state.clone()),
         ))
     } else {
         None
