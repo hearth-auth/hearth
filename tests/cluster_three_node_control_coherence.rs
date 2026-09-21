@@ -179,6 +179,7 @@ impl ThreeNodeCluster {
                 // Generous: the lag monitor must not gate reads during the
                 // brief windows between a leader write and follower apply.
                 read_lag_threshold_ms: Some(30_000),
+                write_timeout_ms: None,
             };
             let engine = Arc::new(
                 ClusterEngine::build_clustered(storage, &cluster_cfg, &storage_cfg)
@@ -633,6 +634,7 @@ async fn cold_cluster_nodes(
             tls_key_path: leaf_certs[i].1.clone(),
             tls_ca_cert_path: ca_path.clone(),
             read_lag_threshold_ms: Some(30_000),
+            write_timeout_ms: None,
         };
         let engine = Arc::new(
             ClusterEngine::build_clustered(inner, &cluster_cfg, &storage_cfg)

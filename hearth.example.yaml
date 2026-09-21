@@ -929,6 +929,7 @@ onboarding:
 #   tls_key_path:  "/etc/hearth/certs/node1.key"   # required — node private key
 #   tls_ca_cert_path: "/etc/hearth/certs/ca.crt"   # required — CA shared by all nodes
 #   read_lag_threshold_ms: 500           # optional — follower lag threshold (default: 500)
+#   write_timeout_ms: 10000              # optional — bound on a replicated write (default: 10000)
 
 
 # =============================================================================

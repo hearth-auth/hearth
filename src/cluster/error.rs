@@ -18,6 +18,14 @@ pub enum TransportError {
     Tls(String),
     /// Internal error (e.g. poisoned mutex).
     Internal(String),
+    /// A fault injected by a test through
+    /// [`PeerFaults`](crate::cluster::network::PeerFaults): this peer is
+    /// currently isolated, so the RPC was never put on the wire.
+    ///
+    /// Never produced by a node built through
+    /// [`ClusterEngine::build_clustered`](crate::cluster::ClusterEngine::build_clustered),
+    /// which installs no injector at all.
+    InjectedPartition(u64),
 }
 
 impl fmt::Display for TransportError {
@@ -29,6 +37,12 @@ impl fmt::Display for TransportError {
             Self::Deserialize(e) => write!(f, "payload deserialize: {e}"),
             Self::Tls(e) => write!(f, "TLS: {e}"),
             Self::Internal(e) => write!(f, "internal: {e}"),
+            Self::InjectedPartition(peer) => {
+                write!(
+                    f,
+                    "injected partition: peer {peer} is isolated from this node"
+                )
+            }
         }
     }
 }

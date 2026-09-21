@@ -61,7 +61,7 @@ pub trait ReplicatedWriteObserver: Send + Sync {
 
 pub use engine::{ClusterBuildError, ClusterEngine, ClusterError, ClusterStorageAdapter};
 pub use log_store::{HearthLogReader, HearthLogStore};
-pub use network::HearthNetworkFactory;
+pub use network::{HearthNetworkFactory, PeerFaults};
 pub use server::{serve, IncomingRpcDispatch, NoopDispatch, RaftRpcHandler};
 pub use state_machine::HearthStateMachine;
 pub use types::{HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};

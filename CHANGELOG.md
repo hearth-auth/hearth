@@ -267,6 +267,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   the variable is unset and when it is set. A warning, not an error, following task 26.23 — the key is a
   property of the machine, not of the file being validated.
 
+- **`POST /admin/cluster/transfer-leadership` actually steps the leader down (task 26.57)** — the
+  documented graceful-shutdown call always answered `leadership transfer timed out after 5 s` on a healthy
+  three-node cluster, and leadership never moved. Three independent faults, each sufficient on its own: it
+  asked openraft to run an election with `trigger().elect()`, which that API documents as a no-op on a node
+  that is already leader; it never stopped heartbeating, so no follower's leader lease ever expired and
+  leadership could not move for any reason; and it waited 5 s, which is *below* openraft's own floor for a
+  follower to start an election (`leader_lease + election_timeout` = 4.5–6.0 s under Hearth's Raft config).
+  It now stops heartbeating, declines to stand in the resulting election, and waits 20 s, restoring both
+  runtime flags on every exit path. **It remains a step-down, not a targeted transfer** — openraft 0.9.25
+  exposes no API for handing leadership to a chosen peer, so `target_node_id` is a preference the server
+  cannot honour and `exact_target` will normally be `false`; `docs/guides/clustering.md` now says so, along
+  with the several-second leaderless window the call deliberately opens.
+
+- **A replicated write can no longer hang forever (task 26.58)** — `ClusterEngine` awaited
+  `Raft::client_write` with no timeout. A leader that lost contact with a quorum immediately after accepting
+  a write never resolved it: the entry sits in its own log, the quorum acknowledgement can never arrive, and
+  openraft 0.9 neither steps a leader down on a lost quorum nor emits a redirect — so the HTTP handler above
+  it waited indefinitely, holding a connection and, on the login path, an advisory lock. Writes are now
+  bounded by the new `cluster.write_timeout_ms` (default 10000). On expiry the caller is told the outcome is
+  **unknown** rather than failed, because the timeout does not cancel the proposal and Raft may still commit
+  it — re-read rather than assuming the write was lost.
+
 ### Security
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one
   single-use path with no advisory lock: the authorization-code exchange takes `code_exchange_lock` and
@@ -4397,6 +4419,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   needed, and `/docs` carries `default-src 'none'; script-src 'self'; ... frame-ancestors 'none'`.
   **Air-gapped and CSP-restricted deployments no longer need an outbound allowance for
   `unpkg.com`.**
+
+- **`cluster.write_timeout_ms`** — upper bound, in milliseconds, on how long a single replicated write waits
+  for quorum commit before the caller is told the outcome is unknown (default `10000`, task 26.58). Raise it
+  on a cluster whose commits are legitimately slow; a fixed bound would trade a liveness bug for an
+  availability one.
 
 
 ## [1.0.0] — 2026-06-21

@@ -5984,6 +5984,7 @@ mod tests {
             tls_key_path: std::path::PathBuf::from("/etc/hearth/node.key"),
             tls_ca_cert_path: std::path::PathBuf::from("/etc/hearth/ca.crt"),
             read_lag_threshold_ms: None,
+            write_timeout_ms: None,
         }
     }
 

@@ -249,6 +249,7 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 | `tls_key_path` | path | — | **Required.** Path to this node's PEM private key. |
 | `tls_ca_cert_path` | path | — | **Required.** Path to the CA certificate used to verify peer certificates. All nodes must share the same CA. |
 | `read_lag_threshold_ms` | integer | `500` | Maximum follower replication lag in milliseconds. Currently informational — see write routing note below. |
+| `write_timeout_ms` | integer | `10000` | Upper bound on how long a single replicated write waits for quorum commit before the caller is told the outcome is **unknown**. See the write-bound note below. |
 
 ```yaml
 cluster:
@@ -263,7 +264,10 @@ cluster:
   tls_key_path:  "/etc/hearth/certs/node1.key"
   tls_ca_cert_path: "/etc/hearth/certs/ca.crt"
   read_lag_threshold_ms: 500   # optional — omit to use the default
+  write_timeout_ms: 10000      # optional — omit to use the default
 ```
+
+**Write bound (`write_timeout_ms`):** a leader that loses contact with a quorum immediately after accepting a write would otherwise wait forever — the entry is already in its own log, the quorum acknowledgement can never arrive, and openraft 0.9 neither steps a leader down on a lost quorum nor emits a redirect. The write is therefore bounded; on expiry the caller gets an error saying the outcome is **unknown**, because the timeout does not cancel the proposal and Raft may still commit it. Re-read rather than assuming the write was lost. Raise the value on a cluster whose commits are legitimately slow; lowering it below your normal commit latency turns healthy writes into failures.
 
 **Write routing (H-3):** Writes that arrive on a follower currently return HTTP 500. There is no leader-redirect response. Route all write traffic exclusively to the leader node at the load balancer layer.
 
@@ -2196,6 +2200,7 @@ Every field's default value at a glance.
 | `server` | `trust_forwarded_proto` | `false` |
 | `cluster` | `peer_address` | `"127.0.0.1:8421"` |
 | `cluster` | `read_lag_threshold_ms` | `500` |
+| `cluster` | `write_timeout_ms` | `10000` |
 | `storage` | `data_dir` | `"./data"` |
 | `storage` | `wal_max_size_bytes` | `268435456` (256 MiB) |
 | `storage` | `memtable_flush_bytes` | `67108864` (64 MiB) |

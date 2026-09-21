@@ -177,24 +177,32 @@ pub(crate) async fn admin_cluster_status(
 pub(crate) struct TransferLeadershipRequest {
     /// Preferred target node ID for the new leader.
     ///
-    /// Accepted for forward-compatibility; openraft 0.9 has no targeted
-    /// transfer API so the election winner is not guaranteed to match this
-    /// value. Inspect `exact_target` in the response to verify.
+    /// A preference only. openraft 0.9.25 has no targeted-transfer API, so
+    /// the winner of the election this node stands down from is whichever
+    /// voter's timer fires first. Inspect `exact_target` in the response to
+    /// see whether it happened to match.
     pub target_node_id: Option<u64>,
 }
 
 /// `POST /admin/cluster/transfer-leadership`
 ///
-/// Gracefully transfers Raft leadership from this node to another. This node
-/// must be the current leader; returns 409 otherwise.
+/// Steps this node down so another voter takes over. This node must be the
+/// current leader; returns 409 otherwise.
 ///
-/// The `target_node_id` field is accepted for forward-compatibility but not
-/// enforced in Phase A (openraft 0.9 has no targeted transfer API). The
-/// `exact_target` field in the response indicates whether the winner matches
-/// the requested target.
+/// This is a **step-down, not a targeted transfer.** openraft 0.9.25 exposes
+/// no API for handing leadership to a chosen peer (`Trigger::transfer_leader`
+/// arrived in 0.10), so `target_node_id` is a preference the server cannot
+/// honour. The response reports which node actually won in `new_leader_id`
+/// and whether that was the requested one in `exact_target`, which will
+/// normally be `false`.
 ///
-/// **Availability note:** writes will fail with `NoLeader` for up to one
-/// election timeout (~1.5–3 s) during the step-down window.
+/// **Availability note:** this deliberately lets the followers' leader leases
+/// expire, so the cluster is without a leader for
+/// `leader_lease + election_timeout` — 4.5–6 s under Hearth's Raft config —
+/// and writes fail with `NoLeader`/`NotLeader` throughout. Do not call it
+/// during a write burst. The call itself waits up to 20 s (task 26.57; the
+/// previous 5 s bound was *below* openraft's own floor, so it reported
+/// failure on transfers that were about to succeed).
 ///
 /// Returns 503 when the server is running in single-node mode.
 pub(crate) async fn admin_cluster_transfer_leadership(

@@ -308,17 +308,42 @@ curl -s http://10.0.0.1:8420/admin/cluster/status \
 
 ### Graceful Shutdown
 
-Before shutting down the leader node, initiate a Raft leadership transfer to avoid an election timeout:
+Before shutting down the leader node, step it down so the cluster elects a
+replacement while the old leader is still reachable:
 
 ```bash
-# Transfer leadership before stopping the process
+# Step this node down before stopping the process
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/transfer-leadership \
   -H "Authorization: Bearer <system-admin-token>" \
   -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
+# => {"new_leader_id": 2, "exact_target": false}
 
 # Then stop the process
 systemctl stop hearth
 ```
+
+> **This is a step-down, not a targeted transfer.** openraft 0.9.25 — the
+> version Hearth pins — has no API for handing leadership to a *chosen* peer;
+> `Trigger::transfer_leader` arrived in 0.10. `target_node_id` is therefore a
+> preference the server cannot honour, and `exact_target` will normally be
+> `false`. Read `new_leader_id` to find out who actually took over.
+
+> **It is not instantaneous, and it is not free.** The endpoint works by
+> letting the followers' leader leases expire, so the cluster has **no leader**
+> for `leader_lease + election_timeout` — 4.5 to 6 seconds under Hearth's Raft
+> configuration — and every write during that window fails with
+> `NoLeader`/`NotLeader`. Do not call it during a write burst. The call returns
+> once a different node has won and this node has accepted that it no longer
+> leads, or fails after 20 s.
+
+> **Before task 26.57 this endpoint did not work at all.** On a healthy
+> three-node cluster it always answered `leadership transfer timed out after
+> 5 s` and leadership never moved: it asked openraft to run an election via
+> `trigger().elect()`, which is documented as a no-op on a node that is already
+> leader; it never stopped heartbeating, so no follower's lease ever expired;
+> and it waited 5 s, below openraft's own 4.5–6 s floor. If you are running a
+> build from before that fix, shut the leader down without this call and accept
+> the election timeout — the endpoint cannot help you.
 
 ---
 

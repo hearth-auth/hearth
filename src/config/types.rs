@@ -3974,9 +3974,24 @@ pub struct ClusterConfig {
     /// and the caller is redirected to the leader (default: 500).
     #[serde(default)]
     pub read_lag_threshold_ms: Option<u64>,
+    /// Upper bound, in milliseconds, on how long a single replicated write
+    /// waits for quorum commit before the caller is told the outcome is
+    /// unknown (default: 10000 — see
+    /// [`ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS`]).
+    ///
+    /// A leader that loses contact with a quorum immediately after accepting a
+    /// write waits forever otherwise: the entry is in its own log, the
+    /// acknowledgement can never arrive, and openraft 0.9 does not step a
+    /// leader down on a lost quorum, so no redirect is produced either (task
+    /// 26.58). Raise it on a cluster whose commits are legitimately slow.
+    #[serde(default)]
+    pub write_timeout_ms: Option<u64>,
 }
 
 impl ClusterConfig {
+    /// Default for [`ClusterConfig::write_timeout_ms`], in milliseconds.
+    pub const DEFAULT_WRITE_TIMEOUT_MS: u64 = 10_000;
+
     fn default_peer_address() -> String {
         "127.0.0.1:8421".to_string()
     }
