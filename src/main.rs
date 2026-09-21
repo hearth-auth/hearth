@@ -2245,12 +2245,15 @@ async fn run_serve(
         });
     }
 
-    let onboarding_service = Arc::new(OnboardingService::new(
-        Arc::clone(&identity_engine),
-        Arc::clone(&rbac_engine),
-        Arc::clone(&email_service),
-        data_dir.clone(),
-    ));
+    let onboarding_service = Arc::new(
+        OnboardingService::new(
+            Arc::clone(&identity_engine),
+            Arc::clone(&rbac_engine),
+            Arc::clone(&email_service),
+            data_dir.clone(),
+        )
+        .with_dev_mode(config.dev_mode),
+    );
 
     // Parse trusted proxy IPs early so both AppState (JSON API) and WebState
     // (browser UI) can use the same list for real client IP extraction.

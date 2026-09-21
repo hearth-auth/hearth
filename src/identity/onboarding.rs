@@ -42,6 +42,10 @@ use crate::rbac::{AssignRoleRequest, RbacEngine, Scope, Subject};
 /// Filename used for the one-time setup token inside `data_dir`.
 pub const SETUP_TOKEN_FILENAME: &str = ".setup_token";
 
+/// Filename used for the first admin's email-verification URL inside
+/// `data_dir`, written with `0600` when not in dev mode (task 26.25).
+pub const VERIFICATION_URL_FILENAME: &str = ".verification_url";
+
 /// Errors from the onboarding flow.
 ///
 /// Kept deliberately small — the setup handler maps each variant to an
@@ -241,6 +245,47 @@ fn log_and_notify_setup_url(
     }
 }
 
+/// Returns the verification URL that is safe to write to the log, persisting
+/// the full one to a `0600` file when not in dev mode.
+///
+/// # Task 26.25
+///
+/// The full URL — token and all — was logged at `warn` unconditionally, so
+/// anyone with log read access could finish the first operator account. Task
+/// 2.8 removed the *setup* token from production logs for exactly this reason;
+/// the verification token that completes the same account was still printed.
+///
+/// The log line exists so an operator can recover when email delivery fails,
+/// and that is worth keeping — so production does not simply drop it. The full
+/// URL goes to `<data_dir>/.verification_url` at `0600`, the same mechanism the
+/// setup token already uses, and the log names the file.
+///
+/// A write failure is not fatal: the URL is still returned to the caller, and
+/// the operator can reissue verification from the admin console.
+fn persist_and_redact_verification_url(
+    data_dir: &Path,
+    verification_url: &str,
+    dev_mode: bool,
+) -> String {
+    if dev_mode {
+        return verification_url.to_string();
+    }
+    let path = data_dir.join(VERIFICATION_URL_FILENAME);
+    if let Err(e) = write_file_mode_0600(&path, verification_url.as_bytes()) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "could not write the verification URL file; reissue verification from the \
+             admin console if email delivery failed"
+        );
+    }
+    // Everything up to the query string: the token lives in `?token=`.
+    verification_url.split_once('?').map_or_else(
+        || verification_url.to_string(),
+        |(base, _)| base.to_string(),
+    )
+}
+
 /// Compares a caller-supplied token against the on-disk token in constant time.
 ///
 /// Returns `Ok(())` only if the token file exists and the tokens match.
@@ -377,6 +422,9 @@ pub struct OnboardingService {
     rbac: Arc<dyn RbacEngine>,
     email: Arc<EmailService>,
     data_dir: PathBuf,
+    /// When false (the default), the first admin's email-verification token is
+    /// written to a `0600` file instead of the log (task 26.25).
+    dev_mode: bool,
 }
 
 impl OnboardingService {
@@ -393,7 +441,18 @@ impl OnboardingService {
             rbac,
             email,
             data_dir,
+            dev_mode: false,
         }
+    }
+
+    /// Marks this service as running in dev mode.
+    ///
+    /// The default is production, so a caller that forgets gets the safe
+    /// behaviour: the verification token goes to a `0600` file, not the log.
+    #[must_use]
+    pub fn with_dev_mode(mut self, dev_mode: bool) -> Self {
+        self.dev_mode = dev_mode;
+        self
     }
 
     /// Returns `true` iff no realm exists yet.
@@ -526,12 +585,23 @@ impl OnboardingService {
             token
         );
 
-        // 7. Log the link unconditionally so the operator can always recover
-        //    it, even if email delivery fails or the log transport is in use.
-        tracing::warn!(
-            verification_url = %verification_url,
-            "onboarding: verification link (check logs if email delivery fails)"
-        );
+        // 7. Make the link recoverable even if email delivery fails — but
+        //    keep the token out of the production log (task 26.25).
+        let logged_url =
+            persist_and_redact_verification_url(&self.data_dir, &verification_url, self.dev_mode);
+        if self.dev_mode {
+            tracing::warn!(
+                verification_url = %logged_url,
+                "onboarding: verification link (check logs if email delivery fails)"
+            );
+        } else {
+            tracing::warn!(
+                verification_url = %logged_url,
+                url_file = VERIFICATION_URL_FILENAME,
+                "onboarding: verification link written to the URL file in the data directory \
+                 (the token is not logged)"
+            );
+        }
 
         // 8. Retire the setup token. All critical state (user, password,
         //    RBAC role assignment, verification token) is persisted and the
@@ -773,5 +843,83 @@ mod tests {
         });
 
         assert!(out.contains(token), "dev log must carry the token: {out}");
+    }
+}
+
+#[cfg(test)]
+mod verification_url_redaction_tests {
+    use super::*;
+
+    const URL: &str = "https://auth.example.com/ui/admin/verify-email?token=oEhA5FTVICziutYT3oBZ";
+    const TOKEN: &str = "oEhA5FTVICziutYT3oBZ";
+
+    /// Task 26.25 — production must not write the verification token to the log.
+    ///
+    /// The full URL was logged at `warn` unconditionally, so anyone with log
+    /// read access could finish the first operator account. Task 2.8 removed
+    /// the *setup* token from production logs for exactly this reason; the
+    /// verification token that completes the same account was still printed.
+    #[test]
+    fn production_keeps_the_token_out_of_the_logged_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let logged = persist_and_redact_verification_url(dir.path(), URL, false);
+
+        assert!(
+            !logged.contains(TOKEN),
+            "the logged URL must not carry the token; got: {logged}"
+        );
+        assert!(
+            logged.ends_with("/ui/admin/verify-email"),
+            "the logged URL must still name the page the operator needs; got: {logged}"
+        );
+    }
+
+    /// The recovery path the log line existed for must survive the redaction.
+    ///
+    /// The original comment said the link is logged "so the operator can always
+    /// recover it, even if email delivery fails". Dropping the token from the
+    /// log without putting it anywhere would remove that, so the full URL goes
+    /// to a `0600` file instead — the same mechanism the setup token uses.
+    #[test]
+    fn production_writes_the_full_url_to_a_protected_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        persist_and_redact_verification_url(dir.path(), URL, false);
+
+        let path = dir.path().join(VERIFICATION_URL_FILENAME);
+        let written = std::fs::read_to_string(&path).expect("the URL file must be written");
+        assert_eq!(written, URL, "the file must carry the complete URL");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the URL file carries a live credential and must be owner-only; got {mode:o}"
+            );
+        }
+    }
+
+    /// Control — dev mode still logs the clickable link and writes no file.
+    ///
+    /// Without this, a change that redacted unconditionally would pass both
+    /// tests above while making the local first-run worse for no gain.
+    #[test]
+    fn dev_mode_still_logs_the_clickable_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let logged = persist_and_redact_verification_url(dir.path(), URL, true);
+
+        assert_eq!(logged, URL, "dev mode must keep the clickable URL");
+        assert!(
+            !dir.path().join(VERIFICATION_URL_FILENAME).exists(),
+            "dev mode must not leave a credential file behind"
+        );
     }
 }

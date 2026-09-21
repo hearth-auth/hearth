@@ -31,6 +31,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   immediate first tick so a request outstanding at shutdown is retried at start-up.
 
 ### Security
+- **The first admin's email-verification token is no longer written to the production log
+  (task 26.25)** — it was logged in full at `WARN`, so anyone with log read access could finish the
+  first operator account. Task 2.8 removed the *setup* token from production logs for exactly this
+  reason; the verification token that completes the same account was still printed. The log line
+  exists so an operator can recover when email delivery fails, so production does not drop it: the
+  full URL is written to `<data_dir>/.verification_url` with mode `0600`, the same mechanism the setup
+  token uses, and the log names the file and the token-free URL. `--dev` still logs the clickable link.
+
 - **A CIDR entry in `server.trusted_proxies` is now refused instead of silently discarded (task 26.24)** —
   the runtime parses each entry as a single IP address and drops anything else with a warning, which
   `docs/specs/CONFIGURATION.md` already stated, but the validator accepted CIDR. A list of ranges
