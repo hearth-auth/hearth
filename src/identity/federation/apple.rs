@@ -536,6 +536,7 @@ mod tests {
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: Some(AppleConfig {
                 team_id: "TEAM123456".to_string(),
                 key_id: "KEY123456".to_string(),

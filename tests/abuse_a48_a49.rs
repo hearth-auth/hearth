@@ -126,6 +126,7 @@ fn build_rig() -> Rig {
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: None,
             created_at: hearth::core::Timestamp::from_micros(0),
             updated_at: hearth::core::Timestamp::from_micros(0),

@@ -297,6 +297,7 @@ async fn reconcile_federation_wires_claim_mappings_to_idp() {
             idp_certificate_pem: None,
             sign_authn_requests: None,
             want_assertions_signed: None,
+            trust_asserted_email: None,
             attribute_map: None,
         },
     );
@@ -468,5 +469,80 @@ realms:
         client.post_logout_redirect_uris(),
         ["http://localhost:5173"],
         "YAML post_logout_redirect_uris must land on the reconciled client"
+    );
+}
+
+/// Task 25.27 — `trust_asserted_email` must survive the YAML → `IdpConfig` hop.
+///
+/// This repo has repeatedly shipped a config key that parsed, validated and
+/// reached the domain struct while no consumer ever read it. The consumer is
+/// pinned by `tests/saml.rs`; this pins the half in front of it, so the two
+/// together cover the whole path an operator's YAML actually travels.
+#[tokio::test]
+async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
+    use hearth::config::{FederationProviderYaml, FederationYamlConfig};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+
+    let mut providers = std::collections::HashMap::new();
+    for (name, trust) in [("corp-okta", Some(true)), ("corp-adfs", None)] {
+        providers.insert(
+            name.to_string(),
+            FederationProviderYaml {
+                kind: "saml".to_string(),
+                display_name: Some(name.to_string()),
+                entity_id: Some("https://idp.example".to_string()),
+                sso_url: Some("https://idp.example/sso".to_string()),
+                idp_certificate_pem: Some(
+                    "-----BEGIN CERTIFICATE-----\nQQ==\n-----END CERTIFICATE-----".to_string(),
+                ),
+                trust_asserted_email: trust,
+                ..FederationProviderYaml::default_oidc()
+            },
+        );
+    }
+
+    let mut realms = HashMap::new();
+    realms.insert(
+        "trustcorp".to_string(),
+        RealmYamlConfig {
+            federation: Some(FederationYamlConfig {
+                providers,
+                link_existing_accounts: None,
+            }),
+            ..RealmYamlConfig::default()
+        },
+    );
+
+    let config = config_with_realms(Some(realms));
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+
+    let realm = identity
+        .get_realm_by_name("trustcorp")
+        .expect("lookup realm")
+        .expect("trustcorp realm exists");
+    let idps = identity.list_idps(realm.id()).expect("list idps");
+
+    let okta = idps
+        .iter()
+        .find(|c| c.name == "corp-okta")
+        .expect("corp-okta idp");
+    assert!(
+        okta.trust_asserted_email,
+        "trust_asserted_email: true in YAML must reach the connector, or the \
+         operator's opt-in is a no-op and SAML account linking stays unreachable"
+    );
+
+    // Control: an omitted key must stay off, so the assertion above cannot
+    // pass because the field defaults to true.
+    let adfs = idps
+        .iter()
+        .find(|c| c.name == "corp-adfs")
+        .expect("corp-adfs idp");
+    assert!(
+        !adfs.trust_asserted_email,
+        "an omitted trust_asserted_email must default to false: turning it on \
+         lets the upstream IdP claim any address in the realm"
     );
 }

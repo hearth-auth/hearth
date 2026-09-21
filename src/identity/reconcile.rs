@@ -1614,6 +1614,7 @@ fn build_idp_config(
         leeway_seconds: cap_federation_leeway(provider.leeway_seconds),
         // Non-SAML connectors don't consume this flag.
         want_assertions_signed: false,
+        trust_asserted_email: false,
         apple: apple_cfg,
         created_at: now,
         updated_at: now,
@@ -1723,6 +1724,7 @@ fn build_saml_idp_config(
         // field is required in the shared struct — use the default value.
         leeway_seconds: crate::identity::federation::IdpConfig::default_leeway_seconds(),
         want_assertions_signed: provider.want_assertions_signed.unwrap_or(false),
+        trust_asserted_email: provider.trust_asserted_email.unwrap_or(false),
         apple: None,
         created_at: now,
         updated_at: now,

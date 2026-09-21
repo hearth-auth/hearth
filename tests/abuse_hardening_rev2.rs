@@ -117,6 +117,7 @@ fn make_idp_config(leeway_seconds: u32) -> hearth::identity::federation::IdpConf
         claim_mappings: Default::default(),
         leeway_seconds,
         want_assertions_signed: false,
+        trust_asserted_email: false,
         apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),

@@ -44,6 +44,7 @@ fn sample_cfg() -> IdpConfig {
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
         want_assertions_signed: false,
+        trust_asserted_email: false,
         apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),

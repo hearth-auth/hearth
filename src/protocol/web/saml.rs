@@ -168,6 +168,7 @@ pub async fn sp_acs(
         idp_certificates_pem: vec![idp_cfg.client_secret.expose_secret().to_string()],
         sign_authn_requests: false,
         want_assertions_signed: idp_cfg.want_assertions_signed,
+        trust_asserted_email: idp_cfg.trust_asserted_email,
         attribute_map: idp_cfg.claim_mappings.clone(),
     };
 

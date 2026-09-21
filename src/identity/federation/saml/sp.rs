@@ -129,8 +129,12 @@ impl SamlSpService {
             }
         }
 
-        let identity =
-            assertion_to_external_identity(idp.idp_id.clone(), &assertion, &idp.attribute_map)?;
+        let identity = assertion_to_external_identity(
+            idp.idp_id.clone(),
+            &assertion,
+            &idp.attribute_map,
+            idp.trust_asserted_email,
+        )?;
         let session_index = assertion.session_index.clone();
         Ok((identity, session_index, assertion))
     }
@@ -142,6 +146,7 @@ fn assertion_to_external_identity(
     idp_id: crate::core::IdpId,
     a: &Assertion,
     map: &AttributeMap,
+    trust_asserted_email: bool,
 ) -> Result<ExternalIdentity, IdentityError> {
     let nameid = a.subject_name_id.as_deref().unwrap_or("").to_string();
 
@@ -155,11 +160,18 @@ fn assertion_to_external_identity(
         idp_id,
         external_sub,
         email,
-        // SAML doesn't carry a `email_verified` signal; enterprises treat
-        // SAML-asserted emails as trustworthy since they come from a
-        // trusted corporate IdP. Still, default to false and require the
-        // caller to opt into auto-link via YAML.
-        email_verified: false,
+        // SAML carries no `email_verified` signal, so the operator opts in
+        // per connector with `trust_asserted_email` (task 25.27). The doc
+        // comment here used to promise that opt-in while hard-coding `false`,
+        // and the consequence was not merely "auto-link is off": with this
+        // false, `is_linkable_by_email` is false for EVERY SAML identity, so
+        // `Confirm` and `Auto` alike are unreachable and a SAML login for an
+        // existing local user silently provisions a second account under a
+        // synthetic address.
+        //
+        // It stays `false` by default because turning it on lets the upstream
+        // IdP claim any address in the realm.
+        email_verified: trust_asserted_email,
         display_name,
         first_name,
         last_name,
@@ -207,7 +219,7 @@ mod tests {
             destination: None,
             bearer_confirmations: Vec::new(),
         };
-        let ext = assertion_to_external_identity(IdpId::generate(), &a, &m).expect("map");
+        let ext = assertion_to_external_identity(IdpId::generate(), &a, &m, false).expect("map");
         assert_eq!(ext.email, "alice@example.com");
     }
 
@@ -272,6 +284,7 @@ mod tests {
             idp_certificates_pem: vec![cert_pem],
             sign_authn_requests: false,
             want_assertions_signed,
+            trust_asserted_email: false,
             attribute_map: BTreeMap::new(),
         }
     }

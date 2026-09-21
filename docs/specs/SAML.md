@@ -183,6 +183,38 @@ but consumes another. Hearth defends structurally:
   Response-level-only signature MUST be rejected. When it is unset, Hearth falls
   back to accepting a valid Response-level signature.
 
+### 4.2 Account linking and the asserted email
+
+SAML carries no `email_verified` signal, so Hearth treats a SAML-asserted
+address as **unverified by default**. `ExternalIdentity::is_linkable_by_email`
+is then false, and `FederationService::resolve_identity` skips its whole
+email-match arm: **both** `link_existing_accounts` modes — `confirm` and
+`auto` — are unreachable for SAML. A SAML login by a user who already exists
+locally falls through to just-in-time provisioning, which detects the address
+collision and creates a **second** account under a synthetic address.
+
+An operator opts in per connector:
+
+```yaml
+realms:
+  corp:
+    federation:
+      providers:
+        corp-okta:
+          type: saml
+          trust_asserted_email: true   # default: false
+```
+
+With it `true`, the address the IdP asserts counts as verified and the realm's
+`link_existing_accounts` mode applies as it does for OIDC. Turn it on only for
+an IdP that owns its users' mailboxes: it lets that IdP claim **any** address
+in the realm. The key is ignored for non-SAML connectors, which carry the
+upstream's own `email_verified` claim.
+
+(Tests: `saml_confirm_link_is_reachable_only_when_the_asserted_email_is_trusted`
+proves the consumer; `reconcile_federation_carries_trust_asserted_email_to_the_idp`
+proves the YAML reaches it.)
+
 ## 5. Assertion validation
 
 After signature verification, `extract_and_validate_assertion` enforces, in

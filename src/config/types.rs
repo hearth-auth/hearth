@@ -3179,6 +3179,20 @@ pub struct FederationProviderYaml {
     /// Whether Hearth requires Assertion-level signatures.
     #[serde(default)]
     pub want_assertions_signed: Option<bool>,
+    /// Whether to trust the email this IdP asserts as **verified**.
+    ///
+    /// SAML carries no `email_verified` signal, so Hearth defaults to
+    /// treating a SAML-asserted email as unverified. That makes every
+    /// email-based linking mode unreachable: a SAML login for a user who
+    /// already exists locally falls through to just-in-time provisioning and
+    /// silently creates a SECOND account under a synthetic address.
+    ///
+    /// Set this to `true` only for a corporate IdP that owns its users'
+    /// mailboxes, because it lets that IdP claim any address in the realm.
+    /// Ignored for non-SAML connectors, which carry the upstream's own
+    /// `email_verified` claim (task 25.27).
+    #[serde(default)]
+    pub trust_asserted_email: Option<bool>,
     /// Attribute mapping: Hearth field → SAML attribute URI.
     #[serde(default)]
     pub attribute_map: Option<std::collections::BTreeMap<String, String>>,
@@ -3209,6 +3223,7 @@ impl FederationProviderYaml {
             idp_certificate_pem: None,
             sign_authn_requests: None,
             want_assertions_signed: None,
+            trust_asserted_email: None,
             attribute_map: None,
         }
     }

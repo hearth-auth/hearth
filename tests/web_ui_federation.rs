@@ -120,6 +120,7 @@ fn build_rig(stub: Arc<StubFederationTransport>) -> Rig {
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: None,
             created_at: hearth::core::Timestamp::from_micros(0),
             updated_at: hearth::core::Timestamp::from_micros(0),
@@ -943,6 +944,7 @@ fn register_apple_idp(rig: &Rig) {
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: Some(AppleConfig {
                 team_id: "A1B2C3D4E5".to_string(),
                 key_id: "ABCDE12345".to_string(),

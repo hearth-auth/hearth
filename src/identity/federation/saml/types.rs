@@ -78,6 +78,10 @@ pub struct SamlIdpConfig {
     /// If true, reject assertions whose `<Assertion>` element is not
     /// individually signed. Recommended on.
     pub want_assertions_signed: bool,
+    /// If true, an email this IdP asserts counts as **verified**, which is
+    /// what makes email-based account linking reachable for SAML at all.
+    /// Defaults to false; see the `trust_asserted_email` YAML field.
+    pub trust_asserted_email: bool,
     /// Attribute map: Hearth field → SAML attribute URI.
     pub attribute_map: AttributeMap,
 }

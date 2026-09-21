@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Security
+- **New `trust_asserted_email` SAML connector key, and SAML account linking now works at all (task 25.27)** —
+  SAML carries no `email_verified` signal, so Hearth hard-coded the asserted address as unverified.
+  That made `link_existing_accounts` unreachable for SAML in **both** modes: a SAML login by a user who
+  already existed locally fell through to just-in-time provisioning, which detected the address collision
+  and silently created a second account under a synthetic address. Set
+  `realms.<realm>.federation.providers.<name>.trust_asserted_email: true` to opt a connector in. It
+  defaults to `false`, because enabling it lets that IdP claim any address in the realm. Ignored for
+  non-SAML connectors. See `docs/specs/SAML.md` §4.2.
 - **Two WebAuthn ceremonies now honour the realm's `webauthn_user_verification` setting (task 26.4)** — `POST /ui/account/passkeys/step-up-begin` and `POST /webauthn/auth/begin` hard-coded `userVerification: "preferred"`. Completion already enforced the realm setting, so a realm configured to require user verification failed the ceremony at the end instead of prompting for it at the start. Passkey registration and passkey login already read the setting.
 - **A session-limit eviction that fails now refuses the new session (audit 2026-08-28 §9 item 1)** —
   under `session_over_limit_policy: evict_oldest`, Hearth discarded the result of every

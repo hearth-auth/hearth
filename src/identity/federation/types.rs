@@ -204,6 +204,17 @@ pub struct IdpConfig {
     /// non-SAML connectors. Defaults to `false` (HEA-1759 / S4 Part A).
     #[serde(default)]
     pub want_assertions_signed: bool,
+    /// SAML only: whether an email this IdP asserts counts as **verified**.
+    ///
+    /// SAML carries no `email_verified` signal, so this defaults to `false`
+    /// and [`ExternalIdentity::is_linkable_by_email`] is then always false for
+    /// a SAML identity — every email-based linking mode is unreachable and a
+    /// SAML login for an existing local user silently provisions a second
+    /// account under a synthetic address. Driven from the connector's
+    /// `trust_asserted_email` YAML field; ignored for non-SAML connectors,
+    /// which carry the upstream's own claim (task 25.27).
+    #[serde(default)]
+    pub trust_asserted_email: bool,
     /// Apple-specific config required when `kind == IdpKind::Apple`.
     /// `None` for all other connector kinds.
     #[serde(default)]
@@ -454,6 +465,7 @@ mod tests {
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: None,
             created_at: Timestamp::from_micros(1),
             updated_at: Timestamp::from_micros(2),

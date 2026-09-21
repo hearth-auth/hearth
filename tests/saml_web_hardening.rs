@@ -735,6 +735,7 @@ fn register_saml_idp(
             claim_mappings,
             leeway_seconds: 60,
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: None,
             created_at: now,
             updated_at: now,

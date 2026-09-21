@@ -59,6 +59,7 @@ async fn sp_happy_path_accepts_well_formed_assertion() {
         idp_certificates_pem: vec![idp_cert_pem],
         sign_authn_requests: false,
         want_assertions_signed: false,
+        trust_asserted_email: false,
         attribute_map: {
             let mut m = BTreeMap::new();
             m.insert("email".into(), "NameID".into());
@@ -112,6 +113,7 @@ async fn sp_rejects_tampered_assertion() {
         idp_certificates_pem: vec![cert_pem],
         sign_authn_requests: false,
         want_assertions_signed: false,
+        trust_asserted_email: false,
         attribute_map: BTreeMap::new(),
     };
 
@@ -166,6 +168,7 @@ async fn sp_rejects_audience_mismatch() {
         idp_certificates_pem: vec![cert_pem],
         sign_authn_requests: false,
         want_assertions_signed: false,
+        trust_asserted_email: false,
         attribute_map: BTreeMap::new(),
     };
 
@@ -402,6 +405,7 @@ fn sp_rejects_wrapped_assertion_signed_elsewhere_in_the_document() {
         idp_certificates_pem: vec![idp_cert_pem],
         sign_authn_requests: false,
         want_assertions_signed: true,
+        trust_asserted_email: false,
         attribute_map: {
             let mut m = BTreeMap::new();
             m.insert("email".into(), "NameID".into());
@@ -553,6 +557,7 @@ fn sp_idp_config(cert_pem: String) -> SamlIdpConfig {
         idp_certificates_pem: vec![cert_pem],
         sign_authn_requests: false,
         want_assertions_signed: false,
+        trust_asserted_email: false,
         attribute_map: BTreeMap::new(),
     }
 }
@@ -768,4 +773,149 @@ async fn put_saml_state_reclaims_expired_bags() {
     h.identity()
         .take_saml_state(&realm_id, "in-flight")
         .expect("the live bag is the survivor");
+}
+
+/// Task 25.27 — the SAML `ConfirmLinkRequired` branch, end to end.
+///
+/// SAML carries no `email_verified` signal, so `assertion_to_external_identity`
+/// hard-coded `email_verified: false` — and its own comment promised an opt-in
+/// "via YAML" that did not exist. The consequence was not merely "auto-link is
+/// off". With that field false, `ExternalIdentity::is_linkable_by_email` is
+/// false for EVERY SAML identity, so `resolve_identity` skips its whole
+/// email-match arm: `LinkMode::Confirm` and `LinkMode::Auto` alike are
+/// unreachable, and a SAML login by a user who already exists locally falls
+/// through to just-in-time provisioning, which detects the email collision and
+/// silently creates a SECOND account under a synthetic address.
+///
+/// The `trust_asserted_email` connector field is that opt-in. This test drives
+/// a real signed assertion through the SP service and then through
+/// `resolve_identity` against a real engine holding a user with the same
+/// address.
+///
+/// The `false` half is the control: it pins today's default and proves the
+/// `true` half is the flag doing the work, not the fixture.
+#[tokio::test]
+async fn saml_confirm_link_is_reachable_only_when_the_asserted_email_is_trusted() {
+    use hearth::identity::federation::{
+        FederationOutcome, FederationService, LinkMode, StubFederationTransport,
+    };
+    use hearth::identity::CreateUserRequest;
+    use std::sync::Arc;
+
+    let h = TestHarness::embedded().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("saml-link-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+
+    // The local account the SAML login must be offered a link to.
+    h.identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: "alice@example.com".to_string(),
+                display_name: "Alice".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let service = FederationService::new(
+        h.identity_arc(),
+        Arc::new(StubFederationTransport::new()),
+        "https://hearth.example/federation/callback".to_string(),
+    );
+
+    for trust in [false, true] {
+        let identity = saml_identity_for("alice@example.com", trust);
+        assert_eq!(
+            identity.is_linkable_by_email(),
+            trust,
+            "trust_asserted_email is what makes a SAML identity linkable at all"
+        );
+
+        let outcome = service
+            .resolve_identity(
+                realm.id(),
+                identity,
+                LinkMode::Confirm,
+                Timestamp::from_micros(1_700_000_000 * 1_000_000),
+            )
+            .expect("resolve identity");
+
+        if trust {
+            assert!(
+                matches!(outcome, FederationOutcome::ConfirmLinkRequired(_)),
+                "with the asserted email trusted, an existing local account must \
+                 be offered confirm-to-link; got a different outcome"
+            );
+        } else {
+            assert!(
+                matches!(outcome, FederationOutcome::JitProvision(_)),
+                "the default must stay as it was: no linking, JIT provisioning"
+            );
+        }
+    }
+}
+
+/// Runs a real signed assertion for `email` through the SP service and returns
+/// the `ExternalIdentity` it produced.
+///
+/// Going through `SamlSpService::complete` rather than building the struct by
+/// hand is the point: the field under test is set inside that path, so a
+/// hand-built identity would test nothing.
+fn saml_identity_for(
+    email: &str,
+    trust_asserted_email: bool,
+) -> hearth::identity::federation::ExternalIdentity {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cert_pem = cert_der_to_pem(idp_key.cert_der());
+    let sp_entity_id = "https://hearth.example/ui/realms/acme";
+    let acs_url = "https://hearth.example/ui/realms/acme/federation/saml/acs";
+
+    let idp_cfg = SamlIdpConfig {
+        idp_id: IdpId::generate(),
+        name: "test-idp".into(),
+        entity_id: "https://idp.example".into(),
+        sso_url: "https://idp.example/sso".into(),
+        slo_url: None,
+        idp_certificates_pem: vec![idp_cert_pem],
+        sign_authn_requests: false,
+        want_assertions_signed: false,
+        trust_asserted_email,
+        attribute_map: {
+            let mut m = BTreeMap::new();
+            m.insert("email".into(), "NameID".into());
+            m
+        },
+    };
+
+    let now = Timestamp::from_micros(1_700_000_000 * 1_000_000);
+    let response_id = "_link1";
+    let xml = build_response_xml(&ResponseBuilder {
+        response_id,
+        in_response_to: Some("_req1"),
+        issue_instant: now,
+        destination: acs_url,
+        issuer: "https://idp.example",
+        audience: sp_entity_id,
+        assertion_id: "_alink1",
+        subject_name_id: email,
+        subject_name_id_format: SamlNameIdFormat::EmailAddress.as_uri(),
+        session_index: "sess1",
+        not_before: Timestamp::from_micros((1_700_000_000 - 10) * 1_000_000),
+        not_on_or_after: Timestamp::from_micros((1_700_000_000 + 300) * 1_000_000),
+        attributes: &BTreeMap::new(),
+    });
+    let signed = sign_element(xml.as_bytes(), response_id, &idp_key).expect("sign");
+
+    match SamlSpService::complete(&idp_cfg, sp_entity_id, acs_url, Some("_req1"), now, &signed) {
+        SamlSpOutcome::Accepted { identity, .. } => identity,
+        SamlSpOutcome::Rejected { error } => panic!("expected accept, got {error:?}"),
+    }
 }
