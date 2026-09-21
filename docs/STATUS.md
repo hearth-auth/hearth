@@ -31,7 +31,7 @@
 | Multi-tenancy (realms) | ✅ Shipped | `src/identity/` |
 | Organizations (B2B groups) | ✅ Shipped | `src/identity/` |
 | Dev mode (in-memory store + mailcatcher) | ✅ Shipped | `--dev` flag |
-| LDAP / Active Directory federation | ✅ Shipped | `src/identity/ldap/` |
+| LDAP / Active Directory federation | ⚠️ Not operator-reachable | `src/identity/ldap/` — see the LDAP caveat below |
 | Webhook subscriptions (signed delivery) | ✅ Shipped | `src/webhook/` |
 
 > **Cluster-mode caveat.** The Raft implementation ships and replicates, but "shipped" here
@@ -41,6 +41,14 @@
 > ([`reports/follower-bypass-enumeration-2026-09-21.md`](../reports/follower-bypass-enumeration-2026-09-21.md));
 > a systematic enumeration against a live three-node cluster has **not** been done. Treat
 > single-node as the audited deployment shape.
+
+> **LDAP caveat.** `src/identity/ldap/` is a complete connector — user search, password-bind
+> authentication, attribute mapping, `modifyTimestamp` and `uSNChanged` delta sync, LDAPS
+> enforcement — and it is exercised against a real OpenLDAP service container by the
+> `ldap-integration` CI job. It is **not reachable by an operator**: there is no `ldap:` block
+> in `hearth.yaml`, no admin API, and no caller anywhere in `src/` outside the module itself.
+> `docs/guides/federation.md` has said "wiring in progress" all along; this row said "Shipped",
+> which was wrong. See [`reports/subsystem-audit-ldap-grpc-email-2026-09-21.md`](../reports/subsystem-audit-ldap-grpc-email-2026-09-21.md).
 
 ---
 

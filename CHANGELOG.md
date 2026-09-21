@@ -30,6 +30,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **Revoking an AAT, a cross-realm trust policy, or a user's sessions now fails when its
   mandatory audit record cannot be written** — all three are `FailOperation` actions, and
   all three returned success after losing the record of a terminal security action.
+- **Revoking or suspending an agent now stops its outstanding AATs, and its queued approvals
+  (subsystem audit 2026-09-21, tasks 23.10/23.11)** — `issue_aat` refused to mint for an agent that
+  was not `Active`, but AAT *validation* and *derivation* never looked the agent up again, so a
+  token issued moments before a revocation stayed valid for its full lifetime (up to an hour) and
+  could still be derived into fresh children. The approval lifecycle had the same hole at both ends:
+  neither creating nor approving a request checked the agent, so an operator working through a
+  human-in-the-loop queue could mint a live capability token for an agent that had been revoked — or
+  automatically suspended by the abuse monitor — since the request was filed. All four paths now
+  require an `Active` agent; a refused approval leaves the request `Pending`. Reactivating an agent
+  restores its outstanding AATs.
+- **A storage error during AAT revocation lookup no longer reads as "not revoked"** — the chain
+  revocation check took the same branch for a failed read as for an absent key, so an I/O fault
+  admitted a revoked token. The read now fails the validation.
+- **gRPC `OAuthService/DeviceAuthorize` now authenticates a confidential client (subsystem audit
+  2026-09-21, task 23.9)** — the RPC read only the realm header and the `client_id`, so a party
+  holding a confidential client's identifier alone could run the whole RFC 8628 device flow under
+  that client's identity. `POST /device_authorization` has enforced this since audit §4.19#4 was
+  closed; the gRPC twin never did, so the REST fix could be side-stepped by switching protocol.
+  `DeviceAuthorizationRequest.client_secret` was already on the wire and already documented in the
+  proto as the `client_secret_post` fallback — the handler decoded it and dropped it. Metadata
+  credentials (`x-hearth-client-id` / `x-hearth-client-secret`) take precedence; the body
+  `client_secret` is the fallback; public clients are unaffected. A storage error during the client
+  lookup now fails the request rather than skipping the gate.
+- **The admin onboarding wizard no longer writes a live password-reset token to the log (task
+  23.12)** — `POST /ui/admin/onboarding/invite` logged the full
+  `…/reset-password?token=…` URL at WARN on every run. That URL is a bearer-equivalent credential
+  for the realm administrator being created, and it reached any log aggregator collecting the
+  server's output. `src/protocol/redact.rs` already names `reset_url` as a field that must always
+  be redacted, and the sibling site in `forgot_password` already redacted it. Now wrapped in
+  `Redact`, matching that site.
+
+### Changed
+- **`docs/STATUS.md` no longer lists LDAP / Active Directory federation as shipped (task 23.8)** —
+  `src/identity/ldap/` is a complete connector and is exercised against a real OpenLDAP container by
+  the `ldap-integration` CI job, but it is not reachable by an operator: there is no `ldap:` block in
+  `hearth.yaml`, no admin API, and no caller anywhere in `src/` outside the module.
+  `docs/guides/federation.md` always said "wiring in progress"; the status table said "Shipped".
 
 ### Removed
 - **`createRealm` removed from all SDKs (HEA-2171)** — the Go, Kotlin, Node, PHP,
@@ -337,9 +374,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   reported itself as a violation and left this merge gate red at HEAD. The rule now matches an
   actual attribute, joins line continuations before looking for the tracking reference, and accepts
   an `openspec:<change>#<task>` reference alongside `HEA-####` (24.4).
+- **`GET /v1/agents` supports the filters and pagination AGENT_AUTH.md §1.3 requires (task 23.11)** —
+  the handler passed a default, unfiltered query and a fixed limit of 100 with no query extractor at
+  all, so `owner_id`, `status` and `capability` were unreachable and a realm holding more than 100
+  agents could not be enumerated past its first page. `?owner_type=`, `?owner_id=`, `?status=`,
+  `?capability=`, `?cursor=` and `?limit=` are now honoured; an unparseable `status` or `owner_id`
+  answers `422` rather than silently returning every agent in the realm.
 
 
 ### Fixed
+- **Organization invitations no longer report "sent" when no email went out (subsystem audit
+  2026-09-21, task 23.12)** — `POST /ui/admin/realms/{realm}/organizations/{id}/invite` and its
+  resend twin showed the green flash "Invitation sent to …" on every path that reached them: when
+  the email transport refused the message (the error was logged at WARN and swallowed) and when no
+  `email.transport` was configured at all. The invitation record is still created in both cases, and
+  the flash now says which of the three actually happened.
+- **Email and SMS provider error bodies can no longer panic the sending task (task 23.12)** — the
+  `truncate_body` helper sliced a provider's error response at byte 200 with `&body[..200]`, which
+  panics when byte 200 falls inside a multi-byte UTF-8 character. A localised or em-dashed error
+  string from SendGrid, Postmark, Mailgun, Mailtrap, Amazon SNS or Twilio was enough to trigger it.
+  All six call sites now truncate on a character boundary.
+- **The gRPC per-realm rate limit is now actually per realm (task 23.9)** — the A-15 request-shaper
+  interceptor passed an empty realm key for every gRPC request, so all realms shared one bucket.
+  With `security.request_shaper.realm_rps` set, one busy tenant exhausted the budget and every other
+  tenant's gRPC calls answered `RESOURCE_EXHAUSTED`. The bucket is now keyed on the caller's
+  `x-realm-id` metadata.
+- **LDAP search filters no longer corrupt non-ASCII assertion values (task 23.8)** — the RFC 4515
+  escaper rebuilt each non-special byte with `char::from`, a Latin-1 decode, and re-encoded the
+  result as UTF-8, doubling every byte above 0x7F. Non-ASCII values are now hex-escaped per
+  RFC 4515 §3. The connector is not yet operator-reachable (see below), so no deployment was
+  affected.
 - **DPoP sender-constraint reaches the whole administrative surface** — the guard was mounted
   on the `/admin` and `/scim/v2` nests only, so a stolen `cnf`-bound admin token was still
   replayable as a plain `Bearer` against `POST /users`, `POST /clients` and every
@@ -645,6 +709,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   that asked the authentication for its name — access decisions, audit logging,
   `@PreAuthorize` — recursed until the stack overflowed. It now returns the JWT
   subject.
+- **Changing an organization's status in the admin console records who did it** — the console's
+  audit helper mapped only `create`, `update` and `delete`, and dropped everything else through a
+  silent catch-all, so the suspend/resume action appended nothing. The engine still wrote an
+  unattributed `OrgUpdated` event, leaving a record that an organization changed with no acting
+  administrator named. The event now carries the acting admin and the new status, and an unmapped
+  operation is logged instead of dropped (task 23.10).
 ### Fixed
 - **`hearth backup` says what happened (audit 2026-08-28 §4.9#8, §4.14#6)** — `create`, `restore`,
   `verify` and `inspect` installed no tracing subscriber, so every diagnostic those paths emit was

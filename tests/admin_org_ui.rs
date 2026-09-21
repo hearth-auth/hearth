@@ -44,10 +44,19 @@ struct Rig {
     member_user_id: hearth::core::UserId,
     admin_session_id: SessionId,
     admin_realm_id: RealmId,
+    /// The tenant realm the organization lives in (`acme`).
+    org_realm_id: RealmId,
+    /// Audit engine backing the web state, so tests can assert what was written.
+    audit: Arc<dyn hearth::audit::AuditEngine>,
 }
 
 #[allow(clippy::too_many_lines)]
 fn build_rig() -> Rig {
+    build_rig_with_email(None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_rig_with_email(email: Option<Arc<EmailService>>) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -186,10 +195,10 @@ fn build_rig() -> Rig {
     let state = WebState::new(
         Arc::clone(&identity),
         Arc::clone(&authz),
-        audit,
+        Arc::clone(&audit),
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET_BYTES),
-        None,
+        email,
     )
     .with_dev_mode(true);
     let app = web::router(state);
@@ -200,6 +209,8 @@ fn build_rig() -> Rig {
         member_user_id: member_user.id().clone(),
         admin_session_id: admin_session.id().clone(),
         admin_realm_id,
+        org_realm_id: realm.id().clone(),
+        audit,
     }
 }
 
@@ -484,5 +495,227 @@ async fn edit_org_accepts_empty_max_members() {
         StatusCode::SEE_OTHER,
         "edit-org with empty max_members must redirect to detail, \
          not return a form-deserialization error"
+    );
+}
+
+// ── Organization status change must be audited ──────────────────────────────
+//
+// Subsystem audit 2026-09-21 (task 23.10). `admin_org_status_toggle` called
+// `audit_org_event(.., "status_change")`, but that helper's `match op` knew
+// only "create" | "update" | "delete" and swallowed everything else through a
+// silent `_ => return`. Suspending or resuming an organization — the operator's
+// org-level kill switch — therefore wrote no audit record at all, while the
+// call site read as if it did.
+
+/// Suspending an organization through the console must leave an audit record
+/// naming the acting admin and the organization.
+#[tokio::test]
+async fn org_status_toggle_writes_an_audit_event() {
+    let rig = build_rig();
+    let csrf = "csrf-status";
+    let cookie = admin_cookie(&rig, csrf);
+    let form = format!("status=Suspended&_csrf={csrf}");
+
+    let before = rig
+        .audit
+        .query(&hearth::audit::AuditQuery {
+            realm_id: rig.org_realm_id.clone(),
+            start_time: None,
+            end_time: None,
+            actor: None,
+            action: None,
+            limit: Some(1000),
+            agent_id: None,
+            tool: None,
+        })
+        .expect("query audit before")
+        .len();
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/ui/admin/realms/acme/organizations/{}/status",
+                    rig.org_id.as_uuid()
+                ))
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "status toggle should redirect on success"
+    );
+
+    let events = rig
+        .audit
+        .query(&hearth::audit::AuditQuery {
+            realm_id: rig.org_realm_id.clone(),
+            start_time: None,
+            end_time: None,
+            actor: None,
+            action: None,
+            limit: Some(1000),
+            agent_id: None,
+            tool: None,
+        })
+        .expect("query audit after");
+
+    assert!(
+        events.len() > before,
+        "changing an organization's status must append at least one audit event \
+         (before={before}, after={})",
+        events.len()
+    );
+
+    let org_uuid = rig.org_id.as_uuid().to_string();
+    let matched = events.iter().find(|e| {
+        e.resource_type == "organization"
+            && e.resource_id == org_uuid
+            && e.metadata
+                .as_ref()
+                .and_then(|m| m.get("op"))
+                .and_then(serde_json::Value::as_str)
+                == Some("status_change")
+    });
+    let found = matched.expect("an audit event describing the org status change must exist");
+    assert_eq!(
+        found
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("status"))
+            .and_then(serde_json::Value::as_str),
+        Some("Suspended"),
+        "the audit event must record the new status"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 23.12 — an invitation whose email never went out must not flash "sent"
+// ---------------------------------------------------------------------------
+
+/// A transport that always refuses, standing in for an unreachable SMTP relay
+/// or a provider rejecting the API key.
+struct RefusingSender;
+
+impl hearth::identity::email::EmailSender for RefusingSender {
+    fn send(
+        &self,
+        _message: &hearth::identity::email::EmailMessage,
+    ) -> Result<(), hearth::identity::email::EmailError> {
+        Err(hearth::identity::email::EmailError::Transport {
+            reason: "connection refused".to_string(),
+        })
+    }
+}
+
+fn refusing_email_service() -> Arc<EmailService> {
+    Arc::new(
+        EmailService::new(
+            Arc::new(RefusingSender),
+            "Hearth".to_string(),
+            None,
+            EmailBranding::default(),
+            String::new(),
+            None,
+        )
+        .expect("email service"),
+    )
+}
+
+/// Decodes the `hearth_ui_flash` cookie a handler set: `<b64url(msg)>.<kind>`.
+fn flash_from(resp: &axum::response::Response) -> (String, String) {
+    let raw = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("hearth_ui_flash="))
+        .expect("a flash cookie must be set");
+    let value = raw
+        .trim_start_matches("hearth_ui_flash=")
+        .split(';')
+        .next()
+        .expect("cookie value");
+    let (msg_b64, kind) = value.rsplit_once('.').expect("flash cookie shape");
+    let bytes = data_encoding::BASE64URL_NOPAD
+        .decode(msg_b64.as_bytes())
+        .expect("flash base64");
+    (
+        String::from_utf8(bytes).expect("flash utf8"),
+        kind.to_string(),
+    )
+}
+
+async fn post_invite(rig: &Rig, email: &str) -> axum::response::Response {
+    let cookie = admin_cookie(rig, "csrf-invite");
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/ui/admin/realms/acme/organizations/{}/invite",
+                    rig.org_id.as_uuid()
+                ))
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "email={email}&role=Member&_csrf=csrf-invite"
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn invite_reports_failure_when_the_transport_refuses_the_message() {
+    let rig = build_rig_with_email(Some(refusing_email_service()));
+    let resp = post_invite(&rig, "invitee%40acme.test").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let (message, kind) = flash_from(&resp);
+    assert_ne!(
+        kind, "success",
+        "an invitation whose email was refused must not flash success: {message}"
+    );
+    assert!(
+        !message.contains("Invitation sent to"),
+        "the admin must not be told the invitation was sent: {message}"
+    );
+    assert!(
+        message.contains("could not be delivered"),
+        "the flash must say what actually happened: {message}"
+    );
+}
+
+#[tokio::test]
+async fn invite_reports_that_nothing_was_sent_when_no_transport_is_configured() {
+    // `build_rig` wires `WebState` with `email: None`, the shape an operator
+    // gets before configuring `email.transport`.
+    let rig = build_rig();
+    let resp = post_invite(&rig, "invitee%40acme.test").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let (message, kind) = flash_from(&resp);
+    assert_ne!(
+        kind, "success",
+        "with no transport configured nothing was sent: {message}"
+    );
+    assert!(
+        !message.contains("Invitation sent to"),
+        "the admin must not be told the invitation was sent: {message}"
+    );
+    assert!(
+        message.contains("no email transport is configured"),
+        "the flash must name the cause: {message}"
     );
 }

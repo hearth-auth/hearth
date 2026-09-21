@@ -12,10 +12,18 @@ const RFC4515_SPECIAL: &[u8] = b"*()\\\x00";
 ///
 /// The characters `*`, `(`, `)`, `\`, and NUL are replaced with their
 /// `\xx` hex-escape form.
+///
+/// Every byte outside printable ASCII is hex-escaped too. RFC 4515 § 3 permits
+/// `ESC HEX HEX` for *any* octet, and the alternative is wrong: the previous
+/// implementation rebuilt each non-special byte with `char::from(byte)`, which
+/// is a Latin-1 decode. Re-encoding that `char` as UTF-8 doubled every byte
+/// above 0x7F, so `José` left this function as `JosÃ©` and the directory was
+/// asked about an identifier nobody has. Hex-escaping keeps the octets the
+/// caller actually supplied, and makes the output pure ASCII by construction.
 pub(crate) fn escape_assertion_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for &byte in value.as_bytes() {
-        if RFC4515_SPECIAL.contains(&byte) {
+        if RFC4515_SPECIAL.contains(&byte) || !(0x20..0x7f).contains(&byte) {
             out.push('\\');
             out.push_str(&format!("{byte:02x}"));
         } else {
@@ -124,6 +132,29 @@ mod tests {
         );
         assert!(escaped.contains(r"\2a"), "* must be encoded as \\2a");
         assert!(escaped.contains(r"\29"), ") must be encoded as \\29");
+    }
+
+    // 23.8: the escaper rebuilt every non-special byte with `char::from`,
+    // a Latin-1 decode. Re-encoding as UTF-8 doubled every byte above 0x7F,
+    // so a non-ASCII assertion value reached the directory corrupted.
+    #[test]
+    fn escape_preserves_non_ascii_octets_exactly() {
+        // "José" — the é is U+00E9, whose UTF-8 encoding is 0xC3 0xA9.
+        let escaped = escape_assertion_value("José");
+        assert_eq!(
+            escaped, r"Jos\c3\a9",
+            "non-ASCII octets must be hex-escaped, not Latin-1 round-tripped"
+        );
+        assert!(
+            escaped.is_ascii(),
+            "an RFC 4515 assertion value must leave this function as ASCII"
+        );
+    }
+
+    #[test]
+    fn escape_hex_escapes_control_characters() {
+        let escaped = escape_assertion_value("a\tb\u{7f}");
+        assert_eq!(escaped, r"a\09b\7f");
     }
 
     #[test]

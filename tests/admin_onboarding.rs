@@ -551,3 +551,103 @@ async fn complete_page_renders_with_realm() {
     assert!(html.contains("You're all set"), "completion heading");
     assert!(html.contains("acme"), "realm name present");
 }
+
+// ---------------------------------------------------------------------------
+// 23.12 — the invite step must not write the reset token into the log
+// ---------------------------------------------------------------------------
+
+/// Collects everything a `tracing` subscriber formats, so a test can assert on
+/// what actually reached the operator log.
+#[derive(Clone, Default)]
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CaptureWriter {
+    fn contents(&self) -> String {
+        let bytes = self.0.lock().expect("capture mutex").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture mutex").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The wizard's invite step issues a live password-reset token for the realm
+/// administrator it is creating. That URL is a bearer-equivalent credential:
+/// anyone who can read the operator log can complete the takeover. Every
+/// other site that logs a `reset_url` wraps it in `protocol::redact::Redact`.
+#[tokio::test]
+async fn step3_invite_does_not_log_the_reset_token() {
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let _log_guard = tracing::subscriber::set_default(subscriber);
+
+    let rig = build_rig(false);
+    let cookie = admin_cookie(&rig.admin_session_id);
+
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/admin/onboarding/realm")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(csrf_body(
+                    "display_name=Acme&realm_name=acme&theme=ember",
+                )))
+                .expect("test"),
+        )
+        .await
+        .expect("test");
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/admin/onboarding/invite")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(csrf_body(
+                    "realm=acme&email=newadmin%40example.com&role=admin",
+                )))
+                .expect("test"),
+        )
+        .await
+        .expect("test");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let logged = capture.contents();
+    assert!(
+        logged.contains("onboarding: invitation link"),
+        "the invite step must still log that a link was issued; got: {logged}"
+    );
+    assert!(
+        !logged.contains("reset-password?token="),
+        "the reset token must never reach the log; got: {logged}"
+    );
+    assert!(
+        logged.contains("reset_url=[REDACTED]"),
+        "the field must survive as a redacted marker; got: {logged}"
+    );
+}

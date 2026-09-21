@@ -80,7 +80,7 @@ pub(crate) fn map_entry(
 /// Used to build the attribute list passed to `ldap3`'s `search()` call so
 /// the server only returns the fields we actually need.
 pub(crate) fn requested_attributes(attr_map: &LdapAttributeMap) -> Vec<String> {
-    let mut attrs = vec![
+    let candidates = [
         attr_map.email.clone(),
         attr_map.display_name.clone(),
         attr_map.given_name.clone(),
@@ -89,9 +89,18 @@ pub(crate) fn requested_attributes(attr_map: &LdapAttributeMap) -> Vec<String> {
         attr_map.username.clone(),
         attr_map.sync_attribute.clone(),
     ];
-    attrs.extend(attr_map.extra.keys().cloned());
-    // Dedup while preserving insertion order.
-    attrs.dedup();
+    // Dedup while preserving insertion order. `Vec::dedup` only collapses
+    // *adjacent* equal elements, so it silently missed the common mappings
+    // that repeat a directory attribute in two non-adjacent slots — e.g.
+    // `display_name = cn` together with `username = cn`, which asked the
+    // server for `cn` twice in every search.
+    let mut seen = std::collections::HashSet::new();
+    let mut attrs = Vec::with_capacity(candidates.len() + attr_map.extra.len());
+    for attr in candidates.into_iter().chain(attr_map.extra.keys().cloned()) {
+        if seen.insert(attr.clone()) {
+            attrs.push(attr);
+        }
+    }
     attrs
 }
 
@@ -221,6 +230,35 @@ mod tests {
         assert!(attrs.contains(&"cn".to_string()));
         assert!(attrs.contains(&"entryUUID".to_string()));
         assert!(attrs.contains(&"modifyTimestamp".to_string()));
+    }
+
+    // 23.8: `Vec::dedup` only collapses *adjacent* duplicates. A mapping that
+    // points two non-adjacent slots at one directory attribute — the common
+    // `display_name = cn` / `username = cn` pairing — asked the server for
+    // that attribute twice on every search and delta-sync page.
+    #[test]
+    fn requested_attributes_dedups_non_adjacent_duplicates() {
+        let mut am = default_attr_map();
+        // Slot 1 (display_name) and slot 5 (username) — never adjacent.
+        am.username = "cn".to_string();
+        let attrs = requested_attributes(&am);
+        assert_eq!(
+            attrs.iter().filter(|a| a.as_str() == "cn").count(),
+            1,
+            "a repeated attribute must be requested once: {attrs:?}"
+        );
+    }
+
+    #[test]
+    fn requested_attributes_dedups_an_extra_that_repeats_a_core_slot() {
+        let mut am = default_attr_map();
+        am.extra.insert("mail".to_string(), "alt".to_string());
+        let attrs = requested_attributes(&am);
+        assert_eq!(
+            attrs.iter().filter(|a| a.as_str() == "mail").count(),
+            1,
+            "an extra repeating a core attribute must not double it: {attrs:?}"
+        );
     }
 
     #[test]

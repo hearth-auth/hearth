@@ -1531,6 +1531,7 @@ pub async fn admin_org_invite(
     ) {
         Ok((_invitation, token)) => {
             // Send invitation email if email service is configured
+            let mut delivery = InviteDelivery::NoTransport;
             if let Some(ref email_service) = state.email {
                 let org_name = state
                     .identity
@@ -1569,10 +1570,13 @@ pub async fn admin_org_invite(
                     None,
                 ) {
                     tracing::warn!(error = %e, "failed to send invitation email");
+                    delivery = InviteDelivery::TransportFailed;
+                } else {
+                    delivery = InviteDelivery::Delivered;
                 }
             }
-            let msg = format!("Invitation sent to {}", form.email);
-            org_redirect_flash(&org_id, target.0.name(), &msg, "success", secure)
+            let (msg, kind) = invite_flash(&form.email, "sent", delivery);
+            org_redirect_flash(&org_id, target.0.name(), &msg, kind, secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, email = %form.email, "create_invitation failed");
@@ -1694,7 +1698,14 @@ pub async fn admin_org_status_toggle(
         },
     ) {
         Ok(_) => {
-            audit_org_event(&state, &session, &target.0, &org_id, "status_change");
+            audit_org_event_with(
+                &state,
+                &session,
+                &target.0,
+                &org_id,
+                "status_change",
+                Some(serde_json::json!({ "status": form.status })),
+            );
             let label = match new_status {
                 OrganizationStatus::Active => "Organization resumed",
                 OrganizationStatus::Suspended => "Organization suspended",
@@ -1802,6 +1813,7 @@ pub async fn admin_org_resend_invite(
         },
     ) {
         Ok((_invitation, token)) => {
+            let mut delivery = InviteDelivery::NoTransport;
             if let Some(ref email_service) = state.email {
                 let org_name = state
                     .identity
@@ -1837,10 +1849,13 @@ pub async fn admin_org_resend_invite(
                     None,
                 ) {
                     tracing::warn!(error = %e, "failed to send resend invitation email");
+                    delivery = InviteDelivery::TransportFailed;
+                } else {
+                    delivery = InviteDelivery::Delivered;
                 }
             }
-            let msg = format!("Invitation resent to {email}");
-            org_redirect_flash(&org_id, target.0.name(), &msg, "success", secure)
+            let (msg, kind) = invite_flash(&email, "resent", delivery);
+            org_redirect_flash(&org_id, target.0.name(), &msg, kind, secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, email = %email, "resend create_invitation failed");
@@ -2066,6 +2081,48 @@ pub(super) fn org_redirect_flash(
     super::templates::redirect_with_flash(&url, message, kind, secure)
 }
 
+/// Builds the flash for an invitation whose record was created, reporting what
+/// actually happened to the *email*.
+///
+/// The two invite handlers used to answer `"Invitation sent to {email}"` with
+/// `kind = "success"` on every path that reached them: when the transport
+/// rejected the message (the failure was logged at WARN and swallowed), and
+/// when no `email.transport` was configured at all, so nothing was ever
+/// attempted. The admin was told the invitation had gone out, the invitee
+/// never received it, and nothing on the screen said so (task 23.12 — the
+/// same class as audit §4.24#10, which reached the reset/bulk-invite actions
+/// but not these two).
+fn invite_flash(email: &str, verb: &str, delivery: InviteDelivery) -> (String, &'static str) {
+    match delivery {
+        InviteDelivery::Delivered => (format!("Invitation {verb} to {email}"), "success"),
+        InviteDelivery::TransportFailed => (
+            format!(
+                "Invitation created for {email}, but the email could not be delivered. \
+                 Check the server log and the email transport configuration."
+            ),
+            "error",
+        ),
+        InviteDelivery::NoTransport => (
+            format!(
+                "Invitation created for {email}, but no email transport is configured, \
+                 so nothing was sent."
+            ),
+            "error",
+        ),
+    }
+}
+
+/// What became of an invitation email.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InviteDelivery {
+    /// The transport accepted the message.
+    Delivered,
+    /// A transport is configured and refused the message.
+    TransportFailed,
+    /// No `email.transport` is configured; nothing was attempted.
+    NoTransport,
+}
+
 /// Parses an organization role string from a form field.
 fn parse_org_role(s: &str) -> OrganizationRole {
     match s {
@@ -2083,20 +2140,51 @@ fn audit_org_event(
     org_id: &OrganizationId,
     op: &'static str,
 ) {
+    audit_org_event_with(state, session, target_realm, org_id, op, None);
+}
+
+/// Appends an attributed organization audit event, optionally carrying extra
+/// metadata (for example the new status on a status change).
+///
+/// The `op` → [`AuditAction`] map used to end in a silent `_ => return`, which
+/// meant `audit_org_event(.., "status_change")` — the call at the end of the
+/// suspend/resume handler — appended nothing. The engine's own
+/// `update_organization` still wrote an unattributed `OrgUpdated`, so the
+/// change was visible but the acting administrator was not. An unknown `op` is
+/// now logged rather than dropped, so the same mistake cannot be silent again.
+fn audit_org_event_with(
+    state: &Arc<WebState>,
+    session: &super::auth::UiSession,
+    target_realm: &Realm,
+    org_id: &OrganizationId,
+    op: &'static str,
+    extra: Option<serde_json::Value>,
+) {
     use crate::audit::{AuditAction, CreateAuditEvent};
     let action = match op {
         "create" => AuditAction::OrgCreated,
-        "update" => AuditAction::OrgUpdated,
+        "update" | "status_change" => AuditAction::OrgUpdated,
         "delete" => AuditAction::OrgDeleted,
-        _ => return,
+        other => {
+            tracing::warn!(op = %other, "org admin audit: unmapped operation, event dropped");
+            return;
+        }
     };
+    let mut metadata = serde_json::json!({ "via": "ui", "op": op });
+    if let (Some(serde_json::Value::Object(fields)), Some(target)) =
+        (extra, metadata.as_object_mut())
+    {
+        for (k, v) in fields {
+            target.insert(k, v);
+        }
+    }
     if let Err(e) = state.audit.append(&CreateAuditEvent {
         realm_id: target_realm.id().clone(),
         actor: session.user_id.as_uuid().to_string(),
         action,
         resource_type: "organization".to_string(),
         resource_id: org_id.as_uuid().to_string(),
-        metadata: Some(serde_json::json!({ "via": "ui" })),
+        metadata: Some(metadata),
     }) {
         tracing::warn!(error = %e, "org admin audit append failed");
     }
