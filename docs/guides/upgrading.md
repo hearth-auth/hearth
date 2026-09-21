@@ -39,12 +39,11 @@ Work through this list for every upgrade, including patch releases.
     --output /backups/pre-upgrade-$(date +%Y%m%d-%H%M%S).hearth-backup
   ```
 
-  > **Check the path, and check the output.** `backup create` **creates** a missing
-  > `--data-dir` rather than refusing it, so a typo'd path produces an empty archive,
-  > prints only `warning: no realms found to export`, and **exits 0**. `backup verify`
-  > then reports `OK — all checksums match (0 files verified)` and also exits 0. Always
-  > read the realm list from `backup inspect` (below) before trusting an archive.
-
+  > **A bad `--data-dir` now fails loudly.** `backup create` refuses a path that
+  > does not exist and refuses a store with no realms in it, and `backup verify`
+  > refuses an archive with zero files. Until task 26.26 all three exited `0`, so
+  > a typo'd path produced an empty archive that verified clean. Still read the
+  > realm list from `backup inspect` (below) before trusting an archive.
   Verify it was written cleanly:
 
   ```bash

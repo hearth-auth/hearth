@@ -4229,7 +4229,19 @@ fn run_backup_create(
     use hearth::core::RealmId;
     use uuid::Uuid;
 
-    std::fs::create_dir_all(data_dir)?;
+    // Task 26.26: do NOT create the directory. `backup create` READS a store; a
+    // directory that does not exist holds no store, and creating one turned a
+    // typo'd `--data-dir` into an empty archive and an exit code of 0. The
+    // restore path still creates its target, because restoring into a fresh
+    // directory is the normal case.
+    if !data_dir.exists() {
+        return Err(format!(
+            "data directory '{}' does not exist. `backup create` reads an existing store; \
+             check the path.",
+            data_dir.display()
+        )
+        .into());
+    }
     let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, audit, rbac) = build_all_engines(
@@ -4313,8 +4325,23 @@ fn run_backup_create(
         ids
     };
 
+    // Task 26.26: an archive with no realms in it is not a backup. This used to
+    // print `warning:` and exit 0, so a typo'd `--data-dir` produced a file
+    // that `backup verify` then called "OK — all checksums match (0 files
+    // verified)". Two commands in a row reported success over nothing.
     if realms_to_export.is_empty() {
-        tracing::error!("warning: no realms found to export");
+        return Err(match realm_filter {
+            Some(name) => format!(
+                "no realm named '{name}' in '{}' — nothing to export",
+                data_dir.display()
+            ),
+            None => format!(
+                "no realms found in '{}' — nothing to export. Check --data-dir points at the \
+                 store you meant.",
+                data_dir.display()
+            ),
+        }
+        .into());
     }
 
     for realm_id in &realms_to_export {
@@ -4447,6 +4474,18 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
 
     let reader = BackupArchive::open(input)?;
     reader.verify_checksums()?;
+    // Task 26.26: "all checksums match" over zero checksums is vacuously true,
+    // and it printed `OK — all checksums match (0 files verified)` and exited
+    // 0. An operator reading that has been told their backup is good when the
+    // archive holds nothing. Verification of an empty archive fails.
+    if reader.manifest.checksums.is_empty() {
+        return Err(format!(
+            "'{}' contains no files: there is nothing to verify and nothing to restore. \
+             The export that produced it had no realms.",
+            input.display()
+        )
+        .into());
+    }
     tracing::info!(
         "OK — all checksums match ({} files verified)",
         reader.manifest.checksums.len()
@@ -5153,6 +5192,59 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── An empty backup must not report success (task 26.26) ──────────────
+
+    /// A `--data-dir` that does not exist must fail, not be created.
+    ///
+    /// `backup create` ran `create_dir_all` on its `--data-dir`, so a typo
+    /// produced a brand-new empty store, exported zero realms, printed only
+    /// `warning: no realms found to export`, and **exited 0**. `backup verify`
+    /// then answered `OK — all checksums match (0 files verified)` and also
+    /// exited 0. Two commands in a row reported success over nothing, and the
+    /// operator's pre-upgrade backup was an empty file.
+    #[test]
+    fn backup_create_refuses_a_data_dir_that_does_not_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("typo");
+        let out = dir.path().join("out.hearth-backup");
+
+        let err = run_backup_create(Some(&out), None, false, false, &missing, None)
+            .expect_err("a nonexistent data directory must be refused");
+
+        assert!(
+            err.to_string().contains("does not exist"),
+            "the error must say what is wrong with the path; got: {err}"
+        );
+        assert!(
+            !missing.exists(),
+            "the command must not CREATE the directory it was asked to read"
+        );
+        assert!(!out.exists(), "no archive may be written");
+    }
+
+    /// An existing but empty store must fail too.
+    ///
+    /// This is the other half: `--data-dir` can point at a real directory that
+    /// simply holds no realms — a fresh `data/` beside the real one, say. An
+    /// archive with no realms in it is not a backup.
+    #[test]
+    fn backup_create_refuses_a_store_with_no_realms() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
+        let out = dir.path().join("empty.hearth-backup");
+
+        let err = run_backup_create(Some(&out), None, false, false, &data_dir, None)
+            .expect_err("an export with no realms must be refused");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        assert!(
+            err.to_string().contains("nothing to export"),
+            "the error must say the archive would be empty; got: {err}"
+        );
+    }
 
     // ── `config validate` must agree with `serve` (task 26.23) ────────────
 

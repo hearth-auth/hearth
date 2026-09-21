@@ -28,12 +28,13 @@ Hearth ships a built-in backup CLI that exports realm data to a self-contained `
 > environment variable nor a config file, and there was no `--config` flag, while
 > the error it printed named both.
 
-> **A mistyped `--data-dir` does not fail.** `backup create` *creates* a missing
-> directory, exports zero realms, prints only `warning: no realms found to export`,
-> and exits `0`; `backup verify` then reports `OK — all checksums match
-> (0 files verified)` and also exits `0`. Confirm the realm list with
-> `hearth backup inspect` before trusting any archive.
-
+> **A mistyped `--data-dir` now fails.** `backup create` READS a store, so it no
+> longer creates a missing directory: a path that does not exist is refused, and
+> so is a directory that holds no realms. `backup verify` refuses an archive with
+> zero files for the same reason. Until task 26.26 all three reported success —
+> a typo produced an empty archive, `create` exited `0` after printing only
+> `warning: no realms found to export`, and `verify` answered
+> `OK — all checksums match (0 files verified)` and exited `0` as well.
 ---
 
 ## Archive format

@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **A backup of nothing no longer reports success (task 26.26)** — `hearth backup create` ran
+  `create_dir_all` on its `--data-dir`, so a typo built a brand-new empty store, exported zero realms,
+  printed only `warning: no realms found to export` and **exited 0**; `hearth backup verify` then
+  answered `OK — all checksums match (0 files verified)` and also exited 0. Two commands in a row
+  reported success over an empty file, which is the state an operator is least able to notice. `create`
+  now refuses a `--data-dir` that does not exist and refuses a store with no realms; `verify` refuses an
+  archive with no files. `backup restore` still creates its target directory, because restoring into a
+  fresh one is the normal case.
+
 - **`hearth config validate` now reports a missing storage host key (task 26.23)** — it answered `✓` on
   a configuration `hearth serve` then refused with *"HEARTH_MASTER_KEY is not set and auto-generation is
   disabled in production mode"*. The production gates covered `HEARTH_KEK` and stopped. The check accepts
