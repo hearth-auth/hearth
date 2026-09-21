@@ -1352,7 +1352,7 @@ Set `access_token_authorization` on the client record via the admin API:
 
 ```bash
 # Register with decision mode
-curl -X POST http://127.0.0.1:8420/admin/clients \
+curl -X POST http://127.0.0.1:8420/admin/applications \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-Realm-ID: <realm-uuid>" \
   -H "Content-Type: application/json" \
@@ -1364,7 +1364,7 @@ curl -X POST http://127.0.0.1:8420/admin/clients \
   }'
 
 # Update existing client to introspection
-curl -X PATCH http://127.0.0.1:8420/admin/clients/<client-id> \
+curl -X PATCH http://127.0.0.1:8420/admin/applications/<client-id> \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-Realm-ID: <realm-uuid>" \
   -H "Content-Type: application/json" \

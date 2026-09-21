@@ -382,7 +382,7 @@ Set `access_token_authorization` when registering or updating a client via the A
 
 **Register a new client with `decision` mode:**
 ```bash
-curl -X POST http://127.0.0.1:8420/admin/clients \
+curl -X POST http://127.0.0.1:8420/admin/applications \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-Realm-ID: <realm-uuid>" \
   -H "Content-Type: application/json" \
@@ -396,7 +396,7 @@ curl -X POST http://127.0.0.1:8420/admin/clients \
 
 **Update an existing client to `introspection` mode:**
 ```bash
-curl -X PATCH http://127.0.0.1:8420/admin/clients/<client-id> \
+curl -X PATCH http://127.0.0.1:8420/admin/applications/<client-id> \
   -H "Authorization: Bearer <admin-token>" \
   -H "X-Realm-ID: <realm-uuid>" \
   -H "Content-Type: application/json" \

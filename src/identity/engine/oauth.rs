@@ -2594,19 +2594,36 @@ impl EmbeddedIdentityEngine {
         match claims.token_type.as_str() {
             "access" | "id_token" => {
                 if claims.sid != "none" {
-                    // Session-bound token: revoke via session
+                    // Session-bound token: revoke via session.
+                    //
+                    // The outcome is PROPAGATED, not discarded. RFC 7009 §2.2
+                    // lets a client read `200 OK` as "the token is now
+                    // invalid", so answering 200 after a failed revoke tells
+                    // the client a live credential is dead — the same
+                    // "reports success it never achieved" class as the failed
+                    // session write in `update_user` (audit §4.16#10) and the
+                    // reset mails that were minted and dropped (§4.24#10).
+                    // An ALREADY-absent session is not a failure: RFC 7009
+                    // requires 200 for a token that is already invalid.
                     let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
                     if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
                         let session_id = SessionId::new(uuid);
-                        let _ = self.revoke_session(realm_id, &session_id);
+                        match self.revoke_session(realm_id, &session_id) {
+                            Ok(()) | Err(IdentityError::SessionNotFound) => {}
+                            Err(e) => return Err(e),
+                        }
                     }
                 } else if let Some(ref jti) = claims.jti {
                     // Sessionless token (e.g., client_credentials): revoke via JTI blocklist.
                     // Store the token's exp so the hot-path projection can self-evict expired entries.
+                    // Propagated for the same reason as the session arm above:
+                    // the cache insert below would otherwise mask a failed
+                    // durable write, so the blocklist entry would vanish on
+                    // restart while the client believed the token was dead.
                     let jti_key = keys::encode_revoked_jti(jti);
-                    let _ = self
-                        .storage
-                        .put(realm_id, &jti_key, &claims.exp.to_le_bytes());
+                    self.storage
+                        .put(realm_id, &jti_key, &claims.exp.to_le_bytes())
+                        .map_err(Self::storage_err)?;
                     self.insert_revoked_jti_cache(realm_id, jti, claims.exp);
                 }
             }

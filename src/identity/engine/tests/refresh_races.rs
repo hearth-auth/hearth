@@ -499,6 +499,88 @@ impl StorageEngine for SessionWriteFailStorage {
     }
 }
 
+/// `POST /revoke` must not answer `200 OK` when the revocation failed.
+///
+/// RFC 7009 §2.2 lets a client read `200` as "the token is now invalid", so a
+/// success returned over a failed revoke tells the client a LIVE credential is
+/// dead. `revoke_token_inner` discarded the outcome of both its access-token
+/// arms — `revoke_session` and the JTI blocklist write — and returned `Ok(())`
+/// regardless. Same class as the swallowed session write below (§4.16#10) and
+/// the reset mails that were minted and dropped (§4.24#10).
+#[test]
+fn revoking_an_access_token_fails_when_the_session_write_fails() {
+    use crate::identity::oidc::TokenRevocationRequest;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(dir.path().to_path_buf());
+    let real =
+        Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+    let failing = Arc::new(SessionWriteFailStorage::new(real));
+    let storage = Arc::clone(&failing) as Arc<dyn StorageEngine>;
+
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+    let identity_config = IdentityConfig {
+        credential: CredentialConfig::fast_for_testing(),
+        ..IdentityConfig::default()
+    };
+    let audit = Arc::new(crate::audit::EmbeddedAuditEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    ));
+    let engine = EmbeddedIdentityEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+        identity_config,
+        audit as Arc<dyn AuditEngine>,
+    )
+    .expect("engine creation");
+
+    let realm_id = create_test_realm(&engine);
+    let user = create_test_user(&engine, &realm_id);
+    let session = engine
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("session");
+    let tokens = engine
+        .issue_tokens(&realm_id, user.id(), session.id())
+        .expect("issue tokens");
+
+    // Control: with the fault disarmed the revocation succeeds, so the
+    // assertion below cannot pass merely because revocation always fails.
+    engine
+        .revoke_token_inner(
+            &realm_id,
+            &TokenRevocationRequest {
+                token: tokens.access_token().to_string(),
+                token_type_hint: None,
+            },
+        )
+        .expect("an unarmed revocation must succeed");
+
+    let session2 = engine
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("second session");
+    let tokens2 = engine
+        .issue_tokens(&realm_id, user.id(), session2.id())
+        .expect("issue tokens");
+
+    failing.arm();
+    let result = engine.revoke_token_inner(
+        &realm_id,
+        &TokenRevocationRequest {
+            token: tokens2.access_token().to_string(),
+            token_type_hint: None,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a revocation whose session write failed must not report success"
+    );
+    assert!(
+        failing.refused_count() > 0,
+        "the fault must actually have fired, or the assertion above is vacuous"
+    );
+}
+
 /// `update_user(status = Disabled)` revokes every session so the user's live
 /// access and refresh tokens stop working — revocation is the *only* mechanism
 /// that enforces a disable, because access tokens embed their claims at
