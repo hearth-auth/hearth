@@ -184,3 +184,10 @@ Integrate with your own SCA tooling (Dependency-Track, Grype, Trivy) by importin
 
 - That the binary is free of bugs or vulnerabilities — use your SCA tooling on the SBOM for that.
 - Builder isolation — Hearth currently targets SLSA L1. L2 and L3 require a separate hardened builder and are planned for a future release.
+- **That the commit passed its own test suite.** Provenance attests origin, not fitness. Both
+  commands on this page passed for v1.6.11, a commit whose Rust suite failed four tests — the
+  container image and Helm chart were published 37 minutes *before* the validation job wrote
+  "Release is NOT cleared to publish" (audit 2026-08-28 §4.8#2, §4.12). Every release channel
+  now waits for that verdict, but a *verified signature is still not evidence of a green
+  build*. For that, read the `validation-summary.txt` asset attached to the GitHub Release: it
+  records the per-gate verdicts and test counts for the tagged commit.

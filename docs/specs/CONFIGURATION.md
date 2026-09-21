@@ -567,7 +567,7 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
 | `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
 | `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
-| `webauthn_user_verification` | string | — | Global default `userVerification` preference: `"required"`, `"preferred"` or `"discouraged"`. `"required"` is what makes a passkey a genuine second factor. Per-realm `realms.<name>.auth.webauthn_user_verification` overrides. |
+| `webauthn_user_verification` | string | — | Global default `userVerification` preference: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. `"required"` is what makes a passkey a genuine second factor, and it is **enforced server-side**: an assertion whose authenticator-data UV bit is clear is rejected at completion regardless of what the challenge advertised (`realm_requires_user_verification`, `src/identity/engine/mod.rs`). Per-realm `realms.<name>.auth.webauthn_user_verification` overrides. See the note below on which challenge endpoints echo the preference. |
 
 ```yaml
 auth:
@@ -576,6 +576,24 @@ auth:
   password_time_cost: 4
   webauthn_user_verification: "required"
 ```
+
+#### `webauthn_user_verification` — where the preference is echoed
+
+Enforcement and advertisement are two different things, and at `333c74e6` they do not
+agree on every endpoint. Enforcement is unconditional; advertisement is not:
+
+| Endpoint | Echoes the configured preference? |
+|---|---|
+| Passkey login challenge — `passkey_login_begin{,_scoped,_admin}` (`src/protocol/web/handlers.rs`) | Yes — reads the realm config |
+| `POST /ui/account/passkeys/register-begin` (`src/protocol/web/account.rs`) | Yes — reads the realm config |
+| `POST /ui/account/passkeys/step-up-begin` (`src/protocol/web/account.rs`) | **No — hard-codes `"preferred"`** |
+| `POST /webauthn/auth/begin` (`src/protocol/http/mfa.rs`) | **No — hard-codes `"preferred"`** |
+
+On the two hard-coded endpoints a realm set to `"required"` still refuses an unverified
+assertion, so this is not an authentication bypass — but the browser is told UV is optional
+and the ceremony then fails at completion rather than prompting for the gesture up front.
+Tracked as a defect in `reports/documentation-truth-sweep-2026-09-21.md`; documented here
+rather than papered over.
 
 #### Argon2id cost floor
 

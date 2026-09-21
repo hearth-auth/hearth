@@ -93,6 +93,16 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
+> **Known gap — these two commands do not work anonymously today.** Both GHCR packages
+> (`hearth-auth/hearth` and `hearth-auth/charts/hearth`) are still **private**: an
+> unauthenticated manifest fetch answers `401`, re-verified 2026-09-21. `docker pull` and
+> `helm install` below therefore fail at the first request unless you
+> `docker login ghcr.io` with an account that has read access. Release validation now gates on
+> an anonymous fetch (`scripts/check-install-paths.sh`), so newly published versions will be
+> public, but flipping the two existing packages needs a token with `write:packages` and has
+> not been done. Until then, use the released binary above or build from source. The claim
+> that these are turnkey public install paths is withdrawn, not restated.
+
 ```bash
 docker pull ghcr.io/hearth-auth/hearth:v1.6.10
 
@@ -209,7 +219,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 **Protocols**
 - OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591; RFC 7592 management endpoints are roadmap)
 - Token Introspection (RFC 7662), Revocation (RFC 7009), RP-initiated logout
-- SAML 2.0 (SP-initiated and IdP-initiated)
+- SAML 2.0 in **both** roles: Service Provider (inbound federation — SP-initiated and IdP-initiated SSO, plus Single Logout) and Identity Provider (Hearth asserts to third-party SPs at `/realms/{realm}/saml/sso`). Encrypted assertions are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
 - Signed webhook subscriptions for auth and admin events
 - gRPC management API (RBAC admin surface)
@@ -293,14 +303,16 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
 5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
-7. **Conformance** — OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, WebAuthn Level 2 ceremony.
+7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, FAPI 2.0, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs; **no certifying body's suite has been run against Hearth, and Hearth is not certified.**
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
 **Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **5,387 Rust tests — 2,593 unit (`hearth` lib + bin) · 2,715 integration (`tests/`) · 79 crash-recovery simulation (`hearth-simulation`).** 14 of those carry `#[ignore]` (live-LDAP cases and one manual measurement) and do not run by default. Counted with `cargo nextest list --workspace` at `333c74e6` — reproduce it yourself rather than taking the number on faith.
+
+The Rust suite, the seven SDK suites and the SDK conformance check are all in the `needs:` list of the `required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite blocks merge. This README does not assert a green result for any particular commit: look at the CI badge above, or at the `validation-summary.txt` asset on a given release.
 
 > **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — `docs/specs/TEST_SCENARIOS.md` §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
 
@@ -841,8 +853,8 @@ For the full feature spec see [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITEC
 |---|---|---|---|
 | Discovery | `GET` | `/health` | Liveness probe |
 | Discovery | `GET` | `/.well-known/openid-configuration` | OIDC Discovery 1.0 metadata |
-| Discovery | `GET` | `/jwks` | Per-realm public signing keys |
-| OAuth/OIDC | `POST` | `/authorize` | Authorization request |
+| Discovery | `GET` | `/jwks` | Per-realm public signing keys (aliases: `/certs`, `/.well-known/jwks.json`) |
+| OAuth/OIDC | `GET`/`POST` | `/authorize` | Authorization request — `GET` is the browser redirect entry point, `POST` the form-post variant |
 | OAuth/OIDC | `POST` | `/token` | Token exchange (code / refresh / client_credentials / device_code) |
 | OAuth/OIDC | `POST` | `/revoke` | RFC 7009 revocation |
 | OAuth/OIDC | `POST` | `/introspect` | RFC 7662 introspection |
@@ -987,7 +999,7 @@ Hearth administrators live in an invisible **system realm** — distinct from an
 
 - **Admin sign-in:** `GET /ui/admin/login`. The session cookie is bound to the system realm, not any app realm.
 - **Admin email verification:** `GET /ui/admin/verify-email?token=...` — the link embedded in the first-run setup email.
-- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time. `create_realm`, `delete_realm`, `register_user`, `register_client`, and `create_organization` all reject the reserved realm's UUID with a 403 `SystemRealmProtected`. The realm does not appear in `list_realms()`, `get_realm_by_name("system")` returns nothing, and `/ui/realms/system/...` URLs return 404.
+- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time (`src/config/validate.rs`). Fifteen engine entry points reject the reserved realm with a 403 `SystemRealmProtected` — by nil UUID where the request is id-addressed, and by the reserved name `system` where it is name-addressed: `create_realm`, `update_realm`, `delete_realm`, `create_user`, `create_user_attributed`, `register_user`, `register_client`, `create_organization`, `update_organization`, `create_agent`, `import_realm`, `import_user`, `import_client`, `seed_demo_users`, and realm reconciliation. **RBAC writes are gated at the protocol edge instead**, not in the engine: `reject_system_realm_write` guards ten REST admin routes (`src/protocol/http/admin.rs`) and seventeen gRPC `RbacAdmin` RPCs (`src/protocol/grpc/rbac_admin.rs`), because the operator console legitimately writes system-realm roles through the engine directly. The realm does not appear in `list_realms()` or `search_realms()`, `get_realm_by_name("system")` returns `None`, and `/ui/realms/system/...` URLs return 404.
 - **Operators run the first-run setup exactly once**, regardless of how many application realms they've declared. The admin user is always placed in the system realm; tenant realms stay empty of operators.
 
 Admins administer tenant realms via a `?realm=<name>` query parameter on admin URLs, which persists for the session via the `hearth_ui_admin_target` cookie. Switching realms is done either by visiting `/ui/admin/realms` and clicking "Administer this realm" next to the target, or by typing `?realm=<name>` in the URL. The admin's session cookie is always bound to the system realm; the target realm is orthogonal.

@@ -1,6 +1,13 @@
 # Authz Expansion: Custom Permissions, Scopes, and Configurable Claims
 
-**Status:** Partially implemented — Phase 1 foundational types and storage complete; claim-profile structs skeletal; Phase 3 OAuth fields wired. See per-phase checkboxes in §Delivery Phasing and §Critical Files.
+**Status (re-derived 2026-09-21):** Phase 1 foundational types and storage complete; **claim
+profiles are fully wired, not skeletal** — `apply_claim_profile` is called on every token-issue
+path (`src/identity/engine/mod.rs`, `src/identity/engine/oauth.rs`) and `RealmConfig.claim_profile`
+is populated from YAML in `main.rs`; Phase 3 OAuth fields wired. The `PermissionRegistry`
+`ArcSwap` hot-swap is wired in `main.rs` (`RegistrySwap`, rebuilt on SIGHUP reconcile), and
+`User.attributes` runtime validation runs at `create_user`, `update_user` and `import_user`.
+See per-phase checkboxes in §Delivery Phasing and §Critical Files — the "not yet" annotations in
+§Critical Files predated those landings and have been corrected below.
 
 ## Context
 
@@ -880,13 +887,13 @@ Mapping to Hearth's eight layers (per `docs/specs/TESTING.md`):
 
 ## Critical Files
 
-- [x] `src/rbac/registry.rs` — `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS`. **ArcSwap hot-swap not yet wired.**
+- [x] `src/rbac/registry.rs` — `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS`. ArcSwap hot-swap **is** wired (`main.rs`: `RegistrySwap`, rebuilt after each SIGHUP reconcile) — the "not yet wired" note here contradicted the ticked box in §Delivery Phasing and was stale.
 - [x] `src/rbac/types.rs` — `RoleScopeKind`, `UserPermissionGrant`, `PermissionDefinition`, `ScopeBundle`.
 - [x] `src/rbac/keys.rs` — `rba:user_perm:*` storage keys added.
 - [x] `src/rbac/mod.rs` — user-extras trait methods + `add/remove/list_additional_role` added.
 - [x] `src/rbac/engine.rs` — user-extras + additional-roles implementation, tracing events.
 - [x] `src/identity/claims_config.rs` — full claim profile: `default_claim_profile()`, `resolve_claims_for_target()`, layered fallback, gate evaluation.
-- [x] `src/identity/engine.rs` — `issue_tokens_with_context`, digest re-check on `/authorize`, `User.attributes` validation at `update_user`.
+- [x] `src/identity/engine/mod.rs` (the file was split out of `src/identity/engine.rs`) — `issue_tokens_with_context`, digest re-check on `/authorize`, `User.attributes` validation at `create_user` / `update_user` / `import_user`.
 - [x] `src/identity/tokens.rs` — `TokenClaims` with `#[serde(flatten)] custom: BTreeMap<String, Value>` + `skip_serializing_if` on existing fields.
 - [x] `src/identity/types/` — `User.attributes` field (`user.rs`), `OauthClient.trust_level` + `declared_scopes` + `consent_spans_orgs` + `slug` (`credential.rs`), `OrganizationMembership.additional_roles` (`org.rs`), `scope_digest` on consent, `ProtectedResource`, `RealmConfig.protected_resources` + `scopes` (`realm.rs`).
 - [x] `src/protocol/web/admin.rs` — read-only handlers for permissions/roles/scopes, user detail Access card, Token preview tab, consent revocation admin surface.
@@ -1023,13 +1030,13 @@ This specification commits to three phases. SDK DX improvements (codegen CLI, `g
 
 Scope:
 - [x] New types: `RoleScopeKind`, `UserPermissionGrant`, `PermissionDefinition`, `ScopeBundle` (all in `src/rbac/types.rs` or `src/rbac/registry.rs`)
-- [x] `User.attributes` field (`BTreeMap<String, String>`) on `User` struct — **runtime validation not yet done** (key grammar, value ≤1 KiB, map total ≤16 KiB)
-- [x] `src/rbac/registry.rs`: `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS` — **`ArcSwap` hot-swap not yet wired in `main.rs`**
+- [x] `User.attributes` field (`BTreeMap<String, String>`) on `User` struct — runtime validation **is** done, at `create_user`, `update_user` and `import_user` (key grammar, value ≤1 KiB, map total ≤16 KiB)
+- [x] `src/rbac/registry.rs`: `RealmPermissionRegistry`, `PermissionRegistry`, `RegistryError`, grammar validator, `TIER1_CLAIMS` — `ArcSwap` hot-swap **is** wired in `main.rs`
 - [x] Storage keys: `rba:user_perm:*`, `rba:user_perm:by_perm:*`
 - [x] Trait methods: `grant_user_permission`, `revoke_user_permission`, `list_user_permissions`
 - [x] `resolve_permissions` updated to union user extras and honor `scope_kind` / scope-match rule
 - [x] `OrganizationMembership.additional_roles: Vec<String>` field + getter/setter — `add_additional_role` / `remove_additional_role` / `list_additional_roles` done.
-- [x] `User.attributes` runtime validation at `update_user` (key grammar, value ≤1 KiB, total ≤16 KiB). Note: `create_user`/`import_user` don't yet have `attributes` field on request structs.
+- [x] `User.attributes` runtime validation at `create_user`, `update_user` and `import_user` (key grammar, value ≤1 KiB, total ≤16 KiB). `CreateUserRequest.attributes` exists (`src/identity/types/user.rs`); the earlier note saying it did not was stale.
 - [x] `add_additional_role` / `remove_additional_role` / `list_additional_roles` on `RbacEngine` trait + `EmbeddedRbacEngine` + RBAC-owned storage key + `resolve_permissions` integration
 - [x] `PermissionRegistry` hot-swap via `ArcSwap` on SIGHUP wired in `main.rs`
 - [x] Admin UI: `/ui/admin/rbac/permissions` (read-only list), `/ui/admin/rbac/roles` (read-only). User detail Access card and org member typeahead pending.

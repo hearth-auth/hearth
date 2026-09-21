@@ -1,11 +1,20 @@
 # SAML 2.0 — Normative Specification
 
 Status: **Normative.** Requirement levels follow RFC 2119 (MUST / SHOULD / MAY).
-Scope: Hearth's SAML 2.0 **Service Provider (SP)** Web-SSO and Single-Logout
-support for inbound federation. The implementation lives under
+Scope: Hearth's SAML 2.0 Web-SSO and Single-Logout support in **both** roles —
+**Service Provider (SP)** for inbound federation and **Identity Provider (IdP)**
+for asserting to third-party SPs. The implementation lives under
 `src/identity/federation/saml/`; this document is the authoritative contract for
 its security-relevant behavior. Where code and this document disagree, that is a
 bug in one of them — file an issue.
+
+> **Correction (documentation-truth sweep, 2026-09-21).** §1 previously stated that
+> Hearth "acts **only** as a SAML SP" and "is not a SAML IdP for third parties."
+> That was never true: `saml/idp.rs` and the four IdP routes listed in §1 have been
+> registered since the initial SAML commit (`8fd2f02b`). The normative content of
+> this document is almost entirely about the **SP** assertion-consumption path;
+> the IdP side is described in §1 and §8 but is **not** comprehensively specified
+> here. Do not read silence in §§2–7 as a normative statement about IdP behaviour.
 
 Related specs: `docs/specs/AUTHORIZATION.md` (claim mapping after login),
 `docs/specs/OIDC.md` (the OIDC federation path), `docs/specs/ARCHITECTURE.md`
@@ -19,13 +28,51 @@ observable has a corresponding rejection test.
 
 ## 1. Role and profile
 
-- Hearth acts **only as a SAML SP** (Relying Party). It is not a SAML IdP for
-  third parties. (Hearth issues its own metadata as an SP; see §7.)
+Hearth implements both SAML roles. They are independent surfaces with separate
+routes, separate registries and separate keys.
+
+**As a Service Provider (Relying Party)** — inbound federation, the subject of
+§§2–7 below:
+
+| Route | Purpose |
+|---|---|
+| `GET /realms/{realm}/federation/saml/metadata` | Hearth's own SP metadata |
+| `GET /realms/{realm}/federation/saml/begin` | SP-initiated `AuthnRequest` |
+| `POST /realms/{realm}/federation/saml/acs` | Assertion Consumer Service |
+
+Assertions are consumed at the ACS URL and translated into a Hearth
+`ExternalIdentity`, which is then linked/provisioned per the federation link
+policy. A successful consumption establishes a real Hearth session; the
+completed-login audit event is emitted **only** when a session cookie was
+actually issued (`issued_session_cookie`, `src/protocol/web/saml.rs`).
+
+**As an Identity Provider** — Hearth asserts to third-party SPs registered in
+the realm's SP registry:
+
+| Route | Purpose |
+|---|---|
+| `GET /realms/{realm}/saml/metadata` | Hearth's IdP metadata |
+| `GET`/`POST /realms/{realm}/saml/sso` | SSO endpoint (Redirect + POST bindings) |
+| `GET /realms/{realm}/saml/sso/init` | IdP-initiated (unsolicited) SSO |
+| `GET`/`POST /realms/{realm}/saml/slo-idp` | IdP-side Single Logout |
+
+Every IdP route requires a live Hearth session (the `UiSession` extractor) whose
+realm matches the path realm; the asserted `NameID` is that session's user
+email. Hearth signs IdP responses with the realm's RSA key (§4's algorithm rules
+apply in both directions).
+
+`want_authn_requests_signed` on a registered SP is **enforced** at
+`src/protocol/web/saml.rs`: when the flag is set, the `<AuthnRequest>` MUST carry
+a signature that verifies against the SP's `sp_certificate_pem`, and an SP with
+the flag set but **no** certificate registered is refused with `403` — it fails
+closed. The signature is read from the XML, so an SP that sets this flag MUST
+use the **HTTP-POST** binding; the HTTP-Redirect binding carries its signature as
+query parameters and is not accepted for signed `AuthnRequest`s. The audit found
+this flag parsed, validated and never consulted (2026-08-28 §4.10#4); it is
+consulted now.
+
 - Supported profile: **Web Browser SSO Profile** and **Single Logout Profile**
   of SAML 2.0 (`urn:oasis:names:tc:SAML:2.0:protocol`).
-- Assertions are consumed at the SP **Assertion Consumer Service (ACS)** URL and
-  translated into a Hearth `ExternalIdentity`, which is then linked/provisioned
-  per the federation link policy.
 
 ## 2. Bindings
 
@@ -34,8 +81,8 @@ observable has a corresponding rejection test.
 | SP → IdP (`AuthnRequest`, `LogoutRequest`) | HTTP-Redirect (`DEFLATE` + base64 + URL) | MUST |
 | SP → IdP | HTTP-POST (form) | MUST |
 | IdP → SP (`Response`, `LogoutResponse`) at ACS | HTTP-POST (base64, **no** DEFLATE) | MUST |
-| Any | HTTP-Artifact | **Not supported** — MUST reject |
-| Any | SOAP / PAOS (ECP) | **Not supported** |
+| Any | HTTP-Artifact | **Not supported.** No artifact-resolution endpoint is registered, so an `SAMLart` flow has nowhere to land — it 404s. There is no explicit "artifact rejected" branch; the strings `artifact`, `SOAP` and `PAOS` appear nowhere under `src/identity/federation/saml/`. |
+| Any | SOAP / PAOS (ECP) | **Not supported** — same: no endpoint exists. |
 
 - Inbound HTTP-Redirect payloads are DEFLATE-inflated with a hard cap of
   **1 MiB** (`MAX_INFLATED_SAML_BYTES`). A payload that would inflate past the

@@ -212,7 +212,8 @@ time, never from a committed file. The supported chain is:
 fails the length check (env var unset → empty substitution + load warning, or value
 shorter than 32 bytes → length error), Hearth returns a hard configuration error on any
 code path that would derive a fingerprint. There is no silent fail-open. See
-`src/identity/engine.rs` (HEA-836 BLK-2 fix + HEA-861 LOW-1 hardening).
+`src/identity/engine/mod.rs` (HEA-836 BLK-2 fix + HEA-861 LOW-1 hardening); the engine was
+split from a single `engine.rs` into the `engine/` module after that note was written.
 
 #### Rotation runbook
 

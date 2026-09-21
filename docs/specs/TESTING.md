@@ -135,14 +135,30 @@ These tests live in `tests/adversarial.rs` and are part of the standard CI test 
 
 ### 7. Conformance Tests
 
-Run official specification test suites against Hearth's protocol endpoints to verify standards compliance.
+Verify standards compliance against Hearth's protocol endpoints.
 
-**Scope**:
-- **OpenID Connect**: Certification test suite (added when OIDC endpoints are implemented in Phase 0/1)
-- **SAML**: Conformance suite (added when SAML is implemented in Phase 2)
-- **SCIM**: Compliance tests for user provisioning (added when SCIM is implemented in Phase 2)
+**What exists today (verified 2026-09-21).** In-repo, hand-written conformance suites — not
+the certifying bodies' own harnesses:
 
-Conformance tests are treated as required-pass in CI once their protocol layer is implemented.
+| Suite | File |
+|---|---|
+| OIDC Core / Discovery | `tests/oidc_conformance.rs` |
+| FAPI 2.0, realm-level (Baseline + Advanced) | `tests/fapi_conformance.rs` |
+| FAPI 2.0, per-client `ClientProfile::Fapi2` | `tests/fapi2_conformance.rs` |
+| RFC 8693 token exchange | `tests/rfc8693_conformance.rs` |
+| RFC 8707 resource indicators | `tests/rfc8707_conformance.rs` |
+| RFC 9728 Protected Resource Metadata | `tests/rfc9728_conformance.rs` |
+| Federation (OIDC RP side) | `tests/federation_conformance.rs` |
+| SDK contract vs `docs/specs/SDK.md` | `scripts/check-sdk-conformance.sh` (CI job `sdk-conformance`) |
+
+These run in the ordinary `nextest` workspace suite and are therefore required-pass on merge.
+
+> **No official, externally-run conformance suite has ever been executed against Hearth** — not
+> the OpenID Foundation certification suite, not a SAML interop suite, not an SCIM compliance
+> suite. Earlier revisions of this section promised each of them "when the protocol layer is
+> implemented"; all three layers shipped and none of the suites followed. The promise is
+> withdrawn rather than restated, and running one is tracked as an open remediation item
+> (audit 2026-08-28 §8.3). Do not represent Hearth as certified.
 
 ### 8. Benchmarks (`criterion`)
 
@@ -611,7 +627,7 @@ Root cause of incident C-1 ([HEA-2150](/HEA/issues/HEA-2150)): the backup round-
 
 ### CI enforcement (`scripts/check-test-quality.sh`)
 
-A grep-based linter prevents re-introduction of the mechanical anti-patterns documented in this section. It runs as part of `make check`, `make ci-fast`, and the `check` job in `.github/workflows/ci.yml`, so a PR that introduces a banned pattern fails CI with a clear error message.
+A grep-based linter prevents re-introduction of the mechanical anti-patterns documented in this section. It runs as the first gate inside `make check` (before `clippy`, `fmt` and `test`), inside `make ci-fast` and `make ci-local-fast`, and as its own `make test-quality` step in the **`quality`** job of `.github/workflows/ci.yml` — which is in `required-summary`'s `needs:` list. A PR that introduces a banned pattern therefore fails CI with a clear error message. (Earlier revisions of this paragraph named a `check` job; `ci.yml` has no job by that name.)
 
 **Rules (fail the build):**
 
@@ -639,7 +655,15 @@ std::thread::sleep(Duration::from_millis(50));
 | `// AUDIT: justified-sleep: <reason>`        | E — wall-clock sleep            |
 | `// AUDIT: justified-empty-fixture: <reason>` | K — empty authz-field fixture   |
 
-**Scope note** — `src/` `#[cfg(test)]` inline modules are intentionally NOT scanned for A/E. They were outside the [HEA-565](/HEA/issues/HEA-565) audit scope; broaden the lint after a follow-up audit, otherwise CI would fail on unaudited pre-existing patterns. Category I is scanned everywhere because the codebase has zero `#[ignore]` markers today, so no allow-list management is needed.
+**Scope note** — `src/` `#[cfg(test)]` inline modules are intentionally NOT scanned for A/E. They were outside the [HEA-565](/HEA/issues/HEA-565) audit scope; broaden the lint after a follow-up audit, otherwise CI would fail on unaudited pre-existing patterns. Category I is scanned everywhere, and no allow-list is maintained: every `#[ignore]` must carry an `HEA-####` in its message.
+
+> **The claim that "the codebase has zero `#[ignore]` markers today" was false and is withdrawn.**
+> At `333c74e6` there are **14** `#[ignore]` attributes: 4 in `tests/abuse_phase0.rs`, 7 in
+> `tests/ldap_federation.rs` (require a live LDAP server), 1 in `tests/backup.rs`, 1 in
+> `tests/tenant_enumeration_oracle.rs`, and 1 in `simulation/src/tests/wal_group_commit.rs`.
+> Because rule I greps for the *text* `#[ignore` rather than parsing attributes, a prose comment
+> that merely mentions `#[ignore]` is also flagged. Both facts matter to anyone reading the rule:
+> the lint is text-based, not semantic.
 
 Run locally with:
 
@@ -670,13 +694,13 @@ make test-quality          # or: bash scripts/check-test-quality.sh
 - Black box tests for all OAuth 2.0 flows (authorization code, PKCE, client credentials, device flow)
 - Black box tests for WebAuthn registration and authentication
 - Black box tests for magic link and TOTP flows
-- OIDC conformance test suite integration
+- OIDC conformance test suite integration — **in-repo suite only** (`tests/oidc_conformance.rs`); the OpenID Foundation certification suite has not been run
 - Fuzz targets for protocol parsing (JWT, OIDC requests, SAML if applicable)
 - Adversarial tests for token handling (forgery, replay, algorithm confusion)
 
 ### Phase 2+ (Clustering, SAML, SCIM)
 - Simulation tests with network partitions (Raft consensus, leader election, split-brain)
 - Multi-node black box tests (replication consistency, failover behavior)
-- SAML conformance tests
-- SCIM compliance tests
+- SAML conformance tests — **not done.** SAML ships (SP and IdP); coverage is `tests/saml*.rs` and `tests/abuse_*` adversarial tests, not a conformance suite
+- SCIM compliance tests — **not done.** SCIM ships; coverage is `tests/scim*.rs`, not a compliance suite
 - Benchmarks for clustered operations (cross-node permission check, replicated session lookup)

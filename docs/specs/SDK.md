@@ -3,7 +3,14 @@
 > **Canonical reference.** This document is the board-approved specification for all Hearth client SDKs.  
 > Generated from [HEA-332](https://github.com/hearth-auth/hearth) — do not edit without board approval.
 
-> **Pre-release note (board, 2026-05-15):** Hearth has not shipped yet. Breaking changes are fully acceptable during all remediation phases. No backward-compatibility work, deprecation periods, or migration guides are required.
+> **Compatibility status (updated 2026-09-21).** The 2026-05-15 board note here said "Hearth has
+> not shipped yet. Breaking changes are fully acceptable… No backward-compatibility work,
+> deprecation periods, or migration guides are required." **That is no longer true and is
+> withdrawn.** 1.0 GA shipped 2026-06-21 and the 1.x line runs to 2027-12-21 with EOL
+> 2028-06-21. SDK surfaces are covered by [`VERSIONING.md`](../../VERSIONING.md): a breaking
+> SDK change needs a major bump, a deprecation period and a migration note in `CHANGELOG.md`.
+> Leaving the old note in place was the single most load-bearing false statement in this spec —
+> it told every SDK author that none of those obligations applied to them.
 
 ---
 

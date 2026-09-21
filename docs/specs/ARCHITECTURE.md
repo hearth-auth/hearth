@@ -682,7 +682,7 @@ Key architectural decisions codified in this document, with rationale:
 | Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
 | Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch`, `arc-swap` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
 | TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
-| Pre-1.0-GA compatibility | Breaking changes permitted | Semver convention; the strict rules activate at 1.0 GA. Those rules are written down in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, support window, deprecation policy, and the 2.0 process. |
+| Compatibility | **Strict SemVer, in force now** | 1.0 GA shipped 2026-06-21 (`git tag v1.0.0`; CHANGELOG `[1.0.0]`), so the rules in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, the support window, the deprecation policy and the 2.0 process — are **normative today**, not aspirational. The earlier "pre-1.0-GA: breaking changes permitted" entry in this row outlived the release that ended it and is withdrawn. |
 | Encryption at rest mechanism | Envelope encryption (AES-256-GCM) | Key rotation is O(DEKs) not O(data). Industry standard (AWS KMS, GCP KMS). |
 | Batch writes | Atomic multi-op WAL entries | Identity operations span multiple records; individual fsyncs are both slow and unsafe (crash between ops = inconsistency). |
 | Cluster read consistency | Follower reads, bounded staleness | 50–100ms staleness acceptable for auth; linearizable reads bottleneck the leader. Followers stop serving if lag exceeds threshold. |

@@ -682,6 +682,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   landing on a slice boundary, or a number with no digit near the start, aborted the request.
   The masking is character-based and total for any input, and a number that fails E.164
   validation is no longer echoed into that page at all.
+- **Documentation-truth sweep: 20 false claims corrected across the README, `docs/STATUS.md`
+  and the normative specs (audit 2026-08-28 §6, §9 item 4)** — 51 documented claims were
+  re-derived against the code at HEAD. `docs/STATUS.md` listed SAML 2.0, SCIM 2.0, FAPI 2.0
+  and the entire agent-identity surface as unimplemented roadmap items when all four ship;
+  it now carries ten new protocol rows, an LDAP row, a webhook row and a cluster-mode caveat.
+  `docs/specs/SDK.md` still told SDK authors "Hearth has not shipped yet… no
+  backward-compatibility work, deprecation periods, or migration guides are required" —
+  withdrawn; the 1.x support window in `VERSIONING.md` has been binding since 1.0 GA, and
+  `ARCHITECTURE.md`'s matching "pre-1.0-GA: breaking changes permitted" row is withdrawn with
+  it. `docs/specs/SAML.md` claimed Hearth "is not a SAML IdP for third parties"; the four IdP
+  routes have existed since SAML landed, and §1 now documents both roles. `docs/specs/TESTING.md`
+  promised official OIDC/SAML/SCIM certification suites "when the layer is implemented" — all
+  three layers shipped and none of the suites was ever run, so the promise is withdrawn and the
+  seven in-repo suites are named instead: **Hearth is not certified.** The README's test count
+  (4,643) is now the measured 5,387, `/authorize` is documented as `GET`+`POST`, and the
+  `docker pull` / `helm install` blocks now disclose that both GHCR packages are private and
+  fail anonymously today. Full ledger: `reports/documentation-truth-sweep-2026-09-21.md`.
 
 
 ### Security
