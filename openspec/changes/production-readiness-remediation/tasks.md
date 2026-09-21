@@ -311,7 +311,7 @@ found it, the audit piece, and the report's severity.
 ## 24. Wave 4 — Systemic guards from the residual risk statement
 
 - [ ] 24.1 Sweep for the class "operations that report success while not having succeeded": a restore that destroys a realm and exits 0, a CLI family emitting zero bytes, a config editor answering `{"ok":true}` after a partial apply, a release pipeline signing a failing build, a SAML consumer auditing a login that never happened, two admin actions reporting "Reset email sent" (§9 item 1)
-- [ ] 24.2 Add a test that distinguishes `fsync`-before-ack from no `fsync` at all, and confirm it fails against the old code; the WAL's doc comment names a crash loop that does not exist (§4.11#11, §9 item 3 · CLAIM-DEFECT)
+- [x] 24.2 Add a test that distinguishes `fsync`-before-ack from no `fsync` at all, and confirm it fails against the old code; the WAL's doc comment names a crash loop that does not exist (§4.11#11, §9 item 3 · CLAIM-DEFECT)
 - [ ] 24.3 Add a mutation spot-check to CI: comment out a security-critical check and prove something goes red (§9 item 3)
 - [ ] 24.4 Make the merge gate refuse a regression test committed red; two data-integrity regression tests were committed red and stayed red (§9 item 3)
 - [ ] 24.5 Run a documentation-truth sweep driven by §6, which has more FALSE rows than TRUE, covering the README, `docs/STATUS.md` and the normative specs (§9 item 4)
