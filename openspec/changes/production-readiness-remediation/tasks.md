@@ -315,7 +315,7 @@ found it, the audit piece, and the report's severity.
 - [ ] 24.3 Add a mutation spot-check to CI: comment out a security-critical check and prove something goes red (§9 item 3)
 - [ ] 24.4 Make the merge gate refuse a regression test committed red; two data-integrity regression tests were committed red and stayed red (§9 item 3)
 - [ ] 24.5 Run a documentation-truth sweep driven by §6, which has more FALSE rows than TRUE, covering the README, `docs/STATUS.md` and the normative specs (§9 item 4)
-- [ ] 24.6 Enumerate every security-relevant control the Raft state machine bypasses on a follower; two accepted pieces found four, including two kill-switches and key rotation, against a known-defects list naming two caches (§4.1 objection, §4.15#6, §4.16#5, §4.19#12, §9 item 5)
+- [x] 24.6 Enumerate every security-relevant control the Raft state machine bypasses on a follower; two accepted pieces found four, including two kill-switches and key rotation, against a known-defects list naming two caches (§4.1 objection, §4.15#6, §4.16#5, §4.19#12, §9 item 5)
 
 ## 25. Findings raised by the Wave 4 re-runs
 
