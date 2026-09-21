@@ -416,6 +416,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   agents could not be enumerated past its first page. `?owner_type=`, `?owner_id=`, `?status=`,
   `?capability=`, `?cursor=` and `?limit=` are now honoured; an unparseable `status` or `owner_id`
   answers `422` rather than silently returning every agent in the realm.
+- **An agent can now be suspended, reactivated and revoked over the API (task 26.11)** — three new
+  routes, `POST /v1/agents/{id}/suspend`, `POST /v1/agents/{id}/reactivate` and
+  `POST /v1/agents/{id}/revoke`, each gated on `hearth.agents.admin` like the rest of the agent
+  surface. `AGENT_AUTH.md` §1.2 has always made the `Active → Suspended → Active` /
+  `Active|Suspended → Revoked` state machine normative, and twelve places in the engine refuse a
+  non-`Active` agent, but no protocol could enter either state: there was no REST route, no gRPC
+  method and no console page, and the engine methods' only production caller was the abuse
+  monitor's automatic suspension. An operator whose agent API key leaked could revoke that one
+  credential — which neither invalidates issued tokens nor stops new ones being minted — or delete
+  the agent outright, and nothing in between. Each route takes no body, returns the updated agent
+  record, and audits (`agent_suspended`, `agent_reactivated`, `agent_revoked`). Revocation is
+  terminal: reactivating a revoked agent answers `403`, and re-revoking one answers `200`. The
+  realm comes from the caller's own credential, so naming an agent in another realm answers `404`.
 
 
 ### Fixed

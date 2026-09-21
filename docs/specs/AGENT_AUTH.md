@@ -83,12 +83,27 @@ The protocol layer **MUST** expose CRUD endpoints for agents:
 | Update | PATCH | `/v1/agents/{agent_id}` |
 | Delete | DELETE | `/v1/agents/{agent_id}` |
 
+The protocol layer **MUST** also expose the §1.2 status transitions. Without
+them the `Suspended` and `Revoked` states are unreachable by an operator, and
+the only remedies for a leaked agent credential are revoking one credential
+(which neither invalidates issued tokens nor prevents new ones) or deleting the
+agent outright:
+
+| Operation | Method | Path | Transition |
+|-----------|--------|------|------------|
+| Suspend | POST | `/v1/agents/{agent_id}/suspend` | `Active → Suspended` (reversible) |
+| Reactivate | POST | `/v1/agents/{agent_id}/reactivate` | `Suspended → Active` |
+| Revoke | POST | `/v1/agents/{agent_id}/revoke` | `Active\|Suspended → Revoked` (terminal) |
+
 **Rules:**
 
 - Agent creation **MUST** require the caller to be an authenticated user or an admin with `agent:create` permission.
 - The owner **MUST** be set to the authenticated user unless the caller is an admin (admins **MAY** specify a different owner).
 - List endpoints **MUST** support filtering by `owner_id`, `status`, and capability.
 - Pagination **MUST** follow the same cursor-based pattern used by existing list endpoints.
+- Every endpoint in both tables **MUST** require the `hearth.agents.admin` permission and **MUST** take the realm from the caller's own credential, never from the request path, so an agent in another realm answers `404`.
+- The transition endpoints take no request body and **MUST** return the updated agent record. Reactivating a revoked agent **MUST** be refused (`403`); revoking an already-revoked agent **MUST** be idempotent (`200`).
+- Each transition **MUST** emit its audit event (`agent_suspended`, `agent_reactivated`, `agent_revoked`). `agent_revoked` carries the `FailOperation` failure policy: a revocation that cannot be recorded **MUST** fail the request rather than succeed silently.
 
 ### 1.4 Capabilities
 

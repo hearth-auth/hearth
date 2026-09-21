@@ -488,6 +488,37 @@ async fn agents_admin_denied_on_realm_endpoint() {
     );
 }
 
+/// The agent lifecycle routes added for the 2026-09-21 subsystem audit's
+/// finding A-1 name `hearth.agents.admin` like every other handler in
+/// `src/protocol/http/agents.rs`. A token carrying a *different* sub-admin
+/// permission passes the outer gate and must still be refused: revoking an
+/// agent is the operator kill switch, not a clients-admin affordance.
+#[tokio::test]
+async fn clients_admin_denied_on_agent_lifecycle_routes() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "clientsadmin-agentlifecycle@example.com",
+        "hearth.clients.admin",
+    )
+    .await;
+
+    let fake_agent = "agt_00000000000000000000000000000000";
+    for action in ["suspend", "reactivate", "revoke"] {
+        let app = build_app_with_agent_routes(&h).await;
+        let uri = format!("/v1/agents/{fake_agent}/{action}");
+        let status = http_post_json(app, &token, &realm, &uri, "{}").await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "hearth.clients.admin must be denied on POST {uri} (requires hearth.agents.admin)"
+        );
+    }
+}
+
 /// hearth.admin (full superuser) still grants access to all domains.
 #[tokio::test]
 async fn full_admin_accesses_all_domains() {
