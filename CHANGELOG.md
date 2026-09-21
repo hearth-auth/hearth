@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **`POST /admin/users/{id}/roles` refuses an organisation that does not exist (task 26.45)** — it parsed
+  `org_id` into a scope and wrote the assignment without asking whether the organisation was real, so a typo
+  answered `201` and created an assignment that could never grant anything: the administrator was told the
+  role was assigned and it silently never took effect. It now answers `404`. This was a privilege hole until
+  task 26.16 made organisation-context resolution fail closed on an unknown organisation — before that, the
+  dangling assignment granted to anyone presenting that UUID.
+
 - **`hearth config validate` reports a missing storage host key instead of failing on it (task 26.23)** —
   it answered `✓` on a configuration `hearth serve` then refused with *"HEARTH_MASTER_KEY is not set and
   auto-generation is disabled in production mode"*. The successful output now says so on its own line.

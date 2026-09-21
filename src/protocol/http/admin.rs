@@ -4315,7 +4315,41 @@ async fn admin_assign_role(
         Some(s) => {
             let stripped = s.strip_prefix("org_").unwrap_or(&s);
             match uuid::Uuid::parse_str(stripped).map(crate::core::OrganizationId::new) {
-                Ok(oid) => Scope::Org { org_id: oid },
+                Ok(oid) => {
+                    // Task 26.45: the organisation must exist.
+                    //
+                    // `assign_role` checks that the role exists and that a
+                    // group SUBJECT exists, but says nothing about the scope —
+                    // its own comment notes that user existence is "the
+                    // identity layer's concern", and organisations are the
+                    // same kind of concern, which the RBAC layer may not reach
+                    // upward to ask about. So the check belongs here, where the
+                    // caller's value enters.
+                    //
+                    // Without it a typo'd UUID answered 201 and wrote an
+                    // assignment that can never grant anything: the
+                    // administrator was told the role was assigned and it
+                    // silently never took effect. Not a privilege hole today —
+                    // task 26.16 made `active_org_context` fail closed on an
+                    // unknown organisation — but it was one before that.
+                    match state.identity.get_organization(&auth.realm_id, &oid) {
+                        Ok(Some(_)) => Scope::Org { org_id: oid },
+                        Ok(None) => {
+                            return (
+                                StatusCode::NOT_FOUND,
+                                Json(serde_json::json!({
+                                    "error": "organization not found",
+                                    "error_description":
+                                        "the organization named by org_id does not exist in \
+                                         this realm; a role scoped to it could never grant \
+                                         anything"
+                                })),
+                            )
+                                .into_response();
+                        }
+                        Err(e) => return identity_error_to_response(&e).into_response(),
+                    }
+                }
                 Err(_) => {
                     return (
                         StatusCode::BAD_REQUEST,
