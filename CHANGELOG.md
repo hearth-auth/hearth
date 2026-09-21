@@ -170,6 +170,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   what the archive does not hold and what a restore therefore loses, and
   `docs/guides/backup.md` documents each one.
 
+- **A retracted throughput figure is no longer published, and four install paths now disclose that
+  they fail (task 23.2)** — the README and `docs/vision/VISION.md` both advertised durable session
+  creation at `41,255 ops/s @T=256`, a figure `docs/perf/PUBLISHED_FIGURES.md` formally **retracted
+  on 2026-07-30** after five alternating runs measured 10,047–33,888 ops/s (3.4× spread, median
+  ~16,281). Only the single-threaded floor, 484 ops/s @T=1, is still published; `fsync`-before-ack
+  and `W`=1.000 were never in question and are unchanged. `PERFORMANCE_REPORT_2_1.md` and
+  `HEA-1867-COMPETITIVE-COMPARISON.md` carry supersession banners, the latter because it published
+  competitor multipliers the project's own policy withdraws. `docs/guides/storage-sizing.md` no
+  longer claims its latency table "matches the CI gate thresholds" — it does not, and two of its
+  four rows have no gate at all; the real limits are now tabulated and the rows above 1 M users are
+  labelled as extrapolations. On the install side, the GHCR image gap is now disclosed in
+  `deploy/README.md`, `docs/guides/getting-started.mdx` and `docs/guides/upgrading.md`, not just the
+  README; the Kotlin SDK records that `io.hearth` is absent from Maven Central and that its
+  documented `0.1.0` never shipped; the PHP SDK records that Packagist carries no tagged release, so
+  `composer require hearth-auth/php-sdk:^1.0` cannot resolve; and the Go SDK install pin moves from
+  `v1.0.0` to `v1.6.11`. `deploy/README.md` also corrected three operator-visible errors: the
+  Compose stack reads `deploy/hearth.env`, not a repository-root `.env`; Mailpit starts only under
+  `--profile mail`; and the documented `autoscaling.enabled` Helm value does not exist. Finally,
+  `VISION.md` withdraws "conform strictly to their respective RFCs" — no certifying body's suite has
+  been run. Full evidence in `reports/public-claim-verification-2026-09-21.md`.
+
 ### Security
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one
   single-use path with no advisory lock: the authorization-code exchange takes `code_exchange_lock` and

@@ -18,6 +18,18 @@ All methods share the same binary. Download from [GitHub Releases](https://githu
 ghcr.io/hearth-auth/hearth:latest
 ```
 
+> **Known gap — the container image is not anonymously pullable today.** Re-checked 2026-09-21:
+> an unauthenticated manifest fetch for `ghcr.io/hearth-auth/hearth` (any tag) and for the Helm
+> chart package `ghcr.io/hearth-auth/charts/hearth` returns **401**. The GitHub repository and
+> its Releases are public; the two GHCR packages are not. Until they are flipped to public, every
+> `docker pull`, `docker compose up` and `helm install` in this guide fails at the first command
+> for an anonymous user.
+>
+> **What to do instead:** `docker login ghcr.io` with a personal access token carrying
+> `read:packages`, or download the release binary from GitHub Releases and use the systemd path
+> below. Tracked as remediation task 3.4; release validation now gates on an anonymous fetch, so
+> versions published after that gate landed will be public.
+
 ---
 
 ## Docker Compose (single-host / staging)
@@ -36,9 +48,20 @@ curl http://localhost:8420/readyz
 # → {"status":"ready","storage":"ok"}
 ```
 
-Services started:
-- **Hearth** at `http://localhost:8420`
-- **Mailpit** (SMTP capture) at `http://localhost:8025`
+Services started by the command above:
+- **Hearth** at `http://localhost:8420`. Outbound email is captured by the in-process
+  mailcatcher transport and rendered at `http://localhost:8420/dev/mail` — no second container
+  is needed for local mail.
+
+**Mailpit is not started by default.** It sits behind a compose profile, so it only starts when
+you ask for it:
+
+```bash
+docker compose -f deploy/docker-compose.yml --profile mail up -d
+```
+
+That adds **Mailpit** (SMTP capture UI) at `http://localhost:8025`. Its SMTP port is reachable
+only from inside the compose network, as `mailpit:1025`.
 
 ### Configuration
 
@@ -58,12 +81,26 @@ docker compose -f deploy/docker-compose.yml down -v
 
 ### Environment variables
 
-Create a `.env` file in the project root. The compose file loads it automatically:
+Create `deploy/hearth.env`. The compose file loads it automatically when present and starts
+without it when absent:
 
 ```bash
-# .env
+cp deploy/hearth.env.example deploy/hearth.env   # then edit
+```
+
+```bash
+# deploy/hearth.env
 SMTP_PASSWORD=s3cr3t
 ```
+
+> **Not the repository-root `.env`.** The compose file used to read `../.env`, and that was
+> removed (audit 2026-08-28 §4.8#17). Compose injects **every** key of an `env_file` into the
+> container, where `docker inspect` can read it, and Hearth additionally reads `HEARTH_*`
+> variables as configuration — so an unrelated key in a developer's root `.env` was both leaked
+> into the server process and able to silently override the `hearth.yaml` bind-mounted above.
+> `deploy/hearth.env` is gitignored, scoped to this one service, and enforced by
+> `scripts/check-compose-env-scope.sh`. Values in it override `hearth.yaml`; the compose file's
+> own `environment:` block overrides both.
 
 Reference variables in `hearth.yaml`:
 
@@ -249,7 +286,6 @@ automatically triggers a new rollout.
 | `resources.requests.cpu` | `100m` | CPU request |
 | `resources.requests.memory` | `128Mi` | Memory request |
 | `podDisruptionBudget.enabled` | `false` | Enable PDB |
-| `autoscaling.enabled` | `false` | Enable HPA |
 
 Full reference: [`helm/hearth/values.yaml`](helm/hearth/values.yaml).  
 Production profile: [`helm/hearth/values-prod.yaml`](helm/hearth/values-prod.yaml).
@@ -310,8 +346,13 @@ config:
 
 Hearth uses an embedded storage engine (WAL + SSTs on a PVC). Multiple replicas
 sharing a `ReadWriteOnce` volume is not supported. For high availability, use
-`ReadWriteMany` storage or a remote backend (roadmap item). The `autoscaling`
-value block is present but disabled by default.
+`ReadWriteMany` storage or a remote backend (roadmap item).
+
+> **There is no `autoscaling` value and no HorizontalPodAutoscaler template.** An earlier
+> revision of this guide documented `autoscaling.enabled`; the key does not appear anywhere in
+> `deploy/helm/hearth/`, so setting it has no effect and produces no error. Horizontal
+> autoscaling would be wrong for this chart in any case — the storage engine is a single-writer
+> WAL on one PVC, so scaling replicas is not a supported operation, automatic or manual.
 
 > **Note on StatefulSet vs Deployment:** The chart currently uses `Deployment +
 > PVC`. Because the WAL is single-writer and `fsync`-bound, switching to

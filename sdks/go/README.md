@@ -7,12 +7,17 @@ Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 ## Installation
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go@v1.0.0
+go get github.com/hearth-auth/hearth/sdks/go@v1.6.11
 ```
 
 | SDK version | Minimum Hearth server |
 |-------------|----------------------|
 | 1.0.x       | 1.0.0                |
+
+The module is versioned in lockstep with the server. `v1.6.11` is the newest version on
+`proxy.golang.org` as of 2026-09-21; the full list is
+`https://proxy.golang.org/github.com/hearth-auth/hearth/sdks/go/@v/list`. This guide previously
+pinned `v1.0.0`, which resolves but returns a 2026-06-23 build.
 
 ## Quick start
 

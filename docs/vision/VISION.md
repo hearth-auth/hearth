@@ -369,10 +369,16 @@ and therefore one commit stream. Throughput scales with concurrency and the devi
 not with core count — a thread blocked on `fsync` consumes no CPU, so a per-core figure and a
 16-core multiple are both category errors here. The target was revised from `50,000+ ops/sec/core`
 to `30,000+ aggregate` on 2026-07-29; the original figure was arbitrary rather than derived from
-the operation. Measured 41,255 ops/s at T=256 on `dev-ryzen-7840hs`, **engine plane**, with
-`fsync`-before-ack intact (`W`=1.000 — one WAL fsync per durable write). Source of record:
-`docs/perf/PUBLISHED_FIGURES.md` §6; background in `docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2
-(T4) and `docs/perf/HEA-1959-commit-cycle.md`.
+the operation. **This row is currently ungraded: there is no reproducible measurement of it.** A
+figure of 41,255 ops/s at T=256 on `dev-ryzen-7840hs` was published and then **retracted on
+2026-07-30** — five alternating runs at the same commit spanned 10,047–33,888 ops/s (3.4×, median
+~16,281), so the earlier number sat inside the host's own jitter rather than above it. Durability
+was never in question: `W`=1.000 on every run, one WAL fsync per durable write, `fsync`-before-ack
+intact throughout. What survives is the single-threaded floor, **484 ops/s at T=1, engine plane**.
+A peak figure returns only after a re-measurement on a quiesced server-class host. Source of
+record: `docs/perf/PUBLISHED_FIGURES.md` §2.1 and §6; background in
+`docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2 (T4) and `docs/perf/HEA-1959-commit-cycle.md`, both of
+which predate the retraction.
 
 ### 7.3 Capacity Targets (Single Node)
 
@@ -502,7 +508,9 @@ Migration is the highest-friction part of adopting new infrastructure. Hearth ad
 
 ### 8.4 Drop-In Protocol Compatibility
 
-Hearth's OIDC, OAuth 2.0, SAML, and SCIM endpoints conform strictly to their respective RFCs and specifications. Any client library that speaks standard OIDC (e.g., `openid-client` in Node.js, `golang.org/x/oauth2` in Go) should work with Hearth without modification. This means teams can adopt Hearth server-side without changing their application's auth client code — just point the OIDC discovery URL at Hearth instead of Auth0/Keycloak.
+Hearth's OIDC, OAuth 2.0, SAML, and SCIM endpoints are built to their respective RFCs and specifications, and are exercised by in-repo conformance suites (`tests/oidc_conformance.rs`, `fapi_conformance.rs`, `fapi2_conformance.rs`, `rfc8693_conformance.rs`, `rfc8707_conformance.rs`, `rfc9728_conformance.rs`, `federation_conformance.rs`, plus `scripts/check-sdk-conformance.sh`). Any client library that speaks standard OIDC (e.g., `openid-client` in Node.js, `golang.org/x/oauth2` in Go) should work with Hearth without modification, which means teams can adopt Hearth server-side without changing their application's auth client code — just point the OIDC discovery URL at Hearth instead of Auth0/Keycloak.
+
+> **No certifying body's suite has been run.** The suites above are written and maintained in this repository; the OpenID Foundation certification suite, a SAML interop suite and a SCIM compliance suite have never been executed against Hearth. Do not represent Hearth as certified or as "strictly conformant" — the honest statement is that it implements these specifications and tests itself against them. See `docs/specs/TESTING.md` §7.
 
 ---
 

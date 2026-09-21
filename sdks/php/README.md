@@ -30,6 +30,20 @@ Official PHP SDK for [Hearth](https://github.com/hearth-auth/hearth) — a singl
 
 ## Installation
 
+> **Known gap — there is no tagged release on Packagist.** Re-checked 2026-09-21:
+> `hearth-auth/php-sdk` is registered on Packagist but exposes only the `dev-main` branch — the
+> tagged-version list is empty and total downloads are zero. `composer require
+> hearth-auth/php-sdk:^1.0` therefore fails with "could not find a version matching `^1.0`".
+> Until a tag is published, install from the branch or from source:
+>
+> ```bash
+> composer require hearth-auth/php-sdk:dev-main
+> ```
+>
+> `dev-main` tracks the default branch and carries no stability guarantee; pin the commit with
+> `composer.lock` if you use it. The command below is the intended install path once a release
+> is tagged.
+
 ```bash
 composer require hearth-auth/php-sdk:^1.0
 ```

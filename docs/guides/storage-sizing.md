@@ -14,7 +14,10 @@ Read path: hot tier → memtable → SST files
                 ↑ lock-free   ↑ in-memory   ↑ mmap'd on disk
 ```
 
-| Tier | Implementation | Medium | Typical p50 | Typical p99 |
+The table below gives **planning budgets, not measurements.** Read the provenance note under it
+before quoting any row.
+
+| Tier | Implementation | Medium | Planning p50 | Planning p99 |
 |------|---------------|--------|-------------|-------------|
 | Hot tier | `HashMap` + `ArcSwap` | DRAM | < 5 µs | < 10 µs |
 | Memtable | `BTreeMap` + read lock | DRAM | < 20 µs | < 100 µs |
@@ -27,9 +30,24 @@ performing a binary search, so absent-key reads skip the disk search on ~99%
 of SSTs. V1 SSTs (pre-HEA-1626) remain readable without a filter; `might_contain`
 returns `true` for every key on those files, falling back to the full binary search.
 
-These ranges match the CI gate thresholds in `benches/storage_gate.rs`,
-`benches/point_lookup.rs`, and `benches/demotion_latency.rs`. Run `make bench-gate`
-on your target hardware to collect authoritative numbers.
+**Provenance — these are not the CI gate thresholds, and they are not measured figures.** An
+earlier version of this guide said the ranges above "match the CI gate thresholds"; they do not.
+The gates are looser, and two of the four rows have no gate at all:
+
+| Row above | Nearest CI gate | Gate limit |
+|---|---|---|
+| Hot tier (`< 5 µs` / `< 10 µs`) | `benches/storage_gate.rs` `storage_hot_tier_lookup`, `session_lookup_by_id`; `benches/point_lookup.rs` hot-tier hit | p50 **10 µs**, p99 **100 µs** — 2× and 10× looser than the row |
+| Memtable | *none* | — |
+| SST (warm page cache) | *none* | — |
+| SST (cold page fault) | `benches/point_lookup.rs` cold random read | p99 **5 ms** — matches |
+
+A gate is a ceiling that fails the build when crossed, not a typical value, so even where a
+number coincides it is not evidence of observed latency. For latencies that were actually
+measured, with the host, plane and raw artifact attached, see
+[`docs/perf/PUBLISHED_FIGURES.md`](../perf/PUBLISHED_FIGURES.md) §1 — note that it publishes p50
+only; **no p99 read figure has been cleared for publication on either plane.** Run
+`make bench-gate` on your target hardware to collect numbers for your own deployment; treat those,
+not this table, as authoritative for capacity planning.
 
 ## Hot tier memory model
 
@@ -93,8 +111,11 @@ storage:
 ### Datasets that fit in hot tier
 
 When the active working set fits within hot tier capacity, all reads are
-lock-free `ArcSwap` loads and p99 stays under 10 µs. This is the design target
-for a single-realm deployment with ≤ 1 M active sessions on a node with ≥ 4 GiB RAM.
+lock-free `ArcSwap` loads. A p99 under 10 µs is the **design target** for a single-realm
+deployment with ≤ 1 M active sessions on a node with ≥ 4 GiB RAM — it is not a published
+measurement. The CI gate for this path admits up to 100 µs p99, and no p99 read figure has been
+cleared for publication; the measured p50 for a hot-tier session lookup is 0.118 µs, engine plane
+(`docs/perf/PUBLISHED_FIGURES.md` L2).
 
 ### Datasets that exceed hot tier but fit in RAM
 
@@ -151,6 +172,13 @@ Hearth node where the total on-disk dataset is approximately 10× physical RAM.
 > **Note**: "active sessions" at 10% of total users is a common identity-server
 > workload profile. Skewed access distributions (Zipf) will outperform these
 > estimates; uniform random access will approach the worst-case column.
+
+> **Nothing in this table above 1 M users has been measured.** The largest corpus this project
+> has ever measured is **1,000,000 users** (`docs/perf/PUBLISHED_FIGURES.md` §3.1). The 10 M,
+> 100 M and 1 B rows — including their `p99 read (warm)` column — are extrapolations from the
+> measured per-user RAM slope (100 B/user) and per-user disk slope (1,195.6 B/user), not
+> observations. Size from them if you have nothing better, but do not cite them as results, and
+> re-measure with `make bench-gate` before committing to hardware at those scales.
 
 ## Tuning checklist for large datasets
 

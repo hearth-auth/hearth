@@ -261,9 +261,11 @@ All engine-plane figures were measured on `dev-ryzen-7840hs` as of 2026-07-29; f
 | Token introspection (RFC 7662) | **44.0 µs** | — | engine |
 | Permission check | — | **5,987,782 /core/s** · 52,048,086 /s @16T | engine |
 | Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** | — | engine |
-| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 · **41,255 /s** @T=256 | engine |
+| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 (floor) | engine |
 
 `W=1.000` at T=1 means one WAL `fsync` per durable write — the theoretical floor. No write is acknowledged before it is on stable storage. `SyncMode::Async` was evaluated as a default and rejected; every write figure above carries full durability.
+
+> **We publish no peak figure for durable session creation.** A previously published `41,255 /s @T=256` was **retracted** on 2026-07-30: five alternating runs on the same host measured 10,047–33,888 ops/s — a 3.4× spread with a median of ~16,281 — so the number was jitter, not a measurement. `W=1.000` held on every run, so durability is not in question; the *rate* is not reproducible on this host. Only the single-threaded 484 /s floor survives. A peak figure returns when a quiesced server-class host exists. See [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md) §2.1.
 
 ### Password login (HTTP plane, re-verified)
 

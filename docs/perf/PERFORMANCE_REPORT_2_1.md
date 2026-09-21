@@ -6,6 +6,24 @@
 (2.1 as originally graded: head `c709fa58`)
 **Previous report:** `docs/perf/PERFORMANCE_REPORT_2_0.md` (v2, graded 2026-07-29, head `981516f1`)
 
+> ## ⛔ Superseded — read `docs/perf/PUBLISHED_FIGURES.md` first
+>
+> **Added 2026-09-21.** This report's grades are historical. Three of them no longer hold, and
+> `PUBLISHED_FIGURES.md` §6 — not this document — is the list of figures cleared for publication:
+>
+> - **T4 (session creation) is no longer `PASS`.** Revision 2.1a below regrades it `MISS → PASS`
+>   on 41,255 ops/s @T=256. That figure was **retracted on 2026-07-30**: five alternating runs
+>   spanned 10,047–33,888 ops/s, median ~16,281, all `MISS` against the 30,000 target. Only the
+>   single-threaded floor (484 ops/s @T=1) survives. See `PUBLISHED_FIGURES.md` §2.1.
+> - **Every HTTP-plane figure here is retracted** — L1-H, L9-H, T1-H, L9-TH and the 44–63× /
+>   2.3–2.6× multipliers derived from them. They did not reproduce at `1b6b7745`, and HEA-1974
+>   established that no available host can reproduce them. See `PUBLISHED_FIGURES.md` §4.1.
+> - **L5 (`lookup_user`) is withdrawn as a point latency** — 236% run-to-run spread. The
+>   ≈0.458 µs figure below is not a stable measurement. See `PUBLISHED_FIGURES.md` §4.2.
+>
+> The status line below (`19 PASS / 0 MISS`) is the grade as it stood on 2026-07-29 and is not
+> the grade at HEAD.
+
 > **Revision 2.1a — 2026-07-29 — T4 regraded MISS → PASS. Three inputs, in order:**
 >
 > 1. **The board revised the T4 target from 50,000 to 30,000 ops/s**, on the record that the

@@ -8,10 +8,29 @@ Coroutines-first API with full OIDC/JWT support out of the box.
 
 ## Installation
 
+> **Known gap — this artifact is not resolvable from Maven Central today.** Re-checked
+> 2026-09-21: the group id `io.hearth` returns **404** on `repo1.maven.org` and **0 results** on
+> the Maven Central search index. The publish workflow
+> (`.github/workflows/sdk-publish-kotlin.yml`) targets Maven Central via Sonatype OSSRH on
+> `sdk-kotlin-v*` tags, and those tags exist through `sdk-kotlin-v1.6.11` — but nothing has
+> landed in the public repository. Until it does, build from source:
+>
+> ```bash
+> git clone https://github.com/hearth-auth/hearth
+> cd hearth/sdks/kotlin && gradle publishToMavenLocal
+> ```
+>
+> then depend on it from `mavenLocal()`. The coordinates below are what the artifact *will* be
+> published under; they are not usable from Maven Central right now.
+
+Pick the version from the release tags (`sdk-kotlin-v*`) — the latest is `1.6.11`. The in-repo
+`build.gradle.kts` carries `0.1.0` as a placeholder that the publish workflow overwrites from the
+tag name; it is not a released version.
+
 ### Gradle (Kotlin DSL)
 
 ```kotlin
-implementation("io.hearth:hearth-core:0.1.0")
+implementation("io.hearth:hearth-core:1.6.11")
 ```
 
 ### Maven
@@ -20,7 +39,7 @@ implementation("io.hearth:hearth-core:0.1.0")
 <dependency>
   <groupId>io.hearth</groupId>
   <artifactId>hearth-core</artifactId>
-  <version>0.1.0</version>
+  <version>1.6.11</version>
 </dependency>
 ```
 
@@ -335,9 +354,14 @@ try {
 
 | SDK version | Minimum Hearth server |
 |------------|----------------------|
-| 0.1.x      | 0.1.0                |
+| 1.0.x–1.6.x | 1.0.0                |
 
 Requires Java 17+ or Kotlin 2.0+.
+
+The SDK is versioned in lockstep with the server: release tags run `sdk-kotlin-v1.0.0` through
+`sdk-kotlin-v1.6.11`. There is no Hearth 0.1.0 — the first release was **1.0.0 on 2026-06-21**,
+so an earlier version of this table (`0.1.x` against server `0.1.0`) named a server that never
+shipped.
 
 ---
 

@@ -174,6 +174,11 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    docker pull ghcr.io/hearth-auth/hearth:<new-version>
    ```
 
+   > **Known gap:** re-checked 2026-09-21, an anonymous manifest fetch for this package returns
+   > **401** for every tag. Run `docker login ghcr.io` with a token carrying `read:packages`
+   > first, or upgrade via the release binary and the systemd path below. Tracked as remediation
+   > task 3.4.
+
 2. **Update the image tag** in your `docker-compose.yml` (or `.env` file, if you parameterise the tag):
 
    ```yaml
