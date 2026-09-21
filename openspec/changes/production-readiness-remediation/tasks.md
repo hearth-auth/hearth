@@ -293,7 +293,7 @@ found it, the audit piece, and the report's severity.
 - [ ] 23.3 Re-run P29, test-suite quality and the mutation spot-check; we cannot currently say whether this test suite can fail (§7.2, §8.1 item 3)
 - [x] 23.4 Re-run P28, the seven SDKs: produce the per-SDK verify-or-decode-and-trust matrix; an SDK that decodes without verifying would be a critical finding (§7.2, §8.1 item 4)
 - [ ] 23.5 Re-run P20, backup round-trip and on-disk format versioning: round-trip diff, restore into a different version, truncated and corrupted backups (§7.2, §8.1 item 5)
-- [ ] 23.6 Re-run P31, day-2 upgrade and the cold first-run; whether v1.6.x data can be read by the current build is unknown (§7.2, §8.1 item 6)
+- [x] 23.6 Re-run P31, day-2 upgrade and the cold first-run; whether v1.6.x data can be read by the current build is unknown (§7.2, §8.1 item 6)
 - [ ] 23.7 Re-run P11, device grant, DCR, introspection and permission modes; whether DCR is open to the internet by default is unanswered (§7.2, §8.1 item 7)
 - [x] 23.8 Audit LDAP beyond the surface §4.6 covered (§7.3)
 - [x] 23.9 Audit the gRPC management API beyond the `Decide` and admin paths §4.2 and §4.19 reached (§7.3)
@@ -306,7 +306,7 @@ found it, the audit piece, and the report's severity.
 - [ ] 23.16 Stand up a three-node cluster and enumerate every cache the state machine bypasses (§8.3)
 - [x] 23.17 Produce the per-SDK verify/decode matrix (§8.3)
 - [ ] 23.18 Run one official conformance suite — OIDC, SCIM or SAML (§8.3)
-- [ ] 23.19 Do the cold first-run with a transcript; the brief calls it "the single most informative hour in the whole audit" (§8.3)
+- [x] 23.19 Do the cold first-run with a transcript; the brief calls it "the single most informative hour in the whole audit" (§8.3)
 
 ## 24. Wave 4 — Systemic guards from the residual risk statement
 
@@ -374,7 +374,7 @@ found it, the audit piece, and the report's severity.
 - [x] 26.9 `grpc_reflection_auth_interceptor` accepted any `Bearer x`: it checked the header was present, never that the token was valid (23.9 · finding G-4) — closed in `a668a667`
 - [ ] 26.11 **HIGH** — `revoke_agent`, `suspend_agent` and `reactivate_agent` are reachable from no protocol at all: no REST route, no gRPC method, no console page. Four controls honour the `Revoked`/`Suspended` state and nothing can enter it (23.11 · finding A-1)
 - [ ] 26.12 **HIGH** — `delete_agent` discards the `Result` of `purge_user_from_realm` and returns `Ok`, deletes the primary record first so the rest of the cascade is unaddressable, and never revokes the tokens `AGENT_AUTH.md` says it MUST (23.11 · finding A-2)
-- [ ] 26.13 **HIGH** — `flush_approval_webhook_outbox_inner` has zero callers, so the documented "durable at-least-once" approval webhook is at-most-once and one outbox row leaks permanently per undelivered request (23.11 · finding A-7)
+- [x] 26.13 **HIGH** — `flush_approval_webhook_outbox_inner` has zero callers, so the documented "durable at-least-once" approval webhook is at-most-once and one outbox row leaks permanently per undelivered request (23.11 · finding A-7)
 - [ ] 26.14 `parse_and_validate_aat`'s storage-error arm was fixed to propagate (A-4) but carries NO test: the harness has no `StorageEngine` fault injection for this path. Add one (23.11 · finding A-4, unproven)
 - [ ] 26.15 Organisation extra roles survive member removal and are silently restored when the member is re-added (23.10 · finding O-1)
 - [ ] 26.16 Organisation suspension is not a kill switch: the status is read in only two places (23.10 · finding O-2)
@@ -382,3 +382,10 @@ found it, the audit piece, and the report's severity.
 - [ ] 26.18 Token exchange honours an agent's `Revoked` status but not `Suspended` (23.11 · finding A-8)
 - [ ] 26.19 The MCP scope validator has zero production callers (23.11 · finding A-10)
 - [ ] 26.20 `tool_invocation.rs` burns the DPoP JTI BEFORE the binding check, inverting the order `auth.rs` uses, so a proof that fails binding still consumes its replay slot (23.11 · finding A-11)
+- [ ] 26.21 **BLOCKER** — `hearth backup create` cannot export a KEK-encrypted store by any route. It fails with "set `security.key_encryption_key` … or the `HEARTH_KEK` environment variable" while BOTH are set, and there is no `--config` flag: `run_backup_create` (`src/main.rs`) never loads config and never reads the env var. Production requires a KEK, so the mandatory pre-upgrade backup is impossible on any production deployment (23.19 · finding C-1)
+- [ ] 26.22 `${VAR}` substitution runs inside YAML COMMENTS, so `hearth.example.yaml` validates with 22 errors, 20 of them from commented-out lines. `hearth config example` emits the same file (23.19 · C-2)
+- [ ] 26.23 `config validate` says OK on a config `serve` then refuses: it checks `HEARTH_KEK` but not `HEARTH_MASTER_KEY`. The two do not agree (23.19 · C-3)
+- [ ] 26.24 A CIDR entry in `trusted_proxies` satisfies the `trust_forwarded_proto` guard at validation and is then discarded at runtime, so the exact state validation refuses — forwarded-proto trusted with no proxy list — is what actually runs (23.19 · C-4 · security-relevant)
+- [ ] 26.25 The first-admin email-verification token is logged in full at WARN in production. Task 2.8 redacted the setup token for exactly this reason (23.19 · C-5)
+- [ ] 26.26 A mistyped `--data-dir` is CREATED, an empty archive is written, and both `backup create` and `backup verify` exit 0 with "OK — all checksums match (0 files verified)" (23.19 · C-6)
+- [ ] 26.27 The server-generated `quickstart` hard-codes port 8420 and cites `getting-started.md`; the file is `.mdx` (23.19 · C-7)
