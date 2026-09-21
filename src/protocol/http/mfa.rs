@@ -375,13 +375,25 @@ async fn webauthn_auth_begin(
                 },
                 None => Vec::new(),
             };
+            // Read the realm's policy rather than hard-coding "preferred"
+            // (task 26.4). Completion already enforces the realm setting, so a
+            // realm that requires user verification used to fail the ceremony
+            // at the end instead of prompting for it at the start. The browser
+            // passkey-login path already reads the same setting.
+            let user_verification = state
+                .identity
+                .get_realm(&realm_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.config().webauthn_user_verification.clone())
+                .unwrap_or_else(|| "preferred".to_string());
             (
                 StatusCode::OK,
                 Json(WbaBeginRes {
                     challenge: b64_encode(&challenge),
                     rp_id: options.rp_id,
                     allow_credentials,
-                    user_verification: "preferred".to_string(),
+                    user_verification,
                     timeout: 60,
                 }),
             )

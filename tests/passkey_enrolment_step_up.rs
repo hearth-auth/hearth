@@ -777,3 +777,83 @@ async fn rest_enrolment_with_a_wrong_password_is_refused() {
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
     assert!(body.contains("step_up_required"), "body: {body}");
 }
+
+/// Sets the realm's WebAuthn `userVerification` policy to `required`.
+fn require_user_verification(identity: &Arc<dyn IdentityEngine>, realm_id: &RealmId) {
+    let realm = identity
+        .get_realm(realm_id)
+        .expect("get realm")
+        .expect("realm exists");
+    let mut config = realm.config().clone();
+    config.webauthn_user_verification = Some("required".to_string());
+    identity
+        .update_realm(
+            realm_id,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("update realm");
+}
+
+/// Task 26.4 — the step-up ceremony must honour the realm's `userVerification`
+/// policy.
+///
+/// `passkey_step_up_begin` hard-coded `"preferred"`, ignoring the realm. The
+/// completion path already enforces the realm setting
+/// (`realm_requires_user_verification`), so a realm that requires user
+/// verification did not ask the authenticator for it and then rejected the
+/// assertion at the end. The user gets a failure instead of a PIN prompt.
+/// Registration and passkey *login* read the config correctly, which is what
+/// makes this one an oversight rather than a design choice.
+#[tokio::test]
+async fn step_up_begin_honours_the_realms_user_verification_policy() {
+    let rig = build_web_rig(true);
+
+    // Control: with no policy set, the ceremony offers the safe default, so
+    // the assertion below cannot pass merely because the field is always
+    // "required".
+    let default_uv = step_up_user_verification(&rig).await;
+    assert_eq!(
+        default_uv, "preferred",
+        "an unconfigured realm must still get the safe default"
+    );
+
+    require_user_verification(&rig.identity, &rig.realm_id);
+
+    assert_eq!(
+        step_up_user_verification(&rig).await,
+        "required",
+        "a realm that requires user verification must ask for it at the START \
+         of the ceremony, not reject the assertion at the end"
+    );
+}
+
+/// Runs `step-up-begin` and returns its `userVerification` field.
+async fn step_up_user_verification(rig: &WebRig) -> String {
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/passkeys/step-up-begin")
+                .header(header::COOKIE, auth_cookie(rig, "csrf-abc"))
+                .header("x-csrf-token", "csrf-abc")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    parsed
+        .get("userVerification")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}

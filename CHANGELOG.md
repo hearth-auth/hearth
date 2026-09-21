@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Security
+- **Two WebAuthn ceremonies now honour the realm's `webauthn_user_verification` setting (task 26.4)** — `POST /ui/account/passkeys/step-up-begin` and `POST /webauthn/auth/begin` hard-coded `userVerification: "preferred"`. Completion already enforced the realm setting, so a realm configured to require user verification failed the ceremony at the end instead of prompting for it at the start. Passkey registration and passkey login already read the setting.
 - **A session-limit eviction that fails now refuses the new session (audit 2026-08-28 §9 item 1)** —
   under `session_over_limit_policy: evict_oldest`, Hearth discarded the result of every
   eviction, wrote the number of *attempted* evictions to the audit log as `"evicted"`, and

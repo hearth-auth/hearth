@@ -1020,11 +1020,23 @@ pub async fn passkey_step_up_begin(
         .map(|row| serde_json::json!({ "type": "public-key", "id": row.id_b64url }))
         .collect();
 
+    // Read the realm's policy rather than hard-coding "preferred" (task 26.4).
+    // Completion already enforces the realm setting, so a realm that requires
+    // user verification used to fail the ceremony at the end instead of
+    // prompting for it at the start.
+    let user_verification = state
+        .identity
+        .get_realm(&session.realm_id)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().webauthn_user_verification.clone())
+        .unwrap_or_else(|| "preferred".to_string());
+
     Json(serde_json::json!({
         "challenge": challenge,
         "rpId": rp_id,
         "allowCredentials": allow_credentials,
-        "userVerification": "preferred",
+        "userVerification": user_verification,
         "timeout": 300_000,
     }))
     .into_response()
