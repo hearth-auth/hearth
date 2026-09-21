@@ -6,9 +6,6 @@
 //! - Stateless HMAC-SHA256 nonce generation with 5-minute sliding windows
 //! - In-memory JTI replay cache
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use base64::Engine as _;
 use ring::{digest, hmac, signature};
 use serde::{Deserialize, Serialize};
@@ -466,64 +463,24 @@ pub fn compute_access_token_hash(access_token: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
-// ===== JTI replay cache =====
-
-/// Thread-safe in-memory cache for DPoP proof JTI values.
-///
-/// Prevents replay of DPoP proof JWTs within a configurable time window.
-/// Entries are lazily evicted when the cache is checked.
-pub struct DPopJtiCache {
-    /// Maps JTI → expiry timestamp (Unix seconds).
-    inner: Mutex<HashMap<String, i64>>,
-}
-
-impl DPopJtiCache {
-    /// Creates an empty cache.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Checks whether `jti` is already in the cache (replay), then inserts it.
-    ///
-    /// Returns `Err(DPopProofReplay)` if the JTI was already present. On
-    /// success, records the JTI with an expiry of `now_secs + ttl_secs`.
-    pub fn check_and_insert(
-        &self,
-        jti: &str,
-        now_secs: i64,
-        ttl_secs: i64,
-    ) -> Result<(), IdentityError> {
-        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Evict expired entries
-        map.retain(|_, exp| *exp > now_secs);
-
-        if map.contains_key(jti) {
-            return Err(IdentityError::DPopProofReplay);
-        }
-        map.insert(jti.to_string(), now_secs + ttl_secs);
-        Ok(())
-    }
-}
-
-impl Default for DPopJtiCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ===== DPoP processor =====
 
-/// Encapsulates DPoP state (replay cache + nonce secret) that belongs in the
-/// identity layer rather than the HTTP protocol layer.
+/// Holds the per-process DPoP nonce secret.
 ///
-/// The protocol layer holds an `Arc<DPopProcessor>` and delegates all DPoP
-/// enforcement through this type — keeping the HTTP adapter thin and stateless.
+/// # What this does NOT do (task 26.50)
+///
+/// It used to carry a second, in-memory JTI replay cache and a doc comment
+/// saying the protocol layer "delegates all DPoP enforcement through this
+/// type". Neither the cache nor its `check_and_insert_jti` wrapper had a
+/// single production caller: replay protection is
+/// `IdentityEngine::check_and_record_dpop_jti`, which writes a durable
+/// `agt:dpop:jti:*` row and therefore works across a restart and across
+/// cluster nodes, which an in-process `HashMap` cannot.
+///
+/// The dead copy is removed rather than left, because someone auditing DPoP
+/// replay safety — for cluster mode, say — finds it first and reasons about
+/// the wrong mechanism.
 pub struct DPopProcessor {
-    jti_cache: DPopJtiCache,
     nonce_secret: [u8; 32],
 }
 
@@ -531,10 +488,7 @@ impl DPopProcessor {
     /// Creates a new processor with the given HMAC nonce secret.
     #[must_use]
     pub fn new(nonce_secret: [u8; 32]) -> Self {
-        Self {
-            jti_cache: DPopJtiCache::new(),
-            nonce_secret,
-        }
+        Self { nonce_secret }
     }
 
     /// Returns the current DPoP nonce for inclusion in the `DPoP-Nonce` response header.
@@ -547,12 +501,6 @@ impl DPopProcessor {
     #[must_use]
     pub fn is_valid_nonce(&self, nonce: &str, now_secs: i64) -> bool {
         is_valid_dpop_nonce(&self.nonce_secret, nonce, now_secs)
-    }
-
-    /// Records `jti` in the replay cache. Returns `Err(DPopProofReplay)` on replay.
-    pub fn check_and_insert_jti(&self, jti: &str, now_secs: i64) -> Result<(), IdentityError> {
-        self.jti_cache
-            .check_and_insert(jti, now_secs, DPOP_MAX_AGE_SECS)
     }
 }
 
@@ -577,32 +525,6 @@ mod tests {
         // SHA-256({"crv":"P-256","kty":"EC","x":"f83…","y":"x_F…"}) base64url-nopad
         let expected = "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U";
         assert_eq!(compute_jwk_thumbprint(&jwk).expect("thumbprint"), expected);
-    }
-
-    #[test]
-    fn jti_cache_rejects_replay() {
-        let cache = DPopJtiCache::new();
-        assert!(cache.check_and_insert("jti-1", 1000, 120).is_ok());
-        assert!(matches!(
-            cache.check_and_insert("jti-1", 1001, 120),
-            Err(IdentityError::DPopProofReplay)
-        ));
-    }
-
-    #[test]
-    fn jti_cache_allows_different_jtis() {
-        let cache = DPopJtiCache::new();
-        assert!(cache.check_and_insert("jti-a", 1000, 120).is_ok());
-        assert!(cache.check_and_insert("jti-b", 1000, 120).is_ok());
-    }
-
-    #[test]
-    fn jti_cache_evicts_expired() {
-        let cache = DPopJtiCache::new();
-        // Insert with 1s TTL
-        assert!(cache.check_and_insert("jti-old", 1000, 1).is_ok());
-        // At t=1002, the entry has expired (exp=1001 < 1002)
-        assert!(cache.check_and_insert("jti-old", 1002, 120).is_ok());
     }
 
     #[test]
