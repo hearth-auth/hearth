@@ -262,7 +262,7 @@ mod tests {
 
         assert_eq!(
             timeouts.global,
-            Some(std::time::Duration::from_millis(2000)),
+            Some(std::time::Duration::from_secs(2)),
             "the global bound must be the operator's number, not a default"
         );
         let connect = timeouts
@@ -270,7 +270,7 @@ mod tests {
             .expect("a connect bound must be set, or a half-open handshake never returns");
         assert!(
             connect > std::time::Duration::ZERO
-                && connect <= std::time::Duration::from_millis(2000),
+                && connect <= std::time::Duration::from_secs(2),
             "the connect bound must be positive and inside the overall budget; got {connect:?}"
         );
         assert!(

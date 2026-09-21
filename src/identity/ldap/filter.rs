@@ -451,7 +451,6 @@ mod tests {
         assert!(f.contains("entryUUID=*"));
     }
 
-    #[test]
     /// Task 26.38 — a directory-supplied cursor must not be able to panic us.
     ///
     /// `last_usn` is the directory's own `uSNChanged`, read back from a
