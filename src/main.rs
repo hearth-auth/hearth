@@ -4729,6 +4729,12 @@ fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<C
     // TLS cert/key file existence (runtime check not covered by validate_all).
     config_validate_tls_files(&config, &mut issues);
 
+    // Storage host key (task 26.23). Same class as the TLS file check above and
+    // deliberately here rather than in `validate_all`: it reads the filesystem
+    // and the environment of the machine running the check, which is only
+    // meaningful for the pre-flight an operator runs before `serve`.
+    config_validate_host_key(&config, &mut issues);
+
     // Realm permission-registry cross-reference validation.
     if let Some(realms) = &config.realms {
         for (realm_name, realm_yaml) in realms {
@@ -4817,6 +4823,41 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
             Err("configuration validation failed".into())
         }
     }
+}
+
+/// Checks that the storage engine will find a host key, as `serve` requires.
+///
+/// Task 26.23: `hearth config validate` answered `✓` on a configuration that
+/// `serve` then refused with *"HEARTH_MASTER_KEY is not set and auto-generation
+/// is disabled in production mode"*. The production gates covered `HEARTH_KEK`
+/// and stopped; the storage engine needs its own host key as well, and in
+/// production it will not generate one.
+///
+/// `serve` accepts EITHER the environment variable or an existing
+/// `{data_dir}/hearth.host_key`, so this must accept both — demanding the
+/// variable would refuse every already-initialised deployment.
+fn config_validate_host_key(config: &Config, issues: &mut Vec<ValidationIssue>) {
+    if config.dev_mode || config.storage.data_dir.is_empty() {
+        return;
+    }
+    if std::env::var_os("HEARTH_MASTER_KEY").is_some() {
+        return;
+    }
+    let host_key = std::path::Path::new(&config.storage.data_dir).join("hearth.host_key");
+    if host_key.exists() {
+        return;
+    }
+    issues.push(ValidationIssue {
+        field: "storage.data_dir".to_string(),
+        reason: format!(
+            "no storage host key: HEARTH_MASTER_KEY is unset and '{}' does not exist. \
+             Production refuses to auto-generate one, so `hearth serve` will fail to start \
+             even though the rest of this configuration is valid. Set HEARTH_MASTER_KEY to a \
+             64-hex-char random value (openssl rand -hex 32), or run this check on the host \
+             that already holds the key.",
+            host_key.display()
+        ),
+    });
 }
 
 /// Checks TLS cert/key/CA file existence and appends issues when files are missing.
@@ -5109,6 +5150,95 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── `config validate` must agree with `serve` (task 26.23) ────────────
+
+    /// A production config with no host key must be reported, because `serve`
+    /// refuses it.
+    ///
+    /// `hearth config validate` answered `✓` and `serve` then failed with
+    /// "HEARTH_MASTER_KEY is not set and auto-generation is disabled in
+    /// production mode" — the one thing a pre-flight check exists not to do.
+    /// The production gates covered `HEARTH_KEK` and stopped.
+    #[test]
+    fn config_validate_reports_a_missing_storage_host_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let mut issues = Vec::new();
+        config_validate_host_key(&config, &mut issues);
+
+        let hit = issues
+            .iter()
+            .find(|i| i.field == "storage.data_dir")
+            .unwrap_or_else(|| panic!("a config serve will refuse must be reported: {issues:?}"));
+        assert!(
+            hit.reason.contains("HEARTH_MASTER_KEY"),
+            "the report must name the variable that fixes it; got: {}",
+            hit.reason
+        );
+    }
+
+    /// Control — the environment variable satisfies it.
+    #[test]
+    fn config_validate_accepts_a_master_key_in_the_environment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HEARTH_MASTER_KEY", "cd".repeat(32));
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let mut issues = Vec::new();
+        config_validate_host_key(&config, &mut issues);
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        assert!(
+            issues.is_empty(),
+            "HEARTH_MASTER_KEY must satisfy it: {issues:?}"
+        );
+    }
+
+    /// Control — an existing host-key file satisfies it too.
+    ///
+    /// `serve` accepts either, so a check that demanded the environment
+    /// variable would refuse every already-initialised deployment.
+    #[test]
+    fn config_validate_accepts_an_existing_host_key_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        std::fs::write(dir.path().join("hearth.host_key"), [0u8; 72]).expect("write host key");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let mut issues = Vec::new();
+        config_validate_host_key(&config, &mut issues);
+
+        assert!(
+            issues.is_empty(),
+            "an existing hearth.host_key must satisfy it: {issues:?}"
+        );
+    }
+
+    /// Control — dev mode auto-generates, so it must not be reported.
+    #[test]
+    fn config_validate_does_not_demand_a_host_key_in_dev_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let mut config = Config::dev();
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let mut issues = Vec::new();
+        config_validate_host_key(&config, &mut issues);
+
+        assert!(
+            issues.is_empty(),
+            "dev mode generates its own host key: {issues:?}"
+        );
+    }
 
     // ── Backup against a KEK-encrypted store (task 26.21) ─────────────────
 

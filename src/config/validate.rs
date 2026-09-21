@@ -1000,6 +1000,42 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
             continue;
         }
 
+        // 26.24: the runtime parses each entry as a bare `IpAddr` and DISCARDS
+        // anything else with a `warn!`, so an entry this validator waves
+        // through is not necessarily an entry the server uses. CIDR is the
+        // case operators actually write; CONFIGURATION.md already says it is
+        // not supported, which made this validator the only thing claiming
+        // otherwise.
+        //
+        // Refusing here is not pedantry. A list of ranges becomes an EMPTY
+        // trusted-proxy list at runtime, which with `trust_forwarded_proto:
+        // true` is precisely the state the check above refuses: the header
+        // accepted from every peer, so any client decides whether its own
+        // session cookie carries `Secure`.
+        if entry.parse::<std::net::IpAddr>().is_err() {
+            let looks_like_cidr = entry.contains('/');
+            issues.push(ValidationIssue {
+                field,
+                reason: if looks_like_cidr {
+                    format!(
+                        "'{entry}' is CIDR notation, which is not supported here. The server \
+                         parses each entry as a single IP address and silently DISCARDS \
+                         anything else, so this entry would leave the trusted-proxy list \
+                         empty at runtime — and with server.trust_forwarded_proto = true that \
+                         means X-Forwarded-Proto is accepted from any peer. List the \
+                         reverse-proxy IP addresses individually."
+                    )
+                } else {
+                    format!(
+                        "'{entry}' is not a valid IP address. The server parses each entry as \
+                         a single IP address and silently DISCARDS anything else, so this \
+                         entry would not be trusted at runtime."
+                    )
+                },
+            });
+            continue;
+        }
+
         if is_loopback_str(entry) && is_public_listener(&server.bind_address) {
             issues.push(ValidationIssue {
                 field,
@@ -2047,6 +2083,62 @@ mod tests {
         assert!(
             issues.is_empty(),
             "dev mode runs fast_for_testing parameters on purpose; got {issues:?}"
+        );
+    }
+
+    // ===== 26.24: a `trusted_proxies` entry the runtime will discard =====
+
+    /// A CIDR entry must be refused, because the runtime throws it away.
+    ///
+    /// `main.rs` parses each entry as an `IpAddr` and drops anything else with
+    /// a `warn!`. CONFIGURATION.md says so plainly — "CIDR notation is not yet
+    /// supported; supply individual IPs" — but the validator accepted it, so a
+    /// list of ranges passed `hearth config validate`, started cleanly, and ran
+    /// with an EMPTY trusted-proxy list.
+    ///
+    /// That is not merely a dropped setting. With `trust_forwarded_proto: true`
+    /// it produces exactly the state the validator two checks above refuses:
+    /// `X-Forwarded-Proto` accepted from every peer, so any client decides
+    /// whether its own session cookie carries `Secure`.
+    #[test]
+    fn a_cidr_trusted_proxy_is_refused_because_the_runtime_discards_it() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nserver:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"10.0.0.0/8\"]\n\
+               storage:\n  data_dir: \"/tmp/hea-26-24\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        let hit = issues
+            .iter()
+            .find(|i| i.field == "server.trusted_proxies[0]")
+            .unwrap_or_else(|| {
+                panic!("a CIDR entry the runtime discards must be refused: {issues:?}")
+            });
+        assert!(
+            hit.reason.contains("CIDR"),
+            "the refusal must name what is wrong with the entry; got: {}",
+            hit.reason
+        );
+        assert!(config.validate().is_err(), "validate() must refuse it too");
+    }
+
+    /// Control — a bare IP is still accepted.
+    ///
+    /// Without this, a check that refused every entry would pass the test
+    /// above while making `trusted_proxies` unusable.
+    #[test]
+    fn a_plain_ip_trusted_proxy_is_still_accepted() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nserver:\n  trusted_proxies: [\"10.0.0.1\", \"2001:db8::1\"]\n\
+               storage:\n  data_dir: \"/tmp/hea-26-24b\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.field.starts_with("server.trusted_proxies")),
+            "a list of plain IPv4 and IPv6 addresses must be accepted: {issues:?}"
         );
     }
 

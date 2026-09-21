@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **`hearth config validate` now reports a missing storage host key (task 26.23)** — it answered `✓` on
+  a configuration `hearth serve` then refused with *"HEARTH_MASTER_KEY is not set and auto-generation is
+  disabled in production mode"*. The production gates covered `HEARTH_KEK` and stopped. The check accepts
+  either `HEARTH_MASTER_KEY` or an existing `{data_dir}/hearth.host_key`, as `serve` does.
+
 - **`hearth backup create` can now export a production store (task 26.21)** — production requires a
   key-encryption key, and the CLI read it from nowhere: not the `HEARTH_KEK` environment variable,
   not a config file, and there was no `--config` flag. It failed with *"set
@@ -26,6 +31,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   immediate first tick so a request outstanding at shutdown is retried at start-up.
 
 ### Security
+- **A CIDR entry in `server.trusted_proxies` is now refused instead of silently discarded (task 26.24)** —
+  the runtime parses each entry as a single IP address and drops anything else with a warning, which
+  `docs/specs/CONFIGURATION.md` already stated, but the validator accepted CIDR. A list of ranges
+  therefore passed `hearth config validate`, started cleanly, and ran with an **empty** trusted-proxy
+  list — with `server.trust_forwarded_proto: true` that is exactly the state validation refuses two
+  checks earlier: `X-Forwarded-Proto` accepted from every peer, so any client decides whether its own
+  session cookie carries `Secure`.
+
 - **gRPC reflection now requires a valid admin token, not merely an `Authorization` header (task 26.9)** —
   the gate checked only that the value started with `Bearer ` and was longer than that, so `Bearer x`
   passed: no token lookup, no realm, no permission check. Reflection publishes the full service and
