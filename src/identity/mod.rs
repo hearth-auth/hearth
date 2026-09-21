@@ -2222,6 +2222,24 @@ pub trait IdentityEngine: Send + Sync {
         plaintext_key_hex: &str,
     ) -> Result<bool, IdentityError>;
 
+    /// Narrows a caller-supplied organisation context to `None` unless that
+    /// organisation exists and is `Active`.
+    ///
+    /// Suspension is a kill switch, not a label (task 26.16). Every surface
+    /// that accepts an organisation id from its caller must run it through
+    /// here before it grants anything, or a frozen tenant keeps its org-scoped
+    /// authority on whichever surface was forgotten — which is what happened
+    /// to the gRPC RBAC admin path (task 26.34). Realm-scoped authority is
+    /// untouched: the control kills the organisation, not the member's
+    /// account.
+    ///
+    /// Fails closed on an unknown organisation or a storage error.
+    fn active_org_context(
+        &self,
+        realm_id: &RealmId,
+        org_id: Option<OrganizationId>,
+    ) -> Option<OrganizationId>;
+
     /// Sweeps expired entities (authorization codes, device codes,
     /// pending authorization tickets, grant families) from storage.
     ///

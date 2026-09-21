@@ -14389,6 +14389,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.flush_approval_webhook_outbox_inner(realm_id)
     }
 
+    fn active_org_context(
+        &self,
+        realm_id: &RealmId,
+        org_id: Option<crate::core::OrganizationId>,
+    ) -> Option<crate::core::OrganizationId> {
+        Self::active_org_context(self, realm_id, org_id)
+    }
+
     // ===== SAML =====
 
     fn get_or_create_saml_signing_key(

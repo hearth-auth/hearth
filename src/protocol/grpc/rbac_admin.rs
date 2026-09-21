@@ -1156,6 +1156,11 @@ impl RbacAdminService for RbacAdminSvc {
                     .map_err(|_| Status::invalid_argument("invalid org_id"))?,
             )
         };
+        // Task 26.34: `org_id` arrives from the caller. A suspended or archived
+        // organisation must stop granting its org-scoped assignments here as it
+        // does on every other surface (task 26.16), so narrow it before it
+        // reaches the resolver. Realm-scoped authority is untouched.
+        let org_id = self.state.identity.active_org_context(&realm_id, org_id);
         let scope = if inner.scope.is_empty() {
             None
         } else {

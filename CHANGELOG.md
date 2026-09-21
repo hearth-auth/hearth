@@ -88,6 +88,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   deleted agent — is deleted with it.
 
 ### Security
+- **A suspended organisation now stops granting over gRPC too (task 26.34)** —
+  `RbacAdminService.ResolveEffectivePermissions` took a caller-supplied `org_id` straight off the wire
+  and resolved against it without checking the organisation's status, so the fifth path was missed when
+  suspension became a real kill switch. An operator who froze a tenant was still told over gRPC exactly
+  which org-scoped permissions that tenant's members held, and any integration resolving through this RPC
+  still acted on them. The narrowing is now a single `IdentityEngine::active_org_context` shared by every
+  surface, so they cannot drift apart again. Realm-scoped authority is untouched.
+
 - **The first admin's email-verification token is no longer written to the production log
   (task 26.25)** — it was logged in full at `WARN`, so anyone with log read access could finish the
   first operator account. Task 2.8 removed the *setup* token from production logs for exactly this
