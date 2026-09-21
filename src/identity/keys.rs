@@ -710,6 +710,24 @@ pub(crate) fn realm_saml_key_scan_prefix() -> Vec<u8> {
     REALM_SAML_KEY_PREFIX.as_bytes().to_vec()
 }
 
+/// Parses the key id (`kid`) encoded in a retiring-key storage key.
+///
+/// The inverse of the trailing segment of [`encode_realm_retiring_key`]. The
+/// backup importer must write a restored retiring key back under the *same*
+/// `kid`, because that is the `kid` in the JWT header of every token the
+/// outgoing key signed. Returns `None` when the key does not match the
+/// expected format.
+pub(crate) fn parse_retiring_key_id(key_bytes: &[u8]) -> Option<String> {
+    let key_str = std::str::from_utf8(key_bytes).ok()?;
+    let after_prefix = key_str.strip_prefix(REALM_RETIRING_KEY_PREFIX)?;
+    // "{uuid}:" is 37 chars, "{deadline:020}:" is 21 more.
+    let key_id = after_prefix.get(58..)?;
+    if key_id.is_empty() {
+        return None;
+    }
+    Some(key_id.to_string())
+}
+
 /// Parses the deadline (Unix seconds) encoded in a retiring-key storage key.
 ///
 /// The key is expected to follow the format produced by
@@ -1217,7 +1235,6 @@ pub(crate) fn encode_invitation_id(invitation_id: &InvitationId) -> Vec<u8> {
 /// Returns the scan prefix for all invitation records.
 ///
 /// Format: `orgi:id:`
-#[allow(dead_code)]
 pub(crate) fn invitation_id_scan_prefix() -> Vec<u8> {
     ORGI_ID_PREFIX.as_bytes().to_vec()
 }
@@ -1414,10 +1431,28 @@ pub(crate) fn encode_federation_ext_fwd_prefix_for_user(user_id: &UserId) -> Vec
 ///
 /// Format: `fed:ext_fwd:`
 ///
-/// Used by `delete_realm` cascade.
-#[allow(dead_code)]
+/// Used by `delete_realm` cascade and by the backup exporter.
 pub(crate) fn fed_ext_fwd_scan_prefix() -> Vec<u8> {
     FED_EXT_FWD_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers `(user_id, idp_id)` from a forward federation-link index key.
+///
+/// The exact inverse of [`encode_federation_ext_fwd_key`]. The forward index
+/// stores only the `external_sub` in its *value*, so the two identifiers the
+/// backup importer needs to rebuild **both** link directions live in the key.
+/// A rehydrator that re-derives a key must share the writer's encoding, so the
+/// unit test `fed_ext_fwd_decoder_inverts_encoder` asserts exactly that.
+///
+/// Returns `None` for any key outside the forward index or whose segments are
+/// not parseable UUIDs.
+pub(crate) fn decode_federation_ext_fwd(key: &[u8]) -> Option<(UserId, IdpId)> {
+    let text = std::str::from_utf8(key).ok()?;
+    let rest = text.strip_prefix(FED_EXT_FWD_PREFIX)?;
+    let (user_str, idp_str) = rest.split_once(':')?;
+    let user = uuid::Uuid::parse_str(user_str).ok()?;
+    let idp = uuid::Uuid::parse_str(idp_str).ok()?;
+    Some((UserId::new(user), IdpId::new(idp)))
 }
 
 /// Encodes the SCIM `externalId` → `UserId` index key.
@@ -1432,10 +1467,25 @@ pub(crate) fn encode_scim_ext_user_key(external_id: &str) -> Vec<u8> {
 
 /// Returns the scan prefix for every SCIM external-id-to-user mapping.
 ///
-/// Format: `scim:ext_user:` — used by `delete_realm` cascade.
-#[allow(dead_code)]
+/// Format: `scim:ext_user:` — used by `delete_realm` cascade and the backup
+/// exporter.
 pub(crate) fn scim_ext_user_scan_prefix() -> Vec<u8> {
     SCIM_EXT_USER_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers the SCIM `externalId` from a `scim:ext_user:` index key.
+///
+/// The exact inverse of [`encode_scim_ext_user_key`]: the external id is the
+/// whole remainder after the prefix, so it round-trips verbatim even when it
+/// contains `:` or other separators. The unit test
+/// `scim_external_id_decoders_invert_encoders` asserts that.
+pub(crate) fn decode_scim_ext_user_external_id(key: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(key).ok()?;
+    let id = text.strip_prefix(SCIM_EXT_USER_PREFIX)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 /// Encodes the reverse `UserId` → SCIM `externalId` index key.
@@ -1465,10 +1515,22 @@ pub(crate) fn encode_scim_ext_group_key(external_id: &str) -> Vec<u8> {
 
 /// Returns the scan prefix for every SCIM group external-id mapping.
 ///
-/// Format: `scim:ext_group:` — used by `delete_realm` cascade.
-#[allow(dead_code)]
+/// Format: `scim:ext_group:` — used by `delete_realm` cascade and the backup
+/// exporter.
 pub(crate) fn scim_ext_group_scan_prefix() -> Vec<u8> {
     SCIM_EXT_GROUP_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers the SCIM `externalId` from a `scim:ext_group:` index key.
+///
+/// The exact inverse of [`encode_scim_ext_group_key`].
+pub(crate) fn decode_scim_ext_group_external_id(key: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(key).ok()?;
+    let id = text.strip_prefix(SCIM_EXT_GROUP_PREFIX)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 /// Encodes the reverse `OrganizationId` → SCIM `externalId` index key.
@@ -2992,5 +3054,60 @@ mod tests {
             assert!(!fed.starts_with(p));
             assert!(!p.starts_with(&fed));
         }
+    }
+
+    /// A rehydrator that rebuilds a storage key MUST share the writer's
+    /// encoding. The backup exporter reads federation links out of the forward
+    /// index and recovers `(user, idp)` from the *key* — the value holds only
+    /// the external subject — so a drift between encoder and decoder would
+    /// restore links pointing at the wrong user, silently (OpenSpec 26.40).
+    #[test]
+    fn fed_ext_fwd_decoder_inverts_encoder() {
+        let user =
+            UserId::new(Uuid::parse_str("3f2504e0-4f89-41d3-9a0c-0305e82c3301").expect("uuid"));
+        let idp =
+            IdpId::new(Uuid::parse_str("9c858901-8a57-4791-81fe-4c455b099bc9").expect("uuid"));
+        let encoded = encode_federation_ext_fwd_key(&user, &idp);
+        let (decoded_user, decoded_idp) =
+            decode_federation_ext_fwd(&encoded).expect("decoder must invert the encoder");
+        assert_eq!(decoded_user, user);
+        assert_eq!(decoded_idp, idp);
+
+        // A key from a different family must be refused, not misread: the
+        // importer uses this decode to decide what it is about to write.
+        assert!(decode_federation_ext_fwd(&encode_federation_ext_key(&idp, "sub-123")).is_none());
+        assert!(decode_federation_ext_fwd(b"fed:ext_fwd:not-a-uuid:also-not").is_none());
+    }
+
+    /// The SCIM external id is the whole remainder after the prefix, so it
+    /// round-trips verbatim even when the IdP put a `:` in it.
+    #[test]
+    fn scim_external_id_decoders_invert_encoders() {
+        for raw in ["ext-1", "urn:ietf:params:scim:x", "with spaces"] {
+            let encoded = encode_scim_ext_user_key(raw);
+            assert_eq!(
+                decode_scim_ext_user_external_id(&encoded).as_deref(),
+                Some(raw)
+            );
+            let encoded = encode_scim_ext_group_key(raw);
+            assert_eq!(
+                decode_scim_ext_group_external_id(&encoded).as_deref(),
+                Some(raw)
+            );
+        }
+        assert!(decode_scim_ext_user_external_id(b"scim:ext_user:").is_none());
+        assert!(decode_scim_ext_user_external_id(b"usr:id:whatever").is_none());
+    }
+
+    /// The restored retiring key must land under the same `kid` it was signed
+    /// with, or the tokens it is meant to keep alive stop resolving.
+    #[test]
+    fn retiring_key_decoders_invert_encoder() {
+        let realm =
+            RealmId::new(Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid"));
+        let encoded = encode_realm_retiring_key(&realm, 1_764_000_000, "kid-abc");
+        assert_eq!(parse_retiring_key_deadline(&encoded), Some(1_764_000_000));
+        assert_eq!(parse_retiring_key_id(&encoded).as_deref(), Some("kid-abc"));
+        assert!(parse_retiring_key_id(b"realm:key:whatever").is_none());
     }
 }

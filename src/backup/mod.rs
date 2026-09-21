@@ -21,6 +21,15 @@
 //! realms/<realm-slug>/organization_memberships.ndjson
 //! realms/<realm-slug>/consents.ndjson
 //! realms/<realm-slug>/scopes.ndjson
+//! realms/<realm-slug>/agents.ndjson
+//! realms/<realm-slug>/identity_providers.ndjson
+//! realms/<realm-slug>/federation_links.ndjson
+//! realms/<realm-slug>/webhooks.ndjson
+//! realms/<realm-slug>/saml_service_providers.ndjson
+//! realms/<realm-slug>/saml_signing_key.json     (AES-256-GCM encrypted)
+//! realms/<realm-slug>/scim_mappings.ndjson
+//! realms/<realm-slug>/invitations.ndjson
+//! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
 //! realms/<realm-slug>/audit.ndjson       (optional)
 //! realms/<realm-slug>/audit_chain.json   (optional, with audit.ndjson)
@@ -103,57 +112,17 @@ pub struct UnexportedFamily {
 /// and an import for it; when that happens, delete its row here and the
 /// liveness test `unexported_families_are_really_unexported` will confirm the
 /// list and the archive still agree.
-pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[
-    UnexportedFamily {
-        family: "identity providers and federation links",
-        member: "identity_providers.ndjson",
-        consequence: "federated login configuration and every user-to-IdP binding are lost; a \
-                      federated user cannot sign in until the IdP is recreated.",
-    },
-    UnexportedFamily {
-        family: "webhooks",
-        member: "webhooks.ndjson",
-        consequence: "event delivery stops silently after the restore.",
-    },
-    UnexportedFamily {
-        family: "agents and agent credentials",
-        member: "agents.ndjson",
-        consequence: "all agent-authorization state is lost.",
-    },
-    UnexportedFamily {
-        family: "SAML service providers",
-        member: "saml_service_providers.ndjson",
-        consequence: "every service provider must re-federate.",
-    },
-    UnexportedFamily {
-        family: "SCIM external-id mappings",
-        member: "scim_mappings.ndjson",
-        consequence: "the next SCIM sync re-creates users rather than updating them.",
-    },
-    UnexportedFamily {
-        family: "organization invitations",
-        member: "invitations.ndjson",
-        consequence: "outstanding invitation links stop working.",
-    },
-    UnexportedFamily {
-        family: "retiring signing keys",
-        member: "retiring_signing_keys.json",
-        consequence: "only the CURRENT signing key is exported, so a restore taken during a \
-                      rotation grace window drops the outgoing key and invalidates tokens the \
-                      origin would still have accepted.",
-    },
-    UnexportedFamily {
-        family: "sessions",
-        member: "sessions.ndjson",
-        consequence: "every access and refresh token issued before the backup is dead after the \
+pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[UnexportedFamily {
+    family: "sessions",
+    member: "sessions.ndjson",
+    consequence: "every access and refresh token issued before the backup is dead after the \
                       restore, even though the signing key survives. DELIBERATE, and reaffirmed \
                       by OpenSpec 26.40: a session is per-node live state carrying a session \
                       version and a device binding, and a revocation recorded after the backup \
                       is not in the archive — so restoring sessions would resurrect exactly the \
                       sessions an operator revoked. The right fix is documentation, not export: \
                       a restore is a re-authentication event.",
-    },
-];
+}];
 
 /// Entry point for creating and opening `.hearth-backup` archives.
 ///

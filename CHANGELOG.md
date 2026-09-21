@@ -288,6 +288,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   bounded by the new `cluster.write_timeout_ms` (default 10000). On expiry the caller is told the outcome is
   **unknown** rather than failed, because the timeout does not cancel the proposal and Raft may still commit
   it — re-read rather than assuming the write was lost.
+- **Agents, IdPs, federation links, webhooks, SAML SPs, SCIM mappings, invitations and retiring signing keys
+  now survive a restore (OpenSpec 26.40)** — a `.hearth-backup` archive left eight entity families out
+  entirely, and because the importer's allowlist is the union of what the exporter writes, a family nobody
+  exported was a family nobody missed: the restore reported success over a realm that had lost all of it.
+  Every agent and its credentials disappeared, taking that agent's authority with it; a user who only ever
+  signed in through an external IdP could not get back in, because the connector *and* the user-to-IdP
+  binding were both gone; webhook integrations stopped delivering silently; SAML SPs had to re-federate;
+  the next SCIM sync re-created every user it had provisioned instead of updating it; outstanding invitation
+  links stopped redeeming; and a backup taken during a signing-key rotation grace window dropped the outgoing
+  key, invalidating tokens the origin would still have accepted. The archive now carries `agents.ndjson`,
+  `identity_providers.ndjson`, `federation_links.ndjson`, `webhooks.ndjson`,
+  `saml_service_providers.ndjson`, `saml_signing_key.json`, `scim_mappings.ndjson`, `invitations.ndjson`
+  and `retiring_signing_keys.json`, and the restore summary and exit code account for all of them. Every
+  secondary index is rebuilt on import — the reverse federation link the login reads, the agent owner index
+  every listing scans, the invitation token index a link resolves through, and both directions of each SCIM
+  mapping. Key material is **re-sealed under the destination's KEK** rather than copied as ciphertext the
+  destination could not open, and retiring keys resume their original absolute grace deadline rather than
+  restarting it (a key already past its deadline is skipped). **Archives taken before this release do not
+  contain these members**; a realm restored from one still needs these families re-applied from your
+  provisioning source of truth. Sessions remain deliberately unexported, and `backup create` and
+  `backup restore` still say so: a revocation recorded after the backup is not in the archive, so restoring
+  sessions would resurrect exactly the sessions an operator revoked.
 
 ### Security
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one

@@ -12,10 +12,13 @@ use tracing::{debug, warn};
 
 use crate::audit::{AuditEngine, AuditEvent};
 use crate::core::{ClientId, ImportOutcome, RealmId};
+use crate::identity::federation::saml::SamlServiceProvider;
+use crate::identity::federation::IdpConfig;
 use crate::identity::{
-    ClientTrustLevel, ConsentExport, CreateRealmRequest, IdentityEngine, IdentityError,
-    ImportClientRequest, ImportUserRequest, MfaFactorExport, Organization, OrganizationMembership,
-    RawCredential, Realm, User,
+    AgentExport, ClientTrustLevel, ConsentExport, CreateRealmRequest, FederationLinkExport,
+    IdentityEngine, IdentityError, ImportClientRequest, ImportUserRequest, MfaFactorExport,
+    Organization, OrganizationInvitation, OrganizationMembership, RawCredential, Realm,
+    RetiringSigningKeyExport, ScimMappingExport, User, Webhook,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
@@ -46,6 +49,15 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "organizations.ndjson",
     "organization_memberships.ndjson",
     "consents.ndjson",
+    "agents.ndjson",
+    "identity_providers.ndjson",
+    "federation_links.ndjson",
+    "webhooks.ndjson",
+    "saml_service_providers.ndjson",
+    "saml_signing_key.json",
+    "scim_mappings.ndjson",
+    "invitations.ndjson",
+    "retiring_signing_keys.json",
     "signing_key.json",
     "audit.ndjson",
     "audit_chain.json",
@@ -167,6 +179,24 @@ pub struct ImportReport {
     pub organization_memberships: EntityCounts,
     /// Outcome counts for OAuth consent records (OpenSpec 26.40).
     pub consents: EntityCounts,
+    /// Outcome counts for agents, credentials included (OpenSpec 26.40).
+    pub agents: EntityCounts,
+    /// Outcome counts for external IdP connectors (OpenSpec 26.40).
+    pub identity_providers: EntityCounts,
+    /// Outcome counts for federation account links (OpenSpec 26.40).
+    pub federation_links: EntityCounts,
+    /// Outcome counts for webhook registrations (OpenSpec 26.40).
+    pub webhooks: EntityCounts,
+    /// Outcome counts for SAML service-provider registrations (OpenSpec 26.40).
+    pub saml_service_providers: EntityCounts,
+    /// Outcome counts for SCIM `externalId` mappings (OpenSpec 26.40).
+    pub scim_mappings: EntityCounts,
+    /// Outcome counts for organization invitations (OpenSpec 26.40).
+    pub invitations: EntityCounts,
+    /// Outcome counts for retiring signing keys. `skipped` counts keys whose
+    /// grace window had already closed by the time of the restore
+    /// (OpenSpec 26.40).
+    pub retiring_signing_keys: EntityCounts,
     /// Outcome counts for restored audit events.
     pub audit_events: EntityCounts,
     /// Whether the archive's audit hashes were checked against the source
@@ -678,6 +708,131 @@ impl BackupImporter {
             |this, consent: &ConsentExport| {
                 this.identity
                     .import_consent(&restored_realm_id, consent, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // Agents come after users and organizations so their owner exists.
+        // `import_agent` writes the agent, its owner index and every
+        // credential in one batch: an agent whose credentials did not come
+        // back has lost the only way to exercise the authority it describes
+        // (OpenSpec 26.40).
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/agents.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.agents,
+            |this, export: &AgentExport| {
+                this.identity
+                    .import_agent(&restored_realm_id, export, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // IdP connectors BEFORE federation links: a link is keyed by the
+        // connector's id, so the connector must be back under that same id.
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/identity_providers.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.identity_providers,
+            |this, idp: &IdpConfig| {
+                this.identity
+                    .import_identity_provider(&restored_realm_id, idp, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/federation_links.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.federation_links,
+            |this, link: &FederationLinkExport| {
+                this.identity
+                    .import_federation_link(&restored_realm_id, link, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/webhooks.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.webhooks,
+            |this, webhook: &Webhook| {
+                this.identity
+                    .import_webhook(&restored_realm_id, webhook, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // The SAML signing key is restored BEFORE the SPs it authenticates to,
+        // and is re-sealed under THIS node's KEK inside `import_realm_saml_key`
+        // — the archive carries the unsealed form precisely because the
+        // destination's KEK is a different key (OpenSpec 26.40).
+        let saml_key_member = format!("realms/{realm_slug}/saml_signing_key.json");
+        if let Some(raw) = files.get(&saml_key_member) {
+            let plaintext = try_decrypt(raw)?;
+            if !opts.dry_run {
+                self.identity
+                    .import_realm_saml_key(&restored_realm_id, &plaintext)
+                    .map_err(|e| BackupError::Engine(e.to_string()))?;
+            }
+        }
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/saml_service_providers.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.saml_service_providers,
+            |this, sp: &SamlServiceProvider| {
+                this.identity
+                    .import_saml_service_provider(&restored_realm_id, sp, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/scim_mappings.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.scim_mappings,
+            |this, mapping: &ScimMappingExport| {
+                this.identity
+                    .import_scim_mapping(&restored_realm_id, mapping, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/invitations.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.invitations,
+            |this, invitation: &OrganizationInvitation| {
+                this.identity
+                    .import_invitation(&restored_realm_id, invitation, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/retiring_signing_keys.json"),
+            &try_decrypt,
+            opts,
+            &mut report.retiring_signing_keys,
+            |this, key: &RetiringSigningKeyExport| {
+                this.identity
+                    .import_retiring_signing_key(&restored_realm_id, key, overwrite)
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;

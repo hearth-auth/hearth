@@ -2006,3 +2006,550 @@ async fn restore_carries_user_consents() {
         "the restore report must account for the consent"
     );
 }
+
+// ── OpenSpec 26.40: the remaining entity families ────────────────────────────
+//
+// Every test below asserts the DATA or its EFFECT, never a row count. Counting
+// rows is what let group memberships restore empty while every number in the
+// restore summary matched.
+
+/// Restores `realm` from `tmp` into `dst` and returns the restored realm id.
+fn restore_into(
+    dst: &common::TestHarness,
+    tmp: &NamedTempFile,
+    slug: &str,
+) -> (hearth::core::RealmId, hearth::backup::ImportReport) {
+    let reader = BackupArchive::open(tmp.path()).expect("open");
+    let report = make_importer(dst)
+        .import_realm(slug, &reader, &import_opts_with_passphrase())
+        .expect("import realm");
+    let restored: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+    (restored, report)
+}
+
+/// An agent that vanishes on restore takes its credentials and its authority
+/// with it. The assertion is that the API key the operator issued before the
+/// backup still **authenticates** afterwards — not that a row came back.
+#[tokio::test]
+async fn restore_carries_agents_whose_api_keys_still_authenticate() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let owner = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    let agent = src
+        .identity()
+        .create_agent(
+            &realm,
+            &hearth::identity::CreateAgentRequest {
+                display_name: "Nightly Reconciler".to_string(),
+                description: Some("runs the nightly sync".to_string()),
+                owner: hearth::identity::AgentOwner::User(owner.id().clone()),
+                capabilities: vec!["hearth:sync".to_string()],
+                max_delegation_depth: 2,
+            },
+            Some(owner.id()),
+        )
+        .expect("create agent");
+    let issued = src
+        .identity()
+        .create_agent_api_key(
+            &realm,
+            agent.id(),
+            &hearth::identity::CreateAgentApiKeyRequest {
+                label: "ci".to_string(),
+            },
+            Some(owner.id()),
+        )
+        .expect("create agent api key");
+    let plaintext = issued.plaintext_key.expose_once().to_string();
+    assert!(
+        src.identity()
+            .verify_agent_api_key(&realm, agent.id(), &plaintext)
+            .expect("verify at source"),
+        "precondition: the key must authenticate before the backup"
+    );
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+
+    let restored_agent = dst
+        .identity()
+        .get_agent(&restored_realm, agent.id())
+        .expect("get agent")
+        .expect("the agent must survive the restore");
+    assert_eq!(restored_agent.display_name(), agent.display_name());
+    assert_eq!(restored_agent.capabilities(), agent.capabilities());
+
+    assert!(
+        dst.identity()
+            .verify_agent_api_key(&restored_realm, agent.id(), &plaintext)
+            .expect("verify at destination"),
+        "the restored agent's API key must still authenticate — a credential \
+         record that came back but no longer verifies is the same outage"
+    );
+
+    // The owner index is what every listing scans; without it the agent is
+    // invisible to operators while still holding its authority.
+    let listed = dst
+        .identity()
+        .list_agents(
+            &restored_realm,
+            &hearth::identity::ListAgentsQuery::default(),
+            None,
+            50,
+        )
+        .expect("list agents");
+    assert!(
+        listed.items.iter().any(|a| a.id() == agent.id()),
+        "the restored agent must appear in the owner-indexed listing"
+    );
+    assert_eq!(report.agents.created, 1);
+}
+
+/// A user who only ever signed in through an external IdP cannot get back in
+/// if the link is gone. The assertion is that the upstream subject still
+/// **resolves to the same Hearth user**.
+#[tokio::test]
+async fn restore_carries_identity_providers_and_their_federation_links() {
+    use std::collections::BTreeMap;
+
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+
+    let idp_id = hearth::core::IdpId::new(uuid::Uuid::new_v4());
+    let idp = hearth::identity::federation::IdpConfig {
+        id: idp_id.clone(),
+        realm_id: realm.clone(),
+        name: "corp-okta".to_string(),
+        kind: hearth::identity::federation::IdpKind::Oidc,
+        display_name: "Corp Okta".to_string(),
+        issuer: "https://idp.example".to_string(),
+        authorization_endpoint: "https://idp.example/auth".to_string(),
+        token_endpoint: "https://idp.example/token".to_string(),
+        userinfo_endpoint: None,
+        jwks_uri: Some("https://idp.example/jwks".to_string()),
+        scopes: vec!["openid".to_string(), "email".to_string()],
+        client_id: "hearth-rp".to_string(),
+        client_secret: hearth::identity::federation::FederationSecret::new(
+            "upstream-client-secret".to_string(),
+        ),
+        claim_mappings: BTreeMap::new(),
+        leeway_seconds: hearth::identity::federation::IdpConfig::default_leeway_seconds(),
+        want_assertions_signed: false,
+        trust_asserted_email: false,
+        apple: None,
+        created_at: hearth::core::Timestamp::from_micros(1),
+        updated_at: hearth::core::Timestamp::from_micros(1),
+    };
+    src.identity().register_idp(&idp).expect("register idp");
+    src.identity()
+        .link_external_identity(&realm, user.id(), &idp_id, "upstream-sub-42")
+        .expect("link external identity");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+
+    let restored_idp = dst
+        .identity()
+        .get_idp(&restored_realm, &idp_id)
+        .expect("get idp")
+        .expect("the connector must survive under its ORIGINAL id — every link is keyed by it");
+    assert_eq!(restored_idp.issuer, idp.issuer);
+    assert_eq!(
+        restored_idp.client_secret.expose_secret(),
+        "upstream-client-secret",
+        "the upstream client secret must round-trip or the connector cannot complete a token \
+         exchange"
+    );
+
+    // The reverse index: what every federated login actually reads.
+    let resolved = dst
+        .identity()
+        .find_user_by_external_identity(&restored_realm, &idp_id, "upstream-sub-42")
+        .expect("resolve external identity")
+        .expect("the upstream subject must still resolve to a Hearth user");
+    assert_eq!(&resolved, user.id());
+
+    // The forward index: what the account page and the delete cascade read.
+    let listed = dst
+        .identity()
+        .list_external_identities_for_user(&restored_realm, user.id())
+        .expect("list linked accounts");
+    assert!(
+        listed
+            .iter()
+            .any(|(id, sub)| id == &idp_id && sub == "upstream-sub-42"),
+        "both link directions must be rebuilt, not just the one the login reads"
+    );
+    assert_eq!(report.identity_providers.created, 1);
+    assert_eq!(report.federation_links.created, 1);
+}
+
+/// Silent loss of an integration nobody notices until it is needed. The
+/// signing secret has to come back too, or every delivery after the restore
+/// fails the receiver's signature check.
+#[tokio::test]
+async fn restore_carries_webhooks_with_their_signing_secret() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let created = src
+        .identity()
+        .create_webhook(
+            &realm,
+            &hearth::identity::CreateWebhookRequest {
+                url: "https://ops.example/hearth-events".to_string(),
+                secret: Some("hmac-signing-secret-value".to_string()),
+                events: vec!["user.created".to_string(), "user.deleted".to_string()],
+                enabled: true,
+            },
+        )
+        .expect("create webhook");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+
+    let restored = dst
+        .identity()
+        .get_webhook(&restored_realm, created.id())
+        .expect("get webhook")
+        .expect("the webhook must survive the restore");
+    assert_eq!(restored.url, created.url);
+    assert_eq!(restored.events, created.events);
+    assert!(restored.enabled);
+    assert_eq!(
+        restored.secret.as_deref(),
+        Some("hmac-signing-secret-value"),
+        "the HMAC signing secret must round-trip or every delivery after the restore fails the \
+         receiver's signature check"
+    );
+    assert_eq!(report.webhooks.created, 1);
+}
+
+/// SAML SPs and the per-realm RSA key whose certificate they pinned.
+///
+/// Source and destination are sealed under **different** KEKs, which is the
+/// whole point: a naive round-trip would copy ciphertext the destination
+/// cannot open, and it would look like it worked until the first SAML login.
+#[tokio::test]
+async fn restore_carries_saml_service_providers_and_a_usable_signing_key() {
+    use std::collections::BTreeMap;
+
+    let src = common::TestHarness::embedded_with_kek([7u8; 32])
+        .await
+        .expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let source_key = src
+        .identity()
+        .get_or_create_saml_signing_key(&realm, "hearth-test-idp")
+        .expect("create saml key");
+    let source_cert = source_key.cert_der().to_vec();
+
+    let sp = hearth::identity::federation::saml::SamlServiceProvider {
+        sp_key: "my-crm".to_string(),
+        entity_id: "https://crm.example".to_string(),
+        acs_url: "https://crm.example/acs".to_string(),
+        slo_url: None,
+        sp_certificate_pem: None,
+        sign_assertions: true,
+        sign_responses: true,
+        want_authn_requests_signed: false,
+        nameid_format: hearth::identity::federation::saml::SamlNameIdFormat::EmailAddress,
+        attribute_map: BTreeMap::new(),
+    };
+    src.identity()
+        .register_saml_sp(&realm, &sp)
+        .expect("register sp");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    // A DIFFERENT KEK: the destination cannot open the source's envelopes.
+    let dst = common::TestHarness::embedded_with_kek([9u8; 32])
+        .await
+        .expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+
+    let restored_sp = dst
+        .identity()
+        .get_saml_sp_by_entity_id(&restored_realm, "https://crm.example")
+        .expect("get sp")
+        .expect("the SP registration must survive the restore");
+    assert_eq!(restored_sp.acs_url, sp.acs_url);
+    assert!(restored_sp.sign_assertions);
+    assert_eq!(report.saml_service_providers.created, 1);
+
+    // `get_or_create` would silently GENERATE a fresh key if the restored one
+    // were unreadable, so an equal certificate is proof the restored key was
+    // decrypted under the destination's own KEK and is usable.
+    let restored_key = dst
+        .identity()
+        .get_or_create_saml_signing_key(&restored_realm, "hearth-test-idp")
+        .expect("load restored saml key");
+    assert_eq!(
+        restored_key.cert_der(),
+        source_cert.as_slice(),
+        "the restored SAML key must be the ORIGINAL one, re-sealed under the destination's KEK — \
+         a freshly generated key hands every SP a certificate it does not trust"
+    );
+}
+
+/// Without these, the next SCIM sync re-creates every user and group it
+/// provisioned instead of updating it.
+#[tokio::test]
+async fn restore_carries_scim_external_id_mappings() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+    let org = src
+        .identity()
+        .create_organization(
+            &realm,
+            &hearth::identity::CreateOrganizationRequest {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("create org");
+    src.identity()
+        .set_scim_external_id(&realm, user.id(), "idp-user-0001")
+        .expect("set scim user id");
+    src.identity()
+        .set_scim_group_external_id(&realm, org.id(), "idp-group-0001")
+        .expect("set scim group id");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+
+    let resolved_user = dst
+        .identity()
+        .find_user_by_scim_external_id(&restored_realm, "idp-user-0001")
+        .expect("resolve scim user")
+        .expect("the SCIM externalId must still resolve, or the next sync duplicates the user");
+    assert_eq!(resolved_user.id(), user.id());
+    assert_eq!(
+        dst.identity()
+            .get_scim_external_id(&restored_realm, user.id())
+            .expect("reverse lookup")
+            .as_deref(),
+        Some("idp-user-0001"),
+        "both directions of the mapping must be rebuilt"
+    );
+    let resolved_group = dst
+        .identity()
+        .find_group_by_scim_external_id(&restored_realm, "idp-group-0001")
+        .expect("resolve scim group")
+        .expect("the SCIM group externalId must still resolve");
+    assert_eq!(resolved_group.id(), org.id());
+    assert_eq!(report.scim_mappings.created, 2);
+}
+
+/// An outstanding invitation link must still redeem after the restore. The
+/// assertion is the redemption itself, through the plaintext token — the token
+/// index is the entry the link resolves through, and a record restored without
+/// it would 404.
+#[tokio::test]
+async fn restore_carries_invitations_that_still_redeem() {
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let inviter = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+    let org = src
+        .identity()
+        .create_organization(
+            &realm,
+            &hearth::identity::CreateOrganizationRequest {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("create org");
+    let (invitation, token) = src
+        .identity()
+        .create_invitation(
+            &realm,
+            &hearth::identity::CreateInvitationRequest {
+                org_id: org.id().clone(),
+                email: "newcomer@backup-test.example".to_string(),
+                role: hearth::identity::OrganizationRole::Member,
+                invited_by: inviter.id().clone(),
+            },
+        )
+        .expect("create invitation");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+    assert_eq!(report.invitations.created, 1);
+
+    let membership = dst
+        .identity()
+        .accept_invitation(&restored_realm, &token)
+        .expect(
+            "the invitation link must still redeem after the restore — the token index is what it \
+             resolves through",
+        );
+    assert_eq!(membership.org_id(), org.id());
+    assert_eq!(
+        membership.role(),
+        hearth::identity::OrganizationRole::Member,
+        "the invited role must survive, not just the invitation row"
+    );
+    // The org listing index too, so the invitation is still visible to an
+    // admin reviewing what is outstanding.
+    let listed = dst
+        .identity()
+        .list_invitations(&restored_realm, org.id(), None, 50)
+        .expect("list invitations");
+    assert!(
+        listed.items.iter().any(|i| i.id() == invitation.id()),
+        "the org listing index must be rebuilt as well as the token index"
+    );
+}
+
+/// A restore taken mid-rotation is exactly when the outgoing key matters.
+///
+/// Source and destination use different KEKs, so the key must be unsealed on
+/// export and re-sealed on import. The assertion is that a token signed by the
+/// *outgoing* key still verifies against the restored realm's JWKS.
+#[tokio::test]
+async fn restore_carries_retiring_signing_keys_still_inside_their_grace_window() {
+    use std::collections::BTreeMap;
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use hearth::identity::tokens::{verify_token_signature, Audience, SigningKey, TokenClaims};
+
+    let src = common::TestHarness::embedded_with_kek([3u8; 32])
+        .await
+        .expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+
+    // Sign a JWT with the realm's CURRENT key, exactly as the OIDC flows do.
+    let outgoing_pkcs8 = src
+        .identity()
+        .export_realm_signing_key_pkcs8(&realm)
+        .expect("export signing key");
+    let outgoing = SigningKey::from_pkcs8(&outgoing_pkcs8).expect("parse key");
+    let claims = TokenClaims {
+        sub: "client_pre-rotation".to_string(),
+        iss: "hearth".to_string(),
+        aud: Audience::single("hearth-api".to_string()),
+        exp: 4_102_444_800,
+        iat: 1_700_000_000,
+        nbf: None,
+        sid: "none".to_string(),
+        tid: realm.to_string(),
+        oid: None,
+        token_type: "access".to_string(),
+        jti: Some("pre-rotation-jwt".to_string()),
+        fid: None,
+        scope: None,
+        nonce: None,
+        azp: None,
+        cnf: None,
+        // AUDIT: justified-empty-fixture: this fixture exercises retiring-key continuity only; authz state round-trip is verified by roundtrip_restores_full_authorization_model (OpenSpec 26.40)
+        roles: Vec::new(),
+        // AUDIT: justified-empty-fixture: retiring-key continuity fixture (OpenSpec 26.40)
+        groups: Vec::new(),
+        // AUDIT: justified-empty-fixture: retiring-key continuity fixture (OpenSpec 26.40)
+        org_groups: Vec::new(),
+        permissions: Vec::new(),
+        custom: BTreeMap::new(),
+        required_actions: Vec::new(),
+        act: None,
+        amr: Vec::new(),
+        sv: None,
+    };
+    let pre_rotation_jwt = outgoing.issue_token(&claims).expect("issue jwt");
+    let outgoing_kid = src
+        .identity()
+        .realm_jwks(&realm)
+        .expect("jwks")
+        .keys
+        .iter()
+        .find(|k| k.kty == "OKP")
+        .expect("an Ed25519 key")
+        .kid
+        .clone();
+
+    // Rotate with an hour of grace: the key above is now a RETIRING key, and
+    // this is the window in which a restore has to preserve it.
+    src.identity()
+        .rotate_realm_signing_key(&realm, 3_600)
+        .expect("rotate");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    // A DIFFERENT KEK at the destination: the key must be unsealed on export
+    // and re-sealed here, not copied as ciphertext nothing here can open.
+    let dst = common::TestHarness::embedded_with_kek([5u8; 32])
+        .await
+        .expect("dst harness");
+    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+    assert_eq!(
+        report.retiring_signing_keys.created, 1,
+        "the outgoing key was still inside its grace window and must be restored"
+    );
+
+    let jwks = dst.identity().realm_jwks(&restored_realm).expect("jwks");
+    let retiring =
+        jwks.keys.iter().find(|k| k.kid == outgoing_kid).expect(
+            "the restored JWKS must still advertise the outgoing key inside its grace window",
+        );
+    let public_key = URL_SAFE_NO_PAD
+        .decode(retiring.x.as_ref().expect("Ed25519 jwk must have x"))
+        .expect("decode jwk public key");
+    let verified = verify_token_signature(&pre_rotation_jwt, &public_key).expect(
+        "a token signed before the rotation must still verify against the restored retiring key \
+         — otherwise the grace window silently ended at the restore",
+    );
+    assert_eq!(verified.sub, "client_pre-rotation");
+}
+
+/// Sessions stay out, deliberately, and the row has to keep saying why.
+#[test]
+fn sessions_are_the_only_family_left_unexported_and_that_is_deliberate() {
+    let families = hearth::backup::UNEXPORTED_FAMILIES;
+    assert_eq!(
+        families.len(),
+        1,
+        "every accidentally-omitted family was closed by OpenSpec 26.40; only the deliberate one \
+         remains"
+    );
+    assert_eq!(families[0].family, "sessions");
+    assert!(
+        families[0].consequence.contains("revoke"),
+        "the reason must stay on the row: a revocation recorded after the backup is not in the \
+         archive, so restoring sessions would resurrect exactly what an operator revoked"
+    );
+}

@@ -52,6 +52,34 @@ pub struct RecordCounts {
     /// created before `consents.ndjson` existed.
     #[serde(default)]
     pub consents: u64,
+    /// Number of agents exported, each carrying its own credentials
+    /// (OpenSpec 26.40). Zero for archives created before `agents.ndjson`
+    /// existed — in those, every agent and all of its authority is lost.
+    #[serde(default)]
+    pub agents: u64,
+    /// Number of external IdP connectors (OpenSpec 26.40).
+    #[serde(default)]
+    pub identity_providers: u64,
+    /// Number of federation account links (OpenSpec 26.40).
+    #[serde(default)]
+    pub federation_links: u64,
+    /// Number of webhook registrations (OpenSpec 26.40).
+    #[serde(default)]
+    pub webhooks: u64,
+    /// Number of SAML service-provider registrations (OpenSpec 26.40).
+    #[serde(default)]
+    pub saml_service_providers: u64,
+    /// Number of SCIM `externalId` mappings, users and groups together
+    /// (OpenSpec 26.40).
+    #[serde(default)]
+    pub scim_mappings: u64,
+    /// Number of organization invitations (OpenSpec 26.40).
+    #[serde(default)]
+    pub invitations: u64,
+    /// Number of retiring signing keys still inside their rotation grace
+    /// window at export time (OpenSpec 26.40).
+    #[serde(default)]
+    pub retiring_signing_keys: u64,
     /// Number of OAuth scope definitions.
     pub scopes: u64,
     /// Number of audit events exported (0 when audit export was omitted).

@@ -437,6 +437,130 @@ impl BackupExporter {
             writer.add_file(&format!("{prefix}/consents.ndjson"), &encrypted)?;
         }
 
+        // agents.ndjson — the agent record AND its credentials. An agent that
+        // vanishes on restore takes its credentials and its authority with it
+        // (OpenSpec 26.40).
+        let agents = self
+            .identity
+            .export_all_agents(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.agents = agents.len() as u64;
+        if !agents.is_empty() {
+            let data = to_ndjson(&agents)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/agents.ndjson"), &encrypted)?;
+        }
+
+        // identity_providers.ndjson — the connector configs. The IdpId must
+        // survive because every federation link is keyed by it.
+        let idps = self
+            .identity
+            .export_all_identity_providers(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.identity_providers = idps.len() as u64;
+        if !idps.is_empty() {
+            let data = to_ndjson(&idps)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/identity_providers.ndjson"), &encrypted)?;
+        }
+
+        // federation_links.ndjson — the user-to-IdP bindings. Without them a
+        // user who only ever signed in through an external IdP cannot get back
+        // in, even with the connector restored.
+        let links = self
+            .identity
+            .export_all_federation_links(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.federation_links = links.len() as u64;
+        if !links.is_empty() {
+            let data = to_ndjson(&links)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/federation_links.ndjson"), &encrypted)?;
+        }
+
+        // webhooks.ndjson — silent loss of an integration nobody notices until
+        // it is needed. The signing secret rides along so the receiver's
+        // signature check keeps passing.
+        let webhooks = self
+            .identity
+            .export_all_webhooks(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.webhooks = webhooks.len() as u64;
+        if !webhooks.is_empty() {
+            let data = to_ndjson(&webhooks)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/webhooks.ndjson"), &encrypted)?;
+        }
+
+        // saml_service_providers.ndjson + saml_signing_key.json — the SPs and
+        // the RSA key whose certificate they pinned. Restoring the SPs without
+        // the key would hand every one of them a certificate they do not
+        // trust, so the two travel together.
+        let sps = self
+            .identity
+            .export_all_saml_service_providers(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.saml_service_providers = sps.len() as u64;
+        if !sps.is_empty() {
+            let data = to_ndjson(&sps)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(
+                &format!("{prefix}/saml_service_providers.ndjson"),
+                &encrypted,
+            )?;
+        }
+        if let Some(saml_key) = self
+            .identity
+            .export_realm_saml_key(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?
+        {
+            // Unsealed on the way out, resealed under the destination's KEK on
+            // the way in. The archive member itself is DEK-encrypted.
+            let encrypted = encrypt_bytes(&saml_key, dek)?;
+            writer.add_file(&format!("{prefix}/saml_signing_key.json"), &encrypted)?;
+        }
+
+        // scim_mappings.ndjson — without them the next SCIM sync re-creates
+        // every user it provisioned instead of updating it.
+        let scim = self
+            .identity
+            .export_all_scim_mappings(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.scim_mappings = scim.len() as u64;
+        if !scim.is_empty() {
+            let data = to_ndjson(&scim)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/scim_mappings.ndjson"), &encrypted)?;
+        }
+
+        // invitations.ndjson — an outstanding invitation link must still
+        // redeem after the restore.
+        let invitations = self
+            .identity
+            .export_all_invitations(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.invitations = invitations.len() as u64;
+        if !invitations.is_empty() {
+            let data = to_ndjson(&invitations)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/invitations.ndjson"), &encrypted)?;
+        }
+
+        // retiring_signing_keys.json — a restore taken mid-rotation is exactly
+        // when the outgoing key matters. Deadlines are absolute, so the window
+        // resumes rather than restarting, and keys already past theirs are not
+        // exported at all.
+        let retiring = self
+            .identity
+            .export_retiring_signing_keys(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.retiring_signing_keys = retiring.len() as u64;
+        if !retiring.is_empty() {
+            let data = to_ndjson(&retiring)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/retiring_signing_keys.json"), &encrypted)?;
+        }
+
         // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
         let pkcs8 = self
             .identity

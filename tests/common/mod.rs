@@ -159,6 +159,55 @@ impl TestHarness {
         })
     }
 
+    /// Creates a test harness in embedded mode whose stored key material is
+    /// sealed under `kek`.
+    ///
+    /// Two harnesses built with *different* KEKs are how a backup test proves
+    /// that secret material is re-enveloped on import rather than copied as
+    /// ciphertext the destination cannot open (OpenSpec 26.40).
+    #[allow(clippy::unused_async)]
+    pub async fn embedded_with_kek(kek: [u8; 32]) -> Result<Self, TestHarnessError> {
+        let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
+        let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+        let rbac_engine = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            key_encryption_key: Some(hearth::identity::key_encryption::StorageKek::new(kek)),
+            ..IdentityConfig::default()
+        };
+        let audit_engine = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_engine = EmbeddedIdentityEngine::with_rbac(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+            identity_config,
+            Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+            Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+        )
+        .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub));
+        let identity_engine = Arc::new(identity_engine);
+        rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
+
+        Ok(Self {
+            mode: HarnessMode::Embedded,
+            engine,
+            rbac_engine,
+            identity_engine,
+            audit_engine,
+            base_url: None,
+            _server_handle: None,
+            _temp_dir: temp_dir,
+        })
+    }
+
     /// Creates a test harness in embedded mode with an injected pre-token
     /// webhook transport (for HEA-1324 tests).
     #[allow(clippy::unused_async)]

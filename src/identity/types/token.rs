@@ -86,6 +86,104 @@ pub fn canonicalize_scopes(mut scopes: Vec<String>) -> Vec<String> {
     scopes
 }
 
+/// One agent plus every credential registered against it, for backup export
+/// (OpenSpec 26.40).
+///
+/// Agents and their credentials are exported together because a restored agent
+/// with no credentials cannot authenticate: the authority the agent record
+/// describes would come back while the only way to exercise it silently did
+/// not. Credential records hold no plaintext secret — API keys are stored as a
+/// SHA-256 hash and public keys and certificate fingerprints as-is — so the
+/// archive needs no re-enveloping for this member, and the restored hash still
+/// verifies the same API key the operator issued before the backup.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentExport {
+    /// The agent record.
+    pub agent: Agent,
+    /// Every credential registered against the agent, revoked ones included —
+    /// a revoked credential that came back active would be a security
+    /// regression, so revocations are carried rather than dropped.
+    pub credentials: Vec<AgentCredential>,
+}
+
+/// One federation account link — the binding between a Hearth user and the
+/// subject an upstream IdP asserts for them (OpenSpec 26.40).
+///
+/// Storage holds this as two index entries: `fed:ext:{idp}:{sub}` -> user, the
+/// one every federated login reads, and `fed:ext_fwd:{user}:{idp}` -> sub, the
+/// one the account page and the delete cascade read. The exporter reads the
+/// forward index (the pair of identifiers lives in its key, the subject in its
+/// value) and the importer writes **both** back: restoring only the forward
+/// entry would leave a link that shows up in the UI and still refuses the
+/// login.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FederationLinkExport {
+    /// The Hearth user the upstream identity is bound to.
+    pub user_id: UserId,
+    /// The connector that asserted it.
+    pub idp_id: crate::core::IdpId,
+    /// The upstream subject identifier, used verbatim as the link key.
+    pub external_sub: String,
+}
+
+/// Which side of the SCIM namespace a mapping belongs to.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScimMappingKind {
+    /// `scim:ext_user:{external_id}` -> `UserId`.
+    User,
+    /// `scim:ext_group:{external_id}` -> `OrganizationId`.
+    Group,
+}
+
+/// One SCIM `externalId` mapping, for backup export (OpenSpec 26.40).
+///
+/// Without it the next SCIM sync after a restore does not recognise the users
+/// and groups it provisioned and re-creates them all, duplicating every
+/// account the IdP owns.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScimMappingExport {
+    /// Whether this maps a user or an organization (SCIM group).
+    pub kind: ScimMappingKind,
+    /// The `externalId` the SCIM client assigned.
+    pub external_id: String,
+    /// The Hearth entity it resolves to.
+    pub subject_id: uuid::Uuid,
+}
+
+/// One retiring realm signing key still inside its rotation grace window,
+/// for backup export (OpenSpec 26.40).
+///
+/// `deadline_secs` is an **absolute** Unix-seconds instant, carried unchanged:
+/// a restore does not restart the grace window, it resumes it. A key whose
+/// deadline has already passed at restore time is dropped rather than written,
+/// because the origin would no longer accept it either.
+///
+/// `pkcs8` is private key material in the clear. It exists only inside a
+/// DEK-encrypted archive member and is re-enveloped under the *destination's*
+/// KEK on import; `Debug` never reveals it.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetiringSigningKeyExport {
+    /// The `kid` that appears in the JWT header of every token this key
+    /// signed. Restored verbatim, or the tokens it exists to keep alive stop
+    /// resolving to it.
+    pub key_id: String,
+    /// Absolute Unix-seconds instant after which the key must not verify.
+    pub deadline_secs: u64,
+    /// PKCS#8 DER private key bytes.
+    pub pkcs8: Vec<u8>,
+}
+
+impl std::fmt::Debug for RetiringSigningKeyExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetiringSigningKeyExport")
+            .field("key_id", &self.key_id)
+            .field("deadline_secs", &self.deadline_secs)
+            .field("pkcs8", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// One persisted consent record plus the exact storage key it was read from,
 /// for backup export.
 ///

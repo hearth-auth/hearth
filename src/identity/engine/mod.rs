@@ -283,17 +283,19 @@ use crate::identity::tokens::{
 };
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
-    Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, BulkResult,
+    Agent, AgentCredential, AgentCredentialKind, AgentExport, AgentOwner, AgentStatus, BulkResult,
     ConsentExport, ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest,
     CreateAgentApiKeyResponse, CreateAgentRequest, CreateInvitationRequest,
     CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, DemoSeedOutcome,
-    DemoSeedSpec, ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery,
-    Organization, OrganizationInvitation, OrganizationMembership, OrganizationRole,
-    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource,
-    Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session,
-    SessionContext, SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
+    DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest, InvitationStatus,
+    ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
+    OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
+    ProtectedResource, Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport, Rfc8693Request,
+    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
+    Webhook,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -478,6 +480,21 @@ fn prune_rate_tracker(map: &mut HashMap<String, AttemptTracker>, cutoff_micros: 
     let before = map.len() as u64;
     map.retain(|_, t| t.last_failure_micros >= cutoff_micros);
     before.saturating_sub(map.len() as u64)
+}
+
+/// The at-rest shape of a realm's SAML signing key: the RSA private key and
+/// the self-signed certificate that advertises it in SP metadata.
+///
+/// Persisted at `realm:saml_key:{realm}` under the system realm, sealed under
+/// the node's KEK. The backup exporter reads the *unsealed* form and the
+/// importer re-seals it under the destination's KEK — a sealed blob copied
+/// verbatim into another deployment is ciphertext nobody there can open.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SamlStoredKey {
+    /// PKCS#8 DER private key bytes.
+    pub(crate) pkcs8: Vec<u8>,
+    /// DER-encoded self-signed certificate.
+    pub(crate) cert: Vec<u8>,
 }
 
 /// A retiring per-realm signing key still inside its rotation grace period.
@@ -12219,6 +12236,566 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
+    fn export_all_agents(&self, realm_id: &RealmId) -> Result<Vec<AgentExport>, IdentityError> {
+        let prefix = keys::agent_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Ok(agent) = serde_json::from_slice::<Agent>(&entry.value) else {
+                continue;
+            };
+            let credentials = self.list_agent_credentials(realm_id, agent.id())?;
+            out.push(AgentExport { agent, credentials });
+        }
+        Ok(out)
+    }
+
+    fn import_agent(
+        &self,
+        realm_id: &RealmId,
+        export: &AgentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let agent = &export.agent;
+        let id_key = keys::encode_agent_id(agent.id());
+        let exists = self
+            .storage
+            .get(realm_id, &id_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let agent_bytes = serde_json::to_vec(agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        // The owner index is what `list_agents` scans. An agent restored
+        // without it is invisible to every listing while still authenticating,
+        // which is the worst of both outcomes.
+        let owner_index_key = keys::encode_agent_owner_index(
+            agent.owner().storage_tag(),
+            &agent.owner().uuid_str(),
+            agent.id(),
+        );
+        let mut batch = vec![(id_key, agent_bytes), (owner_index_key, Vec::new())];
+        for cred in &export.credentials {
+            let cred_key = keys::encode_agent_credential(agent.id(), cred.id());
+            let cred_bytes =
+                serde_json::to_vec(cred).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            batch.push((cred_key, cred_bytes));
+        }
+        self.storage
+            .put_batch(realm_id, &batch)
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_identity_providers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::federation::IdpConfig>, IdentityError> {
+        let prefix = keys::fed_idp_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Ok(idp) =
+                serde_json::from_slice::<crate::identity::federation::IdpConfig>(&entry.value)
+            {
+                out.push(idp);
+            }
+        }
+        Ok(out)
+    }
+
+    fn import_identity_provider(
+        &self,
+        realm_id: &RealmId,
+        idp: &crate::identity::federation::IdpConfig,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let key = keys::encode_idp_key(&idp.id);
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let bytes = serde_json::to_vec(idp).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_federation_links(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<FederationLinkExport>, IdentityError> {
+        // Read the FORWARD index: its key carries both identifiers and its
+        // value carries the external subject, so one scan yields everything
+        // needed to rebuild both directions.
+        let prefix = keys::fed_ext_fwd_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Some((user_id, idp_id)) = keys::decode_federation_ext_fwd(&entry.key) else {
+                continue;
+            };
+            let Ok(external_sub) = String::from_utf8(entry.value.clone()) else {
+                continue;
+            };
+            out.push(FederationLinkExport {
+                user_id,
+                idp_id,
+                external_sub,
+            });
+        }
+        Ok(out)
+    }
+
+    fn import_federation_link(
+        &self,
+        realm_id: &RealmId,
+        link: &FederationLinkExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let reverse_key = keys::encode_federation_ext_key(&link.idp_id, &link.external_sub);
+        let forward_key = keys::encode_federation_ext_fwd_key(&link.user_id, &link.idp_id);
+        let exists = self
+            .storage
+            .get(realm_id, &reverse_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // The reverse entry is the one every federated login reads; the
+        // forward entry is the one the account page and the delete cascade
+        // read. Restoring one without the other yields a link that either
+        // cannot log in or cannot be revoked.
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (reverse_key, link.user_id.as_uuid().as_bytes().to_vec()),
+                    (forward_key, link.external_sub.as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError> {
+        let prefix = keys::webhook_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Ok(webhook) = serde_json::from_slice::<Webhook>(&entry.value) {
+                out.push(webhook);
+            }
+        }
+        Ok(out)
+    }
+
+    fn import_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook: &Webhook,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let key = keys::encode_webhook_id(webhook.id());
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let bytes = serde_json::to_vec(webhook).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_saml_service_providers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
+        let prefix = keys::saml_sp_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Ok(sp) = serde_json::from_slice::<
+                crate::identity::federation::saml::SamlServiceProvider,
+            >(&entry.value)
+            {
+                out.push(sp);
+            }
+        }
+        Ok(out)
+    }
+
+    fn import_saml_service_provider(
+        &self,
+        realm_id: &RealmId,
+        sp: &crate::identity::federation::saml::SamlServiceProvider,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let key = keys::encode_saml_sp_key(&sp.sp_key);
+        let exists = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let bytes = serde_json::to_vec(sp).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_realm_saml_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let storage_key = keys::encode_realm_saml_key(realm_id);
+        let Some(raw) = self
+            .storage
+            .get(&sys_realm, &storage_key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        // Unseal here: the destination's KEK is a different key, so a sealed
+        // blob copied verbatim restores ciphertext nothing there can open.
+        let plaintext = crate::identity::key_encryption::unwrap_key_strict(&raw, kek)?;
+        Ok(Some(plaintext))
+    }
+
+    fn import_realm_saml_key(
+        &self,
+        realm_id: &RealmId,
+        plaintext_json: &[u8],
+    ) -> Result<(), IdentityError> {
+        let stored: SamlStoredKey =
+            serde_json::from_slice(plaintext_json).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        // Prove the material is USABLE before writing it. A key that only
+        // looks present is exactly the failure this member exists to prevent:
+        // it would surface at the first SAML login, long after the restore was
+        // called a success.
+        let _usable = crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
+            &stored.pkcs8,
+            &stored.cert,
+        )?;
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let body = crate::identity::key_encryption::wrap_key(plaintext_json, kek)?;
+        let sys_realm = keys::system_realm_id();
+        let storage_key = keys::encode_realm_saml_key(realm_id);
+        self.storage
+            .put(&sys_realm, &storage_key, &body)
+            .map_err(Self::storage_err)?;
+        // Drop any cached key for this realm so the restored one is picked up.
+        self.realm_saml_keys
+            .lock()
+            .expect("saml key cache")
+            .remove(&realm_id.as_uuid().to_string());
+        Ok(())
+    }
+
+    fn export_all_scim_mappings(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<ScimMappingExport>, IdentityError> {
+        let mut out = Vec::new();
+        for (kind, prefix, decode) in [
+            (
+                ScimMappingKind::User,
+                keys::scim_ext_user_scan_prefix(),
+                keys::decode_scim_ext_user_external_id as fn(&[u8]) -> Option<String>,
+            ),
+            (
+                ScimMappingKind::Group,
+                keys::scim_ext_group_scan_prefix(),
+                keys::decode_scim_ext_group_external_id as fn(&[u8]) -> Option<String>,
+            ),
+        ] {
+            let end = keys::prefix_end(&prefix);
+            let entries = self
+                .storage
+                .scan(realm_id, &prefix, &end)
+                .map_err(Self::storage_err)?;
+            for entry in entries {
+                let Some(external_id) = decode(&entry.key) else {
+                    continue;
+                };
+                if entry.value.len() != 16 {
+                    continue;
+                }
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&entry.value);
+                out.push(ScimMappingExport {
+                    kind,
+                    external_id,
+                    subject_id: uuid::Uuid::from_bytes(bytes),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    fn import_scim_mapping(
+        &self,
+        realm_id: &RealmId,
+        mapping: &ScimMappingExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let (reverse_key, forward_key) = match mapping.kind {
+            ScimMappingKind::User => (
+                keys::encode_scim_ext_user_key(&mapping.external_id),
+                keys::encode_scim_ext_user_fwd_key(&UserId::new(mapping.subject_id)),
+            ),
+            ScimMappingKind::Group => (
+                keys::encode_scim_ext_group_key(&mapping.external_id),
+                keys::encode_scim_ext_group_fwd_key(&OrganizationId::new(mapping.subject_id)),
+            ),
+        };
+        let exists = self
+            .storage
+            .get(realm_id, &reverse_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (reverse_key, mapping.subject_id.as_bytes().to_vec()),
+                    (forward_key, mapping.external_id.as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_all_invitations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<OrganizationInvitation>, IdentityError> {
+        let prefix = keys::invitation_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Ok(invitation) = serde_json::from_slice::<OrganizationInvitation>(&entry.value) {
+                out.push(invitation);
+            }
+        }
+        Ok(out)
+    }
+
+    fn import_invitation(
+        &self,
+        realm_id: &RealmId,
+        invitation: &OrganizationInvitation,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let id_key = keys::encode_invitation_id(invitation.id());
+        let exists = self
+            .storage
+            .get(realm_id, &id_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let bytes = serde_json::to_vec(invitation).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        // All four entries `create_invitation` writes. The token index is the
+        // one an outstanding invitation LINK resolves through: without it the
+        // record restores and the link 404s.
+        let id_bytes = invitation.id().as_uuid().as_bytes().to_vec();
+        let token_key = keys::encode_invitation_token(invitation.token_hash());
+        let dedup_key = keys::encode_invitation_org_email(invitation.org_id(), invitation.email());
+        let list_key = keys::encode_invitation_list(invitation.org_id(), invitation.id());
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (id_key, bytes),
+                    (token_key, id_bytes.clone()),
+                    (dedup_key, id_bytes),
+                    (list_key, Vec::new()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn export_retiring_signing_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let prefix = keys::realm_retiring_key_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(&sys_realm, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        let mut out = Vec::new();
+        for entry in entries {
+            let Some(deadline_secs) = keys::parse_retiring_key_deadline(&entry.key) else {
+                continue;
+            };
+            // A key past its grace deadline verifies nothing at the origin
+            // either; carrying it would put live private key material in the
+            // archive for no recovery value.
+            if deadline_secs <= now_secs {
+                continue;
+            }
+            let Some(key_id) = keys::parse_retiring_key_id(&entry.key) else {
+                continue;
+            };
+            let plaintext = crate::identity::key_encryption::unwrap_key_strict(&entry.value, kek)?;
+            out.push(RetiringSigningKeyExport {
+                key_id,
+                deadline_secs,
+                pkcs8: plaintext.to_vec(),
+            });
+        }
+        Ok(out)
+    }
+
+    fn import_retiring_signing_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+        // A restore RESUMES a grace window, it never restarts one: the
+        // deadline is absolute. Past it, the origin would refuse the key too.
+        if key.deadline_secs <= now_secs {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Refuse material that does not load, rather than storing a blob that
+        // `load_realm_retiring_keys` will silently drop at validation time.
+        let _usable = SigningKey::from_pkcs8(&key.pkcs8)?;
+        let sys_realm = keys::system_realm_id();
+        let storage_key = keys::encode_realm_retiring_key(realm_id, key.deadline_secs, &key.key_id);
+        let exists = self
+            .storage
+            .get(&sys_realm, &storage_key)
+            .map_err(Self::storage_err)?
+            .is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let body = crate::identity::key_encryption::wrap_key(&key.pkcs8, kek)?;
+        self.storage
+            .put(&sys_realm, &storage_key, &body)
+            .map_err(Self::storage_err)?;
+        // Drop the cached retiring-key set so validation picks the new one up.
+        self.realm_retiring_keys.remove(realm_id);
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
     fn add_member(
         &self,
         realm_id: &RealmId,
@@ -14638,14 +15215,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_realm_saml_key(realm_id);
 
-        // Two-part value: [8-byte cert_der_len BE, pkcs8_der | cert_der].
-        // Simpler to use JSON, but key bytes must not serialize cleartext
-        // into logs — JSON is fine since this struct isn't logged.
-        #[derive(serde::Serialize, serde::Deserialize)]
-        struct Stored {
-            pkcs8: Vec<u8>,
-            cert: Vec<u8>,
-        }
+        use SamlStoredKey as Stored;
 
         let kek = self
             .config

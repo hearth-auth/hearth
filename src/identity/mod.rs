@@ -120,24 +120,26 @@ pub use types::{
     AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, CidrPolicy,
     ConsentDecision, ConsentExport, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
     CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
-    CredentialExport, DcrPolicy, DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest,
-    ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization,
-    OrganizationConfig, OrganizationInvitation, OrganizationMembership, OrganizationRole,
-    OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig,
-    PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
+    CredentialExport, DcrPolicy, DemoSeedOutcome, DemoSeedSpec, FapiProfile, FederationLinkExport,
+    ImportClientRequest, ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof,
+    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
+    PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
+    Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
+    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, ScimMappingExport,
+    ScimMappingKind, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
     UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
     UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
-    AgentOwner, AgentStatus, ApprovalRequest, ApprovalRequestResponse, ApprovalRequestStatus,
-    CapabilityTokenInfo, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse, CreateAgentRequest,
-    CreateApprovalRequestInput, CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest,
-    CrossRealmTrustPolicy, DelegationGrantEntry, DeriveAatRequest, IssueAatRequest,
-    ListAgentsQuery, PlaintextApiKey, ProtectedResource, RegisterProtectedResourceRequest,
-    RegisterSpiffeIdRequest, Rfc8693Request, Rfc8693Response, SpiffeIdentityMapping,
+    AgentExport, AgentOwner, AgentStatus, ApprovalRequest, ApprovalRequestResponse,
+    ApprovalRequestStatus, CapabilityTokenInfo, CreateAgentApiKeyRequest,
+    CreateAgentApiKeyResponse, CreateAgentRequest, CreateApprovalRequestInput,
+    CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest, CrossRealmTrustPolicy,
+    DelegationGrantEntry, DeriveAatRequest, IssueAatRequest, ListAgentsQuery, PlaintextApiKey,
+    ProtectedResource, RegisterProtectedResourceRequest, RegisterSpiffeIdRequest,
+    RetiringSigningKeyExport, Rfc8693Request, Rfc8693Response, SpiffeIdentityMapping,
     StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse, UpdateAgentRequest,
     UpdateProtectedResourceRequest,
 };
@@ -2370,6 +2372,159 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         consent: &ConsentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every agent in a realm with all of its credentials, for backup
+    /// export (OpenSpec 26.40).
+    fn export_all_agents(&self, realm_id: &RealmId) -> Result<Vec<AgentExport>, IdentityError>;
+
+    /// Restores one agent and its credentials, rebuilding the owner index the
+    /// agent listing scans.
+    ///
+    /// Performs none of `create_agent`'s validation: the archive is the
+    /// authority and its records are written verbatim, revocations included.
+    fn import_agent(
+        &self,
+        realm_id: &RealmId,
+        export: &AgentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every external IdP connector registered in a realm, for backup
+    /// export (OpenSpec 26.40).
+    fn export_all_identity_providers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::federation::IdpConfig>, IdentityError>;
+
+    /// Restores one IdP connector under its original [`IdpId`].
+    ///
+    /// The id must be preserved: every federation account link is keyed by it,
+    /// so a connector that comes back under a fresh id orphans every link.
+    fn import_identity_provider(
+        &self,
+        realm_id: &RealmId,
+        idp: &crate::identity::federation::IdpConfig,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every federation account link in a realm, for backup export.
+    fn export_all_federation_links(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<FederationLinkExport>, IdentityError>;
+
+    /// Restores one federation account link, writing **both** index entries.
+    fn import_federation_link(
+        &self,
+        realm_id: &RealmId,
+        link: &FederationLinkExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every webhook registered in a realm, for backup export.
+    fn export_all_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError>;
+
+    /// Restores one webhook, signing secret included, so deliveries resume
+    /// with signatures the receiver already trusts.
+    fn import_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook: &Webhook,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every registered SAML service provider in a realm.
+    fn export_all_saml_service_providers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError>;
+
+    /// Restores one SAML service-provider registration.
+    fn import_saml_service_provider(
+        &self,
+        realm_id: &RealmId,
+        sp: &crate::identity::federation::saml::SamlServiceProvider,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's SAML signing key as plaintext JSON
+    /// (`{"pkcs8":…,"cert":…}`), or `None` when the realm has never acted as a
+    /// SAML IdP.
+    ///
+    /// At rest the key is sealed under the node's KEK. The bytes returned here
+    /// are **unsealed**, because the destination's KEK is a different key: an
+    /// archive carrying the sealed form would restore ciphertext nothing at the
+    /// destination can open, and the failure would not surface until the first
+    /// SAML login. The caller MUST encrypt them before they leave the process.
+    fn export_realm_saml_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, IdentityError>;
+
+    /// Installs a realm's SAML signing key from the plaintext JSON produced by
+    /// [`export_realm_saml_key`](Self::export_realm_saml_key), re-sealing it
+    /// under **this** node's KEK.
+    ///
+    /// Validates that the material actually loads as an RSA signing key before
+    /// writing, so an unusable key fails the restore instead of the first
+    /// federated login after it.
+    fn import_realm_saml_key(
+        &self,
+        realm_id: &RealmId,
+        plaintext_json: &[u8],
+    ) -> Result<(), IdentityError>;
+
+    /// Returns every SCIM `externalId` mapping in a realm, for backup export.
+    fn export_all_scim_mappings(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<ScimMappingExport>, IdentityError>;
+
+    /// Restores one SCIM `externalId` mapping, writing both index directions.
+    fn import_scim_mapping(
+        &self,
+        realm_id: &RealmId,
+        mapping: &ScimMappingExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every organization invitation in a realm, for backup export.
+    fn export_all_invitations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<OrganizationInvitation>, IdentityError>;
+
+    /// Restores one organization invitation with all four of its index entries
+    /// (primary, token hash, org+email dedup, org listing), so an outstanding
+    /// invitation link still redeems after the restore.
+    fn import_invitation(
+        &self,
+        realm_id: &RealmId,
+        invitation: &OrganizationInvitation,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's retiring signing keys that are still inside their
+    /// rotation grace window, as plaintext PKCS#8 (OpenSpec 26.40).
+    ///
+    /// Keys whose deadline has already elapsed are omitted: they can no longer
+    /// verify anything at the origin either.
+    fn export_retiring_signing_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError>;
+
+    /// Re-installs one retiring signing key under its original `kid` and its
+    /// original **absolute** deadline, re-sealed under this node's KEK.
+    ///
+    /// Returns [`ImportOutcome::Skipped`] when the deadline has already passed:
+    /// a restore resumes a grace window, it does not restart one.
+    fn import_retiring_signing_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 

@@ -4493,8 +4493,9 @@ fn run_backup_create(
 /// `restore` fails closed on an *unrecognized* member but has nothing to say
 /// about a *missing category*: the importer's allowlist is the union of what
 /// the exporter writes, so a family nobody exports is a family nobody misses
-/// (audit re-run 23.5). Group memberships, organization memberships and
-/// consents have since been closed; the families still listed are what remains.
+/// (audit re-run 23.5). Every accidental omission has since been closed
+/// (OpenSpec 26.40); the one family still listed — sessions — is left out on
+/// purpose, and the row says why.
 ///
 /// Until each family round-trips this is the only thing standing between an
 /// operator and a silent loss, so both `create` and `restore` say it out loud.
@@ -4642,6 +4643,14 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.organizations.errored > 0
         || report.organization_memberships.errored > 0
         || report.consents.errored > 0
+        || report.agents.errored > 0
+        || report.identity_providers.errored > 0
+        || report.federation_links.errored > 0
+        || report.webhooks.errored > 0
+        || report.saml_service_providers.errored > 0
+        || report.scim_mappings.errored > 0
+        || report.invitations.errored > 0
+        || report.retiring_signing_keys.errored > 0
         || report.audit_events.errored > 0
 }
 
@@ -4732,7 +4741,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 14] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -4746,6 +4755,14 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("orgs", &report.organizations),
         ("org members", &report.organization_memberships),
         ("consents", &report.consents),
+        ("agents", &report.agents),
+        ("idps", &report.identity_providers),
+        ("federation links", &report.federation_links),
+        ("webhooks", &report.webhooks),
+        ("saml sps", &report.saml_service_providers),
+        ("scim mappings", &report.scim_mappings),
+        ("invitations", &report.invitations),
+        ("retiring keys", &report.retiring_signing_keys),
         ("audit", &report.audit_events),
     ];
     tracing::info!("Realm '{slug}':");
