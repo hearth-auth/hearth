@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **A session-limit eviction that fails now refuses the new session (audit 2026-08-28 §9 item 1)** —
+  under `session_over_limit_policy: evict_oldest`, Hearth discarded the result of every
+  eviction, wrote the number of *attempted* evictions to the audit log as `"evicted"`, and
+  admitted the new session regardless. A failing revocation therefore took the realm over
+  `max_concurrent_sessions` while the audit log recorded the limit as enforced. The count is
+  now the number that actually succeeded, and the new session is refused with
+  `SessionLimitExceeded` when any eviction fails.
+- **`POST /revoke` no longer answers 200 over a failed refresh-token revocation** —
+  the refresh-token arm discarded its session revocation, so a client was told a live
+  session was dead. This is the same defect the access-token arm carried; RFC 7009's
+  silent success covers an *unknown* token, not a revocation the server failed to perform.
+- **Revoking an AAT, a cross-realm trust policy, or a user's sessions now fails when its
+  mandatory audit record cannot be written** — all three are `FailOperation` actions, and
+  all three returned success after losing the record of a terminal security action.
+
 ### Removed
 - **`createRealm` removed from all SDKs (HEA-2171)** — the Go, Kotlin, Node, PHP,
   Python, Rust, and TypeScript SDKs each shipped a `createRealm` client method
