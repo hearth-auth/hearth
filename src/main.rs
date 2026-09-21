@@ -3151,7 +3151,13 @@ fn build_startup_panel(
     mailcatcher: Option<(&str, &str)>,
     stats: &StartupStats,
 ) -> Vec<String> {
-    let base = format!("http://{addr}");
+    // The panel's URLs must match the scheme the listener actually speaks. Port
+    // `addr` is the TLS socket when TLS is configured (the plaintext redirect
+    // listener sits on a different port), so advertising `http://` there sends
+    // the operator's first request — the `Setup:` link — as plaintext at a TLS
+    // socket, which simply fails to connect.
+    let scheme = if stats.tls { "https" } else { "http" };
+    let base = format!("{scheme}://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
     let mut lines: Vec<String> = Vec::new();
     lines.push(String::new());
@@ -6322,6 +6328,49 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("RATE LIMITERS DISABLED")),
             "panel must not mention disabled limiters during normal operation: {lines:?}"
+        );
+    }
+
+    // ── build_startup_panel URL scheme (OpenID conformance run 2026-09-21) ──
+
+    fn panel_stats_tls(tls: bool) -> StartupStats {
+        StartupStats {
+            tls,
+            ..panel_stats(false)
+        }
+    }
+
+    #[test]
+    fn startup_panel_uses_https_urls_when_tls_is_enabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, false, Some("tok"), None, &panel_stats_tls(true));
+        let urls: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("127.0.0.1:8420"))
+            .collect();
+        assert!(!urls.is_empty(), "panel must print at least one URL");
+        for line in &urls {
+            assert!(
+                line.contains("https://127.0.0.1:8420"),
+                "TLS is on, so every printed URL must be https — a plaintext URL against the \
+                 TLS listener does not connect at all: {line}"
+            );
+            assert!(
+                !line.contains("http://127.0.0.1:8420"),
+                "panel must not print a plaintext URL while TLS is enabled: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_panel_uses_http_urls_when_tls_is_disabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, Some("tok"), None, &panel_stats_tls(false));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("http://127.0.0.1:8420") && !l.contains("https://")),
+            "plaintext listener must still advertise http: {lines:?}"
         );
     }
 

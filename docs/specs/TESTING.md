@@ -153,12 +153,43 @@ the certifying bodies' own harnesses:
 
 These run in the ordinary `nextest` workspace suite and are therefore required-pass on merge.
 
-> **No official, externally-run conformance suite has ever been executed against Hearth** — not
-> the OpenID Foundation certification suite, not a SAML interop suite, not an SCIM compliance
-> suite. Earlier revisions of this section promised each of them "when the protocol layer is
-> implemented"; all three layers shipped and none of the suites followed. The promise is
-> withdrawn rather than restated, and running one is tracked as an open remediation item
-> (audit 2026-08-28 §8.3). Do not represent Hearth as certified.
+#### External suites — what has actually been run (2026-09-21)
+
+One official suite has now been executed. Earlier revisions of this section promised all three
+"when the protocol layer is implemented"; all three layers shipped and none of the suites
+followed. What follows is the state after the first real run. Full write-up:
+[`reports/conformance-suite-run-2026-09-21.md`](../../reports/conformance-suite-run-2026-09-21.md).
+
+| Suite | Status |
+|---|---|
+| **OpenID Foundation conformance suite** (`gitlab.com/openid/conformance-suite`, `release-v5.3.1`) | **Run 2026-09-21.** `oidcc-config-certification-test-plan` (the **Config OP** certification profile) executed against a production-mode Hearth — `serve -c`, TLS on, real KEK, **not** `--dev`. Run twice, against the global and the realm-scoped discovery documents; identical both times. **Result: 38 conditions passed, 1 failed, 1 warned — the plan FAILED.** |
+| OIDF authorization-flow profiles (Basic / Implicit / Hybrid OP) | **Not run.** They would fail on the same single defect below, which every OP profile checks. |
+| OIDF FAPI plans | **Not run.** `tests/fapi_conformance.rs` / `tests/fapi2_conformance.rs` remain self-assessment. |
+| SCIM compliance suite | **Not run — and none exists to run.** The IETF operates no SCIM certification programme. The available options are Microsoft's hosted Entra SCIM Validator (needs a publicly reachable endpoint) and third-party checkers such as `scim2-tester`; neither is a certifying body's harness. |
+| SAML interop suite | **Not run.** The OASIS interop programme is dormant; the practical options are hosted services requiring public ingress. |
+
+**The one failure is a Hearth defect, not a configuration artefact.**
+`OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported` fails because Hearth advertises
+`id_token_signing_alg_values_supported: ["EdDSA"]`. OpenID Connect Discovery 1.0 §3 requires
+that RS256 **MUST** be included, and OpenID Connect Core 1.0 §15.1 independently requires OPs to
+support signing ID tokens with RS256. Hearth's Ed25519-only signing policy is deliberate
+(`CLAUDE.md`, `docs/specs/OIDC.md`), but the consequence must be stated plainly:
+
+> **While Hearth signs ID tokens with EdDSA alone it cannot pass *any* OpenID Connect Core
+> certification profile** — including the discovery-only Config OP profile. Every OP profile runs
+> this same condition.
+
+The one warning (`CheckForUnexpectedParametersInServerMetadata`) is also a real, if minor,
+deviation: `resource_indicators_supported` is not a registered OAuth Authorization Server Metadata
+parameter. It is mandated by `docs/specs/AGENT_AUTH.md` and is a Hearth extension published under
+an unprefixed, unregistered name.
+
+> **Hearth is NOT certified, and MUST NOT be represented as certified, "OpenID Certified",
+> conformant, or as "passing the OpenID conformance suite".** This run *failed* the one profile it
+> executed. Even a passing local run would not be certification: that requires an OpenID Foundation
+> membership and certification agreement, a submitted passing test log, and OIDF acceptance. None
+> of that has happened. The same applies to SCIM and SAML, for which nothing external has been run
+> at all.
 
 ### 8. Benchmarks (`criterion`)
 
@@ -694,7 +725,7 @@ make test-quality          # or: bash scripts/check-test-quality.sh
 - Black box tests for all OAuth 2.0 flows (authorization code, PKCE, client credentials, device flow)
 - Black box tests for WebAuthn registration and authentication
 - Black box tests for magic link and TOTP flows
-- OIDC conformance test suite integration — **in-repo suite only** (`tests/oidc_conformance.rs`); the OpenID Foundation certification suite has not been run
+- OIDC conformance test suite integration — **partial.** The in-repo suite (`tests/oidc_conformance.rs`) plus one profile of the OpenID Foundation suite: the **Config OP** plan was run 2026-09-21 and **failed** (see §7). No authorization-flow profile has been run, and Hearth is not certified.
 - Fuzz targets for protocol parsing (JWT, OIDC requests, SAML if applicable)
 - Adversarial tests for token handling (forgery, replay, algorithm confusion)
 

@@ -190,6 +190,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `--profile mail`; and the documented `autoscaling.enabled` Helm value does not exist. Finally,
   `VISION.md` withdraws "conform strictly to their respective RFCs" — no certifying body's suite has
   been run. Full evidence in `reports/public-claim-verification-2026-09-21.md`.
+- **Startup banner now prints `https://` URLs when TLS is enabled (task 23.18)** — it hard-coded
+  `http://` regardless, so a production boot with `server.tls_cert_path` set told the operator to
+  open `http://<addr>:<port>/ui/setup`. That port is the TLS listener (the plaintext redirect
+  listener is on a different port), so the very first instruction Hearth gives after a production
+  boot sent plaintext at a TLS socket and failed to connect. Found while running the OpenID
+  Foundation conformance suite; see `reports/conformance-suite-run-2026-09-21.md`.
 
 ### Security
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one
