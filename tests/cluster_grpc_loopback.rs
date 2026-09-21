@@ -6,9 +6,11 @@
 //! 10 KV entries to the leader, and asserts every node converges on the same
 //! state via real gRPC + mTLS round-trips.
 //!
-//! Complements `tests/cluster_smoke.rs`, which exercises the same surface area
-//! through the in-process `MemRouter` — this test is the first one that
-//! validates the network layer end-to-end on real sockets.
+//! This is the only test that drives the peer transport over real sockets;
+//! `simulation/src/tests/cluster_failover.rs` and `cluster_chaos.rs` cover
+//! failover and crash recovery through an in-process `RaftNetwork` instead.
+//! (An earlier version of this comment pointed at `tests/cluster_smoke.rs`,
+//! which does not exist — see `reports/cluster-ga-readiness-2026-09-21.md` D-5.)
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

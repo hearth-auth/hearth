@@ -878,6 +878,13 @@ impl std::fmt::Debug for EmbeddedIdentityEngine {
 /// handlers update the projection synchronously and never pass through here.
 impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
     fn on_replicated_put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
+        // The RBAC decision cache is invalidated by a per-realm generation
+        // counter that only the node serving the mutation bumps, so a role or
+        // permission revoked on the leader kept resolving on every follower
+        // (task 23.16, `reports/cluster-ga-readiness-2026-09-21.md` B-6).
+        // The identity engine is the node's single replicated-write observer,
+        // so it forwards the row; the RBAC engine decides whether it cares.
+        self.rbac.on_replicated_row(realm_id, key);
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
@@ -893,6 +900,9 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
     }
 
     fn on_replicated_delete(&self, realm_id: &RealmId, key: &[u8]) {
+        // A role unassignment reaches a follower as a delete, not a put, so
+        // this arm carries the same forward as `on_replicated_put`.
+        self.rbac.on_replicated_row(realm_id, key);
         let prefix = keys::revoked_jti_scan_prefix();
         if let Some(jti_bytes) = key.strip_prefix(prefix.as_slice()) {
             let jti = String::from_utf8_lossy(jti_bytes);
@@ -902,6 +912,7 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
     }
 
     fn on_replicated_reset(&self) {
+        self.rbac.on_replicated_snapshot();
         if let Err(e) = self.populate_revoked_jti_cache() {
             tracing::error!(
                 error = %e,

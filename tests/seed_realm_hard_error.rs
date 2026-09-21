@@ -40,6 +40,14 @@ impl RbacEngine for FailSeedRbac {
         Err(RbacError::Storage("injected seed failure for test".into()))
     }
 
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
+        self.inner.on_replicated_row(realm_id, key);
+    }
+
+    fn on_replicated_snapshot(&self) {
+        self.inner.on_replicated_snapshot();
+    }
+
     fn resolve_permissions(
         &self,
         user_id: &UserId,

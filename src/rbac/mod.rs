@@ -108,6 +108,30 @@ pub trait RbacEngine: Send + Sync {
         resource: Option<&Uri>,
     ) -> Result<ResolvedPermissions, RbacError>;
 
+    // ------- Replicated-write invalidation (cluster mode) -------
+
+    /// Notifies the engine that `key` was written or deleted for `realm_id` by
+    /// the replication layer rather than by this node's own mutation path.
+    ///
+    /// Implementations MUST drop any cached decision the row could change.
+    /// Without this a follower keeps serving a pre-revocation permission set:
+    /// the decision cache is invalidated by a per-realm generation counter
+    /// that only the node serving the mutation bumps, while the revocation
+    /// itself reaches other nodes as a plain replicated storage write. The
+    /// `/ui/admin` authorization gate resolves through that cache on an
+    /// ordinary GET, which a follower is free to serve, so the stale hit is a
+    /// privilege-escalation window bounded only by cache eviction.
+    ///
+    /// Called on the Raft state-machine apply path: it MUST be fast,
+    /// non-blocking and infallible. Keys that are not this engine's concern
+    /// MUST be ignored cheaply.
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]);
+
+    /// Notifies the engine that the entire key space was replaced beneath it
+    /// (a Raft snapshot install). Implementations MUST drop every cached
+    /// decision, for every realm.
+    fn on_replicated_snapshot(&self);
+
     /// Grants a direct permission to a user outside any role.
     fn grant_user_permission(
         &self,

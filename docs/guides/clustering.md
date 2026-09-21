@@ -1,6 +1,6 @@
 # Clustering Guide
 
-> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is incomplete in Hearth 1.x. Known defects (described below) make multi-node deployments unsafe for production data. **The supported deployment model for Hearth 1.x is single-node.** Clustering improvements are tracked in Wave 5 of the production-readiness roadmap.
+> **⚠ EXPERIMENTAL — and, as of 2026-09-21, a multi-node cluster does not start.** See [G-1](#g-1--a-cold-cluster-cannot-be-bootstrapped) below: every node exits fatally during start-up, before the bootstrap endpoint can be called. The rest of this guide documents the intended API and the known defects of a *running* cluster; none of it is reachable today. **The supported deployment model for Hearth 1.x is single-node.** Clustering improvements are tracked in Wave 5 of the production-readiness roadmap.
 
 Hearth includes a partial Raft consensus implementation (`src/cluster/` via `openraft`). The clustering code path exists, but several critical components are either unimplemented or incorrect. This guide documents the current state accurately so operators can make informed decisions.
 
@@ -9,6 +9,27 @@ Hearth includes a partial Raft consensus implementation (`src/cluster/` via `ope
 ---
 
 ## Known Defects in Experimental Cluster Mode
+
+### G-1 — A cold cluster cannot be bootstrapped
+
+`serve` builds the identity engine over the cluster storage adapter, and that
+constructor **writes** the global signing key on a cold `data_dir`. In cluster
+mode the write is a Raft proposal, and a cluster that has not been bootstrapped
+has no leader, so the write returns `NotLeader` and start-up is fatal:
+
+```text
+ERROR hearth: error: storage error: storage I/O error:
+              raft: not the leader; redirect to unknown
+```
+
+**Consequence:** the [Bootstrap Sequence](#bootstrap-sequence) below cannot be
+performed. Step 1 (start all nodes) never completes, so step 3 (POST
+`/admin/cluster/bootstrap`) is unreachable. This applies to every node of a
+fresh cluster, including the designated bootstrap node.
+
+Verified on three nodes on 2026-09-21; the transcript is in
+`reports/cluster-ga-readiness-2026-09-21.md`, and the defect is pinned by
+`tests/cluster_three_node_control_coherence.rs::identity_engine_construction_fails_on_an_unbootstrapped_cluster_node`.
 
 ### C-5 — Followers do not invalidate RBAC or session caches
 
@@ -74,6 +95,18 @@ Before enabling cluster mode in a test environment:
 
 4. **Separate `data_dir` per node.** The exclusive directory lock means no two nodes may share a `data_dir`.
 
+5. **The same `HEARTH_MASTER_KEY` and key-encryption key on every node.** Both wrap data that *replicates*: a row encrypted by one node must be decryptable by the others. Generate each value **once** for the whole cluster and distribute it — do not run `openssl rand -hex 32` per node. Every node also needs the full set of settings that are [mandatory in production](../specs/CONFIGURATION.md#mandatory-in-production):
+
+   | Setting | Where | Must match across nodes? |
+   |---|---|---|
+   | `HEARTH_MASTER_KEY` (env) | environment | **Yes** |
+   | `security.key_encryption_key` (or `HEARTH_KEK`) | YAML or environment | **Yes** |
+   | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` with a non-empty `server.trusted_proxies` | YAML | No — per node |
+
+   `HEARTH_MASTER_KEY` is **not** reported by `hearth config validate`, which
+   only checks the YAML. A configuration that validates clean can still fail at
+   start-up on the missing master key.
+
 ---
 
 ### Generating Certificates
@@ -86,24 +119,29 @@ openssl req -new -x509 -days 3650 -nodes \
   -subj "/CN=hearth-cluster-ca" \
   -keyout ca.key -out ca.crt
 
-# 2 — Leaf cert for node 1 (repeat with node-specific CN/SAN for each node)
+# 2 — Leaf key + CSR for node 1 (repeat with a node-specific CN for each node)
 openssl req -new -nodes \
   -subj "/CN=hearth-node-1" \
   -keyout node1.key -out node1.csr
 
+# 3 — Sign it. The SAN is REQUIRED: rustls verifies the peer against
+#     subjectAltName and ignores the Common Name, so a leaf signed without
+#     -extfile fails the handshake with no usable diagnostic.
+#     Use the address the peers will actually dial.
 openssl x509 -req -days 3650 \
-  -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -in node1.csr -out node1.crt
-```
-
-For a test environment with IP-based SANs:
-
-```bash
-openssl x509 -req -days 365 \
   -extfile <(printf "subjectAltName=IP:10.0.0.1") \
   -CA ca.crt -CAkey ca.key -CAcreateserial \
   -in node1.csr -out node1.crt
 ```
+
+Use `subjectAltName=DNS:node1.example.com` instead when `peers[].address` names
+a hostname rather than an IP. Verify before deploying:
+
+```bash
+openssl x509 -in node1.crt -noout -text | grep -A1 "Subject Alternative Name"
+```
+
+An empty result means the certificate will not work.
 
 ---
 
@@ -116,6 +154,18 @@ Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_ad
 ```yaml
 oidc:
   issuer: "https://auth.example.com"
+
+server:
+  # Distinct per node only when several nodes share a host (evaluation).
+  # On separate hosts every node can keep the default 8420.
+  port: 8420
+  tls_cert_path: "/etc/hearth/certs/https-node1.crt"
+  tls_key_path:  "/etc/hearth/certs/https-node1.key"
+
+security:
+  # REQUIRED in production, and IDENTICAL on every node — see Prerequisites §5.
+  # Prefer the HEARTH_KEK environment variable to putting it in YAML.
+  key_encryption_key: "<64 lowercase hex chars, generated once for the cluster>"
 
 storage:
   data_dir: "/var/lib/hearth/data"
@@ -137,11 +187,25 @@ cluster:
 
 **Node 3:** Analogous.
 
+> Note the two certificate pairs. `server.tls_cert_path` is the node's **HTTPS**
+> identity for client traffic; `cluster.tls_cert_path` is its **peer mTLS**
+> identity for Raft. They are unrelated and are not interchangeable.
+
+> Every node must also have `HEARTH_MASTER_KEY` exported in its environment,
+> with the same value on all three. It is not a YAML key and `hearth config
+> validate` does not check for it.
+
 > All config fields are documented in the [Configuration reference](../specs/CONFIGURATION.md#cluster).
 
 ---
 
 ### Bootstrap Sequence
+
+> **⚠ This sequence does not currently work.** See
+> [G-1](#g-1--a-cold-cluster-cannot-be-bootstrapped): every node exits during
+> start-up with `raft: not the leader; redirect to unknown`, so step 3 is never
+> reached. The sequence below is the intended design, retained so the fix has a
+> target to restore.
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 

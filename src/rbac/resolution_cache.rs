@@ -202,6 +202,27 @@ impl ShardedResolutionCache {
             next
         });
     }
+
+    /// Drops every cached entry, for every realm.
+    ///
+    /// Used when the whole key space was replaced underneath this node — a
+    /// Raft snapshot install on a follower — where no per-realm bump can be
+    /// derived because the set of realms that changed is not known. Bumping
+    /// every *known* realm is not sufficient on its own: a realm the node has
+    /// never resolved has generation 0 and an entry tagged 0 would still
+    /// match, so the entry shards are cleared as well.
+    pub(crate) fn invalidate_all(&self) {
+        self.generations.rcu(|old| {
+            let mut next = (**old).clone();
+            for version in next.values_mut() {
+                *version += 1;
+            }
+            next
+        });
+        for shard in self.entries.iter() {
+            shard.rcu(|_| HashMap::new());
+        }
+    }
 }
 
 #[cfg(test)]

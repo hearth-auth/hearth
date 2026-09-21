@@ -673,6 +673,18 @@ impl Resolver for EmbeddedRbacEngine {
 // ---------------------------------------------------------------------------
 
 impl RbacEngine for EmbeddedRbacEngine {
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
+        // One prefix compare on the apply path; every non-RBAC row costs
+        // nothing beyond it.
+        if key.starts_with(keys::RBAC_KEY_PREFIX) {
+            self.resolution_cache.bump(realm_id);
+        }
+    }
+
+    fn on_replicated_snapshot(&self) {
+        self.resolution_cache.invalidate_all();
+    }
+
     fn resolve_permissions(
         &self,
         user_id: &UserId,

@@ -8,6 +8,11 @@ use crate::core::{OrganizationId, RealmId, UserId};
 
 use super::types::{AssignmentId, GroupId, GroupMember, RoleId, Scope};
 
+/// Every RBAC row starts with this. Used to recognise an RBAC write that
+/// arrives from the replication layer rather than from this node's own
+/// mutation path — see `RbacEngine::on_replicated_row`.
+pub(crate) const RBAC_KEY_PREFIX: &[u8] = b"rba:";
+
 pub(crate) const ROLE_PREFIX: &str = "rba:role:";
 pub(crate) const ROLE_NAME_PREFIX: &str = "rba:role:name:";
 pub(crate) const GROUP_PREFIX: &str = "rba:group:";

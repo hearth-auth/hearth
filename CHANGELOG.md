@@ -374,6 +374,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   realm-status caches; memtable, SST readers, hot tier and block cache) are deliberately
   untouched: a read lock is forbidden there, and they need epoch-based reclamation instead.
 
+- **A revoked role now stops resolving on every cluster node, not just the one that served the
+  revocation (tasks 23.1, 23.16)** — the RBAC decision cache is gated on a per-realm generation
+  counter that only the node serving a mutation bumped. On any other node a role unassignment,
+  permission revoke or group removal arrived as a plain replicated storage write that touched no
+  generation, so a warm entry kept serving the pre-revocation permission set until coarse cache
+  eviction happened to drop it. `/ui/admin`'s authorization gate resolves through that cache on an
+  ordinary GET, which a follower is free to serve, so a revoked administrator kept admin on every
+  follower with no restart and no further write to end it. Replicated RBAC rows now invalidate that
+  realm's cache on the node they land on, and a snapshot install drops every entry. Single-node
+  deployments are unaffected. Demonstrated on three real Raft nodes over mTLS gRPC
+  (`tests/cluster_three_node_control_coherence.rs`); the full GA assessment, including a defect that
+  prevents a cold multi-node cluster from starting at all, is in
+  `reports/cluster-ga-readiness-2026-09-21.md`.
+
+- **The clustering guide no longer documents a bootstrap sequence that cannot be performed
+  (task 23.1)** — a cold multi-node cluster exits during start-up with `raft: not the leader`,
+  because the identity engine writes its global signing key through Raft before any leader exists,
+  so `POST /admin/cluster/bootstrap` is unreachable. `docs/guides/clustering.md` now says so up
+  front (G-1). The same walkthrough found four further steps that did not work as written: the
+  example config omits the key-encryption key and TLS settings that production requires, omits
+  `HEARTH_MASTER_KEY` entirely — which must be identical on every node because it wraps replicated
+  data, and which `hearth config validate` does not check — omits `server.port`, and gives a
+  certificate recipe that produces a leaf with no `subjectAltName`, which rustls rejects.
+
 ### Changed
 - **`docs/STATUS.md` no longer lists LDAP / Active Directory federation as shipped (task 23.8)** —
   `src/identity/ldap/` is a complete connector and is exercised against a real OpenLDAP container by
