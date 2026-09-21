@@ -447,3 +447,16 @@ Not fixed: **G-1** (too large — needs a start-up ordering redesign), **B-6**
 (needs leadership state in the audit layer plus a failover harness; labelled
 unproven), **T-1** (writing a real split-brain test is its own task), the dead
 `DPopJtiCache`, and D-6.
+
+### Where the code landed
+
+All eleven files above are in commit **`5a1242dc`**, not in a commit of this
+task's own. The index is shared between agents on this branch, and a sibling's
+bare `git commit` — run while these files were staged and before the `git
+commit` that would have carried this task's message — absorbed every one of
+them. The content is byte-for-byte what this pass intended and was verified at
+that commit: `cargo clippy -D warnings` clean on the lib and all three touched
+test binaries, `cargo fmt --check` clean, and all five tests in those binaries
+green. Only the commit message and the `Co-Authored-By` trailer were lost;
+history was deliberately not rewritten, because rewriting a sibling's commit
+under a live branch is worse than a wrong author line.
