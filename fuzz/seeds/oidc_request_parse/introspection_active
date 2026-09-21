@@ -1,0 +1,1 @@
+{"active": true, "scope": "openid email", "client_id": "c1", "username": "a@b.c", "token_type": "Bearer", "exp": 4102444800, "iat": 1700000000, "sub": "s", "aud": "hearth", "iss": "https://auth.example.com", "jti": "j"}

@@ -21,6 +21,10 @@ lcov.info
 # Fuzz artifacts
 fuzz/artifacts/
 fuzz/corpus/
+# `/target/` above is anchored to the repo root, so the fuzz crate's own build
+# directory was never ignored: a local `cargo fuzz run` left multiple GB of
+# untracked files that a `git add -A` would happily stage.
+fuzz/target/
 
 # Proptest regressions
 **/proptest-regressions/

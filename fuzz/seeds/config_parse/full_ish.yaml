@@ -1,0 +1,17 @@
+server:
+  bind_address: "127.0.0.1:8420"
+  tls:
+    enabled: true
+    cert_path: "/etc/hearth/tls.crt"
+    key_path: "/etc/hearth/tls.key"
+storage:
+  data_dir: "./data"
+  memtable_size_mb: 64
+security:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1/32"]
+oidc:
+  issuer: "https://auth.example.com"
+credentials:
+  memory_cost_kib: 19456
+  time_cost: 2

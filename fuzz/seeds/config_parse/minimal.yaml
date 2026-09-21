@@ -1,0 +1,4 @@
+server:
+  bind_address: "127.0.0.1:8420"
+storage:
+  data_dir: "./data"

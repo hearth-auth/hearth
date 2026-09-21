@@ -1,0 +1,3 @@
+server:
+  bind_address: "127.0.0.1:8420"
+  not_a_real_key: 1

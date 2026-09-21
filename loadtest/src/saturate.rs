@@ -266,7 +266,23 @@ pub async fn run_saturate(
 
 // ── HTTP request helpers ─────────────────────────────────────────────────────
 
-/// `POST /introspect {token, client_id}` — returns `true` on HTTP 2xx.
+/// `POST /introspect {token, client_id}` — returns `true` on HTTP 2xx **whose
+/// body reports `active: true`**.
+///
+/// The status check alone is not enough, and the Goose journey says why in as
+/// many words (`scenarios::journey_validate`): "Introspection returns 200 even
+/// for inactive tokens, so a status check is not enough — the body's `active`
+/// flag is what proves we exercised the live validate path rather than the
+/// reject path." The open-loop driver was checking only the status, so a token
+/// pool that had gone stale (revoked, expired, or minted against a realm that
+/// was re-bootstrapped) would have been measured entirely on the cheaper
+/// reject path and reported as hot-path throughput with a 0% failure rate
+/// (audit 2026-09-21, task 23.14).
+///
+/// The body is already read to return the connection to the pool, so the
+/// substring test below costs no extra I/O and — unlike a full `serde_json`
+/// parse — no meaningful generator CPU, which matters in a driver whose whole
+/// purpose is not to be the bottleneck.
 async fn fire_validate(
     client: &Client,
     host: &str,
@@ -286,10 +302,28 @@ async fn fire_validate(
             let ok = resp.status().is_success();
             // Consume the body so the TCP connection returns to the pool
             // promptly for the next request on this task.
-            let _ = resp.bytes().await;
-            ok
+            let body = resp.bytes().await.unwrap_or_default();
+            ok && introspection_reports_active(&body)
         }
     }
+}
+
+/// Whether an introspection body reports `active: true`.
+///
+/// A substring test rather than a parse: the flag is a bare JSON boolean, the
+/// key is fixed by RFC 7662 §2.2, and this runs once per request in the
+/// open-loop driver's hot loop. Tolerates the whitespace a JSON serialiser may
+/// put around the colon.
+fn introspection_reports_active(body: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let Some(rest) = text.split("\"active\"").nth(1) else {
+        return false;
+    };
+    rest.trim_start()
+        .strip_prefix(':')
+        .is_some_and(|v| v.trim_start().starts_with("true"))
 }
 
 /// `GET /userinfo` with Bearer token — returns `true` on HTTP 2xx.
@@ -409,6 +443,28 @@ fn saturate_metadata(
 
 #[cfg(test)]
 mod tests {
+    use super::introspection_reports_active;
+
+    #[test]
+    fn an_inactive_introspection_body_is_not_a_successful_validate() {
+        // Audit 2026-09-21 (task 23.14). `/introspect` answers 200 for an
+        // inactive token, so the open-loop driver's status-only check counted
+        // the reject path as hot-path throughput.
+        assert!(introspection_reports_active(
+            br#"{"active":true,"sub":"s"}"#
+        ));
+        assert!(introspection_reports_active(
+            br#"{"sub":"s", "active" : true }"#
+        ));
+        assert!(!introspection_reports_active(br#"{"active":false}"#));
+        assert!(!introspection_reports_active(br#"{"active": false}"#));
+        assert!(!introspection_reports_active(br#"{"sub":"s"}"#));
+        assert!(!introspection_reports_active(b""));
+        assert!(!introspection_reports_active(b"\xff\xfe not utf8"));
+        // "active" appearing only as a value must not count.
+        assert!(!introspection_reports_active(br#"{"status":"active"}"#));
+    }
+
     use super::*;
 
     #[test]

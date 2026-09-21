@@ -114,6 +114,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a run whose requests were mostly client-side timeouts was labelled `ceiling: "server"` ("server
   latency is the limiter") off percentiles computed entirely from those timeouts. It now reports
   `generator_saturated`, matching what `loadtest/README.md` already said in prose about the same runs.
+- **`--revoked-frac` now actually revokes tokens during seeding (task 23.14)** — the flag was
+  validated, defaulted to `0.1`, and stamped into every report's `dataset_shape` as
+  `revoked/realm=N`, but the seed step never called the revoke client and wrote `revoked: false`
+  for every token. Reports stated a corpus property that did not exist.
+- **The load-test `saturate` driver no longer counts `/introspect` rejections as successful
+  validations (task 23.14)** — it checked only the HTTP status, and `/introspect` answers 200 for an
+  inactive token, so a stale token pool would have published the rate at which Hearth *rejects*
+  tokens as its hot-path throughput ceiling.
+- **The `tier-miss` sweep now fails a probe that found no user (task 23.14)** — `/dev/probe-user`
+  answers 200 for a miss, so a sweep against an unseeded corpus published a full hot/cold tier
+  latency split measured entirely over not-found lookups.
 
 ### Removed
 - **`createRealm` removed from all SDKs (HEA-2171)** — the Go, Kotlin, Node, PHP,

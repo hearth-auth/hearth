@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r2" Version="2.0" IssueInstant="2026-01-01T00:00:00Z">
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <saml:Assertion ID="_evil" Version="2.0" IssueInstant="2026-01-01T00:00:00Z">
+    <saml:Issuer>https://idp.example.com</saml:Issuer>
+    <saml:Subject><saml:NameID>admin@example.com</saml:NameID></saml:Subject>
+    <saml:Assertion ID="_good" Version="2.0" IssueInstant="2026-01-01T00:00:00Z">
+      <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:Reference URI="#_good"><ds:DigestValue>AAAA</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>BBBB</ds:SignatureValue></ds:Signature>
+      <saml:Subject><saml:NameID>victim@example.com</saml:NameID></saml:Subject>
+    </saml:Assertion>
+  </saml:Assertion>
+</samlp:Response>

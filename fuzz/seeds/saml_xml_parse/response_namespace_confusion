@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<p:Response xmlns:p="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:a="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:samlp="http://attacker.example/ns" ID="_r3" Version="2.0" IssueInstant="2026-01-01T00:00:00Z">
+  <p:Status><p:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></p:Status>
+  <samlp:Assertion ID="_x"><a:NameID>x@example.com</a:NameID></samlp:Assertion>
+  <a:Assertion ID="_y" Version="2.0" IssueInstant="2026-01-01T00:00:00Z"><a:Subject><a:NameID>y@example.com</a:NameID></a:Subject></a:Assertion>
+</p:Response>
