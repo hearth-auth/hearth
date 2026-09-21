@@ -357,7 +357,7 @@ found it, the audit piece, and the report's severity.
 - [x] 25.24 Add every key introduced by tasks 20.13 and 20.14 to `hearth.maximal.yaml`, which advertises itself as the maximal example and now omits roughly forty of them (20.11 · LOW)
 - [x] 25.25 Strengthen the `security_keys` registry's consumer check from "the named file mentions the field" to "a constructor is reachable from `main`", and widen the registry beyond `security.*` to `auth.*`; `security.ip_reputation.*` was registered against a consumer that never constructed a provider, so the registry itself could assert a liveness it had not verified (20.13, 20.17 · MEDIUM)
 - [x] 25.26 Enforce `webauthn_required` at USE, not only at enrolment; a user who enrolled a passkey can still satisfy the realm's requirement with another factor, which needs a WebAuthn-specific `MfaProof` variant (20.14, §4.18#3 · MEDIUM)
-- [ ] 25.27 Cover the SAML `ConfirmLinkRequired` branch with an integration test; it is currently unreachable because SAML never asserts a verified email, so `is_linkable_by_email` is always false and the path is only unit-tested (19.5 · LOW)
+- [x] 25.27 Cover the SAML `ConfirmLinkRequired` branch with an integration test; it is currently unreachable because SAML never asserts a verified email, so `is_linkable_by_email` is always false and the path is only unit-tested (19.5 · LOW)
 
 ## 26. Escalations
 
