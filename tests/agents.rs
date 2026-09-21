@@ -1515,3 +1515,150 @@ async fn agent_rest_crud_positive_http() {
         "GET after DELETE must return 404 Not Found"
     );
 }
+
+// ── GET /v1/agents: filters and pagination (AGENT_AUTH.md §1.3) ──────────────
+//
+// Subsystem audit 2026-09-21 (task 23.11). §1.3 makes two MUSTs of the list
+// endpoint: "List endpoints MUST support filtering by owner_id, status, and
+// capability" and "Pagination MUST follow the same cursor-based pattern used by
+// existing list endpoints". The handler passed `ListAgentsQuery::default()` and
+// a hard-coded limit of 100 with no `Query` extractor at all, so every filter
+// the engine implements was unreachable and a realm holding more than 100
+// agents could not enumerate past the first page.
+
+/// The REST list endpoint honours `?status=`, `?capability=`, `?owner_id=`,
+/// and cursor pagination via `?limit=` / `?cursor=`.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn agent_rest_list_supports_filters_and_cursor() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
+    let h = common::TestHarness::server_with_agent_auth()
+        .await
+        .expect("server harness");
+    let base = h.base_url().expect("base_url").to_string();
+    let client = reqwest::Client::new();
+
+    let boot: serde_json::Value = client
+        .post(format!("{base}/admin/bootstrap"))
+        .send()
+        .await
+        .expect("bootstrap")
+        .json()
+        .await
+        .expect("bootstrap json");
+    let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
+    let owner_id = boot["user_id"].as_str().expect("user_id").to_string();
+    let token = boot["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let auth = |req: reqwest::RequestBuilder| {
+        req.header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", &realm_id)
+    };
+
+    // Two agents: one with a distinguishing capability.
+    for (name, caps) in [
+        ("List Filter A", vec!["urn:hearth:capability:email:send"]),
+        ("List Filter B", vec!["urn:hearth:capability:files:read"]),
+    ] {
+        let resp = auth(client.post(format!("{base}/v1/agents")))
+            .json(&serde_json::json!({
+                "display_name": name,
+                "owner_type": "user",
+                "owner_id": owner_id,
+                "capabilities": caps,
+                "max_delegation_depth": 1,
+            }))
+            .send()
+            .await
+            .expect("create request");
+        assert_eq!(resp.status().as_u16(), 201, "create {name}");
+    }
+
+    let list_items = |query: String| {
+        let client = client.clone();
+        let base = base.clone();
+        let token = token.clone();
+        let realm_id = realm_id.clone();
+        async move {
+            let resp = client
+                .get(format!("{base}/v1/agents{query}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_id)
+                .send()
+                .await
+                .expect("list request");
+            assert_eq!(resp.status().as_u16(), 200, "GET /v1/agents{query}");
+            resp.json::<serde_json::Value>().await.expect("list json")
+        }
+    };
+
+    // ── capability filter ────────────────────────────────────────────────────
+    let filtered = list_items("?capability=urn:hearth:capability:files:read".to_string()).await;
+    let names: Vec<String> = filtered["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|a| a["display_name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.contains(&"List Filter B".to_string()),
+        "capability filter must keep the matching agent, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"List Filter A".to_string()),
+        "capability filter must drop non-matching agents, got {names:?}"
+    );
+
+    // ── status filter ────────────────────────────────────────────────────────
+    let active = list_items("?status=active".to_string()).await;
+    assert!(
+        !active["items"].as_array().expect("items").is_empty(),
+        "status=active must return the live agents"
+    );
+    let revoked = list_items("?status=revoked".to_string()).await;
+    assert!(
+        revoked["items"].as_array().expect("items").is_empty(),
+        "status=revoked must return nothing when no agent is revoked"
+    );
+
+    // ── owner filter ─────────────────────────────────────────────────────────
+    let other_owner = uuid::Uuid::new_v4();
+    let none = list_items(format!("?owner_type=user&owner_id={other_owner}")).await;
+    assert!(
+        none["items"].as_array().expect("items").is_empty(),
+        "filtering by an owner with no agents must return an empty page"
+    );
+    let mine = list_items(format!("?owner_type=user&owner_id={owner_id}")).await;
+    assert!(
+        mine["items"].as_array().expect("items").len() >= 2,
+        "filtering by the real owner must return that owner's agents"
+    );
+
+    // ── cursor pagination ────────────────────────────────────────────────────
+    let page1 = list_items("?limit=1".to_string()).await;
+    assert_eq!(
+        page1["items"].as_array().expect("items").len(),
+        1,
+        "limit=1 must return exactly one item"
+    );
+    let cursor = page1["next_cursor"]
+        .as_str()
+        .expect("a second page must be reachable via next_cursor")
+        .to_string();
+    let page2 = list_items(format!("?limit=1&cursor={cursor}")).await;
+    let first_id = page1["items"][0]["id"].as_str().unwrap_or_default();
+    let second_id = page2["items"][0]["id"].as_str().unwrap_or_default();
+    assert_ne!(
+        first_id, second_id,
+        "the cursor must advance past the first page"
+    );
+}

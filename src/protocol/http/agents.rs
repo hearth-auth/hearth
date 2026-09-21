@@ -294,8 +294,46 @@ async fn create_agent(
     }
 }
 
+/// Query parameters for `GET /v1/agents`.
+///
+/// AGENT_AUTH.md §1.3 requires the list endpoint to filter by `owner_id`,
+/// `status` and capability, and to paginate with the same cursor pattern as
+/// every other list endpoint. The handler previously passed
+/// `ListAgentsQuery::default()` and a fixed limit of 100 with no extractor at
+/// all, so none of that was reachable and a realm with more than 100 agents
+/// could not be enumerated past the first page.
+#[derive(Debug, Default, Deserialize)]
+struct ListAgentsParams {
+    /// `user` or `organization`; defaults to `user` when only `owner_id` is given.
+    owner_type: Option<String>,
+    /// UUID of the owning user or organization.
+    owner_id: Option<String>,
+    /// `active`, `suspended`, or `revoked`.
+    status: Option<String>,
+    /// Exact capability URI the agent must declare.
+    capability: Option<String>,
+    /// Opaque cursor from a previous page's `next_cursor`.
+    cursor: Option<String>,
+    /// Page size. Defaults to 100; the engine caps it.
+    limit: Option<usize>,
+}
+
+/// Parses `?status=` into an [`AgentStatus`].
+fn parse_agent_status(s: &str) -> Option<AgentStatus> {
+    match s {
+        "active" => Some(AgentStatus::Active),
+        "suspended" => Some(AgentStatus::Suspended),
+        "revoked" => Some(AgentStatus::Revoked),
+        _ => None,
+    }
+}
+
 /// `GET /v1/agents`
-async fn list_agents(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn list_agents(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<ListAgentsParams>,
+) -> impl IntoResponse {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
@@ -305,9 +343,51 @@ async fn list_agents(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     }
     let realm_id = auth.realm_id;
 
+    // An unparseable filter is a client error, not a silently wider listing:
+    // answering 200 with every agent in the realm would be the fail-open shape.
+    let owner = match &params.owner_id {
+        Some(oid) => {
+            let kind = params.owner_type.as_deref().unwrap_or("user");
+            match parse_owner(kind, oid) {
+                Ok(o) => Some(o),
+                Err(msg) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({"error": msg})),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        None => None,
+    };
+    let status = match &params.status {
+        Some(s) => match parse_agent_status(s) {
+            Some(st) => Some(st),
+            None => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "status must be 'active', 'suspended', or 'revoked'"
+                    })),
+                )
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+
+    let query = ListAgentsQuery {
+        owner_id: owner,
+        status,
+        capability: params.capability.clone(),
+    };
+    let cursor = params.cursor.clone();
+    let limit = params.limit.unwrap_or(100);
+
     let identity = Arc::clone(&state.identity);
     let result = tokio::task::spawn_blocking(move || {
-        identity.list_agents(&realm_id, &ListAgentsQuery::default(), None, 100)
+        identity.list_agents(&realm_id, &query, cursor.as_deref(), limit)
     })
     .await
     .unwrap_or_else(|e| {

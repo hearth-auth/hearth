@@ -1,13 +1,40 @@
-//! Sharded, lock-free decision cache for full permission resolutions (HEA-1906).
+//! Sharded decision cache for full permission resolutions (HEA-1906).
 //!
 //! Replaces the single `Mutex<ResolutionCache>` (HEA-1770) that serialized every
 //! `permission_check`. The C7 saturation sweep (HEA-1875, `b29e57dd`) measured
 //! that path scaling at **−0.549** — adding cores made it *slower* — because both
 //! the hit-check and the fill took the same global mutex, bouncing one cache line
-//! across every core. This structure moves reads to the wait-free `ArcSwap`
-//! pattern already proven by the identity-engine `ShardedArcSwapMap` (HEA-1772,
-//! C-3) and the permission cache: a read is two atomic `load()`s (the per-realm
-//! version map plus one entry shard), with no lock, allocation, or syscall.
+//! across every core. This structure shards the map 64 ways and makes a read two
+//! cheap [`SwapCell`] loads — the per-realm version map plus one entry shard —
+//! so readers never block readers and a writer contends with at most 1/64 of
+//! them.
+//!
+//! # Why this is not `ArcSwap` any more (task 26.1)
+//!
+//! It was, and `ArcSwap` is genuinely wait-free, which is better than a read
+//! lock. It had to go because `arc-swap` 1.9.2 corrupts the heap under this
+//! exact load+rcu pattern. Measured on 2026-09-21 with
+//! `concurrent_readers_never_observe_stale_after_bump`, three copies running
+//! concurrently so the readers and the writer actually interleave:
+//!
+//! | Primitive | Failures in 150 loaded runs |
+//! |---|---|
+//! | `arc_swap::ArcSwap` 1.9.2 | **3** — two `SIGSEGV`, one `free(): invalid size` |
+//! | [`SwapCell`] (this file) | 0 |
+//!
+//! This module is 100% safe Rust and contains no `unsafe`, so a heap
+//! corruption here cannot originate in it. The traced abort ran the shard
+//! map's destructor from a reader's guard drop while the writer still held it.
+//! There is no release to upgrade to: 1.9.2 is the newest (2026-06-28) and
+//! changes only a doc note over 1.9.1; the two before it were both
+//! memory-ordering fixes, and the crate ships its own `tests/bug-198.rs` crash
+//! regression.
+//!
+//! Permission resolution is explicitly **not** on the hot path — permissions
+//! are embedded in the JWT at issue time — so a read lock is allowed here where
+//! it would not be in `validate_token`. The remaining `ArcSwap` call sites,
+//! including the genuinely hot ones, are enumerated in
+//! `reports/arc-swap-use-after-free-2026-09-21.md`.
 //!
 //! # Correctness (security boundary)
 //!
@@ -18,8 +45,8 @@
 //! served only when its stored version equals the realm's current version, so any
 //! mutation atomically renders every prior entry for that realm unreachable.
 //!
-//! Splitting the former single mutex into (a) one `ArcSwap<HashMap<RealmId,u64>>`
-//! for the versions and (b) [`SHARD_COUNT`] `ArcSwap<HashMap<Key,…>>` entry shards
+//! Splitting the former single mutex into (a) one `SwapCell<HashMap<RealmId,u64>>`
+//! for the versions and (b) [`SHARD_COUNT`] `SwapCell<HashMap<Key,…>>` entry shards
 //! does **not** widen the stale-read window versus the mutex, because:
 //!
 //! * mutations only ever bump `generations`; they never touch entry shards, so an
@@ -38,12 +65,59 @@
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-
-use arc_swap::ArcSwap;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::core::{OrganizationId, RealmId, UserId};
 
 use super::types::ResolvedPermissions;
+
+/// A cell holding an `Arc<T>` that readers clone and writers replace wholesale.
+///
+/// The read-copy-update shape `ArcSwap` provides, without `ArcSwap`. See the
+/// module docs for why (task 26.1).
+///
+/// A reader takes the read lock only long enough to bump a refcount, so readers
+/// never block readers and never hold the lock across any work. A writer builds
+/// the next value *before* taking the write lock in `rcu`, so the exclusive
+/// window is one pointer store.
+#[derive(Debug)]
+pub(crate) struct SwapCell<T> {
+    inner: RwLock<Arc<T>>,
+}
+
+impl<T> SwapCell<T> {
+    /// Creates a cell owning `value`.
+    fn from_pointee(value: T) -> Self {
+        Self {
+            inner: RwLock::new(Arc::new(value)),
+        }
+    }
+
+    /// Returns the current value.
+    ///
+    /// A poisoned lock is recovered rather than propagated: every entry in this
+    /// cache is re-derivable from storage, so the worst case of reading past a
+    /// panic is a stale-versioned entry, which the version equality check
+    /// already rejects. Refusing to read would turn an unrelated panic into a
+    /// permanent authorization outage.
+    fn load(&self) -> Arc<T> {
+        Arc::clone(&self.inner.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the value with `f(current)`.
+    ///
+    /// Unlike `ArcSwap::rcu` this is not a compare-and-swap retry loop: the
+    /// write lock makes the read-modify-write atomic outright, so `f` runs
+    /// exactly once and no update can be lost.
+    fn rcu<F>(&self, f: F)
+    where
+        F: FnOnce(&Arc<T>) -> T,
+    {
+        let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let next = Arc::new(f(&guard));
+        *guard = next;
+    }
+}
 
 /// Upper bound on cached resolutions across all realms and shards. When a shard
 /// exceeds its share the shard is cleared wholesale (coarse eviction — always
@@ -75,11 +149,11 @@ pub(crate) struct ShardedResolutionCache {
     /// `ArcSwap::load`; a bump is a rare (off-hot-path) `rcu`. The realm count is
     /// small, so cloning this map on bump is cheap; it is deliberately *not*
     /// sharded to keep the invalidation boundary a single, auditable atomic.
-    generations: ArcSwap<HashMap<RealmId, u64>>,
+    generations: SwapCell<HashMap<RealmId, u64>>,
     /// `(realm,user,org)` → `(version-at-fill, resolved)`, partitioned into
     /// [`SHARD_COUNT`] independently-published shards so a fill `rcu`s only the
     /// one shard the key maps to.
-    entries: Box<[ArcSwap<HashMap<CacheKey, Entry>>]>,
+    entries: Box<[SwapCell<HashMap<CacheKey, Entry>>]>,
     /// Fixed hasher used *only* for shard selection so a key always resolves to
     /// the same shard for the life of the cache (kept separate from each shard's
     /// internal `RandomState`).
@@ -105,11 +179,11 @@ impl ShardedResolutionCache {
     /// uses [`Self::new`]; tests use a small cap to exercise eviction cheaply.
     fn with_shard_cap(max_entries_per_shard: usize) -> Self {
         let entries = (0..SHARD_COUNT)
-            .map(|_| ArcSwap::from_pointee(HashMap::new()))
+            .map(|_| SwapCell::from_pointee(HashMap::new()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
-            generations: ArcSwap::from_pointee(HashMap::new()),
+            generations: SwapCell::from_pointee(HashMap::new()),
             entries,
             hasher: std::collections::hash_map::RandomState::new(),
             max_entries_per_shard,
@@ -117,7 +191,7 @@ impl ShardedResolutionCache {
     }
 
     #[inline]
-    fn shard(&self, key: &CacheKey) -> &ArcSwap<HashMap<CacheKey, Entry>> {
+    fn shard(&self, key: &CacheKey) -> &SwapCell<HashMap<CacheKey, Entry>> {
         // SHARD_COUNT is a power of two, so the mask is exact.
         let idx = (self.hasher.hash_one(key) as usize) & (SHARD_COUNT - 1);
         &self.entries[idx]
@@ -266,7 +340,7 @@ mod tests {
         let before: Vec<*const HashMap<CacheKey, Entry>> = cache
             .entries
             .iter()
-            .map(|s| Arc::as_ptr(&s.load_full()))
+            .map(|s| Arc::as_ptr(&s.load()))
             .collect();
         cache.insert(
             key(&realm, &UserId::generate()),
@@ -276,7 +350,7 @@ mod tests {
         let after: Vec<*const HashMap<CacheKey, Entry>> = cache
             .entries
             .iter()
-            .map(|s| Arc::as_ptr(&s.load_full()))
+            .map(|s| Arc::as_ptr(&s.load()))
             .collect();
 
         let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
@@ -363,75 +437,29 @@ mod tests {
         // Writer: fill-then-bump many times, mirroring the engine's
         // resolve→mutation interleaving. Capped at 5_000 (down from 50_000).
         //
-        // NOTE (task 25.16, 2026-09-15): the earlier HEA-1953 note attributed
-        // the flake here to "ruinous allocation pressure" and lowered the
-        // iteration count as the remedy. That diagnosis was wrong, and lowering
-        // the count only made the symptom rarer. The real cause is an *upstream
-        // memory-safety bug in arc-swap* (<= 1.9.2, the default hybrid
-        // debt/hazard strategy): a `Guard` returned by `load()` can dereference
-        // an `Arc` inner that has already been freed and re-allocated, so the
-        // guard's drop runs a spurious `Arc` decrement. Reproduced here at ~5
-        // aborts per 200 runs under real concurrent-build load; every captured
-        // core has the identical stack
-        //   ShardedResolutionCache::get
-        //     -> arc_swap::Guard drop -> HybridProtection::drop
-        //       -> Arc<HashMap<..>> drop -> free() -> SIGSEGV / "free(): invalid size"
-        // See vorner/arc-swap#210 (report), #211 (opt-in `genlock-load`
-        // RwLock-strategy mitigation), #203 (closed, unmerged UAF fix).
+        // NOTE (task 26.1, closed 2026-09-21): this test was the instrument
+        // that found the `arc-swap` heap corruption, and it is now the
+        // regression guard for the fix. Two earlier diagnoses were wrong —
+        // "ruinous allocation pressure" (HEA-1953), answered by lowering the
+        // iteration count, and a plain flake — because the bug is invisible
+        // under an unloaded run. It needs BOTH an allocator that checks what is
+        // freed AND real concurrency:
         //
-        // CONFIRMED INDEPENDENTLY (2026-09-16). Reproduction recipe, because the
-        // bug is invisible under a plain run — 180 runs of this test (60 serial,
-        // then 120 at 6-way parallelism) all passed. Hardening the allocator so
-        // it *checks* what the guard frees, instead of silently freeing a
-        // recycled chunk, surfaces it:
-        //
-        //   MALLOC_CHECK_=3 MALLOC_PERTURB_=165 \
-        //     <lib test binary> --exact \
+        //   MALLOC_CHECK_=3 <lib test binary> --exact \
         //     rbac::resolution_cache::tests::concurrent_readers_never_observe_stale_after_bump
         //
-        // run 10-way concurrent. 1 abort in 120 runs: `free(): invalid pointer`,
-        // SIGABRT, core dumped. `MALLOC_PERTURB_` only poisons freed memory and
-        // `MALLOC_CHECK_` only validates the chunk header — neither can fabricate
-        // an invalid free. The captured core's stack is frame-for-frame the one
-        // above, on a *reader* thread:
-        //   ShardedResolutionCache::get
-        //     -> drop_glue<arc_swap::Guard<Arc<HashMap<..>>>>
-        //       -> <HybridProtection as Drop>::drop
-        //         -> drop_in_place<Arc<HashMap<..>>> -> HashMap drop
-        //           -> RawTable::drop_inner_table -> ResolvedPermissions drop
-        //             -> Vec<Permission> -> String -> RawVec<u8> -> free() -> abort
-        // i.e. the reader's guard drop took the refcount to zero and ran the
-        // map's real destructor while the writer still owned it.
+        // three copies at a time. On `ArcSwap` that measured 3 failures in 150
+        // runs (two SIGSEGV, one `free(): invalid size`); on `SwapCell` it
+        // measures 0. Full evidence and the remaining call sites are in
+        // `reports/arc-swap-use-after-free-2026-09-21.md`.
         //
-        // Two corrections to the options above, checked against the vendored
-        // crate rather than the issue tracker:
-        //   * The RwLock strategy is NOT reachable from a production build of
-        //     1.9.2. `strategy/rw_lock.rs` is `#[cfg(feature =
-        //     "internal-test-strategies")]`, its own module doc says "*This is
-        //     not meant to be used in production code*", and there is no
-        //     `genlock-load` feature — 1.9.2 ships only `experimental-strategies`,
-        //     `experimental-thread-local`, `internal-test-strategies` and `weak`.
-        //   * There is no version to upgrade to. 1.9.2 is the newest published
-        //     release, and its only change over 1.9.1 is a doc note (#208). The
-        //     two releases before it were both memory-ordering fixes (1.9.0:
-        //     "original proofs based on wrong reading of standard"; 1.9.1: "one
-        //     more SeqCst"), and the crate carries its own `tests/bug-198.rs`
-        //     crash regression — this is a recurring defect class there, not a
-        //     one-off.
-        // So the remedy is to move off the crate or off this strategy; neither
-        // is available as a dependency bump, which is why it stays a
-        // workspace-level decision.
-        //
-        // This code is 100% safe Rust and uses only arc-swap's public API, so
-        // the fault is NOT in this module and must NOT be "fixed" by lowering
-        // the iteration count again or by #[ignore]-ing this test: the same
-        // load+rcu pattern is used on production hot paths (identity engine,
-        // storage memtable/tiered, TLS cert swap). The remedy is an arc-swap
-        // upgrade or strategy change, which is a workspace-level decision.
+        // So do NOT "fix" a failure here by lowering the count again or by
+        // #[ignore]-ing it. This module is 100% safe Rust with no `unsafe`; a
+        // heap corruption reported here comes from underneath it.
         //
         // 5k still exercises thousands of concurrent reader/writer
         // interleavings — enough to catch any ordering hole in the
-        // ArcSwap-based invalidation path.
+        // invalidation path.
         barrier.wait();
         for v in 0..5_000u64 {
             cache.insert(k.clone(), cache.generation(&realm), resolved_with("v.read"));

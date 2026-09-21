@@ -32,6 +32,9 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateApprovalRequestInput,
     ) -> Result<ApprovalRequest, IdentityError> {
+        // The agent must exist and be Active before its request may be queued.
+        self.require_active_agent(realm_id, &request.agent_id)?;
+
         let now = self.clock.now();
         let now_secs = now.as_micros() / 1_000_000;
         let expires_in = request
@@ -95,6 +98,27 @@ impl EmbeddedIdentityEngine {
         Ok(record)
     }
 
+    /// Requires `agent_id` to name a live, `Active` agent in this realm.
+    ///
+    /// Returns `AgentNotFound` when no such agent exists and `AgentRevoked` for
+    /// any non-`Active` status (`Suspended` included — that is the state the
+    /// abuse monitor applies automatically, so treating it as usable would make
+    /// the automatic response a no-op for the approval plane).
+    fn require_active_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<(), IdentityError> {
+        let agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+        if agent.status() == crate::identity::AgentStatus::Active {
+            Ok(())
+        } else {
+            Err(IdentityError::AgentRevoked)
+        }
+    }
+
     /// Retrieves an approval request by ID.
     pub(super) fn get_approval_request_inner(
         &self,
@@ -151,6 +175,13 @@ impl EmbeddedIdentityEngine {
         if record.expires_at <= now {
             return Err(IdentityError::ApprovalRequestExpired);
         }
+
+        // Re-check the agent at approval time, not only at request time. A
+        // human-in-the-loop queue exists precisely to put a delay between the
+        // two, and an agent revoked or suspended inside that window must not
+        // have a live capability token minted for it. This runs before the
+        // status transition, so a refused approval leaves the request Pending.
+        self.require_active_agent(realm_id, &record.agent_id)?;
 
         let now_secs = now.as_micros() / 1_000_000;
         let ttl = capability_ttl_secs

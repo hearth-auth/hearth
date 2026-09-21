@@ -1139,3 +1139,139 @@ async fn aat_no_audience_rejects_expected_audience() {
         .validate_aat(&realm_id, &resp.aat, None)
         .expect("unconstrained AAT must still validate without expected_aud");
 }
+
+// ── Agent kill-switch: revoking the agent must invalidate its AATs ───────────
+//
+// Subsystem audit 2026-09-21 (task 23.11). `issue_aat_inner` requires the agent
+// to be `Active`, but `parse_and_validate_aat` — the single funnel used by both
+// `validate_aat` and `derive_aat` — never looked the agent up again. An AAT
+// therefore outlived the revocation of the very agent it names, for the whole
+// of its (up to one hour) lifetime, and could still spawn fresh children.
+
+/// An AAT minted before the agent was revoked must stop validating.
+#[tokio::test]
+async fn aat_rejected_after_owning_agent_revoked() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id: agent_id.clone(),
+                tools: vec![],
+                scope: vec!["read".to_string()],
+                aud: None,
+                expires_in_secs: Some(3600),
+            },
+        )
+        .expect("issue AAT while the agent is active");
+
+    // Sanity: valid while the agent is active.
+    h.identity()
+        .validate_aat(&realm_id, &resp.aat, None)
+        .expect("AAT must validate while its agent is active");
+
+    h.identity()
+        .revoke_agent(&realm_id, &agent_id, None)
+        .expect("revoke agent");
+
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &resp.aat, None)
+        .expect_err("AAT must not validate once its agent is revoked");
+    assert!(
+        matches!(err, IdentityError::AgentRevoked),
+        "expected AgentRevoked after agent revocation, got {err:?}"
+    );
+}
+
+/// A revoked agent must not be able to derive a child from an outstanding AAT.
+#[tokio::test]
+async fn aat_derive_rejected_after_owning_agent_revoked() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let parent = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id: agent_id.clone(),
+                tools: vec![],
+                scope: vec!["read".to_string(), "write".to_string()],
+                aud: None,
+                expires_in_secs: Some(3600),
+            },
+        )
+        .expect("issue parent AAT");
+
+    h.identity()
+        .revoke_agent(&realm_id, &agent_id, None)
+        .expect("revoke agent");
+
+    let err = h
+        .identity()
+        .derive_aat(
+            &realm_id,
+            &DeriveAatRequest {
+                parent_aat: parent.aat,
+                tools: vec![],
+                scope: vec!["read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect_err("a revoked agent must not derive fresh AATs");
+    assert!(
+        matches!(err, IdentityError::AgentRevoked),
+        "expected AgentRevoked on derive after revocation, got {err:?}"
+    );
+}
+
+/// A suspended agent — the state the abuse monitor auto-applies — must also
+/// stop its outstanding AATs, not merely be barred from minting new ones.
+#[tokio::test]
+async fn aat_rejected_after_owning_agent_suspended() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id: agent_id.clone(),
+                tools: vec![],
+                scope: vec!["read".to_string()],
+                aud: None,
+                expires_in_secs: Some(3600),
+            },
+        )
+        .expect("issue AAT while the agent is active");
+
+    h.identity()
+        .suspend_agent(&realm_id, &agent_id, None)
+        .expect("suspend agent");
+
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &resp.aat, None)
+        .expect_err("AAT must not validate while its agent is suspended");
+    assert!(
+        matches!(err, IdentityError::AgentRevoked),
+        "expected AgentRevoked for a suspended agent, got {err:?}"
+    );
+
+    // Reactivating the agent restores its outstanding AATs.
+    h.identity()
+        .reactivate_agent(&realm_id, &agent_id, None)
+        .expect("reactivate agent");
+    h.identity()
+        .validate_aat(&realm_id, &resp.aat, None)
+        .expect("AAT must validate again once the agent is reactivated");
+}

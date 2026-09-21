@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Security
+- **Removed `arc-swap` from the authorization decision cache (task 26.1, CRITICAL)** — `arc-swap`
+  1.9.2 corrupts the heap under the `load`+`rcu` pattern: a reader's guard drop can run a map's
+  destructor while a writer still owns it. Measured in `src/rbac/resolution_cache.rs` at 3 failures
+  in 150 concurrent runs under a checking allocator (two `SIGSEGV`, one `free(): invalid size`), and
+  0 in 150 after the change. There is no release to upgrade to and no production-reachable
+  alternative strategy in the crate. The permission-resolution cache now uses an internal
+  `RwLock<Arc<T>>` cell; its 64-way sharding is unchanged, so readers still never block readers.
+  Twelve other call sites still use `arc-swap` and are enumerated, with what each needs, in
+  `reports/arc-swap-use-after-free-2026-09-21.md`.
 - **New `trust_asserted_email` SAML connector key, and SAML account linking now works at all (task 25.27)** —
   SAML carries no `email_verified` signal, so Hearth hard-coded the asserted address as unverified.
   That made `link_existing_accounts` unreachable for SAML in **both** modes: a SAML login by a user who

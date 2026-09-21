@@ -619,3 +619,158 @@ async fn capability_token_tool_mismatch_rejected() {
         "token for send_email must not authorize delete_file: {result:?}"
     );
 }
+
+// ── Agent kill-switch: a revoked agent must not be approved ──────────────────
+//
+// Subsystem audit 2026-09-21 (task 23.11). `issue_aat_inner`, `mint_txn_token`
+// and the SPIFFE path all require the agent to be `Active`. The approval
+// lifecycle did not: neither `create_approval_request` nor
+// `approve_approval_request` looked the agent up, so an operator approving a
+// queued request minted a live capability token for an agent that had been
+// revoked in the meantime — exactly the window a human-in-the-loop queue
+// creates by design.
+
+/// Approving a request whose agent was revoked after it was queued must fail,
+/// and must not mint a capability token.
+#[tokio::test]
+async fn approve_rejected_when_agent_revoked_after_request() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let created = h
+        .identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id: agent_id.clone(),
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::Value::Null,
+                delegation_chain: vec![],
+                expires_in_secs: Some(600),
+            },
+        )
+        .expect("create approval request");
+
+    h.identity()
+        .revoke_agent(&realm_id, &agent_id, None)
+        .expect("revoke agent");
+
+    let err = h
+        .identity()
+        .approve_approval_request(&realm_id, &created.request_id, None)
+        .expect_err("approving a revoked agent's request must fail");
+    assert!(
+        matches!(err, IdentityError::AgentRevoked),
+        "expected AgentRevoked, got {err:?}"
+    );
+
+    // The request must stay Pending — a refused approval is not a transition.
+    let after = h
+        .identity()
+        .get_approval_request(&realm_id, &created.request_id)
+        .expect("reload request");
+    assert_eq!(
+        after.status,
+        ApprovalRequestStatus::Pending,
+        "a refused approval must leave the request Pending"
+    );
+}
+
+/// A suspended agent — the state the abuse monitor applies automatically —
+/// must not have pending requests approved either.
+#[tokio::test]
+async fn approve_rejected_when_agent_suspended() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let created = h
+        .identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id: agent_id.clone(),
+                tool: "send_email".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::Value::Null,
+                delegation_chain: vec![],
+                expires_in_secs: Some(600),
+            },
+        )
+        .expect("create approval request");
+
+    h.identity()
+        .suspend_agent(&realm_id, &agent_id, None)
+        .expect("suspend agent");
+
+    let err = h
+        .identity()
+        .approve_approval_request(&realm_id, &created.request_id, None)
+        .expect_err("approving a suspended agent's request must fail");
+    assert!(
+        matches!(err, IdentityError::AgentRevoked),
+        "expected AgentRevoked for suspended agent, got {err:?}"
+    );
+}
+
+/// Creating a request for an agent that is already revoked must be refused at
+/// the door, rather than queued for an operator who cannot tell it is dead.
+#[tokio::test]
+async fn create_approval_request_rejected_for_revoked_agent() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    h.identity()
+        .revoke_agent(&realm_id, &agent_id, None)
+        .expect("revoke agent");
+
+    let err = h
+        .identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id,
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::Value::Null,
+                delegation_chain: vec![],
+                expires_in_secs: Some(600),
+            },
+        )
+        .expect_err("a revoked agent must not queue approval requests");
+    assert!(
+        matches!(err, IdentityError::AgentRevoked),
+        "expected AgentRevoked, got {err:?}"
+    );
+}
+
+/// An approval request naming an agent that does not exist in this realm must
+/// be refused — a typo'd or cross-realm `agent_id` must not become an
+/// approvable request whose capability token names a nonexistent subject.
+#[tokio::test]
+async fn create_approval_request_rejected_for_unknown_agent() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+
+    let err = h
+        .identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id: AgentId::generate(),
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::Value::Null,
+                delegation_chain: vec![],
+                expires_in_secs: Some(600),
+            },
+        )
+        .expect_err("an unknown agent must not queue approval requests");
+    assert!(
+        matches!(err, IdentityError::AgentNotFound),
+        "expected AgentNotFound, got {err:?}"
+    );
+}
