@@ -28,6 +28,8 @@ use hearth::identity::{
 #[derive(Clone)]
 struct ApprovalCapture {
     deliveries: Arc<Mutex<Vec<CapturedDelivery>>>,
+    /// The `timeout_ms` each delivery was handed (task 26.37).
+    timeouts_seen: Arc<Mutex<Vec<u64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,7 +46,13 @@ impl ApprovalCapture {
     fn new() -> Self {
         Self {
             deliveries: Arc::new(Mutex::new(Vec::new())),
+            timeouts_seen: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Returns the `timeout_ms` values the transport was handed, in order.
+    fn timeouts_seen(&self) -> Vec<u64> {
+        self.timeouts_seen.lock().expect("lock").clone()
     }
 
     fn captured(&self) -> Vec<CapturedDelivery> {
@@ -60,7 +68,9 @@ impl ApprovalWebhookTransport for ApprovalCapture {
         event_type: &str,
         delivery_id: &str,
         signature: Option<&str>,
+        timeout_ms: u64,
     ) -> Result<(), String> {
+        self.timeouts_seen.lock().expect("lock").push(timeout_ms);
         self.deliveries
             .lock()
             .expect("lock")
@@ -504,6 +514,7 @@ impl ApprovalWebhookTransport for FlakyApprovalTransport {
         _event_type: &str,
         delivery_id: &str,
         _signature: Option<&str>,
+        _timeout_ms: u64,
     ) -> Result<(), String> {
         if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
             return Err("endpoint down".to_string());
@@ -589,5 +600,53 @@ async fn a_refused_approval_webhook_is_redelivered_by_the_outbox_flush() {
         (delivered, remaining),
         (0, 0),
         "a drained outbox must stay drained"
+    );
+}
+
+// ─── Task 26.37: the operator's timeout must reach the wire ─────────────────
+
+/// The realm's `approval_webhook.timeout_ms` must reach the transport.
+///
+/// It parsed, it validated, it reached `ApprovalWebhookConfig` — and `deliver`
+/// never handed it on, so the production transport built a `ureq` config with
+/// `https_only` and `max_redirects` and no timeout of any kind. ureq 3.3.0's
+/// `Timeouts::default()` leaves every field `None` except `await_100`, and the
+/// call runs inside `tokio::task::block_in_place`, so an approver's endpoint
+/// that completes the handshake and then stops responding took a Tokio worker
+/// thread out of service permanently.
+///
+/// A dead config key and an unbounded egress path are the same bug here, and
+/// this test is the only thing that can tell either of them apart from working
+/// code — every other test in this file uses a transport that ignores it.
+#[tokio::test]
+async fn the_realms_configured_timeout_reaches_the_transport() {
+    let capture = Arc::new(ApprovalCapture::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+
+    // `make_realm_with_webhook` configures `timeout_ms: 2000`.
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, None);
+    h.identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id,
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::json!({}),
+                delegation_chain: vec![],
+                expires_in_secs: None,
+            },
+        )
+        .expect("create approval request");
+
+    assert_eq!(
+        capture.timeouts_seen(),
+        vec![2000],
+        "the realm's configured timeout_ms must reach the transport, not be \
+         dropped on the way"
     );
 }

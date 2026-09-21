@@ -113,6 +113,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   where a library integrator would read it.
 
 ### Security
+- **Five outbound HTTP paths had no timeouts at all; all five are bounded now (task 26.37)** — ureq 3.3.0's
+  `Timeouts::default()` leaves every field `None` except `await_100`. Four of the five run inside
+  `tokio::task::block_in_place`, so an upstream that completes the TCP handshake and then stops responding
+  took a Tokio **worker** thread out of service permanently: the approval webhook, the Have I Been Pwned
+  breach check (on the password-set path), and the Turnstile captcha siteverify (on the login path, where it
+  also meant the fail-open branch could never fire). The fifth, the Spamhaus DROP-list refresh, runs under
+  `spawn_blocking` and leaked one blocking-pool thread per refresh interval instead.
+- **`approval_webhook.timeout_ms` now reaches the wire (task 26.37)** — the key parsed, validated and reached
+  `ApprovalWebhookConfig`, and `deliver` never handed it to the transport. A dead config key and an unbounded
+  egress path were the same defect.
+
 - **A revoked agent's capability token stops working immediately (task 26.35)** — `validate_capability_token`
   checked the signature, audience, expiry, tool, action, caller binding and single-use JTI, and never asked
   whether the agent still existed. Every sibling path did, so revoking an agent stopped everything except the

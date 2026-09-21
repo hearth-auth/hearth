@@ -325,6 +325,40 @@ fn fetch_url(url: &str) -> Result<String, String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod egress_bound_tests {
+    use super::*;
+
+    /// Task 26.37 — a hung DROP-list endpoint must not leak a thread forever.
+    ///
+    /// The fetch used bare `ureq::get`, and ureq 3.3.0's `Timeouts::default()`
+    /// leaves every field `None` except `await_100`. This runs inside
+    /// `spawn_blocking`, so it costs a blocking-pool thread rather than a Tokio
+    /// worker — milder than its siblings, but still one thread per refresh
+    /// interval, permanently. The refresh loop's "retaining previous list"
+    /// recovery cannot fire either, because the call never returns to report a
+    /// failure.
+    #[test]
+    fn spamhaus_agent_config_bounds_both_timeouts() {
+        let timeouts = spamhaus_agent_config().timeouts();
+        assert_eq!(
+            timeouts.connect,
+            Some(SPAMHAUS_CONNECT_TIMEOUT),
+            "DROP-list refresh must bound connect time"
+        );
+        assert_eq!(
+            timeouts.global,
+            Some(SPAMHAUS_REQUEST_TIMEOUT),
+            "DROP-list refresh must bound total request time"
+        );
+        assert!(
+            SPAMHAUS_REQUEST_TIMEOUT > SPAMHAUS_CONNECT_TIMEOUT,
+            "the DROP lists are hundreds of kilobytes; the overall budget must \
+             leave room to read them after connecting"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 

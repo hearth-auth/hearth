@@ -37,6 +37,33 @@ pub trait HibpTransport: Send + Sync {
 /// Runs the blocking ureq call inside `block_in_place` when invoked from a
 /// multi-thread Tokio runtime, matching the pattern used by
 /// `src/identity/email/http.rs`.
+/// Connect timeout for the Have I Been Pwned range lookup.
+const HIBP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Total request timeout for the Have I Been Pwned range lookup.
+const HIBP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Builds the `ureq` config for a breach-check lookup.
+///
+/// # Task 26.37
+///
+/// This transport called bare `ureq::get`, and ureq 3.3.0's
+/// `Timeouts::default()` leaves every field `None` except `await_100`. The
+/// call runs inside `tokio::task::block_in_place` on the **password-set**
+/// path, so an unreachable-but-accepting api.pwnedpasswords.com took a Tokio
+/// worker thread out of service for every password change until it answered.
+///
+/// The values match `email_agent_config`, the closest sibling egress path.
+/// `https_only` is safe to assert: the URL is a compile-time constant.
+fn hibp_agent_config() -> ureq::config::Config {
+    ureq::config::Config::builder()
+        .timeout_connect(Some(HIBP_CONNECT_TIMEOUT))
+        .timeout_global(Some(HIBP_REQUEST_TIMEOUT))
+        .https_only(true)
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build()
+}
+
 #[allow(dead_code)]
 pub(crate) struct UreqHibpTransport;
 
@@ -48,7 +75,8 @@ impl HibpTransport for UreqHibpTransport {
         );
 
         let do_request = || -> Result<String, HibpError> {
-            let mut req = ureq::get(&url).header("Add-Padding", "true");
+            let agent = ureq::Agent::new_with_config(hibp_agent_config());
+            let mut req = agent.get(&url).header("Add-Padding", "true");
             if let Some(key) = api_key {
                 if !key.is_empty() {
                     req = req.header("hibp-api-key", key);
@@ -177,6 +205,38 @@ fn response_contains_suffix(body: &str, suffix: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod egress_bound_tests {
+    use super::*;
+
+    /// Task 26.37 — the breach check must not be able to hang forever.
+    ///
+    /// The transport called bare `ureq::get`, and ureq 3.3.0's
+    /// `Timeouts::default()` leaves every field `None` except `await_100`. The
+    /// call runs inside `tokio::task::block_in_place` on the PASSWORD-SET path,
+    /// so an api.pwnedpasswords.com that accepts the connection and then stops
+    /// answering took a Tokio worker thread out of service on every password
+    /// change until it replied.
+    #[test]
+    fn hibp_agent_config_bounds_both_timeouts() {
+        let timeouts = hibp_agent_config().timeouts();
+        assert_eq!(
+            timeouts.connect,
+            Some(HIBP_CONNECT_TIMEOUT),
+            "breach-check egress must bound connect time"
+        );
+        assert_eq!(
+            timeouts.global,
+            Some(HIBP_REQUEST_TIMEOUT),
+            "breach-check egress must bound total request time"
+        );
+        assert!(
+            hibp_agent_config().https_only(),
+            "the HIBP URL is a compile-time https constant; plaintext must be refused"
+        );
+    }
 }
 
 #[cfg(test)]

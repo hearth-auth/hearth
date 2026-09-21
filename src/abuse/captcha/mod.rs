@@ -68,6 +68,39 @@ pub struct TurnstileConfig {
     pub verify_url: String,
 }
 
+/// Connect timeout for a Turnstile siteverify call.
+const TURNSTILE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Total request timeout for a Turnstile siteverify call.
+///
+/// Tighter than the provider-egress defaults because this sits on the login
+/// path: a slow verify is a slow login for every user behind the challenge.
+const TURNSTILE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Builds the `ureq` config for a Turnstile siteverify call.
+///
+/// # Task 26.37
+///
+/// The call used bare `ureq::post`, and ureq 3.3.0's `Timeouts::default()`
+/// leaves every field `None` except `await_100`. The handler's fail-open arm
+/// is a deliberate availability choice, but without a bound it never fires:
+/// a siteverify endpoint that accepts the connection and then stops answering
+/// holds the login request open instead of failing open.
+///
+/// This deliberately does NOT assert `https_only`, unlike the email and HIBP
+/// transports. `TurnstileConfig::verify_url` is a public field that defaults
+/// to the https constant but is not constrained to it — the provider's own
+/// tests point it at an `http://` loopback address. Asserting https here would
+/// be a behaviour change dressed up as a timeout fix, and the comment claiming
+/// the constructor enforces it would have been false.
+fn turnstile_agent_config() -> ureq::config::Config {
+    ureq::config::Config::builder()
+        .timeout_connect(Some(TURNSTILE_CONNECT_TIMEOUT))
+        .timeout_global(Some(TURNSTILE_REQUEST_TIMEOUT))
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build()
+}
+
 impl TurnstileConfig {
     /// Builds a production config using the official Cloudflare verify endpoint.
     #[must_use]
@@ -176,7 +209,14 @@ impl CaptchaProvider for TurnstileCaptchaProvider {
             "remoteip": ip.to_string(),
         });
 
-        let result = ureq::post(&self.verify_url)
+        // Task 26.37: ureq 3.3.0 defaults to NO timeouts, and this verify sits
+        // on the login path — a siteverify endpoint that accepts the connection
+        // and then stops answering would hold the request open indefinitely.
+        // The fail-open below is a deliberate availability choice; without a
+        // bound it never actually fires.
+        let agent = ureq::Agent::new_with_config(turnstile_agent_config());
+        let result = agent
+            .post(&self.verify_url)
             .header("Content-Type", "application/json")
             .send_json(&body);
 
@@ -239,6 +279,39 @@ fn build_widget_html(site_key: &str) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod egress_bound_tests {
+    use super::*;
+
+    /// Task 26.37 — the fail-open arm cannot fire if nothing ever times out.
+    ///
+    /// The siteverify call used bare `ureq::post`, and ureq 3.3.0's
+    /// `Timeouts::default()` leaves every field `None` except `await_100`.
+    /// The handler's fail-open branch is a deliberate availability choice, but
+    /// a verify endpoint that accepts the connection and then stops answering
+    /// held the login request open instead of failing open — the opposite of
+    /// what the branch was written for.
+    #[test]
+    fn turnstile_agent_config_bounds_both_timeouts() {
+        let timeouts = turnstile_agent_config().timeouts();
+        assert_eq!(
+            timeouts.connect,
+            Some(TURNSTILE_CONNECT_TIMEOUT),
+            "siteverify must bound connect time"
+        );
+        assert_eq!(
+            timeouts.global,
+            Some(TURNSTILE_REQUEST_TIMEOUT),
+            "siteverify must bound total request time"
+        );
+        assert!(
+            TURNSTILE_REQUEST_TIMEOUT < std::time::Duration::from_secs(10),
+            "this sits on the login path, so its budget must be tighter than \
+             the provider-egress default"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
