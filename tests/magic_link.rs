@@ -7,7 +7,7 @@
 mod common;
 
 use hearth::core::RealmId;
-use hearth::identity::{CreateRealmRequest, CreateUserRequest, User};
+use hearth::identity::{CreateRealmRequest, CreateUserRequest, RegistrationPolicy, User};
 
 /// Helper: creates a real realm with a signing key.
 fn create_realm(harness: &common::TestHarness) -> RealmId {
@@ -16,6 +16,24 @@ fn create_realm(harness: &common::TestHarness) -> RealmId {
         .create_realm(&CreateRealmRequest {
             name: format!("ml-test-{}", uuid::Uuid::new_v4()),
             config: None,
+        })
+        .expect("create realm");
+    realm.id().clone()
+}
+
+/// Creates a realm whose self-registration policy is `policy`.
+fn create_realm_with_registration(
+    harness: &common::TestHarness,
+    policy: RegistrationPolicy,
+) -> RealmId {
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("ml-reg-{}", uuid::Uuid::new_v4()),
+            config: Some(hearth::identity::RealmConfig {
+                registration_policy: Some(policy),
+                ..hearth::identity::RealmConfig::default()
+            }),
         })
         .expect("create realm");
     realm.id().clone()
@@ -102,7 +120,12 @@ async fn magic_link_creates_account_for_unknown_email() {
     let harness = common::TestHarness::embedded()
         .await
         .expect("harness setup");
-    let realm = create_realm(&harness);
+    // Task 22.24 made `validate_magic_link` consult the realm's
+    // `RegistrationPolicy`, which defaults to `Disabled`. Creating an account
+    // from a magic link IS a registration, so this test must open the realm to
+    // registration; the fail-closed default is pinned by the sibling test
+    // below.
+    let realm = create_realm_with_registration(&harness, RegistrationPolicy::Open);
     let unknown_email = format!("newuser-{}@example.com", uuid::Uuid::new_v4());
 
     // Email should not exist yet
@@ -156,6 +179,43 @@ async fn magic_link_creates_account_for_unknown_email() {
 //
 // Request 3 magic links for same email → all succeed
 // Request 4th → fails with RateLimited
+
+/// Task 22.24 (audit 2026-08-28 §4.24#11): redeeming a magic link for an
+/// address with no account is a self-registration, and must obey the realm's
+/// `RegistrationPolicy`. Before this it created the account regardless, so a
+/// realm with registration disabled could still be populated by anyone who
+/// could request a link.
+#[tokio::test]
+async fn magic_link_refuses_to_create_an_account_when_registration_is_disabled() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm_with_registration(&harness, RegistrationPolicy::Disabled);
+    let unknown_email = format!("nobody-{}@example.com", uuid::Uuid::new_v4());
+
+    // Requesting stays silent: enumeration resistance is unchanged.
+    let response = harness
+        .identity()
+        .request_magic_link(&realm, &unknown_email)
+        .expect("request_magic_link for unknown email");
+
+    let err = harness
+        .identity()
+        .validate_magic_link(&realm, response.token())
+        .expect_err("a closed realm must not gain an account from a magic link");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::RegistrationDisabled),
+        "got {err:?}"
+    );
+    assert!(
+        harness
+            .identity()
+            .get_user_by_email(&realm, &unknown_email)
+            .expect("get_user_by_email")
+            .is_none(),
+        "no account may exist after the refusal"
+    );
+}
 
 #[tokio::test]
 async fn magic_link_rate_limiting() {
@@ -365,5 +425,101 @@ fn magic_link_retry_after_reports_nonzero_when_blocked() {
     assert!(
         retry_after > 0,
         "Retry-After secs must be positive when IP is at threshold; got {retry_after}"
+    );
+}
+
+// ===== Audit 2026-08-28 §4.24#6: the SDK grant must be accepted =====
+
+/// All seven SDKs complete the passwordless flow by posting
+/// `grant_type=urn:hearth:grant-type:magic-link` with the opaque token to the
+/// token endpoint. The endpoint had no arm for that grant, so every SDK's
+/// `exchangeMagicLink` was rejected with `unsupported_grant_type` and the
+/// flow could not complete.
+#[tokio::test]
+async fn magic_link_grant_is_accepted_at_the_token_endpoint() {
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
+    use hearth::protocol::http::{router, AppState};
+    use tower::ServiceExt as _;
+
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user_with_email(&harness, &realm, "grant@magic.test");
+
+    let minted = harness
+        .identity()
+        .request_magic_link(&realm, "grant@magic.test")
+        .expect("mint magic link");
+
+    let app = router(Arc::new(AppState::new_dev(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    )));
+
+    let body = serde_json::json!({
+        "grant_type": "urn:hearth:grant-type:magic-link",
+        "token": minted.token(),
+    })
+    .to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .expect("build POST"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("read body");
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the magic-link grant must be accepted (audit §4.24#6); body: {text}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("json body");
+    let access_token = parsed
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .expect("access_token in the grant response");
+    let claims = harness
+        .identity()
+        .validate_token(&realm, access_token)
+        .expect("the issued access token must validate");
+    assert!(
+        claims.sub.contains(&user.id().as_uuid().to_string()),
+        "the token must be bound to the magic link's user; sub was {}",
+        claims.sub
+    );
+
+    // Single use: replaying the same token must not mint a second session.
+    let replay = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("build POST"),
+        )
+        .await
+        .expect("oneshot");
+    assert_ne!(
+        replay.status(),
+        StatusCode::OK,
+        "a magic-link token must be single-use at the token endpoint"
     );
 }

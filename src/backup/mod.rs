@@ -10,16 +10,34 @@
 //! realms/<realm-slug>/realm.json
 //! realms/<realm-slug>/users.ndjson
 //! realms/<realm-slug>/credentials.ndjson
+//! realms/<realm-slug>/mfa_factors.ndjson
 //! realms/<realm-slug>/clients.ndjson
 //! realms/<realm-slug>/roles.ndjson
 //! realms/<realm-slug>/permissions.ndjson
 //! realms/<realm-slug>/groups.ndjson
+//! realms/<realm-slug>/group_memberships.ndjson
 //! realms/<realm-slug>/assignments.ndjson
 //! realms/<realm-slug>/organizations.ndjson
+//! realms/<realm-slug>/organization_memberships.ndjson
+//! realms/<realm-slug>/consents.ndjson
 //! realms/<realm-slug>/scopes.ndjson
+//! realms/<realm-slug>/agents.ndjson
+//! realms/<realm-slug>/identity_providers.ndjson
+//! realms/<realm-slug>/federation_links.ndjson
+//! realms/<realm-slug>/webhooks.ndjson
+//! realms/<realm-slug>/saml_service_providers.ndjson
+//! realms/<realm-slug>/saml_signing_key.json     (AES-256-GCM encrypted)
+//! realms/<realm-slug>/scim_mappings.ndjson
+//! realms/<realm-slug>/invitations.ndjson
+//! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
 //! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
 //! realms/<realm-slug>/audit.ndjson       (optional)
+//! realms/<realm-slug>/audit_chain.json   (optional, with audit.ndjson)
 //! ```
+//!
+//! Empty sections are omitted, so an absent member means "none of these
+//! existed". See [`UNEXPORTED_FAMILIES`] for the entity families this list
+//! deliberately or accidentally leaves out.
 //!
 //! The manifest is always the **last** entry so that checksums for all
 //! preceding files can be included in it.
@@ -66,6 +84,46 @@ use std::path::{Path, PathBuf};
 use hex::encode as hex_encode;
 use sha2::{Digest, Sha256};
 
+/// One entity family a `.hearth-backup` archive does **not** carry.
+///
+/// See [`UNEXPORTED_FAMILIES`].
+#[derive(Clone, Copy, Debug)]
+pub struct UnexportedFamily {
+    /// Human name of the family, as an operator would say it.
+    pub family: &'static str,
+    /// The archive member it would occupy if it were exported. Nothing writes
+    /// this member today; the name is what the liveness test in this module
+    /// checks against the importer's allowlist.
+    pub member: &'static str,
+    /// What a restore loses because the family is absent.
+    pub consequence: &'static str,
+}
+
+/// Every entity family an archive does not carry, and what a restore loses.
+///
+/// The importer fails closed on an *unrecognized* member but has nothing to say
+/// about a *missing category*: its allowlist is the union of what the exporter
+/// writes, so a family nobody exports is a family nobody misses (audit re-run
+/// 23.5). Until each family round-trips, `backup create` and `backup restore`
+/// print this list, so an operator is told what the archive does not hold at
+/// the moment it matters rather than discovering it after a disaster.
+///
+/// This is a *disclosure*, not a fix. Closing a family means adding an export
+/// and an import for it; when that happens, delete its row here and the
+/// liveness test `unexported_families_are_really_unexported` will confirm the
+/// list and the archive still agree.
+pub const UNEXPORTED_FAMILIES: &[UnexportedFamily] = &[UnexportedFamily {
+    family: "sessions",
+    member: "sessions.ndjson",
+    consequence: "every access and refresh token issued before the backup is dead after the \
+                      restore, even though the signing key survives. DELIBERATE, and reaffirmed \
+                      by OpenSpec 26.40: a session is per-node live state carrying a session \
+                      version and a device binding, and a revocation recorded after the backup \
+                      is not in the archive — so restoring sessions would resurrect exactly the \
+                      sessions an operator revoked. The right fix is documentation, not export: \
+                      a restore is a re-authentication event.",
+}];
+
 /// Entry point for creating and opening `.hearth-backup` archives.
 ///
 /// Archives are zstd-compressed tarballs. Use [`create`](Self::create) to
@@ -94,8 +152,9 @@ impl BackupArchive {
     /// field is populated. Use [`ArchiveReader::verify_checksums`] to validate
     /// file integrity.
     ///
-    /// Returns [`BackupError::UnsupportedVersion`] when the archive was
-    /// created by a newer, incompatible version of Hearth.
+    /// Returns [`BackupError::UnsupportedVersion`] when the archive's
+    /// `format_version` is not exactly [`MANIFEST_VERSION`] — an *older*
+    /// archive is rejected by the same branch as a newer one.
     pub fn open(path: &Path) -> Result<ArchiveReader, BackupError> {
         let manifest = read_manifest(path)?;
         if manifest.format_version != MANIFEST_VERSION {
@@ -245,16 +304,31 @@ impl ArchiveReader {
         Ok(out)
     }
 
-    /// Reads every non-manifest entry from the archive and validates its
-    /// SHA-256 checksum against the manifest.
+    /// Reads every non-manifest entry from the archive, validates its SHA-256
+    /// checksum against the manifest, and reconciles the manifest's file list
+    /// with the archive's contents **in both directions**.
     ///
-    /// Returns `Ok(())` if all checksummed files match. Returns
-    /// [`BackupError::ChecksumMismatch`] on the first mismatch detected.
-    pub fn verify_checksums(&self) -> Result<(), BackupError> {
+    /// Returns the number of files actually read and verified — not the size of
+    /// the manifest's checksum map, which is what the CLI used to print.
+    ///
+    /// # Errors
+    ///
+    /// - [`BackupError::ChecksumMismatch`] — a file's content changed.
+    /// - [`BackupError::MissingMembers`] — the manifest checksums a file the
+    ///   archive does not carry. This walked past silently before: the loop
+    ///   iterated the tar, so a *deleted* member was never visited and never
+    ///   missed. `hearth backup verify` answered "OK — all checksums match"
+    ///   over an archive whose `users.ndjson` had been removed, and `restore`
+    ///   then exited 0 having created zero users (audit re-run 23.5, B-3).
+    /// - [`BackupError::UnchecksummedMember`] — the archive carries a file the
+    ///   manifest does not list. [`ArchiveWriter::add_file`] checksums every
+    ///   member it appends, so an unlisted one was added after sealing.
+    pub fn verify_checksums(&self) -> Result<usize, BackupError> {
         let file = std::fs::File::open(&self.path)?;
         let decoder = zstd::Decoder::new(file)?;
         let mut archive = tar::Archive::new(decoder);
 
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in archive.entries()? {
             let mut entry = entry?;
             let entry_path = entry.path()?.to_string_lossy().into_owned();
@@ -263,20 +337,38 @@ impl ArchiveReader {
                 continue;
             }
 
-            if let Some(expected) = self.manifest.checksums.get(&entry_path) {
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes)?;
-                let actual = sha256_hex(&bytes);
-                if actual != *expected {
-                    return Err(BackupError::ChecksumMismatch {
-                        path: entry_path,
-                        expected: expected.clone(),
-                        actual,
-                    });
-                }
+            let Some(expected) = self.manifest.checksums.get(&entry_path) else {
+                return Err(BackupError::UnchecksummedMember { path: entry_path });
+            };
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            let actual = sha256_hex(&bytes);
+            if actual != *expected {
+                return Err(BackupError::ChecksumMismatch {
+                    path: entry_path,
+                    expected: expected.clone(),
+                    actual,
+                });
             }
+            seen.insert(entry_path);
         }
-        Ok(())
+
+        let mut missing: Vec<&str> = self
+            .manifest
+            .checksums
+            .keys()
+            .filter(|path| !seen.contains(path.as_str()))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            missing.sort_unstable();
+            return Err(BackupError::MissingMembers {
+                count: missing.len(),
+                paths: missing.join(", "),
+            });
+        }
+
+        Ok(seen.len())
     }
 }
 
@@ -321,6 +413,7 @@ mod tests {
                     users: 2,
                     ..Default::default()
                 },
+                audit_chain_included: false,
             }],
             checksums: HashMap::new(),
             sections_encrypted: false,
@@ -376,6 +469,197 @@ mod tests {
 
         let reader = BackupArchive::open(path).expect("open");
         reader.verify_checksums().expect("checksums valid");
+    }
+
+    /// Rewrites the archive at `src` into `dst`, passing every member through
+    /// `transform`. Returning `None` drops that member. `manifest.json` is
+    /// passed through like any other entry, so a caller can leave it stale on
+    /// purpose — which is exactly what an archive tamperer does.
+    fn repack<F>(src: &Path, dst: &Path, transform: F)
+    where
+        F: Fn(&str, Vec<u8>) -> Option<Vec<u8>>,
+    {
+        let decoder = zstd::Decoder::new(std::fs::File::open(src).expect("open src")).expect("dec");
+        let mut archive = tar::Archive::new(decoder);
+        let encoder =
+            zstd::Encoder::new(std::fs::File::create(dst).expect("create dst"), 0).expect("enc");
+        let mut builder = tar::Builder::new(encoder);
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let path = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read");
+            let Some(bytes) = transform(&path, bytes) else {
+                continue;
+            };
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &path, bytes.as_slice())
+                .expect("append");
+        }
+        builder
+            .into_inner()
+            .expect("into_inner")
+            .finish()
+            .expect("finish");
+    }
+
+    /// Rewrites the archive at `path` in place with `name` appended, leaving
+    /// `manifest.json` untouched.
+    fn append_member(path: &Path, name: &str, bytes: &[u8]) {
+        let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+        let decoder = zstd::Decoder::new(std::fs::File::open(path).expect("open")).expect("dec");
+        for entry in tar::Archive::new(decoder).entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let p = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut b = Vec::new();
+            entry.read_to_end(&mut b).expect("read");
+            all.push((p, b));
+        }
+        all.push((name.to_string(), bytes.to_vec()));
+
+        let encoder =
+            zstd::Encoder::new(std::fs::File::create(path).expect("create"), 0).expect("enc");
+        let mut builder = tar::Builder::new(encoder);
+        for (p, b) in all {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(b.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &p, b.as_slice())
+                .expect("append");
+        }
+        builder
+            .into_inner()
+            .expect("into_inner")
+            .finish()
+            .expect("finish");
+    }
+
+    /// Writes a two-member archive at `path` and returns it sealed.
+    fn two_member_archive(path: &Path) {
+        let mut writer = BackupArchive::create(path).expect("create");
+        writer
+            .add_file("realms/test-realm/realm.json", b"{\"slug\":\"test-realm\"}")
+            .expect("add realm");
+        writer
+            .add_file("realms/test-realm/users.ndjson", b"{\"id\":\"user_1\"}\n")
+            .expect("add users");
+        writer.finish(sample_manifest()).expect("finish");
+    }
+
+    /// A member deleted from the archive must be an integrity failure.
+    ///
+    /// `verify_checksums` walked the entries *present in the tar*, so a file
+    /// that was not there was never iterated and its absence was not an error.
+    /// Removing `users.ndjson` from a real archive left `hearth backup verify`
+    /// printing `OK — all checksums match (15 files verified)` and `restore`
+    /// exiting 0 with `users — created: 0`: two commands in a row reporting
+    /// success over a realm nobody can log in to (audit re-run 23.5, B-3).
+    #[test]
+    fn verify_rejects_an_archive_missing_a_file_the_manifest_lists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("good.hearth-backup");
+        let elided = dir.path().join("elided.hearth-backup");
+        two_member_archive(&good);
+
+        // Control: the unmodified archive verifies, so any failure below is
+        // attributable to the elision and not to the repack.
+        let verified = BackupArchive::open(&good)
+            .expect("open good")
+            .verify_checksums()
+            .expect("the control archive must verify");
+        assert_eq!(verified, 2, "both members must be read and verified");
+
+        repack(&good, &elided, |path, bytes| {
+            if path == "realms/test-realm/users.ndjson" {
+                None
+            } else {
+                Some(bytes)
+            }
+        });
+
+        let err = BackupArchive::open(&elided)
+            .expect("open elided")
+            .verify_checksums()
+            .expect_err("a deleted member must be an integrity failure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("users.ndjson"),
+            "the error must name the missing file; got: {msg}"
+        );
+        assert!(
+            matches!(err, BackupError::MissingMembers { count: 1, .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// An archive member the manifest does not checksum must be refused.
+    ///
+    /// `add_file` records a checksum for every member it appends, so an
+    /// unlisted member was added after the archive was sealed. The old loop
+    /// silently ignored it: `if let Some(expected) = …` simply fell through.
+    #[test]
+    fn verify_rejects_an_archive_member_the_manifest_does_not_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("good.hearth-backup");
+        let padded = dir.path().join("padded.hearth-backup");
+        two_member_archive(&good);
+
+        // Smuggle a member in without touching the manifest, exactly as an
+        // editor of a sealed archive would.
+        std::fs::copy(&good, &padded).expect("copy");
+        append_member(
+            &padded,
+            "realms/test-realm/smuggled.ndjson",
+            b"{\"id\":\"user_evil\"}\n",
+        );
+
+        let err = BackupArchive::open(&padded)
+            .expect("open padded")
+            .verify_checksums()
+            .expect_err("an unlisted member must be an integrity failure");
+        assert!(
+            matches!(err, BackupError::UnchecksummedMember { ref path } if path.contains("smuggled")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Every family [`UNEXPORTED_FAMILIES`] warns about must still be absent.
+    ///
+    /// The list is a promise to operators about what their archive does not
+    /// hold. When someone teaches the exporter to write one of these members,
+    /// the warning becomes a lie — so the member names are checked against the
+    /// importer's allowlist, which is kept in step with what the exporter
+    /// writes. A failure here means: delete that row from
+    /// `UNEXPORTED_FAMILIES`, because the family now round-trips.
+    #[test]
+    fn unexported_families_are_really_unexported() {
+        for family in UNEXPORTED_FAMILIES {
+            assert!(
+                !import::RECOGNIZED_MEMBERS.contains(&family.member),
+                "'{}' is now an archive member, so `{}` no longer belongs in \
+                 UNEXPORTED_FAMILIES — the CLI is warning operators about data the \
+                 archive does carry",
+                family.member,
+                family.family
+            );
+            assert!(
+                !family.consequence.is_empty() && !family.family.is_empty(),
+                "every row must say what a restore loses"
+            );
+        }
+        assert!(
+            !UNEXPORTED_FAMILIES.is_empty(),
+            "an empty list must mean every family round-trips, not that the list was \
+             quietly emptied"
+        );
     }
 
     #[test]

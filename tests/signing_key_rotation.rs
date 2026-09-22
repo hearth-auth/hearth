@@ -18,7 +18,7 @@ use hearth::core::{Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::reconcile::{apply_diff, save_snapshot};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
-    IdentityConfig, IdentityEngine, RealmConfig, SessionContext,
+    IdentityConfig, IdentityEngine, RealmConfig, RealmStatus, SessionContext, UpdateRealmRequest,
 };
 use hearth::rbac::EmbeddedRbacEngine;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -254,7 +254,14 @@ async fn snapshot_rotate_flag_cleared_after_apply_diff() {
     );
 
     // Apply diffs — rotation handler fires and returns consumed realm names.
-    let consumed = apply_diff(&diffs, &config, harness.identity(), harness.rbac()).unwrap();
+    let consumed = apply_diff(
+        &diffs,
+        &config,
+        harness.identity(),
+        harness.rbac(),
+        harness.audit(),
+    )
+    .unwrap();
     assert!(
         consumed.contains(&"tenant".to_string()),
         "tenant should be in consumed_rotations"
@@ -535,6 +542,7 @@ fn realm_delete_purges_retiring_keys_sync_path() {
     engine.rotate_realm_signing_key(realm.id(), 86_400).unwrap();
     assert_eq!(retiring_key_blobs(&storage, realm.id()).len(), 1);
 
+    archive_realm(&engine, realm.id());
     engine.delete_realm(realm.id()).unwrap();
 
     assert!(
@@ -559,6 +567,7 @@ async fn realm_delete_purges_retiring_keys_background_path() {
     engine.rotate_realm_signing_key(&realm, 86_400).unwrap();
     assert_eq!(retiring_key_blobs(&storage, &realm).len(), 1);
 
+    archive_realm(&engine, &realm);
     engine.delete_realm(&realm).unwrap();
 
     // The cascade runs on a spawned task; poll for completion.
@@ -570,4 +579,218 @@ async fn realm_delete_purges_retiring_keys_background_path() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("background cascade left retiring signing keys in storage");
+}
+
+// ── B9 (audit 2026-08-28): rotation is the remedy for a leaked key ────────────
+
+/// Builds the admin REST router over a harness.
+fn build_admin_app(h: &common::TestHarness) -> axum::Router {
+    hearth::protocol::http::router(Arc::new(hearth::protocol::http::AppState::new(
+        h.identity_arc(),
+        h.rbac_arc(),
+        h.audit_arc(),
+    )))
+}
+
+/// Creates an admin user in `realm` with `realm.admin` and returns an access
+/// token signed by that realm's active signing key.
+fn admin_access_token(h: &common::TestHarness, realm: &RealmId, suffix: &str) -> String {
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("rotate-{suffix}@test.example"),
+                display_name: "Rotation Admin".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create admin user");
+    let role = h
+        .rbac()
+        .get_role_by_name(realm, "realm.admin")
+        .expect("lookup role")
+        .expect("realm.admin role exists after seed");
+    h.rbac()
+        .assign_role(
+            realm,
+            &hearth::rbac::AssignRoleRequest {
+                subject: hearth::rbac::Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: hearth::rbac::Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign realm.admin");
+    let session = h
+        .identity()
+        .create_session(realm, user.id(), &SessionContext::default())
+        .expect("create session");
+    h.identity()
+        .issue_tokens(realm, user.id(), session.id())
+        .expect("issue tokens")
+        .access_token()
+        .to_string()
+}
+
+async fn admin_get(app: &axum::Router, uri: &str, token: &str, realm: &RealmId) -> u16 {
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        axum::http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-realm-id", realm.as_uuid().to_string())
+            .body(axum::body::Body::empty())
+            .expect("build request"),
+    )
+    .await
+    .expect("response");
+    resp.status().as_u16()
+}
+
+/// B9 — rotating a realm's signing key must revoke it.
+///
+/// Rotation is the documented remedy for a leaked signing key. While the
+/// retired key stays valid, whoever holds it keeps minting **new**
+/// administrative credentials: the grace window protects the attacker as
+/// faithfully as it protects a legitimate session. `POST
+/// /admin/realms/{id}/rotate-signing-key` therefore revokes by default.
+#[tokio::test]
+async fn admin_rotate_signing_key_revokes_the_retired_key() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed rbac");
+    let app = build_admin_app(&h);
+    let token = admin_access_token(&h, &realm, "revoke");
+
+    // Baseline: the credential works before rotation.
+    assert_eq!(
+        admin_get(&app, "/admin/users", &token, &realm).await,
+        200,
+        "the admin token must work before rotation"
+    );
+
+    let rotate = tower::ServiceExt::oneshot(
+        app.clone(),
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/realms/{}/rotate-signing-key",
+                realm.as_uuid()
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-realm-id", realm.as_uuid().to_string())
+            .body(axum::body::Body::empty())
+            .expect("build rotate request"),
+    )
+    .await
+    .expect("rotate response");
+    assert_eq!(rotate.status().as_u16(), 200, "rotation must succeed");
+
+    // Every route the critic reached with a retired-key credential.
+    for uri in ["/admin/users", "/admin/realms", "/admin/audit"] {
+        assert_eq!(
+            admin_get(&app, uri, &token, &realm).await,
+            401,
+            "a credential signed with the retired key must be refused on {uri}"
+        );
+    }
+}
+
+/// A planned rotation can still ask for a grace window explicitly, which is
+/// what keeps live sessions alive across routine key hygiene (HEA-2090).
+/// The operator opts in; it is never the default.
+#[tokio::test]
+async fn admin_rotate_signing_key_honours_an_explicit_grace_period() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed rbac");
+    let app = build_admin_app(&h);
+    let token = admin_access_token(&h, &realm, "grace");
+
+    let rotate = tower::ServiceExt::oneshot(
+        app.clone(),
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/realms/{}/rotate-signing-key?grace_period_secs=3600",
+                realm.as_uuid()
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-realm-id", realm.as_uuid().to_string())
+            .body(axum::body::Body::empty())
+            .expect("build rotate request"),
+    )
+    .await
+    .expect("rotate response");
+    assert_eq!(rotate.status().as_u16(), 200, "rotation must succeed");
+
+    assert_eq!(
+        admin_get(&app, "/admin/users", &token, &realm).await,
+        200,
+        "an explicit grace window must keep pre-rotation credentials working"
+    );
+}
+
+/// A revoking rotation must clear keys retired by an *earlier* rotation too.
+///
+/// Purging only expired keys would leave the previous key live inside its own
+/// window: the operator is told the realm has been re-keyed while the key they
+/// are running from an incident for still validates tokens.
+#[test]
+fn revoking_rotation_purges_an_earlier_rotations_live_retiring_key() {
+    let (_dir, engine, _clock, storage) = setup_engine_with_storage(
+        1_000_000_000_000,
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+    );
+    let (realm, _user, pair) = realm_user_and_tokens(&engine, "revoke-earlier");
+    let access = pair.access_token().to_string();
+
+    // A planned rotation with a 24-hour window.
+    engine.rotate_realm_signing_key(&realm, 86_400).unwrap();
+    assert_eq!(
+        retiring_key_blobs(&storage, &realm).len(),
+        1,
+        "a grace rotation stores the retired key"
+    );
+    engine
+        .validate_token(&realm, &access)
+        .expect("the pre-rotation token is inside the grace window");
+
+    // Now the incident: revoke.
+    engine.rotate_realm_signing_key(&realm, 0).unwrap();
+    assert!(
+        retiring_key_blobs(&storage, &realm).is_empty(),
+        "a revoking rotation must leave no retiring key material behind"
+    );
+    let err = engine
+        .validate_token(&realm, &access)
+        .expect_err("a revoking rotation must refuse tokens from every retired key");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::InvalidToken),
+        "expected InvalidToken after a revoking rotation, got {err:?}"
+    );
+}
+
+/// Retires `realm_id` so `delete_realm` will accept it.
+///
+/// The archival gate lives in `delete_realm` rather than in each protocol
+/// adapter (audit 2026-08-28 §4.20#10), so a test that deletes a realm it just
+/// created must archive it first, exactly as an operator would.
+fn archive_realm(engine: &EmbeddedIdentityEngine, realm_id: &RealmId) {
+    engine
+        .update_realm(
+            realm_id,
+            &UpdateRealmRequest {
+                status: Some(RealmStatus::Archived),
+                ..Default::default()
+            },
+        )
+        .expect("archive realm");
 }

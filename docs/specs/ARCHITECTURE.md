@@ -246,7 +246,15 @@ incompatible, startup MUST fail with a clear error directing the operator to re-
 
 ### 6.3 Encryption at Rest
 
-- Credentials and sensitive fields MUST be encrypted at rest using per-realm keys.
+- Credentials and sensitive fields MUST be encrypted at rest.
+- **Blast radius (as implemented):** the key-encryption key is **not** per realm. `KeyRegistry`
+  is a realm-keyed map, but the storage engine only ever provisions and uses the **system
+  realm's** KEK (`RealmId::nil()`) to wrap every WAL-segment and SST data-encryption key
+  (`src/storage/engine.rs` — `ensure_kek_for_realm(&system_realm)` at open, and
+  `get_kek_for_realm(&self.system_realm)` on the flush and both compaction paths). Recovering
+  that one KEK unwraps every realm's on-disk data. Operators MUST size key-compromise blast
+  radius against a single KEK, not against one KEK per tenant. Per-realm KEK provisioning is a
+  future change; it is not shipped.
 - Encryption keys MUST NOT appear in log output, error messages, or debug dumps.
 - The storage engine MUST support key rotation without downtime.
 
@@ -256,7 +264,7 @@ incompatible, startup MUST fail with a clear error directing the operator to re-
 
 **Key rotation**: Key rotation MUST re-wrap DEKs with the new KEK. Data sections MUST NOT be re-encrypted during rotation — only the wrapped DEK in each file header changes. This makes rotation O(number of files), not O(data size).
 
-**WAL encryption**: The WAL MUST use the same envelope encryption pattern, with a per-segment DEK. Each WAL segment has its own random DEK, wrapped by the realm's KEK.
+**WAL encryption**: The WAL MUST use the same envelope encryption pattern, with a per-segment DEK. Each WAL segment has its own random DEK, wrapped by the same single system-realm KEK described above (the WAL is a shared, cross-realm log — it has no single owning realm).
 
 ### 6.4 Format Versioning
 
@@ -310,6 +318,11 @@ Hearth's internal hot path validates tokens via **session lookup**, not signatur
 ### 8.2 Cryptographic Primitives
 
 - Use `ring` or `RustCrypto` crates only. No hand-rolled cryptography.
+- `aws-lc-rs` is permitted for exactly one purpose: `rcgen`'s RSA-2048 key
+  generation, which `ring` cannot do and which replaces the unpatched `rsa`
+  crate (RUSTSEC-2023-0071). It MUST NOT be selected as a TLS provider — pin
+  `ring` on `rustls` and `tokio-rustls`. `deny.toml` enforces this with
+  `wrappers = ["rcgen"]`.
 - All comparisons of secrets (tokens, hashes, keys) MUST use constant-time comparison functions.
 
 ### 8.3 Password Hashing
@@ -553,11 +566,17 @@ These crates are pre-approved and need no additional justification:
 - No `lazy_static`. Use `std::sync::OnceLock` or `std::sync::LazyLock`.
 - No `async-trait` on hot path code — it heap-allocates. Use return-position `impl Trait` in traits (RPITIT, stable since Rust 1.75).
 - No `reqwest` in production code. Hearth is a server, not an HTTP client. Test-only is fine.
+  Enforced by `deny.toml` and by `scripts/check-production-deps.sh`, which fails if a banned
+  crate reaches `cargo tree -e normal` — the transitive route that put `reqwest` in the
+  published binary via `opentelemetry-otlp`'s default exporter (audit 2026-08-28 §4.8#9).
+- No second TLS or crypto backend. `openssl`, `native-tls`, `hyper-tls` and `boring` are denied
+  outright in `deny.toml`.
 
 ### 15.4 Auditing
 
 - `cargo-audit` MUST run in CI on every PR.
-- `cargo-deny` MUST be configured to enforce license and duplicate-crate policies.
+- `cargo-deny` MUST be configured to enforce license, duplicate-crate, and dependency-ban
+  policies. The crypto-backend and HTTP-client bans above are encoded in `deny.toml`.
 - `cargo-vet` SHOULD be used to track audit status of third-party crates.
 
 ---
@@ -663,7 +682,7 @@ Key architectural decisions codified in this document, with rationale:
 | Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
 | Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch`, `arc-swap` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
 | TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
-| Pre-1.0-GA compatibility | Breaking changes permitted | Semver convention; the strict rules activate at 1.0 GA. Those rules are written down in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, support window, deprecation policy, and the 2.0 process. |
+| Compatibility | **Strict SemVer, in force now** | 1.0 GA shipped 2026-06-21 (`git tag v1.0.0`; CHANGELOG `[1.0.0]`), so the rules in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, the support window, the deprecation policy and the 2.0 process — are **normative today**, not aspirational. The earlier "pre-1.0-GA: breaking changes permitted" entry in this row outlived the release that ended it and is withdrawn. |
 | Encryption at rest mechanism | Envelope encryption (AES-256-GCM) | Key rotation is O(DEKs) not O(data). Industry standard (AWS KMS, GCP KMS). |
 | Batch writes | Atomic multi-op WAL entries | Identity operations span multiple records; individual fsyncs are both slow and unsafe (crash between ops = inconsistency). |
 | Cluster read consistency | Follower reads, bounded staleness | 50–100ms staleness acceptable for auth; linearizable reads bottleneck the leader. Followers stop serving if lag exceeds threshold. |

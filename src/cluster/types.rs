@@ -45,6 +45,25 @@ pub enum RaftCommand {
         /// `(key, value)` pairs to write atomically.
         entries: Vec<(Vec<u8>, Vec<u8>)>,
     },
+    /// Atomically apply a mix of writes and removals for a single realm.
+    ///
+    /// The counterpart to [`Self::Batch`] for callers that must land a record
+    /// and remove its old index in one durable step. Applied as one
+    /// `write_batch` on the node's storage engine, so a crash mid-apply leaves
+    /// either the whole batch or none of it (audit 2026-08-28 §4.9#4).
+    ///
+    /// Added after `Batch`, so a node running an older build cannot decode it.
+    /// Cluster mode is experimental and requires a full-cluster restart to
+    /// change membership, so a mixed-version cluster is already unsupported.
+    WriteBatch {
+        /// Leader wall-clock timestamp (microseconds since UNIX epoch).
+        leader_timestamp: i64,
+        realm: RealmId,
+        /// `(key, value)` pairs to write.
+        puts: Vec<(Vec<u8>, Vec<u8>)>,
+        /// Keys to remove.
+        deletes: Vec<Vec<u8>>,
+    },
     /// Insert a key-value pair only if the key is currently absent.
     ///
     /// The check and write are performed atomically inside the state machine —

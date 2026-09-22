@@ -452,9 +452,10 @@ Returns a single client by UUID.
 
 ### Update application
 
-`PUT /admin/applications/{id}`
+`PATCH /admin/applications/{id}`
 
 Updates a client. All fields are optional; omitted fields are unchanged.
+`PUT` on this path returns **405 Method Not Allowed** (audit 2026-08-28 §4.12#19).
 
 | Field | Description |
 |---|---|
@@ -470,7 +471,7 @@ Updates a client. All fields are optional; omitted fields are unchanged.
 
 ```bash
 # Switch a client to decision mode
-curl -X PUT https://auth.example.com/admin/applications/<client_uuid> \
+curl -X PATCH https://auth.example.com/admin/applications/<client_uuid> \
   -H "Authorization: Bearer <admin_token>" \
   -H "X-Realm-ID: <realm_uuid>" \
   -H "Content-Type: application/json" \

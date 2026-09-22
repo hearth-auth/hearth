@@ -42,7 +42,14 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 echo "Starting hearth in single-node dev mode on port $PORT..."
-"$BINARY" serve --dev --port "$PORT" --data-dir "$DATA_DIR" \
+# Audit 2026-08-28 §4.12#13: launch from an empty directory. `serve --dev` with
+# no `--config` auto-detects a `hearth.yaml` in the working directory, and
+# CLAUDE.md tells every contributor to `cp hearth.example.yaml hearth.yaml`. The
+# example sets `oidc.issuer: https://auth.example.com`, so the minted tokens
+# carry `iss=https://auth.example.com/realms/dev-realm` instead of the local
+# port — and any client that fetches JWKS from the issuer fails. CI never saw it
+# because hearth.yaml is gitignored and absent there.
+( cd "$DATA_DIR" && exec "$BINARY" serve --dev --port "$PORT" --data-dir "$DATA_DIR" ) \
     2>"$DATA_DIR/server.log" &
 SERVER_PID=$!
 

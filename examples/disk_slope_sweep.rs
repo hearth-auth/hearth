@@ -61,8 +61,28 @@ const K7_BUDGET_BYTES_PER_USER: f64 = 2147.0;
 /// Default sweep checkpoints (user counts at which disk is measured).
 const DEFAULT_CHECKPOINTS: &[usize] = &[5_000, 20_000, 60_000, 100_000, 150_000, 200_000];
 
-/// Commit SHA measured. Embedded at compile time if set; otherwise informational.
-const COMMIT_SHA: &str = "abf179ba (duplicate-UserCreated NOT yet fixed)";
+/// Commit SHA measured.
+///
+/// # Task 26.52 — a provenance harness that lied about its own provenance
+///
+/// This was the literal `"abf179ba (duplicate-UserCreated NOT yet fixed)"`,
+/// while its doc comment claimed it was "embedded at compile time if set". So
+/// every run since that commit stamped a stale SHA onto its output — in a tool
+/// whose entire job is recording which commit a measurement came from — and a
+/// later branch keyed its advice off that same stale string.
+///
+/// Now genuinely compile-time. Set `HEARTH_COMMIT_SHA` when you run it:
+///
+/// ```text
+/// HEARTH_COMMIT_SHA=$(git rev-parse --short HEAD) cargo run --release --example disk_slope_sweep
+/// ```
+///
+/// Unset, it reports `unknown`, which is the honest answer and refuses to
+/// launder a guess as provenance.
+const COMMIT_SHA: &str = match option_env!("HEARTH_COMMIT_SHA") {
+    Some(sha) => sha,
+    None => "unknown (set HEARTH_COMMIT_SHA to record provenance)",
+};
 
 /// Recursively sums file bytes in `dir`, partitioned into (WAL, SST, other).
 fn disk_usage(dir: &Path) -> (u64, u64, u64) {
@@ -326,17 +346,6 @@ fn main() {
         println!("  Asymptotically disk/user → SST/user = {m:.1} B, which extrapolates to");
         println!("  {gib_100m:.1} GiB @100M — {headroom:.2}× inside the 200 GiB K7 budget.");
         println!("  The K7 MISS in PERFORMANCE_REPORT v2 was a small-N measurement artifact.");
-        if COMMIT_SHA.contains("duplicate-UserCreated NOT") {
-            println!();
-            println!(
-                "  NOTE: measured on code with the duplicate-UserCreated bug (HEA-1946 §3.3)."
-            );
-            println!(
-                "  After that fix lands, SST/user is expected to drop by ~39.5% → ~{:.0} B/user.",
-                m * 0.605
-            );
-            println!("  Re-run this sweep after the fix to update the K7 projection.");
-        }
     } else {
         println!("  SST/user ({m:.1} B) exceeds the K7 budget ({K7_BUDGET_BYTES_PER_USER:.0} B).");
         println!("  Compression (Option A) or the duplicate-UserCreated fix is required.");

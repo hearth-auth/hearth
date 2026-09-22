@@ -9,11 +9,26 @@ name: Security
 #
 # Posture: each job uploads a separate SARIF category to GitHub Code Scanning,
 # so existing alert dedup + branch-protection rules continue to work. Failures
-# in one scanner do not cancel the others (no fail-fast); each writes its own
-# SARIF and is required to remain green independently.
+# in one scanner do not cancel the others (no fail-fast).
 #
-# Doc-only PRs are skipped via paths-ignore — security scanners don't add value
-# on documentation diffs and would just burn runner minutes.
+# How each scanner fails, stated exactly (audit 2026-08-28 §4.8#16 corrected an
+# earlier blanket claim that all of them were "required to remain green"):
+#
+#   trivy         fails its own job on a CRITICAL/HIGH finding (exit-code: '1').
+#   osv-scanner   fails its own job on any finding (no continue-on-error).
+#   cargo-deny    fails its own job on an advisory, licence or ban violation.
+#   codeql        does NOT fail its job on a finding. CodeQL reports to Code
+#                 Scanning; the gate is the branch-protection rule on the code
+#                 scanning results check, not this workflow's exit code.
+#
+# The published container image is scanned in docker.yml, not here — this
+# workflow's Trivy job is a filesystem scan of the checkout and never reads the
+# image layers operators pull. Guard: scripts/check-scanner-coverage.sh.
+#
+# Doc-only PRs are skipped by ci.yml's `docs-only` filter output, which gates
+# the call to this workflow — security scanners don't add value on documentation
+# diffs and would just burn runner minutes. (This used to be a `paths-ignore` on
+# this file's own pull_request trigger; that trigger is gone, see below.)
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # Stale-analysis hygiene (HEA-716 / HEA-717)
@@ -44,15 +59,14 @@ name: Security
 #   analyses are an unconditional cleanup target in the script above.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Audit 2026-08-28 §4.12#12: the PR run reached no required check, so a CodeQL,
+# Trivy, cargo-deny or OSV failure could not block a merge. The PR entry point
+# is now ci.yml, which calls this as a reusable workflow and lists `security` in
+# `required-summary`'s `needs:`. ci.yml's filter skips it on doc-only PRs, which
+# is what the old paths-ignore did. ci.yml also runs on push to main, so only
+# the weekly cron and the manual dispatch stay here.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
-      - "CHANGELOG.md"
+  workflow_call:
   schedule:
     - cron: "0 6 * * 1"  # Weekly Monday 06:00 UTC
   # Allow manual re-runs to verify alert state after config changes (HEA-1523)
@@ -64,7 +78,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Literal prefix, not ${{ github.workflow }}: when ci.yml calls this workflow,
+  # github.workflow is "CI", and a shared group would cancel ci.yml's own run.
+  group: security-scanners-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -192,12 +208,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Audit §4.8#16: this step carried no `exit-code`, so a CRITICAL or HIGH
+      # finding produced a `success` job while the header above called each
+      # scanner "required to remain green independently". `exit-code: '1'` arms
+      # it. The SARIF upload below is `if: always()`, so alerts still reach Code
+      # Scanning on the failing run.
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
+          exit-code: "1"
           # HEA-690: Trivy fs scan focuses on secrets + misconfigs in shipping
           # code. Tests, examples, fuzz, and node_modules are intentionally noisy
           # (fake creds in fixtures, vendored deps) and excluded.
@@ -235,6 +257,19 @@ jobs:
       - name: cargo deny check (advisories + licenses + bans)
         run: cargo deny check
 
+      # Audit §4.8#9: a third crypto backend and a policy-banned HTTP client
+      # were linked into the published binary, and deny.toml encoded neither
+      # ban. deny.toml now does, but `reqwest`'s ban must permit the dev-only
+      # edge, so its wrapper would also permit a production one. This asks the
+      # resolver directly: is the crate in `cargo tree -e normal`?
+      - name: Production dependency bans (check-production-deps.sh)
+        run: bash scripts/check-production-deps.sh
+
+      # Proof the guard can go red: banning a crate that IS in the production
+      # graph must fail it.
+      - name: Production dependency bans — guard self-test
+        run: bash scripts/tests/check-production-deps.test.sh
+
   osv-scanner:
     name: osv-scanner
     runs-on: ubuntu-latest
@@ -252,9 +287,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # No continue-on-error: the audit 2026-08-28 (§4.12#3) found both
+      # dependency-advisory gates disarmed, and a 70-vulnerability scan
+      # produced a `success` job. A finding now fails this job; the SARIF
+      # upload below still runs (`if: always()`), so alerts reach Code
+      # Scanning either way.
       - name: Run OSV-Scanner
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-        continue-on-error: true
         with:
           # HEA-1523: Explicit lockfile list instead of --recursive so examples/**
           # and tests/ui/** are never scanned. The [[PackageOverrides]] `group`

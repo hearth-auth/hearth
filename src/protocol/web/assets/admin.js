@@ -1086,8 +1086,15 @@ class ConfigEditor {
       const el = document.getElementById('diff-output');
       if (el) el.innerHTML = await resp.text();
     } else {
-      htmx.ajax('POST', '/ui/admin/settings/editor/preview',
-        { target: '#diff-output', values: { yaml: document.getElementById('yaml-editor').value } });
+      htmx.ajax('POST', '/ui/admin/settings/editor/preview', {
+        target: '#diff-output',
+        values: {
+          yaml: document.getElementById('yaml-editor').value,
+          // The handler verifies the double-submit token as a form field,
+          // so htmx.ajax must carry it in the body, not only as a header.
+          _csrf: this.csrf,
+        },
+      });
     }
   }
 
@@ -1154,12 +1161,34 @@ class ConfigEditor {
       if (this.mode === 'visual') {
         const valid = await this.validate();
         if (!valid) return;
-        const resp = await fetch('/ui/admin/settings/editor/visual/apply', {
+        let resp = await fetch('/ui/admin/settings/editor/visual/apply', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
           body: JSON.stringify(this.config),
         });
-        const result = await resp.json();
+        let result = await resp.json();
+        // Task 21.5: the server refuses an apply whose reload would archive
+        // realms this document does not list. Name them and make the operator
+        // say yes before re-sending with the acknowledgement.
+        if (resp.status === 409 && result.requires_confirmation) {
+          const doomed = (result.would_archive || []).join(', ');
+          const proceed = window.confirm(
+            'This configuration does not list the following realm(s) that exist now:\n\n  ' +
+            doomed +
+            '\n\nApplying it will ARCHIVE them. Their users will not be able to sign in.\n\nApply anyway?'
+          );
+          if (!proceed) {
+            const diff = document.getElementById('diff-output');
+            if (diff) diff.innerHTML = '<div class="rounded-md bg-danger/[0.12] px-6 py-4 text-sm text-danger-fg ring-1 ring-danger/30"><h3 class="font-semibold">Not applied</h3><p class="mt-1 font-mono text-xs">' + escHtml(result.error || '') + '</p></div>';
+            return;
+          }
+          resp = await fetch('/ui/admin/settings/editor/visual/apply?confirm_archive=true', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
+            body: JSON.stringify(this.config),
+          });
+          result = await resp.json();
+        }
         if (result.ok) {
           window.location.href = '/ui/admin/settings/editor?flash=' + encodeURIComponent(result.message || 'Applied') + '&flash_kind=success';
         } else {

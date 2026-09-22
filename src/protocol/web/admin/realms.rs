@@ -258,26 +258,28 @@ pub async fn admin_realm_delete(
 
     let realm_id = target.id().clone();
 
-    // Only allow permanent deletion of Archived realms.
+    // The archival gate lives in `delete_realm`, so every adapter gets it
+    // (audit 2026-08-28 §4.20#10). This handler renders the refusal; it does
+    // not decide it. Deciding it here is what left the `/ui` copy of the gate
+    // without the `DeletingInProgress` case, so the UI could not recover a
+    // realm wedged mid-cascade (§4.20#3).
     match state.identity.get_realm(&realm_id) {
-        Ok(Some(realm)) if realm.status() == RealmStatus::Archived => {
-            match state.identity.delete_realm(&realm_id) {
-                Ok(()) => {
-                    audit_realm_event(&state, &session, &realm_id, "delete");
-                    Redirect::to("/ui/admin/realms").into_response()
-                }
-                Err(IdentityError::RealmNotFound) => {
-                    super::handlers_common::not_found("Realm not found")
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "delete_realm failed");
-                    super::handlers_common::server_error()
-                }
+        Ok(Some(_)) => match state.identity.delete_realm(&realm_id) {
+            Ok(()) => {
+                audit_realm_event(&state, &session, &realm_id, "delete");
+                Redirect::to("/ui/admin/realms").into_response()
             }
-        }
-        Ok(Some(_)) => super::handlers_common::bad_request(
-            "Only archived realms can be permanently deleted. Remove the realm from hearth.yaml and restart to archive it first.",
-        ),
+            Err(IdentityError::RealmNotFound) => {
+                super::handlers_common::not_found("Realm not found")
+            }
+            Err(e @ IdentityError::RealmNotArchived) => {
+                super::handlers_common::bad_request(&e.to_string())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "delete_realm failed");
+                super::handlers_common::server_error()
+            }
+        },
         Ok(None) => super::handlers_common::not_found("Realm not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");
@@ -300,8 +302,17 @@ fn audit_realm_event(
         "delete" => AuditAction::RealmDeleted,
         _ => return,
     };
+    // Deletion evidence is scoped to the SYSTEM realm: appending under the
+    // realm that was just deleted would re-create `audit:*` keys in a key
+    // space the cascade must leave empty (§4.9#1). Create/update stay scoped
+    // to the realm they describe.
+    let scope_realm = if op == "delete" {
+        crate::identity::keys::system_realm_id()
+    } else {
+        realm_id.clone()
+    };
     if let Err(e) = state.audit.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
+        realm_id: scope_realm,
         actor: session.user_id.as_uuid().to_string(),
         action,
         resource_type: "realm".to_string(),
@@ -432,6 +443,9 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::OrgCreated => "Organization Created",
         A::OrgUpdated => "Organization Updated",
         A::OrgDeleted => "Organization Deleted",
+        A::InvitationCreated => "Invitation Created",
+        A::InvitationAccepted => "Invitation Accepted",
+        A::InvitationRevoked => "Invitation Revoked",
         A::GroupCreated => "Group Created",
         A::GroupUpdated => "Group Updated",
         A::GroupDeleted => "Group Deleted",
@@ -581,6 +595,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         A::OrgCreated
         | A::OrgUpdated
         | A::OrgDeleted
+        | A::InvitationCreated
+        | A::InvitationAccepted
+        | A::InvitationRevoked
         | A::GroupCreated
         | A::GroupUpdated
         | A::GroupDeleted
@@ -779,25 +796,34 @@ fn pill_display_value(key: &str, v: &serde_json::Value) -> String {
 }
 
 /// Truncates a metadata value for inline pill rendering — strings cap at
-/// 24 chars, other types stringify and cap at 20 chars.
+/// 24 characters, other types stringify and cap at 20 characters.
+///
+/// The cap counts **characters, not bytes**. Audit metadata carries
+/// attacker-supplied values — a SAML `NameID`, a SCIM field, an upstream
+/// `sub` — so a byte-offset slice landing inside a multi-byte character
+/// panicked, and under `panic=abort` that took the whole multi-tenant process
+/// down (audit §4.4#1, §4.10#3).
 fn truncate_pill_value(v: &serde_json::Value) -> String {
     match v {
-        serde_json::Value::String(s) => {
-            if s.len() > 24 {
-                format!("{}…", &s[..24])
-            } else {
-                s.clone()
-            }
-        }
-        other => {
-            let s = other.to_string();
-            if s.len() > 20 {
-                format!("{}…", &s[..20])
-            } else {
-                s
-            }
-        }
+        serde_json::Value::String(s) => truncate_chars(s, 24),
+        other => truncate_chars(&other.to_string(), 20),
     }
+}
+
+/// Returns `s` unchanged when it is at most `max_chars` characters long, and
+/// otherwise its first `max_chars` characters followed by an ellipsis.
+///
+/// Never slices on a byte offset, so it cannot panic on any input.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(max_chars * 4 + 3));
+    for (i, c) in s.chars().enumerate() {
+        if i == max_chars {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Resolves an audit-event actor string (typically a user UUID) to a
@@ -1218,7 +1244,12 @@ pub async fn admin_audit_verify_integrity(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
+    FriendlyForm(form): FriendlyForm<super::users::CsrfOnlyForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     match state.audit.verify_integrity(target.id(), None, None) {
         Ok(true) => render(&AuditListTemplate {
             events: Vec::new(),
@@ -1358,17 +1389,20 @@ pub async fn admin_audit_export(
 ) -> Response {
     // A-30: emit a watermark audit event at the start of every audit export.
     let export_id = uuid::Uuid::new_v4().to_string();
-    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-        realm_id: target.id().clone(),
-        actor: session.user_id.as_uuid().to_string(),
-        action: crate::audit::AuditAction::RealmExportWatermarked,
-        resource_type: "export".to_string(),
-        resource_id: export_id.clone(),
-        metadata: Some(serde_json::json!({
-            "export_id": export_id,
-            "export_type": "audit",
-        })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &crate::audit::CreateAuditEvent {
+            realm_id: target.id().clone(),
+            actor: session.user_id.as_uuid().to_string(),
+            action: crate::audit::AuditAction::RealmExportWatermarked,
+            resource_type: "export".to_string(),
+            resource_id: export_id.clone(),
+            metadata: Some(serde_json::json!({
+                "export_id": export_id,
+                "export_type": "audit",
+            })),
+        },
+    );
 
     let action = params
         .action
@@ -1499,6 +1533,7 @@ pub struct UpdateAuditRetentionBody {
 pub async fn admin_api_audit_config_put(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
     axum::Json(body): axum::Json<UpdateAuditRetentionBody>,
@@ -1524,6 +1559,7 @@ pub async fn admin_api_audit_config_put(
 pub async fn admin_api_audit_prune(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
 ) -> Response {
@@ -1816,9 +1852,13 @@ pub async fn admin_config_editor(
 /// `POST /ui/admin/settings/editor/preview` — HTMX diff preview.
 pub async fn admin_config_editor_preview(
     State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
+    RequireAdmin(session): RequireAdmin,
     FriendlyForm(form): FriendlyForm<ConfigEditorForm>,
 ) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
     let new_yaml = form.yaml;
 
     // Validate the new config
@@ -1927,6 +1967,7 @@ pub async fn admin_config_editor_export(
 /// in read-only / container environments where "Apply" cannot write to disk.
 pub async fn admin_config_editor_visual_export(
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     axum::Json(json): axum::Json<serde_json::Value>,
 ) -> Response {
     match editor_json_to_yaml(&json) {
@@ -2043,6 +2084,7 @@ fn editor_json_to_yaml(json: &serde_json::Value) -> Result<String, String> {
 pub async fn admin_config_editor_visual_preview(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     axum::Json(json): axum::Json<serde_json::Value>,
 ) -> Response {
     let new_yaml = match editor_json_to_yaml(&json) {
@@ -2092,6 +2134,7 @@ pub async fn admin_config_editor_visual_preview(
 pub async fn admin_config_editor_visual_validate(
     State(_state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     axum::Json(json): axum::Json<serde_json::Value>,
 ) -> Response {
     let new_yaml = match editor_json_to_yaml(&json) {
@@ -2104,6 +2147,23 @@ pub async fn admin_config_editor_visual_validate(
             .into_response();
         }
     };
+
+    // HEA control-liveness 10.2: dev_mode must only be set via the `--dev`
+    // CLI flag, never by a config file — including one an admin submits
+    // through this editor. `from_yaml_str_unchecked` deliberately still
+    // honours `dev_mode: true` for internal test fixtures, so this endpoint
+    // guards itself rather than relying on `validate_all()`, which cannot
+    // distinguish an editor submission from a legitimate `--dev` boot.
+    if crate::config::validate::yaml_declares_dev_mode(&new_yaml) {
+        return axum::response::Json(serde_json::json!({
+            "valid": false,
+            "errors": [{
+                "field": "dev_mode",
+                "reason": "cannot be set from the config editor; use `hearth serve --dev` instead",
+            }],
+        }))
+        .into_response();
+    }
 
     let config = match Config::from_yaml_str_unchecked(&new_yaml) {
         Ok(c) => c,
@@ -2128,53 +2188,171 @@ pub async fn admin_config_editor_visual_validate(
     .into_response()
 }
 
-/// `POST /ui/admin/settings/editor/visual/apply` — JSON-based apply.
+/// Query string for `POST /ui/admin/settings/editor/visual/apply`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct VisualApplyQuery {
+    /// Operator acknowledgement that the submitted document archives realms
+    /// that are currently live. Required whenever the apply would archive
+    /// anything (task 21.5). Kept in the query string so the request body stays
+    /// a pure config document.
+    #[serde(default)]
+    pub confirm_archive: bool,
+}
+
+/// Converts the visual editor's JSON document to YAML and validates it.
 ///
-/// Accepts the visual editor's config state as JSON, converts to YAML,
-/// validates (collecting all errors), writes to disk, and triggers a
-/// hot-reload.
-pub async fn admin_config_editor_visual_apply(
-    State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
-    axum::Json(json): axum::Json<serde_json::Value>,
-) -> Response {
+/// Returns `(yaml, parsed config)` on success, or the `ok:false` JSON response
+/// the caller should return verbatim. Extracted from
+/// [`admin_config_editor_visual_apply`] so that handler stays under the
+/// `clippy::too_many_lines` bar.
+#[allow(clippy::result_large_err)] // `Response` is the handler's own return type
+fn editor_document_to_config(json: &serde_json::Value) -> Result<(String, Config), Response> {
     // Convert JSON → YAML
-    let new_yaml = match editor_json_to_yaml(&json) {
-        Ok(y) => y,
-        Err(e) => {
-            return axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": e,
-            }))
-            .into_response();
-        }
-    };
+    let new_yaml = editor_json_to_yaml(json).map_err(|e| {
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": e,
+        }))
+        .into_response()
+    })?;
+
+    // HEA control-liveness 10.2: never write a config file to disk that
+    // arms dev_mode — see the matching guard in
+    // admin_config_editor_visual_validate for why this cannot be left to
+    // validate_all().
+    if crate::config::validate::yaml_declares_dev_mode(&new_yaml) {
+        return Err(axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "dev_mode cannot be set from the config editor",
+            "errors": [{
+                "field": "dev_mode",
+                "reason": "cannot be set from the config editor; use `hearth serve --dev` instead",
+            }],
+        }))
+        .into_response());
+    }
 
     // Parse without validation so we can run validate_all()
-    let config = match Config::from_yaml_str_unchecked(&new_yaml) {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            let field = field_from_parse_error(&msg);
-            return axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": format!("Parse error: {msg}"),
-                "errors": [{ "field": field, "reason": msg }],
-            }))
-            .into_response();
-        }
-    };
+    let config = Config::from_yaml_str_unchecked(&new_yaml).map_err(|e| {
+        let msg = e.to_string();
+        let field = field_from_parse_error(&msg);
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": format!("Parse error: {msg}"),
+            "errors": [{ "field": field, "reason": msg }],
+        }))
+        .into_response()
+    })?;
 
     // Run full validation and report all issues
     let issues: Vec<ValidationIssue> = config.validate_all();
     if !issues.is_empty() {
         let count = issues.len();
-        return axum::response::Json(serde_json::json!({
+        return Err(axum::response::Json(serde_json::json!({
             "ok": false,
             "error": format!("{count} validation error(s)"),
             "errors": issues,
         }))
-        .into_response();
+        .into_response());
+    }
+
+    Ok((new_yaml, config))
+}
+
+/// Realms that would be archived by reconciling `yaml` against storage.
+///
+/// `reconcile_declared_realms` archives every storage realm whose name is
+/// absent from `realms:` in the YAML. The visual editor submits its *whole*
+/// in-memory document, so a browser tab opened before a realm existed — or an
+/// editor that simply never loaded the `realms:` section — silently deletes
+/// every realm the operator did not re-list. `apply` then returned
+/// `{"ok":true}` because it only checks that the file was written; the archiving
+/// happens later, in the hot-reload, with no channel back to the caller
+/// (audit §4.23#4, task 21.5).
+///
+/// Returns an empty vector when the document omits `realms:` entirely, because
+/// `reconcile_realms` then skips realm reconciliation altogether.
+fn realms_archived_by(state: &Arc<WebState>, config: &Config) -> Vec<String> {
+    let Some(declared) = config.realms.as_ref() else {
+        return Vec::new();
+    };
+    let mut doomed = Vec::new();
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let Ok(page) = state
+            .identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+        else {
+            // Storage unavailable: report nothing rather than inventing names.
+            // The apply still refuses below only on a non-empty list, so a
+            // read failure cannot silently *enable* a destructive apply — it
+            // degrades to the pre-existing behaviour.
+            return doomed;
+        };
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            if realm.status() != crate::identity::RealmStatus::Archived
+                && !declared.contains_key(realm.name())
+            {
+                doomed.push(realm.name().to_string());
+            }
+        }
+        if n == 0 || offset + n >= page.total {
+            break;
+        }
+        offset += n;
+    }
+    doomed.sort();
+    doomed
+}
+
+/// `POST /ui/admin/settings/editor/visual/apply` — JSON-based apply.
+///
+/// Accepts the visual editor's config state as JSON, converts to YAML,
+/// validates (collecting all errors), writes to disk, and triggers a
+/// hot-reload.
+///
+/// Refuses with `409 Conflict` when the submitted document would archive realms
+/// that are currently live, unless `?confirm_archive=true` is supplied
+/// (task 21.5). Nothing is written on the refusal path.
+pub async fn admin_config_editor_visual_apply(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
+    Query(q): Query<VisualApplyQuery>,
+    axum::Json(json): axum::Json<serde_json::Value>,
+) -> Response {
+    let (new_yaml, config) = match editor_document_to_config(&json) {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    // Destructive-apply gate (task 21.5). The reconcile that the hot-reload
+    // below kicks off archives every storage realm the submitted document does
+    // not re-list, and the caller never hears about it — the old code answered
+    // `{"ok":true}` the moment the file landed on disk. Compute the casualties
+    // BEFORE writing, and refuse unless the operator has acknowledged them.
+    let would_archive = realms_archived_by(&state, &config);
+    if !would_archive.is_empty() && !q.confirm_archive {
+        let count = would_archive.len();
+        tracing::warn!(
+            realms = ?would_archive,
+            "config editor apply refused: would archive live realms"
+        );
+        return (
+            StatusCode::CONFLICT,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "requires_confirmation": true,
+                "error": format!(
+                    "This configuration does not list {count} realm(s) that exist now. \
+                     Applying it archives them. Re-submit with ?confirm_archive=true to proceed."
+                ),
+                "would_archive": would_archive,
+            })),
+        )
+            .into_response();
     }
 
     // Write to disk
@@ -2202,9 +2380,18 @@ pub async fn admin_config_editor_visual_apply(
 
     tracing::info!("config file updated via visual editor, reload triggered");
 
+    let message = if would_archive.is_empty() {
+        "Configuration applied successfully".to_string()
+    } else {
+        format!(
+            "Configuration applied. {} realm(s) will be archived by the reload.",
+            would_archive.len()
+        )
+    };
     axum::response::Json(serde_json::json!({
         "ok": true,
-        "message": "Configuration applied successfully",
+        "message": message,
+        "archived_realms": would_archive,
     }))
     .into_response()
 }
@@ -2534,17 +2721,25 @@ pub async fn admin_realm_admin_revoke(
 
 /// Request body for `PATCH /admin/realms/{realm}/config`.
 ///
-/// All fields are optional — send only the keys you want to change.
-/// Unknown JSON keys are silently ignored by `serde`.
+/// All fields are optional — send only the keys you want to change. Unknown
+/// keys are **refused** with `400`: the handler previously accepted them
+/// silently and answered `200`, so a typo like `defualt_required_actions`
+/// looked applied and was not (audit §4.13#6).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchRealmConfigBody {
     /// Replaces the realm's full `default_required_actions` list.
     ///
-    /// Pass an empty array (`[]`) to clear the default. All strings must
-    /// be valid v1 action types (`"VERIFY_EMAIL"`, `"UPDATE_PASSWORD"`);
-    /// unknown values return 400.
+    /// Absent leaves the realm's current list **unchanged**; pass an empty
+    /// array (`[]`) to clear it. This used to be `Vec<String>` with
+    /// `#[serde(default)]`, so an omitted key deserialized to `vec![]` and the
+    /// handler cleared the realm's default required actions on every request
+    /// that only meant to change, say, `mfa_methods` (audit §4.13#6).
+    ///
+    /// All strings must be valid v1 action types (`"VERIFY_EMAIL"`,
+    /// `"UPDATE_PASSWORD"`); unknown values return 400.
     #[serde(default)]
-    pub default_required_actions: Vec<String>,
+    pub default_required_actions: Option<Vec<String>>,
     /// Replaces the realm's allowed MFA methods list (e.g. `["totp","sms"]`).
     ///
     /// `null` / absent leaves the field unchanged. Pass `[]` to clear.
@@ -2576,30 +2771,56 @@ pub struct PatchRealmConfigBody {
 pub async fn admin_api_realm_config_patch(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    axum::Json(body): axum::Json<PatchRealmConfigBody>,
+    // Deserialize the raw object first so an unknown or misspelled key comes
+    // back as a `400` with the offending key named, rather than the bare `422`
+    // the `Json<PatchRealmConfigBody>` extractor would produce.
+    axum::Json(raw): axum::Json<serde_json::Value>,
 ) -> Response {
     use crate::identity::{RequiredAction, UpdateRealmRequest};
 
-    // Validate and parse action strings.
-    let mut actions: Vec<RequiredAction> = Vec::with_capacity(body.default_required_actions.len());
-    for s in &body.default_required_actions {
-        match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
-            Ok(a) => actions.push(a),
-            Err(_) => {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    axum::Json(serde_json::json!({ "error": format!("unknown action type: {s}") })),
-                )
-                    .into_response();
-            }
+    let body: PatchRealmConfigBody = match serde_json::from_value(raw) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
-    }
+    };
+
+    // Validate and parse action strings.
+    let actions: Option<Vec<RequiredAction>> = match &body.default_required_actions {
+        None => None,
+        Some(strs) => {
+            let mut parsed = Vec::with_capacity(strs.len());
+            for s in strs {
+                match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone()))
+                {
+                    Ok(a) => parsed.push(a),
+                    Err(_) => {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(
+                                serde_json::json!({ "error": format!("unknown action type: {s}") }),
+                            ),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            Some(parsed)
+        }
+    };
 
     // Build updated config: start from existing, apply only provided fields.
     let mut config = target.0.config().clone();
-    config.default_required_actions = actions;
+    if let Some(actions) = actions {
+        config.default_required_actions = actions;
+    }
     if let Some(methods) = body.mfa_methods {
         config.mfa_methods = if methods.is_empty() {
             None
@@ -2642,9 +2863,53 @@ pub async fn admin_api_realm_config_patch(
 
 #[cfg(test)]
 mod metadata_pill_tests {
-    use super::build_metadata_pills;
+    use super::{build_metadata_pills, truncate_pill_value};
     use crate::audit::AuditAction;
     use serde_json::json;
+
+    /// A SAML `NameID` is attacker-supplied and lands in audit metadata, so a
+    /// multi-byte character sitting on the truncation offset used to slice
+    /// mid-character and abort the whole process (audit §4.4#1, §4.10#3).
+    #[test]
+    fn pill_truncation_survives_a_multibyte_char_on_the_offset() {
+        // 'é' is two bytes. 23 ASCII bytes then 'é' puts the char boundary
+        // across byte offset 24 — the old `&s[..24]` panicked here.
+        let value = format!("{}é{}", "a".repeat(23), "b".repeat(40));
+        let out = truncate_pill_value(&json!(value));
+        assert!(out.ends_with('…'), "long value must be marked truncated");
+        assert!(
+            out.chars().count() <= 25,
+            "expected 24 characters plus the ellipsis, got {}",
+            out.chars().count()
+        );
+    }
+
+    /// The same offset hazard on the non-string arm, which caps at 20 bytes.
+    #[test]
+    fn non_string_pill_truncation_survives_a_multibyte_char() {
+        let value = json!({ "k": format!("{}é{}", "a".repeat(16), "b".repeat(40)) });
+        let out = truncate_pill_value(&value);
+        assert!(out.ends_with('…'), "long value must be marked truncated");
+    }
+
+    /// Every character length around both offsets must be safe, including
+    /// 4-byte characters that no single offset lands inside cleanly.
+    #[test]
+    fn pill_truncation_never_panics_on_any_offset() {
+        for filler in 0..40 {
+            for ch in ['é', '☃', '🔥'] {
+                let s = format!("{}{ch}{}", "a".repeat(filler), "b".repeat(40));
+                let _ = truncate_pill_value(&json!(s.clone()));
+                let _ = truncate_pill_value(&json!({ "k": s }));
+            }
+        }
+    }
+
+    /// A short value is returned unchanged — the fix must not truncate more.
+    #[test]
+    fn short_values_are_returned_verbatim() {
+        assert_eq!(truncate_pill_value(&json!("héllo")), "héllo");
+    }
 
     fn keys(pills: &[(String, String)]) -> Vec<&str> {
         pills.iter().map(|(k, _)| k.as_str()).collect()

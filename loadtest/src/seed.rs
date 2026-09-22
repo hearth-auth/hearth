@@ -93,10 +93,15 @@ pub async fn run_seed(params: &SeedParams) -> Result<SeedHandle, SeedError> {
     let out = std::path::Path::new(&params.seed_out);
     handle.write_to(out)?;
     println!(
-        "  wrote seed handle: {} ({} users, {} sessions)",
+        "  wrote seed handle: {} ({} users, {} sessions, {} tokens of which {} revoked)",
         params.seed_out,
         handle.realms.iter().map(|r| r.users.len()).sum::<usize>(),
         handle.total_sessions(),
+        handle.total_tokens(),
+        // Printed so the operator can see the pre-revoked count the run will
+        // actually have, rather than only the `revoked/realm=N` the parameter
+        // summary *claims* (audit 2026-09-21, task 23.14).
+        handle.total_revoked(),
     );
 
     Ok(handle)
@@ -182,6 +187,34 @@ async fn seed_realm(
     }
     println!("    minted {} access tokens", tokens.len());
 
+    // 3b. Pre-revoke `--revoked-frac` of the minted tokens (audit 2026-09-21,
+    //     task 23.14). Until now nothing in the seed step ever called
+    //     `SeedClient::revoke` — the method had zero callers anywhere in the
+    //     crate, which is why `cargo clippy --all-targets` reported it dead —
+    //     and every `SeededToken` was written with a hard-coded
+    //     `revoked: false`. So `--revoked-frac` (validated, defaulted to 0.1,
+    //     documented in the README as "fraction of live tokens pre-revoked",
+    //     and stamped into every report's `dataset_shape` as `revoked/realm=N`)
+    //     described a corpus property that did not exist, and
+    //     `LoadContext::from_handle`'s `!t.revoked` filter — there so the
+    //     validate journey is never handed a dead token — had nothing to
+    //     filter.
+    //
+    //     Revocation is by construction the LAST seeding step for a token: the
+    //     remaining tokens must stay live for the read-plane journeys.
+    let want_revoked = params.revoked_per_realm() as usize;
+    let revoke_count = revoke_target_count(want_revoked, tokens.len());
+    for token in tokens.iter_mut().take(revoke_count) {
+        client.revoke(&client_id, &token.access_token).await?;
+        token.revoked = true;
+    }
+    if revoke_count > 0 {
+        println!(
+            "    pre-revoked {revoke_count} of {} access tokens",
+            tokens.len()
+        );
+    }
+
     // 4. Create raw session records for a fraction of the seeded users via the
     //    dev-only endpoint (HEA-1907). These are storage-level session IDs used
     //    for the C0 per-session memory sweep; distinct from the token sessions
@@ -209,4 +242,41 @@ async fn seed_realm(
         tokens,
         sessions,
     })
+}
+
+/// How many minted tokens to pre-revoke.
+///
+/// `SeedParams::revoked_per_realm` derives its count from the *session* count,
+/// which is itself a fraction of the user count, so it can exceed the number of
+/// tokens actually minted. Revoking every token would leave
+/// `LoadContext::from_handle` with no live token and fail the run with
+/// `NoLiveTokens`, so at least one token is always kept live.
+fn revoke_target_count(want: usize, minted: usize) -> usize {
+    if minted == 0 {
+        return 0;
+    }
+    want.min(minted.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::revoke_target_count;
+
+    #[test]
+    fn revocation_never_consumes_the_whole_live_pool() {
+        // Audit 2026-09-21 (task 23.14). `revoked_per_realm()` is a fraction of
+        // the SESSION count, not of the token count, so it can exceed the
+        // tokens minted. Revoking all of them would leave the run with no live
+        // token at all.
+        assert_eq!(revoke_target_count(0, 10), 0);
+        assert_eq!(revoke_target_count(1, 10), 1);
+        assert_eq!(revoke_target_count(10, 10), 9, "one token must stay live");
+        assert_eq!(revoke_target_count(999, 10), 9);
+        assert_eq!(
+            revoke_target_count(5, 1),
+            0,
+            "a single token is never revoked"
+        );
+        assert_eq!(revoke_target_count(5, 0), 0);
+    }
 }

@@ -70,6 +70,43 @@ type WebAuthnAllowCredential struct {
 	Type string `json:"type"`
 }
 
+// StepUpAssertion is an assertion from an already-enrolled passkey, offered as
+// a step-up proof. Every field is base64url without padding.
+type StepUpAssertion struct {
+	CredentialID      string `json:"credential_id"`
+	ClientDataJSON    string `json:"client_data_json"`
+	AuthenticatorData string `json:"authenticator_data"`
+	Signature         string `json:"signature"`
+	UserHandle        string `json:"user_handle,omitempty"`
+}
+
+// StepUpProof proves possession of a credential the account already holds.
+//
+// Passkey enrolment refuses a request that carries no proof: an access token
+// alone is one factor, and enrolling with it would turn a stolen token into a
+// permanent credential. Build one with StepUpWithPassword, StepUpWithTOTPCode
+// or StepUpWithAssertion.
+type StepUpProof struct {
+	Password  string           `json:"password,omitempty"`
+	TOTPCode  string           `json:"totp_code,omitempty"`
+	Assertion *StepUpAssertion `json:"assertion,omitempty"`
+}
+
+// StepUpWithPassword proves the step-up with the account password.
+func StepUpWithPassword(password string) StepUpProof {
+	return StepUpProof{Password: password}
+}
+
+// StepUpWithTOTPCode proves the step-up with a current authenticator code.
+func StepUpWithTOTPCode(code string) StepUpProof {
+	return StepUpProof{TOTPCode: code}
+}
+
+// StepUpWithAssertion proves the step-up with an already-enrolled passkey.
+func StepUpWithAssertion(assertion StepUpAssertion) StepUpProof {
+	return StepUpProof{Assertion: &assertion}
+}
+
 // WebAuthnRegistrationBeginResponse holds PublicKeyCredentialCreationOptions from the server.
 type WebAuthnRegistrationBeginResponse struct {
 	Challenge       string `json:"challenge"`
@@ -158,6 +195,10 @@ type Realm struct {
 }
 
 // UpdateRealmRequest contains parameters for updating a realm.
+//
+// Retained for callers that model a realm patch locally; no client method
+// sends it. Realms are provisioned from hearth.yaml and the server answers 405
+// to PATCH /admin/realms/{id} (audit 2026-08-28 §25.4).
 type UpdateRealmRequest struct {
 	Name   *string `json:"name,omitempty"`
 	Status *string `json:"status,omitempty"`
@@ -338,24 +379,9 @@ type UpdateGroupRequest struct {
 	Name *string `json:"name,omitempty"`
 }
 
-// OrgMember represents an organization membership record.
-type OrgMember struct {
-	UserID    string `json:"user_id"`
-	OrgID     string `json:"org_id"`
-	Role      string `json:"role"`
-	CreatedAt int64  `json:"created_at,omitempty"`
-}
-
-// AddOrgMemberRequest contains parameters for adding a member to an organization.
-type AddOrgMemberRequest struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role,omitempty"`
-}
-
-// UpdateOrgMemberRequest contains parameters for updating an org membership.
-type UpdateOrgMemberRequest struct {
-	Role *string `json:"role,omitempty"`
-}
+// OrgMember, AddOrgMemberRequest and UpdateOrgMemberRequest were removed with
+// the org-membership methods: Hearth serves no organization route over HTTP
+// (audit 2026-08-28 §25.19).
 
 // APIError represents an error from the Hearth API.
 type APIError struct {

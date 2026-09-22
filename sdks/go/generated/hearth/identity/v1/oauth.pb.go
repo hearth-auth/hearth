@@ -894,9 +894,13 @@ func (x *ClientCredentialsResponse) GetScope() string {
 
 // Request for the Device Authorization Grant (RFC 8628).
 type DeviceAuthorizationRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	Scope         *string                `protobuf:"bytes,2,opt,name=scope,proto3,oneof" json:"scope,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ClientId string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	Scope    *string                `protobuf:"bytes,2,opt,name=scope,proto3,oneof" json:"scope,omitempty"`
+	// Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth
+	// is preferred and takes precedence; this is the client_secret_post
+	// fallback. Public clients omit it.
+	ClientSecret  *string `protobuf:"bytes,3,opt,name=client_secret,json=clientSecret,proto3,oneof" json:"client_secret,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -941,6 +945,13 @@ func (x *DeviceAuthorizationRequest) GetClientId() string {
 func (x *DeviceAuthorizationRequest) GetScope() string {
 	if x != nil && x.Scope != nil {
 		return *x.Scope
+	}
+	return ""
+}
+
+func (x *DeviceAuthorizationRequest) GetClientSecret() string {
+	if x != nil && x.ClientSecret != nil {
+		return *x.ClientSecret
 	}
 	return ""
 }
@@ -2191,11 +2202,13 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\n" +
 	"expires_in\x18\x03 \x01(\x03R\texpiresIn\x12\x19\n" +
 	"\x05scope\x18\x04 \x01(\tH\x00R\x05scope\x88\x01\x01B\b\n" +
-	"\x06_scope\"^\n" +
+	"\x06_scope\"\x9a\x01\n" +
 	"\x1aDeviceAuthorizationRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x19\n" +
-	"\x05scope\x18\x02 \x01(\tH\x00R\x05scope\x88\x01\x01B\b\n" +
-	"\x06_scope\"\xc1\x01\n" +
+	"\x05scope\x18\x02 \x01(\tH\x00R\x05scope\x88\x01\x01\x12(\n" +
+	"\rclient_secret\x18\x03 \x01(\tH\x01R\fclientSecret\x88\x01\x01B\b\n" +
+	"\x06_scopeB\x10\n" +
+	"\x0e_client_secret\"\xc1\x01\n" +
 	"\x1bDeviceAuthorizationResponse\x12\x1f\n" +
 	"\vdevice_code\x18\x01 \x01(\tR\n" +
 	"deviceCode\x12\x1b\n" +

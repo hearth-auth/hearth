@@ -229,8 +229,8 @@ if (!$claims->hasPermission('docs.edit')) {
 ```rust
 use hearth_sdk::HearthClient;
 
-// Reads embedded JWT claims locally — no network call
-let allowed = HearthClient::has_permission(&access_token, "docs.edit")?;
+// Verifies the token against the cached JWKS, then reads its claims
+let allowed = client.has_permission(&access_token, "docs.edit").await?;
 if !allowed {
     return Err(StatusCode::FORBIDDEN.into_response());
 }
@@ -341,9 +341,9 @@ The issued JWT carries only identity claims. When a resource server needs to aut
 
 ### Configuring a client's mode
 
-Via Admin API (`PUT /admin/applications/{id}`):
+Via Admin API (`PATCH /admin/applications/{id}`):
 ```bash
-curl -X PUT https://auth.example.com/admin/applications/<client_uuid> \
+curl -X PATCH https://auth.example.com/admin/applications/<client_uuid> \
   -H "Authorization: Bearer <admin_token>" \
   -H "X-Realm-ID: <realm_uuid>" \
   -H "Content-Type: application/json" \

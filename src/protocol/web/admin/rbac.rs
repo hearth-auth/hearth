@@ -478,6 +478,8 @@ pub async fn admin_org_member_assign_role(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<MemberAssignRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -533,7 +535,7 @@ pub async fn admin_org_member_assign_role(
                     super::templates::htmx_toast_response("Role assigned", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Role assigned", "success")
+                org_redirect_flash(&org_id, target.0.name(), "Role assigned", "success", secure)
             }
         }
         Err(e) => {
@@ -552,6 +554,8 @@ pub async fn admin_org_member_unassign_role(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<MemberUnassignRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -588,7 +592,7 @@ pub async fn admin_org_member_unassign_role(
                     super::templates::htmx_toast_response("Role removed", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Role removed", "success")
+                org_redirect_flash(&org_id, target.0.name(), "Role removed", "success", secure)
             }
         }
         Err(e) => {
@@ -608,6 +612,8 @@ pub async fn admin_org_member_grant_perm(
     FriendlyForm(form): FriendlyForm<MemberGrantPermForm>,
 ) -> Response {
     use crate::core::Timestamp;
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -661,7 +667,13 @@ pub async fn admin_org_member_grant_perm(
                     super::templates::htmx_toast_response("Permission granted", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Permission granted", "success")
+                org_redirect_flash(
+                    &org_id,
+                    target.0.name(),
+                    "Permission granted",
+                    "success",
+                    secure,
+                )
             }
         }
         Err(e) => {
@@ -680,6 +692,8 @@ pub async fn admin_org_member_revoke_perm(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<MemberRevokePermForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -728,7 +742,13 @@ pub async fn admin_org_member_revoke_perm(
                     super::templates::htmx_toast_response("Permission revoked", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Permission revoked", "success")
+                org_redirect_flash(
+                    &org_id,
+                    target.0.name(),
+                    "Permission revoked",
+                    "success",
+                    secure,
+                )
             }
         }
         Err(e) => {
@@ -1536,14 +1556,21 @@ pub async fn admin_realm_claims(
             profile
                 .mappings
                 .iter()
-                .map(|m| ClaimMappingRow {
-                    claim: m.claim.clone(),
-                    source: claim_source_label(&m.source),
-                    include_in_access_token: m.include_in_access_token,
-                    include_in_id_token: m.include_in_id_token,
-                    include_in_userinfo: m.include_in_userinfo,
-                    first_party_only: m.first_party_only,
-                    required_scopes: m.required_scopes.clone().unwrap_or_default(),
+                // Show the *effective* mapping, not the raw YAML. A gate the
+                // operator omitted still has a value at issuance time — the
+                // viewer must show the one the token issuer will use
+                // (audit 2026-08-28 §4.13#3).
+                .map(|m| {
+                    let m = m.to_domain();
+                    ClaimMappingRow {
+                        claim: m.claim.clone(),
+                        source: claim_source_label(&m.source),
+                        include_in_access_token: m.include_in_access_token,
+                        include_in_id_token: m.include_in_id_token,
+                        include_in_userinfo: m.include_in_userinfo,
+                        first_party_only: m.first_party_only,
+                        required_scopes: m.required_scopes.clone().unwrap_or_default(),
+                    }
                 })
                 .collect::<Vec<_>>()
         })

@@ -47,8 +47,8 @@ All SDKs expose the same surface (method names vary by language convention). See
 | Device flow — start | `client.startDeviceFlow()` | `client.startDeviceFlow()` | `client.StartDeviceFlow()` | `client.start_device_flow()` | `client.start_device_flow().await` | `$client->startDeviceFlow()` | `client.deviceAuthorization()` ⚠ |
 | Device flow — poll | `client.pollDeviceToken()` | `client.pollDeviceToken()` | `client.PollDeviceToken()` ⚠ | `client.poll_device_token()` | `client.poll_device_token().await` | `$client->pollDeviceToken()` | `client.pollDeviceToken()` ⚠ |
 | Magic-link initiation | `client.requestMagicLink()` | `client.requestMagicLink()` | `client.RequestMagicLink()` | `client.request_magic_link()` | `client.initiate_magic_link().await` ⚠ | `$client->requestMagicLink()` | — ⚠ |
-| Role check (local) | `claims.hasRole()` | `token.hasRole()` | `client.HasRole()` | `claims.has_role()` | `HearthClient::has_role()` | `$claims->hasRole()` | `client.hasRole()` |
-| Permission check (local) | `claims.hasPermission()` | `token.hasPermission()` | `client.HasPermission()` | `claims.has_permission()` | `HearthClient::has_permission()` | `$claims->hasPermission()` | `client.hasPermission()` |
+| Role check (from claims) | `claims.hasRole()` | `token.hasRole()` | `client.HasRole(ctx, …)` | `claims.has_role()` | `client.has_role().await` | `$claims->hasRole()` | `client.hasRole()` |
+| Permission check (from claims) | `claims.hasPermission()` | `token.hasPermission()` | `client.HasPermission(ctx, …)` | `claims.has_permission()` | `client.has_permission().await` | `$claims->hasPermission()` | `client.hasPermission()` |
 | Group check (local) | `claims.inGroup()` | `token.inGroup()` | `client.InGroup()` | `claims.in_group()` | `HearthClient::in_group()` | `$claims->inGroup()` | `client.hasRole()` → `inGroup` |
 | Token refresh | `client.refreshTokens()` | — | `client.RefreshTokens()` | `client.refresh_tokens()` | `client.refresh_tokens().await` | `$client->refreshToken()` | `client.refreshTokens()` |
 

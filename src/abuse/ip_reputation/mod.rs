@@ -7,7 +7,7 @@
 //! 1. [`spamhaus::SpamhausDropProvider`] — checks the source IP against the
 //!    Spamhaus DROP (IPv4) and EDROP (IPv6) blocklists.  The lists are loaded
 //!    in-memory and refreshed daily via a background Tokio task.  Hot-path
-//!    lookup is lock-free via an [`arc_swap::ArcSwap`]-wrapped [`CidrFilter`].
+//!    lookup reads a [`crate::core::SwapCell`]-wrapped [`CidrFilter`].
 //!
 //! 2. [`maxmind::MaxMindAsnProvider`] — looks up the Autonomous System Number
 //!    (ASN) for an IP from a local MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB
@@ -24,8 +24,8 @@
 //! # Hot-path contract
 //!
 //! `check()` MUST be synchronous.  Both reference adapters satisfy this:
-//! - `SpamhausDropProvider`: O(n) scan over in-memory `Vec<Cidr>` via
-//!   `ArcSwap::load()` (zero allocation, no locks on the read path).
+//! - `SpamhausDropProvider`: O(n) scan over in-memory `Vec<Cidr>` behind one
+//!   `SwapCell::load()` (a single `Arc` clone; readers never block readers).
 //! - `MaxMindAsnProvider`: memory-mapped B-tree search inside the MMDB reader.
 //!
 //! # Per-realm policy

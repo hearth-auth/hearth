@@ -36,6 +36,15 @@ use super::rbac_admin::RbacAdminSvc;
 /// Returns `ResourceExhausted` when the limit is exceeded.
 ///
 /// Fail-open: if no peer IP can be determined, the request is allowed through.
+///
+/// The per-realm arm is keyed on the caller's `x-realm-id` metadata, the same
+/// value every RPC on this surface already uses to select its realm. It was
+/// keyed on `""` for every request, which is one shared bucket: with
+/// `security.request_shaper.realm_rps` set, a single busy tenant spent the
+/// whole realm budget and every *other* tenant's gRPC calls answered
+/// `RESOURCE_EXHAUSTED` (task 23.9). `""` remains the key for a call that
+/// carries no realm header — those RPCs are rejected by their own handler
+/// anyway, so they share one bucket by design.
 pub fn grpc_rate_limit_interceptor(
     shaper: Arc<RequestShaper>,
 ) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
@@ -46,7 +55,10 @@ pub fn grpc_rate_limit_interceptor(
             // Fail-open: no peer info means we cannot rate-limit → allow.
             None => return Ok(req),
         };
-        match shaper.check(ip, "") {
+        // Bind the outcome before the match so the metadata borrow ends here
+        // and the `Allow` arm can move `req`.
+        let outcome = shaper.check(ip, grpc_realm_key(req.metadata()));
+        match outcome {
             ShaperOutcome::Allow => Ok(req),
             ShaperOutcome::IpLimited | ShaperOutcome::RealmLimited => {
                 Err(tonic::Status::resource_exhausted("rate limit exceeded"))
@@ -55,34 +67,57 @@ pub fn grpc_rate_limit_interceptor(
     }
 }
 
+/// Returns the per-realm shaper bucket key for a gRPC request.
+///
+/// The raw `x-realm-id` metadata value, or `""` when the header is absent or
+/// not ASCII. The value is only ever used as a `HashMap` key, never parsed or
+/// trusted for authorization — every handler re-extracts and validates it.
+fn grpc_realm_key(md: &tonic::metadata::MetadataMap) -> &str {
+    md.get("x-realm-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+}
+
 /// Extracts the source IP from a tonic request's remote address or metadata.
 fn extract_grpc_peer_ip(req: &tonic::Request<()>) -> Option<IpAddr> {
     // tonic sets the remote addr on the request.
     req.remote_addr().map(|a| a.ip())
 }
 
-/// WEB-009: gRPC interceptor requiring `Authorization: Bearer <token>` for
-/// reflection requests. Applied to the reflection service using
+/// WEB-009: gRPC interceptor requiring a **valid admin token** for reflection
+/// requests. Applied to the reflection service using
 /// `tonic::service::interceptor::InterceptedService` so only reflection RPC
 /// calls are gated; health, admin, and OAuth services are unaffected.
 ///
 /// Reflection is already production-gated by `--allow-reflection-in-prod`.
 /// This gate prevents anonymous schema enumeration on staging/debug instances.
+///
+/// # Task 26.9 — it used to check the header, not the token
+///
+/// The whole check was that the `authorization` value starts with `"Bearer "`
+/// and is longer than that, so `Bearer x` passed. Nothing looked the token up,
+/// no realm was consulted and no permission was checked — which is exactly the
+/// "anonymous schema enumeration" the doc comment above says the gate prevents.
+/// Reflection publishes the full service and message schema of every admin RPC,
+/// so it is a reconnaissance surface.
+///
+/// It now runs the same [`super::auth::authenticate_admin`] the admin RPCs run,
+/// which means reflection needs an `x-realm-id` header and an unexpired token
+/// carrying `hearth.admin` — and, as everywhere else on this surface, refuses a
+/// DPoP-bound token it cannot verify a proof for.
+///
+/// Returns a closure rather than being one, because the check needs the engine.
+///
+/// The authenticated [`AdminAuth`](super::auth::AdminAuth) is attached to the
+/// request extensions, so anything downstream of the gate can attribute the
+/// reflection call to a realm and a user rather than re-deriving it.
 pub fn grpc_reflection_auth_interceptor(
-    req: tonic::Request<()>,
-) -> Result<tonic::Request<()>, tonic::Status> {
-    let has_bearer = req
-        .metadata()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.starts_with("Bearer ") && v.len() > "Bearer ".len())
-        .unwrap_or(false);
-    if has_bearer {
+    state: GrpcState,
+) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
+    move |mut req: tonic::Request<()>| {
+        let auth = super::auth::authenticate_admin(req.metadata(), &state)?;
+        req.extensions_mut().insert(auth);
         Ok(req)
-    } else {
-        Err(tonic::Status::unauthenticated(
-            "reflection requires Authorization: Bearer <token>",
-        ))
     }
 }
 
@@ -173,7 +208,19 @@ pub fn resolve_grpc_reflection(
 ///
 /// A-43: reflection is gated by `reflection_enabled`. Default is `false` in
 /// production; pass `true` only for debugging (requires `--allow-reflection-in-prod`
-/// at startup). The A-15 rate-limit interceptor is applied as a server-level layer.
+/// at startup).
+///
+/// # This router is NOT the one the server runs
+///
+/// It applies **neither** interceptor that [`serve`] applies: not the A-15
+/// per-IP rate limiter ([`grpc_rate_limit_interceptor`]), and not the WEB-009
+/// reflection bearer gate ([`grpc_reflection_auth_interceptor`]). The previous
+/// wording here claimed the rate-limit layer was applied; it never was, and
+/// nothing in this repository calls this function — `main.rs` calls [`serve`],
+/// which builds its own router (task 23.9). An embedder who serves the value
+/// returned here gets an unshaped surface whose reflection service, when
+/// enabled, answers anonymously. Use [`serve`], or re-apply both interceptors
+/// yourself.
 pub async fn build_router(
     state: GrpcState,
     reflection_enabled: bool,
@@ -290,7 +337,7 @@ where
             .build_v1()?;
         Some(tonic::service::interceptor::InterceptedService::new(
             svc,
-            grpc_reflection_auth_interceptor,
+            grpc_reflection_auth_interceptor(state.clone()),
         ))
     } else {
         None

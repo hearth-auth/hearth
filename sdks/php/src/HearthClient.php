@@ -638,15 +638,22 @@ final class HearthClient
      * Returns the server-generated `PublicKeyCredentialCreationOptions` that the
      * browser's `navigator.credentials.create()` call requires.
      *
-     * @param string $accessToken Bearer token of the authenticated user registering a passkey.
+     * @param string               $accessToken Bearer token of the authenticated user registering a passkey.
+     * @param array<string, mixed> $stepUp      Step-up proof. Supply exactly one of
+     *                                          `password`, `totp_code`, or `assertion`
+     *                                          (base64url `credential_id`, `client_data_json`,
+     *                                          `authenticator_data`, `signature`). The server
+     *                                          answers `403 step_up_required` without one: an
+     *                                          access token alone is one factor and does not
+     *                                          enrol a credential.
      *
      * @throws NetworkException  When the WebAuthn begin endpoint is unreachable.
      * @throws \RuntimeException On non-2xx response.
      */
-    public function startWebAuthnRegistration(string $accessToken): WebAuthnOptions
+    public function startWebAuthnRegistration(string $accessToken, array $stepUp): WebAuthnOptions
     {
         $url  = $this->webAuthnUrl('register/begin');
-        $data = $this->postJson($url, [], $accessToken);
+        $data = $this->postJson($url, $stepUp, $accessToken);
 
         return WebAuthnOptions::fromArray($data);
     }

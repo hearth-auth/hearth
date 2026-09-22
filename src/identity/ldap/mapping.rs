@@ -75,12 +75,38 @@ pub(crate) fn map_entry(
     })
 }
 
+/// Maps one page of search results, returning the users that mapped and the
+/// number of entries that were dropped because mapping failed.
+///
+/// Split out of `EmbeddedLdapConnector::search_paged` for task 26.8 (finding
+/// L-5): the drop count existed only as a `warn!` per entry and was never
+/// added up, which is why `DeltaSyncResult.skipped` could be a hard-coded `0`.
+/// Keeping the loop here as a pure function makes the count observable without
+/// a live directory.
+pub(crate) fn map_page(
+    entries: &[(String, HashMap<String, Vec<String>>)],
+    attr_map: &LdapAttributeMap,
+) -> (Vec<LdapUser>, u64) {
+    let mut users = Vec::with_capacity(entries.len());
+    let mut skipped: u64 = 0;
+    for (dn, attrs) in entries {
+        match map_entry(dn, attrs, attr_map) {
+            Ok(user) => users.push(user),
+            Err(e) => {
+                skipped += 1;
+                tracing::warn!(error = %e, "LDAP entry skipped: attribute mapping failed");
+            }
+        }
+    }
+    (users, skipped)
+}
+
 /// Collects all attribute names requested by the configured mapping.
 ///
 /// Used to build the attribute list passed to `ldap3`'s `search()` call so
 /// the server only returns the fields we actually need.
 pub(crate) fn requested_attributes(attr_map: &LdapAttributeMap) -> Vec<String> {
-    let mut attrs = vec![
+    let candidates = [
         attr_map.email.clone(),
         attr_map.display_name.clone(),
         attr_map.given_name.clone(),
@@ -89,9 +115,18 @@ pub(crate) fn requested_attributes(attr_map: &LdapAttributeMap) -> Vec<String> {
         attr_map.username.clone(),
         attr_map.sync_attribute.clone(),
     ];
-    attrs.extend(attr_map.extra.keys().cloned());
-    // Dedup while preserving insertion order.
-    attrs.dedup();
+    // Dedup while preserving insertion order. `Vec::dedup` only collapses
+    // *adjacent* equal elements, so it silently missed the common mappings
+    // that repeat a directory attribute in two non-adjacent slots — e.g.
+    // `display_name = cn` together with `username = cn`, which asked the
+    // server for `cn` twice in every search.
+    let mut seen = std::collections::HashSet::new();
+    let mut attrs = Vec::with_capacity(candidates.len() + attr_map.extra.len());
+    for attr in candidates.into_iter().chain(attr_map.extra.keys().cloned()) {
+        if seen.insert(attr.clone()) {
+            attrs.push(attr);
+        }
+    }
     attrs
 }
 
@@ -213,6 +248,62 @@ mod tests {
         assert!(!user.extra.contains_key("phone"));
     }
 
+    // 26.8 / finding L-5: the per-entry `warn!` was the only record that an
+    // entry had been dropped — nothing counted them, which is how
+    // `DeltaSyncResult.skipped` could be a hard-coded `0`.
+    #[test]
+    fn map_page_counts_the_entries_it_drops() {
+        let good = |dn: &str, mail: &str| {
+            (
+                dn.to_string(),
+                make_attrs(&[
+                    ("mail", mail),
+                    ("cn", "Someone"),
+                    ("entryUUID", dn),
+                    ("modifyTimestamp", "20240101120000Z"),
+                ]),
+            )
+        };
+        // No `mail` — the exact failure the finding's 10,000-account scenario
+        // describes.
+        let unmappable = (
+            "uid=nomail,dc=example,dc=com".to_string(),
+            make_attrs(&[
+                ("cn", "No Mail"),
+                ("entryUUID", "uuid-nomail"),
+                ("modifyTimestamp", "20240101130000Z"),
+            ]),
+        );
+
+        let page = vec![
+            good("uid=a,dc=example,dc=com", "a@example.com"),
+            unmappable,
+            good("uid=b,dc=example,dc=com", "b@example.com"),
+        ];
+        let (users, skipped) = map_page(&page, &default_attr_map());
+        assert_eq!(users.len(), 2, "both mappable entries must be returned");
+        assert_eq!(
+            skipped, 1,
+            "the dropped entry must be counted, not just logged"
+        );
+    }
+
+    #[test]
+    fn map_page_reports_zero_skipped_when_every_entry_maps() {
+        let page = vec![(
+            "uid=a,dc=example,dc=com".to_string(),
+            make_attrs(&[
+                ("mail", "a@example.com"),
+                ("cn", "A"),
+                ("entryUUID", "uuid-a"),
+                ("modifyTimestamp", "20240101120000Z"),
+            ]),
+        )];
+        let (users, skipped) = map_page(&page, &default_attr_map());
+        assert_eq!(users.len(), 1);
+        assert_eq!(skipped, 0);
+    }
+
     #[test]
     fn requested_attributes_includes_all_configured() {
         let am = default_attr_map();
@@ -221,6 +312,35 @@ mod tests {
         assert!(attrs.contains(&"cn".to_string()));
         assert!(attrs.contains(&"entryUUID".to_string()));
         assert!(attrs.contains(&"modifyTimestamp".to_string()));
+    }
+
+    // 23.8: `Vec::dedup` only collapses *adjacent* duplicates. A mapping that
+    // points two non-adjacent slots at one directory attribute — the common
+    // `display_name = cn` / `username = cn` pairing — asked the server for
+    // that attribute twice on every search and delta-sync page.
+    #[test]
+    fn requested_attributes_dedups_non_adjacent_duplicates() {
+        let mut am = default_attr_map();
+        // Slot 1 (display_name) and slot 5 (username) — never adjacent.
+        am.username = "cn".to_string();
+        let attrs = requested_attributes(&am);
+        assert_eq!(
+            attrs.iter().filter(|a| a.as_str() == "cn").count(),
+            1,
+            "a repeated attribute must be requested once: {attrs:?}"
+        );
+    }
+
+    #[test]
+    fn requested_attributes_dedups_an_extra_that_repeats_a_core_slot() {
+        let mut am = default_attr_map();
+        am.extra.insert("mail".to_string(), "alt".to_string());
+        let attrs = requested_attributes(&am);
+        assert_eq!(
+            attrs.iter().filter(|a| a.as_str() == "mail").count(),
+            1,
+            "an extra repeating a core attribute must not double it: {attrs:?}"
+        );
     }
 
     #[test]

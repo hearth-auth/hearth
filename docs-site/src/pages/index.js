@@ -418,7 +418,7 @@ const FEATURES = [
   {
     tag: 'Performance',
     title: 'Sub-millisecond hot path',
-    desc: 'validate_token, lookup_session, and lookup_user serve from a lock-free in-process hash structure (ArcSwap<HashMap>) with zero per-request heap allocations and no lock contention.',
+    desc: 'validate_token, lookup_session, and lookup_user serve from an in-process hash structure with zero per-request heap allocations and no lock on the read path.',
   },
   {
     tag: 'Standards',
@@ -644,8 +644,8 @@ function StatsBar() {
     <div className="container">
       <div className={styles.stats}>
         <div className={styles.stat}>
-          <span className={styles.statValue}>&lt;1 ms</span>
-          <span className={styles.statLabel}>p99 validate_token</span>
+          <span className={styles.statValue}>1.31 µs</span>
+          <span className={styles.statLabel}>validate_token p50, engine plane</span>
         </div>
         <div className={styles.stat}>
           <span className={styles.statValue}>0</span>
@@ -657,7 +657,7 @@ function StatsBar() {
         </div>
         <div className={styles.stat}>
           <span className={styles.statValue}>OIDC</span>
-          <span className={styles.statLabel}>Core 1.0 conformant</span>
+          <span className={styles.statLabel}>Core 1.0 + OAuth 2.0 implemented</span>
         </div>
       </div>
     </div>

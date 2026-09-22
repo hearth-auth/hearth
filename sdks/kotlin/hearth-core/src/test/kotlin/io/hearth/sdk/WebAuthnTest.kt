@@ -44,7 +44,10 @@ class WebAuthnTest {
                 .setResponseCode(200)
         )
 
-        makeClient().startWebAuthnRegistration("bearer-token")
+        makeClient().startWebAuthnRegistration(
+            "bearer-token",
+            StepUpProof.password("correct-horse-battery-staple"),
+        )
 
         val req = server.takeRequest()
         assertEquals("POST", req.method)
@@ -62,7 +65,10 @@ class WebAuthnTest {
                 .setResponseCode(200)
         )
 
-        makeClient().startWebAuthnRegistration("my-access-token")
+        makeClient().startWebAuthnRegistration(
+            "my-access-token",
+            StepUpProof.password("correct-horse-battery-staple"),
+        )
 
         val req = server.takeRequest()
         assertEquals("Bearer my-access-token", req.getHeader("Authorization"))
@@ -80,7 +86,10 @@ class WebAuthnTest {
                 .setResponseCode(200)
         )
 
-        val resp = makeClient().startWebAuthnRegistration("token")
+        val resp = makeClient().startWebAuthnRegistration(
+            "token",
+            StepUpProof.password("correct-horse-battery-staple"),
+        )
 
         assertEquals("abc123", resp.challenge)
         assertEquals("example.com", resp.rpId)

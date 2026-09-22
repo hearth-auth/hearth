@@ -384,3 +384,58 @@ async fn auth_complete_pins_origin_server_side() {
         body["user_id"]
     );
 }
+
+/// Task 26.4 — `auth/begin` must honour the realm's `userVerification` policy.
+///
+/// `webauthn_auth_begin` hard-coded `"preferred"`, ignoring the realm. The
+/// completion path already enforces the realm setting
+/// (`realm_requires_user_verification`), so a realm that requires user
+/// verification did not ask the authenticator for it and then rejected the
+/// assertion at the end. The browser passkey-login path
+/// (`web/handlers.rs`) reads the same setting correctly, which is what makes
+/// this REST path an oversight rather than a design choice.
+#[tokio::test]
+async fn auth_begin_honours_the_realms_user_verification_policy() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+    let app = build_app(&harness);
+    let body_for = json!({ "user_id": user.id().as_uuid().to_string() });
+
+    // Control: an unconfigured realm still gets the safe default, so the
+    // assertion below cannot pass because the field is always "required".
+    let (status, body) = post_json(&app, "/webauthn/auth/begin", &realm, body_for.clone()).await;
+    assert_eq!(status, StatusCode::OK, "begin should succeed: {body}");
+    assert_eq!(
+        body["user_verification"].as_str(),
+        Some("preferred"),
+        "an unconfigured realm must still get the safe default"
+    );
+
+    let stored = harness
+        .identity()
+        .get_realm(&realm)
+        .expect("get realm")
+        .expect("realm exists");
+    let mut config = stored.config().clone();
+    config.webauthn_user_verification = Some("required".to_string());
+    harness
+        .identity()
+        .update_realm(
+            &realm,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("update realm");
+
+    let (status, body) = post_json(&app, "/webauthn/auth/begin", &realm, body_for).await;
+    assert_eq!(status, StatusCode::OK, "begin should succeed: {body}");
+    assert_eq!(
+        body["user_verification"].as_str(),
+        Some("required"),
+        "a realm that requires user verification must ask for it at the START \
+         of the ceremony, not reject the assertion at the end"
+    );
+}

@@ -73,7 +73,7 @@ tuning.
 ```yaml
 auth:
   session_ttl: "24h"
-  password_memory_cost: 65536  # Argon2id memory in KiB (OWASP minimum: 64 MiB = 65536)
+  password_memory_cost: 65536  # Argon2id memory in KiB (OWASP floor: 19456 at t=2, or 47104 at t=1)
   password_time_cost: 3        # Argon2id iterations
 
 oidc:

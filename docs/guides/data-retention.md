@@ -16,7 +16,7 @@
 | Audit log events | 90 days | Yes (per-realm via API) | Yes (background pruner) |
 | Sessions | 24 hours | Yes (`auth.session_ttl`) | Yes (TTL on write) |
 | Access tokens | 15 minutes | Yes (`token.access_token_ttl`) | Yes (TTL; verified on use) |
-| Refresh tokens | 7 days | Yes (`token.refresh_token_ttl`) | Yes (TTL; deleted on rotation) |
+| Refresh tokens | 7 days | Yes (`token.refresh_token_ttl`) | Yes (TTL; rotation replaces the stored hash, the family row is swept at `expires_at`) |
 | Authorization codes | 10 minutes | Yes (`oidc.authorization_code_ttl`) | Yes (TTL on write) |
 | Revoked JTI blocklist | Matches originating token TTL | No | Yes (storage TTL) |
 | User records | Indefinite | No | No — explicit deletion only |
@@ -147,7 +147,7 @@ Access tokens are short-lived JWTs. They are **not stored** in Hearth — they a
 
 ### Refresh tokens
 
-Refresh tokens are stored as a SHA-256 hash of the current token in a grant family record (`oauth:family:{family_id}`). The plaintext refresh token is never persisted. On rotation, the old hash is replaced; on revocation, the family record is deleted. A background sweep removes grant families whose `expires_at` has elapsed.
+Refresh tokens are stored as a SHA-256 hash of the current token in a grant family record (`oauth:family:{family_id}`). The plaintext refresh token is never persisted. On rotation, the old hash is replaced in place. Revocation does **not** delete the record — it sets `revoked = true`, because the row is what a later presentation of a rotated-out token is checked against; deleting it would turn a revoked grant into an unknown one. A background sweep removes grant families whose `expires_at` has elapsed, revoked or not.
 
 | Config key | Default | Per-realm override |
 |---|---|---|
@@ -191,7 +191,21 @@ curl -X DELETE https://auth.example.com/admin/api/realms/{realm}/users/{user_id}
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-This cascades to all associated data: the credential record, credential history, MFA secrets, WebAuthn credentials, sessions, device fingerprints, and organization memberships.
+This cascades to every row keyed by the user: the credential record, credential
+history, the password-reset watermark, MFA secrets, WebAuthn credentials and
+their discoverable index, sessions and the session index, organization
+memberships (both directions), OAuth consent records, federated identity links
+(both directions), the SCIM `externalId` mapping (both directions), device
+fingerprints, RBAC role assignments and group memberships, and any agent the
+user owns.
+
+The cascade is not one atomic transaction. Only its last step is: the primary
+record, the email index and the 90-day email tombstone (§5) are written
+together, so no crash can leave an email index pointing at a record that is
+gone. Every earlier step is a separate durable write, so a crash part-way
+through leaves some rows behind — the primary record survives that window, so
+repeating the `DELETE` completes the cascade. A `DELETE` that answers `404`
+after an interrupted delete has still swept the rows it found.
 
 ### GDPR right to erasure (Art. 17)
 

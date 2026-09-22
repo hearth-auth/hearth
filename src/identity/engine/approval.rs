@@ -32,6 +32,9 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateApprovalRequestInput,
     ) -> Result<ApprovalRequest, IdentityError> {
+        // The agent must exist and be Active before its request may be queued.
+        self.require_active_agent(realm_id, &request.agent_id)?;
+
         let now = self.clock.now();
         let now_secs = now.as_micros() / 1_000_000;
         let expires_in = request
@@ -95,6 +98,27 @@ impl EmbeddedIdentityEngine {
         Ok(record)
     }
 
+    /// Requires `agent_id` to name a live, `Active` agent in this realm.
+    ///
+    /// Returns `AgentNotFound` when no such agent exists and `AgentRevoked` for
+    /// any non-`Active` status (`Suspended` included — that is the state the
+    /// abuse monitor applies automatically, so treating it as usable would make
+    /// the automatic response a no-op for the approval plane).
+    fn require_active_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<(), IdentityError> {
+        let agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+        if agent.status() == crate::identity::AgentStatus::Active {
+            Ok(())
+        } else {
+            Err(IdentityError::AgentRevoked)
+        }
+    }
+
     /// Retrieves an approval request by ID.
     pub(super) fn get_approval_request_inner(
         &self,
@@ -151,6 +175,13 @@ impl EmbeddedIdentityEngine {
         if record.expires_at <= now {
             return Err(IdentityError::ApprovalRequestExpired);
         }
+
+        // Re-check the agent at approval time, not only at request time. A
+        // human-in-the-loop queue exists precisely to put a delay between the
+        // two, and an agent revoked or suspended inside that window must not
+        // have a live capability token minted for it. This runs before the
+        // status transition, so a refused approval leaves the request Pending.
+        self.require_active_agent(realm_id, &record.agent_id)?;
 
         let now_secs = now.as_micros() / 1_000_000;
         let ttl = capability_ttl_secs
@@ -478,9 +509,20 @@ impl EmbeddedIdentityEngine {
     /// Scans this realm's approval webhook outbox and redelivers any entries
     /// that survived a previous failed delivery or server crash.
     ///
-    /// Called by the startup recovery scan and the periodic background task.
-    #[allow(dead_code)]
-    pub(super) fn flush_approval_webhook_outbox_inner(&self, realm_id: &RealmId) {
+    /// Returns `(delivered, remaining)`.
+    ///
+    /// # Task 26.13 — this had no caller
+    ///
+    /// The doc comment said "Called by the startup recovery scan and the
+    /// periodic background task"; neither existed, and `#[allow(dead_code)]`
+    /// kept the compiler quiet about it. So `AGENT_AUTH.md`'s "durable
+    /// at-least-once" delivery was at-MOST-once — a failed webhook was never
+    /// retried — and every undelivered request leaked its outbox row forever,
+    /// because only a successful delivery deletes it.
+    ///
+    /// The caller is now `main.rs`'s approval-outbox task, whose first tick is
+    /// immediate so start-up recovery and the periodic retry are the same code.
+    pub(super) fn flush_approval_webhook_outbox_inner(&self, realm_id: &RealmId) -> (u64, u64) {
         // Guard: only proceed if this realm has a webhook configured.
         if self
             .get_realm(realm_id)
@@ -489,7 +531,7 @@ impl EmbeddedIdentityEngine {
             .and_then(|r| r.config().approval_webhook.clone())
             .is_none()
         {
-            return;
+            return (0, 0);
         }
 
         let prefix = keys::approval_webhook_outbox_scan_prefix();
@@ -503,10 +545,12 @@ impl EmbeddedIdentityEngine {
                     error = %e,
                     "failed to scan approval webhook outbox"
                 );
-                return;
+                return (0, 0);
             }
         };
 
+        let mut delivered = 0u64;
+        let mut remaining = 0u64;
         for entry in entries {
             // Extract request_id from key suffix.
             let key_str = String::from_utf8_lossy(&entry.key);
@@ -518,13 +562,21 @@ impl EmbeddedIdentityEngine {
                 continue;
             };
 
-            // Deliver and clean up on success.
+            // Deliver and clean up on success. The outbox row is the record
+            // of truth: `notify_approval_webhook_inner` deletes it only when
+            // the endpoint answered, so re-reading it is how we know which
+            // way the attempt went.
             self.notify_approval_webhook_inner(realm_id, &request);
+            match self.storage.get(realm_id, &entry.key) {
+                Ok(None) => delivered += 1,
+                _ => remaining += 1,
+            }
             // Throttle to avoid hammering a flaky endpoint.
             // Safety: this is called from a background scan, not the hot path.
             #[allow(clippy::disallowed_methods)]
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        (delivered, remaining)
     }
 
     /// Validates a capability token for a tool invocation (Phase C — Complete Mediation).
@@ -607,6 +659,23 @@ impl EmbeddedIdentityEngine {
         // Parse agent ID from `sub`.
         let agent_uuid = uuid::Uuid::parse_str(&claims.sub).map_err(|_| deny())?;
         let agent_id = AgentId::new(agent_uuid);
+
+        // Task 26.35 (audit finding A-6): the agent must still be Active.
+        //
+        // Every sibling path already asks — AAT issue, validate and derive,
+        // approval create and approve, SPIFFE validation, both transaction-token
+        // subjects and both token-exchange subjects. This one did not, so
+        // revoking an agent stopped everything except the one credential that
+        // is already a standing permission to act, for the rest of its
+        // five-minute life. `AGENT_AUTH.md` §1.2 documented that as a known
+        // exception rather than claiming full revocation; this closes it.
+        //
+        // It sits BEFORE the `put_if_absent` below for the same reason task
+        // 26.20 moved the DPoP binding check ahead of its JTI write: a token
+        // refused on a check must not spend its one-shot slot, or refusing it
+        // becomes a way to deny the rightful holder.
+        self.require_active_agent(realm_id, &agent_id)
+            .map_err(|_| deny())?;
 
         // Single-use enforcement (M1 — TOCTOU hardening, HEA-1757): the previous
         // implementation did a `get` existence check followed by a later `put`,

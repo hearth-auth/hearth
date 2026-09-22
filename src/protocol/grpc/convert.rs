@@ -64,7 +64,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::LastOwner
         | IdentityError::NotAMember
         | IdentityError::UserNotVerified
-        | IdentityError::AuthMethodNotAllowed { .. } => (Code::PermissionDenied, err.to_string()),
+        | IdentityError::AuthMethodNotAllowed { .. }
+        | IdentityError::MfaMethodNotAllowed { .. } => (Code::PermissionDenied, err.to_string()),
         IdentityError::InvalidInput { .. }
         | IdentityError::InvalidAttribute { .. }
         | IdentityError::InvalidRedirectUri
@@ -113,7 +114,9 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::DeviceCodeDenied
         | IdentityError::TokenRevoked
         | IdentityError::PasswordExpired
-        | IdentityError::PasswordReused => (Code::FailedPrecondition, err.to_string()),
+        | IdentityError::PasswordReused
+        | IdentityError::RealmNotArchived
+        | IdentityError::YamlManagedResource { .. } => (Code::FailedPrecondition, err.to_string()),
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached
         | IdentityError::TokenTooLarge { .. } => (Code::ResourceExhausted, err.to_string()),
@@ -291,6 +294,10 @@ pub fn audit_error_to_status(err: AuditError) -> Status {
         AuditError::IntegrityViolation { .. } => {
             Status::new(Code::DataLoss, "audit chain integrity violation")
         }
+        AuditError::InvalidQuery { ref reason } => Status::new(
+            Code::InvalidArgument,
+            format!("invalid audit query: {reason}"),
+        ),
         AuditError::Storage(_)
         | AuditError::Serialization { .. }
         | AuditError::MergedAppendNotSupported => {

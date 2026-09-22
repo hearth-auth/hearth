@@ -444,7 +444,11 @@ impl Fs for FaultFs {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        if self.config.fail_next_remove_file.swap(false, Ordering::SeqCst) {
+        if self
+            .config
+            .fail_next_remove_file
+            .swap(false, Ordering::SeqCst)
+        {
             return Err(io::Error::other("injected remove_file fault"));
         }
         hearth::storage::RealFs.remove_file(path)

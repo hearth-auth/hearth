@@ -6,7 +6,7 @@
 use super::response::{extract_and_validate_assertion, parse_response, Assertion, ValidateParams};
 use super::signature::verify_signed_element;
 use super::types::{AttributeMap, SamlIdpConfig};
-use super::xml::ns;
+use super::xml::{count_elements, ns};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
@@ -71,23 +71,42 @@ impl SamlSpService {
         now: Timestamp,
         xml: &[u8],
     ) -> Result<(ExternalIdentity, Option<String>, Assertion), IdentityError> {
-        // Signature verification: prefer Assertion-level signature if
-        // want_assertions_signed, else accept Response-level signature.
         let primary_cert = idp
             .idp_certificates_pem
             .first()
             .ok_or(IdentityError::Saml(SamlError::Signature))?;
-        let mut sig_ok = false;
-        if verify_signed_element(xml, "Assertion", primary_cert).is_ok() {
-            sig_ok = true;
+
+        // XML Signature Wrapping defence, part 1 (audit 2026-08-28 B5).
+        //
+        // The document must carry exactly one `<saml:Assertion>`. A wrapped
+        // response hides a second one where the signature cannot see it —
+        // inside the `<ds:Signature>` element, which the enveloped-signature
+        // transform strips before the digest is computed. Signature
+        // verification then passes on the IdP's assertion while the response
+        // parser, which collects every `<saml:Assertion>` at any depth,
+        // consumes the attacker's. Counting the whole document closes every
+        // placement, not just the one that was reproduced.
+        //
+        // This SP consumes a single assertion (`extract_and_validate_assertion`
+        // refuses more than one), so requiring exactly one here removes no
+        // supported case.
+        if count_elements(xml, ns::SAML, "Assertion")? != 1 {
+            return Err(IdentityError::Saml(SamlError::Signature));
         }
-        if !sig_ok {
-            if idp.want_assertions_signed {
-                return Err(IdentityError::Saml(SamlError::Signature));
+
+        // Signature verification: prefer Assertion-level signature if
+        // want_assertions_signed, else accept Response-level signature.
+        let verified_assertion_id = match verify_signed_element(xml, "Assertion", primary_cert) {
+            Ok(verified) => Some(verified.id),
+            Err(_) => {
+                if idp.want_assertions_signed {
+                    return Err(IdentityError::Saml(SamlError::Signature));
+                }
+                // Fall back to Response-level signature.
+                verify_signed_element(xml, "Response", primary_cert)?;
+                None
             }
-            // Fall back to Response-level signature.
-            verify_signed_element(xml, "Response", primary_cert)?;
-        }
+        };
 
         let resp = parse_response(xml)?;
         let assertion = extract_and_validate_assertion(
@@ -102,8 +121,20 @@ impl SamlSpService {
             },
         )?;
 
-        let identity =
-            assertion_to_external_identity(idp.idp_id.clone(), &assertion, &idp.attribute_map)?;
+        // XML Signature Wrapping defence, part 2: the element whose
+        // signature was verified must be the element that is consumed.
+        if let Some(verified_id) = verified_assertion_id {
+            if assertion.id != verified_id {
+                return Err(IdentityError::Saml(SamlError::Signature));
+            }
+        }
+
+        let identity = assertion_to_external_identity(
+            idp.idp_id.clone(),
+            &assertion,
+            &idp.attribute_map,
+            idp.trust_asserted_email,
+        )?;
         let session_index = assertion.session_index.clone();
         Ok((identity, session_index, assertion))
     }
@@ -115,6 +146,7 @@ fn assertion_to_external_identity(
     idp_id: crate::core::IdpId,
     a: &Assertion,
     map: &AttributeMap,
+    trust_asserted_email: bool,
 ) -> Result<ExternalIdentity, IdentityError> {
     let nameid = a.subject_name_id.as_deref().unwrap_or("").to_string();
 
@@ -128,11 +160,18 @@ fn assertion_to_external_identity(
         idp_id,
         external_sub,
         email,
-        // SAML doesn't carry a `email_verified` signal; enterprises treat
-        // SAML-asserted emails as trustworthy since they come from a
-        // trusted corporate IdP. Still, default to false and require the
-        // caller to opt into auto-link via YAML.
-        email_verified: false,
+        // SAML carries no `email_verified` signal, so the operator opts in
+        // per connector with `trust_asserted_email` (task 25.27). The doc
+        // comment here used to promise that opt-in while hard-coding `false`,
+        // and the consequence was not merely "auto-link is off": with this
+        // false, `is_linkable_by_email` is false for EVERY SAML identity, so
+        // `Confirm` and `Auto` alike are unreachable and a SAML login for an
+        // existing local user silently provisions a second account under a
+        // synthetic address.
+        //
+        // It stays `false` by default because turning it on lets the upstream
+        // IdP claim any address in the realm.
+        email_verified: trust_asserted_email,
         display_name,
         first_name,
         last_name,
@@ -178,8 +217,9 @@ mod tests {
             in_response_to: None,
             session_index: None,
             destination: None,
+            bearer_confirmations: Vec::new(),
         };
-        let ext = assertion_to_external_identity(IdpId::generate(), &a, &m).expect("map");
+        let ext = assertion_to_external_identity(IdpId::generate(), &a, &m, false).expect("map");
         assert_eq!(ext.email, "alice@example.com");
     }
 
@@ -244,6 +284,7 @@ mod tests {
             idp_certificates_pem: vec![cert_pem],
             sign_authn_requests: false,
             want_assertions_signed,
+            trust_asserted_email: false,
             attribute_map: BTreeMap::new(),
         }
     }

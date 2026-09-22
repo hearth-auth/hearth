@@ -154,6 +154,14 @@ enum BackupAction {
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
+
+        /// Path to `hearth.yaml`, read for `security.key_encryption_key`.
+        ///
+        /// Needed whenever the data directory's signing keys are encrypted at
+        /// rest, which production requires. `HEARTH_KEK` takes precedence and
+        /// makes this flag unnecessary (task 26.21).
+        #[arg(long, short)]
+        config: Option<PathBuf>,
     },
     /// Restore realm data from a `.hearth-backup` archive.
     Restore {
@@ -179,6 +187,19 @@ enum BackupAction {
         #[arg(long)]
         dry_run: bool,
 
+        /// Skip the SHA-256 integrity check restore now runs before it writes.
+        ///
+        /// Restore verifies the archive against `manifest.json` first — the
+        /// same check `hearth backup verify` runs — and refuses an archive
+        /// whose contents do not match, whose files are missing, or which
+        /// carries a member the manifest does not list. It used to do none of
+        /// that, so an archive `verify` rejected restored cleanly (audit re-run
+        /// 23.5, B-7). Pass this only when re-reading a very large archive is
+        /// genuinely too expensive and it has already been verified out of
+        /// band; a corrupt archive will then be applied without warning.
+        #[arg(long)]
+        skip_verify: bool,
+
         /// Proceed even when the archive carries no restorable signing key.
         ///
         /// By default restore REFUSES an archive with no usable signing key
@@ -192,6 +213,14 @@ enum BackupAction {
         /// Path to the data directory.
         #[arg(long, default_value = "data")]
         data_dir: PathBuf,
+
+        /// Path to `hearth.yaml`, read for `security.key_encryption_key`.
+        ///
+        /// Needed whenever the data directory's signing keys are encrypted at
+        /// rest, which production requires. `HEARTH_KEK` takes precedence and
+        /// makes this flag unnecessary (task 26.21).
+        #[arg(long, short)]
+        config: Option<PathBuf>,
     },
     /// Verify archive integrity by recomputing SHA-256 checksums.
     ///
@@ -543,6 +572,12 @@ async fn main() {
             }
         },
         Commands::Backup { action } => {
+            // Without this every `tracing::error!` below — and every info the
+            // export, restore and verify paths emit — is written to a
+            // dispatcher that does not exist. A failed `verify` exited 3 with
+            // an empty stderr, and a `create` that lost the data-directory lock
+            // said nothing at all (audit 2026-08-28 §4.9#8, §4.14#6).
+            let _tracing_guard = init_cli_tracing();
             let code = match action {
                 BackupAction::Create {
                     output,
@@ -550,6 +585,7 @@ async fn main() {
                     include_audit,
                     encrypt,
                     data_dir,
+                    config,
                 } => {
                     match run_backup_create(
                         output.as_deref(),
@@ -557,6 +593,7 @@ async fn main() {
                         include_audit,
                         encrypt,
                         &data_dir,
+                        config.as_deref(),
                     ) {
                         Ok(()) => 0,
                         Err(e) => {
@@ -570,16 +607,20 @@ async fn main() {
                     realm,
                     mode,
                     dry_run,
+                    skip_verify,
                     allow_missing_signing_key,
                     data_dir,
+                    config,
                 } => {
                     match run_backup_restore(
                         &input,
                         realm.as_deref(),
                         &mode,
                         dry_run,
+                        skip_verify,
                         allow_missing_signing_key,
                         &data_dir,
+                        config.as_deref(),
                     ) {
                         Ok(had_errors) => i32::from(had_errors),
                         Err(e) => {
@@ -926,6 +967,14 @@ async fn run_serve(
         warn!(vars = ?vars, "config references unset or empty environment variables");
     }
 
+    // 19.12: advisory server warnings are produced as data by the validator and
+    // logged HERE, after the subscriber exists. They used to be `tracing::warn!`
+    // calls inside `Config::validate`, which runs from `load_config` above —
+    // before `telemetry::init`, so every one of them was discarded.
+    for warning in hearth::config::deferred_server_warnings(&config.server) {
+        warn!("{warning}");
+    }
+
     info!(
         dev_mode = config.dev_mode,
         port = config.server.port,
@@ -980,6 +1029,14 @@ async fn run_serve(
             };
         info!(path = %data_path.display(), "using data directory (dev mode)");
         let mut storage_config = StorageConfig::dev(data_path);
+        // `storage.fsync` is a real knob in dev mode: absent leaves
+        // `SyncMode::None` (fast local iteration), an explicit `true` gives the
+        // production group-commit path so a developer can reproduce a
+        // durability bug without editing code (audit §4.11#12).
+        if config.storage.fsync_enabled(true) {
+            storage_config.wal_config.sync_mode = hearth::storage::wal::SyncMode::EveryWrite;
+            info!("storage.fsync: true honoured in dev mode — WAL uses SyncMode::EveryWrite");
+        }
         // Dev mode otherwise uses the default 100k-entry hot tier. An explicit
         // `storage.hot_tier_capacity` lets a corpus-scale load profile size the
         // hot tier below the working set so cold/SST tier misses fire (HEA-1800).
@@ -998,6 +1055,7 @@ async fn run_serve(
             merge_min: config.storage.compaction.merge_min,
         };
         storage_config.block_cache_bytes = config.storage.block_cache_bytes;
+        storage_config.set_hot_tier_per_realm_metrics(config.storage.hot_tier_per_realm_metrics);
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     } else {
@@ -1013,12 +1071,14 @@ async fn run_serve(
             cap
         });
 
-        if !config.storage.fsync {
-            tracing::warn!(
-                    "storage.fsync=false is ignored in production mode — WAL durability is non-negotiable; \
-                     use dev mode or a custom WalConfig if you need fsync disabled"
-                );
-        }
+        // `storage.fsync: false` outside dev mode is now a hard validation
+        // error (audit §4.11#12), so by the time we get here the knob can only
+        // resolve to `true`. The previous code warned and carried on, which is
+        // how the key stayed ignored in production for as long as it did.
+        debug_assert!(
+            config.storage.fsync_enabled(false),
+            "config validation must reject storage.fsync: false outside dev mode"
+        );
         let mut storage_config = StorageConfig::production(
             PathBuf::from(&config.storage.data_dir),
             config.storage.wal_max_size_bytes,
@@ -1033,6 +1093,7 @@ async fn run_serve(
             merge_min: config.storage.compaction.merge_min,
         };
         storage_config.block_cache_bytes = config.storage.block_cache_bytes;
+        storage_config.set_hot_tier_per_realm_metrics(config.storage.hot_tier_per_realm_metrics);
         let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
         (engine, storage_config)
     };
@@ -1149,8 +1210,12 @@ async fn run_serve(
             }
         }
         if let Some(ttl) = &config.token.signing_key_rotation_grace_period {
+            // A negative value is rejected by `validate_token` before we reach
+            // here; clamp defensively so a stray negative can never wrap
+            // through `as u64` into an effectively infinite grace window
+            // (audit 2026-08-28 §4.15#2).
             if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
-                tc.signing_key_rotation_grace_period_secs = (micros / 1_000_000) as u64;
+                tc.signing_key_rotation_grace_period_secs = micros.max(0) as u64 / 1_000_000;
             }
         }
         if let Some(max) = config.token.claims_cache_max {
@@ -1215,32 +1280,8 @@ async fn run_serve(
 
     // Resolve the storage key-encryption key (KEK). Env var takes precedence.
     // Accepted format: 64 lowercase hex characters (32 bytes / AES-256).
-    let storage_kek: Option<hearth::identity::key_encryption::StorageKek> = {
-        let hex_opt = std::env::var("HEARTH_KEK")
-            .ok()
-            .or_else(|| config.security.key_encryption_key.clone());
-        match hex_opt {
-            None => None,
-            Some(hex) => {
-                if hex == "0".repeat(64) {
-                    return Err(
-                        "security.key_encryption_key / HEARTH_KEK must not be the all-zero key \
-                         — generate a random 32-byte (64 hex char) value"
-                            .into(),
-                    );
-                }
-                let bytes = hex::decode(&hex).map_err(|e| {
-                    format!("security.key_encryption_key / HEARTH_KEK is not valid hex: {e}")
-                })?;
-                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-                    "security.key_encryption_key / HEARTH_KEK must be exactly 64 hex characters \
-                     (32 bytes / AES-256)"
-                        .to_string()
-                })?;
-                Some(hearth::identity::key_encryption::StorageKek::new(arr))
-            }
-        }
-    };
+    let storage_kek: Option<hearth::identity::key_encryption::StorageKek> =
+        resolve_storage_kek(config.security.key_encryption_key.as_deref())?;
 
     // Capture KEK bytes for the audit engine before storage_kek is consumed
     // by identity_config (it is moved on the non-dev_mode path).
@@ -1283,12 +1324,18 @@ async fn run_serve(
         "kdf admin-reserved admission gate installed from security.password.kdf"
     );
 
+    // §4.17#8: the documented global `auth.password_memory_cost` /
+    // `auth.password_time_cost` keys reach the base Argon2 config here. Both
+    // arms go through the one resolver so the dev arm cannot drift.
+    let base_credential = config.base_credential_config(pepper);
+    info!(
+        memory_cost_kib = base_credential.memory_cost_kib,
+        time_cost = base_credential.time_cost,
+        "argon2id base parameters resolved from auth.password_*"
+    );
     let identity_config = if config.dev_mode {
         IdentityConfig {
-            credential: CredentialConfig {
-                pepper,
-                ..CredentialConfig::fast_for_testing()
-            },
+            credential: base_credential,
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -1299,10 +1346,7 @@ async fn run_serve(
         }
     } else {
         IdentityConfig {
-            credential: CredentialConfig {
-                pepper,
-                ..CredentialConfig::default()
-            },
+            credential: base_credential,
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
@@ -1312,6 +1356,32 @@ async fn run_serve(
             ..IdentityConfig::default()
         }
     };
+
+    // 19.11: state the Argon2id parameters this process will actually hash with,
+    // and warn when they fall below the OWASP floor. `hearth.yaml` and the realm
+    // API both refuse sub-floor values now, but `--dev` still runs
+    // `fast_for_testing`, and a realm override persisted before the gate existed
+    // is still honoured at verification time.
+    {
+        let cred = &identity_config.credential;
+        if cred.meets_owasp_floor() {
+            info!(
+                argon2_memory_kib = cred.memory_cost_kib,
+                argon2_time_cost = cred.time_cost,
+                argon2_parallelism = cred.parallelism,
+                "Argon2id password hashing parameters"
+            );
+        } else {
+            warn!(
+                argon2_memory_kib = cred.memory_cost_kib,
+                argon2_time_cost = cred.time_cost,
+                owasp_min_memory_kib_t2 = hearth::identity::OWASP_ARGON2_MIN_MEMORY_KIB_T2,
+                owasp_min_memory_kib_t1 = hearth::identity::OWASP_ARGON2_MIN_MEMORY_KIB_T1,
+                "Argon2id parameters are below the OWASP Password Storage Cheat Sheet floor; \
+                 a stolen credential store is materially cheaper to crack offline"
+            );
+        }
+    }
 
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
@@ -1333,6 +1403,23 @@ async fn run_serve(
         .with_kek(audit_kek),
     );
 
+    // The identity engine writes on a cold data directory. In cluster mode
+    // that is a Raft proposal, so it must not be attempted before the cluster
+    // can accept one — otherwise every node of a cold cluster exits with
+    // `raft: not the leader` before `POST /admin/cluster/bootstrap` can be
+    // reached (task 26.46). A no-op in single-node mode.
+    if config.cluster.is_some() {
+        if let Err(e) = EmbeddedIdentityEngine::await_cold_start_window(
+            &storage,
+            std::time::Duration::from_secs(120),
+        )
+        .await
+        {
+            report_startup_fatal(&format!("cluster start-up window never opened: {e}"));
+            return Err(e.into());
+        }
+    }
+
     let raw_identity_engine = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
@@ -1342,16 +1429,21 @@ async fn run_serve(
     )?);
     // Wire session-version bumping so RBAC changes invalidate standing tokens.
     raw_rbac_engine.init_sv_bumper(Arc::clone(&raw_identity_engine) as Arc<dyn SvBumper>);
+    // Wire the Raft state machine's projection observer so a revocation
+    // replicated to this node reaches the hot-path revoked-JTI blocklist
+    // without a restart (audit 2026-08-28 §4.16#5). No-op in single-node mode.
+    cluster_engine.set_replicated_write_observer(
+        Arc::clone(&raw_identity_engine) as Arc<dyn hearth::cluster::ReplicatedWriteObserver>
+    );
     let identity_engine: Arc<dyn IdentityEngine> = raw_identity_engine;
 
-    // Build the PermissionRegistry from the initial config and wrap it in an
-    // ArcSwap for zero-downtime hot-swap on SIGHUP.  The registry is rebuilt
+    // Build the PermissionRegistry from the initial config and wrap it in a
+    // SwapCell for zero-downtime hot-swap on SIGHUP.  The registry is rebuilt
     // and atomically swapped inside `run_config_reconciliation` every time the
     // operator sends SIGHUP or triggers a programmatic reload.
-    let permission_registry: Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>> =
-        Arc::new(arc_swap::ArcSwap::from_pointee(build_permission_registry(
-            &config,
-        )));
+    let permission_registry: RegistrySwap = Arc::new(hearth::core::SwapCell::from_pointee(
+        build_permission_registry(&config),
+    ));
 
     // Base URL for email links and onboarding (computed once, reused).
     let base_url = config.onboarding.base_url.clone().unwrap_or_else(|| {
@@ -1496,6 +1588,7 @@ async fn run_serve(
             Some(&base_url),
             Some(email_service.as_ref()),
             config.onboarding.notification_email.as_deref(),
+            config.dev_mode,
         ) {
             Ok(token) => token,
             Err(e) => {
@@ -1535,6 +1628,7 @@ async fn run_serve(
         &config,
         identity_engine.as_ref(),
         rbac_engine.as_ref(),
+        audit_engine.as_ref(),
     ) {
         Ok(rotated) => rotated,
         Err(e) => {
@@ -1728,6 +1822,33 @@ async fn run_serve(
         storage.as_ref(),
     );
 
+    // Task 25.15 — name every stored cross-realm policy whose source is the
+    // system realm in a realm that is not the system realm.
+    //
+    // 25.11 refuses to *author* one unless a system-realm actor writes it, but
+    // that guard is write-side only: a policy stored before it shipped is still
+    // consulted by `check_cross_realm_policy` and still silently narrows what
+    // the platform operator may do inside that realm. An operator who finds
+    // themselves locked out of a tenant realm had nothing to look at. Warn,
+    // never refuse: such a policy may be deliberate, and refusing to boot would
+    // strand the operator who needs the server up to delete it (task 25.14's
+    // `DELETE /admin/realms/{id}/cross-realm-policies/{policy_id}`).
+    for legacy in
+        hearth::identity::find_system_sourced_cross_realm_policies(identity_engine.as_ref())
+    {
+        tracing::warn!(
+            realm_id = %legacy.target_realm_id.as_uuid(),
+            realm_name = %legacy.target_realm_name,
+            policy_id = %legacy.policy_id,
+            allowed_capabilities = ?legacy.allowed_capabilities,
+            "cross-realm trust policy names the system realm as its source in a \
+             tenant realm. It gates what the platform operator may do inside that \
+             realm and predates the guard that would now refuse to write it. \
+             Review it, and if it was not intended delete it with DELETE \
+             /admin/realms/<realm_id>/cross-realm-policies/<policy_id>."
+        );
+    }
+
     // Load migration history for the admin UI.
     let migration_records = hearth::identity::reconcile::load_migration_records(storage.as_ref());
 
@@ -1787,6 +1908,10 @@ async fn run_serve(
                                         device_codes = stats.device_codes_deleted,
                                         pending_tickets = stats.pending_tickets_deleted,
                                         grant_families = stats.grant_families_deleted,
+                                        saml_states = stats.saml_states_deleted,
+                                        saml_assertions = stats.saml_assertions_deleted,
+                                        revoked_jtis = stats.revoked_jtis_deleted,
+                                        session_family_rows = stats.session_family_rows_deleted,
                                         rate_trackers_pruned = stats.rate_trackers_pruned,
                                         errors = stats.errors,
                                         "cleanup: swept expired entities",
@@ -1879,6 +2004,72 @@ async fn run_serve(
                     .dfp_sweeper_evicted_total
                     .inc_by(evicted_f64);
                 hearth::metrics::metrics().dfp_keys_active.set(active_f64);
+            }
+        });
+    }
+
+    // Background approval-webhook outbox flush (task 26.13).
+    //
+    // An approval request writes its outbox row BEFORE it attempts delivery and
+    // deletes it only on a 2xx, so a surviving row is a notification nobody
+    // received. `flush_approval_webhook_outbox` is the retry half of the
+    // "durable at-least-once" guarantee in `AGENT_AUTH.md`; until this task
+    // existed it had NO caller, which made delivery at-MOST-once and leaked one
+    // row per undelivered request, permanently.
+    //
+    // Unlike the sweeps above, the first tick is NOT skipped: the first tick is
+    // the start-up recovery scan, and a request that was outstanding when the
+    // process died is exactly the one a warm-up delay keeps waiting.
+    //
+    // It runs under `spawn_blocking` because the flush throttles itself with a
+    // 100 ms sleep per entry; on the async runtime that would park a worker.
+    if cleanup_enabled && cleanup_interval_secs > 0 {
+        let outbox_engine = Arc::clone(&identity_engine);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
+            loop {
+                interval.tick().await;
+                let engine = Arc::clone(&outbox_engine);
+                let joined = tokio::task::spawn_blocking(move || {
+                    let batch = hearth::core::MAX_PAGE_LIMIT;
+                    let mut offset = 0u64;
+                    let (mut delivered, mut remaining) = (0u64, 0u64);
+                    loop {
+                        let page =
+                            match engine.list_realms(&hearth::core::PageRequest::new(offset, batch))
+                            {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    warn!(error = %e, "approval_outbox: realm enumeration failed, retrying next tick");
+                                    break;
+                                }
+                            };
+                        let n = page.items.len() as u64;
+                        for realm in &page.items {
+                            let (d, r) = engine.flush_approval_webhook_outbox(realm.id());
+                            delivered += d;
+                            remaining += r;
+                        }
+                        if n == 0 || offset + n >= page.total {
+                            break;
+                        }
+                        offset += n;
+                    }
+                    (delivered, remaining)
+                })
+                .await;
+                match joined {
+                    Ok((delivered, remaining)) if delivered > 0 || remaining > 0 => {
+                        info!(
+                            delivered,
+                            remaining, "approval_outbox: redelivered pending approval webhooks",
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "approval_outbox: flush task panicked, retrying next tick");
+                    }
+                }
             }
         });
     }
@@ -2085,20 +2276,15 @@ async fn run_serve(
         });
     }
 
-    let onboarding_service = Arc::new(OnboardingService::new(
-        Arc::clone(&identity_engine),
-        Arc::clone(&rbac_engine),
-        Arc::clone(&email_service),
-        data_dir.clone(),
-    ));
-
-    let rotation_grace_period_secs = config
-        .token
-        .signing_key_rotation_grace_period
-        .as_deref()
-        .and_then(|s| hearth::config::parse_duration_to_micros(s).ok())
-        .map(|micros| (micros / 1_000_000) as u64)
-        .unwrap_or(86_400);
+    let onboarding_service = Arc::new(
+        OnboardingService::new(
+            Arc::clone(&identity_engine),
+            Arc::clone(&rbac_engine),
+            Arc::clone(&email_service),
+            data_dir.clone(),
+        )
+        .with_dev_mode(config.dev_mode),
+    );
 
     // Parse trusted proxy IPs early so both AppState (JSON API) and WebState
     // (browser UI) can use the same list for real client IP extraction.
@@ -2158,10 +2344,12 @@ async fn run_serve(
     );
 
     // A-10: build the JWKS rate limiter from the operator-configured RPS limit.
-    // Dev mode disables the cap (u32::MAX) to keep local iteration and CLI
-    // integration tests deterministic; production retains the configured cap.
+    // Dev mode disables the cap to keep local iteration and CLI integration
+    // tests deterministic; production retains the configured cap. `disabled()`
+    // replaces the old `u32::MAX` stand-in, which existed only because `0`
+    // used to mean "deny everything" on this one limiter (audit §4.13#7).
     let jwks_rate_limiter = if config.dev_mode {
-        Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX))
+        Arc::new(JwksRateLimiter::disabled())
     } else {
         Arc::new(JwksRateLimiter::with_rps_limit(
             config.security.jwks_rps_limit,
@@ -2311,6 +2499,38 @@ async fn run_serve(
         info!(count = allowed_hosts.len(), "loaded allowed_hosts");
     }
 
+    // §4.13#5: the restore handler reads this off `AppState`, and nothing ever
+    // put it there — the signature check could not fire on any deployment.
+    // `Config::validate` has already refused a key that cannot decode, so an
+    // error here would be a bug, not operator input; refuse to start either way
+    // rather than fall back to "no verification".
+    let backup_verify_key = match config.security.backup.verify_key_bytes() {
+        Ok(k) => k,
+        Err(reason) => {
+            report_startup_fatal(&format!("security.backup.verify_key: {reason}"));
+            return Err(reason.into());
+        }
+    };
+    if backup_verify_key.is_some() {
+        info!("backup restore signature verification ENABLED (security.backup.verify_key)");
+    }
+
+    // Externally-reachable origin for links Hearth emails to users (magic
+    // links, reset links). Falls back to the bind address when
+    // `onboarding.base_url` is unset.
+    let public_base_url = config.onboarding.base_url.clone().unwrap_or_else(|| {
+        let host = match config.server.bind_address.as_str() {
+            "0.0.0.0" | "::" | "[::]" => "localhost",
+            h => h,
+        };
+        let scheme = if config.server.tls_cert_path.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        format!("{scheme}://{host}:{}", config.server.port)
+    });
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -2321,7 +2541,6 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_metrics_bearer_token(config.metrics.bearer_token.clone())
-            .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
@@ -2329,12 +2548,15 @@ async fn run_serve(
             .with_request_shaper(Arc::clone(&request_shaper))
             .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
+            .with_backup_verify_key(backup_verify_key)
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
             // without manually setting every capability flag.
             .with_agent_identity(true)
             .with_agent_approval(true)
-            .with_agent_advanced(true),
+            .with_agent_advanced(true)
+            .with_email(Some(Arc::clone(&email_service)))
+            .with_public_base_url(public_base_url.clone()),
         )
     } else {
         Arc::new(
@@ -2346,7 +2568,6 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_metrics_bearer_token(config.metrics.bearer_token.clone())
-            .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
@@ -2354,9 +2575,12 @@ async fn run_serve(
             .with_request_shaper(Arc::clone(&request_shaper))
             .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
             .with_rate_limiters_disabled(load_test_unthrottled)
+            .with_backup_verify_key(backup_verify_key)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
-            .with_agent_advanced(config.agent_auth.capabilities.advanced),
+            .with_agent_advanced(config.agent_auth.capabilities.advanced)
+            .with_email(Some(Arc::clone(&email_service)))
+            .with_public_base_url(public_base_url.clone()),
         )
     };
 
@@ -2372,6 +2596,27 @@ async fn run_serve(
     // The email service still receives the original file path — its
     // `resolve_branding()` reads and inlines local SVGs directly.
     let (web_logo_url, custom_logo) = resolve_web_logo(&config);
+
+    // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
+    // the `security:` block. Nine guards documented "Shipped" in
+    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
+    // this is the production path. Every guard is fail-open until an operator
+    // enables it, so an existing config sees no behaviour change.
+    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
+        &config.security,
+    ));
+    abuse_guards.spawn_background_tasks(&config.security);
+    info!(
+        tarpit = config.security.tarpit.threshold.is_some(),
+        distributed_attack_detector = config.security.distributed_attack_detector.enabled,
+        outbound_volume_shield = config.security.outbound_volume_shield.enabled,
+        cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
+        bot_signal = config.security.providers.bot_signal.enabled,
+        email_reputation = config.security.providers.email_reputation.enabled,
+        ip_reputation = config.security.ip_reputation.enabled,
+        risk_scorer = config.security.risk_scorer.enabled,
+        "abuse-prevention guards installed"
+    );
 
     let mut web_state = WebState::new(
         Arc::clone(&identity_engine),
@@ -2390,6 +2635,7 @@ async fn run_serve(
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
     .with_sms(sms_sender, sms_hmac_key_bytes)
+    .with_abuse_guards(Arc::clone(&abuse_guards))
     .with_dev_mode(config.dev_mode);
 
     if !api_trusted_proxies.is_empty() {
@@ -2440,13 +2686,18 @@ async fn run_serve(
     // Build global theme CSS: named theme base + optional operator custom CSS file.
     let named_theme = config.branding.theme.as_deref().unwrap_or("ember");
     let theme_base_css = web::themes::theme_css(named_theme);
+    // 21.13 (audit 2026-08-28 §4.23#12): these bytes are served verbatim to
+    // unauthenticated clients at `GET /ui/static/theme.css`. Validate the
+    // content type and the size before they become resident, and fail soft to
+    // an empty override rather than publishing whatever the path happened to
+    // point at.
     let global_custom_css = config
         .branding
         .custom_css
         .as_deref()
         .map(|path| {
-            std::fs::read_to_string(path).unwrap_or_else(|e| {
-                warn!(path = %path, error = %e, "failed to read branding custom CSS file");
+            web::themes::load_custom_css(path).unwrap_or_else(|e| {
+                warn!(path = %path, error = %e, "refusing branding.custom_css");
                 String::new()
             })
         })
@@ -2490,12 +2741,15 @@ async fn run_serve(
             }
         }
         let base = web_cfg.theme.as_deref().map_or("", web::themes::theme_css);
+        // Same gate as `branding.custom_css` above (21.13, §4.23#12): the
+        // per-realm block is served at `GET /ui/static/realm-theme/{id}`,
+        // which is equally unauthenticated.
         let custom = web_cfg
             .custom_css
             .as_deref()
             .map(|path| {
-                std::fs::read_to_string(path).unwrap_or_else(|e| {
-                    warn!(path = %path, name = %realm_name, error = %e, "failed to read realm custom CSS file");
+                web::themes::load_custom_css(path).unwrap_or_else(|e| {
+                    warn!(path = %path, name = %realm_name, error = %e, "refusing realm custom CSS");
                     String::new()
                 })
             })
@@ -2593,10 +2847,43 @@ async fn run_serve(
         }
     }
 
-    let mut app_router = http::router(Arc::clone(&app_state)).merge(web::router(web_state));
-    if let Some(mc_state) = &mailcatcher_state {
-        app_router = app_router.merge(web::mailcatcher_router(Arc::clone(mc_state)));
+    // 22.5 / 22.12 — install the operational and HTTP/2 limits before either
+    // listener binds. Both `serve_router_on` and `serve_tls_router` read these,
+    // so a knob cannot land on one listener and miss the other. Before this,
+    // `operational.request_timeout_secs`, `operational.max_connections` and
+    // `operational.queue_depth` were parsed and validated but read by nothing
+    // (audit §4.4#3), and the HTTP/2 rapid-reset caps were compiled-in
+    // constants applied on the TLS accept loop only (§4.12#20).
+    if !http::limits::init_server_limits(http::limits::ServerLimits {
+        request_timeout: Duration::from_secs(config.operational.request_timeout_secs),
+        max_connections: config.operational.max_connections,
+        queue_depth: config.operational.queue_depth,
+        http2_max_concurrent_streams: config.security.http2.max_concurrent_streams,
+        http2_max_pending_reset_streams: config.security.http2.max_pending_reset_streams,
+    }) {
+        warn!("server limits were already installed; the first installation stands");
     }
+    info!(
+        request_timeout_secs = config.operational.request_timeout_secs,
+        max_connections = config.operational.max_connections,
+        queue_depth = config.operational.queue_depth,
+        http2_max_concurrent_streams = config.security.http2.max_concurrent_streams,
+        http2_max_pending_reset_streams = config.security.http2.max_pending_reset_streams,
+        "operational + HTTP/2 limits installed"
+    );
+
+    // 21.1 — the browser tree is merged *under* the API router's guard stack,
+    // not beside it. `http::router(..).merge(web::router(..))` left the `Host`
+    // allowlist, the per-IP request shaper, the JSON parse-bomb depth guard,
+    // the body limit and the request-duration histogram unreachable from
+    // `/ui/*`, the SAML front channel and the pre-auth recovery pages, because
+    // `Router::layer` wraps only the routes registered before it (audit §4.5#1
+    // through §4.5#4, §4.10#8, §4.24#8).
+    let mut browser_router = web::router(web_state);
+    if let Some(mc_state) = &mailcatcher_state {
+        browser_router = browser_router.merge(web::mailcatcher_router(Arc::clone(mc_state)));
+    }
+    let app_router = http::router_with(Arc::clone(&app_state), browser_router);
 
     // Spawn the webhook dispatcher. Uses a watch channel so we can signal
     // clean shutdown after the HTTP server exits.
@@ -2696,11 +2983,15 @@ async fn run_serve(
         );
     }
 
+    // Set when a graceful drain runs out of deadline with requests still in
+    // flight. Reported at the very end so every cleanup step still runs.
+    let mut drain_incomplete = false;
+
     // Check for TLS configuration
     if let (Some(cert_path), Some(key_path)) =
         (&config.server.tls_cert_path, &config.server.tls_key_path)
     {
-        run_serve_tls(
+        let tls_drain_incomplete = run_serve_tls(
             addr,
             &config,
             app_router,
@@ -2714,6 +3005,7 @@ async fn run_serve(
             Arc::clone(&reload_notify),
         )
         .await?;
+        drain_incomplete = tls_drain_incomplete;
     } else {
         // Non-TLS: register SIGHUP handler for config hot-reload.
         #[cfg(unix)]
@@ -2773,6 +3065,7 @@ async fn run_serve(
                     drain_deadline_secs = drain_secs,
                     "graceful drain deadline exceeded, forcing shutdown"
                 );
+                drain_incomplete = true;
             }
         }
     }
@@ -2788,6 +3081,7 @@ async fn run_serve(
                     drain_deadline_secs = drain_secs,
                     "gRPC graceful drain deadline exceeded, forcing shutdown"
                 );
+                drain_incomplete = true;
             }
         }
     }
@@ -2795,8 +3089,33 @@ async fn run_serve(
     // Signal the webhook dispatcher to stop.
     let _ = wh_shutdown_tx.send(());
 
+    // Flush the memtable now that no request can write. Acknowledged writes
+    // are already durable in the WAL — this shortens the next start-up's replay
+    // and leaves the data directory readable by a file copy without one
+    // (audit 2026-08-28 §3 B4, §4.11#1). A failure here loses no data, so it is
+    // logged rather than propagated: the WAL still holds every record.
+    match storage.flush_memtable() {
+        Ok(()) => info!("memtable flushed on shutdown"),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "memtable flush on shutdown failed; the WAL still holds every acknowledged write"
+            );
+        }
+    }
+
     // Clean up PID file on exit.
     let _ = std::fs::remove_file(&pid_file_path);
+
+    // A drain that ran out of deadline cut requests off mid-flight. Reporting
+    // that as a clean exit lets an orchestrator record a rollout as successful
+    // when it dropped traffic (audit 2026-08-28 §4.11#10). Every cleanup step
+    // above still ran, so the failure is reported only here, at the end.
+    if drain_incomplete {
+        error!("Hearth server stopped with an incomplete drain");
+        return Err("graceful drain did not complete within the shutdown timeout".into());
+    }
+
     info!("Hearth server stopped");
     Ok(())
 }
@@ -2849,7 +3168,13 @@ fn build_startup_panel(
     mailcatcher: Option<(&str, &str)>,
     stats: &StartupStats,
 ) -> Vec<String> {
-    let base = format!("http://{addr}");
+    // The panel's URLs must match the scheme the listener actually speaks. Port
+    // `addr` is the TLS socket when TLS is configured (the plaintext redirect
+    // listener sits on a different port), so advertising `http://` there sends
+    // the operator's first request — the `Setup:` link — as plaintext at a TLS
+    // socket, which simply fails to connect.
+    let scheme = if stats.tls { "https" } else { "http" };
+    let base = format!("{scheme}://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
     let mut lines: Vec<String> = Vec::new();
     lines.push(String::new());
@@ -2995,6 +3320,10 @@ fn build_email_sender(
                 .ok_or("MailcatcherState must be pre-built before build_email_sender")?;
             Arc::new(MailcatcherSender::new(state))
         }
+        // Dev logs the full body so an engineer can click the link; production
+        // suppresses it — the body carries recovery links (audit 2026-08-28
+        // §4.14#2, §4.24#2).
+        EmailTransport::Log if config.dev_mode => Arc::new(LoggingEmailSender::new_dev()),
         EmailTransport::Log => Arc::new(LoggingEmailSender::new()),
         EmailTransport::Smtp => Arc::new(smtp_sender_from_config(&config.email)?),
         EmailTransport::Sendgrid => {
@@ -3192,8 +3521,13 @@ async fn wait_for_shutdown_signal() {
 }
 
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
+///
+/// Returns `true` when the graceful drain ran out of deadline with requests
+/// still in flight. The caller reports that after its own cleanup, so a
+/// truncated shutdown exits non-zero without skipping the memtable flush
+/// (audit 2026-08-28 §4.11#10).
 /// Registry type alias used for hot-swap on SIGHUP.
-type RegistrySwap = Arc<arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>>;
+type RegistrySwap = Arc<hearth::core::SwapCell<hearth::rbac::registry::PermissionRegistry>>;
 
 #[allow(clippy::too_many_arguments)]
 async fn run_serve_tls(
@@ -3208,7 +3542,7 @@ async fn run_serve_tls(
     reload_config_path: Option<PathBuf>,
     dev: bool,
     reload_notify: Arc<Notify>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
         .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
 
@@ -3299,25 +3633,31 @@ async fn run_serve_tls(
         drop(shutdown_tx);
     });
 
-    // Start HTTPS server with drain deadline.
+    // Start the HTTPS server. It owns the drain and its deadline: an outer
+    // `select!` here would win the race the instant the accept loop returned,
+    // which is exactly how a drain that never happened looked clean
+    // (audit 2026-08-28 §4.11#9). `drain_start_rx` is no longer needed.
+    drop(drain_start_rx);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tokio::select! {
-        result = http::serve_tls_router(listener, app_router, acceptor, shutdown_rx) => {
-            result?;
-        }
-        _ = async {
-            let _ = drain_start_rx.await;
-            tokio::time::sleep(Duration::from_secs(drain_secs)).await;
-        } => {
-            warn!(
-                drain_deadline_secs = drain_secs,
-                "graceful drain deadline exceeded, forcing shutdown"
-            );
-        }
-    }
+    let drain_outcome = http::serve_tls_router(
+        listener,
+        app_router,
+        acceptor,
+        shutdown_rx,
+        Duration::from_secs(drain_secs),
+    )
+    .await;
 
     let _ = redirect_handle.await;
-    Ok(())
+
+    // A drain that did not complete is not a clean shutdown. Report it to the
+    // caller rather than returning early: the caller still has a memtable to
+    // flush and a PID file to remove.
+    match drain_outcome {
+        Ok(()) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(true),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Loads configuration from file, dev mode, or defaults.
@@ -3396,13 +3736,13 @@ fn load_config(
 /// crash the server — the previous config remains in effect.
 ///
 /// After successful reconciliation the `PermissionRegistry` is rebuilt from
-/// the new config and atomically swapped in via `ArcSwap`.
+/// the new config and atomically swapped in via `SwapCell`.
 fn run_config_reconciliation(
     engine: &dyn IdentityEngine,
     rbac: &dyn RbacEngine,
     config_path: Option<&std::path::Path>,
     dev: bool,
-    registry: &arc_swap::ArcSwap<hearth::rbac::registry::PermissionRegistry>,
+    registry: &hearth::core::SwapCell<hearth::rbac::registry::PermissionRegistry>,
 ) {
     let config = match load_config(dev, config_path) {
         Ok(cfg) => cfg,
@@ -3460,7 +3800,7 @@ fn run_config_reconciliation(
 /// Each declared realm's YAML config is compiled into a
 /// [`RealmPermissionRegistry`] and assembled into the global snapshot.
 /// Realms whose config fails validation are skipped with a `warn` log;
-/// the previous registry entry (if any) is preserved by the `ArcSwap`
+/// the previous registry entry (if any) is preserved by the `SwapCell`
 /// caller.
 fn build_permission_registry(config: &Config) -> hearth::rbac::registry::PermissionRegistry {
     use hearth::rbac::registry::PermissionRegistry;
@@ -3636,7 +3976,7 @@ fn run_migrate_keycloak(
         "--data-dir is required for a real migration (use --dry-run to validate without writing)",
     )?;
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, rbac) = build_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, false)?;
     let importer = KeycloakImporter::new(identity, rbac);
@@ -3691,7 +4031,7 @@ fn run_migrate_auth0(
         "--data-dir is required for a real migration (use --dry-run to validate without writing)",
     )?;
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
     let (identity, rbac) = build_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, false)?;
     let importer = Auth0Importer::new(identity, rbac);
@@ -3724,7 +4064,7 @@ fn run_migrate_rotate_pepper(
 
     use hearth::storage::StorageEngine as _;
 
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = EmbeddedStorageEngine::open(storage_config)?;
 
     // List realms stored under the system realm.
@@ -3825,6 +4165,94 @@ fn run_migrate_rotate_pepper(
 /// Opens the storage engine, exports all (or a filtered) set of realms into a
 /// zstd-compressed `.hearth-backup` archive, and prints a per-realm entity count
 /// summary.  Exit code 0 on full success, 2 on any fatal error.
+/// Builds the storage configuration a CLI subcommand opens a **production**
+/// data directory with.
+///
+/// Every such subcommand used `StorageConfig::dev`, which sets
+/// `SyncMode::None` and `dev_mode: true`. `hearth backup restore` and both
+/// migration importers therefore printed success for writes that no `fsync`
+/// had covered, and a power loss right after lost them silently
+/// (audit 2026-08-28 §4.11#13).
+///
+/// Tuning comes from the `[storage]` defaults, so a CLI run behaves like a
+/// default-configured server. A migration importer's throwaway temp directory
+/// keeps the dev config on purpose: nothing in it outlives the command.
+/// Resolves the storage key-encryption key (KEK) from the environment or config.
+///
+/// `HEARTH_KEK` wins; `config_kek` is `security.key_encryption_key`. Accepted
+/// format: 64 lowercase hex characters (32 bytes / AES-256).
+///
+/// This is the ONE place the KEK is resolved (task 26.21). `serve` had this
+/// logic inline and no CLI subcommand had it at all, so `hearth backup create`
+/// opened a KEK-encrypted store with no key and failed telling the operator to
+/// set the very things it never read.
+fn resolve_storage_kek(
+    config_kek: Option<&str>,
+) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
+    let hex_opt = std::env::var("HEARTH_KEK")
+        .ok()
+        .or_else(|| config_kek.map(str::to_string));
+    let Some(hex) = hex_opt else {
+        return Ok(None);
+    };
+    if hex == "0".repeat(64) {
+        return Err(
+            "security.key_encryption_key / HEARTH_KEK must not be the all-zero key \
+                    — generate a random 32-byte (64 hex char) value"
+                .into(),
+        );
+    }
+    let bytes = hex::decode(&hex)
+        .map_err(|e| format!("security.key_encryption_key / HEARTH_KEK is not valid hex: {e}"))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        "security.key_encryption_key / HEARTH_KEK must be exactly 64 hex characters \
+         (32 bytes / AES-256)"
+            .to_string()
+    })?;
+    Ok(Some(hearth::identity::key_encryption::StorageKek::new(arr)))
+}
+
+/// Resolves the KEK for a one-shot CLI subcommand.
+///
+/// `HEARTH_KEK` first, then `security.key_encryption_key` from `config_path`
+/// when one was given. A config that will not parse is an error, not a silent
+/// fall-through to "no KEK" — that would reproduce the original defect with a
+/// friendlier symptom.
+fn resolve_cli_kek(
+    config_path: Option<&std::path::Path>,
+) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
+    if std::env::var_os("HEARTH_KEK").is_some() {
+        return resolve_storage_kek(None);
+    }
+    let Some(path) = config_path else {
+        return Ok(None);
+    };
+    // `from_file_unchecked` on purpose: this command needs exactly one key out
+    // of the file, and running the full production validator here would mean a
+    // config that has drifted — a missing TLS path, say — blocks the backup.
+    // That is the same class of blocker task 26.21 exists to remove.
+    let config = Config::from_file_unchecked(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let kek = config.security.key_encryption_key.clone();
+    resolve_storage_kek(kek.as_deref())
+}
+
+fn cli_storage_config(data_dir: &std::path::Path) -> StorageConfig {
+    let defaults = StorageSection::default();
+    let hot_tier_capacity = defaults.hot_tier_capacity.unwrap_or_else(|| {
+        hearth::storage::auto_size::auto_size_hot_tier_capacity(defaults.hot_tier_max_memory)
+    });
+    let mut config = StorageConfig::production(
+        data_dir.to_path_buf(),
+        defaults.wal_max_size_bytes,
+        defaults.memtable_flush_bytes,
+        hot_tier_capacity,
+    );
+    config.block_cache_bytes = defaults.block_cache_bytes;
+    config.set_hot_tier_per_realm_metrics(defaults.hot_tier_per_realm_metrics);
+    config
+}
+
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn run_backup_create(
     output: Option<&std::path::Path>,
@@ -3832,16 +4260,31 @@ fn run_backup_create(
     include_audit: bool,
     encrypt: bool,
     data_dir: &std::path::Path,
+    config_path: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
     use hearth::core::RealmId;
     use uuid::Uuid;
 
-    std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    // Task 26.26: do NOT create the directory. `backup create` READS a store; a
+    // directory that does not exist holds no store, and creating one turned a
+    // typo'd `--data-dir` into an empty archive and an exit code of 0. The
+    // restore path still creates its target, because restoring into a fresh
+    // directory is the normal case.
+    if !data_dir.exists() {
+        return Err(format!(
+            "data directory '{}' does not exist. `backup create` reads an existing store; \
+             check the path.",
+            data_dir.display()
+        )
+        .into());
+    }
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, audit, rbac) =
-        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+    let (identity, audit, rbac) = build_all_engines(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        resolve_cli_kek(config_path)?,
+    )?;
 
     // Resolve output path — default: `./hearth-backup-<unix_secs>.hearth-backup`
     let out_path = match output {
@@ -3893,79 +4336,178 @@ fn run_backup_create(
         realm_filter: filter_id.as_ref().map(|id| vec![id.clone()]),
     };
 
-    let mut writer = BackupArchive::create(&out_path)?;
-    let mut realm_manifests = Vec::new();
+    // Task 23.5: everything from `BackupArchive::create` onward runs inside
+    // this closure so a failure can delete the file it already created. Each
+    // `?` below used to abandon a partial — usually zero-byte — archive at the
+    // operator's chosen `--output` path. `backup create` with no
+    // `HEARTH_MASTER_KEY`, for instance, exits 2 *after* writing every entity
+    // file, leaving `prod-2026-09-21.hearth-backup` sitting in the backup
+    // directory at 0 bytes. A cron job that only checks "did a file appear"
+    // then reports a healthy backup history over nothing.
+    let build = || -> Result<(), Box<dyn std::error::Error>> {
+        let mut writer = BackupArchive::create(&out_path)?;
+        let mut realm_manifests = Vec::new();
 
-    // Enumerate realms to export.
-    let realms_to_export: Vec<RealmId> = if let Some(id) = filter_id {
-        vec![id]
-    } else {
-        let mut ids = Vec::new();
-        let batch = hearth::core::MAX_PAGE_LIMIT;
-        let mut offset = 0u64;
-        loop {
-            let page = identity
-                .list_realms(&hearth::core::PageRequest::new(offset, batch))
-                .map_err(|e| format!("list_realms: {e}"))?;
-            let n = page.items.len() as u64;
-            for realm in &page.items {
-                ids.push(realm.id().clone());
+        // Enumerate realms to export.
+        let realms_to_export: Vec<RealmId> = if let Some(id) = filter_id {
+            vec![id]
+        } else {
+            let mut ids = Vec::new();
+            let batch = hearth::core::MAX_PAGE_LIMIT;
+            let mut offset = 0u64;
+            loop {
+                let page = identity
+                    .list_realms(&hearth::core::PageRequest::new(offset, batch))
+                    .map_err(|e| format!("list_realms: {e}"))?;
+                let n = page.items.len() as u64;
+                for realm in &page.items {
+                    ids.push(realm.id().clone());
+                }
+                if n == 0 || offset + n >= page.total {
+                    break;
+                }
+                offset += n;
             }
-            if n == 0 || offset + n >= page.total {
-                break;
+
+            // Task 26.39: `list_realms` deliberately hides the system realm
+            // (the nil UUID), so an unfiltered "full" backup contained no
+            // operator-console account at all. Proven by A/B login in audit
+            // re-run 23.5 (B-1): the origin answered 200 at `/ui`, the
+            // instance restored from its own full backup answered 401. The
+            // datacenter-burns runbook therefore produced an archive nobody
+            // could log in to, and neither `create`, `restore` nor `inspect`
+            // said a word about the omission. Named explicitly with `--realm
+            // 00000000-…` the same store exported it fine, so this was an
+            // enumeration gap, not a capability gap.
+            //
+            // Exporting it does put operator identities in the file. That is
+            // already true of every other realm's `credentials.ndjson` and
+            // signing key, and `backup create` refuses to write an archive at
+            // all without `HEARTH_MASTER_KEY` or `--encrypt`: every section is
+            // AES-256-GCM encrypted under a DEK wrapped with Argon2id from
+            // that passphrase. Withholding the system realm bought no
+            // confidentiality the other realms did not already spend, and cost
+            // the restore its only way back in. `--realm <name>` still exports
+            // exactly one realm, so an operator who does not want it in a given
+            // archive can still say so.
+            //
+            // Guarded on `ids` being non-empty, and that guard is load-bearing:
+            // the system realm is seeded during engine construction, so it
+            // exists in *every* store the CLI opens — including a store that
+            // was just created by pointing `--data-dir` at an empty directory.
+            // Appending it unconditionally would make `realms_to_export` never
+            // empty and silently disable the 26.26 refusal below, turning a
+            // mistyped path back into an exit-0 archive holding one
+            // freshly-seeded, userless realm. A store with no tenant realm is
+            // not a store worth backing up.
+            let system_id = RealmId::new(Uuid::nil());
+            if !ids.is_empty()
+                && !ids.contains(&system_id)
+                && identity
+                    .get_realm(&system_id)
+                    .map_err(|e| format!("get_realm(system): {e}"))?
+                    .is_some()
+            {
+                ids.push(system_id);
             }
-            offset += n;
+
+            ids
+        };
+
+        // Task 26.26: an archive with no realms in it is not a backup. This used to
+        // print `warning:` and exit 0, so a typo'd `--data-dir` produced a file
+        // that `backup verify` then called "OK — all checksums match (0 files
+        // verified)". Two commands in a row reported success over nothing.
+        if realms_to_export.is_empty() {
+            return Err(match realm_filter {
+                Some(name) => format!(
+                    "no realm named '{name}' in '{}' — nothing to export",
+                    data_dir.display()
+                ),
+                None => format!(
+                    "no realms found in '{}' — nothing to export. Check --data-dir points at the \
+                 store you meant.",
+                    data_dir.display()
+                ),
+            }
+            .into());
         }
-        ids
+
+        for realm_id in &realms_to_export {
+            let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek)?;
+            tracing::info!(
+                "  exported '{}': {} users, {} clients",
+                realm_manifest.slug,
+                realm_manifest.record_counts.users,
+                realm_manifest.record_counts.clients,
+            );
+            realm_manifests.push(realm_manifest);
+        }
+
+        // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
+        let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
+            if mk.is_empty() {
+                return Err("HEARTH_MASTER_KEY is set but empty".into());
+            }
+            mk
+        } else if encrypt {
+            let p = rpassword::prompt_password("Enter backup passphrase: ")?;
+            let c = rpassword::prompt_password("Confirm passphrase: ")?;
+            if p != c {
+                return Err("passphrases do not match".into());
+            }
+            if p.is_empty() {
+                return Err("passphrase must not be empty".into());
+            }
+            p
+        } else {
+            return Err(
+                "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
+            );
+        };
+        let passphrase = secrecy::SecretString::from(passphrase_str);
+        let (wrapped_dek_b64, wrapping_params) =
+            BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
+        let mut manifest = BackupManifest::new(realm_manifests);
+        manifest.sections_encrypted = true;
+        manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+        manifest.dek_wrapping_params = Some(wrapping_params);
+        writer.finish(manifest)?;
+        Ok(())
     };
 
-    if realms_to_export.is_empty() {
-        tracing::error!("warning: no realms found to export");
+    if let Err(e) = build() {
+        // Leave no half-written archive behind. `remove_file` is best-effort:
+        // if it fails the original error is still the one the operator needs.
+        let _ = std::fs::remove_file(&out_path);
+        return Err(e);
     }
-
-    for realm_id in &realms_to_export {
-        let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek)?;
-        tracing::info!(
-            "  exported '{}': {} users, {} clients",
-            realm_manifest.slug,
-            realm_manifest.record_counts.users,
-            realm_manifest.record_counts.clients,
-        );
-        realm_manifests.push(realm_manifest);
-    }
-
-    // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
-    let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
-        if mk.is_empty() {
-            return Err("HEARTH_MASTER_KEY is set but empty".into());
-        }
-        mk
-    } else if encrypt {
-        let p = rpassword::prompt_password("Enter backup passphrase: ")?;
-        let c = rpassword::prompt_password("Confirm passphrase: ")?;
-        if p != c {
-            return Err("passphrases do not match".into());
-        }
-        if p.is_empty() {
-            return Err("passphrase must not be empty".into());
-        }
-        p
-    } else {
-        return Err(
-            "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
-        );
-    };
-    let passphrase = secrecy::SecretString::from(passphrase_str);
-    let (wrapped_dek_b64, wrapping_params) =
-        BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
-    let mut manifest = BackupManifest::new(realm_manifests);
-    manifest.sections_encrypted = true;
-    manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
-    manifest.dek_wrapping_params = Some(wrapping_params);
-    writer.finish(manifest)?;
 
     tracing::info!("Backup written to: {}", out_path.display());
+    warn_unexported_families("This archive does NOT contain");
     Ok(())
+}
+
+/// Prints every entity family the archive format does not carry (task 26.40).
+///
+/// `restore` fails closed on an *unrecognized* member but has nothing to say
+/// about a *missing category*: the importer's allowlist is the union of what
+/// the exporter writes, so a family nobody exports is a family nobody misses
+/// (audit re-run 23.5). Every accidental omission has since been closed
+/// (OpenSpec 26.40); the one family still listed — sessions — is left out on
+/// purpose, and the row says why.
+///
+/// Until each family round-trips this is the only thing standing between an
+/// operator and a silent loss, so both `create` and `restore` say it out loud.
+fn warn_unexported_families(lead: &str) {
+    tracing::warn!("{lead} the following, which a restore will NOT bring back:");
+    for family in hearth::backup::UNEXPORTED_FAMILIES {
+        tracing::warn!("  - {}: {}", family.family, family.consequence);
+    }
+    tracing::warn!(
+        "  See docs/guides/backup.md § 'What a backup does not carry'. Plan recovery of \
+         these families separately; do not treat a restore as a complete recovery."
+    );
 }
 
 /// Runs `hearth backup restore`.
@@ -3977,8 +4519,10 @@ fn run_backup_restore(
     realm_slug: Option<&str>,
     mode_str: &str,
     dry_run: bool,
+    skip_verify: bool,
     allow_missing_signing_key: bool,
     data_dir: &std::path::Path,
+    config_path: Option<&std::path::Path>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use hearth::backup::{BackupArchive, BackupImporter, ImportOptions, RestoreMode};
 
@@ -3990,11 +4534,46 @@ fn run_backup_restore(
 
     let reader = BackupArchive::open(input)?;
 
+    // Task 26.42: verify BEFORE anything is written.
+    //
+    // `run_backup_restore` used to open the archive and import. It never called
+    // `verify_checksums`, so an archive `hearth backup verify` rejected with
+    // exit 3 — one checksum in the manifest set to 64 zeros — restored with
+    // exit 0 and `users — created: 3` (audit re-run 23.5, B-7). Corruption
+    // detection was opt-in and out of band, while `docs/guides/backup.md`
+    // presented `verify` as *the* integrity gate without saying restore skips
+    // it.
+    //
+    // The placement is load-bearing, not incidental. This runs before
+    // `create_dir_all`, before the storage engine opens, and therefore before
+    // `import_realm_record` writes the realm and its signing key. A restore is
+    // NOT transactional (B-6): a fatal error partway through leaves whatever
+    // was already applied, and the realm record is the first thing written, so
+    // the target was left holding a realm with the archive's signing key and no
+    // users. Making every integrity failure fatal *here* moves the entire class
+    // the report demonstrated — flipped bytes, tampered checksums, elided
+    // members — in front of the first write, which is the property an operator
+    // actually needs. What remains non-atomic is an engine failure mid-import,
+    // and the honest remedy for that is to restore into a fresh data directory;
+    // `docs/guides/backup.md` says so.
+    if skip_verify {
+        tracing::warn!(
+            "--skip-verify: restoring '{}' WITHOUT checking its checksums. A corrupt or \
+             edited archive will be applied without warning.",
+            input.display()
+        );
+    } else {
+        let verified = reader.verify_checksums()?;
+        tracing::info!("integrity OK — {verified} files verified before restore");
+    }
+
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, audit, rbac) =
-        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+    let (identity, audit, rbac) = build_all_engines(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        resolve_cli_kek(config_path)?,
+    )?;
 
     let importer = BackupImporter::new(identity, rbac, audit);
     let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
@@ -4013,6 +4592,10 @@ fn run_backup_restore(
         realm_target: None,
         dek_passphrase,
         allow_missing_signing_key,
+        // The CLI runs with full operator authority on the local data
+        // directory, so it may restore every realm the archive contains. The
+        // HTTP route scopes this to the caller's realm instead (B1).
+        allowed_realm: None,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
@@ -4029,11 +4612,46 @@ fn run_backup_restore(
     for slug in &slugs {
         let report = importer.import_realm(slug, &reader, &opts)?;
         print_import_report(slug, &report);
-        if report.users.errored > 0 || report.clients.errored > 0 || report.realms.errored > 0 {
+        if import_report_had_errors(&report) {
             had_errors = true;
         }
     }
+    warn_unexported_families("This restore did NOT bring back");
     Ok(had_errors)
+}
+
+/// Returns `true` when any entity bucket of `report` recorded a failed import.
+///
+/// The exit-code check used to name three buckets — `users`, `clients` and
+/// `realms` — out of the eleven [`ImportReport`](hearth::backup::ImportReport)
+/// carries. Every role, permission, group, role-assignment, scope,
+/// organization and audit event could fail to import and `hearth backup
+/// restore` still exited 0, having printed nothing about any of them. A
+/// disaster-recovery runbook that trusts the exit code would bring a realm
+/// back with no RBAC at all and be told it succeeded (audit re-run 23.5).
+fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
+    report.realms.errored > 0
+        || report.users.errored > 0
+        || report.mfa_factors.errored > 0
+        || report.clients.errored > 0
+        || report.roles.errored > 0
+        || report.permissions.errored > 0
+        || report.groups.errored > 0
+        || report.group_memberships.errored > 0
+        || report.assignments.errored > 0
+        || report.scopes.errored > 0
+        || report.organizations.errored > 0
+        || report.organization_memberships.errored > 0
+        || report.consents.errored > 0
+        || report.agents.errored > 0
+        || report.identity_providers.errored > 0
+        || report.federation_links.errored > 0
+        || report.webhooks.errored > 0
+        || report.saml_service_providers.errored > 0
+        || report.scim_mappings.errored > 0
+        || report.invitations.errored > 0
+        || report.retiring_signing_keys.errored > 0
+        || report.audit_events.errored > 0
 }
 
 /// Runs `hearth backup verify`.
@@ -4045,11 +4663,25 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
     use hearth::backup::BackupArchive;
 
     let reader = BackupArchive::open(input)?;
-    reader.verify_checksums()?;
-    tracing::info!(
-        "OK — all checksums match ({} files verified)",
-        reader.manifest.checksums.len()
-    );
+    // Task 26.41: the count printed below is the number of files this call
+    // actually read, not `manifest.checksums.len()`. Those differed whenever a
+    // member had been deleted from the archive — `verify` reported "(15 files
+    // verified)" over fourteen — which is precisely the case in which the
+    // number mattered.
+    let verified = reader.verify_checksums()?;
+    // Task 26.26: "all checksums match" over zero checksums is vacuously true,
+    // and it printed `OK — all checksums match (0 files verified)` and exited
+    // 0. An operator reading that has been told their backup is good when the
+    // archive holds nothing. Verification of an empty archive fails.
+    if reader.manifest.checksums.is_empty() {
+        return Err(format!(
+            "'{}' contains no files: there is nothing to verify and nothing to restore. \
+             The export that produced it had no realms.",
+            input.display()
+        )
+        .into());
+    }
+    tracing::info!("OK — all checksums match ({verified} files verified)");
     Ok(())
 }
 
@@ -4086,9 +4718,10 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
         let rc = &r.record_counts;
         tracing::info!("    {slug:<24}  id={id}", slug = r.slug, id = r.realm_id);
         tracing::info!(
-            "      users={u}  credentials={c}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
+            "      users={u}  credentials={c}  mfa_factors={m}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
             u = rc.users,
             c = rc.credentials,
+            m = rc.mfa_factors,
             cl = rc.clients,
             ro = rc.roles,
             g = rc.groups,
@@ -4100,29 +4733,48 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 }
 
 /// Prints an [`ImportReport`](hearth::backup::ImportReport) as a human-readable summary.
+///
+/// Every bucket the report carries is printed, including the zero ones. The
+/// summary used to name four — realms, users, mfa and clients — so a restore
+/// that dropped all ten roles, both groups and every role assignment showed
+/// the operator nothing but `users created: 3` and exited 0 (audit re-run
+/// 23.5). A restore report that hides seven of its eleven entity types is
+/// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
+    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
+        ("realms", &report.realms),
+        ("users", &report.users),
+        ("mfa", &report.mfa_factors),
+        ("clients", &report.clients),
+        ("roles", &report.roles),
+        ("permissions", &report.permissions),
+        ("groups", &report.groups),
+        ("group members", &report.group_memberships),
+        ("assignments", &report.assignments),
+        ("scopes", &report.scopes),
+        ("orgs", &report.organizations),
+        ("org members", &report.organization_memberships),
+        ("consents", &report.consents),
+        ("agents", &report.agents),
+        ("idps", &report.identity_providers),
+        ("federation links", &report.federation_links),
+        ("webhooks", &report.webhooks),
+        ("saml sps", &report.saml_service_providers),
+        ("scim mappings", &report.scim_mappings),
+        ("invitations", &report.invitations),
+        ("retiring keys", &report.retiring_signing_keys),
+        ("audit", &report.audit_events),
+    ];
     tracing::info!("Realm '{slug}':");
-    tracing::info!(
-        "  realms   — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.realms.created,
-        report.realms.skipped,
-        report.realms.overwritten,
-        report.realms.errored
-    );
-    tracing::info!(
-        "  users    — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.users.created,
-        report.users.skipped,
-        report.users.overwritten,
-        report.users.errored
-    );
-    tracing::info!(
-        "  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.clients.created,
-        report.clients.skipped,
-        report.clients.overwritten,
-        report.clients.errored
-    );
+    for (name, counts) in buckets {
+        tracing::info!(
+            "  {name:<12} — created: {}, skipped: {}, overwritten: {}, errored: {}",
+            counts.created,
+            counts.skipped,
+            counts.overwritten,
+            counts.errored
+        );
+    }
     if !report.conflicts.is_empty() {
         tracing::info!("  conflicts ({}):", report.conflicts.len());
         for c in &report.conflicts {
@@ -4156,6 +4808,7 @@ type AllEngines = (
 /// Uses production-mode credential settings since backup operates on live data.
 fn build_all_engines(
     storage: Arc<dyn StorageEngine>,
+    key_encryption_key: Option<hearth::identity::key_encryption::StorageKek>,
 ) -> Result<AllEngines, Box<dyn std::error::Error>> {
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
     let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
@@ -4163,14 +4816,24 @@ fn build_all_engines(
         Arc::clone(&clock),
     ));
     let rbac = Arc::clone(&raw_rbac) as Arc<dyn hearth::rbac::RbacEngine>;
-    let audit = Arc::new(EmbeddedAuditEngine::new(
-        Arc::clone(&storage),
-        Arc::clone(&clock),
-    )) as Arc<dyn hearth::audit::AuditEngine>;
+    // The audit engine needs the SAME KEK as the identity engine: per-realm
+    // audit HMAC keys are HKEY-enveloped at rest exactly like signing keys.
+    // Task 26.21 threaded the KEK into `EmbeddedIdentityEngine` here and
+    // stopped, so on a KEK-encrypted store `hearth backup create
+    // --include-audit` died at `audit HMAC key unwrap failed: ... no
+    // key_encryption_key is configured` — while the very same command without
+    // `--include-audit` succeeded (audit re-run 23.5).
+    let audit_kek = key_encryption_key.as_ref().map(|k| *k.as_bytes());
+    let audit = Arc::new(
+        EmbeddedAuditEngine::new(Arc::clone(&storage), Arc::clone(&clock)).with_kek(audit_kek),
+    ) as Arc<dyn hearth::audit::AuditEngine>;
     let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
-        IdentityConfig::default(),
+        IdentityConfig {
+            key_encryption_key,
+            ..IdentityConfig::default()
+        },
         Arc::clone(&rbac),
         Arc::clone(&audit),
     )?);
@@ -4282,16 +4945,35 @@ fn mime_for_logo(path: &std::path::Path) -> &'static str {
 /// pass. Callers on a failure path can print the `Err` verbatim; a clean `Ok`
 /// tells them the config itself was not the problem.
 ///
-/// `force_dev` applies the same relaxations `--dev` does (`dev_mode`, no
-/// `fsync`) so the report matches the rules the caller was validated under.
+/// `force_dev` applies the same relaxation `--dev` does (`dev_mode`) so the
+/// report matches the rules the caller was validated under.
+///
+/// Audit §4.13#8: this is the validator behind `hearth config validate` *and*
+/// behind the admin visual config editor, which is a raw JSON→YAML passthrough
+/// that writes `hearth.yaml`. It runs `Config::validate_all`, which
+/// `Config::validate` now delegates to, so it can no longer bless a config the
+/// server refuses to start with. The one remaining gate it must apply itself is
+/// the `dev_mode:`-in-a-file refusal, which lives in the checked loader
+/// (`from_yaml_str`) rather than in either validator.
 fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<Config, String> {
+    if !force_dev {
+        match std::fs::read_to_string(file) {
+            Ok(raw) if hearth::config::validate::yaml_declares_dev_mode(&raw) => {
+                return Err(
+                    "✗ Configuration invalid — 1 error(s):\n\n  dev_mode: cannot be set in a \
+                     config file; use `hearth serve --dev` instead\n"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
     let mut config = match Config::from_file_unchecked(file) {
         Ok(c) => c,
         Err(e) => return Err(format!("✗ Configuration invalid\n\n  parse error: {e}\n")),
     };
     if force_dev {
         config.dev_mode = true;
-        config.storage.fsync = false;
     }
 
     // Collect all structural issues in one pass.
@@ -4390,6 +5072,93 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
     }
 }
 
+/// Describes whether the storage engine will find a host key, as `serve` needs.
+///
+/// Returns `None` when it will, and a one-line warning when it will not.
+///
+/// # Task 26.23 — and why this is a warning, not an error
+///
+/// `hearth config validate` answered `✓` on a configuration `hearth serve`
+/// then refused with *"HEARTH_MASTER_KEY is not set and auto-generation is
+/// disabled in production mode"*. The production gates covered `HEARTH_KEK`
+/// and stopped; the storage engine needs its own host key as well.
+///
+/// It does not fail the command, because the host key is a property of the
+/// MACHINE, not of the file being validated: an operator validating a config
+/// on a laptop or in CI, with the key in a secrets manager, is doing something
+/// legitimate, and failing them would be the same "validation disagrees with
+/// reality" defect pointing the other way. Saying so on the success path
+/// closes the gap without inventing a new one.
+///
+/// `serve` accepts EITHER the environment variable or an existing
+/// `{data_dir}/hearth.host_key`, so both satisfy this.
+fn config_validate_host_key_warning(config: &Config) -> Option<String> {
+    if config.dev_mode || config.storage.data_dir.is_empty() {
+        return None;
+    }
+    if std::env::var_os("HEARTH_MASTER_KEY").is_some() {
+        return None;
+    }
+    let host_key = std::path::Path::new(&config.storage.data_dir).join("hearth.host_key");
+    if host_key.exists() {
+        return None;
+    }
+    Some(format!(
+        "HEARTH_MASTER_KEY is unset and '{}' does not exist. Production refuses to \
+         auto-generate a host key, so `hearth serve` will fail to start on a host in this \
+         state even though this configuration is valid. Set HEARTH_MASTER_KEY before \
+         starting, or run this check on the host that already holds the key.",
+        host_key.display()
+    ))
+}
+
+/// Describes the `HEARTH_MASTER_KEY` requirement a MULTI-NODE config carries
+/// that a single-node one does not (task 26.51).
+///
+/// Returns `None` for a single-node configuration, and a one-line note
+/// otherwise.
+///
+/// The key and the KEK wrap data that **replicates**, so every node of a
+/// cluster must hold a byte-identical `HEARTH_MASTER_KEY`. Provisioning three
+/// hosts independently — the obvious reading of "each node gets its own
+/// `hearth.yaml`" — produces three different master keys and a cluster whose
+/// nodes cannot decrypt one another's replicated rows. The string `HEARTH` did
+/// not occur in `docs/guides/clustering.md` at all; the guide has been
+/// corrected, and this closes the same gap in the validator.
+///
+/// [`config_validate_host_key_warning`] does not cover it. That check is
+/// satisfied by an existing `{data_dir}/hearth.host_key`, which is exactly the
+/// per-node, auto-generated key that is *wrong* in a cluster — so on a node
+/// that has already run once it stays silent on the very configuration that
+/// will fail.
+///
+/// A warning rather than an error, for the reason task 26.23 established: the
+/// key is a property of the machine, not of the file being validated, and
+/// validating a cluster config on a laptop is legitimate. Nor can this check
+/// compare the value against the other nodes' — which is why the note is
+/// emitted even when the variable *is* set.
+fn config_validate_cluster_master_key_warning(config: &Config) -> Option<String> {
+    let cluster = config.cluster.as_ref()?;
+    if cluster.peers.is_empty() {
+        return None;
+    }
+    let node_count = cluster.peers.len() + 1;
+    if std::env::var_os("HEARTH_MASTER_KEY").is_some() {
+        return Some(format!(
+            "HEARTH_MASTER_KEY is set, and this is a {node_count}-node cluster configuration. \
+             The master key and the KEK wrap data that REPLICATES, so the value must be \
+             byte-identical on every node — this check can only see the local one."
+        ));
+    }
+    Some(format!(
+        "HEARTH_MASTER_KEY is unset and this is a {node_count}-node cluster configuration. \
+         A cluster node must NOT auto-generate its own host key: the master key and the KEK \
+         wrap data that replicates, so a node with a different key cannot decrypt rows its \
+         peers wrote. Set one value for HEARTH_MASTER_KEY and export the SAME value on every \
+         node before starting any of them."
+    ))
+}
+
 /// Checks TLS cert/key/CA file existence and appends issues when files are missing.
 fn config_validate_tls_files(config: &Config, issues: &mut Vec<ValidationIssue>) {
     for (field, path_opt) in [
@@ -4431,6 +5200,19 @@ fn config_validate_print_summary(config: &Config) {
     println!("  storage:          {}", config.storage.data_dir);
     println!("  email transport:  {email_transport}");
     println!("  TLS:              {tls_mode}");
+
+    // Task 26.23: a valid file is not the same as a server that will start.
+    if let Some(warning) = config_validate_host_key_warning(config) {
+        println!();
+        println!("  ! storage host key: {warning}");
+    }
+
+    // Task 26.51: a multi-node config carries a requirement a single-node one
+    // does not, and the host-key check above cannot see it.
+    if let Some(warning) = config_validate_cluster_master_key_warning(config) {
+        println!();
+        println!("  ! cluster master key: {warning}");
+    }
 }
 
 /// Returns an actionable hint for well-known validation issues.
@@ -4505,7 +5287,7 @@ fn run_rbac_orphans_list(
     use hearth::storage::StorageEngine as _;
 
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
 
     // `rba:user_perm:` is the key prefix for user extra-permission grants.
@@ -4540,7 +5322,7 @@ fn run_rbac_orphans_purge(
     use hearth::storage::StorageEngine as _;
 
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
 
     let scan_start: &[u8] = b"rba:user_perm:";
@@ -4680,6 +5462,797 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── An empty backup must not report success (task 26.26) ──────────────
+
+    /// A `--data-dir` that does not exist must fail, not be created.
+    ///
+    /// `backup create` ran `create_dir_all` on its `--data-dir`, so a typo
+    /// produced a brand-new empty store, exported zero realms, printed only
+    /// `warning: no realms found to export`, and **exited 0**. `backup verify`
+    /// then answered `OK — all checksums match (0 files verified)` and also
+    /// exited 0. Two commands in a row reported success over nothing, and the
+    /// operator's pre-upgrade backup was an empty file.
+    #[test]
+    fn backup_create_refuses_a_data_dir_that_does_not_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("typo");
+        let out = dir.path().join("out.hearth-backup");
+
+        let err = run_backup_create(Some(&out), None, false, false, &missing, None)
+            .expect_err("a nonexistent data directory must be refused");
+
+        assert!(
+            err.to_string().contains("does not exist"),
+            "the error must say what is wrong with the path; got: {err}"
+        );
+        assert!(
+            !missing.exists(),
+            "the command must not CREATE the directory it was asked to read"
+        );
+        assert!(!out.exists(), "no archive may be written");
+    }
+
+    // ── Audit re-run 23.5: backup create / restore failure reporting ──────
+
+    /// A failed `backup create` must not leave its half-written archive behind.
+    ///
+    /// `BackupArchive::create` opens the output file before a single realm is
+    /// read, and every `?` after it returned without touching that file. The
+    /// mandatory-encryption gate is the worst case: it fires *after* every
+    /// entity file has been written, so `hearth backup create -o
+    /// /backups/nightly.hearth-backup` with no `HEARTH_MASTER_KEY` exits 2 and
+    /// leaves a zero-byte `nightly.hearth-backup` in the backup directory. A
+    /// cron wrapper that checks only "did a file appear" reports a healthy
+    /// backup history over nothing.
+    #[test]
+    fn backup_create_removes_the_partial_archive_when_it_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let out = dir.path().join("partial.hearth-backup");
+
+        // The master key MUST be set, or the store never opens and the
+        // archive is never created — which would make this test vacuous. With
+        // it set, `BackupArchive::create` opens `out`, the realm enumeration
+        // finds nothing, and the error is raised with the file already there.
+        std::env::set_var("HEARTH_MASTER_KEY", "d4".repeat(32));
+        let err = run_backup_create(Some(&out), None, false, false, &data_dir, None)
+            .expect_err("the export must fail");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        assert!(
+            err.to_string().contains("nothing to export"),
+            "the failure must be the one raised AFTER the archive file is \
+             opened, or this test proves nothing; got: {err}"
+        );
+        assert!(
+            !out.exists(),
+            "a failed `backup create` must not leave a file at the operator's \
+             --output path"
+        );
+    }
+
+    /// Rewrites the archive at `src` into `dst`, dropping `drop_member`.
+    ///
+    /// `manifest.json` is copied through untouched, so the result is an archive
+    /// whose manifest still checksums a file that is no longer there — exactly
+    /// what the audit re-run produced by hand with `tar`.
+    fn repack_without(src: &std::path::Path, dst: &std::path::Path, drop_member: &str) {
+        use std::io::Read as _;
+
+        let decoder = zstd::Decoder::new(std::fs::File::open(src).expect("open src")).expect("dec");
+        let mut archive = tar::Archive::new(decoder);
+        let encoder =
+            zstd::Encoder::new(std::fs::File::create(dst).expect("create dst"), 0).expect("enc");
+        let mut builder = tar::Builder::new(encoder);
+        let mut dropped = false;
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let path = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read");
+            if path == drop_member {
+                dropped = true;
+                continue;
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &path, bytes.as_slice())
+                .expect("append");
+        }
+        builder
+            .into_inner()
+            .expect("into_inner")
+            .finish()
+            .expect("finish");
+        assert!(
+            dropped,
+            "the member '{drop_member}' was not in the archive — the mutation \
+             this test depends on did not happen"
+        );
+    }
+
+    /// An unfiltered `backup create` must export the system realm (task 26.39).
+    ///
+    /// `list_realms` deliberately hides the nil-UUID system realm, and the
+    /// unfiltered export enumerated realms through it — so a "full" backup
+    /// contained no operator-console account. The audit re-run proved it by
+    /// A/B login: the origin answered 200 at `/ui`, an instance restored from
+    /// its own full backup answered 401 (23.5, B-1). Nothing in `create`,
+    /// `restore` or `inspect` mentioned that the realm holding the only
+    /// administrative identity had been skipped.
+    #[test]
+    fn backup_create_exports_the_system_realm_in_a_full_export() {
+        use hearth::identity::{CreateRealmRequest, CreateUserRequest};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let master_key = "c3".repeat(32);
+        std::env::set_var("HEARTH_MASTER_KEY", &master_key);
+
+        let system_id = hearth::core::RealmId::new(uuid::Uuid::nil());
+        {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, ..) = build_all_engines(Arc::clone(&storage), None).expect("engines");
+            // Engine construction seeds the system realm. A tenant realm beside
+            // it makes "full" mean more than one realm, so the assertion below
+            // cannot pass just because the export found *something*.
+            identity
+                .create_realm(&CreateRealmRequest {
+                    name: "tenant".to_string(),
+                    config: None,
+                })
+                .expect("tenant realm");
+            // `create_admin_user` is the only path into the system realm —
+            // plain `create_user` answers `SystemRealmProtected` there. This is
+            // exactly the account an operator signs in to `/ui/admin` with.
+            identity
+                .create_admin_user(&CreateUserRequest {
+                    email: "operator@hearth.test".to_string(),
+                    display_name: "Operator".to_string(),
+                    ..Default::default()
+                })
+                .expect("operator account in the system realm");
+        }
+
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
+        let out = dir.path().join("full.hearth-backup");
+        run_backup_create(Some(&out), None, false, false, &copy, None).expect("full export");
+
+        let reader = hearth::backup::BackupArchive::open(&out).expect("open archive");
+        let expected_id = system_id.to_string();
+        let system = reader
+            .realms()
+            .iter()
+            .find(|r| r.realm_id == expected_id)
+            .expect(
+                "an unfiltered backup must carry the system realm — it holds every \
+                 operator-console account, and a restore without it leaves nobody \
+                 able to log in",
+            );
+        assert!(
+            reader.realms().len() >= 2,
+            "the tenant realm must still be exported too"
+        );
+
+        // The manifest's count is a claim. Decrypt the member and read the
+        // account out of it, so this proves the DATA round-trips rather than
+        // that the exporter did not error.
+        let dek = hearth::backup::unwrap_dek(
+            reader
+                .manifest
+                .wrapped_dek_b64
+                .as_deref()
+                .expect("wrapped DEK"),
+            reader
+                .manifest
+                .dek_wrapping_params
+                .as_ref()
+                .expect("DEK wrapping params"),
+            &secrecy::SecretString::from(master_key.clone()),
+        )
+        .expect("unwrap DEK");
+        let member = format!("realms/{}/users.ndjson", system.slug);
+        let raw = reader
+            .read_file(&member)
+            .expect("read member")
+            .expect("the system realm's users.ndjson must be in the archive");
+        let plain = hearth::backup::decrypt_bytes(&raw, &dek).expect("decrypt");
+        let text = String::from_utf8_lossy(&plain);
+        assert!(
+            text.contains("operator@hearth.test"),
+            "the operator account must be IN the archive, not merely counted"
+        );
+
+        // The system realm is seeded during engine construction, so it exists
+        // in EVERY store the CLI opens — including one the operator just
+        // created by mistyping `--data-dir` at an empty directory. Including it
+        // must therefore not make `realms_to_export` unconditionally non-empty
+        // and silently disable task 26.26's refusal.
+        let empty_store = dir.path().join("empty-store");
+        std::fs::create_dir_all(&empty_store).expect("empty store");
+        let out_empty = dir.path().join("empty.hearth-backup");
+        let err = run_backup_create(Some(&out_empty), None, false, false, &empty_store, None)
+            .expect_err("a store with no tenant realm must still be refused");
+        assert!(
+            err.to_string().contains("nothing to export"),
+            "the system realm must not resurrect the empty-archive defect; got: {err}"
+        );
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    /// `backup restore` must verify the archive before it writes (task 26.42).
+    ///
+    /// It opened the archive and imported. It never called `verify_checksums`,
+    /// so an archive `hearth backup verify` rejected with exit 3 restored with
+    /// exit 0 (audit re-run 23.5, B-7). Worse, `import_realm_record` writes the
+    /// realm and its signing key first, so a fatal failure later left the
+    /// target holding a realm with no users (B-6). Verification now runs before
+    /// the data directory is even created, so an integrity failure cannot leave
+    /// a partial realm behind.
+    #[test]
+    fn restore_verifies_the_archive_before_writing_anything() {
+        use hearth::identity::{CreateRealmRequest, CreateUserRequest};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        std::env::set_var("HEARTH_MASTER_KEY", "e5".repeat(32));
+
+        {
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let (identity, ..) = build_all_engines(Arc::clone(&storage), None).expect("engines");
+            let realm = identity
+                .create_realm(&CreateRealmRequest {
+                    name: "tenant".to_string(),
+                    config: None,
+                })
+                .expect("realm");
+            identity
+                .create_user(
+                    realm.id(),
+                    &CreateUserRequest {
+                        email: "someone@example.test".to_string(),
+                        display_name: "Someone".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .expect("user");
+        }
+
+        let copy = dir.path().join("copy");
+        copy_dir_recursive(&data_dir, &copy).expect("copy data dir");
+        let good = dir.path().join("good.hearth-backup");
+        run_backup_create(Some(&good), None, false, false, &copy, None).expect("export");
+
+        // Control: the unmodified archive restores. Without this the assertion
+        // below could pass because the archive was never restorable at all.
+        let control_target = dir.path().join("control-target");
+        run_backup_restore(
+            &good,
+            Some("tenant"),
+            "skip",
+            true, // dry run — do not take the data-directory lock for real
+            false,
+            true,
+            &control_target,
+            None,
+        )
+        .expect("the control archive must restore");
+
+        // Now delete a member and leave its checksum in the manifest — the
+        // `elide-users` mutation from the report, which `verify` called
+        // "OK — all checksums match" and `restore` applied with exit 0.
+        let elided = dir.path().join("elided.hearth-backup");
+        repack_without(&good, &elided, "realms/tenant/users.ndjson");
+
+        let target = dir.path().join("target");
+        let err = run_backup_restore(
+            &elided,
+            Some("tenant"),
+            "skip",
+            false,
+            false,
+            true,
+            &target,
+            None,
+        )
+        .expect_err("a restore must refuse an archive that fails verification");
+        assert!(
+            err.to_string().contains("users.ndjson"),
+            "the refusal must name the missing member; got: {err}"
+        );
+        assert!(
+            !target.exists(),
+            "the refusal must land BEFORE the target data directory is created, \
+             or a fatal restore leaves a partial realm behind"
+        );
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    /// The restore exit code must account for every entity bucket.
+    ///
+    /// It named three of the eleven, so a restore in which every role,
+    /// permission, group, assignment, scope and organization failed still
+    /// exited 0.
+    #[test]
+    fn restore_exit_code_counts_every_entity_bucket() {
+        use hearth::backup::{EntityCounts, ImportReport};
+
+        let errored = EntityCounts {
+            created: 0,
+            skipped: 0,
+            overwritten: 0,
+            errored: 1,
+        };
+        /// Names one bucket and the setter that fills it.
+        type BucketSetter = (&'static str, fn(&mut ImportReport, EntityCounts));
+
+        // One bucket at a time, so a fix that only widens the check partially
+        // still fails here.
+        let mutators: Vec<BucketSetter> = vec![
+            ("realms", |r, c| r.realms = c),
+            ("users", |r, c| r.users = c),
+            ("mfa_factors", |r, c| r.mfa_factors = c),
+            ("clients", |r, c| r.clients = c),
+            ("roles", |r, c| r.roles = c),
+            ("permissions", |r, c| r.permissions = c),
+            ("groups", |r, c| r.groups = c),
+            ("assignments", |r, c| r.assignments = c),
+            ("scopes", |r, c| r.scopes = c),
+            ("organizations", |r, c| r.organizations = c),
+            ("audit_events", |r, c| r.audit_events = c),
+        ];
+
+        let clean = ImportReport::default();
+        assert!(
+            !import_report_had_errors(&clean),
+            "a report with no failures must not report errors"
+        );
+
+        for (name, set) in mutators {
+            let mut report = ImportReport::default();
+            set(&mut report, errored.clone());
+            assert!(
+                import_report_had_errors(&report),
+                "a restore whose `{name}` bucket errored must set the partial \
+                 exit code; it was reported as a clean success"
+            );
+        }
+    }
+
+    /// `build_all_engines` must hand the audit engine the same KEK as identity.
+    ///
+    /// Per-realm audit HMAC keys are HKEY-enveloped at rest exactly like
+    /// signing keys. The audit engine was constructed without the KEK, so on a
+    /// KEK-encrypted store `hearth backup create --include-audit` died with
+    /// `audit HMAC key unwrap failed: ... no key_encryption_key is configured`
+    /// — while the same command without `--include-audit` succeeded, which is
+    /// why it went unnoticed.
+    #[test]
+    fn build_all_engines_gives_the_audit_engine_the_kek() {
+        use hearth::audit::{AuditAction, AuditEngine, CreateAuditEvent, EmbeddedAuditEngine};
+        use hearth::core::{Clock, RealmId, SystemClock};
+        use hearth::identity::key_encryption::StorageKek;
+        use hearth::storage::{EmbeddedStorageEngine, StorageEngine};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let kek_bytes = [7u8; 32];
+        let realm = RealmId::new(uuid::Uuid::from_u128(0x2305));
+
+        // `cli_storage_config` opens a PRODUCTION store, which wraps its
+        // on-disk key registry under the host master key. nextest gives each
+        // test its own process, so setting it here cannot leak sideways.
+        std::env::set_var("HEARTH_MASTER_KEY", "c3".repeat(32));
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(cli_storage_config(dir.path())).expect("open store"),
+        );
+
+        // Seed an ENVELOPED audit chain key with an engine that definitely has
+        // the KEK, so the assertion below cannot pass by both sides agreeing
+        // on "no KEK at all".
+        {
+            let seeder = EmbeddedAuditEngine::new(
+                Arc::clone(&storage) as Arc<dyn StorageEngine>,
+                Arc::new(SystemClock) as Arc<dyn Clock>,
+            )
+            .with_kek(Some(kek_bytes));
+            seeder
+                .append(&CreateAuditEvent {
+                    realm_id: realm.clone(),
+                    actor: "user_seed".to_string(),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: "user_seed".to_string(),
+                    metadata: None,
+                })
+                .expect("seed one audit event under the KEK");
+        }
+
+        let (_identity, audit, _rbac) = build_all_engines(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Some(StorageKek::new(kek_bytes)),
+        )
+        .expect("build engines");
+
+        // This is exactly what `backup create --include-audit` calls.
+        let material = audit
+            .export_chain_material(&realm)
+            .expect("the audit engine must be able to unwrap its own chain key");
+        assert!(
+            material.is_some(),
+            "the seeded realm has an audit chain; export must return it"
+        );
+    }
+
+    /// An existing but empty store must fail too.
+    ///
+    /// This is the other half: `--data-dir` can point at a real directory that
+    /// simply holds no realms — a fresh `data/` beside the real one, say. An
+    /// archive with no realms in it is not a backup.
+    #[test]
+    fn backup_create_refuses_a_store_with_no_realms() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
+        let out = dir.path().join("empty.hearth-backup");
+
+        let err = run_backup_create(Some(&out), None, false, false, &data_dir, None)
+            .expect_err("an export with no realms must be refused");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        assert!(
+            err.to_string().contains("nothing to export"),
+            "the error must say the archive would be empty; got: {err}"
+        );
+    }
+
+    // ── `config validate` must agree with `serve` (task 26.23) ────────────
+
+    /// A production config with no host key must be reported, because `serve`
+    /// refuses it.
+    ///
+    /// `hearth config validate` answered `✓` and `serve` then failed with
+    /// "HEARTH_MASTER_KEY is not set and auto-generation is disabled in
+    /// production mode" — the one thing a pre-flight check exists not to do.
+    /// The production gates covered `HEARTH_KEK` and stopped.
+    #[test]
+    fn config_validate_reports_a_missing_storage_host_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let warning = config_validate_host_key_warning(&config)
+            .expect("a config serve will refuse must be reported");
+        assert!(
+            warning.contains("HEARTH_MASTER_KEY"),
+            "the report must name the variable that fixes it; got: {warning}"
+        );
+    }
+
+    /// Control — the environment variable satisfies it.
+    #[test]
+    fn config_validate_accepts_a_master_key_in_the_environment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HEARTH_MASTER_KEY", "cd".repeat(32));
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let warning = config_validate_host_key_warning(&config);
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        assert!(
+            warning.is_none(),
+            "HEARTH_MASTER_KEY must satisfy it: {warning:?}"
+        );
+    }
+
+    /// Control — an existing host-key file satisfies it too.
+    ///
+    /// `serve` accepts either, so a check that demanded the environment
+    /// variable would refuse every already-initialised deployment.
+    #[test]
+    fn config_validate_accepts_an_existing_host_key_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        std::fs::write(dir.path().join("hearth.host_key"), [0u8; 72]).expect("write host key");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let warning = config_validate_host_key_warning(&config);
+
+        assert!(
+            warning.is_none(),
+            "an existing hearth.host_key must satisfy it: {warning:?}"
+        );
+    }
+
+    // ── Cluster master key (task 26.51) ───────────────────────────────────
+
+    fn cluster_config_with_peers(n_peers: usize) -> hearth::config::ClusterConfig {
+        hearth::config::ClusterConfig {
+            node_id: 1,
+            peer_address: "10.0.0.1:8421".to_string(),
+            peers: (0..n_peers)
+                .map(|i| hearth::config::PeerConfig {
+                    id: (i + 2) as u64,
+                    address: format!("10.0.0.{}:8421", i + 2),
+                })
+                .collect(),
+            tls_cert_path: std::path::PathBuf::from("/etc/hearth/node.crt"),
+            tls_key_path: std::path::PathBuf::from("/etc/hearth/node.key"),
+            tls_ca_cert_path: std::path::PathBuf::from("/etc/hearth/ca.crt"),
+            read_lag_threshold_ms: None,
+            write_timeout_ms: None,
+        }
+    }
+
+    /// A multi-node config with no master key must be reported — and reported
+    /// even though an existing `hearth.host_key` satisfies the single-node
+    /// check, because a per-node auto-generated host key is precisely what is
+    /// wrong in a cluster.
+    #[test]
+    fn config_validate_reports_a_missing_cluster_master_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        std::fs::write(dir.path().join("hearth.host_key"), [0u8; 72]).expect("write host key");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.storage.data_dir = dir.path().display().to_string();
+        config.cluster = Some(cluster_config_with_peers(2));
+
+        assert!(
+            config_validate_host_key_warning(&config).is_none(),
+            "fixture broken: the single-node check must be satisfied here, otherwise this \
+             test does not show the cluster-specific gap"
+        );
+        let warning = config_validate_cluster_master_key_warning(&config)
+            .expect("a multi-node config without a shared master key must be reported");
+        assert!(
+            warning.contains("HEARTH_MASTER_KEY") && warning.contains("SAME value on every"),
+            "the report must name the variable and the identical-across-nodes rule; got: \
+             {warning}"
+        );
+    }
+
+    /// Set is not the same as shared: the note still has to say so, because
+    /// nothing local can compare this node's value against its peers'.
+    #[test]
+    fn config_validate_still_notes_the_identical_key_rule_when_it_is_set() {
+        std::env::set_var("HEARTH_MASTER_KEY", "ab".repeat(32));
+        let mut config = Config::dev();
+        config.dev_mode = false;
+        config.cluster = Some(cluster_config_with_peers(2));
+
+        let warning = config_validate_cluster_master_key_warning(&config);
+        std::env::remove_var("HEARTH_MASTER_KEY");
+
+        let warning = warning.expect("a multi-node config must still carry the shared-key note");
+        assert!(
+            warning.contains("byte-identical on every node"),
+            "got: {warning}"
+        );
+    }
+
+    /// Control — a single-node config carries no such requirement.
+    #[test]
+    fn config_validate_does_not_mention_a_cluster_master_key_without_peers() {
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let mut config = Config::dev();
+        config.dev_mode = false;
+
+        assert!(
+            config_validate_cluster_master_key_warning(&config).is_none(),
+            "a config with no cluster section must not be told about cluster keys"
+        );
+
+        config.cluster = Some(cluster_config_with_peers(0));
+        assert!(
+            config_validate_cluster_master_key_warning(&config).is_none(),
+            "a cluster section with no peers replicates to nobody"
+        );
+    }
+
+    /// Control — dev mode auto-generates, so it must not be reported.
+    #[test]
+    fn config_validate_does_not_demand_a_host_key_in_dev_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("HEARTH_MASTER_KEY");
+        let mut config = Config::dev();
+        config.storage.data_dir = dir.path().display().to_string();
+
+        let warning = config_validate_host_key_warning(&config);
+
+        assert!(
+            warning.is_none(),
+            "dev mode generates its own host key: {warning:?}"
+        );
+    }
+
+    // ── Backup against a KEK-encrypted store (task 26.21) ─────────────────
+
+    /// `hearth backup create` must export a store whose signing keys are
+    /// KEK-encrypted.
+    ///
+    /// It could not, by any route. `run_backup_create` built its engines with
+    /// `IdentityConfig::default()`, which carries no key-encryption key, so the
+    /// export hit an `HKEY` envelope it had no key for and failed with
+    /// *"set security.key_encryption_key in hearth.yaml or the HEARTH_KEK
+    /// environment variable"* — while both were set. There was no `--config`
+    /// flag and nothing read the environment variable, so the error named two
+    /// remedies and neither existed.
+    ///
+    /// Production requires a KEK, which made the pre-upgrade backup that
+    /// `docs/guides/upgrading.md` calls mandatory impossible on every
+    /// production deployment.
+    #[test]
+    fn backup_create_exports_a_kek_encrypted_store() {
+        use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let kek_hex = "a1".repeat(32);
+        // The production storage config needs its own master key; it is
+        // unrelated to the KEK under test and just has to be present.
+        std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
+
+        // Write a realm whose signing key is wrapped with the KEK.
+        {
+            std::fs::create_dir_all(&data_dir).expect("data dir");
+            let storage = Arc::new(
+                EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
+            ) as Arc<dyn StorageEngine>;
+            let kek = resolve_storage_kek(Some(&kek_hex))
+                .expect("valid kek")
+                .expect("kek present");
+            let (identity, ..) =
+                build_all_engines(Arc::clone(&storage), Some(kek)).expect("engines");
+            let realm = identity
+                .create_realm(&CreateRealmRequest {
+                    name: "kek-realm".to_string(),
+                    config: None,
+                })
+                .expect("create realm");
+            let user = identity
+                .create_user(
+                    realm.id(),
+                    &CreateUserRequest {
+                        email: "kek@example.test".to_string(),
+                        display_name: "Kek".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .expect("create user");
+            let session = identity
+                .create_session(realm.id(), user.id(), &SessionContext::default())
+                .expect("session");
+            // Minting a token is what forces the realm's signing key into
+            // storage inside an HKEY envelope.
+            identity
+                .issue_tokens(realm.id(), user.id(), session.id())
+                .expect("issue tokens");
+        }
+
+        // Each invocation gets its own copy of the store. The engines
+        // `build_all_engines` wires hold one another, so the data-directory
+        // lock is not released until the process exits — harmless for a
+        // one-shot CLI, fatal for three calls inside one test.
+        let copy_of = |name: &str| {
+            let dst = dir.path().join(name);
+            copy_dir_recursive(&data_dir, &dst).expect("copy data dir");
+            dst
+        };
+
+        // Control: with no KEK anywhere, the export must still FAIL. Without
+        // this, a store whose keys were never encrypted would pass the
+        // assertions below and prove nothing.
+        std::env::remove_var("HEARTH_KEK");
+        let out0 = dir.path().join("out0.hearth-backup");
+        assert!(
+            run_backup_create(Some(&out0), None, false, false, &copy_of("d0"), None).is_err(),
+            "sanity: this store really is KEK-encrypted, so an export with no \
+             KEK must fail"
+        );
+
+        // The environment variable the error message names.
+        let out = dir.path().join("out.hearth-backup");
+        std::env::set_var("HEARTH_KEK", &kek_hex);
+        run_backup_create(Some(&out), None, false, false, &copy_of("d1"), None)
+            .expect("HEARTH_KEK must make the export work — the error says so");
+        assert!(out.exists(), "the archive must be written");
+        std::env::remove_var("HEARTH_KEK");
+
+        // And the other remedy the error message names: a config file.
+        let cfg_path = dir.path().join("hearth.yaml");
+        std::fs::write(
+            &cfg_path,
+            format!("security:\n  key_encryption_key: \"{kek_hex}\"\n"),
+        )
+        .expect("write config");
+        let out2 = dir.path().join("out2.hearth-backup");
+        run_backup_create(
+            Some(&out2),
+            None,
+            false,
+            false,
+            &copy_of("d2"),
+            Some(cfg_path.as_path()),
+        )
+        .expect("--config must make the export work — the error says so too");
+        assert!(out2.exists(), "the archive must be written");
+
+        std::env::remove_var("HEARTH_MASTER_KEY");
+    }
+
+    /// Copies `src` to `dst` recursively. Test-only.
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let to = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir_recursive(&entry.path(), &to)?;
+            } else {
+                std::fs::copy(entry.path(), to)?;
+            }
+        }
+        Ok(())
+    }
+
+    // ── CLI storage config (audit 2026-08-28 §4.11#13) ────────────────────
+
+    /// Every CLI subcommand that opens a production data directory must open it
+    /// with the production storage configuration.
+    ///
+    /// They all used `StorageConfig::dev`, which sets `SyncMode::None` and
+    /// `dev_mode: true`. `hearth backup restore` and both migration importers
+    /// therefore reported success for writes no `fsync` had covered: a power
+    /// loss straight after a restore lost it, silently.
+    #[test]
+    fn cli_storage_config_is_a_production_config() {
+        use hearth::storage::wal::SyncMode;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cli_storage_config(dir.path());
+
+        assert_eq!(
+            cfg.wal_config.sync_mode,
+            SyncMode::EveryWrite,
+            "a CLI subcommand must not acknowledge a write no fsync covered"
+        );
+        assert!(
+            !cfg.dev_mode,
+            "a CLI subcommand must not open a production data directory in dev mode"
+        );
+        assert_eq!(
+            cfg.data_dir,
+            dir.path(),
+            "the config must open the directory it was given"
+        );
+
+        // Tuning must match a default-configured server, not dev defaults.
+        let defaults = StorageSection::default();
+        assert_eq!(cfg.wal_config.max_size, defaults.wal_max_size_bytes);
+        assert_eq!(cfg.block_cache_bytes, defaults.block_cache_bytes);
+    }
 
     // ── init_cli_tracing (HEA-2143 silent-CLI gate) ───────────────────────
 
@@ -4933,6 +6506,49 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("RATE LIMITERS DISABLED")),
             "panel must not mention disabled limiters during normal operation: {lines:?}"
+        );
+    }
+
+    // ── build_startup_panel URL scheme (OpenID conformance run 2026-09-21) ──
+
+    fn panel_stats_tls(tls: bool) -> StartupStats {
+        StartupStats {
+            tls,
+            ..panel_stats(false)
+        }
+    }
+
+    #[test]
+    fn startup_panel_uses_https_urls_when_tls_is_enabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, false, Some("tok"), None, &panel_stats_tls(true));
+        let urls: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("127.0.0.1:8420"))
+            .collect();
+        assert!(!urls.is_empty(), "panel must print at least one URL");
+        for line in &urls {
+            assert!(
+                line.contains("https://127.0.0.1:8420"),
+                "TLS is on, so every printed URL must be https — a plaintext URL against the \
+                 TLS listener does not connect at all: {line}"
+            );
+            assert!(
+                !line.contains("http://127.0.0.1:8420"),
+                "panel must not print a plaintext URL while TLS is enabled: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_panel_uses_http_urls_when_tls_is_disabled() {
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, Some("tok"), None, &panel_stats_tls(false));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("http://127.0.0.1:8420") && !l.contains("https://")),
+            "plaintext listener must still advertise http: {lines:?}"
         );
     }
 

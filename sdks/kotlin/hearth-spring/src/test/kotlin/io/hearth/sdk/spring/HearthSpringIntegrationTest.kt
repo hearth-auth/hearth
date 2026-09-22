@@ -15,11 +15,13 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Bean
 import org.springframework.http.HttpHeaders
+import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.security.web.SecurityFilterChain
+import org.springframework.security.web.authentication.HttpStatusEntryPoint
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
@@ -147,6 +149,13 @@ class HearthSpringIntegrationTest {
     @SpringBootApplication(scanBasePackages = ["io.hearth.sdk.spring"])
     open class TestApplication {
 
+        // Registered explicitly, not by component scan: Spring Boot's
+        // TestTypeExcludeFilter drops every class nested inside a test class
+        // from scanning, so a scan-only TestController yields 404 on every
+        // route (audit 2026-08-28 §25.8).
+        @Bean
+        open fun testController(): TestController = TestController()
+
         @Bean
         open fun mockHearthClient(): HearthClient = mockk(relaxed = true)
 
@@ -169,7 +178,11 @@ class HearthSpringIntegrationTest {
                     auth.requestMatchers("/protected/**").authenticated()
                     auth.anyRequest().authenticated()
                 }
-                .exceptionHandling { }
+                // A bearer-token API answers a missing/!unusable credential with
+                // 401, not Spring Security's default 403 entry point.
+                .exceptionHandling {
+                    it.authenticationEntryPoint(HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+                }
             return http.build()
         }
     }

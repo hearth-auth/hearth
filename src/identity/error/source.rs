@@ -78,6 +78,8 @@ impl std::error::Error for IdentityError {
             | Self::FederationNotLinked
             | Self::FederationAlreadyLinked
             | Self::SystemRealmProtected { .. }
+            | Self::RealmNotArchived
+            | Self::YamlManagedResource { .. }
             | Self::DuplicateScimExternalId
             | Self::ConfigInvalid { .. }
             | Self::Serialization { .. }
@@ -89,6 +91,7 @@ impl std::error::Error for IdentityError {
             | Self::PasswordReused
             | Self::PasswordCompromised
             | Self::AuthMethodNotAllowed { .. }
+            | Self::MfaMethodNotAllowed { .. }
             | Self::WebhookNotFound
             | Self::StepUpChallengeRequired
             | Self::EnrollMfaRequired

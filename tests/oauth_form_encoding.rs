@@ -32,9 +32,9 @@ fn make_realm(harness: &common::TestHarness) -> String {
 }
 
 /// RFC 7009 §2.1 — `POST /realms/{realm}/revoke` MUST accept a form body.
-/// An unknown token yields 200 per RFC 7009 (no information leakage), so a
-/// form body carrying a bogus token proves the endpoint parses the form
-/// (previously 415).
+/// The route requires client authentication (audit 2026-08-28 §4.1#3), so an
+/// anonymous form body yields 401 `client_id required` — reaching that check
+/// proves the form parsed (previously 415).
 #[tokio::test]
 async fn realm_revoke_accepts_form_encoded_body() {
     let h = common::TestHarness::server().await.expect("server harness");
@@ -53,11 +53,11 @@ async fn realm_revoke_accepts_form_encoded_body() {
         .as_u16();
 
     assert_eq!(
-        status, 200,
-        "RFC 7009 form-encoded revoke must be accepted (200), got {status}"
+        status, 401,
+        "form-encoded revoke must parse and reach client auth (401), got {status}"
     );
 
-    // Backward-compat: JSON must still work.
+    // Backward-compat: JSON must still parse the same way.
     let json_status = client
         .post(format!("{base}/realms/{realm}/revoke"))
         .json(&serde_json::json!({"token": "not-a-real-token"}))
@@ -67,13 +67,15 @@ async fn realm_revoke_accepts_form_encoded_body() {
         .status()
         .as_u16();
     assert_eq!(
-        json_status, 200,
-        "JSON revoke must still work, got {json_status}"
+        json_status, 401,
+        "JSON revoke must still parse and reach client auth, got {json_status}"
     );
 }
 
 /// RFC 7662 §2.1 — `POST /realms/{realm}/introspect` MUST accept a form body.
-/// An unknown token yields 200 with `active: false` per RFC 7662 §2.2.
+/// The route requires client authentication (audit 2026-08-28 §4.1#3), so an
+/// anonymous form body yields 401 — reaching that check proves the form
+/// parsed (previously 415).
 #[tokio::test]
 async fn realm_introspect_accepts_form_encoded_body() {
     let h = common::TestHarness::server().await.expect("server harness");
@@ -81,29 +83,21 @@ async fn realm_introspect_accepts_form_encoded_body() {
     let realm = make_realm(&h);
     let client = reqwest::Client::new();
 
-    let resp = client
+    let status = client
         .post(format!("{base}/realms/{realm}/introspect"))
         .header("Content-Type", FORM)
         .body("token=not-a-real-token")
         .send()
         .await
-        .expect("form introspect request");
-    let status = resp.status().as_u16();
+        .expect("form introspect request")
+        .status()
+        .as_u16();
     assert_eq!(
-        status, 200,
-        "RFC 7662 form-encoded introspect must be accepted (200), got {status}"
-    );
-    let body: serde_json::Value = resp.json().await.expect("introspect JSON");
-    // RFC 7662 §2.2 — an unknown token is not active. (The realm handler
-    // serializes via proto3, which omits the `false` default, so `active` may be
-    // absent rather than literally `false`; either way it must not be `true`.)
-    assert_ne!(
-        body["active"],
-        serde_json::Value::Bool(true),
-        "unknown token must not report active:true, got {body}"
+        status, 401,
+        "form-encoded introspect must parse and reach client auth (401), got {status}"
     );
 
-    // Backward-compat: JSON must still work.
+    // Backward-compat: JSON must still parse the same way.
     let json_status = client
         .post(format!("{base}/realms/{realm}/introspect"))
         .json(&serde_json::json!({"token": "not-a-real-token"}))
@@ -113,8 +107,8 @@ async fn realm_introspect_accepts_form_encoded_body() {
         .status()
         .as_u16();
     assert_eq!(
-        json_status, 200,
-        "JSON introspect must still work, got {json_status}"
+        json_status, 401,
+        "JSON introspect must still parse and reach client auth, got {json_status}"
     );
 }
 

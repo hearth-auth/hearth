@@ -1,0 +1,137 @@
+name: Mutation Spot-Check
+
+# Production-readiness task 24.3 (audit 2026-08-28 §9 item 3).
+#
+# The audit's verdict on this repository's test suite was not "it has gaps" —
+# it was "we cannot say whether it can fail at all":
+#
+#   "The mutation spot-check (P29). The brief's sharpest instrument — comment
+#    out five security-critical checks and see whether anything goes red — has
+#    no passed result. We therefore cannot say whether this test suite can
+#    fail. Given §4.11 established that no test can distinguish `fsync`-before-
+#    ack from no `fsync` at all, this gap should worry a reader more than most."
+#
+# This workflow answers that question on a schedule. For each entry in
+# `ci/mutations.toml` it runs the named test unmutated (which must pass),
+# deletes the security check the entry names, runs the same test again (which
+# must fail, as a test failure and not a compile error), and restores the file
+# from a byte snapshot with a SHA-256 comparison.
+#
+# ── Why nightly and not PR-blocking ─────────────────────────────────────────
+#
+# Every entry changes a file in the `hearth` lib, so each phase is a full
+# rebuild of that crate plus the one test target — two rebuilds per entry, and
+# the entries deliberately span four different targets (the simulation crate,
+# two integration binaries, and the lib) so they cannot share one. Measured on
+# a warm target directory with CARGO_BUILD_JOBS=2, the four-entry run takes
+# ~8 minutes; on a cold GitHub runner with no shared target cache the rebuilds
+# dominate and 25-40 minutes is the realistic band. ci.yml's `quality` job
+# already carries a 30-minute budget on its own, and the merge gate's value is
+# in its latency.
+#
+# The trade is made honestly rather than hidden: the CHEAP half of the check IS
+# PR-blocking. `scripts/mutation-spot-check.sh --check` runs in ci.yml's
+# `filter` job on every PR and refuses a manifest whose anchor string has moved,
+# become ambiguous, or whose test has been renamed away — which is how a
+# mutation manifest rots. What nightly adds is the expensive half: actually
+# building the mutation and watching the test go red.
+#
+# There is deliberately no `pull_request:` trigger here. `required-summary` in
+# ci.yml is the only required context on main, GitHub cannot express `needs:`
+# across workflows, and a workflow with its own PR trigger is a run that cannot
+# fail a merge however red it goes (audit §4.12#12). If this check is ever
+# promoted to blocking, it must be folded into ci.yml as a reusable workflow
+# and added to `required-summary`'s `needs:` and its results loop — not given a
+# PR trigger here.
+
+on:
+  schedule:
+    # 03:30 UTC daily — after ui-nightly (02:00) has released the runners.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mutation-spot-check:
+    name: mutation-spot-check (can the guards go red?)
+    runs-on: ubuntu-latest
+    # Two builds per entry across four distinct targets, cold cache.
+    timeout-minutes: 75
+    env:
+      # Force HTTP/1.1 to eliminate crates.io HTTP/2 framing-layer resets (HEA-1530).
+      CARGO_HTTP_MULTIPLEXING: "false"
+      # Retry transient registry downloads; default is 3 (HEA-1530).
+      CARGO_NET_RETRY: "10"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Free disk space (Rust debug builds need ~12 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Setup Rust toolchain (HEA-676 reusable)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+
+      # Fail fast on a rotted manifest before spending 40 minutes of runner
+      # time discovering the same thing.
+      - name: Validate the manifest (no build)
+        run: bash scripts/mutation-spot-check.sh --check
+
+      - name: Runner self-test (proves the runner itself can report a failure)
+        run: bash scripts/tests/mutation-spot-check.test.sh
+
+      - name: Mutation spot-check (ci/mutations.toml)
+        env:
+          PROTOC: protoc
+        run: bash scripts/mutation-spot-check.sh
+
+      # The runner restores from a byte snapshot and verifies SHA-256, but the
+      # claim is cheap to check independently and expensive to get wrong: a
+      # mutated source file surviving into any later step would be a
+      # catastrophic false signal.
+      - name: Assert the working tree is unchanged
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "A source file was not restored after mutation:"
+            git status --porcelain
+            git --no-pager diff
+            exit 1
+          fi
+          echo "Working tree is clean — every mutated file was restored."
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Mutation spot-check (task 24.3)"
+            echo ""
+            echo "Each entry in \`ci/mutations.toml\` deletes one security-critical"
+            echo "check and asserts that exactly one named test notices."
+            echo ""
+            echo "| entry | guarded file | test |"
+            echo "| --- | --- | --- |"
+            awk -F' = ' '
+              /^id = /   { id = $2 }
+              /^file = / { file = $2 }
+              /^test = / { printf "| %s | %s | %s |\n", id, file, $2 }
+            ' ci/mutations.toml | tr -d '"'
+          } >> "$GITHUB_STEP_SUMMARY"

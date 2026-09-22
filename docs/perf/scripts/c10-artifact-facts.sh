@@ -38,7 +38,11 @@ for i in 1 2 3 4 5; do
   # TIME_WAIT and the next run would fail with EADDRINUSE, silently dropping samples.
   RUN_PORT=$(( PORT + i ))
   START_NS=$(date +%s%N)
-  HEARTH_STORAGE__DATA_DIR="$DATA" "$BIN" serve --dev --bind 127.0.0.1 --port "$RUN_PORT" >"$DATA/log" 2>&1 &
+  # Audit 2026-08-28 §4.12#13: run in $DATA, not the caller's directory.
+  # `serve --dev` with no `--config` auto-detects a `hearth.yaml` in the working
+  # directory, so a cold-start figure taken from a checkout with one measured a
+  # different server — parsing a 39 KB config — than one taken without.
+  ( cd "$DATA" && HEARTH_STORAGE__DATA_DIR="$DATA" exec "$BIN" serve --dev --bind 127.0.0.1 --port "$RUN_PORT" ) >"$DATA/log" 2>&1 &
   PID=$!
   # Poll tightly; do not sleep in coarse increments or we quantise the measurement.
   READY_NS=""

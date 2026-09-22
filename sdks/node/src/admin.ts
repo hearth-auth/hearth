@@ -104,17 +104,14 @@ export class AdminClient {
   // ── Realms ─────────────────────────────────────────────────────────────────
   //
   // Realms are provisioned via hearth.yaml, not the admin API. There is no
-  // `createRealm` method: the server returns 405 for POST /admin/realms
-  // (HEA-2171). Only read paths are exposed.
+  // `createRealm` and no `updateRealm` method: the server answers 405 with
+  // "Realms are managed via hearth.yaml" to both POST /admin/realms and
+  // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+  // paths and deletion are exposed.
 
   /** Get a realm by ID. */
   async getRealm(id: string): Promise<Record<string, unknown>> {
     return this.request("GET", this.buildUrl(`/admin/realms/${id}`));
-  }
-
-  /** Update a realm by ID. */
-  async updateRealm(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PATCH", this.buildUrl(`/admin/realms/${id}`), params);
   }
 
   /** Delete a realm by ID. */
@@ -132,27 +129,27 @@ export class AdminClient {
 
   /** Create an OAuth 2.0 client registration. */
   async createClient(params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("POST", this.buildUrl("/admin/clients"), params);
+    return this.request("POST", this.buildUrl("/admin/applications"), params);
   }
 
   /** Get an OAuth client by ID. */
   async getClient(id: string): Promise<Record<string, unknown>> {
-    return this.request("GET", this.buildUrl(`/admin/clients/${id}`));
+    return this.request("GET", this.buildUrl(`/admin/applications/${id}`));
   }
 
   /** Update an OAuth client by ID. */
   async updateClient(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PATCH", this.buildUrl(`/admin/clients/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/applications/${id}`), params);
   }
 
   /** Delete an OAuth client by ID. */
   async deleteClient(id: string): Promise<void> {
-    await this.request("DELETE", this.buildUrl(`/admin/clients/${id}`));
+    await this.request("DELETE", this.buildUrl(`/admin/applications/${id}`));
   }
 
   /** List OAuth clients with optional pagination. */
   async listClients(options?: PageOptions): Promise<PageResponse<Record<string, unknown>>> {
-    const url = options ? this.buildUrl("/admin/clients", options) : `${this.baseUrl}/admin/clients`;
+    const url = options ? this.buildUrl("/admin/applications", options) : `${this.baseUrl}/admin/applications`;
     return this.request("GET", url);
   }
 
@@ -212,22 +209,11 @@ export class AdminClient {
     return this.request("GET", url);
   }
 
-  // ── Organization Memberships ───────────────────────────────────────────────
-
-  /** Add a member to an organization. */
-  async addOrgMember(orgId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("POST", this.buildUrl(`/admin/orgs/${orgId}/members`), params);
-  }
-
-  /** List members of an organization. */
-  async listOrgMembers(orgId: string, options?: PageOptions): Promise<PageResponse<Record<string, unknown>>> {
-    const path = `/admin/orgs/${orgId}/members`;
-    const url = options ? this.buildUrl(path, options) : `${this.baseUrl}${path}`;
-    return this.request("GET", url);
-  }
-
-  /** Remove a member from an organization. */
-  async removeOrgMember(orgId: string, userId: string): Promise<void> {
-    await this.request("DELETE", this.buildUrl(`/admin/orgs/${orgId}/members/${userId}`));
-  }
+  // ── Organization Memberships — removed ─────────────────────────────────────
+  //
+  // Hearth serves no organization route over HTTP: there is no /admin/orgs, no
+  // /admin/orgs/{orgId}/members and no per-member route anywhere in the router,
+  // so addOrgMember, listOrgMembers and removeOrgMember every one 404'd
+  // (audit 2026-08-28 §25.19). Organization membership is administered through
+  // the admin console, not the admin API.
 }

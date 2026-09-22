@@ -11,7 +11,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::core::UserId;
+use crate::identity::{verify_step_up, StepUpError};
 use crate::protocol::client_info::PeerAddr;
+use crate::protocol::step_up::StepUpProofBody;
 
 use super::{
     extract_realm_id, extract_user_auth, identity_error_to_response, make_ip_rate_limit_response,
@@ -55,6 +57,38 @@ fn b64_encode(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
 
+/// Maps a failed step-up to its wire response.
+///
+/// `403 step_up_required` when the proof is absent or wrong. `503` with
+/// `Retry-After` when the KDF admission gate shed the password verification —
+/// the caller may retry, so it MUST NOT read as a credential failure.
+fn step_up_error_response(error: &StepUpError) -> impl IntoResponse {
+    match error {
+        StepUpError::Overloaded { retry_after } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(
+                axum::http::header::RETRY_AFTER,
+                retry_after.as_secs().to_string(),
+            )],
+            Json(serde_json::json!({
+                "error": "temporarily_unavailable",
+                "error_description": "step-up verification is shedding load; retry shortly",
+            })),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "step_up_required",
+                "error_description":
+                    "supply the account password, a current TOTP code, or an assertion from an \
+                     enrolled passkey to enrol a credential",
+            })),
+        )
+            .into_response(),
+    }
+}
+
 /// Derives the server-pinned `WebAuthn` origin and RP ID from the configured
 /// OIDC issuer, mirroring the browser path's L5 hardening in
 /// [`crate::protocol::web`].
@@ -91,7 +125,7 @@ fn pinned_origin_and_rp_id(state: &AppState) -> (String, String) {
     (origin, rp_id)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct WbrBeginReq {
     /// Accepted for backward compatibility but **ignored**: the RP ID is pinned
     /// server-side from the configured issuer (HEA-2025). A client cannot choose
@@ -99,6 +133,11 @@ struct WbrBeginReq {
     #[allow(dead_code)]
     rp_id: Option<String>,
     discoverable: Option<bool>,
+    /// Step-up proof — the account password, a current TOTP code, or an
+    /// assertion from an already-enrolled passkey (audit 2026-08-28 §4.18#2).
+    /// An access token alone is one factor and does not enrol a credential.
+    #[serde(flatten)]
+    step_up: StepUpProofBody,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,7 +246,19 @@ async fn webauthn_register_begin(
         Err(e) => return e.into_response(),
     };
     // Pin the RP ID server-side; ignore any client-supplied `rp_id` (HEA-2025).
-    let (_origin, rp_id) = pinned_origin_and_rp_id(&state);
+    let (origin, rp_id) = pinned_origin_and_rp_id(&state);
+    // Enrolling a credential needs more than the access token that carried the
+    // request (audit 2026-08-28 §4.18#2).
+    if let Err(e) = verify_step_up(
+        &state.identity,
+        &realm_id,
+        &user_id,
+        body.step_up.into_proof(&origin),
+    )
+    .await
+    {
+        return step_up_error_response(&e).into_response();
+    }
     let options = crate::identity::webauthn::RegistrationOptions {
         rp_id,
         discoverable: body.discoverable.unwrap_or(true),
@@ -324,13 +375,25 @@ async fn webauthn_auth_begin(
                 },
                 None => Vec::new(),
             };
+            // Read the realm's policy rather than hard-coding "preferred"
+            // (task 26.4). Completion already enforces the realm setting, so a
+            // realm that requires user verification used to fail the ceremony
+            // at the end instead of prompting for it at the start. The browser
+            // passkey-login path already reads the same setting.
+            let user_verification = state
+                .identity
+                .get_realm(&realm_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.config().webauthn_user_verification.clone())
+                .unwrap_or_else(|| "preferred".to_string());
             (
                 StatusCode::OK,
                 Json(WbaBeginRes {
                     challenge: b64_encode(&challenge),
                     rp_id: options.rp_id,
                     allow_credentials,
-                    user_verification: "preferred".to_string(),
+                    user_verification,
                     timeout: 60,
                 }),
             )
@@ -475,6 +538,57 @@ struct MagicLinkRequestBody {
     email: String,
 }
 
+/// Builds the browser redemption URL and mails it, off the request path.
+///
+/// The URL points at `/ui/realms/<realm>/magic-link`, the browser redemption
+/// route. SMTP latency is kept off the request path so a registered address
+/// is not distinguishable from an unknown one.
+fn deliver_magic_link(
+    state: &Arc<AppState>,
+    realm_id: &crate::core::RealmId,
+    realm_name: &str,
+    email: &str,
+    token: &str,
+) {
+    let Some(email_service) = state.email.clone() else {
+        tracing::warn!("magic_link: no email transport configured; the link cannot be delivered");
+        return;
+    };
+
+    let realm = state.identity.get_realm(realm_id).ok().flatten();
+    let branding = realm
+        .as_ref()
+        .and_then(|r| r.config().email_branding.clone());
+    let stored = realm
+        .as_ref()
+        .and_then(|r| r.config().email_templates.get("magic_link").cloned());
+
+    let url = format!(
+        "{}/ui/realms/{}/magic-link?token={}",
+        state.public_base_url,
+        form_urlencoded::byte_serialize(realm_name.as_bytes()).collect::<String>(),
+        form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>(),
+    );
+    let recipient = email.to_string();
+    let job = move || {
+        if let Err(e) = email_service.send_magic_link_email(
+            &recipient,
+            &url,
+            branding.as_ref(),
+            stored.as_ref(),
+            None,
+        ) {
+            tracing::warn!(error = %e, "magic_link: delivery failed");
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(job);
+        }
+        Err(_) => job(),
+    }
+}
+
 /// POST /v1/{realm}/auth/magic-link
 ///
 /// Requests a magic-link login email. Always returns 202 regardless of whether
@@ -511,7 +625,17 @@ async fn magic_link_request(
     }
 
     // Request magic link; ignore per-email RateLimited to prevent enumeration.
-    let _ = state.identity.request_magic_link(&realm_id, &body.email);
+    // The token used to be minted and dropped, so the flow could never
+    // complete (audit 2026-08-28 §4.24#6). Deliver it.
+    if let Ok(response) = state.identity.request_magic_link(&realm_id, &body.email) {
+        deliver_magic_link(
+            &state,
+            &realm_id,
+            &realm_name,
+            &body.email,
+            response.token(),
+        );
+    }
 
     (
         StatusCode::ACCEPTED,

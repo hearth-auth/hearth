@@ -194,8 +194,13 @@ client configurations, and read the audit log for that realm.
 **Compromised host (disk/memory access without root)**
 
 - All data written to disk (WAL and SST files) is encrypted using AES-256-GCM with a
-  three-tier key hierarchy: host key → realm KEK → per-file DEK. A read of raw disk files
+  three-tier key hierarchy: host key → KEK → per-file DEK. A read of raw disk files
   yields ciphertext only.
+- The middle tier is **one KEK for the whole deployment**, not one per realm. The key
+  registry is keyed by realm ID, but only the system realm's KEK is ever provisioned, and it
+  wraps the data key of every WAL segment and every SST regardless of which realms' records
+  they contain. Recovering that KEK exposes every realm's data — it is a durability and
+  media-theft control, not a cross-tenant isolation boundary.
 - Signing key material is stored in `hearth.keys` encrypted by the host key (loaded from
   `HEARTH_MASTER_KEY` or auto-generated to `hearth.host_key`). Losing the host key makes
   all on-disk data permanently unrecoverable.

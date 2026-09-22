@@ -30,15 +30,32 @@ async fn healthz() -> impl IntoResponse {
 
 /// Readiness probe endpoint.
 ///
-/// Returns `200 OK` when the storage engine is accessible and the server is
-/// prepared to handle traffic. Returns `503 Service Unavailable` when the
-/// storage layer is unreachable (e.g. during startup or after a corruption
-/// event). Kubernetes gates inbound traffic behind this check.
+/// Returns `200 OK` when the storage engine is accessible, accepts writes, and
+/// the server is prepared to handle traffic. Returns `503 Service Unavailable`
+/// when the storage layer is unreachable (e.g. during startup or after a
+/// corruption event), or when the WAL write fence is engaged. Kubernetes gates
+/// inbound traffic behind this check.
+///
+/// The fence is the second case, and it needs its own probe: a fenced node
+/// serves reads normally and refuses every write, so a read probe alone
+/// reported it ready (audit 2026-08-28 §4.11#8). The fence is permanent for the
+/// life of the process — restart the node to clear it.
 async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let identity = Arc::clone(&state.identity);
-    let healthy = tokio::task::spawn_blocking(move || identity.is_storage_healthy())
-        .await
-        .unwrap_or(false);
+    let probe = tokio::task::spawn_blocking(move || {
+        (identity.is_storage_healthy(), identity.is_write_fenced())
+    })
+    .await;
+
+    // A probe that could not run at all is treated as unhealthy.
+    let (healthy, write_fenced) = probe.unwrap_or((false, false));
+
+    if write_fenced {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "not_ready", "storage": "write_fenced"})),
+        );
+    }
 
     if healthy {
         (

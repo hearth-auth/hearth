@@ -12,11 +12,17 @@ use tracing::{debug, warn};
 
 use crate::audit::{AuditEngine, AuditEvent};
 use crate::core::{ClientId, ImportOutcome, RealmId};
+use crate::identity::federation::saml::SamlServiceProvider;
+use crate::identity::federation::IdpConfig;
 use crate::identity::{
-    ClientTrustLevel, CreateRealmRequest, IdentityEngine, IdentityError, ImportClientRequest,
-    ImportUserRequest, Organization, RawCredential, Realm, User,
+    AgentExport, ClientTrustLevel, ConsentExport, CreateRealmRequest, FederationLinkExport,
+    IdentityEngine, IdentityError, ImportClientRequest, ImportUserRequest, MfaFactorExport,
+    Organization, OrganizationInvitation, OrganizationMembership, RawCredential, Realm,
+    RetiringSigningKeyExport, ScimMappingExport, User, Webhook,
 };
-use crate::rbac::{Group, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport};
+use crate::rbac::{
+    Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
+};
 
 use zeroize::Zeroizing;
 
@@ -28,19 +34,33 @@ use super::{decrypt_bytes, unwrap_dek, ArchiveReader, BackupError};
 ///
 /// Keep in sync with the members written by
 /// [`BackupExporter::export_realm`](super::BackupExporter::export_realm).
-const RECOGNIZED_MEMBERS: &[&str] = &[
+pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "realm.json",
     "users.ndjson",
     "credentials.ndjson",
+    "mfa_factors.ndjson",
     "clients.ndjson",
     "roles.ndjson",
     "permissions.ndjson",
     "groups.ndjson",
+    "group_memberships.ndjson",
     "assignments.ndjson",
     "scopes.ndjson",
     "organizations.ndjson",
+    "organization_memberships.ndjson",
+    "consents.ndjson",
+    "agents.ndjson",
+    "identity_providers.ndjson",
+    "federation_links.ndjson",
+    "webhooks.ndjson",
+    "saml_service_providers.ndjson",
+    "saml_signing_key.json",
+    "scim_mappings.ndjson",
+    "invitations.ndjson",
+    "retiring_signing_keys.json",
     "signing_key.json",
     "audit.ndjson",
+    "audit_chain.json",
 ];
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -82,6 +102,18 @@ pub struct ImportOptions {
     /// When `true`, the operator has explicitly accepted that a new signing key
     /// will be generated and all previously issued tokens will stop validating.
     pub allow_missing_signing_key: bool,
+    /// Restrict the restore to a single realm.
+    ///
+    /// When `Some`, an archive whose `realm.json` carries any other realm ID is
+    /// refused with [`BackupError::RealmNotPermitted`] before anything is
+    /// written. `None` means the caller may restore every realm the archive
+    /// contains — the system realm and the CLI, which run with full operator
+    /// authority.
+    ///
+    /// The check reads the decrypted `realm.json`, not the manifest: the
+    /// manifest is caller-supplied and may name one realm while the archive
+    /// carries another (audit 2026-08-28 §3 B1, §4.1#1).
+    pub allowed_realm: Option<RealmId>,
 }
 
 /// Per-entity-type outcome counts for a single realm restore operation.
@@ -122,6 +154,9 @@ pub struct ImportReport {
     pub realms: EntityCounts,
     /// Outcome counts for user records.
     pub users: EntityCounts,
+    /// Outcome counts for second-factor records — TOTP state and `WebAuthn`
+    /// passkeys (audit 2026-08-28 §4.18#5).
+    pub mfa_factors: EntityCounts,
     /// Outcome counts for OAuth client records.
     pub clients: EntityCounts,
     /// Outcome counts for RBAC role records.
@@ -130,14 +165,48 @@ pub struct ImportReport {
     pub permissions: EntityCounts,
     /// Outcome counts for RBAC group records.
     pub groups: EntityCounts,
+    /// Outcome counts for group-membership edges (OpenSpec 26.40). Before
+    /// this member existed, groups restored empty and every permission a user
+    /// held *through* a group silently vanished.
+    pub group_memberships: EntityCounts,
     /// Outcome counts for role-assignment records.
     pub assignments: EntityCounts,
     /// Outcome counts for OAuth scope records.
     pub scopes: EntityCounts,
     /// Outcome counts for organization records.
     pub organizations: EntityCounts,
+    /// Outcome counts for organization-membership records (OpenSpec 26.40).
+    pub organization_memberships: EntityCounts,
+    /// Outcome counts for OAuth consent records (OpenSpec 26.40).
+    pub consents: EntityCounts,
+    /// Outcome counts for agents, credentials included (OpenSpec 26.40).
+    pub agents: EntityCounts,
+    /// Outcome counts for external IdP connectors (OpenSpec 26.40).
+    pub identity_providers: EntityCounts,
+    /// Outcome counts for federation account links (OpenSpec 26.40).
+    pub federation_links: EntityCounts,
+    /// Outcome counts for webhook registrations (OpenSpec 26.40).
+    pub webhooks: EntityCounts,
+    /// Outcome counts for SAML service-provider registrations (OpenSpec 26.40).
+    pub saml_service_providers: EntityCounts,
+    /// Outcome counts for SCIM `externalId` mappings (OpenSpec 26.40).
+    pub scim_mappings: EntityCounts,
+    /// Outcome counts for organization invitations (OpenSpec 26.40).
+    pub invitations: EntityCounts,
+    /// Outcome counts for retiring signing keys. `skipped` counts keys whose
+    /// grace window had already closed by the time of the restore
+    /// (OpenSpec 26.40).
+    pub retiring_signing_keys: EntityCounts,
     /// Outcome counts for restored audit events.
     pub audit_events: EntityCounts,
+    /// Whether the archive's audit hashes were checked against the source
+    /// chain before being re-signed under the destination realm's key.
+    ///
+    /// `false` when the realm carried no audit events, or when the archive
+    /// predates `audit_chain.json` — in which case the restore logs a warning
+    /// and the restored chain attests only to the restore, not to the source
+    /// (audit 2026-08-28 §4.14#5).
+    pub audit_chain_verified: bool,
     /// Conflicts encountered — populated in Skip / Merge mode only.
     pub conflicts: Vec<Conflict>,
 }
@@ -324,6 +393,36 @@ impl BackupImporter {
             );
         }
 
+        // Parse realm.json — required.
+        //
+        // This runs BEFORE any write so the realm-authorization check below can
+        // refuse with nothing written. The realm ID is taken from the decrypted
+        // `realm.json`, never from the manifest: the manifest is caller-supplied
+        // and an archive may name one realm in its manifest and carry another
+        // (audit 2026-08-28 §3 B1, §4.1#1).
+        let realm_key = format!("realms/{realm_slug}/realm.json");
+        let realm_raw = files.get(&realm_key).ok_or_else(|| {
+            BackupError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("realm.json not found for slug '{realm_slug}'"),
+            ))
+        })?;
+        let realm_bytes = try_decrypt(realm_raw)?;
+        let realm: Realm = serde_json::from_slice(&realm_bytes)?;
+
+        // ── Realm authorization (fail closed, before any write) ─────────────
+        //
+        // When the caller is scoped to a single realm, the archive may only
+        // restore that realm. Nothing has been written at this point, so a
+        // refusal leaves the target untouched.
+        if let Some(allowed) = &opts.allowed_realm {
+            if realm.id() != allowed {
+                return Err(BackupError::RealmNotPermitted {
+                    slug: realm_slug.to_string(),
+                });
+            }
+        }
+
         // ── Audit events (restored FIRST) ───────────────────────────────────
         //
         // Audit events are re-chained under the destination realm's HMAC key
@@ -340,17 +439,70 @@ impl BackupImporter {
         let audit_key = format!("realms/{realm_slug}/audit.ndjson");
         if let Some(raw) = files.get(&audit_key) {
             let decrypted = try_decrypt(raw)?;
+            let mut events: Vec<AuditEvent> = Vec::new();
             for line in decrypted.split(|&b| b == b'\n') {
                 let line = trim_bytes(line);
                 if line.is_empty() {
                     continue;
                 }
-                let event: AuditEvent = serde_json::from_slice(line)?;
+                events.push(serde_json::from_slice(line)?);
+            }
+
+            // Check the source hashes BEFORE re-signing them. Re-chaining under
+            // the destination key discards whatever the archive said, so a
+            // tampered audit log used to restore into a chain that verifies
+            // clean — a false attestation (audit 2026-08-28 §4.14#5).
+            let chain_declared = reader
+                .realms()
+                .iter()
+                .find(|r| r.slug == realm_slug)
+                .is_some_and(|r| r.audit_chain_included);
+            let chain_key = format!("realms/{realm_slug}/audit_chain.json");
+            match files.get(&chain_key) {
+                Some(raw_chain) => {
+                    let material: crate::audit::AuditChainMaterial =
+                        serde_json::from_slice(&try_decrypt(raw_chain)?)?;
+                    use base64::Engine as _;
+                    let key = base64::engine::general_purpose::STANDARD
+                        .decode(&material.chain_key_b64)
+                        .map_err(|e| {
+                            BackupError::Crypto(format!("audit chain key is not base64: {e}"))
+                        })?;
+                    if let Some(idx) =
+                        crate::audit::first_broken_link(&events, &key, &material.anchor)
+                    {
+                        return Err(BackupError::Engine(format!(
+                            "audit chain in archive is broken at event {} of {}; refusing to                              restore an audit log that does not match its own hashes",
+                            idx + 1,
+                            events.len()
+                        )));
+                    }
+                    report.audit_chain_verified = true;
+                }
+                None if chain_declared => {
+                    // The manifest says the file was written. Its absence is
+                    // tampering, not an old archive.
+                    return Err(BackupError::Engine(format!(
+                        "manifest declares audit chain material for realm '{realm_slug}' but                          audit_chain.json is missing from the archive"
+                    )));
+                }
+                None => {
+                    warn!(
+                        realm = %realm_slug,
+                        events = events.len(),
+                        "archive carries audit events with no chain material; their source \
+                         hashes cannot be checked. Re-export with a current Hearth to get a \
+                         verifiable audit section."
+                    );
+                }
+            }
+
+            for event in &events {
                 if opts.dry_run {
                     report.audit_events.created += 1;
                     continue;
                 }
-                match self.audit.import_event(&event) {
+                match self.audit.import_event(event) {
                     Ok(()) => report.audit_events.created += 1,
                     Err(e) => {
                         warn!(err = %e, "import audit event failed");
@@ -359,17 +511,6 @@ impl BackupImporter {
                 }
             }
         }
-
-        // Parse realm.json — required.
-        let realm_key = format!("realms/{realm_slug}/realm.json");
-        let realm_raw = files.get(&realm_key).ok_or_else(|| {
-            BackupError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("realm.json not found for slug '{realm_slug}'"),
-            ))
-        })?;
-        let realm_bytes = try_decrypt(realm_raw)?;
-        let realm: Realm = serde_json::from_slice(&realm_bytes)?;
 
         // Parse credentials.ndjson — optional (users may have no passwords).
         let cred_key = format!("realms/{realm_slug}/credentials.ndjson");
@@ -390,6 +531,21 @@ impl BackupImporter {
         };
 
         let restored_realm_id = if opts.dry_run {
+            // A dry run reports what the real restore would do. An overwrite
+            // over a live realm is refused (B3), so the dry run must refuse
+            // too rather than report a success the restore would not deliver
+            // (audit 2026-08-28 §9 item 1).
+            if matches!(opts.mode, RestoreMode::Overwrite)
+                && self
+                    .identity
+                    .get_realm(&realm_id)
+                    .map_err(identity_to_backup_err)?
+                    .is_some()
+            {
+                return Err(BackupError::RealmExists {
+                    slug: target_name.to_string(),
+                });
+            }
             report.realms.created += 1;
             realm_id.clone()
         } else {
@@ -414,6 +570,24 @@ impl BackupImporter {
                 &mut report,
             )?;
         }
+
+        // ── MFA factors (audit 2026-08-28 §4.18#5) ─────────────────────────
+        //
+        // After users so the owning records exist. TOTP state is re-encrypted
+        // under the destination realm's MFA DEK inside `import_mfa_factor`.
+        let overwrite_mfa = opts.mode == RestoreMode::Overwrite;
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/mfa_factors.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.mfa_factors,
+            |this, factor: &MfaFactorExport| {
+                this.identity
+                    .import_mfa_factor(&restored_realm_id, factor, overwrite_mfa)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
 
         // ── Clients ────────────────────────────────────────────────────────
         let clients_key = format!("realms/{realm_slug}/clients.ndjson");
@@ -491,6 +665,174 @@ impl BackupImporter {
             |this, assignment: &RoleAssignment| {
                 this.rbac
                     .import_assignment(&restored_realm_id, assignment, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // Group memberships come AFTER groups and users so the records they
+        // reference already exist. `import_group_membership` writes both the
+        // forward and the reverse index; the reverse one is what permission
+        // resolution scans (OpenSpec 26.40).
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/group_memberships.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.group_memberships,
+            |this, edge: &GroupMembershipEdge| {
+                this.rbac
+                    .import_group_membership(&restored_realm_id, edge, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/organization_memberships.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.organization_memberships,
+            |this, membership: &OrganizationMembership| {
+                this.identity
+                    .import_organization_membership(&restored_realm_id, membership, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/consents.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.consents,
+            |this, consent: &ConsentExport| {
+                this.identity
+                    .import_consent(&restored_realm_id, consent, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // Agents come after users and organizations so their owner exists.
+        // `import_agent` writes the agent, its owner index and every
+        // credential in one batch: an agent whose credentials did not come
+        // back has lost the only way to exercise the authority it describes
+        // (OpenSpec 26.40).
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/agents.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.agents,
+            |this, export: &AgentExport| {
+                this.identity
+                    .import_agent(&restored_realm_id, export, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // IdP connectors BEFORE federation links: a link is keyed by the
+        // connector's id, so the connector must be back under that same id.
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/identity_providers.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.identity_providers,
+            |this, idp: &IdpConfig| {
+                this.identity
+                    .import_identity_provider(&restored_realm_id, idp, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/federation_links.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.federation_links,
+            |this, link: &FederationLinkExport| {
+                this.identity
+                    .import_federation_link(&restored_realm_id, link, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/webhooks.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.webhooks,
+            |this, webhook: &Webhook| {
+                this.identity
+                    .import_webhook(&restored_realm_id, webhook, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        // The SAML signing key is restored BEFORE the SPs it authenticates to,
+        // and is re-sealed under THIS node's KEK inside `import_realm_saml_key`
+        // — the archive carries the unsealed form precisely because the
+        // destination's KEK is a different key (OpenSpec 26.40).
+        let saml_key_member = format!("realms/{realm_slug}/saml_signing_key.json");
+        if let Some(raw) = files.get(&saml_key_member) {
+            let plaintext = try_decrypt(raw)?;
+            if !opts.dry_run {
+                self.identity
+                    .import_realm_saml_key(&restored_realm_id, &plaintext)
+                    .map_err(|e| BackupError::Engine(e.to_string()))?;
+            }
+        }
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/saml_service_providers.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.saml_service_providers,
+            |this, sp: &SamlServiceProvider| {
+                this.identity
+                    .import_saml_service_provider(&restored_realm_id, sp, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/scim_mappings.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.scim_mappings,
+            |this, mapping: &ScimMappingExport| {
+                this.identity
+                    .import_scim_mapping(&restored_realm_id, mapping, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/invitations.ndjson"),
+            &try_decrypt,
+            opts,
+            &mut report.invitations,
+            |this, invitation: &OrganizationInvitation| {
+                this.identity
+                    .import_invitation(&restored_realm_id, invitation, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
+            &format!("realms/{realm_slug}/retiring_signing_keys.json"),
+            &try_decrypt,
+            opts,
+            &mut report.retiring_signing_keys,
+            |this, key: &RetiringSigningKeyExport| {
+                this.identity
+                    .import_retiring_signing_key(&restored_realm_id, key, overwrite)
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;
@@ -613,15 +955,23 @@ impl BackupImporter {
                         Ok(realm_id)
                     }
                     RestoreMode::Overwrite => {
-                        self.identity
-                            .delete_realm(&realm_id)
-                            .map_err(identity_to_backup_err)?;
-                        let r = self
-                            .identity
-                            .import_realm(req, Some(realm_id), signing_key_pkcs8)
-                            .map_err(identity_to_backup_err)?;
-                        report.realms.overwritten += 1;
-                        Ok(r.id().clone())
+                        // B3: refuse rather than half-execute. This arm used to
+                        // `delete_realm` and then re-import. `delete_realm`
+                        // backgrounds its cascade for a realm above
+                        // `cascade_background_threshold` and returns `Ok` while
+                        // it is still running, so the re-import raced its own
+                        // deletion: the cascade then removed the realm record,
+                        // the name index, the signing key and the freshly
+                        // written user, credential and session keys underneath
+                        // it (audit 2026-08-28 §3 B3, §4.9#2).
+                        //
+                        // Nothing has been deleted at this point, so the target
+                        // is untouched. Restoring into an instance where the
+                        // realm is absent is unaffected — the `import_realm`
+                        // above succeeds and this arm is never reached.
+                        Err(BackupError::RealmExists {
+                            slug: req.name.clone(),
+                        })
                     }
                 }
             }
@@ -994,6 +1344,7 @@ mod tests {
                     users: 2,
                     ..Default::default()
                 },
+                audit_chain_included: false,
             }],
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,
@@ -1087,8 +1438,17 @@ mod tests {
         assert_eq!(r2.conflicts.len(), 3, "1 realm + 2 user conflicts");
     }
 
+    /// B3 (audit 2026-08-28 §3 B3, §4.9#2): `RestoreMode::Overwrite` over a
+    /// realm that is already present is refused, and nothing is deleted.
+    ///
+    /// This test previously asserted that overwrite cascaded a realm delete and
+    /// re-created the users. That is the behaviour that destroyed the realm:
+    /// `delete_realm` backgrounds its cascade above
+    /// `cascade_background_threshold` and returns while it is still running, so
+    /// the re-import raced its own deletion. Of 1,160 recorded CLI runs none
+    /// completed and 975 left the realm destroyed or truncated.
     #[test]
-    fn overwrite_mode_replaces_users() {
+    fn overwrite_mode_refuses_over_a_live_realm() {
         let archive_dir = TempDir::new().expect("archive tmpdir");
         let rig = make_rig();
 
@@ -1115,18 +1475,62 @@ mod tests {
             allow_missing_signing_key: true,
             ..Default::default()
         };
-        let r2 = importer
+        let err = importer
             .import_realm(slug, &reader, &opts)
-            .expect("overwrite import");
-        assert_eq!(r2.realms.overwritten, 1, "realm should be overwritten");
-        // Realm overwrite cascades: delete_realm removes all child users, so
-        // users are then imported fresh (created) rather than individually overwritten.
-        assert_eq!(
-            r2.users.created, 2,
-            "users re-created after realm cascade delete"
+            .expect_err("overwrite over a live realm must be refused");
+        assert!(
+            matches!(err, BackupError::RealmExists { slug: ref s } if s == slug),
+            "expected RealmExists, got: {err:?}"
         );
-        assert_eq!(r2.users.overwritten, 0);
-        assert_eq!(r2.users.errored, 0);
+
+        // Fail closed: the realm and its users must all survive the refusal.
+        let realm_id = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("parse uuid"));
+        assert!(
+            rig.identity
+                .get_realm(&realm_id)
+                .expect("get realm")
+                .is_some(),
+            "a refused overwrite must leave the realm in place"
+        );
+    }
+
+    /// A dry run reports what the real restore would do. An overwrite over a
+    /// live realm is refused, so the dry run must refuse too rather than report
+    /// a success the restore would not deliver (audit 2026-08-28 §9 item 1).
+    #[test]
+    fn dry_run_overwrite_over_a_live_realm_predicts_the_refusal() {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let rig = make_rig();
+
+        let realm_uuid = "00000000-0000-0000-0000-000000000031";
+        let slug = "dry-run-overwrite-realm";
+        let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
+
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.audit),
+        );
+
+        importer
+            .import_realm(slug, &reader, &opts_with_passphrase())
+            .expect("first import");
+
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            dry_run: true,
+            dek_passphrase: Some(test_passphrase()),
+            allow_missing_signing_key: true,
+            ..Default::default()
+        };
+        let err = importer
+            .import_realm(slug, &reader, &opts)
+            .expect_err("a dry-run overwrite over a live realm must predict the refusal");
+        assert!(
+            matches!(err, BackupError::RealmExists { .. }),
+            "expected RealmExists, got: {err:?}"
+        );
     }
 
     #[test]
@@ -1248,6 +1652,7 @@ mod tests {
                 realm_id: format!("realm_{realm_uuid}"),
                 slug: slug.to_string(),
                 record_counts: RecordCounts::default(),
+                audit_chain_included: false,
             }],
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,
@@ -1333,6 +1738,7 @@ mod tests {
                 realm_id: format!("realm_{realm_uuid}"),
                 slug: slug.to_string(),
                 record_counts: RecordCounts::default(),
+                audit_chain_included: false,
             }],
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,

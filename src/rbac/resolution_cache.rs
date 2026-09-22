@@ -1,13 +1,43 @@
-//! Sharded, lock-free decision cache for full permission resolutions (HEA-1906).
+//! Sharded decision cache for full permission resolutions (HEA-1906).
 //!
 //! Replaces the single `Mutex<ResolutionCache>` (HEA-1770) that serialized every
 //! `permission_check`. The C7 saturation sweep (HEA-1875, `b29e57dd`) measured
 //! that path scaling at **−0.549** — adding cores made it *slower* — because both
 //! the hit-check and the fill took the same global mutex, bouncing one cache line
-//! across every core. This structure moves reads to the wait-free `ArcSwap`
-//! pattern already proven by the identity-engine `ShardedArcSwapMap` (HEA-1772,
-//! C-3) and the permission cache: a read is two atomic `load()`s (the per-realm
-//! version map plus one entry shard), with no lock, allocation, or syscall.
+//! across every core. This structure shards the map 64 ways and makes a read two
+//! cheap [`SwapCell`] loads — the per-realm version map plus one entry shard —
+//! so readers never block readers and a writer contends with at most 1/64 of
+//! them.
+//!
+//! # Why this is not `ArcSwap` any more (task 26.1)
+//!
+//! It was, and `ArcSwap` is genuinely wait-free, which is better than a read
+//! lock. It had to go because `arc-swap` 1.9.2 corrupts the heap under this
+//! exact load+rcu pattern. Measured on 2026-09-21 with
+//! `concurrent_readers_never_observe_stale_after_bump`, three copies running
+//! concurrently so the readers and the writer actually interleave:
+//!
+//! | Primitive | Failures in 150 loaded runs |
+//! |---|---|
+//! | `arc_swap::ArcSwap` 1.9.2 | **3** — two `SIGSEGV`, one `free(): invalid size` |
+//! | [`SwapCell`] (this file) | 0 |
+//!
+//! [`SwapCell`] now lives in [`crate::core`] so the other non-hot call sites
+//! can share it (task 26.5); its full rationale is documented there.
+//!
+//! This module is 100% safe Rust and contains no `unsafe`, so a heap
+//! corruption here cannot originate in it. The traced abort ran the shard
+//! map's destructor from a reader's guard drop while the writer still held it.
+//! There is no release to upgrade to: 1.9.2 is the newest (2026-06-28) and
+//! changes only a doc note over 1.9.1; the two before it were both
+//! memory-ordering fixes, and the crate ships its own `tests/bug-198.rs` crash
+//! regression.
+//!
+//! Permission resolution is explicitly **not** on the hot path — permissions
+//! are embedded in the JWT at issue time — so a read lock is allowed here where
+//! it would not be in `validate_token`. The remaining `ArcSwap` call sites,
+//! including the genuinely hot ones, are enumerated in
+//! `reports/arc-swap-use-after-free-2026-09-21.md`.
 //!
 //! # Correctness (security boundary)
 //!
@@ -18,8 +48,8 @@
 //! served only when its stored version equals the realm's current version, so any
 //! mutation atomically renders every prior entry for that realm unreachable.
 //!
-//! Splitting the former single mutex into (a) one `ArcSwap<HashMap<RealmId,u64>>`
-//! for the versions and (b) [`SHARD_COUNT`] `ArcSwap<HashMap<Key,…>>` entry shards
+//! Splitting the former single mutex into (a) one `SwapCell<HashMap<RealmId,u64>>`
+//! for the versions and (b) [`SHARD_COUNT`] `SwapCell<HashMap<Key,…>>` entry shards
 //! does **not** widen the stale-read window versus the mutex, because:
 //!
 //! * mutations only ever bump `generations`; they never touch entry shards, so an
@@ -39,9 +69,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use arc_swap::ArcSwap;
-
-use crate::core::{OrganizationId, RealmId, UserId};
+use crate::core::{OrganizationId, RealmId, SwapCell, UserId};
 
 use super::types::ResolvedPermissions;
 
@@ -71,15 +99,15 @@ type Entry = (u64, ResolvedPermissions);
 /// Sharded, lock-free decision cache. See the module docs for the correctness
 /// model — this is a security boundary, edit with that in mind.
 pub(crate) struct ShardedResolutionCache {
-    /// Per-realm graph version, bumped on every mutation. Wait-free reads via
-    /// `ArcSwap::load`; a bump is a rare (off-hot-path) `rcu`. The realm count is
+    /// Per-realm graph version, bumped on every mutation. Reads are one
+    /// `SwapCell::load`; a bump is a rare (off-hot-path) `rcu`. The realm count is
     /// small, so cloning this map on bump is cheap; it is deliberately *not*
     /// sharded to keep the invalidation boundary a single, auditable atomic.
-    generations: ArcSwap<HashMap<RealmId, u64>>,
+    generations: SwapCell<HashMap<RealmId, u64>>,
     /// `(realm,user,org)` → `(version-at-fill, resolved)`, partitioned into
     /// [`SHARD_COUNT`] independently-published shards so a fill `rcu`s only the
     /// one shard the key maps to.
-    entries: Box<[ArcSwap<HashMap<CacheKey, Entry>>]>,
+    entries: Box<[SwapCell<HashMap<CacheKey, Entry>>]>,
     /// Fixed hasher used *only* for shard selection so a key always resolves to
     /// the same shard for the life of the cache (kept separate from each shard's
     /// internal `RandomState`).
@@ -105,11 +133,11 @@ impl ShardedResolutionCache {
     /// uses [`Self::new`]; tests use a small cap to exercise eviction cheaply.
     fn with_shard_cap(max_entries_per_shard: usize) -> Self {
         let entries = (0..SHARD_COUNT)
-            .map(|_| ArcSwap::from_pointee(HashMap::new()))
+            .map(|_| SwapCell::from_pointee(HashMap::new()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
-            generations: ArcSwap::from_pointee(HashMap::new()),
+            generations: SwapCell::from_pointee(HashMap::new()),
             entries,
             hasher: std::collections::hash_map::RandomState::new(),
             max_entries_per_shard,
@@ -117,7 +145,7 @@ impl ShardedResolutionCache {
     }
 
     #[inline]
-    fn shard(&self, key: &CacheKey) -> &ArcSwap<HashMap<CacheKey, Entry>> {
+    fn shard(&self, key: &CacheKey) -> &SwapCell<HashMap<CacheKey, Entry>> {
         // SHARD_COUNT is a power of two, so the mask is exact.
         let idx = (self.hasher.hash_one(key) as usize) & (SHARD_COUNT - 1);
         &self.entries[idx]
@@ -173,6 +201,27 @@ impl ShardedResolutionCache {
             *next.entry(realm_id.clone()).or_insert(0) += 1;
             next
         });
+    }
+
+    /// Drops every cached entry, for every realm.
+    ///
+    /// Used when the whole key space was replaced underneath this node — a
+    /// Raft snapshot install on a follower — where no per-realm bump can be
+    /// derived because the set of realms that changed is not known. Bumping
+    /// every *known* realm is not sufficient on its own: a realm the node has
+    /// never resolved has generation 0 and an entry tagged 0 would still
+    /// match, so the entry shards are cleared as well.
+    pub(crate) fn invalidate_all(&self) {
+        self.generations.rcu(|old| {
+            let mut next = (**old).clone();
+            for version in next.values_mut() {
+                *version += 1;
+            }
+            next
+        });
+        for shard in self.entries.iter() {
+            shard.rcu(|_| HashMap::new());
+        }
     }
 }
 
@@ -266,7 +315,7 @@ mod tests {
         let before: Vec<*const HashMap<CacheKey, Entry>> = cache
             .entries
             .iter()
-            .map(|s| Arc::as_ptr(&s.load_full()))
+            .map(|s| Arc::as_ptr(&s.load()))
             .collect();
         cache.insert(
             key(&realm, &UserId::generate()),
@@ -276,7 +325,7 @@ mod tests {
         let after: Vec<*const HashMap<CacheKey, Entry>> = cache
             .entries
             .iter()
-            .map(|s| Arc::as_ptr(&s.load_full()))
+            .map(|s| Arc::as_ptr(&s.load()))
             .collect();
 
         let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
@@ -361,13 +410,31 @@ mod tests {
             .collect();
 
         // Writer: fill-then-bump many times, mirroring the engine's
-        // resolve→mutation interleaving. Capped at 5_000 (down from 50_000) so
-        // the test does not create ruinous allocation pressure under full-suite
-        // parallelism: each iteration clones two single-entry HashMaps via rcu,
-        // and running 50k of those concurrently with 4500+ other tests caused
-        // a one-time flake (HEA-1953). 5k still exercises thousands of
-        // concurrent reader/writer interleavings — more than enough to catch any
-        // ordering hole in the ArcSwap-based invalidation path.
+        // resolve→mutation interleaving. Capped at 5_000 (down from 50_000).
+        //
+        // NOTE (task 26.1, closed 2026-09-21): this test was the instrument
+        // that found the `arc-swap` heap corruption, and it is now the
+        // regression guard for the fix. Two earlier diagnoses were wrong —
+        // "ruinous allocation pressure" (HEA-1953), answered by lowering the
+        // iteration count, and a plain flake — because the bug is invisible
+        // under an unloaded run. It needs BOTH an allocator that checks what is
+        // freed AND real concurrency:
+        //
+        //   MALLOC_CHECK_=3 <lib test binary> --exact \
+        //     rbac::resolution_cache::tests::concurrent_readers_never_observe_stale_after_bump
+        //
+        // three copies at a time. On `ArcSwap` that measured 3 failures in 150
+        // runs (two SIGSEGV, one `free(): invalid size`); on `SwapCell` it
+        // measures 0. Full evidence and the remaining call sites are in
+        // `reports/arc-swap-use-after-free-2026-09-21.md`.
+        //
+        // So do NOT "fix" a failure here by lowering the count again or by
+        // #[ignore]-ing it. This module is 100% safe Rust with no `unsafe`; a
+        // heap corruption reported here comes from underneath it.
+        //
+        // 5k still exercises thousands of concurrent reader/writer
+        // interleavings — enough to catch any ordering hole in the
+        // invalidation path.
         barrier.wait();
         for v in 0..5_000u64 {
             cache.insert(k.clone(), cache.generation(&realm), resolved_with("v.read"));

@@ -19,6 +19,7 @@ use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::{
     extract_grpc_user_auth, extract_realm_id, identity_to_status, verify_grpc_client_auth,
+    CLIENT_ID_META_KEY,
 };
 use super::server::GrpcState;
 
@@ -160,12 +161,52 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::DeviceAuthorizationRequest>,
     ) -> Result<Response<pb::DeviceAuthorizationResponse>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
+        let md = req.metadata().clone();
         let body = req.into_inner();
         let client_id = body
             .client_id
             .parse::<uuid::Uuid>()
             .map(ClientId::new)
             .map_err(|_| Status::invalid_argument("invalid client_id UUID"))?;
+
+        // RFC 8628 §3.1: a confidential client authenticates at the device
+        // authorization endpoint exactly as it does at the token endpoint.
+        // The REST sibling `POST /device_authorization` has enforced this
+        // since audit §4.19#4 / §4.22#6 was closed; this RPC never did, so a
+        // party holding only the client *identifier* could still start the
+        // whole RFC 8628 flow under a confidential client's identity by
+        // switching protocol. `DeviceAuthorizationRequest.client_secret` was
+        // already on the wire — and its own proto comment already promised
+        // this check — but the handler decoded the field and dropped it
+        // (task 23.9). Public clients pass through unchanged.
+        //
+        // The lookup fails closed: a storage error becomes an error to the
+        // caller rather than a skipped gate.
+        let client = self
+            .state
+            .identity
+            .get_client(&realm_id, &client_id)
+            .map_err(identity_to_status)?;
+        if client.as_ref().is_some_and(|c| c.is_confidential()) {
+            if md.get(CLIENT_ID_META_KEY).is_some() {
+                // Metadata credentials are the gRPC analogue of HTTP Basic and
+                // take precedence, as the proto comment states.
+                let authenticated =
+                    verify_grpc_client_auth(&md, &realm_id, self.state.identity.as_ref())?;
+                if authenticated != client_id {
+                    return Err(Status::unauthenticated(
+                        "client authentication does not match request client_id",
+                    ));
+                }
+            } else {
+                // `client_secret_post` fallback: the request body's own field.
+                self.state
+                    .identity
+                    .authenticate_client(&realm_id, &client_id, body.client_secret.as_deref())
+                    .map_err(|_| Status::unauthenticated("invalid client credentials"))?;
+            }
+        }
+
         let domain_req = DeviceAuthorizationRequest {
             client_id,
             scope: body.scope,

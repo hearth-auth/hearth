@@ -89,7 +89,7 @@ def _sync_check(
     Never raises — callers should catch and treat exceptions as denial.
     """
     if mode == "embedded":
-        return _check_embedded(token, permission)
+        return _check_embedded(client, token, permission)
 
     if mode == "decision":
         if client is None:
@@ -219,7 +219,10 @@ def require_permission(
 
     :param permission: Permission string to require, e.g. ``"docs.write"``.
     :param client: A :class:`~hearth.client.HearthClient` instance.  Falls back
-        to ``settings.HEARTH_CLIENT`` when not provided.
+        to ``settings.HEARTH_CLIENT`` when not provided.  Required in every
+        mode — embedded mode uses it to verify the token's signature against
+        the realm's JWKS before reading the ``permissions`` claim.  Without one
+        the decorator denies.
     :param mode: Authorization mode.  Must be ``"embedded"``,
         ``"introspection"``, or ``"decision"``.  Defaults to ``"embedded"``.
     :param client_id: Required when ``mode="introspection"``.
@@ -229,6 +232,7 @@ def require_permission(
 
     Usage::
 
+        # settings.HEARTH_CLIENT (or an explicit client=) must be configured.
         @require_permission("docs.write")
         def my_view(request):
             return HttpResponse("ok")
@@ -250,8 +254,10 @@ def require_permission(
                 return _django_401_required_action()
 
             # Resolve client: explicit arg > settings.HEARTH_CLIENT.
+            # Every mode needs one — embedded included, since it is the client
+            # that verifies the token's signature before any claim is read.
             _client = client or getattr(django_settings, "HEARTH_CLIENT", None)
-            if _client is None and mode != "embedded":
+            if _client is None:
                 return _django_403()
 
             try:

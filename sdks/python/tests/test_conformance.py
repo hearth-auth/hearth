@@ -20,13 +20,17 @@ from hearth.claims import Claims
 # Helpers
 # ---------------------------------------------------------------------------
 
+from .signing import install_test_key, sign_jwt, unsigned_jwt
+
+
 def _make_jwt(payload: dict) -> str:
-    """Build a minimal unsigned JWT for testing local-decode paths."""
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
-    body = base64.urlsafe_b64encode(
-        json.dumps(payload).encode()
-    ).rstrip(b"=").decode()
-    return f"{header}.{body}."
+    """Build a JWT signed with the suite's test key.
+
+    The embedded-mode gates verify before reading claims, so a token that is
+    meant to be accepted must be signed. Use ``unsigned_jwt`` for the forgery
+    side of a test.
+    """
+    return sign_jwt(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +162,7 @@ class TestWsgiRequiredAction:
 
     def _client(self):
         from hearth.client import HearthClient
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def _environ(self, token: Optional[str] = None) -> dict:
         environ = {"REQUEST_METHOD": "GET", "PATH_INFO": "/api/data"}
@@ -212,7 +216,7 @@ class TestAsgiRequiredAction:
 
     def _client(self):
         from hearth.client import HearthClient
-        return HearthClient("http://localhost:8420", realm_id="realm-1")
+        return install_test_key(HearthClient("http://localhost:8420", realm_id="realm-1"))
 
     def _scope(self, token: Optional[str] = None) -> dict:
         headers = []
@@ -285,7 +289,7 @@ class TestAdminClients:
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
     def test_list_clients(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/clients").mock(
+        respx_mock.get("http://localhost:8420/admin/applications").mock(
             return_value=httpx.Response(200, json={"items": [
                 {"id": "c1", "name": "My App", "redirect_uris": [], "trust_level": "confidential"}
             ], "next_cursor": None})
@@ -295,7 +299,7 @@ class TestAdminClients:
         assert result.items[0].id == "c1"
 
     def test_get_client(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/clients/c1").mock(
+        respx_mock.get("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(200, json={
                 "id": "c1", "name": "My App", "redirect_uris": [], "trust_level": "confidential"
             })
@@ -305,7 +309,7 @@ class TestAdminClients:
 
     def test_create_client(self, respx_mock):
         from hearth.types import CreateClientRequest
-        respx_mock.post("http://localhost:8420/admin/clients").mock(
+        respx_mock.post("http://localhost:8420/admin/applications").mock(
             return_value=httpx.Response(201, json={
                 "id": "c2", "name": "New App", "redirect_uris": ["https://app/cb"],
                 "trust_level": "public"
@@ -317,7 +321,7 @@ class TestAdminClients:
 
     def test_update_client(self, respx_mock):
         from hearth.types import UpdateClientRequest
-        respx_mock.put("http://localhost:8420/admin/clients/c1").mock(
+        respx_mock.patch("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(200, json={
                 "id": "c1", "name": "Updated App", "redirect_uris": [], "trust_level": "confidential"
             })
@@ -327,7 +331,7 @@ class TestAdminClients:
         assert result.name == "Updated App"
 
     def test_delete_client(self, respx_mock):
-        respx_mock.delete("http://localhost:8420/admin/clients/c1").mock(
+        respx_mock.delete("http://localhost:8420/admin/applications/c1").mock(
             return_value=httpx.Response(204)
         )
         self._admin().delete_client("c1")  # no error = success
@@ -366,7 +370,7 @@ class TestAdminRoles:
 
     def test_update_role(self, respx_mock):
         from hearth.types import UpdateRoleRequest
-        respx_mock.put("http://localhost:8420/admin/roles/r1").mock(
+        respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
             return_value=httpx.Response(200, json={"id": "r1", "name": "superadmin", "description": None})
         )
         req = UpdateRoleRequest(name="superadmin")
@@ -413,7 +417,7 @@ class TestAdminGroups:
 
     def test_update_group(self, respx_mock):
         from hearth.types import UpdateGroupRequest
-        respx_mock.put("http://localhost:8420/admin/groups/g1").mock(
+        respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
             return_value=httpx.Response(200, json={"id": "g1", "name": "infra", "description": "Infrastructure"})
         )
         req = UpdateGroupRequest(name="infra", description="Infrastructure")
@@ -427,33 +431,104 @@ class TestAdminGroups:
         self._admin().delete_group("g1")
 
 
-class TestAdminOrgMembers:
+class TestAdminOrgMembersRemoved:
+    """Hearth serves no organization route over HTTP.
+
+    There is no ``/admin/orgs``, no ``/admin/orgs/{id}/members`` and no
+    per-member route anywhere in the axum router, so every one of these
+    methods 404'd. They were removed rather than repointed, because there is
+    nothing to repoint them at (audit 2026-08-28 §25.19).
+    """
+
+    def test_admin_client_exposes_no_org_member_methods(self):
+        from hearth.admin import AdminClient
+
+        dead = ["list_org_members", "add_org_member", "remove_org_member",
+                "get_org_member", "update_org_member"]
+        present = [name for name in dead if hasattr(AdminClient, name)]
+        assert present == [], (
+            f"AdminClient still exposes dead /admin/orgs methods: {present}"
+        )
+
+    def test_org_member_types_are_not_exported(self):
+        import hearth
+
+        dead = ["OrgMember", "AddOrgMemberRequest", "UpdateOrgMemberRequest"]
+        present = [name for name in dead if hasattr(hearth, name)]
+        assert present == [], (
+            f"hearth still exports dead org-membership types: {present}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# §12 Admin — HTTP verb contract (audit 2026-08-28 §25.4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.respx(base_url="http://localhost:8420")
+class TestAdminMutationVerbs:
+    """Every Hearth admin mutation is a ``PATCH``.
+
+    ``PUT`` gets a bare 405 from the server's method router — no body, no
+    error code — so the verb is part of the wire contract. These tests assert
+    the method actually put on the wire, not just that a mocked call returned.
+    """
+
     def _admin(self):
         from hearth.admin import AdminClient
         return AdminClient("http://localhost:8420", "tok", "realm-1")
 
-    def test_list_org_members(self, respx_mock):
-        respx_mock.get("http://localhost:8420/admin/orgs/org_1/members").mock(
-            return_value=httpx.Response(200, json={"items": [
-                {"user_id": "u1", "org_id": "org_1", "role": "member"}
-            ], "next_cursor": None})
+    def test_update_user_sends_patch(self, respx_mock):
+        from hearth.types import UpdateUserRequest
+        route = respx_mock.patch("http://localhost:8420/admin/users/u1").mock(
+            return_value=httpx.Response(200, json={
+                "id": "u1", "email": "a@b.c", "username": "alice", "status": "active",
+            })
         )
-        result = self._admin().list_org_members("org_1")
-        assert len(result.items) == 1
-        assert result.items[0].user_id == "u1"
+        self._admin().update_user("u1", UpdateUserRequest(display_name="New"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
 
-    def test_add_org_member(self, respx_mock):
-        from hearth.types import AddOrgMemberRequest
-        respx_mock.post("http://localhost:8420/admin/orgs/org_1/members").mock(
-            return_value=httpx.Response(201, json={"user_id": "u2", "org_id": "org_1", "role": "admin"})
+    def test_update_client_sends_patch_to_applications(self, respx_mock):
+        from hearth.types import UpdateClientRequest
+        route = respx_mock.patch(
+            "http://localhost:8420/admin/applications/c1"
+        ).mock(
+            return_value=httpx.Response(200, json={
+                "id": "c1", "name": "Updated", "redirect_uris": [],
+                "trust_level": "confidential",
+            })
         )
-        req = AddOrgMemberRequest(user_id="u2", role="admin")
-        result = self._admin().add_org_member("org_1", req)
-        assert result.user_id == "u2"
-        assert result.role == "admin"
+        self._admin().update_client("c1", UpdateClientRequest(name="Updated"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
 
-    def test_remove_org_member(self, respx_mock):
-        respx_mock.delete("http://localhost:8420/admin/orgs/org_1/members/u1").mock(
-            return_value=httpx.Response(204)
+    def test_update_role_sends_patch(self, respx_mock):
+        from hearth.types import UpdateRoleRequest
+        route = respx_mock.patch("http://localhost:8420/admin/roles/r1").mock(
+            return_value=httpx.Response(200, json={
+                "id": "r1", "name": "admin", "permissions": [],
+            })
         )
-        self._admin().remove_org_member("org_1", "u1")
+        self._admin().update_role("r1", UpdateRoleRequest(description="New"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
+
+    def test_update_group_sends_patch(self, respx_mock):
+        from hearth.types import UpdateGroupRequest
+        route = respx_mock.patch("http://localhost:8420/admin/groups/g1").mock(
+            return_value=httpx.Response(200, json={"id": "g1", "name": "eng"})
+        )
+        self._admin().update_group("g1", UpdateGroupRequest(name="eng"))
+        assert route.called
+        assert route.calls.last.request.method == "PATCH"
+
+    def test_update_realm_is_not_offered(self):
+        """Realms are provisioned from ``hearth.yaml``.
+
+        ``POST /admin/realms`` and ``PATCH /admin/realms/{id}`` both answer 405
+        with "Realms are managed via hearth.yaml", so no verb makes
+        ``update_realm`` work and the SDK must not offer it at all.
+        """
+        from hearth.admin import AdminClient
+        assert not hasattr(AdminClient, "update_realm")
+        assert not hasattr(AdminClient, "create_realm")

@@ -45,6 +45,21 @@ pub enum StorageError {
         /// The version number found in the file.
         found: u16,
     },
+    /// A corrupt WAL record was found mid-segment with cryptographically
+    /// valid records after it.
+    ///
+    /// Truncating here would physically destroy acknowledged writes, so the
+    /// open refuses and leaves the file byte-for-byte intact instead
+    /// (audit 2026-08-28 §4.11#3). Only a corruption whose tail contains no
+    /// valid record — a torn write from a crash — is truncated automatically.
+    WalMidSegmentCorruption {
+        /// Absolute byte offset of the corrupt record's frame in the segment.
+        corrupt_offset: u64,
+        /// Absolute byte offset of the first surviving valid record.
+        survivor_offset: u64,
+        /// Records that replay cleanly before the corruption.
+        recovered_records: u64,
+    },
     /// Realm KEKs cannot be decrypted with the current (or previous) host key.
     ///
     /// Startup is blocked. The operator must either set `HEARTH_PREVIOUS_MASTER_KEY`
@@ -88,6 +103,16 @@ pub enum StorageError {
         /// The snapshot ID from the interrupted install (from the marker file).
         snapshot_id: String,
     },
+
+    /// A range scan was requested with `start > end`.
+    ///
+    /// The half-open interval `[start, end)` is only meaningful when
+    /// `start <= end`; equal bounds are legal and select nothing. A reversed
+    /// window used to index a legacy eager SST body as `entries[lo..hi]` with
+    /// `lo > hi`, which panics — and aborts the whole multi-tenant process
+    /// under the release profile's `panic=abort`. Callers that take either
+    /// bound from a request MUST validate it themselves as well.
+    InvalidRange,
 }
 
 impl fmt::Display for StorageError {
@@ -107,6 +132,10 @@ impl fmt::Display for StorageError {
                 write!(f, "invalid SST format: {reason}")
             }
             Self::HotTierFull => write!(f, "hot tier is full and eviction could not free space"),
+            Self::InvalidRange => write!(
+                f,
+                "invalid scan range: the start key is greater than the end key"
+            ),
             Self::Crypto { reason } => {
                 write!(f, "cryptographic operation failed: {reason}")
             }
@@ -115,6 +144,21 @@ impl fmt::Display for StorageError {
                     f,
                     "WAL format version {found} is not supported by this binary; \
                      upgrade Hearth or restore from backup"
+                )
+            }
+            Self::WalMidSegmentCorruption {
+                corrupt_offset,
+                survivor_offset,
+                recovered_records,
+            } => {
+                write!(
+                    f,
+                    "WAL segment is corrupt at byte offset {corrupt_offset}, but valid \
+                     records follow it (first at byte offset {survivor_offset}); \
+                     {recovered_records} record(s) replay cleanly before the corruption. \
+                     Refusing to open: automatic truncation would destroy acknowledged \
+                     writes. Copy the segment aside and restore from backup, or truncate \
+                     it at the corrupt offset to accept the loss explicitly"
                 )
             }
             Self::HostKeyMismatch { affected_realms } => {
@@ -172,7 +216,9 @@ impl std::error::Error for StorageError {
             | Self::HostKeyMismatch { .. }
             | Self::CorruptedKeks { .. }
             | Self::AlreadyLocked { .. }
-            | Self::TornSnapshotRestore { .. } => None,
+            | Self::InvalidRange
+            | Self::TornSnapshotRestore { .. }
+            | Self::WalMidSegmentCorruption { .. } => None,
         }
     }
 }

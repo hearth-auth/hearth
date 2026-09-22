@@ -1,0 +1,4 @@
+base: &base
+  data_dir: "./data"
+storage:
+  <<: *base

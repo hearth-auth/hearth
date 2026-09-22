@@ -654,9 +654,9 @@ pub async fn admin_org_detail(
         inline_theme_css: state.inline_theme_css(),
     });
     if had_flash {
-        if let Ok(value) =
-            axum::http::HeaderValue::from_str(&super::templates::clear_flash_cookie())
-        {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&super::templates::clear_flash_cookie(
+            state.is_secure_request(&headers),
+        )) {
             response
                 .headers_mut()
                 .append(axum::http::header::SET_COOKIE, value);
@@ -1007,8 +1007,11 @@ pub async fn admin_org_add_member(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<AddMemberForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1021,7 +1024,13 @@ pub async fn admin_org_add_member(
     let user_id = match form.user_id.trim().parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
         Err(_) => {
-            return org_redirect_flash(&org_id, target.0.name(), "Invalid user selection", "error");
+            return org_redirect_flash(
+                &org_id,
+                target.0.name(),
+                "Invalid user selection",
+                "error",
+                secure,
+            );
         }
     };
 
@@ -1038,6 +1047,7 @@ pub async fn admin_org_add_member(
                 target.0.name(),
                 "Member added successfully",
                 "success",
+                secure,
             )
         }
         Err(IdentityError::AlreadyMember) => org_redirect_flash(
@@ -1045,10 +1055,17 @@ pub async fn admin_org_add_member(
             target.0.name(),
             "User is already a member",
             "error",
+            secure,
         ),
         Err(e) => {
             tracing::warn!(error = %e, "add_member failed");
-            org_redirect_flash(&org_id, target.0.name(), "Failed to add member", "error")
+            org_redirect_flash(
+                &org_id,
+                target.0.name(),
+                "Failed to add member",
+                "error",
+                secure,
+            )
         }
     }
 }
@@ -1204,6 +1221,8 @@ pub async fn admin_org_remove_member(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1237,7 +1256,13 @@ pub async fn admin_org_remove_member(
             if is_htmx {
                 super::templates::htmx_toast_response("Member removed", "success")
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Member removed", "success")
+                org_redirect_flash(
+                    &org_id,
+                    target.0.name(),
+                    "Member removed",
+                    "success",
+                    secure,
+                )
             }
         }
         Err(e) => {
@@ -1265,7 +1290,7 @@ pub async fn admin_org_remove_member(
                 }
                 super::templates::htmx_toast_response(&msg, "error")
             } else {
-                org_redirect_flash(&org_id, target.0.name(), &msg, "error")
+                org_redirect_flash(&org_id, target.0.name(), &msg, "error", secure)
             }
         }
     }
@@ -1361,6 +1386,8 @@ pub async fn admin_org_update_role(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<UpdateRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1426,7 +1453,7 @@ pub async fn admin_org_update_role(
                     super::templates::htmx_toast_response("Role updated", "success")
                 }
             } else {
-                org_redirect_flash(&org_id, target.0.name(), "Role updated", "success")
+                org_redirect_flash(&org_id, target.0.name(), "Role updated", "success", secure)
             }
         }
         Err(e) => {
@@ -1450,7 +1477,7 @@ pub async fn admin_org_update_role(
                 }
                 super::templates::htmx_toast_response(&msg, "error")
             } else {
-                org_redirect_flash(&org_id, target.0.name(), &msg, "error")
+                org_redirect_flash(&org_id, target.0.name(), &msg, "error", secure)
             }
         }
     }
@@ -1477,8 +1504,11 @@ pub async fn admin_org_invite(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<InviteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1501,6 +1531,7 @@ pub async fn admin_org_invite(
     ) {
         Ok((_invitation, token)) => {
             // Send invitation email if email service is configured
+            let mut delivery = InviteDelivery::NoTransport;
             if let Some(ref email_service) = state.email {
                 let org_name = state
                     .identity
@@ -1539,10 +1570,13 @@ pub async fn admin_org_invite(
                     None,
                 ) {
                     tracing::warn!(error = %e, "failed to send invitation email");
+                    delivery = InviteDelivery::TransportFailed;
+                } else {
+                    delivery = InviteDelivery::Delivered;
                 }
             }
-            let msg = format!("Invitation sent to {}", form.email);
-            org_redirect_flash(&org_id, target.0.name(), &msg, "success")
+            let (msg, kind) = invite_flash(&form.email, "sent", delivery);
+            org_redirect_flash(&org_id, target.0.name(), &msg, kind, secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, email = %form.email, "create_invitation failed");
@@ -1551,6 +1585,7 @@ pub async fn admin_org_invite(
                 target.0.name(),
                 "Failed to create invitation",
                 "error",
+                secure,
             )
         }
     }
@@ -1623,8 +1658,11 @@ pub async fn admin_org_status_toggle(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<StatusToggleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1643,6 +1681,7 @@ pub async fn admin_org_status_toggle(
                 target.0.name(),
                 "Unknown organization status",
                 "error",
+                secure,
             )
         }
     };
@@ -1659,20 +1698,33 @@ pub async fn admin_org_status_toggle(
         },
     ) {
         Ok(_) => {
-            audit_org_event(&state, &session, &target.0, &org_id, "status_change");
+            audit_org_event_with(
+                &state,
+                &session,
+                &target.0,
+                &org_id,
+                "status_change",
+                Some(serde_json::json!({ "status": form.status })),
+            );
             let label = match new_status {
                 OrganizationStatus::Active => "Organization resumed",
                 OrganizationStatus::Suspended => "Organization suspended",
                 OrganizationStatus::Archived => "Organization archived",
             };
-            org_redirect_flash(&org_id, target.0.name(), label, "success")
+            org_redirect_flash(&org_id, target.0.name(), label, "success", secure)
         }
         Err(IdentityError::OrganizationNotFound) => {
             super::handlers_common::not_found("Organization not found")
         }
         Err(e) => {
             tracing::warn!(error = %e, "update_organization (status) failed");
-            org_redirect_flash(&org_id, target.0.name(), "Failed to change status", "error")
+            org_redirect_flash(
+                &org_id,
+                target.0.name(),
+                "Failed to change status",
+                "error",
+                secure,
+            )
         }
     }
 }
@@ -1694,8 +1746,11 @@ pub async fn admin_org_resend_invite(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid, iid)): AxumPath<(String, String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1725,6 +1780,7 @@ pub async fn admin_org_resend_invite(
                 target.0.name(),
                 "Failed to load invitation",
                 "error",
+                secure,
             );
         }
     };
@@ -1757,6 +1813,7 @@ pub async fn admin_org_resend_invite(
         },
     ) {
         Ok((_invitation, token)) => {
+            let mut delivery = InviteDelivery::NoTransport;
             if let Some(ref email_service) = state.email {
                 let org_name = state
                     .identity
@@ -1792,10 +1849,13 @@ pub async fn admin_org_resend_invite(
                     None,
                 ) {
                     tracing::warn!(error = %e, "failed to send resend invitation email");
+                    delivery = InviteDelivery::TransportFailed;
+                } else {
+                    delivery = InviteDelivery::Delivered;
                 }
             }
-            let msg = format!("Invitation resent to {email}");
-            org_redirect_flash(&org_id, target.0.name(), &msg, "success")
+            let (msg, kind) = invite_flash(&email, "resent", delivery);
+            org_redirect_flash(&org_id, target.0.name(), &msg, kind, secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, email = %email, "resend create_invitation failed");
@@ -1804,6 +1864,7 @@ pub async fn admin_org_resend_invite(
                 target.0.name(),
                 "Failed to resend invitation",
                 "error",
+                secure,
             )
         }
     }
@@ -1971,6 +2032,7 @@ pub async fn admin_api_nav_realms(
 pub async fn admin_api_config_reload(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
 ) -> Response {
     if let Some(notify) = &state.reload_notify {
         notify.notify_one();
@@ -2007,6 +2069,7 @@ pub(super) fn org_redirect_flash(
     realm_name: &str,
     message: &str,
     kind: &str,
+    secure: bool,
 ) -> Response {
     // Cookie-based flash: redirect URL stays clean (no `?flash=…`)
     // so refreshes / bookmarks / back-button traversals don't replay the
@@ -2015,7 +2078,49 @@ pub(super) fn org_redirect_flash(
         "/ui/admin/realms/{realm_name}/organizations/{}",
         org_id.as_uuid()
     );
-    super::templates::redirect_with_flash(&url, message, kind)
+    super::templates::redirect_with_flash(&url, message, kind, secure)
+}
+
+/// Builds the flash for an invitation whose record was created, reporting what
+/// actually happened to the *email*.
+///
+/// The two invite handlers used to answer `"Invitation sent to {email}"` with
+/// `kind = "success"` on every path that reached them: when the transport
+/// rejected the message (the failure was logged at WARN and swallowed), and
+/// when no `email.transport` was configured at all, so nothing was ever
+/// attempted. The admin was told the invitation had gone out, the invitee
+/// never received it, and nothing on the screen said so (task 23.12 — the
+/// same class as audit §4.24#10, which reached the reset/bulk-invite actions
+/// but not these two).
+fn invite_flash(email: &str, verb: &str, delivery: InviteDelivery) -> (String, &'static str) {
+    match delivery {
+        InviteDelivery::Delivered => (format!("Invitation {verb} to {email}"), "success"),
+        InviteDelivery::TransportFailed => (
+            format!(
+                "Invitation created for {email}, but the email could not be delivered. \
+                 Check the server log and the email transport configuration."
+            ),
+            "error",
+        ),
+        InviteDelivery::NoTransport => (
+            format!(
+                "Invitation created for {email}, but no email transport is configured, \
+                 so nothing was sent."
+            ),
+            "error",
+        ),
+    }
+}
+
+/// What became of an invitation email.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InviteDelivery {
+    /// The transport accepted the message.
+    Delivered,
+    /// A transport is configured and refused the message.
+    TransportFailed,
+    /// No `email.transport` is configured; nothing was attempted.
+    NoTransport,
 }
 
 /// Parses an organization role string from a form field.
@@ -2035,20 +2140,51 @@ fn audit_org_event(
     org_id: &OrganizationId,
     op: &'static str,
 ) {
+    audit_org_event_with(state, session, target_realm, org_id, op, None);
+}
+
+/// Appends an attributed organization audit event, optionally carrying extra
+/// metadata (for example the new status on a status change).
+///
+/// The `op` → [`AuditAction`] map used to end in a silent `_ => return`, which
+/// meant `audit_org_event(.., "status_change")` — the call at the end of the
+/// suspend/resume handler — appended nothing. The engine's own
+/// `update_organization` still wrote an unattributed `OrgUpdated`, so the
+/// change was visible but the acting administrator was not. An unknown `op` is
+/// now logged rather than dropped, so the same mistake cannot be silent again.
+fn audit_org_event_with(
+    state: &Arc<WebState>,
+    session: &super::auth::UiSession,
+    target_realm: &Realm,
+    org_id: &OrganizationId,
+    op: &'static str,
+    extra: Option<serde_json::Value>,
+) {
     use crate::audit::{AuditAction, CreateAuditEvent};
     let action = match op {
         "create" => AuditAction::OrgCreated,
-        "update" => AuditAction::OrgUpdated,
+        "update" | "status_change" => AuditAction::OrgUpdated,
         "delete" => AuditAction::OrgDeleted,
-        _ => return,
+        other => {
+            tracing::warn!(op = %other, "org admin audit: unmapped operation, event dropped");
+            return;
+        }
     };
+    let mut metadata = serde_json::json!({ "via": "ui", "op": op });
+    if let (Some(serde_json::Value::Object(fields)), Some(target)) =
+        (extra, metadata.as_object_mut())
+    {
+        for (k, v) in fields {
+            target.insert(k, v);
+        }
+    }
     if let Err(e) = state.audit.append(&CreateAuditEvent {
         realm_id: target_realm.id().clone(),
         actor: session.user_id.as_uuid().to_string(),
         action,
         resource_type: "organization".to_string(),
         resource_id: org_id.as_uuid().to_string(),
-        metadata: Some(serde_json::json!({ "via": "ui" })),
+        metadata: Some(metadata),
     }) {
         tracing::warn!(error = %e, "org admin audit append failed");
     }

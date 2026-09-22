@@ -259,19 +259,44 @@ data class UpdateGroupRequest(
     val description: String? = null,
 )
 
-// ── Admin — Organization Memberships ──────────────────────────────────────────
+// ── Admin — Organization Memberships — removed ────────────────────────────────
+//
+// OrgMember and AddOrgMemberRequest went with the org-membership methods: Hearth
+// serves no organization route over HTTP (audit 2026-08-28 §25.19).
 
+// ── Admin — Role assignment ───────────────────────────────────────────────────
+
+/** Body of `POST /admin/users/{id}/roles`. Omit [orgId] for a realm-scoped grant. */
 @Serializable
-data class OrgMember(
-    @SerialName("user_id") val userId: String,
-    val role: String,
-    @SerialName("joined_at") val joinedAt: Long? = null,
+data class AssignRoleRequest(
+    @SerialName("role_id") val roleId: String,
+    @SerialName("org_id") val orgId: String? = null,
 )
 
+/** Subject of a [RoleAssignment] — a user or a group. */
 @Serializable
-data class AddOrgMemberRequest(
-    @SerialName("user_id") val userId: String,
-    val role: String = "member",
+data class AssignmentSubject(
+    val type: String,
+    val id: String,
+)
+
+/** Applicability boundary of a [RoleAssignment] — realm-wide or one organization. */
+@Serializable
+data class AssignmentScope(
+    val type: String,
+    @SerialName("org_id") val orgId: String? = null,
+)
+
+/** A role granted to a subject, as returned by `POST /admin/users/{id}/roles`. */
+@Serializable
+data class RoleAssignment(
+    val id: String,
+    @SerialName("realm_id") val realmId: String,
+    val subject: AssignmentSubject,
+    @SerialName("role_id") val roleId: String,
+    val scope: AssignmentScope,
+    @SerialName("assigned_at") val assignedAt: Long? = null,
+    @SerialName("assigned_by") val assignedBy: String? = null,
 )
 
 // ── Permission delivery modes (HEA-922) ───────────────────────────────────────
@@ -306,6 +331,45 @@ data class CheckPermissionResponse(
 )
 
 // ── WebAuthn ──────────────────────────────────────────────────────────────────
+
+/**
+ * An assertion from an already-enrolled passkey, offered as a step-up proof.
+ * Every field is base64url without padding.
+ */
+@Serializable
+data class StepUpAssertion(
+    @SerialName("credential_id") val credentialId: String,
+    @SerialName("client_data_json") val clientDataJson: String,
+    @SerialName("authenticator_data") val authenticatorData: String,
+    val signature: String,
+    @SerialName("user_handle") val userHandle: String? = null,
+)
+
+/**
+ * Proof that the caller holds a credential the account already has.
+ *
+ * Passkey enrolment refuses a request that carries no proof: an access token
+ * alone is one factor, and enrolling with it would turn a stolen token into a
+ * permanent credential. Build one with [password], [totpCode] or [assertion].
+ */
+@Serializable
+data class StepUpProof(
+    val password: String? = null,
+    @SerialName("totp_code") val totpCode: String? = null,
+    val assertion: StepUpAssertion? = null,
+) {
+    companion object {
+        /** Proves the step-up with the account password. */
+        fun password(password: String): StepUpProof = StepUpProof(password = password)
+
+        /** Proves the step-up with a current authenticator code. */
+        fun totpCode(code: String): StepUpProof = StepUpProof(totpCode = code)
+
+        /** Proves the step-up with an already-enrolled passkey. */
+        fun assertion(assertion: StepUpAssertion): StepUpProof =
+            StepUpProof(assertion = assertion)
+    }
+}
 
 /** Server-issued `PublicKeyCredentialCreationOptions` for passkey registration. */
 @Serializable

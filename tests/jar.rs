@@ -1324,3 +1324,159 @@ fn no_jar_alg_enforced_client_still_gets_jarm() {
         "plain response_mode=None is upgraded to query.jwt when client enforces JARM"
     );
 }
+
+// ── 22.3 — the authorization response must name the JAR's redirect_uri ───────
+
+/// Signs a JAR whose `redirect_uri` claim is `jar_redirect_uri`.
+fn sign_jar_with_redirect(
+    pkcs8_bytes: &[u8],
+    client_id: &str,
+    issuer: &str,
+    jti: &str,
+    jar_redirect_uri: &str,
+) -> String {
+    use data_encoding::BASE64URL_NOPAD;
+
+    let header = serde_json::json!({ "alg": "EdDSA", "kid": TEST_KID });
+    let pkce_challenge = BASE64URL_NOPAD
+        .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref());
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "aud": issuer,
+        "exp": EPOCH_MICROS / 1_000_000 + 3600,
+        "iat": EPOCH_MICROS / 1_000_000,
+        "jti": jti,
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": jar_redirect_uri,
+        "scope": "openid",
+        "state": "jar-state",
+        "code_challenge": pkce_challenge,
+        "code_challenge_method": "S256",
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+    let signing_input = format!("{header_b64}.{claims_b64}");
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes).expect("from_pkcs8");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(pair.sign(signing_input.as_bytes()).as_ref());
+    format!("{signing_input}.{sig_b64}")
+}
+
+/// 22.3 (audit 2026-08-28 §4.3#5): the response must carry the *effective*,
+/// registration-validated redirect URI.
+///
+/// When a JAR supplies its own `redirect_uri`, the engine validates that one
+/// and never looks at the outer query parameter — yet callers built the 302
+/// from their own outer copy. A client permitted to use JAR could therefore
+/// have `code` and `state` delivered to any URI it liked. The engine now
+/// reports the URI it actually validated, so a caller cannot get this wrong.
+#[test]
+fn authorization_response_reports_the_jar_redirect_uri_not_the_outer_one() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+
+    let user = env
+        .engine
+        .create_user(
+            &env.realm,
+            &CreateUserRequest {
+                email: "jar-user@example.com".to_string(),
+                display_name: "JAR User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let jar = sign_jar_with_redirect(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        "jti-redirect-1",
+        REDIRECT_URI,
+    );
+
+    // The outer parameter is an attacker-chosen URI that is NOT registered.
+    const ATTACKER_URI: &str = "https://evil.example.com/steal";
+    let req = AuthorizationRequest {
+        client_id: client_id.clone(),
+        redirect_uri: ATTACKER_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "outer-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        user_id: user.id().clone(),
+        code_challenge: None,
+        code_challenge_method: None,
+        nonce: None,
+        amr_values: Vec::new(),
+        response_mode: None,
+        request: Some(jar),
+        via_par: false,
+    };
+
+    let resp: AuthorizationResponse = env
+        .engine
+        .authorize(&env.realm, &req)
+        .expect("a JAR naming a registered redirect_uri must authorize");
+
+    assert_eq!(
+        resp.redirect_uri(),
+        REDIRECT_URI,
+        "the response must name the JAR's validated redirect_uri"
+    );
+    assert_ne!(
+        resp.redirect_uri(),
+        ATTACKER_URI,
+        "the unvalidated outer redirect_uri must never be the delivery target"
+    );
+    // JAR values win throughout, so `state` comes from the JWT too.
+    assert_eq!(resp.state(), "jar-state");
+}
+
+/// Without a JAR the response simply echoes the (validated) outer URI, so the
+/// new accessor is safe to use unconditionally.
+#[test]
+fn authorization_response_reports_the_outer_redirect_uri_without_a_jar() {
+    let env = setup();
+    let (_pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let user = env
+        .engine
+        .create_user(
+            &env.realm,
+            &CreateUserRequest {
+                email: "plain-user@example.com".to_string(),
+                display_name: "Plain User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    use data_encoding::BASE64URL_NOPAD;
+    let challenge = BASE64URL_NOPAD
+        .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref());
+
+    let req = AuthorizationRequest {
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "plain-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        user_id: user.id().clone(),
+        code_challenge: Some(challenge),
+        code_challenge_method: Some(CodeChallengeMethod::S256),
+        nonce: None,
+        amr_values: Vec::new(),
+        response_mode: None,
+        request: None,
+        via_par: false,
+    };
+
+    let resp = env.engine.authorize(&env.realm, &req).expect("authorize");
+    assert_eq!(resp.redirect_uri(), REDIRECT_URI);
+}

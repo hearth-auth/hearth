@@ -8,7 +8,7 @@ exclude = ["loadtest"]
 
 [package]
 name = "hearth"
-version = "1.6.9"
+version = "1.6.11"
 edition = "2021"
 description = "Purpose-built identity database: authentication, authorization, and session management"
 license = "Apache-2.0"
@@ -43,7 +43,14 @@ data-encoding = "2"
 flate2 = "1"
 fs2 = "0.4"
 hyper = "1"
-hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto"] }
+# `server-graceful` supplies the connection watcher the TLS accept loop uses to
+# drain in-flight requests on SIGTERM (audit 2026-08-28 §4.11#9). It pulls in no
+# new crate — the feature only enables `tokio/sync`.
+hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto", "server-graceful"] }
+# HTTPS connector for the OTLP/HTTP exporter. Ring provider only — the OTLP
+# HTTP client moved off `reqwest` (audit 2026-08-28 §4.8#9) and hyper's default
+# connector is plaintext-only, which would break an https:// collector.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "webpki-tokio"] }
 hmac = "0.12"
 lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport",
@@ -70,7 +77,10 @@ sha2 = "0.10"
 subtle = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 ring = "0.17"
-rustls = "0.23"
+# Pin the `ring` provider explicitly. rustls's default features select
+# `aws-lc-rs`, adding a third crypto backend to the binary by accident
+# (audit 2026-08-28 §4.8#9); aws-lc-rs stays only where rcgen needs it.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = "1"
 scrypt = "0.11"
 serde = { version = "1", features = ["derive"] }
@@ -84,7 +94,9 @@ tera = "1"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
+# Default features select the `aws_lc_rs` provider, which is what actually
+# dragged aws-lc-rs into the TLS path (audit 2026-08-28 §4.8#9). Ring only.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 redb = "2"
@@ -100,7 +112,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.32"
 opentelemetry = { version = "0.31", features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+# `default-features = false` drops `reqwest-blocking-client`, the default HTTP
+# client, which linked the policy-banned `reqwest` into the published binary
+# (audit 2026-08-28 §4.8#9). The OTLP/HTTP exporter is kept and re-pointed at
+# `hyper-client` — hyper is already a production dependency.
+# Direct dependency so the OTLP/HTTP exporter can be handed an explicit
+# hyper+rustls client instead of otlp's reqwest default (audit §4.8#9).
+opentelemetry-http = { version = "0.31", default-features = false, features = ["hyper"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "hyper-client",
+    "trace",
+    "metrics",
+    "logs",
+    "internal-logs",
+] }
 opentelemetry-semantic-conventions = "0.31"
 ureq = { version = "3", features = ["json"] }
 unicode-normalization = "0.1"
@@ -117,6 +144,17 @@ rpassword = "7"
 secrecy = { version = "0.8", features = ["alloc"] }
 
 [features]
+# On by default so `make dev`, `cargo nextest` and the Playwright suite are
+# unaffected. The shipped container image builds with `--no-default-features`,
+# which is what actually keeps `/admin/bootstrap`, the `/dev/seed-*` family and
+# the hard-coded `admin@hearth.test` password out of the production binary
+# (audit §4.7#2, task 20.1). A runtime boolean left all of it compiled in.
+default = ["dev-endpoints"]
+
+# Dev-only HTTP endpoints and the hard-coded dev admin credential.
+# Never enable for a production build.
+dev-endpoints = []
+
 # Exposes internal test probes for use by the simulation crate. Never enable in production.
 test-hooks = []
 
@@ -245,6 +283,12 @@ unnecessary_cast = "allow"
 unnecessary_literal_bound = "allow"
 format_push_string = "allow"
 unused_async = "allow"
+# Clippy 1.98 split the trait-impl case out of `unused_async` into its own lint,
+# so the allow above stopped covering it and 25 sites turned red on a toolchain
+# bump alone. Every one is an `async fn` whose signature an external trait
+# dictates — axum's `FromRequestParts`, openraft's `RaftLogStorage` /
+# `RaftNetwork` / `RaftStateMachine` — so the `async` cannot be removed.
+unused_async_trait_impl = "allow"
 useless_format = "allow"
 redundant_closure = "allow"
 collapsible_if = "allow"

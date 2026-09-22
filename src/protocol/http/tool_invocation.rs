@@ -128,14 +128,17 @@ async fn invoke_tool(
     match evaluate_tool_access(&claims.permissions, &body.tool, &tool_groups) {
         ToolAccessDecision::Allow => {
             // M6 — Audit every authorized invocation.
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: claims.sub.clone(),
-                action: AuditAction::AgentToolInvocation,
-                resource_type: "tool".to_string(),
-                resource_id: format!("{}.{}", body.tool, body.action),
-                metadata: None,
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: claims.sub.clone(),
+                    action: AuditAction::AgentToolInvocation,
+                    resource_type: "tool".to_string(),
+                    resource_id: format!("{}.{}", body.tool, body.action),
+                    metadata: None,
+                },
+            );
             (
                 StatusCode::OK,
                 Json(InvokeToolResponse {
@@ -217,17 +220,27 @@ fn validate_dpop_if_bound(
         }
     }
 
-    state
-        .identity
-        .check_and_record_dpop_jti(realm_id, &validated.jti, now_secs)
-        .map_err(|e| identity_error_to_response(&e).into_response())?;
-
+    // A-11: the `cnf.jkt` binding MUST be checked BEFORE the JTI is burned.
+    //
+    // The JTI store is durable and realm-wide, so a spent JTI is spent at every
+    // endpoint. Recording first means a proof that fails the binding check has
+    // still consumed its one-shot replay slot, and the rightful holder's own
+    // use of that proof is then answered `DPopProofReplay` — an attacker-
+    // triggered denial of service against the legitimate caller. `auth.rs`
+    // (`:1053`) and `approval.rs`'s G2 note already order it this way; this
+    // call site had the two statements inverted.
     if validated.jkt != expected_jkt {
         return Err(identity_error_to_response(
             &crate::identity::IdentityError::DPopBindingMismatch,
         )
         .into_response());
     }
+
+    state
+        .identity
+        .check_and_record_dpop_jti(realm_id, &validated.jti, now_secs)
+        .map_err(|e| identity_error_to_response(&e).into_response())?;
+
     Ok(())
 }
 

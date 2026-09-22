@@ -101,6 +101,23 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         Ok(result)
     }
 
+    fn export_chain_material(
+        &self,
+        realm_id: &crate::core::RealmId,
+    ) -> Result<Option<crate::audit::AuditChainMaterial>, crate::audit::AuditError> {
+        self.inner.export_chain_material(realm_id)
+    }
+
+    fn on_replicated_row(&self, realm_id: &crate::core::RealmId, key: &[u8]) {
+        // Chain-head cache invalidation belongs to the engine that owns the
+        // cache; there is nothing to broadcast (task 26.47).
+        self.inner.on_replicated_row(realm_id, key);
+    }
+
+    fn on_replicated_snapshot(&self) {
+        self.inner.on_replicated_snapshot();
+    }
+
     fn import_event(
         &self,
         event: &crate::audit::AuditEvent,

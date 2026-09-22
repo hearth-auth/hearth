@@ -57,10 +57,50 @@ publishing {
                         url.set("https://www.apache.org/licenses/LICENSE-2.0")
                     }
                 }
+                // Maven Central REQUIRES a developers block; a deployment
+                // without one is rejected at validation (task 26.53).
+                developers {
+                    developer {
+                        id.set("hearth-auth")
+                        name.set("Hearth maintainers")
+                        url.set("https://github.com/hearth-auth")
+                    }
+                }
                 scm {
                     url.set("https://github.com/hearth-auth/hearth")
                     connection.set("scm:git:git://github.com/hearth-auth/hearth.git")
                     developerConnection.set("scm:git:ssh://git@github.com/hearth-auth/hearth.git")
+                }
+            }
+        }
+    }
+
+    // Task 26.53 — WITHOUT THIS BLOCK, `gradle publish` SUCCEEDS AND PUBLISHES
+    // NOTHING.
+    //
+    // The publication above was declared with no repository to publish it to.
+    // Gradle's `publish` task then has zero targets, does no work, and exits 0.
+    // So 43 `sdk-kotlin-v*` tags produced 43 green workflow runs and zero
+    // artifacts, `io.hearth` is absent from Maven Central (group 404), and the
+    // `ossrhUsername`/`ossrhPassword` properties the workflow passes in were
+    // read by nothing.
+    //
+    // Credentials come from `ORG_GRADLE_PROJECT_ossrhUsername` /
+    // `ORG_GRADLE_PROJECT_ossrhPassword`. When they are absent — a local build,
+    // or a dry-run — the repository is not declared at all, so `publish` still
+    // has nothing to do rather than failing on missing credentials. That is why
+    // the workflow must ALSO assert an artifact was produced: see
+    // `.github/workflows/sdk-publish-kotlin.yml`.
+    repositories {
+        val ossrhUsername: String? by project
+        val ossrhPassword: String? by project
+        if (ossrhUsername != null && ossrhPassword != null) {
+            maven {
+                name = "ossrh"
+                url = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
+                credentials {
+                    username = ossrhUsername
+                    password = ossrhPassword
                 }
             }
         }

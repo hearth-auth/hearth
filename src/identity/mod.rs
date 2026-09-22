@@ -33,10 +33,12 @@ pub mod search;
 pub mod session_version;
 pub mod sessions;
 pub mod sms;
+pub mod step_up;
 pub mod tokens;
 pub mod tool_permissions;
 pub(crate) mod totp;
 mod types;
+pub mod user_code;
 mod validation;
 pub(crate) mod webauthn;
 
@@ -69,14 +71,16 @@ pub mod keys_test_helpers {
 }
 
 pub use credentials::{
-    hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,
-    PepperKey, StoredCredential,
+    hash_password, validate_argon2_cost, verify_password_with_pepper, CleartextPassword,
+    CredentialConfig, PepperConfig, PepperKey, StoredCredential, OWASP_ARGON2_MIN_MEMORY_KIB_T1,
+    OWASP_ARGON2_MIN_MEMORY_KIB_T2,
 };
 pub use email::{
     ApiKey, EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
     SharedEmailSender, StubHttpTransport,
 };
+pub use engine::cross_realm::{find_system_sourced_cross_realm_policies, SystemSourcedPolicy};
 pub use engine::{
     EmbeddedIdentityEngine, IdentityConfig, RateLimitConfig, SessionConfig, TokenIssuanceContext,
 };
@@ -102,6 +106,9 @@ pub use sms::{
     LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
     StubSmsHttpTransport, TwilioSmsSender,
 };
+pub use step_up::{
+    has_step_up_credential, verify_step_up, StepUpAssertion, StepUpError, StepUpProof,
+};
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
     verify_token_signature, CnfClaim, IssueTokenRequest, Jwk, JwksDocument, JwtAssertionClaims,
@@ -110,26 +117,29 @@ pub use tokens::{
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, ApprovalWebhookConfig, AttributeDefinition,
-    AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, ConsentDecision,
-    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
-    CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
-    DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, CidrPolicy,
+    ConsentDecision, ConsentExport, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
+    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
+    CredentialExport, DcrPolicy, DemoSeedOutcome, DemoSeedSpec, FapiProfile, FederationLinkExport,
+    ImportClientRequest, ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof,
+    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
     Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session, SessionContext,
-    SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
+    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, ScimMappingExport,
+    ScimMappingKind, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
+    UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
-    AgentOwner, AgentStatus, ApprovalRequest, ApprovalRequestResponse, ApprovalRequestStatus,
-    CapabilityTokenInfo, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse, CreateAgentRequest,
-    CreateApprovalRequestInput, CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest,
-    CrossRealmTrustPolicy, DelegationGrantEntry, DeriveAatRequest, IssueAatRequest,
-    ListAgentsQuery, PlaintextApiKey, ProtectedResource, RegisterProtectedResourceRequest,
-    RegisterSpiffeIdRequest, Rfc8693Request, Rfc8693Response, SpiffeIdentityMapping,
+    AgentExport, AgentOwner, AgentStatus, ApprovalRequest, ApprovalRequestResponse,
+    ApprovalRequestStatus, CapabilityTokenInfo, CreateAgentApiKeyRequest,
+    CreateAgentApiKeyResponse, CreateAgentRequest, CreateApprovalRequestInput,
+    CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest, CrossRealmTrustPolicy,
+    DelegationGrantEntry, DeriveAatRequest, IssueAatRequest, ListAgentsQuery, PlaintextApiKey,
+    ProtectedResource, RegisterProtectedResourceRequest, RegisterSpiffeIdRequest,
+    RetiringSigningKeyExport, Rfc8693Request, Rfc8693Response, SpiffeIdentityMapping,
     StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse, UpdateAgentRequest,
     UpdateProtectedResourceRequest,
 };
@@ -449,6 +459,23 @@ pub trait IdentityEngine: Send + Sync {
         password: &CleartextPassword,
     ) -> Result<bool, IdentityError>;
 
+    /// Returns whether the account holds a password credential that the realm
+    /// still accepts.
+    ///
+    /// Answers `Ok(false)` when the realm's `allowed_auth_methods` excludes
+    /// `password`, because such a credential can no longer be presented. Used
+    /// by [`crate::identity::step_up`] to decide whether a step-up proof can
+    /// be demanded at all. Performs no hashing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the credential record cannot be read.
+    fn has_password_credential(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError>;
+
     /// Runs a dummy Argon2id hash of `password` and discards the result.
     ///
     /// Call this when a user is not found during login so the response
@@ -505,6 +532,17 @@ pub trait IdentityEngine: Send + Sync {
     /// `context` carries optional device and network metadata (IP, User-Agent)
     /// captured at the point of authentication. Pass `&SessionContext::default()`
     /// for API-originated or test sessions without browser context.
+    ///
+    /// When the realm sets `mfa_required`, the call is refused with
+    /// `IdentityError::MfaRequired` unless `context.mfa_proof` says a second
+    /// factor was used in this authentication. Enrolment alone does not pass
+    /// the gate (audit 2026-08-28 §4.18#3).
+    ///
+    /// When the realm sets `webauthn_required`, the same refusal applies
+    /// unless that second factor was a WebAuthn assertion that proved user
+    /// verification (`MfaProof::ProvedWebAuthn`). A TOTP code, a recovery code
+    /// or an OTP does not pass, however many passkeys the account holds
+    /// (task 25.26).
     fn create_session(
         &self,
         realm_id: &RealmId,
@@ -629,6 +667,14 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// The refresh token's session must still be valid. The session's TTL
     /// is also refreshed. Returns a new token pair with updated expiration.
+    ///
+    /// Rotation is mandatory and has no fallback. The presented token must
+    /// carry an `fid` naming a live grant family whose current hash it matches;
+    /// a stale hash is treated as theft and revokes the family and its session,
+    /// and a token carrying no `fid` at all is refused rather than served by a
+    /// weaker path (audit 2026-08-28 §4.16#6). A family revoked by logout,
+    /// `revoke_token`, client deletion or consent revocation fails here with
+    /// [`IdentityError::TokenRevoked`].
     ///
     /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
     /// the current request (RFC 9449). FAPI 2.0 clients require it; the
@@ -936,7 +982,24 @@ pub trait IdentityEngine: Send + Sync {
     fn disable_mfa(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError>;
 
     /// Returns whether MFA is currently enabled for a user.
+    ///
+    /// This is TOTP only. For "does this user hold any usable second factor?"
+    /// call [`IdentityEngine::has_second_factor`].
     fn mfa_enabled(&self, realm_id: &RealmId, user_id: &UserId) -> Result<bool, IdentityError>;
+
+    /// Returns whether the user holds a second factor this realm can challenge.
+    ///
+    /// True for an enabled TOTP enrolment, for a verified phone number when the
+    /// realm offers `sms`, and for an email-OTP enrolment when the realm offers
+    /// `email_otp`. Login paths use it to choose between a challenge and forced
+    /// enrolment. It MUST NOT be used to decide whether the `mfa_required`
+    /// policy is met — that gate reads factor use, not enrolment
+    /// (audit 2026-08-28 §4.18#3).
+    fn has_second_factor(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError>;
 
     /// Records a burned MFA pending cookie nonce in WAL storage.
     ///
@@ -1808,6 +1871,12 @@ pub trait IdentityEngine: Send + Sync {
     fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError>;
 
     /// Persists a SAML state bag (SP-initiated login; 10-minute TTL).
+    ///
+    /// The `saml:state:` key space is written by an unauthenticated GET, so
+    /// implementations MUST bound it: reclaim expired bags and refuse with
+    /// [`IdentityError::RateLimited`] once the realm holds
+    /// [`federation::saml::SAML_STATE_MAX_PER_REALM`] live bags
+    /// (audit 2026-08-28 §4.10#9).
     fn put_saml_state(&self, bag: &federation::saml::SamlStateBag) -> Result<(), IdentityError>;
 
     /// Retrieves and deletes a SAML state bag (single-use).
@@ -1819,11 +1888,17 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Marks an assertion ID consumed for this IdP (replay guard).
     /// Returns `SamlReplay` if the ID has already been seen.
+    ///
+    /// `expires_at_secs` is the Unix-seconds instant past which the guarded
+    /// assertion can no longer validate (its `NotOnOrAfter` plus the SP clock
+    /// skew). The sentinel is reclaimable from then on, which is what keeps
+    /// the `saml:asn:` key space bounded (audit 2026-08-28 §4.10#9).
     fn mark_saml_assertion_consumed(
         &self,
         realm_id: &RealmId,
         idp_id: &crate::core::IdpId,
         assertion_id: &str,
+        expires_at_secs: i64,
     ) -> Result<(), IdentityError>;
 
     /// Records that the IdP issued an assertion to an SP for a user session.
@@ -2149,6 +2224,24 @@ pub trait IdentityEngine: Send + Sync {
         plaintext_key_hex: &str,
     ) -> Result<bool, IdentityError>;
 
+    /// Narrows a caller-supplied organisation context to `None` unless that
+    /// organisation exists and is `Active`.
+    ///
+    /// Suspension is a kill switch, not a label (task 26.16). Every surface
+    /// that accepts an organisation id from its caller must run it through
+    /// here before it grants anything, or a frozen tenant keeps its org-scoped
+    /// authority on whichever surface was forgotten — which is what happened
+    /// to the gRPC RBAC admin path (task 26.34). Realm-scoped authority is
+    /// untouched: the control kills the organisation, not the member's
+    /// account.
+    ///
+    /// Fails closed on an unknown organisation or a storage error.
+    fn active_org_context(
+        &self,
+        realm_id: &RealmId,
+        org_id: Option<OrganizationId>,
+    ) -> Option<OrganizationId>;
+
     /// Sweeps expired entities (authorization codes, device codes,
     /// pending authorization tickets, grant families) from storage.
     ///
@@ -2159,6 +2252,20 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
     ) -> Result<crate::identity::cleanup::CleanupStats, IdentityError>;
+
+    /// Redelivers every approval webhook still sitting in `realm_id`'s outbox.
+    ///
+    /// An approval request writes its outbox row BEFORE the delivery attempt
+    /// and deletes it only once the endpoint has answered 2xx, so a row that
+    /// survives is a notification nobody received. This is the retry half of
+    /// the "durable at-least-once" guarantee `AGENT_AUTH.md` states: without a
+    /// caller the delivery is at-MOST-once, and the row leaks permanently
+    /// (task 26.13).
+    ///
+    /// Returns `(delivered, remaining)`. Best-effort: a realm with no webhook
+    /// configured, or a storage error, returns `(0, 0)` rather than failing —
+    /// this runs on a background tick and must not take the task down.
+    fn flush_approval_webhook_outbox(&self, realm_id: &RealmId) -> (u64, u64);
 
     /// Proactively evicts expired device-fingerprint entries from `realm_id`.
     ///
@@ -2183,6 +2290,18 @@ pub trait IdentityEngine: Send + Sync {
         true
     }
 
+    /// Reports whether the storage layer has fenced writes after a write fault
+    /// (audit 2026-08-28 §4.11#8).
+    ///
+    /// A fenced node serves reads but refuses every write for the life of the
+    /// process. `/readyz` reports not-ready while this is `true`, so the node
+    /// stops receiving traffic it cannot accept; restart it to clear the fence.
+    ///
+    /// The default returns `false` (suitable for in-memory or mock engines).
+    fn is_write_fenced(&self) -> bool {
+        false
+    }
+
     // ===== Backup export helpers =====
 
     /// Returns all stored credentials in a realm for backup export.
@@ -2194,6 +2313,220 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
     ) -> Result<Vec<CredentialExport>, IdentityError>;
+
+    /// Returns every second-factor record in a realm for backup export
+    /// (audit 2026-08-28 §4.18#5).
+    ///
+    /// Covers TOTP/recovery-code state (decrypted — the archive encrypts it)
+    /// and `WebAuthn` passkeys. SMS-OTP and email-OTP factors have no
+    /// separate durable record: they ride on the user record's phone and
+    /// email fields, which the user export already carries.
+    fn export_all_mfa_factors(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<MfaFactorExport>, IdentityError>;
+
+    /// Writes one second-factor record from a backup archive into the realm.
+    ///
+    /// TOTP state is re-encrypted under this realm's MFA DEK before it is
+    /// stored. When the factor already exists, `overwrite` decides between
+    /// replacing it and skipping it.
+    fn import_mfa_factor(
+        &self,
+        realm_id: &RealmId,
+        factor: &MfaFactorExport,
+        overwrite: bool,
+    ) -> Result<crate::core::ImportOutcome, IdentityError>;
+
+    /// Returns every organization-membership record in a realm for backup
+    /// export (OpenSpec 26.40).
+    ///
+    /// Organizations already round-tripped; their members did not, so a
+    /// restored realm held every org with nobody in it.
+    fn export_all_organization_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<OrganizationMembership>, IdentityError>;
+
+    /// Restores one organization membership, writing **both** index entries
+    /// (org->user and user->org) exactly as `add_member` writes them.
+    ///
+    /// Unlike [`add_member`](Self::add_member) this performs no org-status,
+    /// user-existence or member-limit checks: the archive is the authority and
+    /// its records are written verbatim.
+    fn import_organization_membership(
+        &self,
+        realm_id: &RealmId,
+        membership: &OrganizationMembership,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every OAuth consent record in a realm for backup export,
+    /// paired with the exact storage key it was read from (OpenSpec 26.40).
+    fn export_all_consents(&self, realm_id: &RealmId) -> Result<Vec<ConsentExport>, IdentityError>;
+
+    /// Restores one OAuth consent record at its original storage key.
+    ///
+    /// Rejects any key outside the `oauth:consent:` key space.
+    fn import_consent(
+        &self,
+        realm_id: &RealmId,
+        consent: &ConsentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every agent in a realm with all of its credentials, for backup
+    /// export (OpenSpec 26.40).
+    fn export_all_agents(&self, realm_id: &RealmId) -> Result<Vec<AgentExport>, IdentityError>;
+
+    /// Restores one agent and its credentials, rebuilding the owner index the
+    /// agent listing scans.
+    ///
+    /// Performs none of `create_agent`'s validation: the archive is the
+    /// authority and its records are written verbatim, revocations included.
+    fn import_agent(
+        &self,
+        realm_id: &RealmId,
+        export: &AgentExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every external IdP connector registered in a realm, for backup
+    /// export (OpenSpec 26.40).
+    fn export_all_identity_providers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::federation::IdpConfig>, IdentityError>;
+
+    /// Restores one IdP connector under its original [`IdpId`].
+    ///
+    /// The id must be preserved: every federation account link is keyed by it,
+    /// so a connector that comes back under a fresh id orphans every link.
+    fn import_identity_provider(
+        &self,
+        realm_id: &RealmId,
+        idp: &crate::identity::federation::IdpConfig,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every federation account link in a realm, for backup export.
+    fn export_all_federation_links(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<FederationLinkExport>, IdentityError>;
+
+    /// Restores one federation account link, writing **both** index entries.
+    fn import_federation_link(
+        &self,
+        realm_id: &RealmId,
+        link: &FederationLinkExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every webhook registered in a realm, for backup export.
+    fn export_all_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError>;
+
+    /// Restores one webhook, signing secret included, so deliveries resume
+    /// with signatures the receiver already trusts.
+    fn import_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook: &Webhook,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every registered SAML service provider in a realm.
+    fn export_all_saml_service_providers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError>;
+
+    /// Restores one SAML service-provider registration.
+    fn import_saml_service_provider(
+        &self,
+        realm_id: &RealmId,
+        sp: &crate::identity::federation::saml::SamlServiceProvider,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's SAML signing key as plaintext JSON
+    /// (`{"pkcs8":…,"cert":…}`), or `None` when the realm has never acted as a
+    /// SAML IdP.
+    ///
+    /// At rest the key is sealed under the node's KEK. The bytes returned here
+    /// are **unsealed**, because the destination's KEK is a different key: an
+    /// archive carrying the sealed form would restore ciphertext nothing at the
+    /// destination can open, and the failure would not surface until the first
+    /// SAML login. The caller MUST encrypt them before they leave the process.
+    fn export_realm_saml_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, IdentityError>;
+
+    /// Installs a realm's SAML signing key from the plaintext JSON produced by
+    /// [`export_realm_saml_key`](Self::export_realm_saml_key), re-sealing it
+    /// under **this** node's KEK.
+    ///
+    /// Validates that the material actually loads as an RSA signing key before
+    /// writing, so an unusable key fails the restore instead of the first
+    /// federated login after it.
+    fn import_realm_saml_key(
+        &self,
+        realm_id: &RealmId,
+        plaintext_json: &[u8],
+    ) -> Result<(), IdentityError>;
+
+    /// Returns every SCIM `externalId` mapping in a realm, for backup export.
+    fn export_all_scim_mappings(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<ScimMappingExport>, IdentityError>;
+
+    /// Restores one SCIM `externalId` mapping, writing both index directions.
+    fn import_scim_mapping(
+        &self,
+        realm_id: &RealmId,
+        mapping: &ScimMappingExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns every organization invitation in a realm, for backup export.
+    fn export_all_invitations(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<OrganizationInvitation>, IdentityError>;
+
+    /// Restores one organization invitation with all four of its index entries
+    /// (primary, token hash, org+email dedup, org listing), so an outstanding
+    /// invitation link still redeems after the restore.
+    fn import_invitation(
+        &self,
+        realm_id: &RealmId,
+        invitation: &OrganizationInvitation,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's retiring signing keys that are still inside their
+    /// rotation grace window, as plaintext PKCS#8 (OpenSpec 26.40).
+    ///
+    /// Keys whose deadline has already elapsed are omitted: they can no longer
+    /// verify anything at the origin either.
+    fn export_retiring_signing_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError>;
+
+    /// Re-installs one retiring signing key under its original `kid` and its
+    /// original **absolute** deadline, re-sealed under this node's KEK.
+    ///
+    /// Returns [`ImportOutcome::Skipped`] when the deadline has already passed:
+    /// a restore resumes a grace window, it does not restart one.
+    fn import_retiring_signing_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
 
     /// Returns the raw PKCS#8 DER bytes for a realm's Ed25519 signing key.
     ///

@@ -56,3 +56,60 @@ skip = [
     # No common version available upstream — skip to suppress the warning.
     { name = "wit-bindgen", version = "=0.51.0" },
 ]
+
+# ── Dependency policy, enforced (audit 2026-08-28 §4.8#9) ─────────────────────
+#
+# CLAUDE.md and ARCHITECTURE.md ban a second TLS/crypto stack and the `reqwest`
+# HTTP client in production. Neither ban was encoded here, and both were being
+# violated: rustls' and tokio-rustls' default features selected the `aws-lc-rs`
+# provider on top of `ring`, and `opentelemetry-otlp`'s default `http-proto`
+# exporter linked `reqwest` into the published binary. Both are now pinned out
+# in Cargo.toml; these entries stop them coming back.
+
+# Crypto backends. `ring` and the RustCrypto crates are the policy stack.
+[[bans.deny]]
+name = "openssl"
+reason = "OpenSSL is not an approved crypto backend; use ring or RustCrypto."
+[[bans.deny]]
+name = "openssl-sys"
+reason = "OpenSSL is not an approved crypto backend; use ring or RustCrypto."
+[[bans.deny]]
+name = "native-tls"
+reason = "Platform TLS is not an approved backend; use rustls with the ring provider."
+[[bans.deny]]
+name = "hyper-tls"
+reason = "Pulls native-tls; use hyper-rustls with the ring provider."
+[[bans.deny]]
+name = "boring"
+reason = "BoringSSL is not an approved crypto backend."
+[[bans.deny]]
+name = "boring-sys"
+reason = "BoringSSL is not an approved crypto backend."
+
+# aws-lc-rs is permitted for exactly one purpose: rcgen's RSA-2048 key
+# generation, which `ring` cannot do and which replaces the `rsa` crate
+# (unpatched RUSTSEC-2023-0071, Marvin Attack). Any other parent — a TLS
+# provider default, say — is the accidental third backend the audit found.
+[[bans.deny]]
+name = "aws-lc-rs"
+wrappers = ["rcgen"]
+reason = "Permitted only as rcgen's RSA key-generation backend; never as a TLS provider."
+
+# HTTP clients. `ureq` is the production client. `reqwest` is permitted only as
+# a direct dev-dependency of this workspace (the integration-test HTTP client);
+# a transitive edge from any other crate puts it in the published binary, which
+# is the defect this entry exists to catch. scripts/check-production-deps.sh
+# closes the remaining gap by asserting it is absent from `cargo tree -e normal`.
+[[bans.deny]]
+name = "reqwest"
+wrappers = ["hearth"]
+reason = "Banned in production (CLAUDE.md); test-only, and only as a direct dev-dependency."
+[[bans.deny]]
+name = "curl"
+reason = "Not an approved HTTP client; use ureq."
+[[bans.deny]]
+name = "curl-sys"
+reason = "Not an approved HTTP client; use ureq."
+[[bans.deny]]
+name = "isahc"
+reason = "Not an approved HTTP client; use ureq."

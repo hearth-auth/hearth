@@ -663,8 +663,14 @@ async fn apply_diff_config_only_returns_ok() {
     let diffs = compute_diff(&loaded, &config_v2);
     assert!(!diffs.is_empty(), "expected some diffs");
 
-    apply_diff(&diffs, &config_v2, harness.identity(), harness.rbac())
-        .expect("apply_diff must not fail for config-only variants");
+    apply_diff(
+        &diffs,
+        &config_v2,
+        harness.identity(),
+        harness.rbac(),
+        harness.audit(),
+    )
+    .expect("apply_diff must not fail for config-only variants");
 }
 
 #[tokio::test]
@@ -699,7 +705,14 @@ async fn apply_diff_org_added_creates_org_in_storage() {
         slug: "newco".to_string(),
     }];
 
-    apply_diff(&diffs, &config_with_org, harness.identity(), harness.rbac()).expect("apply_diff");
+    apply_diff(
+        &diffs,
+        &config_with_org,
+        harness.identity(),
+        harness.rbac(),
+        harness.audit(),
+    )
+    .expect("apply_diff");
 
     // Org should now exist in storage.
     let org = harness
@@ -741,8 +754,22 @@ async fn apply_diff_idempotent_on_org_added() {
     }];
 
     // Apply twice — second run must not fail or duplicate the org.
-    apply_diff(&diffs, &config_with_org, harness.identity(), harness.rbac()).expect("first apply");
-    apply_diff(&diffs, &config_with_org, harness.identity(), harness.rbac()).expect("second apply");
+    apply_diff(
+        &diffs,
+        &config_with_org,
+        harness.identity(),
+        harness.rbac(),
+        harness.audit(),
+    )
+    .expect("first apply");
+    apply_diff(
+        &diffs,
+        &config_with_org,
+        harness.identity(),
+        harness.rbac(),
+        harness.audit(),
+    )
+    .expect("second apply");
 
     let page = harness
         .identity()
@@ -793,6 +820,7 @@ async fn apply_diff_role_added_creates_role_in_storage() {
         &config_with_role,
         harness.identity(),
         harness.rbac(),
+        harness.audit(),
     )
     .expect("apply_diff");
 
@@ -835,6 +863,7 @@ async fn apply_diff_group_added_creates_group_in_storage() {
         &config_with_group,
         harness.identity(),
         harness.rbac(),
+        harness.audit(),
     )
     .expect("apply_diff");
 

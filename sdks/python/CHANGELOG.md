@@ -4,6 +4,13 @@ All notable changes to `hearth-python` are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **`webauthn_register_begin()` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
+  the server refuses passkey enrolment carried by an access token alone with
+  `403 step_up_required`, because a stolen token would otherwise mint a permanent
+  credential. Pass exactly one of the new keyword arguments `password=`, `totp_code=`,
+  or `assertion=`.
+
 ### Removed
 - **`AdminClient.create_realm` and `CreateRealmRequest`** — realms are provisioned
   via `hearth.yaml` and reconciled at startup, not through the admin API. The

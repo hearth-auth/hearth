@@ -4,8 +4,9 @@ use crate::core::RealmId;
 
 /// Key for the LDAP delta-sync checkpoint for a realm.
 ///
-/// Format: `ldap:cp:{realm_uuid}` — JSON-serialised `LdapSyncCheckpoint`.
-/// Stored in WAL under the realm's own namespace.
+/// Format: the ASCII prefix `ldap:cp:` followed by the realm UUID's **16 raw
+/// bytes** (not its hyphenated text form) — the value is a JSON-serialised
+/// `LdapSyncCheckpoint`. Stored in WAL under the realm's own namespace.
 const LDAP_CHECKPOINT_PREFIX: &str = "ldap:cp:";
 
 /// Encodes the LDAP sync checkpoint key for the given realm.

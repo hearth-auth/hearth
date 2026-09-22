@@ -115,12 +115,24 @@ jobs:
 
       - name: Fuzz smoke — ${{ matrix.target }} (1 000 runs)
         # fuzz/seeds/<target>/ holds hand-crafted seed inputs committed to the
-        # repo. fuzz/corpus/ (gitignored) is where libFuzzer accumulates
-        # discovered inputs during extended runs. CI uses seeds only.
+        # repo. fuzz/corpus/<target>/ (gitignored) is where libFuzzer
+        # accumulates discovered inputs.
+        #
+        # ORDER MATTERS (production-readiness task 26.30, audit
+        # reports/subsystem-audit-fuzz-loadtest-2026-09-21.md F-7). libFuzzer
+        # treats its FIRST corpus argument as the directory it WRITES newly
+        # discovered units into; every later one is a read-only input. Passing
+        # "$SEEDS" first therefore made the tracked, hand-reviewed seed corpus
+        # the fuzzer's output directory — two 2 000-run passes left between 14
+        # and 364 machine-generated files in each seed directory, and any
+        # developer running the documented command dirtied the repository.
+        # The writable corpus goes first; the tracked seeds go second.
         run: |
           SEEDS="fuzz/seeds/${{ matrix.target }}"
+          CORPUS="fuzz/corpus/${{ matrix.target }}"
+          mkdir -p "$CORPUS"
           if [ -d "$SEEDS" ]; then
-            cargo fuzz run ${{ matrix.target }} "$SEEDS" -- -runs=1000
+            cargo fuzz run ${{ matrix.target }} "$CORPUS" "$SEEDS" -- -runs=1000
           else
-            cargo fuzz run ${{ matrix.target }} -- -runs=1000
+            cargo fuzz run ${{ matrix.target }} "$CORPUS" -- -runs=1000
           fi

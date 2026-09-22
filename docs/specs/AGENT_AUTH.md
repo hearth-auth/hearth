@@ -69,7 +69,11 @@ An agent record **MUST** contain:
 - Every agent **MUST** belong to exactly one realm. All storage keys **MUST** be realm-prefixed per [ARCHITECTURE.md Section 7](./ARCHITECTURE.md#7-multi-tenancy).
 - An agent's `owner_id` **MUST** reference an existing user or organization within the same realm.
 - Agent status transitions **MUST** be: `Active → Suspended → Active` (reversible) and `Active|Suspended → Revoked` (terminal). Revoked agents **MUST NOT** authenticate or be re-activated.
+- Every status transition, and deletion, **MUST** be refused on a realm that is not `Active`. Archival is a freeze.
+- Any status other than `Active` **MUST** block participation in the token-issuing paths: AAT issuance, derivation and validation; approval-request creation and approval; transaction tokens; SPIFFE SVID mapping; and RFC 8693 token exchange, both as the immediate actor and anywhere in the `act` chain. `Suspended` is applied automatically by the abuse monitor, so treating it as anything less than a block would mean the automatic response to credential abuse did not actually stop the agent.
 - Agent deletion **MUST** cascade: revoke all active tokens, remove all RBAC role assignments where the agent is the subject, remove the agent from any groups, delete all credentials, and emit an audit event.
+- The deletion cascade **MUST** remove the primary agent record **last**, and **MUST** propagate the failure of every step. The primary record is the only handle the rest of the cascade can be addressed by: deleting it first strands every dependent row under a UUID nothing resolves, and a discarded error reports a cascade that never happened. A partial delete therefore leaves the agent resolvable and the operation retryable.
+- "Revoke all active tokens" is satisfied by subject resolution rather than by enumeration: AAT validation, approval-request approval, transaction-token issuance and token exchange all resolve the agent and refuse a subject that is not an `Active` agent of the realm, so a deleted agent's outstanding tokens stop being honoured at their next use. Capability tokens minted before deletion were the known exception until task 26.35; `validate_capability_token` now resolves the agent too, so an unspent capability token stops working the moment its agent stops being `Active`. The check runs before the single-use JTI is burned, so a token refused this way does not spend its one-shot slot.
 
 ### 1.3 Agent Registration API
 
@@ -83,12 +87,27 @@ The protocol layer **MUST** expose CRUD endpoints for agents:
 | Update | PATCH | `/v1/agents/{agent_id}` |
 | Delete | DELETE | `/v1/agents/{agent_id}` |
 
+The protocol layer **MUST** also expose the §1.2 status transitions. Without
+them the `Suspended` and `Revoked` states are unreachable by an operator, and
+the only remedies for a leaked agent credential are revoking one credential
+(which neither invalidates issued tokens nor prevents new ones) or deleting the
+agent outright:
+
+| Operation | Method | Path | Transition |
+|-----------|--------|------|------------|
+| Suspend | POST | `/v1/agents/{agent_id}/suspend` | `Active → Suspended` (reversible) |
+| Reactivate | POST | `/v1/agents/{agent_id}/reactivate` | `Suspended → Active` |
+| Revoke | POST | `/v1/agents/{agent_id}/revoke` | `Active\|Suspended → Revoked` (terminal) |
+
 **Rules:**
 
 - Agent creation **MUST** require the caller to be an authenticated user or an admin with `agent:create` permission.
 - The owner **MUST** be set to the authenticated user unless the caller is an admin (admins **MAY** specify a different owner).
 - List endpoints **MUST** support filtering by `owner_id`, `status`, and capability.
 - Pagination **MUST** follow the same cursor-based pattern used by existing list endpoints.
+- Every endpoint in both tables **MUST** require the `hearth.agents.admin` permission and **MUST** take the realm from the caller's own credential, never from the request path, so an agent in another realm answers `404`.
+- The transition endpoints take no request body and **MUST** return the updated agent record. Reactivating a revoked agent **MUST** be refused (`403`); revoking an already-revoked agent **MUST** be idempotent (`200`).
+- Each transition **MUST** emit its audit event (`agent_suspended`, `agent_reactivated`, `agent_revoked`). `agent_revoked` carries the `FailOperation` failure policy: a revocation that cannot be recorded **MUST** fail the request rather than succeed silently.
 
 ### 1.4 Capabilities
 
@@ -196,7 +215,7 @@ Tokens issued for MCP servers **SHOULD** use granular scope strings aligned with
 | `mcp:prompts:read` | Read prompt templates |
 
 - Custom scopes **MAY** be registered per protected resource.
-- Scope strings **MUST** follow the pattern `{namespace}:{category}:{action}`.
+- Scope strings **MUST** follow the pattern `{namespace}:{category}:{action}`. This is enforced where the vocabulary is declared: registering or updating a protected resource rejects any `mcp:`-prefixed scope that is not exactly three non-empty components of ASCII alphanumerics, `_` or `-`. Non-MCP scopes (`openid`, `profile`, …) are not subject to the rule.
 
 ### 2.7 Dynamic Client Registration
 
@@ -446,6 +465,7 @@ Bearer tokens can be stolen and replayed. Agents operating in untrusted environm
 - DPoP proof JWTs **MUST** include: `jti` (unique), `htm` (HTTP method), `htu` (target URI), `iat` (issued at). The `ath` (access token hash) claim **MUST** be included when the proof accompanies a resource request.
 - DPoP proof `iat` **MUST** be within a configurable clock skew window (default: 60 seconds).
 - DPoP `jti` values **MUST** be tracked for replay prevention. The replay window **MUST** match the clock skew window.
+- The `cnf.jkt` binding check **MUST** run *before* the `jti` is recorded. The `jti` store is durable and realm-wide, so recording first lets a proof that fails the binding check spend the legitimate holder's one-shot slot at every endpoint in the realm — an attacker-triggered denial of service rather than replay protection. The same ordering rule applies to every single-use artefact: the caller-binding check precedes the burn.
 - Access tokens bound via DPoP **MUST** use token type `DPoP` (not `Bearer`).
 - Hearth **MUST** include a `DPoP-Nonce` response header to enable server-provided nonces for tighter replay protection. Clients **MUST** include the server nonce in subsequent DPoP proofs when provided.
 - Ed25519 **MUST** be supported for DPoP keys, aligning with Hearth's existing signing infrastructure per [ARCHITECTURE.md Section 8.1](./ARCHITECTURE.md#81-token-validation-and-signing). P-256 (ES256) **SHOULD** also be supported.
@@ -464,7 +484,7 @@ When a delegated token is re-bound at each hop:
 When the initial token request includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint (`cnf.jkt`) of that proof key (HEA-1725). This means:
 
 - The issued refresh token is bound to the DPoP key pair that was active at grant issuance.
-- Every subsequent refresh request on that grant family **MUST** include a DPoP proof signed by the same key pair. A mismatch is rejected with `invalid_dpop_proof`.
+- Every subsequent refresh request on that grant family **MUST** include a DPoP proof signed by the same key pair. A thumbprint that does not match the family's `bound_jkt` is rejected with **401 `invalid_token`** (`IdentityError::DPopBindingMismatch`); `invalid_dpop_proof` is reserved for a proof that fails to parse or verify on its own terms.
 - **Key rotation invalidates the refresh token.** An agent that rotates its DPoP key pair must re-authorise from scratch (new authorization code flow). It cannot reuse an existing refresh token with the new key.
 
 **Practical guidance for agents:**

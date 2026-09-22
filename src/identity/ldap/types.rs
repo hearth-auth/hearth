@@ -78,7 +78,13 @@ pub enum SyncStrategy {
 /// LDAP connector configuration.
 ///
 /// Bound to a Hearth realm — all sync'd users land in that realm.
-/// Corresponds to `hearth.yaml` block: `ldap.` or per-realm `realms.<name>.ldap.`.
+///
+/// **There is no `hearth.yaml` block that produces one of these.** The struct
+/// derives `Deserialize` in anticipation of the wiring described in
+/// `docs/specs/READINESS_AUDIT_1_0.md` § C-2, but no config type embeds it and
+/// no code path constructs it outside this module's tests (task 26.6 /
+/// finding L-1). The doc comment here previously named `ldap.` and
+/// `realms.<name>.ldap.` as if they existed; neither does.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LdapConfig {
     /// Connection URL. **MUST** start with `ldaps://` in production.
@@ -90,8 +96,11 @@ pub struct LdapConfig {
 
     /// Allow plain `ldap://` connections (default: `false`).
     ///
-    /// Set `allow_insecure = true` only in test environments controlled
-    /// by `hearth.yaml`. Must never be `true` in production deployments.
+    /// Set `allow_insecure = true` only in test environments. Must never be
+    /// `true` in production deployments — and when this connector is wired to
+    /// operator configuration it needs a fatal start-up guard modelled on the
+    /// `email.transport = mailcatcher` one in `src/main.rs`, because nothing
+    /// refuses it today.
     #[serde(default)]
     pub allow_insecure: bool,
 
@@ -214,7 +223,8 @@ pub struct LdapUser {
 
 /// Stored delta-sync checkpoint for a realm.
 ///
-/// Persisted under key `ldap:cp:{realm_uuid}` in WAL storage.
+/// Persisted under the key built by `keys::encode_ldap_checkpoint` in WAL
+/// storage.
 /// Tracks the high-watermark sync cursor so only entries modified since the
 /// last successful sync are fetched on the next run.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -226,16 +236,39 @@ pub struct LdapSyncCheckpoint {
     pub cursor: Option<String>,
     /// Unix timestamp of the last successful sync run.
     pub last_sync_at: Option<u64>,
-    /// Count of users upserted in the last sync run.
+    /// Count of directory entries successfully mapped in the last sync run.
     pub last_sync_count: u64,
+    /// Count of directory entries the last sync run **dropped** because their
+    /// attributes could not be mapped.
+    ///
+    /// The cursor advances past those entries (see
+    /// [`crate::identity::ldap::EmbeddedLdapConnector::delta_sync`] for why),
+    /// so this is the only durable record that the run was not clean. A
+    /// non-zero value means the directory holds entries Hearth will not see
+    /// again until the next full sync.
+    ///
+    /// `#[serde(default)]` so a checkpoint written before task 26.8 still
+    /// deserialises.
+    #[serde(default)]
+    pub last_skipped_count: u64,
 }
 
 /// Result of a delta sync run.
 #[derive(Debug, Clone)]
 pub struct DeltaSyncResult {
-    /// Users that were inserted or updated in Hearth.
+    /// Directory entries that were read and successfully mapped.
+    ///
+    /// The connector does **not** write Hearth users — it has no caller that
+    /// could (finding L-1). This is the set a caller would upsert, not a set
+    /// that was upserted.
     pub upserted: Vec<LdapUser>,
-    /// Number of entries skipped (mapping failures, filtered out, etc.).
+    /// Number of entries the directory returned that were dropped because
+    /// attribute mapping failed.
+    ///
+    /// This was a hard-coded `0` until task 26.8, so a sync that silently
+    /// dropped every entry lacking the configured `mail` attribute reported a
+    /// clean run. A caller **must** treat a non-zero value as an incomplete
+    /// sync: the cursor has already advanced past those entries.
     pub skipped: u64,
     /// The new checkpoint after this run.
     pub checkpoint: LdapSyncCheckpoint,

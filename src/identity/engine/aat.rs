@@ -152,10 +152,18 @@ impl EmbeddedIdentityEngine {
         })
     }
 
-    /// Parses and validates an AAT JWT, checking signature, expiry, and revocation.
+    /// Parses and validates an AAT JWT, checking signature, expiry, the status
+    /// of the agent named in `sub`, and revocation.
     ///
     /// If `expected_aud` is `Some`, the `aud` claim must exactly match or
     /// `AatAudienceMismatch` is returned.
+    ///
+    /// The agent-status check is what makes agent revocation a kill switch for
+    /// AATs. `issue_aat_inner` refuses to mint for a non-`Active` agent, but
+    /// without the same check here an AAT minted a moment earlier stayed valid
+    /// for its whole lifetime — up to an hour — and could still be derived into
+    /// fresh children. Suspension (which the abuse monitor applies
+    /// automatically) counts: anything other than `Active` is refused.
     pub(super) fn parse_and_validate_aat(
         &self,
         realm_id: &RealmId,
@@ -180,10 +188,22 @@ impl EmbeddedIdentityEngine {
             }
         }
 
+        // The agent named by `sub` must still be Active.
+        require_active_subject_agent(self, realm_id, &claims.sub)?;
+
         // Check revocation of this JTI and all ancestors in the chain.
+        //
+        // A storage error here is NOT "not revoked": answering `Ok` on a failed
+        // read would turn a transient I/O fault into a bypass of the revocation
+        // blocklist. Propagate it and fail closed.
         for jti in &claims.aat_chain {
             let rev_key = keys::encode_aat_revoked_jti(jti);
-            if let Ok(Some(_)) = self.storage.get(realm_id, &rev_key) {
+            if self
+                .storage
+                .get(realm_id, &rev_key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
                 return Err(IdentityError::AatRevoked);
             }
         }
@@ -202,8 +222,35 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &key, b"1")
             .map_err(Self::storage_err)?;
 
-        let _ = self.record_audit(realm_id, None, AuditAction::AatRevoked, "aat", jti);
+        // `AatRevoked` is a `FailOperation` action (task 24.1): losing the
+        // record of a terminal security action must fail the call, not be
+        // absorbed into the `Ok(())` below.
+        self.record_audit(realm_id, None, AuditAction::AatRevoked, "aat", jti)?;
         Ok(())
+    }
+}
+
+/// Resolves the `sub` of an AAT to its agent record and requires it to be
+/// [`crate::identity::AgentStatus::Active`].
+///
+/// AAT subjects are always minted as `agt_{uuid}` by `issue_aat_inner`, and
+/// `derive_aat_inner` copies the parent's `sub` verbatim, so a subject that
+/// does not resolve to a live agent in this realm is a token this realm never
+/// issued. Every such case is refused rather than waved through.
+fn require_active_subject_agent(
+    engine: &EmbeddedIdentityEngine,
+    realm_id: &RealmId,
+    sub: &str,
+) -> Result<(), IdentityError> {
+    let raw = sub.strip_prefix("agt_").unwrap_or(sub);
+    let uuid = uuid::Uuid::parse_str(raw).map_err(|_| IdentityError::AgentNotFound)?;
+    let agent_id = crate::core::AgentId::new(uuid);
+    let agent = IdentityEngine::get_agent(engine, realm_id, &agent_id)?
+        .ok_or(IdentityError::AgentNotFound)?;
+    if agent.status() == crate::identity::AgentStatus::Active {
+        Ok(())
+    } else {
+        Err(IdentityError::AgentRevoked)
     }
 }
 

@@ -129,13 +129,16 @@ impl EmbeddedIdentityEngine {
         // Best-effort index cleanup (ignore error if already absent).
         let _ = self.storage.delete(realm_id, &from_index_key);
 
-        let _ = self.record_audit(
+        // `CrossRealmTrustRevoked` is a `FailOperation` action (task 24.1):
+        // tearing down a trust relationship without a durable record of it
+        // must fail the call rather than answer `Ok(())`.
+        self.record_audit(
             realm_id,
             None,
             AuditAction::CrossRealmTrustRevoked,
             "cross_realm_policy",
             policy_id,
-        );
+        )?;
 
         Ok(())
     }
@@ -183,4 +186,79 @@ impl EmbeddedIdentityEngine {
 
         Ok(false)
     }
+}
+
+// ── Task 25.15 — legacy system-sourced policies, reported at start-up ────────
+
+/// A stored cross-realm trust policy that names the **system realm** as its
+/// source while living in a realm that is not the system realm.
+///
+/// Task 25.11 refuses to *author* one of these unless a system-realm actor
+/// writes it, because a tenant admin who could would be declaring what the
+/// platform operator is allowed to do inside their own realm. That guard is
+/// write-side only: a policy written before 25.11 shipped is still stored, is
+/// still consulted by `check_cross_realm_policy`, and still silently narrows —
+/// or removes — the operator's reach into that realm. Nothing announced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSourcedPolicy {
+    /// The realm that stores the policy (the trusting realm).
+    pub target_realm_id: RealmId,
+    /// That realm's name, for an operator-legible log line.
+    pub target_realm_name: String,
+    /// The policy's own identifier, so the operator can delete it by id.
+    pub policy_id: String,
+    /// The capabilities the policy grants the system realm. An operator
+    /// locked out of a realm is usually looking at a short list here.
+    pub allowed_capabilities: Vec<String>,
+}
+
+/// Finds every stored cross-realm policy whose source is the system realm in a
+/// realm that is not the system realm.
+///
+/// Walks every realm, so it runs once at start-up and never on a request path.
+/// Read-only and non-fatal by design: a legacy policy may well be deliberate,
+/// and refusing to boot over one would strand an operator who cannot reach the
+/// server to remove it. The recovery valve is task 25.14's
+/// `DELETE /admin/realms/{id}/cross-realm-policies/{policy_id}`.
+///
+/// A realm whose policies cannot be listed is skipped rather than reported: a
+/// storage error is not evidence of a policy, and inventing one would send the
+/// operator hunting for a record that does not exist.
+pub fn find_system_sourced_cross_realm_policies(
+    identity: &dyn crate::identity::IdentityEngine,
+) -> Vec<SystemSourcedPolicy> {
+    const PAGE: u32 = 200;
+
+    let mut found = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let Ok(page) = identity.list_realms(&crate::core::PageRequest::new(offset, PAGE)) else {
+            break;
+        };
+        let batch = u32::try_from(page.items.len()).unwrap_or(0);
+        for realm in &page.items {
+            if realm.id().as_uuid().is_nil() {
+                // The system realm trusting itself is not the shape in question.
+                continue;
+            }
+            let Ok(policies) = identity.list_cross_realm_policies(realm.id()) else {
+                continue;
+            };
+            for policy in policies {
+                if policy.source_realm_id.as_uuid().is_nil() {
+                    found.push(SystemSourcedPolicy {
+                        target_realm_id: realm.id().clone(),
+                        target_realm_name: realm.name().to_string(),
+                        policy_id: policy.policy_id.clone(),
+                        allowed_capabilities: policy.allowed_capabilities.clone(),
+                    });
+                }
+            }
+        }
+        if batch < PAGE {
+            break;
+        }
+        offset = offset.saturating_add(u64::from(batch));
+    }
+    found
 }

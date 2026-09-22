@@ -265,16 +265,24 @@ be physically removed from storage in the next compaction pass.
 ### Behavior on Realm Deletion
 
 When a realm is deleted (`DELETE /admin/realms/{id}` or via `hearth migrate`),
-the cascade sweep **explicitly purges `email:reserved:` keys** as part of the
-same atomic sequence that removes users, sessions, credentials, and OAuth
-artifacts.  No email tombstone survives a realm deletion — the residual PII
-lifetime is bounded by the realm's lifetime, not by the 90-day window.
+the cascade sweep **explicitly purges `email:reserved:` keys** along with the
+users, sessions, credentials, and OAuth artifacts.  No email tombstone survives
+a realm deletion — the residual PII lifetime is bounded by the realm's
+lifetime, not by the 90-day window.
+
+The sweep is a sequence of durable writes, not one atomic transaction.  A crash
+part-way through leaves the realm in `DeletingInProgress` with some rows still
+present; repeating the delete completes it.  "Zero residual" is the state after
+the cascade **completes**, not an invariant that holds at every instant during
+it.
 
 Operators performing a full tenant offboard (realm deletion) can therefore
-assert **zero email-address residual** after the cascade completes.  The two
-integration tests `delete_realm_leaves_no_residual_pii` and
-`delete_user_leaves_no_residual_pii` (in `tests/users.rs`) codify and verify
-this guarantee.
+assert **zero email-address residual** once the cascade completes.  Three tests
+codify this against the realm's whole key space rather than a list of named
+prefixes: `delete_user_leaves_no_key_naming_the_user` and
+`delete_realm_leaves_no_residual_pii` (in `tests/users.rs`), and
+`simulation_crash_mid_cascade_record_intact` (in the `hearth-simulation`
+crate), which crashes mid-cascade and requires the retry to converge.
 
 ### Related Tombstones (Non-PII)
 

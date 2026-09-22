@@ -80,6 +80,18 @@ pub struct Bootstrap {
     pub realm_id: String,
     /// The dev realm's **name** — always [`DEV_REALM_NAME`]. Carried into the
     /// seed handle so the name-keyed login route can be reconstructed (HEA-2006).
+    ///
+    /// `allow(dead_code)`: the seed flow reads the name off the client
+    /// ([`SeedClient::realm_name`]), which is where the invariant is stored, so
+    /// this copy on the bootstrap result has no direct reader. It is kept
+    /// because `Bootstrap` is the documented shape of the bootstrap step and
+    /// dropping the field would make the struct silently lie about what a
+    /// bootstrap yields. Surfaced by the 2026-09-21 audit, which ran
+    /// `cargo clippy --all-targets -- -D warnings` on this crate for what
+    /// appears to be the first time: the crate is excluded from the workspace,
+    /// so `make clippy` never reaches it and `make loadtest-check` runs only
+    /// `cargo check` + `nextest`.
+    #[allow(dead_code)]
     pub realm_name: String,
     /// The bootstrap admin bearer token. SECRET — stored in the seed handle
     /// (0600 file) so the load run's `user_lookup` journey can authenticate

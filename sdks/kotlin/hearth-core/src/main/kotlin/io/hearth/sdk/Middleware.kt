@@ -65,8 +65,11 @@ data class RequirePermissionOptions(
  * Returns a mode-aware [PermissionChecker] for the given [permission].
  *
  * Behavior by mode:
- * - **[AccessTokenAuthorizationMode.EMBEDDED]** — decodes JWT claims locally; zero network calls.
- *   Returns `false` when the `permissions` claim is absent. DOES NOT fall back to a network call
+ * - **[AccessTokenAuthorizationMode.EMBEDDED]** — verifies the JWT via
+ *   [HearthClient.verifyToken] (Ed25519 signature against the realm's cached JWKS, plus
+ *   `exp`, `nbf`, `iss` and `aud`) and only then reads the `permissions` claim. No
+ *   per-request network call once the JWKS is warm. Returns `false` when the token does
+ *   not verify or the `permissions` claim is absent. DOES NOT fall back to a network call
  *   on claim absence (design constraint: absence of claims ≠ switch mode).
  * - **[AccessTokenAuthorizationMode.DECISION]** — calls [HearthClient.checkPermission] which
  *   POSTs to `POST /oauth/authorize`. Fail-closed: network or server errors return `false`.
@@ -82,7 +85,13 @@ fun requirePermission(permission: String, opts: RequirePermissionOptions): Permi
     when (opts.mode) {
         AccessTokenAuthorizationMode.EMBEDDED -> PermissionChecker { token ->
             checkRequiredAction(token)
-            decodeLocalPermissions(token)?.contains(permission) == true
+            // Verify BEFORE reading a claim. Decoding without verifying would let anyone
+            // mint an unsigned token carrying whatever permissions they liked.
+            try {
+                opts.client.verifyToken(token).hasPermission(permission)
+            } catch (_: HearthException) {
+                false
+            }
         }
 
         AccessTokenAuthorizationMode.DECISION -> PermissionChecker { token ->
@@ -113,7 +122,9 @@ fun requirePermission(permission: String, opts: RequirePermissionOptions): Permi
  * Decodes the JWT payload locally and throws [RequiredActionError] when
  * `token_type === "required_action"` (sdk-spec §6 Rule 6).
  *
- * The signature is NOT verified here — this is an early-exit gate only.
+ * The signature is NOT verified here. That is safe because this gate can only ever
+ * *reject*: a forged `token_type` costs the forger their own request and grants nothing.
+ * Every path that can *grant* verifies first.
  */
 internal fun checkRequiredAction(token: String) {
     if (token.isBlank()) return
@@ -142,7 +153,9 @@ internal fun checkRequiredAction(token: String) {
  * Decodes the JWT payload locally and returns the `permissions` list, or `null` when
  * the token is malformed or the claim is absent.
  *
- * The signature is NOT verified — use [HearthClient.verifyToken] for full verification.
+ * The signature is NOT verified, so this MUST NOT back an authorization decision — the
+ * EMBEDDED checker above goes through [HearthClient.verifyToken] instead. Retained for
+ * callers that need to inspect their own freshly-issued token.
  */
 internal fun decodeLocalPermissions(token: String): List<String>? {
     if (token.isBlank()) return null

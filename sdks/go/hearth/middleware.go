@@ -7,7 +7,8 @@ import (
 // MiddlewareConfig configures a RequirePermission middleware factory.
 type MiddlewareConfig struct {
 	// ExpectedMode is required. Controls how the middleware evaluates permissions.
-	//   ModeEmbedded      — decodes JWT locally; no network call.
+	//   ModeEmbedded      — verifies the JWT against the cached JWKS, then reads
+	//                       its permissions claim. No per-request network call.
 	//   ModeIntrospection — calls POST /introspect; requires ClientID + ClientSecret.
 	//   ModeDecision      — calls POST /oauth/authorize; fail-closed on network errors.
 	//
@@ -68,9 +69,11 @@ func unauthorizedHandler(w http.ResponseWriter, _ *http.Request) {
 // calling next. The check strategy is controlled by cfg.ExpectedMode.
 //
 // Behavior per mode:
-//   - ModeEmbedded:      decodes JWT claims locally; no network round-trip.
+//   - ModeEmbedded:      verifies the JWT's EdDSA signature against the realm's
+//     JWKS (cached) and its exp/nbf/iss, then reads the permissions claim.
+//     A token that fails verification → OnUnauthorized (401).
 //     When the client has a SessionVersionCache configured, the sv claim is
-//     validated first (RFC HEA-930 § 8). Revoked or stale → OnUnauthorized (401).
+//     validated next (RFC HEA-930 § 8). Revoked or stale → OnUnauthorized (401).
 //   - ModeIntrospection: calls POST /introspect, verifies the echoed mode matches
 //     cfg.ExpectedMode, then checks the live permissions claim. Returns
 //     ModeMismatchError (mapped to denial) when modes disagree.
@@ -104,6 +107,10 @@ func RequirePermission(c *Client, permission string, cfg MiddlewareConfig) func(
 			// Spec §6 rule 6: required_action tokens must be rejected with 401
 			// regardless of mode — they are valid but scoped only to completing
 			// pending actions and must never be accepted for general API access.
+			//
+			// This read is deliberately unverified: it can only ever *reject*,
+			// so a forged token_type costs the forger their own request and
+			// grants nothing. Every path that can *grant* verifies first.
 			if raw := decodeClaims(token); raw != nil && raw.TokenType == "required_action" {
 				rae := &RequiredActionError{RequiredActions: raw.RequiredActions}
 				if onRequiredAction != nil {
@@ -118,9 +125,12 @@ func RequirePermission(c *Client, permission string, cfg MiddlewareConfig) func(
 
 			switch cfg.ExpectedMode {
 			case ModeEmbedded:
-				claims := decodeClaims(token)
+				// Verify the signature, exp, nbf and iss against the realm's
+				// JWKS BEFORE reading any claim. A token that does not verify
+				// is unauthenticated, not merely unauthorized — 401, not 403.
+				claims := c.verifiedClaims(r.Context(), token)
 				if claims == nil {
-					deny(w, r)
+					unauth(w, r)
 					return
 				}
 				// Session-version check when cache is configured (RFC HEA-930 § 8).

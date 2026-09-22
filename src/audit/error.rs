@@ -25,6 +25,16 @@ pub enum AuditError {
     /// storage write followed by a call to
     /// [`crate::audit::AuditEngine::append`].
     MergedAppendNotSupported,
+
+    /// The query itself is malformed and was refused without touching storage.
+    ///
+    /// Today the only such case is a reversed time window
+    /// (`start_time > end_time`), which builds a reversed storage scan window.
+    /// That used to abort the whole multi-tenant process (audit §4.9#7).
+    InvalidQuery {
+        /// Operator-facing description. MUST NOT contain event contents.
+        reason: String,
+    },
 }
 
 impl fmt::Display for AuditError {
@@ -35,6 +45,7 @@ impl fmt::Display for AuditError {
             }
             Self::Storage(err) => write!(f, "storage error: {err}"),
             Self::Serialization { reason } => write!(f, "serialization error: {reason}"),
+            Self::InvalidQuery { reason } => write!(f, "invalid audit query: {reason}"),
             Self::MergedAppendNotSupported => {
                 write!(f, "merged append not supported by this audit engine")
             }
@@ -48,6 +59,7 @@ impl std::error::Error for AuditError {
             Self::Storage(err) => Some(&**err),
             Self::IntegrityViolation { .. }
             | Self::Serialization { .. }
+            | Self::InvalidQuery { .. }
             | Self::MergedAppendNotSupported => None,
         }
     }

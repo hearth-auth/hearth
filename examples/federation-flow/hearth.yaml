@@ -37,18 +37,40 @@ realms:
       # The safest default — on email match, force local re-auth
       # before linking. Flip to `auto` to demo silent linking, or
       # `disabled` to demo JIT-only behavior.
+      #
+      # WARNING: `auto` is an account-takeover risk in production. It attaches
+      # the upstream identity to whatever local account already holds that email
+      # address, with no local re-auth, so an IdP that does not verify email
+      # (GitHub, or any generic OIDC IdP that can assert email_verified: true)
+      # lets an attacker claim a victim's address upstream and inherit the
+      # victim's Hearth account, roles and permissions. Only use `auto` with a
+      # single high-trust, email-verifying IdP.
       link_existing_accounts: confirm
       providers:
-        # A generic OIDC connector pointing at the local upstream.
-        # The upstream-idp/ process registers itself at port 9090
-        # with client_id/secret matching the values below.
+        # A generic OIDC connector pointing at the demo upstream.
+        #
+        # These URLs are PLACEHOLDERS — you must replace <your-tunnel-host>
+        # before the demo will run. Hearth's federation transport refuses any
+        # upstream that is not `https://`, or whose host resolves into a
+        # loopback / private / link-local / cloud-metadata range. That guard has
+        # no dev bypass and no allowlist, so `http://localhost:9090` is rejected
+        # before a socket is opened:
+        #
+        #   SSRF guard blocked federation upstream fetch: webhook URL must use
+        #   the https:// scheme
+        #
+        # Run the bundled upstream-idp/ behind an https tunnel (cloudflared or
+        # ngrok — README.md step 1b) and paste the tunnel's public hostname
+        # here, in all five URLs. The back-channel calls Hearth makes
+        # (discovery, token, userinfo, jwks) go through the tunnel; only the
+        # browser redirects touch localhost.
         upstream:
           type: oidc
-          issuer: "http://localhost:9090"
-          authorization_endpoint: "http://localhost:9090/auth"
-          token_endpoint: "http://localhost:9090/token"
-          userinfo_endpoint: "http://localhost:9090/me"
-          jwks_uri: "http://localhost:9090/jwks"
+          issuer: "https://<your-tunnel-host>"
+          authorization_endpoint: "https://<your-tunnel-host>/auth"
+          token_endpoint: "https://<your-tunnel-host>/token"
+          userinfo_endpoint: "https://<your-tunnel-host>/me"
+          jwks_uri: "https://<your-tunnel-host>/jwks"
           client_id: "hearth-demo"
           client_secret: "demo-secret-do-not-use-in-production"
           scopes:

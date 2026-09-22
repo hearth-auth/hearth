@@ -152,17 +152,40 @@ fn url_encode(s: &str) -> String {
 
 /// Truncates a response body for error messages.
 fn truncate_body(body: &str) -> &str {
-    if body.len() > 200 {
-        &body[..200]
-    } else {
-        body
+    // `&body[..200]` panics when byte 200 lands inside a multi-byte UTF-8
+    // character, and this runs on a provider's own error body — a remote
+    // party's bytes decide whether the process survives. Walk back to the
+    // nearest character boundary instead.
+    if body.len() <= 200 {
+        return body;
     }
+    let mut end = 200;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::identity::email::http::StubHttpTransport;
+
+    // 23.12: `truncate_body` byte-sliced the provider's error body at 200,
+    // which panics when byte 200 falls inside a multi-byte UTF-8 character.
+    // The body belongs to the remote party, so the remote party chose
+    // whether this call panicked.
+    #[test]
+    fn truncate_body_does_not_panic_on_a_multibyte_boundary() {
+        // 199 ASCII bytes, then a 3-byte character occupying bytes 199..202.
+        let body = format!("{}\u{20ac}tail", "a".repeat(199));
+        assert!(
+            !body.is_char_boundary(200),
+            "fixture must straddle byte 200"
+        );
+        assert_eq!(truncate_body(&body), "a".repeat(199));
+    }
 
     fn test_sender(
         stub: StubHttpTransport,

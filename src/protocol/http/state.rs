@@ -58,9 +58,6 @@ pub struct AppState {
     /// carries a valid `detached_signature_b64` in its manifest. Fail-closed:
     /// archives without a valid signature are rejected.
     pub backup_verify_key_bytes: Option<[u8; 32]>,
-    /// Grace period (seconds) during which a retiring signing key remains in
-    /// JWKS after rotation. Sourced from `token.signing_key_rotation_grace_period`.
-    pub signing_key_rotation_grace_period_secs: u64,
     /// Trusted reverse-proxy IPs for `X-Forwarded-For` extraction.
     ///
     /// When non-empty, the OWASP "rightmost non-trusted" algorithm is applied
@@ -113,6 +110,19 @@ pub struct AppState {
     /// limit by switching protocols. Defaults to production-safe limits;
     /// override via `with_request_shaper` using an operator-configured instance.
     pub request_shaper: Arc<RequestShaper>,
+
+    /// Outbound email transport, when one is configured.
+    ///
+    /// `None` in embedded harnesses that do not wire delivery. Required by
+    /// the magic-link endpoint: without it the minted link can never reach
+    /// the account holder (audit 2026-08-28 §4.24#6).
+    pub email: Option<Arc<crate::identity::email::EmailService>>,
+
+    /// Externally-reachable origin (no trailing slash) used to build links
+    /// that are emailed to users, e.g. `https://auth.example.com`.
+    ///
+    /// Sourced from `onboarding.base_url`; falls back to the bind address.
+    pub public_base_url: String,
 }
 
 impl AppState {
@@ -134,7 +144,6 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             // zero key is overridden in production via with_dpop_nonce_secret
@@ -145,6 +154,8 @@ impl AppState {
             agent_advanced_enabled: false,
             allowed_hosts: Vec::new(),
             request_shaper: Arc::new(RequestShaper::new()),
+            email: None,
+            public_base_url: "http://localhost:8420".to_string(),
         }
     }
 
@@ -168,7 +179,6 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
@@ -183,6 +193,8 @@ impl AppState {
             agent_advanced_enabled: false,
             allowed_hosts: Vec::new(),
             request_shaper: Arc::new(RequestShaper::new()),
+            email: None,
+            public_base_url: "http://localhost:8420".to_string(),
         }
     }
 
@@ -208,7 +220,6 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
-            signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
@@ -218,6 +229,8 @@ impl AppState {
             agent_advanced_enabled: false,
             allowed_hosts: Vec::new(),
             request_shaper: Arc::new(RequestShaper::new()),
+            email: None,
+            public_base_url: "http://localhost:8420".to_string(),
         }
     }
 
@@ -285,12 +298,6 @@ impl AppState {
         self
     }
 
-    /// Sets the signing key rotation grace period.
-    pub fn with_signing_key_rotation_grace_period_secs(mut self, secs: u64) -> Self {
-        self.signing_key_rotation_grace_period_secs = secs;
-        self
-    }
-
     /// Attaches a cluster engine, enabling the `/admin/cluster/*` endpoints.
     pub fn with_cluster(mut self, engine: Arc<ClusterEngine>) -> Self {
         self.cluster = Some(engine);
@@ -333,6 +340,22 @@ impl AppState {
     /// switching protocols.
     pub fn with_request_shaper(mut self, shaper: Arc<RequestShaper>) -> Self {
         self.request_shaper = shaper;
+        self
+    }
+
+    /// Wires the outbound email transport used by the magic-link endpoint.
+    #[must_use]
+    pub fn with_email(mut self, email: Option<Arc<crate::identity::email::EmailService>>) -> Self {
+        self.email = email;
+        self
+    }
+
+    /// Sets the externally-reachable origin used to build emailed links.
+    ///
+    /// A trailing slash is trimmed so callers can concatenate paths directly.
+    #[must_use]
+    pub fn with_public_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.public_base_url = base_url.into().trim_end_matches('/').to_string();
         self
     }
 

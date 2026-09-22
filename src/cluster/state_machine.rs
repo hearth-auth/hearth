@@ -12,9 +12,8 @@
 //! `flate2` (gzip).  CBOR is chosen because it encodes `Vec<u8>` as compact
 //! byte strings, not arrays of integers, keeping snapshot sizes small.
 
-use std::collections::BTreeSet;
 use std::io::{Cursor, Read as _, Write as _};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use flate2::read::GzDecoder;
@@ -30,6 +29,7 @@ use tokio::task::spawn_blocking;
 use tracing::{debug, info, instrument};
 
 use crate::cluster::types::{HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
+use crate::cluster::ReplicatedWriteObserver;
 use crate::core::RealmId;
 use crate::storage::StorageEngine;
 
@@ -81,14 +81,20 @@ struct StoredSnapshot {
 
 // ── HearthSnapshotBuilder ─────────────────────────────────────────────────────
 
-/// Builds a snapshot by scanning the full key-space of each known realm.
+/// Builds a snapshot by scanning the full key-space of every realm on disk.
 ///
 /// Returned by [`HearthStateMachine::get_snapshot_builder`].  The builder
 /// holds its own `Arc` to the engine so snapshot creation doesn't block
 /// the state machine from continuing to apply entries concurrently.
+///
+/// Realms are enumerated with [`StorageEngine::list_realms`] — the same source
+/// [`restore_snapshot_in_place`] uses for its Phase 1 clear (audit 2026-08-28
+/// §4.9#3).  An earlier version enumerated an in-memory `known_realms` set that
+/// only `apply` ever filled.  That set is never persisted, so a restarted
+/// leader built a snapshot omitting every realm on its own disk, and installing
+/// it deleted those realms from every follower.
 pub struct HearthSnapshotBuilder {
     engine: Arc<dyn StorageEngine>,
-    known_realms: BTreeSet<RealmId>,
     last_applied: Option<LogId<u64>>,
     last_membership: StoredMembership<u64, HearthNode>,
 }
@@ -97,7 +103,6 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
     #[instrument(skip(self), name = "snapshot_build")]
     async fn build_snapshot(&mut self) -> Result<Snapshot<HearthRaftConfig>, StorageError<u64>> {
         let engine = Arc::clone(&self.engine);
-        let realms = self.known_realms.iter().cloned().collect::<Vec<_>>();
         let last_applied = self.last_applied;
         let last_membership = self.last_membership.clone();
 
@@ -107,9 +112,10 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
             uuid::Uuid::new_v4()
         );
 
-        // Scan the full key-space of every known realm inside spawn_blocking —
-        // StorageEngine::scan is a synchronous call.
+        // Enumerate and scan every realm on disk inside spawn_blocking —
+        // StorageEngine::list_realms and ::scan are synchronous calls.
         let payload: SnapshotPayload = spawn_blocking(move || {
+            let realms = engine.list_realms().map_err(io_read_err)?;
             let mut realm_data_vec = Vec::with_capacity(realms.len());
             for realm_id in &realms {
                 let entries = engine
@@ -157,8 +163,10 @@ impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
 
 /// Applies committed Raft entries to [`EmbeddedStorageEngine`].
 ///
-/// Tracks which realms have received writes so snapshot creation can scan
-/// every live realm without a separate realm-registry call.
+/// The state machine keeps no realm registry of its own.  Both snapshot build
+/// and snapshot install enumerate realms with [`StorageEngine::list_realms`],
+/// so the two paths can never disagree about which realms exist
+/// (audit 2026-08-28 §4.9#3).
 pub struct HearthStateMachine {
     /// The underlying storage engine.  Shared with the server — never swapped.
     ///
@@ -166,25 +174,43 @@ pub struct HearthStateMachine {
     /// applies data in-place so the server's `inner` handle always reads
     /// current state without any `Arc` swap (HEA-2126).
     engine: Arc<dyn StorageEngine>,
-    /// Set of realms that have had at least one write applied.
-    known_realms: BTreeSet<RealmId>,
     /// Last applied log id (updated after every `apply` call).
     last_applied: Option<LogId<u64>>,
     /// Last applied membership config.
     last_membership: StoredMembership<u64, HearthNode>,
     /// Most recently built or installed snapshot (kept for `get_current_snapshot`).
     current_snapshot: Option<StoredSnapshot>,
+    /// Slot for the node-local projection observer (audit 2026-08-28 §4.16#5).
+    ///
+    /// A shared `OnceLock` rather than a direct field because the state
+    /// machine is consumed by `Raft::new` before the identity engine — the
+    /// observer's implementor — exists. `build_clustered` keeps a clone of
+    /// this slot and the server composition root fills it after construction
+    /// via [`super::engine::ClusterEngine::set_replicated_write_observer`].
+    observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
 }
 
 impl HearthStateMachine {
     /// Create a state machine wrapping an existing storage engine.
     pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
+        Self::with_observer_slot(engine, Arc::new(OnceLock::new()))
+    }
+
+    /// Create a state machine with a shared observer slot.
+    ///
+    /// The slot may be filled at any later point; applies before that are
+    /// simply not observed (matching startup, where the projection is built
+    /// by a full scan anyway).
+    pub fn with_observer_slot(
+        engine: Arc<dyn StorageEngine>,
+        observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
+    ) -> Self {
         Self {
             engine,
-            known_realms: BTreeSet::new(),
             last_applied: None,
             last_membership: StoredMembership::default(),
             current_snapshot: None,
+            observer,
         }
     }
 }
@@ -246,7 +272,6 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         HearthSnapshotBuilder {
             engine: Arc::clone(&self.engine),
-            known_realms: self.known_realms.clone(),
             last_applied: self.last_applied,
             last_membership: self.last_membership.clone(),
         }
@@ -269,9 +294,8 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // Decompress and deserialise the payload.
         let payload = decompress_payload(&compressed)?;
 
-        // Extract realm IDs before moving payload into spawn_blocking.
-        let realm_ids: BTreeSet<RealmId> =
-            payload.realms.iter().map(|r| r.realm_id.clone()).collect();
+        // Count the realms before moving payload into spawn_blocking.
+        let realm_count = payload.realms.len();
 
         let engine = Arc::clone(&self.engine);
         let snapshot_id = meta.snapshot_id.clone();
@@ -287,8 +311,16 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             .await
             .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
 
-        // Rebuild known_realms from the snapshot.
-        self.known_realms = realm_ids;
+        // The whole key-space was replaced — node-local projections derived
+        // from it (revoked-JTI blocklist, …) must be rebuilt from storage
+        // (audit 2026-08-28 §4.16#5). The rebuild scans storage, so it runs
+        // on the blocking pool like the restore itself.
+        if let Some(obs) = self.observer.get() {
+            let obs = Arc::clone(obs);
+            spawn_blocking(move || obs.on_replicated_reset())
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))?;
+        }
 
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
@@ -300,7 +332,7 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
 
         info!(
             snapshot_id = %meta.snapshot_id,
-            realms = self.known_realms.len(),
+            realms = realm_count,
             "snapshot installed"
         );
 
@@ -341,10 +373,15 @@ impl HearthStateMachine {
                 key,
                 value,
             } => {
-                self.known_realms.insert(realm.clone());
-                spawn_blocking(move || engine.put(&realm, &key, &value).map_err(to_write_err))
-                    .await
-                    .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
+                spawn_blocking(move || {
+                    engine.put(&e_realm, &e_key, &e_value).map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    obs.on_replicated_put(&realm, &key, &value);
+                }
             }
 
             RaftCommand::Delete {
@@ -352,10 +389,13 @@ impl HearthStateMachine {
                 realm,
                 key,
             } => {
-                self.known_realms.insert(realm.clone());
-                spawn_blocking(move || engine.delete(&realm, &key).map_err(to_write_err))
+                let (e_realm, e_key) = (realm.clone(), key.clone());
+                spawn_blocking(move || engine.delete(&e_realm, &e_key).map_err(to_write_err))
                     .await
                     .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    obs.on_replicated_delete(&realm, &key);
+                }
             }
 
             RaftCommand::Batch {
@@ -363,10 +403,41 @@ impl HearthStateMachine {
                 realm,
                 entries,
             } => {
-                self.known_realms.insert(realm.clone());
-                spawn_blocking(move || engine.put_batch(&realm, &entries).map_err(to_write_err))
-                    .await
-                    .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                let (e_realm, e_entries) = (realm.clone(), entries.clone());
+                spawn_blocking(move || {
+                    engine.put_batch(&e_realm, &e_entries).map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    for (key, value) in &entries {
+                        obs.on_replicated_put(&realm, key, value);
+                    }
+                }
+            }
+
+            RaftCommand::WriteBatch {
+                leader_timestamp: _,
+                realm,
+                puts,
+                deletes,
+            } => {
+                let (e_realm, e_puts, e_deletes) = (realm.clone(), puts.clone(), deletes.clone());
+                spawn_blocking(move || {
+                    engine
+                        .write_batch(&e_realm, &e_puts, &e_deletes)
+                        .map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if let Some(obs) = self.observer.get() {
+                    for (key, value) in &puts {
+                        obs.on_replicated_put(&realm, key, value);
+                    }
+                    for key in &deletes {
+                        obs.on_replicated_delete(&realm, key);
+                    }
+                }
             }
 
             RaftCommand::PutIfAbsent {
@@ -375,17 +446,22 @@ impl HearthStateMachine {
                 key,
                 value,
             } => {
-                self.known_realms.insert(realm.clone());
                 // State machine entries are applied sequentially — no concurrent
                 // apply can interleave between the get and the put here, so the
                 // check-and-write is atomically serialised by Raft ordering.
+                let (e_realm, e_key, e_value) = (realm.clone(), key.clone(), value.clone());
                 let success = spawn_blocking(move || {
                     engine
-                        .put_if_absent(&realm, &key, &value)
+                        .put_if_absent(&e_realm, &e_key, &e_value)
                         .map_err(to_write_err)
                 })
                 .await
                 .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                if success {
+                    if let Some(obs) = self.observer.get() {
+                        obs.on_replicated_put(&realm, &key, &value);
+                    }
+                }
                 return Ok(HearthLogResponse {
                     success,
                     payload: Vec::new(),
@@ -427,10 +503,13 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 /// no pointer swap required.
 ///
 /// Phase 1 uses [`StorageEngine::list_realms`] to discover on-disk realms
-/// rather than the state machine's in-memory `known_realms` set.  This fixes
-/// the HEA-2131 regression: a restarted follower's `known_realms` is always
-/// empty (the set is never persisted), so the previous approach left stale
-/// keys from realms the leader deleted during the follower's downtime.
+/// rather than an in-memory set the state machine fills as it applies.  This
+/// fixes the HEA-2131 regression: such a set is never persisted, so a restarted
+/// follower's was always empty and the previous approach left stale keys from
+/// realms the leader deleted during the follower's downtime.
+///
+/// [`HearthSnapshotBuilder`] enumerates from the same call, so build and
+/// install always agree on which realms exist (audit 2026-08-28 §4.9#3).
 ///
 /// The process-local `OPEN_DIRS` guard and the OS-level advisory `LOCK` file
 /// remain continuous across the install, so the exclusive lock is never
@@ -468,10 +547,9 @@ fn restore_snapshot_in_place(
 
     // Phase 1: delete all live keys for every realm currently on disk.
     //
-    // `list_realms` enumerates from the live engine (memtable + SST files),
-    // not from the state machine's in-memory `known_realms` set, so it
-    // correctly clears stale data on a restarted follower whose `known_realms`
-    // is empty (HEA-2131).
+    // `list_realms` enumerates from the live engine (memtable + SST files), so
+    // it correctly clears stale data on a restarted follower (HEA-2131).  The
+    // snapshot builder enumerates from the same call (audit §4.9#3).
     let on_disk_realms = engine.list_realms().map_err(to_write_err)?;
     for realm_id in &on_disk_realms {
         let keys = engine
@@ -564,6 +642,23 @@ mod tests {
         }
     }
 
+    fn make_write_batch_entry(
+        index: u64,
+        realm: RealmId,
+        puts: Vec<(Vec<u8>, Vec<u8>)>,
+        deletes: Vec<Vec<u8>>,
+    ) -> Entry<HearthRaftConfig> {
+        Entry {
+            log_id: make_log_id(index),
+            payload: EntryPayload::Normal(RaftCommand::WriteBatch {
+                leader_timestamp: 0,
+                realm,
+                puts,
+                deletes,
+            }),
+        }
+    }
+
     fn open_sm(dir: &std::path::Path) -> HearthStateMachine {
         let config = StorageConfig::dev(dir.to_path_buf());
         let engine = EmbeddedStorageEngine::open(config).expect("open engine");
@@ -571,6 +666,36 @@ mod tests {
     }
 
     // ── Put / Delete / Batch ──────────────────────────────────────────────────
+
+    /// §4.9#4: a record and the removal of its old index must reach every node
+    /// in ONE log entry, or a follower can apply half of them.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn write_batch_command_applies_puts_and_deletes_together() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(dir.path().join("data").as_path());
+        let realm = make_realm();
+
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"old".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        sm.apply([make_write_batch_entry(
+            2,
+            realm.clone(),
+            vec![(b"new".to_vec(), b"v2".to_vec())],
+            vec![b"old".to_vec()],
+        )])
+        .await
+        .unwrap();
+
+        assert_eq!(sm.engine.get(&realm, b"new").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(sm.engine.get(&realm, b"old").unwrap(), None);
+    }
 
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
@@ -693,9 +818,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Snapshot correctness: same known realms and same entries for each realm.
-        assert_eq!(sm_b.known_realms.len(), 1);
-        let realm_id = sm_b.known_realms.iter().next().unwrap().clone();
+        // Snapshot correctness: same realms on disk and same entries for each realm.
+        let installed_realms = sm_b.engine.list_realms().unwrap();
+        assert_eq!(installed_realms.len(), 1);
+        let realm_id = installed_realms[0].clone();
 
         let check_pairs: &[(&[u8], &[u8])] = &[
             (b"foo", b"bar"),
@@ -773,16 +899,58 @@ mod tests {
 
     // ── HEA-2131 regression pins ──────────────────────────────────────────────
 
-    /// Regression pin for HEA-2131 (restart path): a follower that restarts and
-    /// then receives a snapshot must clear on-disk data for realms absent from the
-    /// snapshot, even though `known_realms` is empty on fresh construction.
+    /// Audit 2026-08-28 §4.9#3: snapshot build and snapshot install must
+    /// enumerate realms from the same source.
     ///
-    /// Before the fix, Phase 1 of `restore_snapshot_in_place` iterated
-    /// `known_realms` (empty after restart), skipped the delete loop entirely,
-    /// and left stale keys permanently on disk.
+    /// Install clears every realm `list_realms()` reports on disk, then replays
+    /// only the realms the payload carries.  While build enumerated the
+    /// in-memory `known_realms` set, a leader that restarted — the set is never
+    /// persisted — built a snapshot that omitted every realm on its own disk.
+    /// Installing that snapshot deleted those realms from every follower.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    async fn snapshot_install_clears_ondisk_realms_absent_from_known_realms() {
+    async fn snapshot_build_includes_realm_this_node_never_applied() {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let realm = make_realm();
+
+        // Restarted leader: the realm's data is already on disk, but the freshly
+        // constructed state machine has applied nothing, so `known_realms` is empty.
+        let config = StorageConfig::dev(dir_a.path().join("data"));
+        let leader_engine: Arc<EmbeddedStorageEngine> =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
+        leader_engine.put(&realm, b"survives", b"restart").unwrap();
+
+        let mut sm_a =
+            HearthStateMachine::new(Arc::clone(&leader_engine) as Arc<dyn StorageEngine>);
+
+        let mut builder = sm_a.get_snapshot_builder().await;
+        let snapshot = builder.build_snapshot().await.unwrap();
+
+        // Follower: install that snapshot and check the realm reached it.
+        let mut sm_b = open_sm(dir_b.path().join("data").as_path());
+        sm_b.install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sm_b.engine.get(&realm, b"survives").unwrap(),
+            Some(b"restart".to_vec()),
+            "a realm on the leader's disk must reach the follower; a build that \
+             enumerates known_realms omits it and install then deletes it everywhere"
+        );
+    }
+
+    /// Regression pin for HEA-2131 (restart path): a follower that restarts and
+    /// then receives a snapshot must clear on-disk data for realms absent from the
+    /// snapshot, even though the fresh state machine has applied nothing.
+    ///
+    /// Before the fix, Phase 1 of `restore_snapshot_in_place` iterated an
+    /// in-memory realm set (empty after restart), skipped the delete loop
+    /// entirely, and left stale keys permanently on disk.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_install_clears_ondisk_realms_absent_from_snapshot() {
         let dir = tempdir().unwrap();
         let data_dir = dir.path().join("data");
         let realm = make_realm();
@@ -804,16 +972,21 @@ mod tests {
         };
 
         // Restarted follower: data already on disk, freshly constructed state
-        // machine, so known_realms is empty.
+        // machine, so it has applied nothing.
         let config = StorageConfig::dev(data_dir.clone());
         let inner: Arc<EmbeddedStorageEngine> =
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         inner.put(&realm, b"stale", b"stale_val").unwrap();
 
         let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>);
-        assert!(
-            sm.known_realms.is_empty(),
-            "precondition: fresh state machine has no known realms"
+        assert_eq!(
+            sm.last_applied, None,
+            "precondition: fresh state machine has applied nothing"
+        );
+        assert_eq!(
+            inner.get(&realm, b"stale").unwrap(),
+            Some(b"stale_val".to_vec()),
+            "precondition: the stale key is on disk before the install"
         );
 
         sm.install_snapshot(&snap.meta, snap.snapshot)
@@ -834,12 +1007,12 @@ mod tests {
     }
 
     /// Regression pin for HEA-2131 (no-restart path): a realm written directly to
-    /// the engine (bypassing `apply`, so never in `known_realms`) must be cleared
-    /// when a snapshot that omits that realm is installed.
+    /// the engine, bypassing `apply`, must be cleared when a snapshot that omits
+    /// that realm is installed.
     ///
     /// This covers the same root cause as the restart pin above but without a
-    /// process restart: `known_realms` is empty because `apply` was never called
-    /// for the stale realm, not because the state machine was freshly constructed.
+    /// process restart: `apply` was never called for the stale realm, rather than
+    /// the state machine having been freshly constructed.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     async fn snapshot_install_clears_realm_never_applied_by_this_node() {
@@ -865,17 +1038,16 @@ mod tests {
         };
 
         // Fresh state machine whose engine already has data for realm_stale written
-        // directly (not via apply), so known_realms is empty and the stale realm is
-        // not tracked.
+        // directly (not via apply), so this node never saw the stale realm.
         let config = StorageConfig::dev(data_dir.clone());
         let inner: Arc<EmbeddedStorageEngine> =
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         inner.put(&realm_stale, b"stale_key", b"stale_val").unwrap();
 
         let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>);
-        assert!(
-            sm.known_realms.is_empty(),
-            "precondition: no prior applies, known_realms is empty"
+        assert_eq!(
+            sm.last_applied, None,
+            "precondition: no prior applies on this state machine"
         );
 
         sm.install_snapshot(&snap.meta, snap.snapshot)
@@ -1038,5 +1210,130 @@ mod tests {
         // Snapshot must include all pairs.
         let payload = decompress_payload(&snap.snapshot.into_inner()).unwrap();
         assert_eq!(payload.realms[0].entries.len(), 20);
+    }
+
+    // ── Follower revoked-JTI projection (audit 2026-08-28 §4.16#5) ────────────
+
+    /// An `oauth:revjti:` write applied by the state machine must reach the
+    /// node-local revoked-JTI projection without a restart.
+    ///
+    /// On a follower, a sessionless-token revocation arrives only as this raw
+    /// storage write. The projection (`revoked_jti_cache`) was populated once
+    /// at startup and updated only by the node's own API handlers, so a token
+    /// revoked on the leader stayed valid on every follower until that
+    /// follower restarted.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn applied_revjti_put_reaches_follower_projection() {
+        use crate::audit::{AuditEngine, EmbeddedAuditEngine};
+        use crate::core::{Clock, FakeClock, Timestamp};
+        use crate::identity::{
+            decode_claims_unverified, ClientCredentialsRequest, CreateRealmRequest,
+            CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
+            RegisterClientRequest,
+        };
+
+        let dir = tempdir().unwrap();
+        let storage: Arc<dyn StorageEngine> = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().join("data"))).unwrap(),
+        );
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let mk_identity = || {
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            ));
+            EmbeddedIdentityEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+                identity_config.clone(),
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("identity engine")
+        };
+
+        // The "leader" seeds the shared replicated state and mints a
+        // sessionless client-credentials token.
+        let leader = mk_identity();
+        let realm = leader
+            .create_realm(&CreateRealmRequest {
+                name: "revjti-cluster-realm".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+        let realm_id = realm.id().clone();
+        let secret = "revjti-secret-abcdefgh!";
+        let client = leader
+            .register_client(
+                &realm_id,
+                &RegisterClientRequest {
+                    client_name: "M2M".to_string(),
+                    redirect_uris: vec![],
+                    client_secret: Some(secret.to_string()),
+                    grant_types: vec!["client_credentials".to_string()],
+                    require_consent: false,
+                    client_logo_url: None,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+        let response = leader
+            .client_credentials_token(
+                &realm_id,
+                &ClientCredentialsRequest {
+                    client_id: client.client_id().clone(),
+                    client_secret: Some(secret.to_string()),
+                    scope: Some("read".to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
+                },
+            )
+            .expect("client credentials token");
+        let token = response.access_token().to_string();
+        let claims = decode_claims_unverified(&token).expect("decode");
+        let jti = claims.jti.clone().expect("sessionless token carries jti");
+
+        // The "follower": a second engine over the same replicated storage,
+        // built before the revocation — its startup scan sees no revocation.
+        let follower = Arc::new(mk_identity());
+        assert!(
+            follower.validate_token(&realm_id, &token).is_ok(),
+            "sanity: the follower must accept the token before revocation"
+        );
+
+        // The leader's revocation reaches the follower as a raw replicated
+        // write applied by the state machine — same key and value the revoke
+        // handler writes. Observer wiring mirrors `build_clustered` + the
+        // server composition root: slot first, observer registered later.
+        let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
+            Arc::new(OnceLock::new());
+        let mut sm = HearthStateMachine::with_observer_slot(
+            Arc::clone(&storage),
+            Arc::clone(&observer_slot),
+        );
+        observer_slot
+            .set(Arc::clone(&follower) as Arc<dyn ReplicatedWriteObserver>)
+            .ok();
+        let revjti_key = crate::identity::keys::encode_revoked_jti(&jti);
+        sm.apply([make_put_entry(
+            1,
+            realm_id.clone(),
+            revjti_key,
+            claims.exp.to_le_bytes().to_vec(),
+        )])
+        .await
+        .unwrap();
+
+        let after = follower.validate_token(&realm_id, &token);
+        assert!(
+            after.is_err(),
+            "a token revoked via a replicated write must be refused by the follower \
+             without a restart (§4.16#5), got: {after:?}"
+        );
     }
 }

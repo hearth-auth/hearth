@@ -229,6 +229,23 @@ fn bloom_hashes(realm_id: &RealmId, key: &[u8]) -> (u64, u64) {
 type ParsedV2 = (Vec<(CompositeKey, MemtableValue)>, Option<BloomFilter>);
 
 /// Serialises a `CompositeKey` into a v3 footer: `realm(16) + len(4) + bytes`.
+/// Staging name for an SST being written: the target name with `.staging`
+/// appended (`000123.sst` → `000123.sst.staging`).
+///
+/// `.staging` rather than `.tmp` so a staged memtable flush is
+/// distinguishable from a compaction merge output, whose temporary target
+/// already uses the `.tmp` suffix. Files with either extension are invisible
+/// to the startup SST scan, and engine open sweeps any left behind by a crash
+/// or write fault (audit 2026-08-28 §4.11#4).
+fn staging_path_for(path: &Path) -> std::path::PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".staging");
+    path.with_file_name(name)
+}
+
 fn write_footer_key(buf: &mut Vec<u8>, key: &CompositeKey) {
     buf.extend_from_slice(key.realm_id().as_uuid().as_bytes());
     #[allow(clippy::cast_possible_truncation)]
@@ -334,7 +351,14 @@ impl SstWriter {
             &mut dyn FnMut(&CompositeKey, &MemtableValue) -> Result<(), StorageError>,
         ) -> Result<(), StorageError>,
     {
-        let mut file = fs.create(path)?;
+        // Stage the body at a `.staging` sibling and rename into place at the
+        // end, so an interrupted body write can never leave a torn file at
+        // the live `NNNNNN.sst` name — a short live SST made the next
+        // startup refuse to open the whole data directory (audit 2026-08-28
+        // §4.11#4). A crash or write fault strands only the `.staging` file,
+        // which the startup scan ignores and engine open sweeps.
+        let staging_path = staging_path_for(path);
+        let mut file = fs.create(&staging_path)?;
 
         // --- Build V3 block-structured body (HEA-1914) ---
         //
@@ -440,11 +464,14 @@ impl SstWriter {
 
         file.write_all(&out)?;
         file.sync_all()?;
-        // Fsync the parent directory so the freshly created SST's directory
-        // entry is durable. A newly created file can otherwise vanish entirely
-        // if power is lost before the dir update commits (HEA-1855). Callers
-        // that finalize via rename (compaction) additionally fsync the dir after
-        // the rename.
+        drop(file);
+        // Publish: the fully-written, fsync'd body atomically takes the live
+        // name. Then fsync the parent directory so both the rename and the
+        // file's directory entry are durable — a newly created file can
+        // otherwise vanish entirely if power is lost before the dir update
+        // commits (HEA-1855). Callers that finalize via a second rename
+        // (compaction) additionally fsync the dir after that rename.
+        fs.rename(&staging_path, path)?;
         if let Some(parent) = path.parent() {
             fs.sync_dir(parent)?;
         }
@@ -1292,6 +1319,13 @@ impl SstReader {
         end_key: &[u8],
         project: impl Fn(&MemtableValue) -> T,
     ) -> Result<Vec<(Vec<u8>, T)>, StorageError> {
+        // A reversed window would index the eager body as `entries[lo..hi]`
+        // with `lo > hi`, which panics and — under `panic=abort` — takes the
+        // whole multi-tenant process down (audit §4.9#7). Refuse it here as
+        // well as at the engine boundary: this is the layer that would crash.
+        if start_key > end_key {
+            return Err(StorageError::InvalidRange);
+        }
         // O(1) range prune: skip SSTs disjoint from the scan window (HEA-1773).
         if !self.overlaps_range(realm_id, start_key, end_key) {
             return Ok(Vec::new());
@@ -1818,7 +1852,10 @@ pub(crate) fn read_encryption_header(
     path: &Path,
     fs: &dyn Fs,
 ) -> Result<(KekId, EncryptionHeader), StorageError> {
-    let data = fs.read(path)?;
+    // Bounded read: `reload_sst_readers` calls this once per live SST on every
+    // memtable flush, so reading the whole file here made one flush re-read
+    // every byte of every live SST (audit 2026-08-28 §4.21#5).
+    let data = fs.read_prefix(path, TOTAL_HEADER_SIZE)?;
     if data.len() < TOTAL_HEADER_SIZE {
         return Err(StorageError::InvalidSstFormat {
             reason: format!("file too small for header: {} bytes", data.len()),
@@ -2772,6 +2809,109 @@ mod tests {
         assert_eq!(realm_entries.len(), 6);
     }
 
+    /// Counts every byte handed back by the filesystem, per call site.
+    struct ByteCountingFs {
+        inner: crate::storage::fs::RealFs,
+        whole_file_bytes: std::sync::atomic::AtomicUsize,
+        prefix_bytes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ByteCountingFs {
+        fn new() -> Self {
+            Self {
+                inner: crate::storage::fs::RealFs,
+                whole_file_bytes: std::sync::atomic::AtomicUsize::new(0),
+                prefix_bytes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Fs for ByteCountingFs {
+        fn open_append(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_append(path)
+        }
+        fn create(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.create(path)
+        }
+        fn open_read(&self, path: &Path) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            let data = self.inner.read(path)?;
+            self.whole_file_bytes
+                .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(data)
+        }
+        fn read_prefix(&self, path: &Path, len: usize) -> std::io::Result<Vec<u8>> {
+            let data = self.inner.read_prefix(path, len)?;
+            self.prefix_bytes
+                .fetch_add(data.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(data)
+        }
+        fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    #[test]
+    fn read_encryption_header_reads_only_the_header() {
+        // §4.21#5: `reload_sst_readers` calls this once per live SST on EVERY
+        // memtable flush.  It read the whole file to take 60 bytes off the
+        // front, so one flush re-read every byte of every live SST.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("big.sst");
+
+        let realm = RealmId::generate();
+        let value = vec![b'v'; 4096];
+        let entries: Vec<_> = (0..256)
+            .map(|i| {
+                (
+                    CompositeKey::new(realm.clone(), format!("key{i:04}").into_bytes()),
+                    MemtableValue::Data(value.clone()),
+                )
+            })
+            .collect();
+        let (dek, enc_header) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc_header).expect("write_sst");
+
+        let file_len = std::fs::metadata(&sst_path).expect("metadata").len() as usize;
+        assert!(
+            file_len > 512 * 1024,
+            "the fixture must be large enough for the difference to matter, got {file_len} bytes"
+        );
+
+        let fs = ByteCountingFs::new();
+        let (_kek_id, _hdr) = read_encryption_header(&sst_path, &fs).expect("read header");
+
+        let whole = fs
+            .whole_file_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let prefix = fs.prefix_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            whole, 0,
+            "reading a {TOTAL_HEADER_SIZE}-byte header must not read the whole file"
+        );
+        assert!(
+            prefix <= 4096,
+            "header read took {prefix} bytes; it needs {TOTAL_HEADER_SIZE}"
+        );
+    }
+
     #[test]
     fn read_encryption_header_extracts_kek_id() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3065,6 +3205,48 @@ mod tests {
                 if reason.contains("entry count mismatch")),
             "expected a clean count-mismatch error, got: {err:?}"
         );
+    }
+
+    /// Audit §4.9#7: a reversed scan window (`start > end`) indexed a legacy
+    /// eager body as `entries[lo..hi]` with `lo > hi`, panicking inside
+    /// `range_scan_inner`. Under the release profile's `panic=abort` that
+    /// killed the whole multi-tenant process; one `GET /admin/audit` did it in
+    /// 6 of 6 runs. Both projections must refuse it cleanly instead.
+    ///
+    /// Under nextest (one process per test) the pre-fix code fails this test
+    /// by panicking; post-fix it returns `Err`.
+    #[test]
+    fn reversed_scan_window_on_a_legacy_eager_sst_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("reversed_v2.sst");
+        let realm = RealmId::generate();
+        let entries = fixed_entries(&realm, 200);
+        let (dek, enc) = test_encryption_context();
+        write_v2_manual(&sst_path, &entries, 7, &dek, &enc);
+        let reader = SstReader::open(&sst_path, 7, &dek).expect("open");
+
+        // Both bounds sit inside the SST's key range, so the O(1) range prune
+        // does not filter this window out.
+        let err = reader
+            .range_scan(&realm, b"k000150", b"k000050")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+        let err = reader
+            .range_scan_keys(&realm, b"k000150", b"k000050")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+
+        // An empty-but-ordered window is not reversed, and stays legal.
+        assert!(reader
+            .range_scan(&realm, b"k000050", b"k000050")
+            .expect("equal bounds are legal")
+            .is_empty());
     }
 
     #[test]

@@ -12,11 +12,19 @@ import type { SessionVersionConfig } from "../src/types.js";
 // ---------------------------------------------------------------------------
 
 /**
- * Flush all outstanding microtasks (promise chains) without advancing fake
- * timers. Five rounds handle promise chains up to depth 5.
+ * Flush outstanding microtasks (promise chains) without advancing fake timers.
+ *
+ * The budget is deliberately generous. Reading a mocked `Response` body costs
+ * more promise hops on Node 20 than on 22+, and CI runs this suite on Node 20:
+ * at five rounds the snapshot fetch had not resolved there, so the cache read
+ * as `age=never seeded` and every seeded-state assertion in this file failed —
+ * on CI only, while passing locally on a newer Node. Rounds are free; guessing
+ * the exact depth is what broke.
+ *
+ * Fake timers are active here, so this cannot yield to the macrotask queue.
  */
 async function flushAsync(): Promise<void> {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
+  for (let i = 0; i < 50; i++) await Promise.resolve();
 }
 
 function forgeJwt(claims: Record<string, unknown>): string {

@@ -228,3 +228,225 @@ fn is_key_material_identifies_signing_key_prefixes() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test 4 (audit 2026-08-28 §25.9): the KEK enrolment sweep and the strict
+// read path must cover the per-realm key families too — SAML signing keys,
+// DPoP nonce secrets and the MFA at-rest DEK — not just Ed25519 signing keys.
+// ---------------------------------------------------------------------------
+
+/// Storage key for a realm's SAML signing key (lives under the system realm).
+fn saml_key_storage_key(realm_id: &RealmId) -> Vec<u8> {
+    format!("realm:saml_key:{}", realm_id.as_uuid()).into_bytes()
+}
+
+const DPOP_NONCE_SECRET_KEY: &[u8] = b"agt:dpop:nonce-secret";
+const MFA_DEK_KEY: &[u8] = b"mfa:dek:key";
+
+/// Boots an engine with **no** KEK and materialises all three per-realm key
+/// families in plaintext, exactly as a pre-KEK deployment leaves them on disk.
+///
+/// Returns the realm the keys belong to.
+fn seed_plaintext_per_realm_keys(storage: &Arc<dyn StorageEngine>) -> RealmId {
+    let engine = make_engine(Arc::clone(storage), None);
+    let realm = engine
+        .create_realm(&CreateRealmRequest {
+            name: "legacy-realm".into(),
+            config: None,
+        })
+        .unwrap();
+    let realm_id = realm.id().clone();
+
+    engine
+        .get_or_create_saml_signing_key(&realm_id, "hearth-test")
+        .unwrap();
+    engine.get_realm_dpop_nonce_secret(&realm_id).unwrap();
+
+    let user = engine
+        .create_user(
+            &realm_id,
+            &hearth::identity::CreateUserRequest {
+                email: "mfa@example.com".into(),
+                display_name: "MFA User".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: std::collections::BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    engine.enroll_totp(&realm_id, user.id()).unwrap();
+
+    realm_id
+}
+
+/// Asserts a stored blob exists and is (or is not) HKEY-enveloped.
+fn assert_envelope(
+    storage: &Arc<dyn StorageEngine>,
+    scope: &RealmId,
+    key: &[u8],
+    want_enveloped: bool,
+    what: &str,
+) {
+    let raw = storage
+        .get(scope, key)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{what} must be present in storage"));
+    let enveloped = raw.len() >= 4 && &raw[..4] == b"HKEY";
+    assert_eq!(
+        enveloped, want_enveloped,
+        "{what}: expected HKEY-enveloped={want_enveloped}, got {enveloped}"
+    );
+}
+
+#[tokio::test]
+async fn kek_enrolment_sweep_covers_saml_dpop_and_mfa_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+    let storage: Arc<dyn StorageEngine> =
+        Arc::new(EmbeddedStorageEngine::open(storage_cfg).unwrap());
+    let sys_realm = system_realm_id();
+
+    let realm_id = seed_plaintext_per_realm_keys(&storage);
+
+    // Precondition: all three really are plaintext before enrolment. Without
+    // this the assertions below could pass over keys that were never written.
+    assert_envelope(
+        &storage,
+        &sys_realm,
+        &saml_key_storage_key(&realm_id),
+        false,
+        "SAML signing key before enrolment",
+    );
+    assert_envelope(
+        &storage,
+        &realm_id,
+        DPOP_NONCE_SECRET_KEY,
+        false,
+        "DPoP nonce secret before enrolment",
+    );
+    assert_envelope(
+        &storage,
+        &realm_id,
+        MFA_DEK_KEY,
+        false,
+        "MFA DEK before enrolment",
+    );
+
+    // Switch the KEK on over the existing store. Construction runs the
+    // enrolment sweep.
+    let _engine = make_engine(Arc::clone(&storage), Some(test_kek()));
+
+    assert_envelope(
+        &storage,
+        &sys_realm,
+        &saml_key_storage_key(&realm_id),
+        true,
+        "SAML signing key after enrolment",
+    );
+    assert_envelope(
+        &storage,
+        &realm_id,
+        DPOP_NONCE_SECRET_KEY,
+        true,
+        "DPoP nonce secret after enrolment",
+    );
+    assert_envelope(
+        &storage,
+        &realm_id,
+        MFA_DEK_KEY,
+        true,
+        "MFA DEK after enrolment",
+    );
+}
+
+#[tokio::test]
+async fn enrolled_store_refuses_a_plaintext_saml_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+    let storage: Arc<dyn StorageEngine> =
+        Arc::new(EmbeddedStorageEngine::open(storage_cfg).unwrap());
+    let sys_realm = system_realm_id();
+
+    let realm_id = seed_plaintext_per_realm_keys(&storage);
+    let _enrolled = make_engine(Arc::clone(&storage), Some(test_kek()));
+
+    // An attacker with storage write access strips the envelope and
+    // substitutes key material of their own. After enrolment that is a
+    // downgrade, not a legacy row.
+    let stripped = br#"{"pkcs8":[],"cert":[]}"#.to_vec();
+    storage
+        .put(&sys_realm, &saml_key_storage_key(&realm_id), &stripped)
+        .unwrap();
+
+    // A fresh engine over the same (already-enrolled) store: the sweep is a
+    // no-op because the marker is present, so the read path must refuse.
+    let engine = make_engine(Arc::clone(&storage), Some(test_kek()));
+    let err = engine
+        .get_or_create_saml_signing_key(&realm_id, "hearth-test")
+        .expect_err("an unenveloped SAML key must be refused on an enrolled store");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("HKEY-envelope") || msg.contains("HKEY-enveloped"),
+        "expected an envelope-downgrade refusal, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn enrolled_store_refuses_a_plaintext_dpop_nonce_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+    let storage: Arc<dyn StorageEngine> =
+        Arc::new(EmbeddedStorageEngine::open(storage_cfg).unwrap());
+
+    let realm_id = seed_plaintext_per_realm_keys(&storage);
+    let _enrolled = make_engine(Arc::clone(&storage), Some(test_kek()));
+
+    storage
+        .put(&realm_id, DPOP_NONCE_SECRET_KEY, &[0x11_u8; 32])
+        .unwrap();
+
+    let engine = make_engine(Arc::clone(&storage), Some(test_kek()));
+    let err = engine
+        .get_realm_dpop_nonce_secret(&realm_id)
+        .expect_err("an unenveloped DPoP nonce secret must be refused on an enrolled store");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("HKEY-envelope") || msg.contains("HKEY-enveloped"),
+        "expected an envelope-downgrade refusal, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn enrolled_store_refuses_a_plaintext_mfa_dek() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+    let storage: Arc<dyn StorageEngine> =
+        Arc::new(EmbeddedStorageEngine::open(storage_cfg).unwrap());
+
+    let realm_id = seed_plaintext_per_realm_keys(&storage);
+    let _enrolled = make_engine(Arc::clone(&storage), Some(test_kek()));
+
+    storage.put(&realm_id, MFA_DEK_KEY, &[0x22_u8; 32]).unwrap();
+
+    let engine = make_engine(Arc::clone(&storage), Some(test_kek()));
+    let user = engine
+        .create_user(
+            &realm_id,
+            &hearth::identity::CreateUserRequest {
+                email: "second@example.com".into(),
+                display_name: "Second".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: std::collections::BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    let err = engine
+        .enroll_totp(&realm_id, user.id())
+        .expect_err("an unenveloped MFA DEK must be refused on an enrolled store");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("HKEY-envelope") || msg.contains("HKEY-enveloped"),
+        "expected an envelope-downgrade refusal, got: {msg}"
+    );
+}

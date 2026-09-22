@@ -1,6 +1,6 @@
 # Clustering Guide
 
-> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is incomplete in Hearth 1.x. Known defects (described below) make multi-node deployments unsafe for production data. **The supported deployment model for Hearth 1.x is single-node.** Clustering improvements are tracked in Wave 5 of the production-readiness roadmap.
+> **⚠ EXPERIMENTAL — and, as of 2026-09-21, a multi-node cluster does not start.** See [G-1](#g-1--a-cold-cluster-cannot-be-bootstrapped) below: every node exits fatally during start-up, before the bootstrap endpoint can be called. The rest of this guide documents the intended API and the known defects of a *running* cluster; none of it is reachable today. **The supported deployment model for Hearth 1.x is single-node.** Clustering improvements are tracked in Wave 5 of the production-readiness roadmap.
 
 Hearth includes a partial Raft consensus implementation (`src/cluster/` via `openraft`). The clustering code path exists, but several critical components are either unimplemented or incorrect. This guide documents the current state accurately so operators can make informed decisions.
 
@@ -9,6 +9,51 @@ Hearth includes a partial Raft consensus implementation (`src/cluster/` via `ope
 ---
 
 ## Known Defects in Experimental Cluster Mode
+
+### G-1 — A cold cluster could not be bootstrapped (FIXED)
+
+`serve` builds the identity engine over the cluster storage adapter, and that
+constructor **writes** on a cold `data_dir` — the KEK-enrolment marker, the
+global signing key and the system-realm row. In cluster mode each is a Raft
+proposal, and a cluster that has not been bootstrapped has no leader, so the
+first one returned `NotLeader` and start-up was fatal on every node:
+
+```text
+ERROR hearth: error: storage error: storage I/O error:
+              raft: not the leader; redirect to unknown
+```
+
+The consequence was that the Bootstrap Sequence could not be performed at all:
+step 1 (start all nodes) never completed, so step 3 (POST
+`/admin/cluster/bootstrap`) was unreachable — including on the designated
+bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
+`reports/cluster-ga-readiness-2026-09-21.md`.
+
+**Fixed in two halves** (task 26.46), both covered by
+`tests/cluster_three_node_control_coherence.rs::a_cold_three_node_cluster_starts_every_node_without_a_manual_bootstrap`:
+
+* **Self-initialisation.** The node with the **lowest node ID** in the
+  membership its own `cluster.peers` names initialises Raft at start-up, so a
+  leader is elected without an HTTP call. The other nodes stay pristine and
+  adopt the membership from the first `AppendEntries` they receive. Nothing new
+  is trusted — the membership, peer addresses and mTLS material all come from
+  that node's own `hearth.yaml`.
+* **A start-up write window.** Before building the identity engine, a node
+  waits until either it is the leader (its writes will land) or the
+  system-realm row has replicated to it (the leader finished the write set, so
+  there is nothing left to write). If neither happens within 120 s, start-up
+  fails with a message naming the likely causes.
+
+**Operational consequences.**
+
+* A cold cluster forms on its own. `POST /admin/cluster/bootstrap` still works
+  and now answers `409` on an already-initialised cluster; it remains the
+  escape hatch when the lowest-ID node is the one that is down.
+* Provision the lowest-ID node first, or at least start it alongside the
+  others. If it never starts, the remaining nodes wait out the 120 s window and
+  exit — bootstrap one of them explicitly instead.
+* A `cluster:` section with an empty `peers` list does **not** self-initialise;
+  there is nothing to replicate to. Use the endpoint.
 
 ### C-5 — Followers do not invalidate RBAC or session caches
 
@@ -74,6 +119,25 @@ Before enabling cluster mode in a test environment:
 
 4. **Separate `data_dir` per node.** The exclusive directory lock means no two nodes may share a `data_dir`.
 
+5. **The same `HEARTH_MASTER_KEY` and key-encryption key on every node.** Both wrap data that *replicates*: a row encrypted by one node must be decryptable by the others. Generate each value **once** for the whole cluster and distribute it — do not run `openssl rand -hex 32` per node. Every node also needs the full set of settings that are [mandatory in production](../specs/CONFIGURATION.md#mandatory-in-production):
+
+   | Setting | Where | Must match across nodes? |
+   |---|---|---|
+   | `HEARTH_MASTER_KEY` (env) | environment | **Yes** |
+   | `security.key_encryption_key` (or `HEARTH_KEK`) | YAML or environment | **Yes** |
+   | `server.tls_cert_path` + `server.tls_key_path`, **or** `server.trust_forwarded_proto: true` with a non-empty `server.trusted_proxies` | YAML | No — per node |
+
+   `hearth config validate` reports this on the success path for any
+   configuration with a non-empty `cluster.peers` — both when
+   `HEARTH_MASTER_KEY` is unset and, because nothing local can compare one
+   node's value against its peers', when it is set (task 26.51). It is a
+   warning, not an error: the key is a property of the machine, not of the file
+   being validated, so validating a cluster config on a laptop stays legal.
+   Note that the single-node host-key check is satisfied by an existing
+   `{data_dir}/hearth.host_key` — which is exactly the per-node, auto-generated
+   key that is *wrong* in a cluster — so the cluster note is emitted
+   independently of it.
+
 ---
 
 ### Generating Certificates
@@ -86,24 +150,29 @@ openssl req -new -x509 -days 3650 -nodes \
   -subj "/CN=hearth-cluster-ca" \
   -keyout ca.key -out ca.crt
 
-# 2 — Leaf cert for node 1 (repeat with node-specific CN/SAN for each node)
+# 2 — Leaf key + CSR for node 1 (repeat with a node-specific CN for each node)
 openssl req -new -nodes \
   -subj "/CN=hearth-node-1" \
   -keyout node1.key -out node1.csr
 
+# 3 — Sign it. The SAN is REQUIRED: rustls verifies the peer against
+#     subjectAltName and ignores the Common Name, so a leaf signed without
+#     -extfile fails the handshake with no usable diagnostic.
+#     Use the address the peers will actually dial.
 openssl x509 -req -days 3650 \
-  -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -in node1.csr -out node1.crt
-```
-
-For a test environment with IP-based SANs:
-
-```bash
-openssl x509 -req -days 365 \
   -extfile <(printf "subjectAltName=IP:10.0.0.1") \
   -CA ca.crt -CAkey ca.key -CAcreateserial \
   -in node1.csr -out node1.crt
 ```
+
+Use `subjectAltName=DNS:node1.example.com` instead when `peers[].address` names
+a hostname rather than an IP. Verify before deploying:
+
+```bash
+openssl x509 -in node1.crt -noout -text | grep -A1 "Subject Alternative Name"
+```
+
+An empty result means the certificate will not work.
 
 ---
 
@@ -116,6 +185,18 @@ Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_ad
 ```yaml
 oidc:
   issuer: "https://auth.example.com"
+
+server:
+  # Distinct per node only when several nodes share a host (evaluation).
+  # On separate hosts every node can keep the default 8420.
+  port: 8420
+  tls_cert_path: "/etc/hearth/certs/https-node1.crt"
+  tls_key_path:  "/etc/hearth/certs/https-node1.key"
+
+security:
+  # REQUIRED in production, and IDENTICAL on every node — see Prerequisites §5.
+  # Prefer the HEARTH_KEK environment variable to putting it in YAML.
+  key_encryption_key: "<64 lowercase hex chars, generated once for the cluster>"
 
 storage:
   data_dir: "/var/lib/hearth/data"
@@ -137,11 +218,26 @@ cluster:
 
 **Node 3:** Analogous.
 
+> Note the two certificate pairs. `server.tls_cert_path` is the node's **HTTPS**
+> identity for client traffic; `cluster.tls_cert_path` is its **peer mTLS**
+> identity for Raft. They are unrelated and are not interchangeable.
+
+> Every node must also have `HEARTH_MASTER_KEY` exported in its environment,
+> with the same value on all three. It is not a YAML key and `hearth config
+> validate` does not check for it.
+
 > All config fields are documented in the [Configuration reference](../specs/CONFIGURATION.md#cluster).
 
 ---
 
 ### Bootstrap Sequence
+
+> **Usually unnecessary.** As of task 26.46 the lowest-ID node in the
+> configured membership initialises the cluster itself at start-up — see
+> [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). Follow this
+> sequence when that node is unavailable, or when you want to form the cluster
+> from a different node's membership. On an already-initialised cluster the
+> endpoint answers `409`.
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 
@@ -212,17 +308,42 @@ curl -s http://10.0.0.1:8420/admin/cluster/status \
 
 ### Graceful Shutdown
 
-Before shutting down the leader node, initiate a Raft leadership transfer to avoid an election timeout:
+Before shutting down the leader node, step it down so the cluster elects a
+replacement while the old leader is still reachable:
 
 ```bash
-# Transfer leadership before stopping the process
+# Step this node down before stopping the process
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/transfer-leadership \
   -H "Authorization: Bearer <system-admin-token>" \
   -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
+# => {"new_leader_id": 2, "exact_target": false}
 
 # Then stop the process
 systemctl stop hearth
 ```
+
+> **This is a step-down, not a targeted transfer.** openraft 0.9.25 — the
+> version Hearth pins — has no API for handing leadership to a *chosen* peer;
+> `Trigger::transfer_leader` arrived in 0.10. `target_node_id` is therefore a
+> preference the server cannot honour, and `exact_target` will normally be
+> `false`. Read `new_leader_id` to find out who actually took over.
+
+> **It is not instantaneous, and it is not free.** The endpoint works by
+> letting the followers' leader leases expire, so the cluster has **no leader**
+> for `leader_lease + election_timeout` — 4.5 to 6 seconds under Hearth's Raft
+> configuration — and every write during that window fails with
+> `NoLeader`/`NotLeader`. Do not call it during a write burst. The call returns
+> once a different node has won and this node has accepted that it no longer
+> leads, or fails after 20 s.
+
+> **Before task 26.57 this endpoint did not work at all.** On a healthy
+> three-node cluster it always answered `leadership transfer timed out after
+> 5 s` and leadership never moved: it asked openraft to run an election via
+> `trigger().elect()`, which is documented as a no-op on a node that is already
+> leader; it never stopped heartbeating, so no follower's lease ever expired;
+> and it waited 5 s, below openraft's own 4.5–6 s floor. If you are running a
+> build from before that fix, shut the leader down without this call and accept
+> the election timeout — the endpoint cannot help you.
 
 ---
 

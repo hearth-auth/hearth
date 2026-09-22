@@ -98,10 +98,18 @@ struct UpdatePasswordPageTemplate {
 /// `application/x-www-form-urlencoded` body for `POST /required-action/UPDATE_PASSWORD`.
 #[derive(Debug, Deserialize)]
 pub struct UpdatePasswordForm {
+    /// The password currently on the account. Verified before the replacement
+    /// is applied (audit §4.23#2, task 21.3) so that possession of the RA
+    /// cookie alone is not enough to take over the account.
+    #[serde(default)]
+    pub current_password: String,
     #[serde(default)]
     pub new_password: String,
     #[serde(default)]
     pub confirm_password: String,
+    /// CSRF double-submit token, matched against the `hearth_ui_csrf` cookie.
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
 }
 
 fn action_label(action: &str) -> &'static str {
@@ -271,10 +279,15 @@ pub fn resume_browser_flow(
     };
     let user_id = UserId::new(user_uuid);
 
-    let session = match state
-        .identity
-        .create_session(realm, &user_id, &SessionContext::default())
-    {
+    // The MFA proof is inherited: the RA session cookie backing this call is
+    // only minted by `required_action_check_browser`, which the login and MFA
+    // challenge handlers call *after* the realm's `mfa_required` gate has been
+    // satisfied (audit 2026-08-28 §4.18#3).
+    let ctx = SessionContext {
+        mfa_proof: crate::identity::MfaProof::Inherited,
+        ..SessionContext::default()
+    };
+    let session = match state.identity.create_session(realm, &user_id, &ctx) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "resume_browser_flow: create_session failed");
@@ -483,7 +496,10 @@ pub fn resume_oidc_flow(
         oidc_params.via_par, // propagated from the original authorize request
     ) {
         Ok(resp) => {
-            let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);
+            // 22.3: always deliver to the engine-validated URI. `jar_request`
+            // is `None` here so the two agree today, but reading it off the
+            // response keeps that true if RA resume ever carries a JAR.
+            let location = build_authorization_redirect(resp.redirect_uri(), &resp);
             let mut response = Redirect::to(&location).into_response();
             append_cookie(&mut response, &clear_cookie);
             response
@@ -661,6 +677,17 @@ fn inject_enroll_email_otp_if_needed(
     }
 }
 
+/// Whether a realm-level passkey requirement is unmet for this user.
+///
+/// Split out from [`inject_enroll_mfa_if_needed`] so the rule is testable
+/// without a live `WebState`. A TOTP secret deliberately does **not** satisfy
+/// `webauthn_required`: the key names a passkey, and an operator who sets it
+/// after a phishing incident is asking for a phishing-resistant factor
+/// specifically (audit §4.18#9).
+const fn enroll_mfa_needed(realm_requires_passkey: bool, has_passkeys: bool) -> bool {
+    realm_requires_passkey && !has_passkeys
+}
+
 /// Dynamically injects `ENROLL_MFA` when a client-level or role-level MFA
 /// requirement is in effect and the user has no enrolled MFA factor.
 ///
@@ -686,6 +713,24 @@ fn inject_enroll_mfa_if_needed(
         .list_webauthn_credentials(realm, user_id)
         .unwrap_or_default()
         .is_empty();
+
+    // §4.18#9: `realms.<name>.auth.webauthn_required` was dead code — the
+    // field existed on `RealmConfig`, was hard-coded to `None` by
+    // `to_realm_config`, and nothing read it. It is a *passkey* requirement,
+    // so TOTP does not satisfy it and it must be evaluated before the
+    // "any factor will do" short-circuit below.
+    let realm_requires_passkey = state
+        .identity
+        .get_realm(realm)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().webauthn_required)
+        .unwrap_or(false);
+    if enroll_mfa_needed(realm_requires_passkey, has_passkeys) {
+        actions.push(RequiredAction::EnrollMfa);
+        return;
+    }
+
     if has_totp || has_passkeys {
         return;
     }
@@ -1102,6 +1147,11 @@ fn percent_encode_string(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Renders the update-password form.
+///
+/// Issues (or re-uses) the `hearth_ui_csrf` double-submit cookie and embeds its
+/// value as the form's `_csrf` field, so the POST handler can verify it
+/// (task 21.3). Mirrors the pre-auth login form, which is the other `/ui` form
+/// rendered without a `UiSession`.
 pub async fn update_password_page(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1109,7 +1159,19 @@ pub async fn update_password_page(
     if read_ra_cookie(&headers).is_none() {
         return handlers_common::bad_request("No active required-action session");
     }
-    render_update_password_form(&state, None)
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(&headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
+    let mut resp = render_update_password_form(&state, None, Some(csrf_value));
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,6 +1190,21 @@ pub async fn update_password_submit(
     headers: HeaderMap,
     Form(form): Form<UpdatePasswordForm>,
 ) -> Response {
+    // CSRF double-submit (audit §4.23#2, task 21.3). The RA cookie is
+    // `SameSite=Strict`, but `SameSite` is a browser-version-dependent
+    // mitigation, not a control — a cross-site POST that rides an existing RA
+    // session must be refused on its own merits. Fail-closed in production;
+    // `--dev` keeps the bypass so direct-POST tooling still works, exactly as
+    // `login_submit_impl` does.
+    let secure = state.is_secure_request(&headers);
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(&headers) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        return update_password_csrf_failure(&state, secure);
+    }
+
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
     };
@@ -1156,32 +1233,88 @@ pub async fn update_password_submit(
         return handlers_common::server_error();
     };
     let user_id = UserId::new(user_uuid);
-    let secure = state.is_secure_request(&headers);
+    let csrf_echo = Some(form.csrf.clone());
 
     if form.new_password != form.confirm_password {
         return render_update_password_form(
             &state,
             Some("New password and confirmation do not match."),
+            csrf_echo,
         );
     }
 
+    // Prove possession of the *current* password before replacing it
+    // (audit §4.23#2). Without this, anyone who can drive one POST with the RA
+    // cookie attached owns the account. `change_password` verifies the old
+    // credential and applies the new one; both are Argon2id operations, so the
+    // pair runs through the shared KDF admission gate rather than inline on the
+    // async worker.
+    let current = CleartextPassword::from_string(form.current_password);
     let new_pw = CleartextPassword::from_string(form.new_password);
-    match state.identity.set_password(&realm, &user_id, &new_pw) {
+    let identity = state.identity.clone();
+    let realm_for_kdf = realm.clone();
+    let user_for_kdf = user_id.clone();
+    let change_result = match crate::identity::gate()
+        .run(move || {
+            match identity.change_password(&realm_for_kdf, &user_for_kdf, &current, &new_pw) {
+                // A user with no password credential at all (federated or
+                // passkey-only, forced to set one) has no "current password"
+                // to prove. There is nothing to bypass in that case, so fall
+                // through to a plain set.
+                Err(IdentityError::CredentialNotFound) => {
+                    identity.set_password(&realm_for_kdf, &user_for_kdf, &new_pw)
+                }
+                other => other,
+            }
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
+            return super::handlers::kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                None,
+                None,
+                None,
+            );
+        }
+        Err(crate::identity::KdfGateError::Join(e)) => {
+            tracing::warn!(error = %e, "update_password_submit: KDF task panicked");
+            return render_update_password_form(
+                &state,
+                Some("Unable to update password. Please try again."),
+                csrf_echo,
+            );
+        }
+    };
+
+    match change_result {
         Ok(()) => {}
+        Err(IdentityError::InvalidCredential { .. }) => {
+            return render_update_password_form(
+                &state,
+                Some("Current password is incorrect."),
+                csrf_echo,
+            );
+        }
         Err(IdentityError::InvalidInput { reason }) => {
-            return render_update_password_form(&state, Some(&reason));
+            return render_update_password_form(&state, Some(&reason), csrf_echo);
         }
         Err(IdentityError::PasswordReused) => {
             return render_update_password_form(
                 &state,
                 Some("That password was used recently — choose a different one."),
+                csrf_echo,
             );
         }
         Err(e) => {
-            tracing::warn!(error = %e, "update_password_submit: set_password failed");
+            tracing::warn!(error = %e, "update_password_submit: change_password failed");
             return render_update_password_form(
                 &state,
                 Some("Unable to update password. Please try again."),
+                csrf_echo,
             );
         }
     }
@@ -1261,8 +1394,12 @@ pub async fn update_password_submit(
 // UPDATE_PASSWORD helpers
 // ---------------------------------------------------------------------------
 
-fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Response {
-    let tmpl = UpdatePasswordPageTemplate {
+fn update_password_template(
+    state: &Arc<WebState>,
+    error: Option<&str>,
+    csrf: Option<String>,
+) -> UpdatePasswordPageTemplate {
+    UpdatePasswordPageTemplate {
         error: error.map(str::to_string),
         chrome: false,
         active: "",
@@ -1270,13 +1407,36 @@ fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Re
         is_admin: false,
         narrow: true,
         flash: None,
-        csrf: None,
+        csrf,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
         inline_theme_css: state.inline_theme_css(),
-    };
-    render(&tmpl)
+    }
+}
+
+fn render_update_password_form(
+    state: &Arc<WebState>,
+    error: Option<&str>,
+    csrf: Option<String>,
+) -> Response {
+    render(&update_password_template(state, error, csrf))
+}
+
+/// 403 response for a failed CSRF double-submit on the update-password form.
+///
+/// Re-renders the form (with a fresh token the browser can actually use) rather
+/// than a bare error page, so a user whose token expired mid-flow can retry.
+fn update_password_csrf_failure(state: &Arc<WebState>, secure: bool) -> Response {
+    let (csrf_value, cookie) = super::auth::fresh_csrf_cookie(secure);
+    let tmpl = update_password_template(
+        state,
+        Some("Your session expired. Please try again."),
+        Some(csrf_value),
+    );
+    let mut resp = super::templates::render_status(&tmpl, StatusCode::FORBIDDEN);
+    append_cookie(&mut resp, &cookie);
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,10 +1508,46 @@ pub async fn enroll_phone_otp_page(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Response {
-    if read_ra_cookie(&headers).is_none() {
-        return handlers_common::bad_request("No active required-action session");
+    // Verify the RA session token, exactly as the email twin does — cookie
+    // presence alone proves nothing (audit 2026-08-28 §4.19#7).
+    if let Err(response) = validated_ra_session(&state, &headers) {
+        return response;
     }
     render_enroll_phone_page(&state, None)
+}
+
+/// Verifies the RA session cookie and returns its realm and claims.
+///
+/// The realm is read from the payload only to select the verification key; the
+/// signature is checked under that realm's key immediately afterwards, so a
+/// caller cannot name a realm it does not hold a token for
+/// (audit 2026-08-28 §4.19#7).
+fn validated_ra_session(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+) -> Result<(RealmId, ra_token::RaClaims), Response> {
+    let Some(token) = read_ra_cookie(headers) else {
+        return Err(handlers_common::bad_request(
+            "No active required-action session",
+        ));
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return Err(handlers_common::bad_request("Malformed RA session token"));
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return Err(handlers_common::bad_request(
+            "Malformed realm in RA session token",
+        ));
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(claims) => Ok((realm, claims)),
+        Err(ra_token::RaTokenError::Expired) => Err(Redirect::to("/").into_response()),
+        Err(_) => Err(handlers_common::bad_request(
+            "Invalid required-action session token",
+        )),
+    }
 }
 
 /// Sends an SMS OTP to the supplied E.164 phone number and renders the
@@ -1365,9 +1561,13 @@ pub async fn enroll_phone_otp_send(
     headers: HeaderMap,
     Form(form): Form<EnrollPhoneOtpSendForm>,
 ) -> Response {
-    if read_ra_cookie(&headers).is_none() {
-        return handlers_common::bad_request("No active required-action session");
-    }
+    // Verify the RA session token before doing anything that costs the realm
+    // money: the realm below comes from the verified token, not from the
+    // unauthenticated payload (audit 2026-08-28 §4.19#7).
+    let realm = match validated_ra_session(&state, &headers) {
+        Ok((realm, _claims)) => realm,
+        Err(response) => return response,
+    };
 
     let phone = form.phone.trim().to_string();
 
@@ -1391,7 +1591,7 @@ pub async fn enroll_phone_otp_send(
     let now_ts = now_unix_ts();
 
     let nonce = match state.identity.issue_sms_otp(
-        &extract_realm_from_ra_cookie(&headers),
+        &realm,
         &phone,
         &hmac_key,
         sms_sender.as_ref(),
@@ -1458,7 +1658,16 @@ pub async fn enroll_phone_otp_verify_submit(
     let secure = state.is_secure_request(&headers);
 
     let phone = form.phone.trim().to_string();
-    if !is_e164(&phone) || form.nonce.is_empty() || form.code.is_empty() {
+    // 22.4 (audit 2026-08-28 §4.4#2): a phone that fails E.164 validation must
+    // not be echoed back into the verify page — that page masks it, and the
+    // masking used to index raw bytes. `mask_phone` is total now, but this
+    // layer still validates its own input rather than trusting the form: an
+    // unparsed number has nothing to mask, so send the user back to the entry
+    // page instead of rendering a masked view of junk.
+    if !is_e164(&phone) {
+        return render_enroll_phone_page(&state, Some("Invalid submission."));
+    }
+    if form.nonce.is_empty() || form.code.is_empty() {
         return render_enroll_phone_verify(
             &state,
             &phone,
@@ -1595,15 +1804,32 @@ fn render_enroll_phone_verify(
 }
 
 /// Masks a phone number for display: keeps the country code and last 4 digits.
-/// E.g. `"+15555550100"` → `"+1•••••0100"`.
+/// E.g. `"+15555550100"` → `"+1••••••0100"`.
+///
+/// 22.4 (audit 2026-08-28 §4.4#2): this used to index `phone` by **byte**
+/// offset in three places — `phone[phone.len() - 4..]`, `phone[..prefix_end]`,
+/// and a `phone.len() - prefix_end - 4` width that could underflow. Any of the
+/// three panicked the handler on input that was not pure ASCII (a multi-byte
+/// character landing across a slice boundary) or that had no digit in the first
+/// few characters. The function is now total for every `&str`: it works on
+/// `char`s and clamps the prefix so the dot count can never go negative.
 fn mask_phone(phone: &str) -> String {
-    if phone.len() <= 5 {
+    let chars: Vec<char> = phone.chars().collect();
+    if chars.len() <= 5 {
         return phone.to_string();
     }
-    let visible_suffix = &phone[phone.len() - 4..];
-    let prefix_end = phone.find(|c: char| c.is_ascii_digit()).unwrap_or(1) + 1;
-    let country_code = &phone[..prefix_end];
-    let dots = "•".repeat(phone.len() - prefix_end - 4);
+    let suffix_start = chars.len() - 4;
+    // Country code = everything up to and including the first ASCII digit
+    // (e.g. "+1"), clamped so it can never overlap the visible suffix.
+    let prefix_end = chars
+        .iter()
+        .position(char::is_ascii_digit)
+        .unwrap_or(1)
+        .saturating_add(1)
+        .min(suffix_start);
+    let country_code: String = chars[..prefix_end].iter().collect();
+    let visible_suffix: String = chars[suffix_start..].iter().collect();
+    let dots = "•".repeat(suffix_start - prefix_end);
     format!("{country_code}{dots}{visible_suffix}")
 }
 
@@ -1623,28 +1849,14 @@ fn is_e164(s: &str) -> bool {
 /// returns a zero-filled 32-byte key. This path is unreachable whenever a real
 /// SMS transport is configured because startup rejects a missing
 /// `HEARTH_SMS_OTP_HMAC_KEY` when `sms.transport` is not `log`.
-fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
+pub(super) fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
     state
         .sms_otp_hmac_key
         .clone()
         .unwrap_or_else(|| vec![0u8; 32])
 }
 
-/// Extracts the realm from the RA session cookie without full JWT verification
-/// (used to provide a `RealmId` to `issue_sms_otp` before full token validation).
-fn extract_realm_from_ra_cookie(headers: &HeaderMap) -> RealmId {
-    read_ra_cookie(headers)
-        .as_deref()
-        .and_then(ra_token::extract_realm_unchecked)
-        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-        .map(RealmId::new)
-        .unwrap_or_else(|| {
-            // Should not happen; caller already verified the cookie exists.
-            tracing::warn!("extract_realm_from_ra_cookie: falling back to nil realm");
-            RealmId::new(uuid::Uuid::nil())
-        })
-}
-
+/// Returns the current Unix timestamp in whole seconds.
 fn now_unix_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2016,7 +2228,7 @@ fn mask_email(email: &str) -> String {
 ///
 /// Reuses the SMS OTP HMAC key if configured; falls back to a deterministic
 /// dev key when neither is set (dev mode only — not for production).
-fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
+pub(super) fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
     state
         .sms_otp_hmac_key
         .clone()
@@ -2314,6 +2526,32 @@ mod tests {
         out
     }
 
+    // ===== realms.<name>.auth.webauthn_required (audit §4.18#9) =====
+
+    /// A realm that requires a passkey must intercept a user who has none.
+    #[test]
+    fn webauthn_required_realm_injects_enroll_mfa_when_no_passkey() {
+        assert!(
+            enroll_mfa_needed(true, false),
+            "webauthn_required with no registered passkey must force enrolment"
+        );
+    }
+
+    /// Once the passkey exists the requirement is satisfied and the user is
+    /// not intercepted again.
+    #[test]
+    fn webauthn_required_realm_is_satisfied_by_a_passkey() {
+        assert!(!enroll_mfa_needed(true, true));
+    }
+
+    /// A realm that does not set the key keeps the previous behaviour: the
+    /// client-level and role-level rules below decide, not this one.
+    #[test]
+    fn webauthn_not_required_never_forces_enrolment_on_its_own() {
+        assert!(!enroll_mfa_needed(false, false));
+        assert!(!enroll_mfa_needed(false, true));
+    }
+
     #[test]
     fn build_redirect_location_appends_params() {
         let loc = build_redirect_location(
@@ -2334,5 +2572,68 @@ mod tests {
         assert_eq!(action_label("VERIFY_EMAIL"), "Verify your email address");
         assert_eq!(action_label("UPDATE_PASSWORD"), "Update your password");
         assert_eq!(action_label("UNKNOWN"), "Complete required action");
+    }
+}
+
+#[cfg(test)]
+mod mask_phone_tests {
+    use super::{is_e164, mask_phone};
+
+    /// The documented happy path still masks exactly as before.
+    #[test]
+    fn masks_an_e164_number_keeping_country_code_and_last_four() {
+        assert_eq!(mask_phone("+15555550100"), "+1••••••0100");
+        assert_eq!(mask_phone("+442071838750"), "+4•••••••8750");
+    }
+
+    /// Short inputs pass through untouched (no suffix to preserve).
+    #[test]
+    fn short_input_passes_through() {
+        assert_eq!(mask_phone(""), "");
+        assert_eq!(mask_phone("+1234"), "+1234");
+        assert_eq!(mask_phone("+1"), "+1");
+    }
+
+    /// 22.4 (§4.4#2): the three byte-slicing panics.
+    ///
+    /// Each of these strings made the old implementation abort the handler:
+    /// a multi-byte char across the `len() - 4` suffix boundary, a multi-byte
+    /// char under the `[..prefix_end]` country-code slice, and a digit far
+    /// enough in that `len() - prefix_end - 4` underflowed.
+    #[test]
+    fn multibyte_and_digitless_input_does_not_panic() {
+        for input in [
+            "+1555555€",       // multi-byte char inside the 4-char suffix
+            "€€€€€€€€",        // every char multi-byte, no ASCII digit at all
+            "++++++9",         // first digit at index 6 ⇒ prefix_end 7 > len - 4
+            "+🔥🔥🔥🔥🔥1234", // emoji (4-byte) before the digits
+            "ありがとう1234",  // no leading '+', multi-byte prefix
+            "+++++++++",       // no digit anywhere, all ASCII
+        ] {
+            let masked = mask_phone(input);
+            // Total, and it never invents characters it was not given.
+            assert!(
+                !masked.is_empty(),
+                "mask_phone({input:?}) returned empty string"
+            );
+        }
+    }
+
+    /// The masked form never leaks more than the last four characters.
+    #[test]
+    fn masked_form_hides_the_middle() {
+        let masked = mask_phone("+15555550100");
+        assert!(!masked.contains("555555"), "middle digits leaked: {masked}");
+        assert!(masked.ends_with("0100"), "suffix missing: {masked}");
+    }
+
+    /// The entry-point guard that keeps unvalidated input away from the
+    /// masking view in the first place (22.4, second half).
+    #[test]
+    fn e164_validator_rejects_the_panic_inputs() {
+        for input in ["+1555555€", "€€€€€€€€", "++++++9", "ありがとう1234"] {
+            assert!(!is_e164(input), "is_e164 accepted {input:?}");
+        }
+        assert!(is_e164("+15555550100"));
     }
 }

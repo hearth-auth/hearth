@@ -73,9 +73,13 @@ internal suspend inline fun <reified Req, reified Res> OkHttpClient.post(
 }
 
 /**
- * Executes a PUT request to [url] with JSON-encoded [payload] and optional [headers].
+ * Executes a PATCH request to [url] with JSON-encoded [payload] and optional [headers].
+ *
+ * Every Hearth admin mutation is a PATCH. The server answers a bare 405 to PUT
+ * — no body, no error code — so the verb is part of the wire contract
+ * (audit 2026-08-28 §25.4).
  */
-internal suspend inline fun <reified Req, reified Res> OkHttpClient.put(
+internal suspend inline fun <reified Req, reified Res> OkHttpClient.patch(
     url: String,
     payload: Req,
     headers: Map<String, String> = emptyMap(),
@@ -83,7 +87,7 @@ internal suspend inline fun <reified Req, reified Res> OkHttpClient.put(
     val body = JSON.encodeToString(payload).toRequestBody(JSON_MEDIA_TYPE)
     val request = Request.Builder().url(url).apply {
         headers.forEach { (k, v) -> addHeader(k, v) }
-        put(body)
+        patch(body)
     }.build()
 
     executeAsync(request).use { resp ->
@@ -92,6 +96,10 @@ internal suspend inline fun <reified Req, reified Res> OkHttpClient.put(
         return JSON.decodeFromString(bodyStr)
     }
 }
+
+// The PUT helper was removed with its only caller, AdminClient.assignRole:
+// Hearth implements every admin mutation as PATCH or POST, never PUT
+// (audit 2026-08-28 §25.4, §25.19).
 
 /**
  * Executes a POST request to [url] with JSON-encoded [payload], discarding the

@@ -204,9 +204,29 @@ pub struct StorageSection {
     /// Ignored when `hot_tier_capacity` is `Some(n)`.
     #[serde(default)]
     pub hot_tier_max_memory: Option<usize>,
-    /// Whether to fsync WAL writes. MUST be true in production.
-    #[serde(default = "StorageSection::default_fsync")]
-    pub fsync: bool,
+    /// Export hot-tier eviction and promotion counters with a `realm` label.
+    ///
+    /// The hot tier is one cache shared by every tenant, so the unlabelled
+    /// totals cannot say which realm the tier is holding or which realm is
+    /// evicting the others (audit 2026-08-28 §4.9#6). Costs one Prometheus
+    /// series per realm on each of two counters; set `false` when the realm
+    /// count makes that too expensive.
+    #[serde(default = "StorageSection::default_hot_tier_per_realm_metrics")]
+    pub hot_tier_per_realm_metrics: bool,
+    /// Whether to `fsync` WAL writes before acknowledging them.
+    ///
+    /// Absent (`None`) resolves to the mode default: **on** in production,
+    /// **off** under `--dev`. An explicit value is honoured in dev mode so a
+    /// developer can exercise the real group-commit path locally.
+    ///
+    /// `fsync: false` outside dev mode is a hard configuration error, not a
+    /// warning: WAL durability is the one thing the storage engine promises,
+    /// and previously this key was accepted, logged about, and then ignored —
+    /// production always built `SyncMode::EveryWrite` regardless (audit
+    /// §4.11#12, §6). Resolve it through [`Self::fsync_enabled`]; do not read
+    /// the field directly.
+    #[serde(default)]
+    pub fsync: Option<bool>,
     /// Total byte budget for the process-wide decrypted-block cache shared by
     /// all v3 SST readers (HEA-1914). Bounds decrypted cold-tier residency
     /// independent of corpus size. Default 256 MiB.
@@ -235,12 +255,26 @@ impl StorageSection {
         64 * 1024 * 1024 // 64 MiB
     }
 
-    const fn default_fsync() -> bool {
-        true
+    /// Resolves `storage.fsync` against the run mode.
+    ///
+    /// This is the single place the knob is interpreted, so a caller cannot
+    /// accidentally read the raw `Option` and reintroduce the "parsed but
+    /// ignored" bug this replaced. Production refuses `Some(false)` during
+    /// validation, so the `dev_mode = false` arm can only ever return `true`.
+    #[must_use]
+    pub const fn fsync_enabled(&self, dev_mode: bool) -> bool {
+        match self.fsync {
+            Some(explicit) => explicit,
+            None => !dev_mode,
+        }
     }
 
     const fn default_block_cache_bytes() -> usize {
         256 * 1024 * 1024 // 256 MiB
+    }
+
+    const fn default_hot_tier_per_realm_metrics() -> bool {
+        true
     }
 }
 
@@ -252,7 +286,8 @@ impl Default for StorageSection {
             memtable_flush_bytes: Self::default_memtable_flush_bytes(),
             hot_tier_capacity: None,
             hot_tier_max_memory: None,
-            fsync: Self::default_fsync(),
+            hot_tier_per_realm_metrics: Self::default_hot_tier_per_realm_metrics(),
+            fsync: None,
             block_cache_bytes: Self::default_block_cache_bytes(),
             compaction: CompactionSection::default(),
         }
@@ -834,8 +869,20 @@ pub struct TokenYamlConfig {
     /// Default: 7 days.
     #[serde(default)]
     pub refresh_token_ttl: Option<String>,
-    /// Grace period during which the old signing key remains in JWKS after
-    /// rotation (e.g. `"24h"`). Default: 24 hours.
+    /// Grace period during which the old signing key remains in JWKS after a
+    /// **config-driven** rotation — `rotate_signing_key: true` on a realm,
+    /// applied at startup (e.g. `"24h"`).
+    ///
+    /// Default: the longest refresh-token lifetime this config can issue —
+    /// the greater of `token.refresh_token_ttl` and any per-realm
+    /// `auth.token.refresh_token_ttl`. A fixed 24 h default retired every
+    /// outstanding refresh token six days before its own `exp` (audit
+    /// 2026-08-28 §4.15#3). A shorter explicit value is honoured verbatim and
+    /// logs a startup warning.
+    ///
+    /// It does not apply to `POST /admin/realms/{id}/rotate-signing-key`,
+    /// which revokes the retired key unless the request names a window
+    /// explicitly (audit 2026-08-28 B9).
     #[serde(default)]
     pub signing_key_rotation_grace_period: Option<String>,
     /// Maximum entries in the in-process token-claims cache on the
@@ -854,8 +901,14 @@ pub struct TokenYamlConfig {
 ///
 /// `Debug` is hand-written (not derived) so the secret fields
 /// `dpop_nonce_secret` and `key_encryption_key` are redacted — see the
-/// `impl Debug` below. Any new secret field MUST be redacted there too.
-#[derive(Clone, Default, Deserialize)]
+/// `impl Debug` below.  `Default` is also hand-written (not derived): several
+/// fields carry a non-zero `#[serde(default = "fn")]` value, which serde only
+/// consults while deserializing an explicit `security:` block. A derived
+/// `Default` bypasses those functions and zeroes/empties the fields instead,
+/// which is what a config file with no `security:` block at all gets — see
+/// `omitted_security_block_keeps_documented_defaults` in `config::validate`.
+/// Any new secret field MUST be redacted in `impl Debug` too.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityYaml {
     /// Global rate-limiting thresholds (overrides compiled-in defaults).
@@ -982,6 +1035,387 @@ pub struct SecurityYaml {
     /// ```
     #[serde(default = "SecurityYaml::default_dev_csp_form_action_origins")]
     pub dev_csp_form_action_origins: Vec<String>,
+    /// A-3 distributed-attack detector (`security.distributed_attack_detector`).
+    ///
+    /// Documented in `docs/specs/ABUSE.md` since HEA-1189 and, until task
+    /// 20.13, absent from this struct — which `deny_unknown_fields` turns into
+    /// a refusal to boot for any operator who copied the documented block
+    /// (audit §4.17#9).
+    #[serde(default)]
+    pub distributed_attack_detector: DistributedAttackDetectorYaml,
+    /// A-4 outbound email/SMS volume shield (`security.outbound_volume_shield`).
+    #[serde(default)]
+    pub outbound_volume_shield: OutboundVolumeShieldYaml,
+    /// A-50 cross-realm aggregation cap (`security.cross_realm_aggregation_cap`).
+    #[serde(default)]
+    pub cross_realm_aggregation_cap: CrossRealmAggCapYaml,
+    /// A-11 / P-4 step-up MFA risk scorer (`security.risk_scorer`).
+    #[serde(default)]
+    pub risk_scorer: RiskScorerYaml,
+    /// A-12 adaptive exponential lockout backoff (`security.adaptive_backoff`).
+    #[serde(default)]
+    pub adaptive_backoff: AdaptiveBackoffYaml,
+    /// A-17 login-event tarpit (`security.tarpit`).
+    #[serde(default)]
+    pub tarpit: TarpitYaml,
+    /// P-3 / P-5 pluggable signal providers (`security.providers`).
+    #[serde(default)]
+    pub providers: AbuseProvidersYaml,
+}
+
+/// `security.distributed_attack_detector` — A-3 cardinality detector.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistributedAttackDetectorYaml {
+    /// Whether the detector runs. Default: `false` (fail-open).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Rolling window length, e.g. `"300s"`. Default: 5 minutes.
+    #[serde(default = "DistributedAttackDetectorYaml::default_window")]
+    pub window: String,
+    /// Distinct usernames tried from one IP before a challenge fires.
+    #[serde(default = "DistributedAttackDetectorYaml::default_threshold")]
+    pub username_per_ip_threshold: usize,
+    /// Distinct IPs targeting one username before a challenge fires.
+    #[serde(default = "DistributedAttackDetectorYaml::default_threshold")]
+    pub ip_per_username_threshold: usize,
+}
+
+impl DistributedAttackDetectorYaml {
+    fn default_window() -> String {
+        "300s".to_string()
+    }
+    const fn default_threshold() -> usize {
+        20
+    }
+}
+
+impl Default for DistributedAttackDetectorYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window: Self::default_window(),
+            username_per_ip_threshold: Self::default_threshold(),
+            ip_per_username_threshold: Self::default_threshold(),
+        }
+    }
+}
+
+/// `security.outbound_volume_shield` — A-4 per-realm outbound breadth caps.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundVolumeShieldYaml {
+    /// Whether the shield runs. Default: `false` (fail-open).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Rolling window length, e.g. `"3600s"`. Default: 1 hour.
+    #[serde(default = "OutboundVolumeShieldYaml::default_window")]
+    pub window: String,
+    /// Distinct email recipients per realm per window before a soft cap.
+    #[serde(default = "OutboundVolumeShieldYaml::default_email_soft_cap")]
+    pub email_soft_cap: usize,
+    /// Distinct email recipients per realm per window before a hard cap.
+    #[serde(default = "OutboundVolumeShieldYaml::default_email_hard_cap")]
+    pub email_hard_cap: usize,
+    /// Distinct SMS recipients per realm per window before a soft cap.
+    #[serde(default = "OutboundVolumeShieldYaml::default_sms_soft_cap")]
+    pub sms_soft_cap: usize,
+    /// Distinct SMS recipients per realm per window before a hard cap.
+    #[serde(default = "OutboundVolumeShieldYaml::default_sms_hard_cap")]
+    pub sms_hard_cap: usize,
+}
+
+impl OutboundVolumeShieldYaml {
+    fn default_window() -> String {
+        "3600s".to_string()
+    }
+    const fn default_email_soft_cap() -> usize {
+        1_000
+    }
+    const fn default_email_hard_cap() -> usize {
+        5_000
+    }
+    const fn default_sms_soft_cap() -> usize {
+        100
+    }
+    const fn default_sms_hard_cap() -> usize {
+        500
+    }
+}
+
+impl Default for OutboundVolumeShieldYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window: Self::default_window(),
+            email_soft_cap: Self::default_email_soft_cap(),
+            email_hard_cap: Self::default_email_hard_cap(),
+            sms_soft_cap: Self::default_sms_soft_cap(),
+            sms_hard_cap: Self::default_sms_hard_cap(),
+        }
+    }
+}
+
+/// `security.cross_realm_aggregation_cap` — A-50 per-recipient realm fan-out cap.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrossRealmAggCapYaml {
+    /// Whether the cap runs. Default: `false` (fail-open).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Rolling window length, e.g. `"3600s"`. Default: 1 hour.
+    #[serde(default = "CrossRealmAggCapYaml::default_window")]
+    pub window: String,
+    /// Distinct realms per recipient before an operator alert.
+    #[serde(default = "CrossRealmAggCapYaml::default_alert_threshold")]
+    pub alert_threshold: usize,
+    /// Distinct realms per email address before a soft cap.
+    #[serde(default = "CrossRealmAggCapYaml::default_email_realm_soft_cap")]
+    pub email_realm_soft_cap: usize,
+    /// Distinct realms per email address before a hard cap.
+    #[serde(default = "CrossRealmAggCapYaml::default_email_realm_hard_cap")]
+    pub email_realm_hard_cap: usize,
+    /// Distinct realms per phone number before a soft cap.
+    #[serde(default = "CrossRealmAggCapYaml::default_sms_realm_soft_cap")]
+    pub sms_realm_soft_cap: usize,
+    /// Distinct realms per phone number before a hard cap.
+    #[serde(default = "CrossRealmAggCapYaml::default_sms_realm_hard_cap")]
+    pub sms_realm_hard_cap: usize,
+}
+
+impl CrossRealmAggCapYaml {
+    fn default_window() -> String {
+        "3600s".to_string()
+    }
+    const fn default_alert_threshold() -> usize {
+        3
+    }
+    const fn default_email_realm_soft_cap() -> usize {
+        5
+    }
+    const fn default_email_realm_hard_cap() -> usize {
+        10
+    }
+    const fn default_sms_realm_soft_cap() -> usize {
+        3
+    }
+    const fn default_sms_realm_hard_cap() -> usize {
+        6
+    }
+}
+
+impl Default for CrossRealmAggCapYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window: Self::default_window(),
+            alert_threshold: Self::default_alert_threshold(),
+            email_realm_soft_cap: Self::default_email_realm_soft_cap(),
+            email_realm_hard_cap: Self::default_email_realm_hard_cap(),
+            sms_realm_soft_cap: Self::default_sms_realm_soft_cap(),
+            sms_realm_hard_cap: Self::default_sms_realm_hard_cap(),
+        }
+    }
+}
+
+/// `security.risk_scorer` — A-11 / P-4 step-up MFA risk weights.
+///
+/// These become the realm default for [`RealmConfig::risk_scorer_config`],
+/// which the A-49 refresh-context check in the identity engine reads. That
+/// field was hard-coded to `None`, so the scorer ran permanently disabled no
+/// matter what the operator wrote (audit §4.17#9).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiskScorerYaml {
+    /// Whether risk scoring is active. Default: `false` (fail-open).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Score at or above which step-up MFA is required. Range `[0.0, 1.0]`.
+    #[serde(default = "RiskScorerYaml::default_step_up_threshold")]
+    pub step_up_threshold: f32,
+    /// Weight for the "unrecognised device" signal.
+    #[serde(default = "RiskScorerYaml::default_new_device_weight")]
+    pub new_device_weight: f32,
+    /// Weight for the "unrecognised country" signal.
+    #[serde(default = "RiskScorerYaml::default_new_country_weight")]
+    pub new_country_weight: f32,
+    /// Weight for the "password older than the threshold" signal.
+    #[serde(default = "RiskScorerYaml::default_password_age_weight")]
+    pub password_age_weight: f32,
+    /// Password age in days before `password_age_weight` applies.
+    #[serde(default = "RiskScorerYaml::default_password_age_days_threshold")]
+    pub password_age_days_threshold: u32,
+    /// Weight for a confirmed breach-corpus hit.
+    #[serde(default = "RiskScorerYaml::default_breach_corpus_weight")]
+    pub breach_corpus_weight: f32,
+    /// Weight per changed dimension in the A-49 refresh-context delta.
+    #[serde(default = "RiskScorerYaml::default_refresh_context_delta_weight")]
+    pub refresh_context_delta_weight: f32,
+}
+
+impl RiskScorerYaml {
+    const fn default_step_up_threshold() -> f32 {
+        0.5
+    }
+    const fn default_new_device_weight() -> f32 {
+        0.3
+    }
+    const fn default_new_country_weight() -> f32 {
+        0.4
+    }
+    const fn default_password_age_weight() -> f32 {
+        0.2
+    }
+    const fn default_password_age_days_threshold() -> u32 {
+        365
+    }
+    const fn default_breach_corpus_weight() -> f32 {
+        1.0
+    }
+    const fn default_refresh_context_delta_weight() -> f32 {
+        0.35
+    }
+
+    /// Projects the YAML declaration into the engine-level scorer config.
+    #[must_use]
+    pub fn to_domain(&self) -> crate::abuse::risk_scorer::RiskScorerConfig {
+        crate::abuse::risk_scorer::RiskScorerConfig {
+            enabled: self.enabled,
+            step_up_threshold: self.step_up_threshold,
+            new_device_weight: self.new_device_weight,
+            new_country_weight: self.new_country_weight,
+            password_age_weight: self.password_age_weight,
+            password_age_days_threshold: self.password_age_days_threshold,
+            breach_corpus_weight: self.breach_corpus_weight,
+            refresh_context_delta_weight: self.refresh_context_delta_weight,
+        }
+    }
+}
+
+impl Default for RiskScorerYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            step_up_threshold: Self::default_step_up_threshold(),
+            new_device_weight: Self::default_new_device_weight(),
+            new_country_weight: Self::default_new_country_weight(),
+            password_age_weight: Self::default_password_age_weight(),
+            password_age_days_threshold: Self::default_password_age_days_threshold(),
+            breach_corpus_weight: Self::default_breach_corpus_weight(),
+            refresh_context_delta_weight: Self::default_refresh_context_delta_weight(),
+        }
+    }
+}
+
+/// `security.adaptive_backoff` — A-12 exponential lockout schedule.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveBackoffYaml {
+    /// Lockout durations applied to successive offences, e.g.
+    /// `["1m", "5m", "30m", "24h"]`.
+    #[serde(default = "AdaptiveBackoffYaml::default_durations")]
+    pub durations: Vec<String>,
+    /// How long a clean record must persist before the offence counter resets.
+    #[serde(default = "AdaptiveBackoffYaml::default_offense_cooldown")]
+    pub offense_cooldown: String,
+}
+
+impl AdaptiveBackoffYaml {
+    fn default_durations() -> Vec<String> {
+        vec![
+            "1m".to_string(),
+            "5m".to_string(),
+            "30m".to_string(),
+            "24h".to_string(),
+        ]
+    }
+    fn default_offense_cooldown() -> String {
+        "7d".to_string()
+    }
+}
+
+impl Default for AdaptiveBackoffYaml {
+    fn default() -> Self {
+        Self {
+            durations: Self::default_durations(),
+            offense_cooldown: Self::default_offense_cooldown(),
+        }
+    }
+}
+
+/// `security.tarpit` — A-17 per-IP login tarpit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TarpitYaml {
+    /// Failures per IP within `window_secs` before delays apply.
+    /// Absent = disabled (fail-open).
+    #[serde(default)]
+    pub threshold: Option<u32>,
+    /// Rolling window for counting failures, in seconds. Default: 60.
+    #[serde(default = "TarpitYaml::default_window_secs")]
+    pub window_secs: u64,
+    /// Deterministic delay per tarpitted request, in milliseconds.
+    /// Must be 100–500 per plan §4.1 A-17. Default: 200.
+    #[serde(default = "TarpitYaml::default_delay_ms")]
+    pub delay_ms: u64,
+}
+
+impl TarpitYaml {
+    const fn default_window_secs() -> u64 {
+        60
+    }
+    const fn default_delay_ms() -> u64 {
+        200
+    }
+}
+
+impl Default for TarpitYaml {
+    fn default() -> Self {
+        Self {
+            threshold: None,
+            window_secs: Self::default_window_secs(),
+            delay_ms: Self::default_delay_ms(),
+        }
+    }
+}
+
+/// `security.providers` — pluggable abuse-signal adapters (P-3, P-5).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbuseProvidersYaml {
+    /// P-3 UA + JA3/JA4 bot-signal heuristics.
+    #[serde(default)]
+    pub bot_signal: BotSignalYaml,
+    /// P-5 disposable-domain and role-address detection.
+    #[serde(default)]
+    pub email_reputation: EmailReputationProviderYaml,
+}
+
+/// `security.providers.bot_signal` — P-3 heuristic adapter.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BotSignalYaml {
+    /// Whether the heuristic adapter replaces the no-op default.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Extra JA3 hashes to block beyond the built-in list.
+    #[serde(default)]
+    pub extra_ja3_blocklist: Vec<String>,
+    /// Extra JA4 hashes or prefixes to block beyond the built-in list.
+    #[serde(default)]
+    pub extra_ja4_blocklist: Vec<String>,
+}
+
+/// `security.providers.email_reputation` — P-5 built-in adapter.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailReputationProviderYaml {
+    /// Whether the built-in adapter replaces the no-op default.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Extra disposable domains beyond the built-in list.
+    #[serde(default)]
+    pub extra_disposable_domains: Vec<String>,
 }
 
 /// Redacts `dpop_nonce_secret` and `key_encryption_key` — both are secret key
@@ -990,6 +1424,11 @@ pub struct SecurityYaml {
 /// `{:?}`-printed (HEA-1841). Presence is preserved (`Some("[REDACTED]")`)
 /// so debug output still distinguishes configured from absent.
 impl std::fmt::Debug for SecurityYaml {
+    // `dev_csp_form_action_origins` and the abuse-guard blocks are omitted
+    // deliberately: this impl exists to redact `dpop_nonce_secret` and
+    // `key_encryption_key`, and every field it prints is one an operator needs
+    // when reading a startup dump. `finish_non_exhaustive` marks the omission.
+    #[allow(clippy::missing_fields_in_debug)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityYaml")
             .field("rate_limiting", &self.rate_limiting)
@@ -1019,7 +1458,7 @@ impl std::fmt::Debug for SecurityYaml {
                 "dev_csp_form_action_origins",
                 &self.dev_csp_form_action_origins,
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -1154,6 +1593,42 @@ impl std::fmt::Debug for PepperYaml {
     }
 }
 
+/// Mirrors serde's per-field `#[serde(default = "fn")]` values so a config
+/// file with no `security:` block at all gets the same documented defaults
+/// as one with an empty `security: {}` block. See the type-level doc comment
+/// on why this cannot be `#[derive(Default)]`.
+impl Default for SecurityYaml {
+    fn default() -> Self {
+        Self {
+            rate_limiting: None,
+            dpop_nonce_secret: None,
+            allowed_hosts: Vec::new(),
+            http2: Http2SecurityYaml::default(),
+            request_shaper: None,
+            load_test_unthrottled: None,
+            allowed_return_to_origins: Vec::new(),
+            ip_reputation: IpReputationYaml::default(),
+            captcha: None,
+            grpc: GrpcSecurityYaml::default(),
+            tls: TlsSecurityYaml::default(),
+            backup: BackupSecurityYaml::default(),
+            reserved_slugs: Self::default_reserved_slugs(),
+            slug_cooldown_days: Self::default_slug_cooldown_days(),
+            jwks_rps_limit: Self::default_jwks_rps_limit(),
+            key_encryption_key: None,
+            password: PasswordSecurityYaml::default(),
+            dev_csp_form_action_origins: Self::default_dev_csp_form_action_origins(),
+            distributed_attack_detector: DistributedAttackDetectorYaml::default(),
+            outbound_volume_shield: OutboundVolumeShieldYaml::default(),
+            cross_realm_aggregation_cap: CrossRealmAggCapYaml::default(),
+            risk_scorer: RiskScorerYaml::default(),
+            adaptive_backoff: AdaptiveBackoffYaml::default(),
+            tarpit: TarpitYaml::default(),
+            providers: AbuseProvidersYaml::default(),
+        }
+    }
+}
+
 impl SecurityYaml {
     /// Default JWKS / discovery rate limit: 60 requests per second per IP (A-10).
     const fn default_jwks_rps_limit() -> u32 {
@@ -1229,6 +1704,29 @@ pub struct CaptchaYaml {
     /// Cloudflare Turnstile settings (required when `provider = "turnstile"`).
     #[serde(default)]
     pub turnstile: Option<TurnstileYaml>,
+    /// A-16: failures per window before a CAPTCHA challenge is demanded.
+    ///
+    /// Documented in `docs/specs/ABUSE.md` § A-16 and, until task 20.13,
+    /// absent from this struct — `deny_unknown_fields` made the documented
+    /// block a refusal to boot (audit §4.17#9).
+    #[serde(default)]
+    pub challenge_threshold: Option<u32>,
+    /// A-16: rolling window for counting failures, in seconds. Default: 60.
+    #[serde(default = "CaptchaYaml::default_window_secs")]
+    pub window_secs: u64,
+    /// A-16: how long a solved challenge remains valid, in seconds.
+    /// Default: 1800 (30 minutes).
+    #[serde(default = "CaptchaYaml::default_challenge_ttl_secs")]
+    pub challenge_ttl_secs: u64,
+}
+
+impl CaptchaYaml {
+    const fn default_window_secs() -> u64 {
+        60
+    }
+    const fn default_challenge_ttl_secs() -> u64 {
+        1_800
+    }
 }
 
 /// Supported CAPTCHA provider identifiers.
@@ -1282,6 +1780,30 @@ pub struct BackupSecurityYaml {
     /// Defaults to 10 when absent.  Set to `0` to disable per-export rate limiting.
     #[serde(default)]
     pub export_rate_limit: Option<u32>,
+}
+
+impl BackupSecurityYaml {
+    /// Decodes [`Self::verify_key`] into the 32 raw Ed25519 public-key bytes.
+    ///
+    /// Returns `Ok(None)` when no key is configured — the documented default,
+    /// under which signature verification is skipped. Returns `Err` with a
+    /// reason when a key is present but is not 32 bytes of base64url (no pad);
+    /// such a key can never verify anything, so startup refuses it rather than
+    /// leaving the operator believing archives are checked (audit 2026-08-28
+    /// §4.13#5).
+    pub fn verify_key_bytes(&self) -> Result<Option<[u8; 32]>, String> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let Some(encoded) = self.verify_key.as_ref() else {
+            return Ok(None);
+        };
+        let raw = URL_SAFE_NO_PAD
+            .decode(encoded.trim())
+            .map_err(|e| format!("must be base64url (URL-safe, no padding); decode failed: {e}"))?;
+        let len = raw.len();
+        <[u8; 32]>::try_from(raw.as_slice()).map(Some).map_err(|_| {
+            format!("must decode to exactly 32 bytes (an Ed25519 public key), got {len}")
+        })
+    }
 }
 
 /// `security.ip_reputation` — IP reputation policy and provider config (P-2).
@@ -1564,6 +2086,14 @@ pub struct AuthConfig {
     /// Per-realm `auth.mfa_required` overrides this.
     #[serde(default)]
     pub mfa_required: Option<bool>,
+    /// Allowed MFA methods for every realm (global default).
+    ///
+    /// Per-realm `realms.<name>.auth.mfa_methods` overrides this wholesale —
+    /// a realm's list replaces the global one rather than merging with it, the
+    /// same way the other `auth.*` policies inherit. Absent at both levels
+    /// means no restriction.
+    #[serde(default)]
+    pub mfa_methods: Option<Vec<String>>,
     /// Whether passkey login still requires a TOTP challenge (global default).
     /// Per-realm `auth.passkey_requires_mfa` overrides this.
     #[serde(default)]
@@ -1577,7 +2107,34 @@ pub struct AuthConfig {
     /// An unrecognised value is a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
+    /// Global default for "every user in this realm must hold a passkey".
+    ///
+    /// Inherited by every realm that does not set
+    /// `realms.<name>.auth.webauthn_required`. The admin visual config editor
+    /// binds this key, and it had no field to land in — a submission carrying
+    /// it made the resulting `hearth.yaml` unparseable, and the value reached
+    /// nothing either way (audit §4.18#9).
+    #[serde(default)]
+    pub webauthn_required: Option<bool>,
+    /// Global default `residentKey` preference for registration ceremonies:
+    /// `"required"`, `"preferred"` or `"discouraged"`.
+    #[serde(default)]
+    pub webauthn_resident_key: Option<String>,
+    /// Global default `userVerification` preference for registration and
+    /// authentication ceremonies: `"required"`, `"preferred"` or
+    /// `"discouraged"`.
+    ///
+    /// `"required"` is what makes a passkey a genuine second factor — see
+    /// audit B10 / §4.18#1.
+    #[serde(default)]
+    pub webauthn_user_verification: Option<String>,
 }
+
+/// Valid `residentKey` / `userVerification` preference strings.
+///
+/// These are the WebAuthn Level 2 enumerations; anything else is sent verbatim
+/// to the browser, which ignores it and silently falls back to `"preferred"`.
+pub(crate) const VALID_WEBAUTHN_PREFERENCES: &[&str] = &["required", "preferred", "discouraged"];
 
 /// Per-realm auth policy configuration in YAML.
 ///
@@ -1621,6 +2178,22 @@ pub struct RealmAuthYaml {
     /// Absent = no restrictions (fail-open per §6.1 of the abuse plan).
     #[serde(default)]
     pub webauthn_attestation: Option<WebAuthnAttestationYaml>,
+    /// Whether every user in this realm must hold a passkey.
+    ///
+    /// When `true`, `create_session` refuses a user with no registered
+    /// WebAuthn credential. Falls back to the global `auth.webauthn_required`.
+    #[serde(default)]
+    pub webauthn_required: Option<bool>,
+    /// `residentKey` preference sent in `authenticatorSelection` during
+    /// registration: `"required"`, `"preferred"` or `"discouraged"`.
+    /// Falls back to the global `auth.webauthn_resident_key`.
+    #[serde(default)]
+    pub webauthn_resident_key: Option<String>,
+    /// `userVerification` preference sent during registration and
+    /// authentication: `"required"`, `"preferred"` or `"discouraged"`.
+    /// Falls back to the global `auth.webauthn_user_verification`.
+    #[serde(default)]
+    pub webauthn_user_verification: Option<String>,
 }
 
 /// WebAuthn attestation policy in YAML (`realms.<name>.auth.webauthn_attestation`).
@@ -2021,12 +2594,74 @@ pub struct ProtectedResourceYamlConfig {
     pub scopes: Vec<ScopeBundleYamlConfig>,
 }
 
+/// YAML for a single claim mapping.
+///
+/// Distinct from the domain [`ClaimMapping`] for two reasons, both from audit
+/// 2026-08-28 §4.13#3:
+///
+/// * `deny_unknown_fields` — a misspelled release gate (`first_party_onlyy`,
+///   `required_scope`) used to be discarded in silence, leaving the mapping on
+///   the permissive struct default and emitting the claim to every client.
+///   A typo is now a boot-time error naming the key.
+/// * `Option<bool>` gates — the Tier-3 default needs to tell "the operator
+///   omitted this gate" from "the operator set it to false". The domain type
+///   cannot: both read as `false`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimMappingYaml {
+    /// Target JWT claim name.
+    pub claim: String,
+    /// How the claim's value is produced.
+    pub source: crate::identity::claims_config::ClaimSource,
+    /// Emit in access tokens. Defaults to `true`.
+    #[serde(default)]
+    pub include_in_access_token: Option<bool>,
+    /// Emit in ID tokens. Defaults to `true`.
+    #[serde(default)]
+    pub include_in_id_token: Option<bool>,
+    /// Emit from `/userinfo`. Defaults to `false`.
+    #[serde(default)]
+    pub include_in_userinfo: Option<bool>,
+    /// Release gate: emit only to first-party clients.
+    ///
+    /// When omitted, see
+    /// [`default_first_party_only_for`](crate::identity::claims_config::default_first_party_only_for).
+    #[serde(default)]
+    pub first_party_only: Option<bool>,
+    /// Release gate: at least one of these scopes must be granted.
+    #[serde(default)]
+    pub required_scopes: Option<Vec<String>>,
+    /// Release gate: the requesting client's slug must appear here.
+    #[serde(default)]
+    pub allowed_clients: Option<Vec<String>>,
+}
+
+impl ClaimMappingYaml {
+    /// Resolves the YAML mapping into the domain mapping, applying every
+    /// documented default.
+    #[must_use]
+    pub fn to_domain(&self) -> ClaimMapping {
+        ClaimMapping {
+            claim: self.claim.clone(),
+            source: self.source.clone(),
+            include_in_access_token: self.include_in_access_token.unwrap_or(true),
+            include_in_id_token: self.include_in_id_token.unwrap_or(true),
+            include_in_userinfo: self.include_in_userinfo.unwrap_or(false),
+            first_party_only: self.first_party_only.unwrap_or_else(|| {
+                crate::identity::claims_config::default_first_party_only_for(&self.claim)
+            }),
+            required_scopes: self.required_scopes.clone(),
+            allowed_clients: self.allowed_clients.clone(),
+        }
+    }
+}
+
 /// YAML claim-profile wrapper.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimsYamlConfig {
     #[serde(default)]
-    pub mappings: Vec<ClaimMapping>,
+    pub mappings: Vec<ClaimMappingYaml>,
 }
 
 /// Per-realm email branding overrides in YAML.
@@ -2191,6 +2826,30 @@ pub struct SeedingYamlConfig {
     pub email_verified: Option<bool>,
 }
 
+/// `realms.<name>.security` — per-realm security policy.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RealmSecurityYaml {
+    /// A-9 tenant-managed CIDR allow/deny lists.
+    #[serde(default)]
+    pub cidr_policy: Option<CidrPolicyYaml>,
+}
+
+/// `realms.<name>.security.cidr_policy` — A-9 allow/deny CIDR lists.
+///
+/// Evaluation order is deny-then-allow: a deny match rejects outright, and a
+/// non-empty allow list rejects everything it does not contain.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CidrPolicyYaml {
+    /// CIDRs permitted to authenticate. Empty = no allow-list restriction.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// CIDRs refused outright. Evaluated before `allow`.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
 /// Per-realm YAML configuration block.
 ///
 /// Fields are optional — `None` inherits from global `auth:` defaults.
@@ -2200,6 +2859,14 @@ pub struct RealmYamlConfig {
     /// Session TTL override (e.g. "12h").
     #[serde(default)]
     pub session_ttl: Option<String>,
+    /// Per-realm security policy (`realms.<name>.security`).
+    ///
+    /// Currently carries the A-9 tenant CIDR allow/deny lists. Documented in
+    /// `docs/specs/ABUSE.md` § A-9 and, until task 20.13, absent from this
+    /// struct — `deny_unknown_fields` made the documented block a refusal to
+    /// boot (audit §4.17#9).
+    #[serde(default)]
+    pub security: Option<RealmSecurityYaml>,
     /// Maximum concurrent sessions per user for this realm.
     /// Overrides global `auth.session_max_concurrent`. `None` = unlimited.
     #[serde(default)]
@@ -2471,6 +3138,28 @@ pub struct FederationProviderYaml {
     #[serde(default)]
     pub leeway_seconds: Option<u32>,
 
+    // --- Apple-specific fields (when `type: apple`) ---
+    /// Apple Developer Team ID (10 characters, e.g. `"A1B2C3D4E5"`).
+    ///
+    /// Required for `type: apple`. Sign In with Apple does not use a static
+    /// `client_secret`; each token-endpoint call presents an ES256
+    /// `private_key_jwt` assertion built from `apple_team_id`, `apple_key_id`
+    /// and `apple_private_key_pem`.
+    #[serde(default)]
+    pub apple_team_id: Option<String>,
+    /// Key ID of the Sign In with Apple key from the Apple Developer portal
+    /// (e.g. `"ABCDE12345"`). Required for `type: apple`.
+    #[serde(default)]
+    pub apple_key_id: Option<String>,
+    /// P-256 private key in PKCS#8 PEM form (`-----BEGIN PRIVATE KEY-----`),
+    /// downloaded once from the Apple Developer portal. Required for
+    /// `type: apple`.
+    ///
+    /// Treat this like any other signing key: prefer an `${ENV_VAR}`
+    /// indirection over an inline literal in `hearth.yaml`.
+    #[serde(default)]
+    pub apple_private_key_pem: Option<String>,
+
     // --- SAML-specific fields (when `type: saml`) ---
     /// SAML IdP entity ID (SAML issuer).
     #[serde(default)]
@@ -2490,6 +3179,20 @@ pub struct FederationProviderYaml {
     /// Whether Hearth requires Assertion-level signatures.
     #[serde(default)]
     pub want_assertions_signed: Option<bool>,
+    /// Whether to trust the email this IdP asserts as **verified**.
+    ///
+    /// SAML carries no `email_verified` signal, so Hearth defaults to
+    /// treating a SAML-asserted email as unverified. That makes every
+    /// email-based linking mode unreachable: a SAML login for a user who
+    /// already exists locally falls through to just-in-time provisioning and
+    /// silently creates a SECOND account under a synthetic address.
+    ///
+    /// Set this to `true` only for a corporate IdP that owns its users'
+    /// mailboxes, because it lets that IdP claim any address in the realm.
+    /// Ignored for non-SAML connectors, which carry the upstream's own
+    /// `email_verified` claim (task 25.27).
+    #[serde(default)]
+    pub trust_asserted_email: Option<bool>,
     /// Attribute mapping: Hearth field → SAML attribute URI.
     #[serde(default)]
     pub attribute_map: Option<std::collections::BTreeMap<String, String>>,
@@ -2511,12 +3214,16 @@ impl FederationProviderYaml {
             scopes: None,
             claim_mappings: None,
             leeway_seconds: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_pem: None,
             entity_id: None,
             sso_url: None,
             slo_url: None,
             idp_certificate_pem: None,
             sign_authn_requests: None,
             want_assertions_signed: None,
+            trust_asserted_email: None,
             attribute_map: None,
         }
     }
@@ -2690,7 +3397,10 @@ impl RealmYamlConfig {
             .map(sha256_hex);
 
         let mfa_required = auth.and_then(|a| a.mfa_required).or(global.mfa_required);
-        let mfa_methods = auth.and_then(|a| a.mfa_methods.clone());
+        // Realm wins over global, whole-list (audit 2026-08-28 §4.18#10).
+        let mfa_methods = auth
+            .and_then(|a| a.mfa_methods.clone())
+            .or_else(|| global.mfa_methods.clone());
         let allowed_auth_methods = auth.and_then(|a| a.allowed_auth_methods.clone());
         let passkey_requires_mfa = auth
             .and_then(|a| a.passkey_requires_mfa)
@@ -2968,7 +3678,11 @@ impl RealmYamlConfig {
             self.claims
                 .clone()
                 .map(|claims| crate::identity::claims_config::ClaimProfile {
-                    mappings: claims.mappings,
+                    mappings: claims
+                        .mappings
+                        .iter()
+                        .map(ClaimMappingYaml::to_domain)
+                        .collect(),
                     updated_at: None,
                 });
 
@@ -3053,9 +3767,25 @@ impl RealmYamlConfig {
             max_failed_logins,
             lockout_duration_micros,
             passkey_requires_mfa,
-            webauthn_required: None,
-            webauthn_resident_key: None,
-            webauthn_user_verification: None,
+            // §4.18#9: these three were hard-coded `None`, so the documented
+            // per-realm keys had nowhere to land and `webauthn_required` was
+            // dead code. Realm value wins, global `auth:` is the fallback —
+            // the same inheritance every other key in this function uses.
+            webauthn_required: self
+                .auth
+                .as_ref()
+                .and_then(|a| a.webauthn_required)
+                .or(global.webauthn_required),
+            webauthn_resident_key: self
+                .auth
+                .as_ref()
+                .and_then(|a| a.webauthn_resident_key.clone())
+                .or_else(|| global.webauthn_resident_key.clone()),
+            webauthn_user_verification: self
+                .auth
+                .as_ref()
+                .and_then(|a| a.webauthn_user_verification.clone())
+                .or_else(|| global.webauthn_user_verification.clone()),
             webauthn_attestation: webauthn_attestation_policy,
             registration_policy,
             dcr_policy,
@@ -3125,10 +3855,13 @@ impl RealmYamlConfig {
             }),
             // Required actions are managed via the admin API, not via hearth.yaml.
             default_required_actions: Vec::new(),
-            // Breach-check config is managed via the admin API or per-realm YAML.
-            // Default is disabled so existing realms are unaffected.
+            // Audit §4.13#9: breach-check has NO YAML key and NO admin-API surface.
+            // `RealmYamlConfig` has no `breach_check` field, so a config file
+            // declaring one is rejected by `deny_unknown_fields`. It is reachable
+            // only by constructing `RealmConfig` in-process. Always default here.
             breach_check: crate::identity::BreachCheckConfig::default(),
-            // Adaptive MFA defaults to disabled; enable per-realm via admin API or YAML.
+            // Audit §4.13#9: adaptive MFA has NO YAML key and NO admin-API surface —
+            // same as `breach_check` above. Always default here.
             adaptive_mfa: crate::identity::AdaptiveMfaConfig::default(),
             // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
             sms_otp_expiry_seconds: None,
@@ -3142,10 +3875,28 @@ impl RealmYamlConfig {
             idle_timeout_secs: None,
             absolute_timeout_secs: None,
             fapi_profile,
+            // Populated by `main.rs` from the global `security.risk_scorer`
+            // block after this call, alongside `web_theme_css` — the same
+            // post-processing seam, because `to_realm_config` is handed the
+            // `auth:` defaults but not the `security:` ones.
             risk_scorer_config: None,
+            // A-9 (§4.17#9): `realms.<name>.security.cidr_policy`. There was no
+            // field to land in, so the documented block refused to boot and the
+            // `CidrFilter` guard had no per-realm input.
+            cidr_policy: self
+                .security
+                .as_ref()
+                .and_then(|s| s.cidr_policy.as_ref())
+                .map(|p| crate::identity::CidrPolicy {
+                    allow: p.allow.clone(),
+                    deny: p.deny.clone(),
+                })
+                .filter(|p| !p.is_empty()),
             quotas: None,
-            // Pre-token webhook is configured via admin API or per-realm YAML.
-            // Defaults to None (disabled) so existing realms are unaffected.
+            // Audit §4.13#9: the pre-token webhook has NO YAML key and NO admin-API
+            // surface. `RealmYamlConfig` has no `pre_token_webhook` field, so a
+            // config file declaring one is rejected by `deny_unknown_fields`. It is
+            // reachable only by constructing `RealmConfig` in-process. Always None.
             pre_token_webhook: None,
             approval_webhook: None,
             mfa_required_roles: None,
@@ -3223,9 +3974,24 @@ pub struct ClusterConfig {
     /// and the caller is redirected to the leader (default: 500).
     #[serde(default)]
     pub read_lag_threshold_ms: Option<u64>,
+    /// Upper bound, in milliseconds, on how long a single replicated write
+    /// waits for quorum commit before the caller is told the outcome is
+    /// unknown (default: 10000 — see
+    /// [`ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS`]).
+    ///
+    /// A leader that loses contact with a quorum immediately after accepting a
+    /// write waits forever otherwise: the entry is in its own log, the
+    /// acknowledgement can never arrive, and openraft 0.9 does not step a
+    /// leader down on a lost quorum, so no redirect is produced either (task
+    /// 26.58). Raise it on a cluster whose commits are legitimately slow.
+    #[serde(default)]
+    pub write_timeout_ms: Option<u64>,
 }
 
 impl ClusterConfig {
+    /// Default for [`ClusterConfig::write_timeout_ms`], in milliseconds.
+    pub const DEFAULT_WRITE_TIMEOUT_MS: u64 = 10_000;
+
     fn default_peer_address() -> String {
         "127.0.0.1:8421".to_string()
     }
@@ -3242,6 +4008,69 @@ mod tests {
         assert_eq!(cfg.port, 8420);
         assert!(cfg.tls_cert_path.is_none());
         assert!(cfg.tls_key_path.is_none());
+    }
+
+    // ===== WebAuthn realm policies (audit §4.18#9, task 20.14) =====
+
+    /// All three documented WebAuthn realm policies must be settable from the
+    /// realm's own `auth:` block. They were hard-coded to `None` in
+    /// `to_realm_config`, so no YAML value could ever reach `RealmConfig`.
+    #[test]
+    fn to_realm_config_reads_webauthn_policies_from_realm_auth() {
+        let yaml = RealmYamlConfig {
+            auth: Some(RealmAuthYaml {
+                webauthn_required: Some(true),
+                webauthn_resident_key: Some("required".to_string()),
+                webauthn_user_verification: Some("required".to_string()),
+                ..RealmAuthYaml::default()
+            }),
+            ..RealmYamlConfig::default()
+        };
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("to_realm_config");
+        assert_eq!(cfg.webauthn_required, Some(true));
+        assert_eq!(cfg.webauthn_resident_key.as_deref(), Some("required"));
+        assert_eq!(cfg.webauthn_user_verification.as_deref(), Some("required"));
+    }
+
+    /// The admin visual config editor binds these three under the **global**
+    /// `auth:` block, so the global values must be inherited by realms that do
+    /// not override them.
+    #[test]
+    fn to_realm_config_inherits_webauthn_policies_from_global_auth() {
+        let global = AuthConfig {
+            webauthn_required: Some(true),
+            webauthn_resident_key: Some("discouraged".to_string()),
+            webauthn_user_verification: Some("required".to_string()),
+            ..AuthConfig::default()
+        };
+        let cfg = RealmYamlConfig::default()
+            .to_realm_config(&global, None)
+            .expect("to_realm_config");
+        assert_eq!(cfg.webauthn_required, Some(true));
+        assert_eq!(cfg.webauthn_resident_key.as_deref(), Some("discouraged"));
+        assert_eq!(cfg.webauthn_user_verification.as_deref(), Some("required"));
+    }
+
+    /// A per-realm value wins over the global one.
+    #[test]
+    fn to_realm_config_realm_webauthn_policy_overrides_global() {
+        let global = AuthConfig {
+            webauthn_user_verification: Some("discouraged".to_string()),
+            ..AuthConfig::default()
+        };
+        let yaml = RealmYamlConfig {
+            auth: Some(RealmAuthYaml {
+                webauthn_user_verification: Some("required".to_string()),
+                ..RealmAuthYaml::default()
+            }),
+            ..RealmYamlConfig::default()
+        };
+        let cfg = yaml
+            .to_realm_config(&global, None)
+            .expect("to_realm_config");
+        assert_eq!(cfg.webauthn_user_verification.as_deref(), Some("required"));
     }
 
     /// Pins REQ-100: `to_realm_config` mirrors `web.theme` from the
@@ -3320,7 +4149,9 @@ mod tests {
         assert_eq!(cfg.memtable_flush_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.hot_tier_capacity, None);
         assert_eq!(cfg.hot_tier_max_memory, None);
-        assert!(cfg.fsync);
+        assert_eq!(cfg.fsync, None, "absent means 'resolve from the run mode'");
+        assert!(cfg.fsync_enabled(false), "production resolves to fsync on");
+        assert!(!cfg.fsync_enabled(true), "dev resolves to fsync off");
     }
 
     #[test]
@@ -3398,9 +4229,13 @@ mod tests {
             password_memory_cost: Some(65536),
             password_time_cost: Some(3),
             mfa_required: None,
+            mfa_methods: None,
             passkey_requires_mfa: None,
             session_max_concurrent: None,
             session_over_limit_policy: None,
+            webauthn_required: None,
+            webauthn_resident_key: None,
+            webauthn_user_verification: None,
         };
         let realm_cfg = RealmYamlConfig {
             session_ttl: Some("12h".to_string()),
@@ -3558,10 +4393,24 @@ pub struct Config {
     pub demo: DemoConfig,
     /// Whether development mode is active.
     ///
-    /// Set to `true` in YAML only for local development or integration tests.
-    /// Setting `dev_mode: true` on a non-loopback bind is a hard startup error.
-    /// The CLI flag `--dev` is the canonical way to enable dev mode; YAML is
-    /// supported for test harnesses that embed inline config strings.
+    /// The attribute below is `#[serde(default)]`, **not** `#[serde(skip)]`:
+    /// serde will populate this field from a `dev_mode: true` line in any YAML
+    /// document, and nothing about the type makes the key unreachable. Two
+    /// comments in `validate.rs` used to claim the `skip` attribute was the
+    /// guard, which is how a config file arming the entire dev perimeter on a
+    /// release binary went unnoticed — the claimed mechanism did not exist
+    /// (audit §4.7#3, §4.13#10).
+    ///
+    /// What actually guards it is an explicit refusal in
+    /// [`Config::from_yaml_str`], the checked loader behind every non-`--dev`
+    /// boot and every SIGHUP reload: `dev_mode: true` in a config file is a
+    /// hard `ValidationError`. `--dev` reaches dev mode programmatically
+    /// through `Config::dev()` / `Config::from_file_as_dev()`, and the
+    /// *unchecked* loaders still honour the YAML key so test harnesses that
+    /// embed inline config strings keep working.
+    ///
+    /// Independently of that, `dev_mode: true` on a non-loopback bind is a hard
+    /// startup error.
     #[serde(default)]
     pub dev_mode: bool,
     /// Env-var substitution warnings from config loading (missing/empty variables).
@@ -3569,4 +4418,15 @@ pub struct Config {
     /// and [`Config::from_yaml_str`].
     #[serde(skip)]
     pub config_warnings: Vec<super::env::EnvVarWarning>,
+    /// Security keys the operator set that no code consumes, plus secret keys
+    /// that resolved to the empty string (audit §1A item 5, §4.13#4).
+    ///
+    /// Populated at parse time by [`Config::from_yaml_str`] and
+    /// [`Config::from_yaml_str_unchecked`], because the check needs the raw
+    /// post-substitution YAML — the struct itself cannot distinguish a key the
+    /// operator wrote from a compiled-in default. `validate_all` folds these in
+    /// so `serve`, `hearth config validate`, and the admin config editor all
+    /// fail closed on the same set.
+    #[serde(skip)]
+    pub key_liveness_issues: Vec<ValidationIssue>,
 }

@@ -360,6 +360,7 @@ async fn agent_cascade_delete_on_realm_deletion() {
     );
 
     // Delete the realm — cascade must sweep the agent key-space.
+    harness.archive_realm(&realm_id);
     identity.delete_realm(&realm_id).expect("delete realm");
 
     // Storage-layer assertion: no orphaned agent key survives the cascade.
@@ -1016,8 +1017,12 @@ async fn agent_credential_quota_enforced() {
 // HEA-1414: HTTP endpoint authentication (adversarial — server mode)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// All 9 agent HTTP endpoints must return 401 when called without
+/// All 12 agent HTTP endpoints must return 401 when called without
 /// an Authorization header. Regression guard against unauthenticated access.
+///
+/// The three lifecycle routes (`suspend`/`reactivate`/`revoke`) were added by
+/// the 2026-09-21 subsystem audit's finding A-1; they are listed here so the
+/// parity matrix fails if a future route skips `extract_admin_auth`.
 #[tokio::test]
 async fn agent_endpoints_require_auth() {
     #[allow(unused_unsafe)]
@@ -1045,6 +1050,9 @@ async fn agent_endpoints_require_auth() {
     let cred_keys = format!("/v1/agents/{fake_agent_id}/credentials/keys");
     let cred_list = format!("/v1/agents/{fake_agent_id}/credentials");
     let cred_revoke = format!("/v1/agents/{fake_agent_id}/credentials/{fake_cred_id}");
+    let agent_suspend = format!("/v1/agents/{fake_agent_id}/suspend");
+    let agent_reactivate = format!("/v1/agents/{fake_agent_id}/reactivate");
+    let agent_revoke = format!("/v1/agents/{fake_agent_id}/revoke");
 
     let endpoints: Vec<(&str, reqwest::Method, Option<serde_json::Value>)> = vec![
         (
@@ -1074,6 +1082,9 @@ async fn agent_endpoints_require_auth() {
         ),
         (&cred_list, reqwest::Method::GET, None),
         (&cred_revoke, reqwest::Method::DELETE, None),
+        (&agent_suspend, reqwest::Method::POST, None),
+        (&agent_reactivate, reqwest::Method::POST, None),
+        (&agent_revoke, reqwest::Method::POST, None),
     ];
 
     for (path, method, body) in &endpoints {
@@ -1512,5 +1523,390 @@ async fn agent_rest_crud_positive_http() {
         after.status().as_u16(),
         404,
         "GET after DELETE must return 404 Not Found"
+    );
+}
+
+// ── GET /v1/agents: filters and pagination (AGENT_AUTH.md §1.3) ──────────────
+//
+// Subsystem audit 2026-09-21 (task 23.11). §1.3 makes two MUSTs of the list
+// endpoint: "List endpoints MUST support filtering by owner_id, status, and
+// capability" and "Pagination MUST follow the same cursor-based pattern used by
+// existing list endpoints". The handler passed `ListAgentsQuery::default()` and
+// a hard-coded limit of 100 with no `Query` extractor at all, so every filter
+// the engine implements was unreachable and a realm holding more than 100
+// agents could not enumerate past the first page.
+
+/// The REST list endpoint honours `?status=`, `?capability=`, `?owner_id=`,
+/// and cursor pagination via `?limit=` / `?cursor=`.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn agent_rest_list_supports_filters_and_cursor() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
+    let h = common::TestHarness::server_with_agent_auth()
+        .await
+        .expect("server harness");
+    let base = h.base_url().expect("base_url").to_string();
+    let client = reqwest::Client::new();
+
+    let boot: serde_json::Value = client
+        .post(format!("{base}/admin/bootstrap"))
+        .send()
+        .await
+        .expect("bootstrap")
+        .json()
+        .await
+        .expect("bootstrap json");
+    let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
+    let owner_id = boot["user_id"].as_str().expect("user_id").to_string();
+    let token = boot["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let auth = |req: reqwest::RequestBuilder| {
+        req.header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", &realm_id)
+    };
+
+    // Two agents: one with a distinguishing capability.
+    for (name, caps) in [
+        ("List Filter A", vec!["urn:hearth:capability:email:send"]),
+        ("List Filter B", vec!["urn:hearth:capability:files:read"]),
+    ] {
+        let resp = auth(client.post(format!("{base}/v1/agents")))
+            .json(&serde_json::json!({
+                "display_name": name,
+                "owner_type": "user",
+                "owner_id": owner_id,
+                "capabilities": caps,
+                "max_delegation_depth": 1,
+            }))
+            .send()
+            .await
+            .expect("create request");
+        assert_eq!(resp.status().as_u16(), 201, "create {name}");
+    }
+
+    let list_items = |query: String| {
+        let client = client.clone();
+        let base = base.clone();
+        let token = token.clone();
+        let realm_id = realm_id.clone();
+        async move {
+            let resp = client
+                .get(format!("{base}/v1/agents{query}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_id)
+                .send()
+                .await
+                .expect("list request");
+            assert_eq!(resp.status().as_u16(), 200, "GET /v1/agents{query}");
+            resp.json::<serde_json::Value>().await.expect("list json")
+        }
+    };
+
+    // ── capability filter ────────────────────────────────────────────────────
+    let filtered = list_items("?capability=urn:hearth:capability:files:read".to_string()).await;
+    let names: Vec<String> = filtered["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|a| a["display_name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.contains(&"List Filter B".to_string()),
+        "capability filter must keep the matching agent, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"List Filter A".to_string()),
+        "capability filter must drop non-matching agents, got {names:?}"
+    );
+
+    // ── status filter ────────────────────────────────────────────────────────
+    let active = list_items("?status=active".to_string()).await;
+    assert!(
+        !active["items"].as_array().expect("items").is_empty(),
+        "status=active must return the live agents"
+    );
+    let revoked = list_items("?status=revoked".to_string()).await;
+    assert!(
+        revoked["items"].as_array().expect("items").is_empty(),
+        "status=revoked must return nothing when no agent is revoked"
+    );
+
+    // ── owner filter ─────────────────────────────────────────────────────────
+    let other_owner = uuid::Uuid::new_v4();
+    let none = list_items(format!("?owner_type=user&owner_id={other_owner}")).await;
+    assert!(
+        none["items"].as_array().expect("items").is_empty(),
+        "filtering by an owner with no agents must return an empty page"
+    );
+    let mine = list_items(format!("?owner_type=user&owner_id={owner_id}")).await;
+    assert!(
+        mine["items"].as_array().expect("items").len() >= 2,
+        "filtering by the real owner must return that owner's agents"
+    );
+
+    // ── cursor pagination ────────────────────────────────────────────────────
+    let page1 = list_items("?limit=1".to_string()).await;
+    assert_eq!(
+        page1["items"].as_array().expect("items").len(),
+        1,
+        "limit=1 must return exactly one item"
+    );
+    let cursor = page1["next_cursor"]
+        .as_str()
+        .expect("a second page must be reachable via next_cursor")
+        .to_string();
+    let page2 = list_items(format!("?limit=1&cursor={cursor}")).await;
+    let first_id = page1["items"][0]["id"].as_str().unwrap_or_default();
+    let second_id = page2["items"][0]["id"].as_str().unwrap_or_default();
+    assert_ne!(
+        first_id, second_id,
+        "the cursor must advance past the first page"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /v1/agents/{id}/{suspend,reactivate,revoke}
+// (AGENT_AUTH.md §1.2 state machine · subsystem audit 2026-09-21 finding A-1)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// §1.2 makes the transitions normative — "Active → Suspended → Active
+// (reversible) and Active|Suspended → Revoked (terminal)" — and twelve separate
+// enforcement points in the engine refuse a non-`Active` agent. Until these
+// routes existed nothing outside the abuse monitor's auto-suspension could
+// enter either state: no REST route, no gRPC method, no console page. An
+// operator whose agent key leaked could revoke one credential or delete the
+// agent outright, and nothing in between.
+
+/// Boots a server harness with the agent routes registered, bootstraps the dev
+/// realm, and creates one agent over HTTP.
+///
+/// Returns `(harness, base_url, realm_id, admin_token, agent_id)`.
+async fn agent_lifecycle_fixture() -> (common::TestHarness, String, String, String, String) {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
+    let h = common::TestHarness::server_with_agent_auth()
+        .await
+        .expect("server harness");
+    let base = h.base_url().expect("base_url").to_string();
+    let client = reqwest::Client::new();
+
+    let boot: serde_json::Value = client
+        .post(format!("{base}/admin/bootstrap"))
+        .send()
+        .await
+        .expect("bootstrap")
+        .json()
+        .await
+        .expect("bootstrap json");
+    let realm_id = boot["realm_id"].as_str().expect("realm_id").to_string();
+    let owner_id = boot["user_id"].as_str().expect("user_id").to_string();
+    let token = boot["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let created: serde_json::Value = client
+        .post(format!("{base}/v1/agents"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-Realm-ID", &realm_id)
+        .json(&serde_json::json!({
+            "display_name": "Lifecycle Agent",
+            "owner_type": "user",
+            "owner_id": owner_id,
+            "capabilities": [],
+            "max_delegation_depth": 2,
+        }))
+        .send()
+        .await
+        .expect("create agent")
+        .json()
+        .await
+        .expect("create json");
+    let agent_id = created["id"].as_str().expect("agent id").to_string();
+
+    (h, base, realm_id, token, agent_id)
+}
+
+/// `POST` helper for the three lifecycle routes: returns `(status, body)`.
+async fn lifecycle_post(
+    base: &str,
+    realm_id: &str,
+    token: &str,
+    agent_id: &str,
+    action: &str,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/agents/{agent_id}/{action}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-Realm-ID", realm_id)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST /v1/agents/{agent_id}/{action} failed: {e}"));
+    let status = resp.status().as_u16();
+    let body = resp.json::<serde_json::Value>().await.unwrap_or_default();
+    (status, body)
+}
+
+/// Suspend → reactivate is a reversible round trip over HTTP, and `GET` agrees
+/// with the transition response at every step.
+#[tokio::test]
+async fn agent_suspend_reactivate_round_trip_http() {
+    let (h, base, realm_id, token, agent_id) = agent_lifecycle_fixture().await;
+    let client = reqwest::Client::new();
+    let get_status = |aid: String| {
+        let (client, base, realm_id, token) = (
+            client.clone(),
+            base.clone(),
+            realm_id.clone(),
+            token.clone(),
+        );
+        async move {
+            let body: serde_json::Value = client
+                .get(format!("{base}/v1/agents/{aid}"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_id)
+                .send()
+                .await
+                .expect("get agent")
+                .json()
+                .await
+                .expect("get json");
+            body["status"].as_str().unwrap_or_default().to_string()
+        }
+    };
+
+    let (status, body) = lifecycle_post(&base, &realm_id, &token, &agent_id, "suspend").await;
+    assert_eq!(status, 200, "POST suspend must return 200, body {body}");
+    assert_eq!(
+        body["status"], "suspended",
+        "suspend must report the new state"
+    );
+    assert_eq!(get_status(agent_id.clone()).await, "suspended");
+
+    let (status, body) = lifecycle_post(&base, &realm_id, &token, &agent_id, "reactivate").await;
+    assert_eq!(status, 200, "POST reactivate must return 200, body {body}");
+    assert_eq!(
+        body["status"], "active",
+        "reactivate must report the new state"
+    );
+    assert_eq!(get_status(agent_id.clone()).await, "active");
+
+    drop(h);
+}
+
+/// A revoke over HTTP flips the persisted status AND kills a token the agent
+/// already holds: an AAT issued while the agent was `Active` stops validating.
+/// Revocation is terminal — reactivate afterwards is refused.
+#[tokio::test]
+async fn agent_revoke_http_kills_a_live_aat() {
+    let (h, base, realm_id, token, agent_id) = agent_lifecycle_fixture().await;
+    let realm = RealmId::new(realm_id.parse::<uuid::Uuid>().expect("realm uuid"));
+    let aid = agent_id.parse::<AgentId>().expect("agent id");
+
+    let aat = h
+        .identity()
+        .issue_aat(
+            &realm,
+            &hearth::identity::IssueAatRequest {
+                agent_id: aid,
+                tools: vec![hearth::identity::AatToolPermission {
+                    tool: "send_email".to_string(),
+                    actions: vec!["invoke".to_string()],
+                    constraints: serde_json::Value::Null,
+                }],
+                scope: vec!["email:send".to_string()],
+                aud: None,
+                expires_in_secs: Some(3600),
+            },
+        )
+        .expect("issue AAT while the agent is active");
+
+    h.identity()
+        .validate_aat(&realm, &aat.aat, None)
+        .expect("a freshly issued AAT must validate before revocation");
+
+    let (status, body) = lifecycle_post(&base, &realm_id, &token, &agent_id, "revoke").await;
+    assert_eq!(status, 200, "POST revoke must return 200, body {body}");
+    assert_eq!(
+        body["status"], "revoked",
+        "revoke must report the new state"
+    );
+
+    match h.identity().validate_aat(&realm, &aat.aat, None) {
+        Err(IdentityError::AgentRevoked) => {}
+        Err(e) => panic!("expected AgentRevoked after HTTP revoke, got {e:?}"),
+        Ok(_) => panic!("an AAT held by a revoked agent must stop validating"),
+    }
+
+    let (status, _) = lifecycle_post(&base, &realm_id, &token, &agent_id, "reactivate").await;
+    assert_eq!(
+        status, 403,
+        "revocation is terminal — reactivate must be refused"
+    );
+}
+
+/// The lifecycle routes are realm-scoped: an admin token for realm A must not
+/// be able to name an agent that lives in realm B.
+#[tokio::test]
+async fn agent_lifecycle_routes_reject_another_realms_agent() {
+    let (h, base, realm_id, token, own_agent_id) = agent_lifecycle_fixture().await;
+
+    // Positive control: the same call against the caller's OWN agent succeeds.
+    // Without it a 404 from "the route does not exist" would be indistinguishable
+    // from a 404 from "that agent is not in your realm".
+    let (status, _) = lifecycle_post(&base, &realm_id, &token, &own_agent_id, "suspend").await;
+    assert_eq!(
+        status, 200,
+        "control: suspending the caller's own agent must succeed"
+    );
+
+    let realm_b = make_realm(h.identity());
+    let owner_b = make_user(h.identity(), &realm_b);
+    let agent_b = h
+        .identity()
+        .create_agent(
+            &realm_b,
+            &CreateAgentRequest {
+                display_name: "Other Realm Agent".to_string(),
+                description: None,
+                owner: AgentOwner::User(owner_b),
+                capabilities: vec![],
+                max_delegation_depth: 1,
+            },
+            None,
+        )
+        .expect("create realm B agent");
+    let agent_b_id = agent_b.id().to_string();
+
+    for action in ["suspend", "reactivate", "revoke"] {
+        let (status, _) = lifecycle_post(&base, &realm_id, &token, &agent_b_id, action).await;
+        assert_eq!(
+            status, 404,
+            "{action} on another realm's agent must be 404, not a cross-realm mutation"
+        );
+    }
+
+    assert_eq!(
+        h.identity()
+            .get_agent(&realm_b, agent_b.id())
+            .expect("get realm B agent")
+            .expect("realm B agent still present")
+            .status(),
+        AgentStatus::Active,
+        "the realm B agent must be untouched"
     );
 }

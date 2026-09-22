@@ -145,6 +145,10 @@ enum AuditAction {
   // MFA lifecycle
   AUDIT_ACTION_MFA_ENABLED = 117;
   AUDIT_ACTION_MFA_DISABLED = 118;
+  // Organization invitation lifecycle
+  AUDIT_ACTION_INVITATION_CREATED = 119;
+  AUDIT_ACTION_INVITATION_ACCEPTED = 120;
+  AUDIT_ACTION_INVITATION_REVOKED = 121;
 }
 
 // A recorded audit event in the append-only log.

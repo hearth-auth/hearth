@@ -2,11 +2,15 @@ package io.hearth.sdk
 
 import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
+import com.nimbusds.jose.crypto.ECDSASigner
 import com.nimbusds.jose.crypto.Ed25519Signer
+import com.nimbusds.jose.crypto.RSASSASigner
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.JWKSet
 import com.nimbusds.jose.jwk.OctetKeyPair
+import com.nimbusds.jose.jwk.gen.ECKeyGenerator
 import com.nimbusds.jose.jwk.gen.OctetKeyPairGenerator
+import com.nimbusds.jose.jwk.gen.RSAKeyGenerator
 import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.SignedJWT
 import kotlinx.coroutines.test.runTest
@@ -149,9 +153,14 @@ class TokenVerifierTest {
 
         val token = mintJwt()
         val parts = token.split(".")
-        // Corrupt the last character of the signature segment.
+        // Corrupt a character in the MIDDLE of the signature segment. The last
+        // base64url character of a 64-byte Ed25519 signature carries only four
+        // significant bits, so substituting it decodes to the same bytes often
+        // enough that a last-character tamper is a coin flip, not a test.
         val sig = parts[2]
-        val corruptedSig = sig.dropLast(1) + if (sig.last() == 'A') 'B' else 'A'
+        val i = sig.length / 2
+        val corruptedSig = sig.substring(0, i) + (if (sig[i] == 'A') 'B' else 'A') + sig.substring(i + 1)
+        check(corruptedSig != sig) { "tamper produced an identical signature segment" }
         val tampered = "${parts[0]}.${parts[1]}.$corruptedSig"
 
         assertFailsWith<TokenInvalidError> { verifier().verify(tampered) }
@@ -238,5 +247,62 @@ class TokenVerifierTest {
         server.enqueue(MockResponse().setResponseCode(503).setBody("Service Unavailable"))
 
         assertFailsWith<JWKSFetchError> { verifier().verify(mintJwt()) }
+    }
+
+    // ── 18.3 — there is no federation exception (SDK.md §2, audit 2026-08-28 §4.2#6) ──
+
+    /**
+     * Enqueues [body] twice: `verify` re-fetches the JWKS once on a `TokenInvalidError`,
+     * so a rejection must survive the retry as well as the first attempt.
+     */
+    private fun enqueueJwksTwice(body: String) {
+        server.enqueue(MockResponse().setBody(body).setResponseCode(200))
+        server.enqueue(MockResponse().setBody(body).setResponseCode(200))
+    }
+
+    /** Claims shaped so that only the algorithm can be the reason for a rejection. */
+    private fun otherwiseValidClaims(): JWTClaimsSet {
+        val now = System.currentTimeMillis()
+        return JWTClaimsSet.Builder()
+            .subject("attacker")
+            .issuer(issuer())
+            .issueTime(Date(now))
+            .expirationTime(Date(now + 300_000L))
+            .build()
+    }
+
+    /**
+     * Hearth signs exclusively with Ed25519. `docs/specs/SDK.md` §2 is normative: an SDK
+     * **must reject** any `alg` other than `EdDSA`. The RS256 branch this verifier used to
+     * carry accepted a token signed by any RSA key that reached the JWKS — a strictly larger
+     * set of keys an attacker can steer the verifier onto, for a relay Hearth never performs.
+     */
+    @Test
+    fun `verify - rejects an RS256 token even when its key is published in the JWKS`() = runTest {
+        val rsaKey = RSAKeyGenerator(2048).keyID("hearth-rsa-1").generate()
+        enqueueJwksTwice("""{"keys":[${keyPair.toPublicJWK()},${rsaKey.toPublicJWK()}]}""")
+
+        val jwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.RS256).keyID("hearth-rsa-1").build(),
+            otherwiseValidClaims(),
+        )
+        jwt.sign(RSASSASigner(rsaKey))
+
+        assertFailsWith<TokenInvalidError> { verifier().verify(jwt.serialize()) }
+    }
+
+    /** The ES256 half of the same claim — see the RS256 test above. */
+    @Test
+    fun `verify - rejects an ES256 token even when its key is published in the JWKS`() = runTest {
+        val ecKey = ECKeyGenerator(Curve.P_256).keyID("hearth-ec-1").generate()
+        enqueueJwksTwice("""{"keys":[${keyPair.toPublicJWK()},${ecKey.toPublicJWK()}]}""")
+
+        val jwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("hearth-ec-1").build(),
+            otherwiseValidClaims(),
+        )
+        jwt.sign(ECDSASigner(ecKey))
+
+        assertFailsWith<TokenInvalidError> { verifier().verify(jwt.serialize()) }
     }
 }

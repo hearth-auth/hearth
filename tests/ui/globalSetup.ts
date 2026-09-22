@@ -40,9 +40,19 @@ export default async function globalSetup(): Promise<void> {
 
   // Ensure the seed app has consent + device_code grant regardless of how it
   // was originally created (seed is cached — creation grant_types may be stale).
+  //
+  // Audit 2026-08-28 §4.12#19: this call used `method: 'PUT'`. The route is
+  // registered as PATCH (src/protocol/http/admin.rs), so every run got 405 and
+  // neither `require_consent` nor the device_code grant was ever applied — the
+  // two things flows/oauth_consent.spec.ts and flows/device_auth.spec.ts need
+  // from it. The response was not checked, so the setup reported success and
+  // the run exited 0 with those flows exercising an app that lacked both.
+  //
+  // The status is now asserted: a setup step that cannot do its job must stop
+  // the run, not hand the suite a fixture it silently failed to build.
   console.log('[globalSetup] patching test-app require_consent + grant_types...');
-  await fetch(`${BASE_URL}/admin/applications/${seed.appClientId}`, {
-    method: 'PUT',
+  const patch = await fetch(`${BASE_URL}/admin/applications/${seed.appClientId}`, {
+    method: 'PATCH',
     headers: {
       Authorization: `Bearer ${creds.access_token}`,
       'X-Realm-ID': creds.realm_id,
@@ -56,6 +66,12 @@ export default async function globalSetup(): Promise<void> {
       ],
     }),
   });
+  if (!patch.ok) {
+    throw new Error(
+      `[globalSetup] PATCH /admin/applications/${seed.appClientId} failed: ` +
+        `${patch.status} ${patch.statusText} — ${await patch.text()}`,
+    );
+  }
 
   console.log('[globalSetup] done.');
 }

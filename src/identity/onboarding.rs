@@ -10,7 +10,9 @@
 //! 1. At startup, if the setup-token file exists (or no realms exist
 //!    and setup hasn't been completed), generate 32 random bytes
 //!    (base64url) and write them to `<data_dir>/.setup_token` with
-//!    `0600` perms. Log the full setup URL at WARN level.
+//!    `0600` perms. Log the setup URL at WARN level — with the token in
+//!    dev mode, without it in production, where the operator reads the
+//!    token from the file.
 //! 2. `/ui/setup` requires the token. Mismatch returns 404 (no leaks).
 //! 3. `complete_setup` finds the first realm (created by YAML
 //!    reconciliation or auto-created "default"), creates the admin user
@@ -39,6 +41,10 @@ use crate::rbac::{AssignRoleRequest, RbacEngine, Scope, Subject};
 
 /// Filename used for the one-time setup token inside `data_dir`.
 pub const SETUP_TOKEN_FILENAME: &str = ".setup_token";
+
+/// Filename used for the first admin's email-verification URL inside
+/// `data_dir`, written with `0600` when not in dev mode (task 26.25).
+pub const VERIFICATION_URL_FILENAME: &str = ".verification_url";
 
 /// Errors from the onboarding flow.
 ///
@@ -146,6 +152,10 @@ pub fn is_first_run(engine: &dyn IdentityEngine) -> Result<bool, IdentityError> 
 /// additionally sends the setup URL to that address. Email failure is
 /// non-fatal — the WARN log is always emitted regardless.
 ///
+/// `dev_mode` controls the log line only: the token itself is written to
+/// the log in dev mode alone. In production the log names the setup URL
+/// and the token file, never the token (HEA-2150 B8).
+///
 /// # Errors
 ///
 /// Returns [`OnboardingError::Io`] on filesystem failure or
@@ -156,6 +166,7 @@ pub fn ensure_setup_token(
     base_url: Option<&str>,
     email_service: Option<&EmailService>,
     notification_email: Option<&str>,
+    dev_mode: bool,
 ) -> Result<Option<String>, OnboardingError> {
     let path = setup_token_path(data_dir);
 
@@ -164,7 +175,13 @@ pub fn ensure_setup_token(
     //    survives realm reconciliation creating realms).
     if path.exists() {
         let token = read_setup_token_file(&path)?;
-        log_and_notify_setup_url(&token, base_url, email_service, notification_email);
+        log_and_notify_setup_url(
+            &token,
+            base_url,
+            email_service,
+            notification_email,
+            dev_mode,
+        );
         return Ok(Some(token));
     }
 
@@ -172,7 +189,13 @@ pub fn ensure_setup_token(
     if is_first_run(engine)? {
         let token = generate_setup_token()?;
         write_setup_token_file(&path, &token)?;
-        log_and_notify_setup_url(&token, base_url, email_service, notification_email);
+        log_and_notify_setup_url(
+            &token,
+            base_url,
+            email_service,
+            notification_email,
+            dev_mode,
+        );
         return Ok(Some(token));
     }
 
@@ -182,20 +205,35 @@ pub fn ensure_setup_token(
 
 /// Logs the setup URL at WARN level and optionally sends a notification
 /// email. Email failure is non-fatal.
+///
+/// The setup token is the highest-privilege bootstrap credential in the
+/// system: it creates the first admin. In production it therefore never
+/// reaches the log — the logged URL carries no `token` query parameter and
+/// the operator reads the token from the `0600` file instead. Only
+/// `dev_mode` logs the clickable full URL.
 fn log_and_notify_setup_url(
     token: &str,
     base_url: Option<&str>,
     email_service: Option<&EmailService>,
     notification_email: Option<&str>,
+    dev_mode: bool,
 ) {
-    let url = match base_url {
-        Some(base) => format!("{}/ui/setup?token={}", base.trim_end_matches('/'), token),
-        None => format!("http://127.0.0.1:8420/ui/setup?token={token}"),
-    };
-    tracing::warn!(
-        setup_url = %url,
-        "first-run setup required: open this URL to create the initial admin account"
-    );
+    let base = base_url.map_or("http://127.0.0.1:8420", |b| b.trim_end_matches('/'));
+    let url = format!("{base}/ui/setup?token={token}");
+
+    if dev_mode {
+        tracing::warn!(
+            setup_url = %url,
+            "first-run setup required: open this URL to create the initial admin account"
+        );
+    } else {
+        tracing::warn!(
+            setup_url = %format!("{base}/ui/setup"),
+            token_file = SETUP_TOKEN_FILENAME,
+            "first-run setup required: open this URL and supply the token from the token file \
+             in the data directory"
+        );
+    }
 
     if let (Some(service), Some(to)) = (email_service, notification_email) {
         if let Err(e) = service.send_setup_notification(to, &url) {
@@ -205,6 +243,47 @@ fn log_and_notify_setup_url(
             );
         }
     }
+}
+
+/// Returns the verification URL that is safe to write to the log, persisting
+/// the full one to a `0600` file when not in dev mode.
+///
+/// # Task 26.25
+///
+/// The full URL — token and all — was logged at `warn` unconditionally, so
+/// anyone with log read access could finish the first operator account. Task
+/// 2.8 removed the *setup* token from production logs for exactly this reason;
+/// the verification token that completes the same account was still printed.
+///
+/// The log line exists so an operator can recover when email delivery fails,
+/// and that is worth keeping — so production does not simply drop it. The full
+/// URL goes to `<data_dir>/.verification_url` at `0600`, the same mechanism the
+/// setup token already uses, and the log names the file.
+///
+/// A write failure is not fatal: the URL is still returned to the caller, and
+/// the operator can reissue verification from the admin console.
+fn persist_and_redact_verification_url(
+    data_dir: &Path,
+    verification_url: &str,
+    dev_mode: bool,
+) -> String {
+    if dev_mode {
+        return verification_url.to_string();
+    }
+    let path = data_dir.join(VERIFICATION_URL_FILENAME);
+    if let Err(e) = write_file_mode_0600(&path, verification_url.as_bytes()) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "could not write the verification URL file; reissue verification from the \
+             admin console if email delivery failed"
+        );
+    }
+    // Everything up to the query string: the token lives in `?token=`.
+    verification_url.split_once('?').map_or_else(
+        || verification_url.to_string(),
+        |(base, _)| base.to_string(),
+    )
 }
 
 /// Compares a caller-supplied token against the on-disk token in constant time.
@@ -343,6 +422,9 @@ pub struct OnboardingService {
     rbac: Arc<dyn RbacEngine>,
     email: Arc<EmailService>,
     data_dir: PathBuf,
+    /// When false (the default), the first admin's email-verification token is
+    /// written to a `0600` file instead of the log (task 26.25).
+    dev_mode: bool,
 }
 
 impl OnboardingService {
@@ -359,7 +441,18 @@ impl OnboardingService {
             rbac,
             email,
             data_dir,
+            dev_mode: false,
         }
+    }
+
+    /// Marks this service as running in dev mode.
+    ///
+    /// The default is production, so a caller that forgets gets the safe
+    /// behaviour: the verification token goes to a `0600` file, not the log.
+    #[must_use]
+    pub fn with_dev_mode(mut self, dev_mode: bool) -> Self {
+        self.dev_mode = dev_mode;
+        self
     }
 
     /// Returns `true` iff no realm exists yet.
@@ -492,12 +585,23 @@ impl OnboardingService {
             token
         );
 
-        // 7. Log the link unconditionally so the operator can always recover
-        //    it, even if email delivery fails or the log transport is in use.
-        tracing::warn!(
-            verification_url = %verification_url,
-            "onboarding: verification link (check logs if email delivery fails)"
-        );
+        // 7. Make the link recoverable even if email delivery fails — but
+        //    keep the token out of the production log (task 26.25).
+        let logged_url =
+            persist_and_redact_verification_url(&self.data_dir, &verification_url, self.dev_mode);
+        if self.dev_mode {
+            tracing::warn!(
+                verification_url = %logged_url,
+                "onboarding: verification link (check logs if email delivery fails)"
+            );
+        } else {
+            tracing::warn!(
+                verification_url = %logged_url,
+                url_file = VERIFICATION_URL_FILENAME,
+                "onboarding: verification link written to the URL file in the data directory \
+                 (the token is not logged)"
+            );
+        }
 
         // 8. Retire the setup token. All critical state (user, password,
         //    RBAC role assignment, verification token) is persisted and the
@@ -660,5 +764,162 @@ mod tests {
         }
         .into();
         assert!(matches!(err, OnboardingError::Email(_)));
+    }
+
+    /// Collects every formatted `tracing` event into a shared buffer so a
+    /// test can assert on what an operator's log would contain.
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CaptureWriter {
+        fn contents(&self) -> String {
+            let bytes = self.0.lock().expect("capture mutex").clone();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture mutex").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CaptureWriter {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `f` with every event at TRACE and above captured.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        writer.contents()
+    }
+
+    /// B8: the setup token is the highest-privilege bootstrap credential.
+    /// In production it must not reach the operator log at any level — the
+    /// operator reads it from the `0600` file instead.
+    #[test]
+    fn production_setup_log_does_not_contain_the_token() {
+        let token = "T0kEn-cAnAry-DoNoTlOg-0123456789abcdef";
+        let out = capture_logs(|| {
+            log_and_notify_setup_url(token, Some("https://id.example.com"), None, None, false);
+        });
+
+        assert!(
+            !out.contains(token),
+            "production log leaks the setup token: {out}"
+        );
+        assert!(
+            out.contains("/ui/setup"),
+            "production log must still name the setup URL: {out}"
+        );
+        assert!(
+            out.contains(SETUP_TOKEN_FILENAME),
+            "production log must name the token file to read: {out}"
+        );
+    }
+
+    /// The dev-mode banner is unchanged: `make dev` keeps printing a URL an
+    /// operator can click.
+    #[test]
+    fn dev_setup_log_contains_the_token() {
+        let token = "dEvT0kEn-0123456789abcdef";
+        let out = capture_logs(|| {
+            log_and_notify_setup_url(token, Some("http://127.0.0.1:8420"), None, None, true);
+        });
+
+        assert!(out.contains(token), "dev log must carry the token: {out}");
+    }
+}
+
+#[cfg(test)]
+mod verification_url_redaction_tests {
+    use super::*;
+
+    const URL: &str = "https://auth.example.com/ui/admin/verify-email?token=oEhA5FTVICziutYT3oBZ";
+    const TOKEN: &str = "oEhA5FTVICziutYT3oBZ";
+
+    /// Task 26.25 — production must not write the verification token to the log.
+    ///
+    /// The full URL was logged at `warn` unconditionally, so anyone with log
+    /// read access could finish the first operator account. Task 2.8 removed
+    /// the *setup* token from production logs for exactly this reason; the
+    /// verification token that completes the same account was still printed.
+    #[test]
+    fn production_keeps_the_token_out_of_the_logged_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let logged = persist_and_redact_verification_url(dir.path(), URL, false);
+
+        assert!(
+            !logged.contains(TOKEN),
+            "the logged URL must not carry the token; got: {logged}"
+        );
+        assert!(
+            logged.ends_with("/ui/admin/verify-email"),
+            "the logged URL must still name the page the operator needs; got: {logged}"
+        );
+    }
+
+    /// The recovery path the log line existed for must survive the redaction.
+    ///
+    /// The original comment said the link is logged "so the operator can always
+    /// recover it, even if email delivery fails". Dropping the token from the
+    /// log without putting it anywhere would remove that, so the full URL goes
+    /// to a `0600` file instead — the same mechanism the setup token uses.
+    #[test]
+    fn production_writes_the_full_url_to_a_protected_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        persist_and_redact_verification_url(dir.path(), URL, false);
+
+        let path = dir.path().join(VERIFICATION_URL_FILENAME);
+        let written = std::fs::read_to_string(&path).expect("the URL file must be written");
+        assert_eq!(written, URL, "the file must carry the complete URL");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the URL file carries a live credential and must be owner-only; got {mode:o}"
+            );
+        }
+    }
+
+    /// Control — dev mode still logs the clickable link and writes no file.
+    ///
+    /// Without this, a change that redacted unconditionally would pass both
+    /// tests above while making the local first-run worse for no gain.
+    #[test]
+    fn dev_mode_still_logs_the_clickable_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let logged = persist_and_redact_verification_url(dir.path(), URL, true);
+
+        assert_eq!(logged, URL, "dev mode must keep the clickable URL");
+        assert!(
+            !dir.path().join(VERIFICATION_URL_FILENAME).exists(),
+            "dev mode must not leave a credential file behind"
+        );
     }
 }

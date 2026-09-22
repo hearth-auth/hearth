@@ -656,3 +656,150 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
         other => panic!("expected TokenTooLarge, got {other:?}"),
     }
 }
+
+// ===== Refresh re-resolves claims (audit 2026-08-28 §4.16#4) =====
+
+/// A refresh must re-resolve the subject's current claims, not copy the
+/// presented token's RBAC claims verbatim.
+///
+/// The rotation path cloned `roles`/`groups`/`permissions` straight from the
+/// presented refresh token into the new pair, so a role revoked after
+/// issuance was re-minted on every refresh, indefinitely — there was no
+/// staleness window, there was a loop (production-readiness audit 2026-08-28
+/// §4.16#4).
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // full grant → revoke → refresh flow reads better unsplit
+async fn refresh_re_resolves_claims_instead_of_copying() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+
+    let user = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: format!("u-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "T".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let role = h
+        .rbac()
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: "docs.editor".into(),
+                description: None,
+                permissions: perms(&["docs.view", "docs.edit"]),
+                parent_roles: vec![],
+                ..Default::default()
+            },
+        )
+        .expect("role");
+    let assignment = h
+        .rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign");
+
+    // First-party client so the default claim profile embeds RBAC claims.
+    let client = h
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "refresh-claims-client".into(),
+                redirect_uris: vec!["http://localhost/callback".into()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".into()],
+                require_consent: false,
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let auth_resp = h
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "http://localhost/callback".into(),
+                scope: "openid profile".into(),
+                state: "csrf".into(),
+                response_type: "code".into(),
+                user_id: user.id().clone(),
+                code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize");
+    let pair = h
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth_resp.code().to_string(),
+                redirect_uri: "http://localhost/callback".into(),
+                code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange");
+
+    // Sanity: the freshly-issued access token carries the role.
+    let before = h
+        .identity()
+        .validate_token(&realm, pair.access_token())
+        .expect("validate pre-revocation");
+    assert!(
+        before.roles.contains(&"docs.editor".to_string()),
+        "setup failure: the issued access token must carry the assigned role"
+    );
+
+    // Revoke the role, then refresh.
+    h.rbac()
+        .unassign_role(&realm, &assignment.id)
+        .expect("unassign");
+    let refreshed = h
+        .identity()
+        .refresh_tokens(&realm, pair.refresh_token(), None, None)
+        .expect("refresh");
+
+    let after = h
+        .identity()
+        .validate_token(&realm, refreshed.access_token())
+        .expect("validate post-refresh");
+    assert!(
+        !after.roles.contains(&"docs.editor".to_string()),
+        "a refreshed access token must not re-mint a revoked role; got roles: {:?}",
+        after.roles
+    );
+    assert!(
+        !after.permissions.contains(&"docs.view".to_string())
+            && !after.permissions.contains(&"docs.edit".to_string()),
+        "a refreshed access token must not re-mint a revoked role's permissions; got: {:?}",
+        after.permissions
+    );
+}

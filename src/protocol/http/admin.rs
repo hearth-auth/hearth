@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -29,9 +29,11 @@ use crate::webhook::{
 };
 use tracing::error;
 
+#[cfg(feature = "dev-endpoints")]
+use super::extract_realm_id;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
-    extract_realm_id, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
+    identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
     require_admin_permission, require_any_admin_permission, verify_manifest_signature, AdminAuth,
     AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
@@ -152,6 +154,14 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/realms/{realm_id}/config", patch(admin_patch_realm_config))
         .route(
+            "/realms/{realm_id}/cross-realm-policies",
+            get(admin_list_cross_realm_policies).post(admin_create_cross_realm_policy),
+        )
+        .route(
+            "/realms/{realm_id}/cross-realm-policies/{policy_id}",
+            delete(admin_delete_cross_realm_policy),
+        )
+        .route(
             "/sessions/{session_id}/sv-bump",
             post(admin_sv_bump_session),
         )
@@ -228,24 +238,287 @@ fn require_realm(state: &AppState, realm_id: &RealmId) -> Result<crate::identity
     }
 }
 
+/// Confirms that `user_id` names a user in `realm_id`.
+///
+/// A sub-resource listing (`/consents`, `/roles`, `/sessions`) scopes its own
+/// query to the caller's realm, so it never serves another realm's rows — but
+/// without this precheck it answers `200 {"items": []}` for a user that does
+/// not exist there, which is indistinguishable from a user that exists and has
+/// no rows. Handlers that read a sub-resource of a user **must** call this
+/// first so the absent parent is reported as `404` (audit 2026-08-28 §4.1#10).
+fn require_user_in_realm(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> Result<(), Response> {
+    match state.identity.get_user(realm_id, user_id) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "user not found"})),
+        )
+            .into_response()),
+        Err(e) => Err(identity_error_to_response(&e).into_response()),
+    }
+}
+
+/// Confirms that `group_id` names a group in `realm_id`.
+///
+/// The group twin of [`require_user_in_realm`]; same `§4.1#10` rationale.
+fn require_group_in_realm(
+    state: &AppState,
+    realm_id: &RealmId,
+    group_id: &GroupId,
+) -> Result<(), Response> {
+    match state.rbac.get_group(realm_id, group_id) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "group not found"})),
+        )
+            .into_response()),
+        Err(e) => Err(rbac_error_to_response(&e).into_response()),
+    }
+}
+
+/// Refuses a write aimed at the reserved system realm.
+///
+/// The README states the system realm is read-only through public APIs, and
+/// `create_realm`, `register_user`, `register_client` and `create_organization`
+/// enforce that in the identity engine. RBAC role and group writes carried no
+/// such gate, so a `system_access_token` mutated the operators' own realm
+/// through `/admin/*` (audit 2026-08-28 §4.1#7).
+///
+/// The gate sits here rather than in the RBAC engine on purpose: the operator
+/// console at `/ui/admin/admin-users` legitimately creates system-realm role
+/// assignments, and it calls the engine directly rather than through this API.
+fn reject_system_realm_write(auth: &AdminAuth) -> Result<(), Response> {
+    if crate::identity::keys::is_system_realm(&auth.realm_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "system_realm_protected",
+                "message": "the reserved system realm is read-only through this API"
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Capability a cross-realm `/admin/realms/{id}/*` operation must be granted by
+/// a stored [`crate::identity::CrossRealmTrustPolicy`] before it is permitted.
+///
+/// A policy may also carry `*`, which grants every capability.
+const CROSS_REALM_ADMIN_CAPABILITY: &str = "hearth.admin";
+
 /// Enforces realm-level object authorization (BOLA guard).
 ///
 /// Returns `path_realm_id` when access is permitted:
-/// - The **system realm** (nil UUID) is a superuser that may operate on any realm.
-/// - Otherwise `auth.realm_id` must equal `path_realm_id` exactly.
+/// - `auth.realm_id == path_realm_id` — no boundary is crossed, always allowed.
+/// - The **system realm** (nil UUID) is a superuser that may operate on any
+///   realm, *subject to the target realm's cross-realm trust policies* (see
+///   [`cross_realm_crossing_permitted`]).
+/// - Otherwise `403 Forbidden`.
 ///
-/// Returns `403 Forbidden` in all other cases. Every handler that exposes a
-/// `{realm_id}` path parameter **must** obtain the realm through this function
-/// rather than using `path_realm_id` directly.
-fn scoped_realm(auth: &AdminAuth, path_realm_id: RealmId) -> Result<RealmId, Response> {
-    if auth.realm_id.as_uuid().is_nil() || auth.realm_id == path_realm_id {
+/// Every handler that exposes a `{realm_id}` path parameter **must** obtain the
+/// realm through this function rather than using `path_realm_id` directly.
+fn scoped_realm(
+    state: &AppState,
+    auth: &AdminAuth,
+    path_realm_id: RealmId,
+) -> Result<RealmId, Response> {
+    if auth.realm_id == path_realm_id {
+        return Ok(path_realm_id);
+    }
+    if !auth.realm_id.as_uuid().is_nil() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response());
+    }
+
+    // A genuine realm crossing. Audit 2026-08-28 §4.1#8: consult the target
+    // realm's stored cross-realm trust policies instead of waving the system
+    // realm through unconditionally.
+    if cross_realm_crossing_permitted(state, &auth.realm_id, &path_realm_id)? {
         Ok(path_realm_id)
     } else {
         Err((
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "forbidden"})),
+            Json(serde_json::json!({
+                "error": "cross_realm_capability_not_allowed",
+                "message": "the target realm's cross-realm trust policy does not \
+                            grant this capability"
+            })),
         )
             .into_response())
+    }
+}
+
+/// Decides whether `source` may reach into `target` for an admin operation.
+///
+/// Three-way outcome, collapsed onto a `bool`:
+/// 1. **Permitted** — a live policy in `target` names `source` and grants
+///    [`CROSS_REALM_ADMIN_CAPABILITY`] (or `*`). Returns `true`.
+/// 2. **Denied** — a live policy in `target` names `source` but withholds that
+///    capability. Returns `false`; the crossing is refused.
+/// 3. **Ungoverned** — no live policy in `target` names `source` at all. The
+///    default is *permissive-with-audit*: the crossing is allowed and a
+///    `WARN`-level record is emitted. Fail-closed here would brick the system
+///    realm's management plane on every deployment that has never authored a
+///    policy, which is every deployment today.
+///
+/// A realm therefore opts into enforcement by authoring its first policy for a
+/// given source realm; until then behaviour is unchanged.
+///
+/// A tenant realm can no longer author a policy that names the system realm as
+/// source — `create_cross_realm_policy` in `advanced.rs` refuses that for a
+/// non-system actor, so a tenant cannot deny service to the platform operator.
+/// The deny branch here therefore fires only on a policy stored before that
+/// rule existed, or one authored by a system-realm actor. Recovery from such a
+/// policy is `DELETE /v1/cross-realm-policies/{id}` **by that realm's own
+/// admin**: those routes are keyed on the caller's realm, so there is no
+/// operator-side path to them.
+fn cross_realm_crossing_permitted(
+    state: &AppState,
+    source: &RealmId,
+    target: &RealmId,
+) -> Result<bool, Response> {
+    let permitted = state
+        .identity
+        .check_cross_realm_policy(target, source, CROSS_REALM_ADMIN_CAPABILITY)
+        .map_err(|e| identity_error_to_response(&e).into_response())?;
+    if permitted {
+        return Ok(true);
+    }
+
+    let policies = state
+        .identity
+        .list_cross_realm_policies(target)
+        .map_err(|e| identity_error_to_response(&e).into_response())?;
+    let now = crate::core::Timestamp::from_micros(super::now_micros());
+    let governed = policies
+        .iter()
+        .any(|p| &p.source_realm_id == source && p.expires_at.is_none_or(|exp| now < exp));
+
+    if governed {
+        tracing::warn!(
+            source_realm = %source.as_uuid(),
+            target_realm = %target.as_uuid(),
+            capability = CROSS_REALM_ADMIN_CAPABILITY,
+            "cross-realm admin operation refused by trust policy"
+        );
+        return Ok(false);
+    }
+
+    tracing::warn!(
+        source_realm = %source.as_uuid(),
+        target_realm = %target.as_uuid(),
+        capability = CROSS_REALM_ADMIN_CAPABILITY,
+        "cross-realm admin operation permitted by default: no cross-realm trust \
+         policy governs this realm pair"
+    );
+    Ok(true)
+}
+
+/// Scans every realm page for the realm whose name equals `slug`.
+///
+/// Blocking: call from inside `spawn_blocking`.
+fn find_realm_id_by_slug(
+    identity: &Arc<dyn crate::identity::IdentityEngine>,
+    slug: &str,
+) -> Result<RealmId, (StatusCode, String)> {
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let page = identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("list_realms: {e}"),
+                )
+            })?;
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            if realm.name() == slug {
+                return Ok(realm.id().clone());
+            }
+        }
+        if n == 0 || offset + n >= page.total {
+            return Err((StatusCode::NOT_FOUND, format!("realm '{slug}' not found")));
+        }
+        offset += n;
+    }
+}
+
+/// Lists every realm ID in the deployment.
+///
+/// Blocking: call from inside `spawn_blocking`.
+fn list_all_realm_ids(
+    identity: &Arc<dyn crate::identity::IdentityEngine>,
+) -> Result<Vec<RealmId>, (StatusCode, String)> {
+    let mut ids = Vec::new();
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let page = identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("list_realms: {e}"),
+                )
+            })?;
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            ids.push(realm.id().clone());
+        }
+        if n == 0 || offset + n >= page.total {
+            return Ok(ids);
+        }
+        offset += n;
+    }
+}
+
+/// Resolves the realms a backup export may cover, from the caller's identity
+/// rather than the request's query string.
+///
+/// `POST /admin/backup` previously resolved `?realm=<slug>` against every realm
+/// in the deployment with no ownership check, and covered every realm when the
+/// parameter was absent. A tenant admin could export a peer tenant in full
+/// (audit 2026-08-28 §3 B1, §4.1#1).
+///
+/// * The **system realm** (nil UUID) may name any realm, and covers every realm
+///   when no slug is given.
+/// * Every other caller covers its own realm only. A slug is compared against
+///   the caller's own realm name, so a peer slug is `403` and this function
+///   never becomes a realm-existence oracle.
+///
+/// Blocking: call from inside `spawn_blocking`.
+fn authorize_export_realms(
+    identity: &Arc<dyn crate::identity::IdentityEngine>,
+    auth_realm: &RealmId,
+    requested_slug: Option<&str>,
+) -> Result<Vec<RealmId>, (StatusCode, String)> {
+    if !auth_realm.as_uuid().is_nil() {
+        if let Some(slug) = requested_slug {
+            let own = identity
+                .get_realm(auth_realm)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get_realm: {e}")))?
+                .ok_or_else(|| (StatusCode::FORBIDDEN, "forbidden".to_string()))?;
+            if own.name() != slug {
+                return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+            }
+        }
+        return Ok(vec![auth_realm.clone()]);
+    }
+
+    match requested_slug {
+        Some(slug) => Ok(vec![find_realm_id_by_slug(identity, slug)?]),
+        None => list_all_realm_ids(identity),
     }
 }
 
@@ -889,17 +1162,20 @@ async fn admin_delete_user_device_fingerprints(
         .delete_user_device_fingerprints(&auth.realm_id, &user_id)
     {
         Ok(erased) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::DeviceFingerprintsErased,
-                resource_type: "user".to_string(),
-                resource_id: user_uuid.to_string(),
-                metadata: Some(serde_json::json!({
-                    "via": "admin_api",
-                    "count": erased,
-                })),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::DeviceFingerprintsErased,
+                    resource_type: "user".to_string(),
+                    resource_id: user_uuid.to_string(),
+                    metadata: Some(serde_json::json!({
+                        "via": "admin_api",
+                        "count": erased,
+                    })),
+                },
+            );
             (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -942,14 +1218,17 @@ async fn admin_bulk_users(
 
             match state.identity.bulk_create_users(&auth.realm_id, &requests) {
                 Ok(results) => {
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: auth.realm_id.clone(),
-                        actor: auth.user_id.as_uuid().to_string(),
-                        action: crate::audit::AuditAction::BulkUsersCreated,
-                        resource_type: "user".to_string(),
-                        resource_id: format!("batch:{}", results.len()),
-                        metadata: Some(serde_json::json!({"via": "admin_api"})),
-                    });
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: auth.realm_id.clone(),
+                            actor: auth.user_id.as_uuid().to_string(),
+                            action: crate::audit::AuditAction::BulkUsersCreated,
+                            resource_type: "user".to_string(),
+                            resource_id: format!("batch:{}", results.len()),
+                            metadata: Some(serde_json::json!({"via": "admin_api"})),
+                        },
+                    );
 
                     let proto_results: Vec<_> =
                         results.iter().map(user_bulk_result_to_proto).collect();
@@ -982,14 +1261,17 @@ async fn admin_bulk_users(
 
             match state.identity.bulk_disable_users(&auth.realm_id, &user_ids) {
                 Ok(results) => {
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: auth.realm_id.clone(),
-                        actor: auth.user_id.as_uuid().to_string(),
-                        action: crate::audit::AuditAction::BulkUsersDisabled,
-                        resource_type: "user".to_string(),
-                        resource_id: format!("batch:{}", results.len()),
-                        metadata: Some(serde_json::json!({"via": "admin_api"})),
-                    });
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: auth.realm_id.clone(),
+                            actor: auth.user_id.as_uuid().to_string(),
+                            action: crate::audit::AuditAction::BulkUsersDisabled,
+                            resource_type: "user".to_string(),
+                            resource_id: format!("batch:{}", results.len()),
+                            metadata: Some(serde_json::json!({"via": "admin_api"})),
+                        },
+                    );
 
                     let proto_results: Vec<_> =
                         results.iter().map(void_bulk_result_to_proto).collect();
@@ -1027,13 +1309,33 @@ async fn admin_list_realms(
         return e.into_response();
     }
 
-    match state.identity.list_realms(&params.as_page_request()) {
-        Ok(page) => (
-            StatusCode::OK,
-            Json(proto_to_rest_json(&realm_page_to_proto(&page))),
-        )
-            .into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+    // System-realm admins may list all realms; a tenant realm admin sees only
+    // their own realm — the gRPC ListRealms twin has always filtered this way
+    // (audit 2026-08-28 §4.1#2).
+    if crate::identity::keys::is_system_realm(&auth.realm_id) {
+        match state.identity.list_realms(&params.as_page_request()) {
+            Ok(page) => (
+                StatusCode::OK,
+                Json(proto_to_rest_json(&realm_page_to_proto(&page))),
+            )
+                .into_response(),
+            Err(e) => identity_error_to_response(&e).into_response(),
+        }
+    } else {
+        match state.identity.get_realm(&auth.realm_id) {
+            Ok(realm) => {
+                let items = realm.as_ref().map(pb::Realm::from).into_iter().collect();
+                (
+                    StatusCode::OK,
+                    Json(proto_to_rest_json(&pb::RealmPage {
+                        items,
+                        next_cursor: None,
+                    })),
+                )
+                    .into_response()
+            }
+            Err(e) => identity_error_to_response(&e).into_response(),
+        }
     }
 }
 
@@ -1073,7 +1375,7 @@ async fn admin_get_realm(
         }
     };
 
-    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1133,39 +1435,38 @@ async fn admin_delete_realm(
         }
     };
 
-    let tid = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+    let tid = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
         Ok(r) => r,
         Err(e) => return e,
     };
 
-    // Check realm status — only Archived realms can be permanently deleted.
+    // The archival gate lives in `delete_realm`, so every adapter gets it
+    // (audit 2026-08-28 §4.20#10). This handler only distinguishes "no such
+    // realm" from a realm it may not delete, and lets the engine decide the
+    // latter.
     match state.identity.get_realm(&tid) {
-        Ok(Some(realm))
-            if realm.status() == crate::identity::RealmStatus::Archived =>
-        {
+        Ok(Some(_)) => {
             match state.identity.delete_realm(&tid) {
                 Ok(()) => {
-                    let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: tid.clone(),
-                        actor: auth.user_id.as_uuid().to_string(),
-                        action: crate::audit::AuditAction::RealmDeleted,
-                        resource_type: "realm".to_string(),
-                        resource_id: realm_uuid.to_string(),
-                        metadata: Some(serde_json::json!({"via": "admin_api"})),
-                    });
+                    // Scoped to the SYSTEM realm: appending under the realm
+                    // that was just deleted would re-create `audit:*` keys in
+                    // a key space the cascade must leave empty (§4.9#1).
+                    crate::protocol::audit_log::record(
+                        state.audit.as_ref(),
+                        &CreateAuditEvent {
+                            realm_id: crate::identity::keys::system_realm_id(),
+                            actor: auth.user_id.as_uuid().to_string(),
+                            action: crate::audit::AuditAction::RealmDeleted,
+                            resource_type: "realm".to_string(),
+                            resource_id: realm_uuid.to_string(),
+                            metadata: Some(serde_json::json!({"via": "admin_api"})),
+                        },
+                    );
                     StatusCode::NO_CONTENT.into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
-        Ok(Some(_)) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "conflict",
-                "message": "Only archived realms can be permanently deleted. Remove the realm from hearth.yaml and restart to archive it first."
-            })),
-        )
-            .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),
@@ -1212,15 +1513,14 @@ async fn admin_patch_user_required_actions(
                 .into_response()
         }
     };
-    let realm_id = RealmId::new(realm_uuid);
-
-    if auth.realm_id != realm_id {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "forbidden"})),
-        )
-            .into_response();
-    }
+    // Route through the shared BOLA guard rather than a hand-rolled equality
+    // check. The hand-rolled copy that stood here omitted `scoped_realm`'s
+    // nil-UUID branch, so the system operator was refused an operation every
+    // other `/admin/realms/{id}/*` handler grants them (audit 2026-08-28 §4.1#6).
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     let user_uuid: uuid::Uuid = match user_id_str.parse() {
         Ok(u) => u,
@@ -1297,32 +1597,38 @@ async fn admin_patch_user_required_actions(
 
     let admin_id = auth.user_id.as_uuid().to_string();
     for a in &add_actions {
-        let _ = state.audit.append(&CreateAuditEvent {
-            realm_id: realm_id.clone(),
-            actor: admin_id.clone(),
-            action: AuditAction::RequiredActionAssigned,
-            resource_type: "user".to_string(),
-            resource_id: uid.as_uuid().to_string(),
-            metadata: Some(serde_json::json!({
-                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
-                "admin_id": admin_id,
-                "via": "admin_api",
-            })),
-        });
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: admin_id.clone(),
+                action: AuditAction::RequiredActionAssigned,
+                resource_type: "user".to_string(),
+                resource_id: uid.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({
+                    "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                    "admin_id": admin_id,
+                    "via": "admin_api",
+                })),
+            },
+        );
     }
     for a in &remove_actions {
-        let _ = state.audit.append(&CreateAuditEvent {
-            realm_id: realm_id.clone(),
-            actor: admin_id.clone(),
-            action: AuditAction::RequiredActionRemoved,
-            resource_type: "user".to_string(),
-            resource_id: uid.as_uuid().to_string(),
-            metadata: Some(serde_json::json!({
-                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
-                "admin_id": admin_id,
-                "via": "admin_api",
-            })),
-        });
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: admin_id.clone(),
+                action: AuditAction::RequiredActionRemoved,
+                resource_type: "user".to_string(),
+                resource_id: uid.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({
+                    "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                    "admin_id": admin_id,
+                    "via": "admin_api",
+                })),
+            },
+        );
     }
 
     (
@@ -1373,34 +1679,82 @@ async fn admin_patch_realm_config(
                 .into_response()
         }
     };
-    let realm_id = RealmId::new(realm_uuid);
+    // Same shared BOLA guard as every other `/admin/realms/{id}/*` handler; see
+    // the note on `admin_patch_user_required_actions` (audit 2026-08-28 §4.1#6).
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(realm_uuid)) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
-    if auth.realm_id != realm_id {
+    // Audit §4.13#6: an unrecognised key used to be dropped on the floor and
+    // the request answered `200`, so a misspelled `defualt_required_actions`
+    // looked applied and was not. Refuse it instead.
+    const KNOWN_KEYS: &[&str] = &[
+        "default_required_actions",
+        "mfa_methods",
+        "sms_otp_expiry_seconds",
+        "sms_otp_max_attempts",
+        "email_otp_expiry_seconds",
+        "email_otp_max_attempts",
+        "fapi_profile",
+        "dcr_policy",
+    ];
+    if let Some(obj) = body.as_object() {
+        if let Some(unknown) = obj.keys().find(|k| !KNOWN_KEYS.contains(&k.as_str())) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "unknown field `{unknown}`; expected one of: {}",
+                        KNOWN_KEYS.join(", ")
+                    )
+                })),
+            )
+                .into_response();
+        }
+    } else {
         return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "forbidden"})),
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "body must be a JSON object"})),
         )
             .into_response();
     }
 
-    let action_strs = body["default_required_actions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    // Audit §4.13#6: absent means "leave unchanged". `body["…"].as_array()`
+    // yielded `None` for both an absent key and an explicit `[]`, and the
+    // `unwrap_or_default()` collapsed them — so a PATCH that only set
+    // `mfa_methods` cleared the realm's default required actions.
+    let action_strs: Option<Vec<serde_json::Value>> = match body.get("default_required_actions") {
+        None => None,
+        Some(serde_json::Value::Array(a)) => Some(a.clone()),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "default_required_actions must be an array of action-type strings"
+                })),
+            )
+                .into_response();
+        }
+    };
 
-    let mut actions: Vec<RequiredAction> = Vec::with_capacity(action_strs.len());
-    for v in action_strs {
-        match serde_json::from_value::<RequiredAction>(v.clone()) {
-            Ok(a) => actions.push(a),
-            Err(_) => {
-                let s = v.as_str().unwrap_or("(non-string)");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
-                )
-                    .into_response();
+    let mut actions: Option<Vec<RequiredAction>> = None;
+    if let Some(strs) = action_strs {
+        let mut parsed = Vec::with_capacity(strs.len());
+        for v in strs {
+            match serde_json::from_value::<RequiredAction>(v.clone()) {
+                Ok(a) => parsed.push(a),
+                Err(_) => {
+                    let s = v.as_str().unwrap_or("(non-string)");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
+                    )
+                        .into_response();
+                }
             }
         }
+        actions = Some(parsed);
     }
 
     let realm = match state.identity.get_realm(&realm_id) {
@@ -1416,7 +1770,9 @@ async fn admin_patch_realm_config(
     };
 
     let mut config = realm.config().clone();
-    config.default_required_actions = actions;
+    if let Some(actions) = actions {
+        config.default_required_actions = actions;
+    }
 
     // Optional fields: apply only when present in the JSON body.
     if let Some(methods) = body["mfa_methods"].as_array() {
@@ -1518,15 +1874,56 @@ async fn admin_patch_realm_config(
     }
 }
 
+/// Reads the optional `grace_period_secs` query parameter for a signing-key
+/// rotation. Absent means 0 — revoke.
+///
+/// # Errors
+///
+/// Returns a `400` response when the parameter is present but is not a
+/// non-negative integer. Failing here rather than falling back to a default
+/// keeps the operator's intent explicit: a typo must not silently grant a
+/// window during an incident.
+fn parse_grace_period_secs(query: Option<&str>) -> Result<u64, Response> {
+    let Some(query) = query else {
+        return Ok(0);
+    };
+    let Some(raw) = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == "grace_period_secs").then_some(value)
+    }) else {
+        return Ok(0);
+    };
+    raw.parse::<u64>().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "grace_period_secs must be a non-negative integer number of seconds"
+            })),
+        )
+            .into_response()
+    })
+}
+
 /// Admin: rotate the Ed25519 signing key for a realm.
 ///
-/// Generates a new key, promotes it to the active key, and keeps the old key
-/// in the JWKS response for the configured grace period (default 24 h) so
-/// tokens signed with the old key remain valid during that window.
+/// Generates a new key, promotes it to the active key, and **revokes every
+/// retired key for the realm**. Credentials signed with the old key stop
+/// validating immediately, which is what makes this endpoint a usable remedy
+/// for a leaked key (audit 2026-08-28 B9).
+///
+/// A planned rotation — routine key hygiene rather than an incident — can keep
+/// existing sessions alive by opting into a grace window:
+/// `?grace_period_secs=86400`. During that window a token signed with the
+/// retired key still validates. **Do not use it after a compromise:** the
+/// window protects whoever holds the leaked key just as faithfully.
+///
+/// Omitting the parameter revokes. `grace_period_secs=0` is the same thing
+/// said explicitly.
 async fn admin_rotate_realm_signing_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> impl IntoResponse {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -1541,7 +1938,7 @@ async fn admin_rotate_realm_signing_key(
         Err(e) => return e,
     };
 
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1551,21 +1948,31 @@ async fn admin_rotate_realm_signing_key(
         Err(e) => return e,
     };
 
-    let grace_period_secs = state.signing_key_rotation_grace_period_secs;
+    // Default 0 — revoke. An operator opts into a grace window explicitly,
+    // after authentication, so a malformed value cannot probe the endpoint.
+    let grace_period_secs = match parse_grace_period_secs(query.as_deref()) {
+        Ok(secs) => secs,
+        Err(response) => return response,
+    };
 
     match state
         .identity
         .rotate_realm_signing_key(&realm_id, grace_period_secs)
     {
         Ok(()) => {
-            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"action": "rotate_signing_key", "grace_period_secs": grace_period_secs})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &crate::audit::CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(
+                        serde_json::json!({"action": "rotate_signing_key", "grace_period_secs": grace_period_secs}),
+                    ),
+                },
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1621,7 +2028,7 @@ async fn admin_get_realm_branding(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1662,7 +2069,7 @@ async fn admin_patch_realm_branding(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1709,14 +2116,17 @@ async fn admin_patch_realm_branding(
         },
     ) {
         Ok(updated) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api", "op": "patch_branding"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api", "op": "patch_branding"})),
+                },
+            );
             let cfg = updated.config();
             (
                 StatusCode::OK,
@@ -1749,7 +2159,7 @@ async fn admin_list_realm_email_templates(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1777,7 +2187,7 @@ async fn admin_get_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1816,7 +2226,7 @@ async fn admin_put_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1875,16 +2285,19 @@ async fn admin_put_realm_email_template(
         },
     ) {
         Ok(updated) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(
-                    serde_json::json!({"via": "admin_api", "op": "put_email_template", "kind": kind}),
-                ),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(
+                        serde_json::json!({"via": "admin_api", "op": "put_email_template", "kind": kind}),
+                    ),
+                },
+            );
             match updated.config().email_templates.get(&kind) {
                 Some(tmpl) => (StatusCode::OK, Json(tmpl.clone())).into_response(),
                 None => StatusCode::NO_CONTENT.into_response(),
@@ -1911,7 +2324,7 @@ async fn admin_delete_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let realm_id = match scoped_realm(&auth, realm_id) {
+    let realm_id = match scoped_realm(&state, &auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1937,16 +2350,19 @@ async fn admin_delete_realm_email_template(
         },
     ) {
         Ok(_) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::RealmUpdated,
-                resource_type: "realm".to_string(),
-                resource_id: realm_id.as_uuid().to_string(),
-                metadata: Some(
-                    serde_json::json!({"via": "admin_api", "op": "delete_email_template", "kind": kind}),
-                ),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::RealmUpdated,
+                    resource_type: "realm".to_string(),
+                    resource_id: realm_id.as_uuid().to_string(),
+                    metadata: Some(
+                        serde_json::json!({"via": "admin_api", "op": "delete_email_template", "kind": kind}),
+                    ),
+                },
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -1999,14 +2415,17 @@ async fn admin_register_client(
 
     match state.identity.register_client(&auth.realm_id, &request) {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientRegistered,
-                resource_type: "client".to_string(),
-                resource_id: client.client_id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientRegistered,
+                    resource_type: "client".to_string(),
+                    resource_id: client.client_id().as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             (
                 StatusCode::CREATED,
                 Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
@@ -2060,7 +2479,7 @@ async fn admin_get_client(
     }
 }
 
-/// JSON body for `PUT /admin/applications/{id}`.
+/// JSON body for `PATCH /admin/applications/{id}`.
 ///
 /// Extends the proto `UpdateClientRequest` with logout URI fields that are
 /// not (yet) in the proto schema.
@@ -2094,6 +2513,18 @@ struct AdminUpdateClientBody {
     /// Trust level for this client: `"first_party"` or `"third_party"`.
     /// Omit to leave unchanged.
     trust_level: Option<String>,
+    /// Base64url-encoded Ed25519 public key (32 bytes) used to verify this
+    /// client's signed assertions — RFC 7523 `private_key_jwt` client
+    /// authentication and the `urn:ietf:params:oauth:grant-type:jwt-bearer`
+    /// grant. `null` clears it; omit to leave unchanged.
+    ///
+    /// 22.15 (audit 2026-08-28 §4.22#7): the engine has read this key since
+    /// those features shipped, and `UpdateClientRequest` has carried the field
+    /// all along, but no protocol surface ever set it — every caller passed
+    /// `None`. Discovery advertised `private_key_jwt` and FAPI 2.0 Advanced
+    /// against a key an operator had no way to install.
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    assertion_public_key: Option<Option<String>>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -2106,8 +2537,14 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize;
-    // Option<Option<String>> naturally handles null vs absent vs string.
-    Option::<Option<String>>::deserialize(d)
+    // `Option::<Option<String>>::deserialize` does NOT distinguish the two:
+    // serde collapses an explicit `null` to the outer `None`, which is the
+    // same value an ABSENT field produces, so `null` silently meant "leave
+    // unchanged" instead of "clear". `#[serde(default)]` supplies `None` when
+    // the field is absent, and this function runs only when it is present, so
+    // wrapping one level here is what makes `null` reach the engine as
+    // `Some(None)`.
+    Ok(Some(Option::<String>::deserialize(d)?))
 }
 
 /// Admin: update client by ID.
@@ -2166,6 +2603,10 @@ async fn admin_update_client(
         trust_level,
         mfa_required: body.mfa_required.map(Some),
         cors_origins: body.cors_origins,
+        // 22.15: the operator surface for `private_key_jwt` / `jwt-bearer`.
+        // `update_client_inner` validates the base64url decode and the 32-byte
+        // Ed25519 length before it writes.
+        assertion_public_key: body.assertion_public_key,
         ..Default::default()
     };
 
@@ -2174,14 +2615,17 @@ async fn admin_update_client(
         .update_client(&auth.realm_id, &ClientId::new(client_uuid), &request)
     {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientUpdated,
-                resource_type: "client".to_string(),
-                resource_id: client_uuid.to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientUpdated,
+                    resource_type: "client".to_string(),
+                    resource_id: client_uuid.to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             (
                 StatusCode::OK,
                 Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
@@ -2222,14 +2666,17 @@ async fn admin_delete_client(
         .delete_client(&auth.realm_id, &ClientId::new(client_uuid))
     {
         Ok(()) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientDeleted,
-                resource_type: "client".to_string(),
-                resource_id: client_uuid.to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientDeleted,
+                    resource_type: "client".to_string(),
+                    resource_id: client_uuid.to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -2265,6 +2712,22 @@ async fn admin_list_audit(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+
+    // A reversed window (`start_time > end_time`) builds a reversed storage
+    // scan window, which used to abort the whole process (audit §4.9#7).
+    // Refuse it here so the caller learns why. Equal bounds are legal and
+    // select nothing.
+    if let (Some(start), Some(end)) = (params.start_time, params.end_time) {
+        if start > end {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "start_time must not be greater than end_time"
+                })),
+            )
+                .into_response();
+        }
     }
 
     let action = params
@@ -2323,6 +2786,10 @@ async fn admin_list_user_consents(
             .into_response();
     };
     let user_id = UserId::new(uuid);
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_user_in_realm(&state, &auth.realm_id, &user_id) {
+        return resp;
+    }
     match state
         .identity
         .list_consents_by_user(&auth.realm_id, &user_id)
@@ -2379,18 +2846,21 @@ async fn admin_revoke_user_consent(
         .revoke_consent(&auth.realm_id, &user_id, &client_id)
     {
         Ok(()) => {
-            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ConsentRevoked,
-                resource_type: "oauth_client".to_string(),
-                resource_id: client_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({
-                    "via": "admin",
-                    "target_user": user_id.as_uuid().to_string(),
-                    "client_id": client_id.as_uuid().to_string(),
-                })),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &crate::audit::CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ConsentRevoked,
+                    resource_type: "oauth_client".to_string(),
+                    resource_id: client_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({
+                        "via": "admin",
+                        "target_user": user_id.as_uuid().to_string(),
+                        "client_id": client_id.as_uuid().to_string(),
+                    })),
+                },
+            );
             (StatusCode::NO_CONTENT, ()).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -2501,6 +2971,7 @@ async fn admin_get_user_effective_permissions(
 /// the route is unregistered in production so it cannot be fingerprinted or
 /// reached in a non-dev deployment. The loopback-only bind constraint (enforced
 /// at config validation) ensures only local processes can reach this endpoint.
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_probe_user(
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -2564,6 +3035,7 @@ pub(super) async fn dev_probe_user(
 /// Required headers: `X-Realm-ID: <realm-uuid>`
 /// Request body:  `{"user_id": "<user-uuid>"}`
 /// Response body: `{"session_id": "<session-uuid>"}`
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_seed_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2599,6 +3071,7 @@ pub(super) async fn dev_seed_session(
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedSessionRequest {
     user_id: String,
 }
@@ -2613,6 +3086,7 @@ pub(super) struct DevSeedSessionRequest {
 /// Required headers: `X-Realm-ID: <realm-uuid>`
 /// Request body:  `{"user_id": "<user-uuid>"}`
 /// Response body: `{"access_token": "<jwt>"}`
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_seed_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2655,6 +3129,7 @@ pub(super) async fn dev_seed_token(
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedTokenRequest {
     user_id: String,
 }
@@ -2676,6 +3151,7 @@ pub(super) struct DevSeedTokenRequest {
 /// Required headers: `X-Realm-ID: <realm-uuid>`
 /// Request body:  `{"user_id": "<user-uuid>", "password": "<cleartext>"}`
 /// Response: `204 No Content` on success.
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn dev_seed_password(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2704,6 +3180,7 @@ pub(super) async fn dev_seed_password(
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "dev-endpoints")]
 pub(super) struct DevSeedPasswordRequest {
     user_id: String,
     password: String,
@@ -2715,6 +3192,7 @@ pub(super) struct DevSeedPasswordRequest {
 /// test suite log in without needing to propagate the password through the
 /// bootstrap response. Acceptable in dev mode; `admin_bootstrap` is a 404
 /// in production.
+#[cfg(feature = "dev-endpoints")]
 pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 
 /// Seeds a system-realm admin user (`admin@hearth.test`) the first time a dev
@@ -2723,6 +3201,7 @@ pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 /// user already existed — the existing password is left untouched.
 ///
 /// Best-effort: logs on error but never returns a failure to the caller.
+#[cfg(feature = "dev-endpoints")]
 fn dev_seed_system_admin(state: &AppState) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
 
@@ -2814,6 +3293,7 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
 ///
 /// Best-effort: logs on error and returns `None` rather than failing bootstrap.
 /// Call [`dev_seed_system_admin`] first to guarantee the admin user exists.
+#[cfg(feature = "dev-endpoints")]
 fn dev_system_admin_token(state: &AppState) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
     let admin = match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
@@ -2847,6 +3327,33 @@ fn dev_system_admin_token(state: &AppState) -> Option<String> {
     }
 }
 
+/// Builds the `quickstart` snippet returned by `POST /admin/bootstrap`.
+///
+/// Production-readiness task 26.27 (`reports/cold-first-run-2026-09-21.md`
+/// C-7): the snippet used to hard-code `http://127.0.0.1:8420`, so an instance
+/// bound to any other port handed the operator commands that could not run,
+/// and it cited `docs/guides/getting-started.md` — the file is `.mdx`. The host
+/// now comes from the request's `Host` header (the address the caller actually
+/// reached); the literal is only a fallback for a request with no `Host`.
+#[cfg(feature = "dev-endpoints")]
+fn bootstrap_quickstart(headers: &HeaderMap, access_token: &str, realm_id: &str) -> String {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1:8420");
+    format!(
+        r#"# 1. Register an OAuth application
+curl -fsS -X POST http://{host}/clients \
+  -H "Authorization: Bearer {access_token}" \
+  -H "X-Realm-ID: {realm_id}" \
+  -H "Content-Type: application/json" \
+  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
+
+# 2. Full PKCE flow — see docs/guides/getting-started.mdx"#
+    )
+}
+
 /// POST /admin/bootstrap — creates a realm, admin user, session, assigns
 /// the admin role, and issues tokens. Returns everything needed for SDK tests.
 ///
@@ -2857,6 +3364,7 @@ fn dev_system_admin_token(state: &AppState) -> Option<String> {
 /// returned once in the response body. Subsequent calls (re-bootstrap) require
 /// a valid Bearer token and do NOT change the existing admin password (HEA-1670).
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
+#[cfg(feature = "dev-endpoints")]
 pub(super) async fn admin_bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2986,16 +3494,7 @@ pub(super) async fn admin_bootstrap(
             };
             let rid_str = rid.as_uuid().to_string();
             let at_str = tokens.access_token().to_string();
-            let qs = format!(
-                r#"# 1. Register an OAuth application
-curl -fsS -X POST http://127.0.0.1:8420/clients \
-  -H "Authorization: Bearer {at_str}" \
-  -H "X-Realm-ID: {rid_str}" \
-  -H "Content-Type: application/json" \
-  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
-
-# 2. Full PKCE flow — see docs/guides/getting-started.md"#
-            );
+            let qs = bootstrap_quickstart(&headers, &at_str, &rid_str);
             // Re-bootstrap: do not modify existing password (HEA-1670). Still
             // mint a fresh cross-realm system token (HEA-2087).
             dev_seed_system_admin(&state);
@@ -3109,16 +3608,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 
     let realm_id_str = realm_id.as_uuid().to_string();
     let access_token_str = tokens.access_token().to_string();
-    let quickstart = format!(
-        r#"# 1. Register an OAuth application
-curl -fsS -X POST http://127.0.0.1:8420/clients \
-  -H "Authorization: Bearer {access_token_str}" \
-  -H "X-Realm-ID: {realm_id_str}" \
-  -H "Content-Type: application/json" \
-  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
-
-# 2. Full PKCE flow — see docs/guides/getting-started.md"#
-    );
+    let quickstart = bootstrap_quickstart(&headers, &access_token_str, &realm_id_str);
 
     let admin_password = dev_seed_system_admin(&state).unwrap_or_default();
     // Cross-realm system-realm admin token (HEA-2087) — the dev-realm
@@ -3306,6 +3796,9 @@ async fn admin_create_role(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let permissions = match permissions_from_strings(body.permissions) {
         Ok(p) => p,
         Err(e) => return rbac_error_to_response(&e).into_response(),
@@ -3344,6 +3837,14 @@ async fn admin_get_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // `extract_admin_auth` is the outer gate only — it admits every
+    // `hearth.*.admin` sub-admin. The rest of the role family (list, create,
+    // update, delete) names `hearth.realm.admin`; this handler named nothing,
+    // so a `hearth.clients.admin` token read role definitions
+    // (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
@@ -3371,6 +3872,9 @@ async fn admin_update_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
@@ -3423,6 +3927,9 @@ async fn admin_delete_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
@@ -3483,6 +3990,9 @@ async fn admin_create_group(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     match state.rbac.create_group(
         &auth.realm_id,
         &CreateGroupRequest {
@@ -3538,6 +4048,9 @@ async fn admin_update_group(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3568,6 +4081,9 @@ async fn admin_delete_group(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3597,6 +4113,10 @@ async fn admin_list_group_members(
         Ok(g) => g,
         Err(e) => return e.into_response(),
     };
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_group_in_realm(&state, &auth.realm_id, &group_id) {
+        return resp;
+    }
     match state.rbac.list_group_members(
         &auth.realm_id,
         &group_id,
@@ -3627,6 +4147,9 @@ async fn admin_add_group_member(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
@@ -3670,6 +4193,9 @@ async fn admin_remove_group_member(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
@@ -3718,6 +4244,10 @@ async fn admin_list_user_assignments(
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_user_in_realm(&state, &auth.realm_id, &user_id) {
+        return resp;
+    }
     match state.rbac.list_user_assignments(&auth.realm_id, &user_id) {
         Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))).into_response(),
         Err(e) => rbac_error_to_response(&e).into_response(),
@@ -3736,6 +4266,9 @@ async fn admin_assign_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let user_id = match parse_user_id_path(&id) {
         Ok(u) => u,
@@ -3782,7 +4315,41 @@ async fn admin_assign_role(
         Some(s) => {
             let stripped = s.strip_prefix("org_").unwrap_or(&s);
             match uuid::Uuid::parse_str(stripped).map(crate::core::OrganizationId::new) {
-                Ok(oid) => Scope::Org { org_id: oid },
+                Ok(oid) => {
+                    // Task 26.45: the organisation must exist.
+                    //
+                    // `assign_role` checks that the role exists and that a
+                    // group SUBJECT exists, but says nothing about the scope —
+                    // its own comment notes that user existence is "the
+                    // identity layer's concern", and organisations are the
+                    // same kind of concern, which the RBAC layer may not reach
+                    // upward to ask about. So the check belongs here, where the
+                    // caller's value enters.
+                    //
+                    // Without it a typo'd UUID answered 201 and wrote an
+                    // assignment that can never grant anything: the
+                    // administrator was told the role was assigned and it
+                    // silently never took effect. Not a privilege hole today —
+                    // task 26.16 made `active_org_context` fail closed on an
+                    // unknown organisation — but it was one before that.
+                    match state.identity.get_organization(&auth.realm_id, &oid) {
+                        Ok(Some(_)) => Scope::Org { org_id: oid },
+                        Ok(None) => {
+                            return (
+                                StatusCode::NOT_FOUND,
+                                Json(serde_json::json!({
+                                    "error": "organization not found",
+                                    "error_description":
+                                        "the organization named by org_id does not exist in \
+                                         this realm; a role scoped to it could never grant \
+                                         anything"
+                                })),
+                            )
+                                .into_response();
+                        }
+                        Err(e) => return identity_error_to_response(&e).into_response(),
+                    }
+                }
                 Err(_) => {
                     return (
                         StatusCode::BAD_REQUEST,
@@ -3819,6 +4386,9 @@ async fn admin_unassign_role(
     };
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
+    }
+    if let Err(e) = reject_system_realm_write(&auth) {
+        return e;
     }
     let aid = match parse_assignment_id(&id) {
         Ok(a) => a,
@@ -4200,6 +4770,14 @@ async fn admin_list_webhook_deliveries(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Every sibling in the webhook family names `hearth.realm.admin`; this
+    // handler named nothing, so any sub-admin read the delivery log — which
+    // carries request and response bodies (audit 2026-08-28 §4.1#9). The gate
+    // sits before the engine check so a deployment without webhooks still
+    // answers `403` rather than disclosing that the feature is off.
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),
@@ -4208,6 +4786,28 @@ async fn admin_list_webhook_deliveries(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
+
+    // The delivery scan is realm-scoped, so an unknown webhook produced an
+    // empty `200` rather than `404` (audit 2026-08-28 §4.1#10). Confirm the
+    // parent subscription exists in this realm first.
+    match engine.get(&auth.realm_id, &webhook_id) {
+        Ok(_) => {}
+        Err(crate::webhook::WebhookError::NotFound { .. }) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "webhook not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            error!("get webhook failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "get webhook failed"})),
+            )
+                .into_response();
+        }
+    }
 
     let query = DeliveryQuery {
         realm_id: auth.realm_id,
@@ -4300,6 +4900,31 @@ async fn admin_backup_create(
         return e.into_response();
     }
 
+    // B1: the realms this export covers come from the caller's identity, never
+    // from the query string (audit 2026-08-28 §3 B1, §4.1#1). Resolved before
+    // the watermark so a refused request does not record an export that never
+    // happened.
+    let scope_identity = Arc::clone(&state.identity);
+    let scope_realm = auth.realm_id.clone();
+    let scope_slug = params.realm.clone();
+    let realms_to_export = match tokio::task::spawn_blocking(move || {
+        authorize_export_realms(&scope_identity, &scope_realm, scope_slug.as_deref())
+    })
+    .await
+    {
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("scope task panicked: {e}")})),
+            )
+                .into_response()
+        }
+        Ok(Err((status, msg))) => {
+            return (status, Json(serde_json::json!({"error": msg}))).into_response()
+        }
+        Ok(Ok(realms)) => realms,
+    };
+
     // A-30: emit audit watermark at the start of every export.
     let export_id = uuid::Uuid::new_v4().to_string();
     emit_export_watermark(
@@ -4314,39 +4939,12 @@ async fn admin_backup_create(
     let identity = Arc::clone(&state.identity);
     let audit_engine = Arc::clone(&state.audit);
     let rbac = Arc::clone(&state.rbac);
-    let realm_filter_slug = params.realm.clone();
     let include_audit = params.include_audit;
     let auth_realm_id = auth.realm_id.clone();
     let actor = auth.user_id.as_uuid().to_string();
 
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
-
-        // Resolve optional realm slug to a RealmId.
-        let filter_id: Option<crate::core::RealmId> = if let Some(slug) = &realm_filter_slug {
-            let mut found = None;
-            let batch = crate::core::MAX_PAGE_LIMIT;
-            let mut offset = 0u64;
-            loop {
-                let page = identity
-                    .list_realms(&crate::core::PageRequest::new(offset, batch))
-                    .map_err(|e| format!("list_realms: {e}"))?;
-                let n = page.items.len() as u64;
-                for realm in &page.items {
-                    if realm.name() == slug {
-                        found = Some(realm.id().clone());
-                        break;
-                    }
-                }
-                if found.is_some() || n == 0 || offset + n >= page.total {
-                    break;
-                }
-                offset += n;
-            }
-            Some(found.ok_or_else(|| format!("realm '{slug}' not found"))?)
-        } else {
-            None
-        };
 
         // Write the archive to a temporary file; read it back as bytes.
         let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
@@ -4360,29 +4958,7 @@ async fn admin_backup_create(
         let dek = BackupExporter::generate_dek().map_err(|e| format!("generate_dek: {e}"))?;
         let opts = ExportOptions {
             include_audit,
-            realm_filter: filter_id.as_ref().map(|id| vec![id.clone()]),
-        };
-
-        let realms_to_export: Vec<crate::core::RealmId> = if let Some(id) = filter_id {
-            vec![id]
-        } else {
-            let mut ids = Vec::new();
-            let batch = crate::core::MAX_PAGE_LIMIT;
-            let mut offset = 0u64;
-            loop {
-                let page = identity
-                    .list_realms(&crate::core::PageRequest::new(offset, batch))
-                    .map_err(|e| format!("list_realms: {e}"))?;
-                let n = page.items.len() as u64;
-                for realm in &page.items {
-                    ids.push(realm.id().clone());
-                }
-                if n == 0 || offset + n >= page.total {
-                    break;
-                }
-                offset += n;
-            }
-            ids
+            realm_filter: Some(realms_to_export.clone()),
         };
 
         let mut writer =
@@ -4438,14 +5014,17 @@ async fn admin_backup_create(
                 .unwrap_or(0);
             let filename = format!("hearth-backup-{ts}.hearth-backup");
 
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth_realm_id,
-                actor,
-                action: crate::audit::AuditAction::BackupCreated,
-                resource_type: "backup".to_string(),
-                resource_id: filename.clone(),
-                metadata: params.realm.map(|s| serde_json::json!({"realm_slug": s})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth_realm_id,
+                    actor,
+                    action: crate::audit::AuditAction::BackupCreated,
+                    resource_type: "backup".to_string(),
+                    resource_id: filename.clone(),
+                    metadata: params.realm.map(|s| serde_json::json!({"realm_slug": s})),
+                },
+            );
 
             axum::http::Response::builder()
                 .status(StatusCode::OK)
@@ -4583,21 +5162,34 @@ async fn admin_backup_restore(
     }
 
     // SEC-14: emit audit event at restore start, before any destructive write.
-    let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: auth.realm_id.clone(),
-        actor: auth.user_id.as_uuid().to_string(),
-        action: crate::audit::AuditAction::BackupRestored,
-        resource_type: "backup".to_string(),
-        resource_id: "restore".to_string(),
-        metadata: Some(serde_json::json!({
-            "dry_run": dry_run,
-            "mode": mode_str,
-            "realm_filter": realm_filter,
-        })),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &CreateAuditEvent {
+            realm_id: auth.realm_id.clone(),
+            actor: auth.user_id.as_uuid().to_string(),
+            action: crate::audit::AuditAction::BackupRestored,
+            resource_type: "backup".to_string(),
+            resource_id: "restore".to_string(),
+            metadata: Some(serde_json::json!({
+                "dry_run": dry_run,
+                "mode": mode_str,
+                "realm_filter": realm_filter,
+            })),
+        },
+    );
 
     let identity = Arc::clone(&state.identity);
     let rbac = Arc::clone(&state.rbac);
+
+    // B1: the realm this restore may write comes from the caller's identity,
+    // never from the query string or the archive's manifest. Only the system
+    // realm (nil UUID) may restore a realm other than its own
+    // (audit 2026-08-28 §3 B1, §4.1#1).
+    let allowed_realm = if auth.realm_id.as_uuid().is_nil() {
+        None
+    } else {
+        Some(auth.realm_id.clone())
+    };
 
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{
@@ -4609,24 +5201,47 @@ async fn admin_backup_restore(
             "merge" => RestoreMode::Merge,
             "skip" | "" => RestoreMode::Skip,
             other => {
-                return Err(format!(
-                    "unknown mode '{other}'; expected skip | overwrite | merge"
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown mode '{other}'; expected skip | overwrite | merge"),
                 ))
             }
         };
 
-        let reader = BackupArchive::open(&tmp_path).map_err(|e| format!("open archive: {e}"))?;
+        let reader = BackupArchive::open(&tmp_path)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("open archive: {e}")))?;
 
         // A-30: verify detached manifest signature when an operator verify key is configured.
         if let Some(key_bytes) = verify_key_bytes.as_ref() {
             verify_manifest_signature(&reader.manifest, key_bytes)
-                .map_err(|(_, body)| format!("{}", body.0))?;
+                .map_err(|(_, body)| (StatusCode::BAD_REQUEST, format!("{}", body.0)))?;
         }
+
+        // Task 26.42: verify the archive against its manifest BEFORE importing.
+        //
+        // Neither restore path ran this check, so an archive `hearth backup
+        // verify` rejected with exit 3 imported cleanly, and an archive with a
+        // member deleted from it imported a realm with zero users and reported
+        // success (audit re-run 23.5, B-3 and B-7). Unlike the CLI this route
+        // has no opt-out: an archive arriving over HTTP was uploaded by
+        // somebody, and there is no "it is too large to re-read" case worth the
+        // risk here. It runs before `import_realm_record` writes the realm
+        // record, which is the first write a restore performs.
+        reader.verify_checksums().map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("archive failed integrity verification, nothing was restored: {e}"),
+            )
+        })?;
 
         let importer = BackupImporter::new(identity, rbac, Arc::clone(&state.audit));
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
-            let mk = std::env::var("HEARTH_MASTER_KEY")
-                .map_err(|_| "HEARTH_MASTER_KEY not set for encrypted restore".to_string())?;
+            let mk = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "HEARTH_MASTER_KEY not set for encrypted restore".to_string(),
+                )
+            })?;
             Some(secrecy::SecretString::from(mk))
         } else {
             None
@@ -4641,13 +5256,17 @@ async fn admin_backup_restore(
             // key that invalidates every pre-restore token. The CLI exposes
             // `--allow-missing-signing-key` for the deliberate override (HEA-2168).
             allow_missing_signing_key: false,
+            allowed_realm,
         };
 
         let slugs: Vec<String> = if let Some(slug) = &realm_filter {
             if reader.realms().iter().any(|r| &r.slug == slug) {
                 vec![slug.clone()]
             } else {
-                return Err(format!("realm '{slug}' not found in archive"));
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("realm '{slug}' not found in archive"),
+                ));
             }
         } else {
             reader.realms().iter().map(|r| r.slug.clone()).collect()
@@ -4656,13 +5275,21 @@ async fn admin_backup_restore(
         let mut reports: std::collections::HashMap<String, ImportReport> =
             std::collections::HashMap::new();
         for slug in &slugs {
-            let report = importer
-                .import_realm(slug, &reader, &opts)
-                .map_err(|e| format!("import_realm '{slug}': {e}"))?;
+            let report = importer.import_realm(slug, &reader, &opts).map_err(|e| {
+                // A realm outside the caller's scope is an authorization
+                // refusal, and a live target realm is a conflict — neither is
+                // a malformed request.
+                let status = match e {
+                    crate::backup::BackupError::RealmNotPermitted { .. } => StatusCode::FORBIDDEN,
+                    crate::backup::BackupError::RealmExists { .. } => StatusCode::CONFLICT,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                (status, format!("import_realm '{slug}': {e}"))
+            })?;
             reports.insert(slug.clone(), report);
         }
 
-        Ok::<_, String>(reports)
+        Ok::<_, (StatusCode, String)>(reports)
     })
     .await;
 
@@ -4672,11 +5299,7 @@ async fn admin_backup_restore(
             Json(serde_json::json!({"error": format!("restore task panicked: {e}")})),
         )
             .into_response(),
-        Ok(Err(msg)) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": msg})),
-        )
-            .into_response(),
+        Ok(Err((status, msg))) => (status, Json(serde_json::json!({"error": msg}))).into_response(),
         Ok(Ok(reports)) => {
             let mut realms_restored = 0u64;
             let mut counts = serde_json::Map::new();
@@ -4694,6 +5317,12 @@ async fn admin_backup_restore(
                             "skipped": report.users.skipped,
                             "overwritten": report.users.overwritten,
                             "errored": report.users.errored,
+                        },
+                        "mfa_factors": {
+                            "created": report.mfa_factors.created,
+                            "skipped": report.mfa_factors.skipped,
+                            "overwritten": report.mfa_factors.overwritten,
+                            "errored": report.mfa_factors.errored,
                         },
                         "clients": {
                             "created": report.clients.created,
@@ -4812,7 +5441,7 @@ async fn admin_sv_bump_all(
                 .into_response()
         }
     };
-    let realm_id = match scoped_realm(&auth, RealmId::new(uuid)) {
+    let realm_id = match scoped_realm(&state, &auth, RealmId::new(uuid)) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -4868,6 +5497,10 @@ async fn admin_list_user_sessions(
             .into_response();
     };
     let user_id = crate::core::UserId::new(uuid);
+    // Absent parent ⇒ 404, not an empty 200 (audit 2026-08-28 §4.1#10).
+    if let Err(resp) = require_user_in_realm(&state, &auth.realm_id, &user_id) {
+        return resp;
+    }
     match state
         .identity
         .list_sessions_by_user(&auth.realm_id, &user_id, &params.as_page_request())
@@ -4935,16 +5568,170 @@ async fn admin_revoke_session(
     let session_id = crate::core::SessionId::new(uuid);
     match state.identity.revoke_session(&auth.realm_id, &session_id) {
         Ok(()) => {
-            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::SessionRevoked,
-                resource_type: "session".to_string(),
-                resource_id: session_id.as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &crate::audit::CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::SessionRevoked,
+                    resource_type: "session".to_string(),
+                    resource_id: session_id.as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "admin_api"})),
+                },
+            );
             (StatusCode::NO_CONTENT, ()).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-realm trust policies, operator side (task 25.14)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolves the target realm for the cross-realm policy routes.
+///
+/// Deliberately does NOT consult the target realm's cross-realm policy, unlike
+/// [`scoped_realm`]. These three routes are the operator's recovery valve: a
+/// policy that withholds `hearth.admin` locks the operator out of every other
+/// `/admin/realms/{id}/*` route, and a valve that the lock also closes is not a
+/// valve. Everything else about the guard is unchanged — a tenant admin still
+/// cannot reach a realm that is not their own.
+///
+/// The exemption is narrow and audited: only these routes use it, and every
+/// call still passes through `extract_admin_auth` and a permission gate.
+fn scoped_realm_for_recovery(
+    auth: &AdminAuth,
+    path_realm_id: RealmId,
+) -> Result<RealmId, Response> {
+    if auth.realm_id == path_realm_id || auth.realm_id.as_uuid().is_nil() {
+        return Ok(path_realm_id);
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({"error": "forbidden"})),
+    )
+        .into_response())
+}
+
+/// Parses a realm id from the path and applies the recovery-scoped guard.
+fn recovery_target_realm(auth: &AdminAuth, realm_id_str: &str) -> Result<RealmId, Response> {
+    let realm_uuid: uuid::Uuid = realm_id_str.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid realm ID"})),
+        )
+            .into_response()
+    })?;
+    scoped_realm_for_recovery(auth, RealmId::new(realm_uuid))
+}
+
+/// `GET /admin/realms/{realm_id}/cross-realm-policies`
+///
+/// Lists the cross-realm trust policies stored in the named realm, so an
+/// operator can see what governs a realm before changing it.
+async fn admin_list_cross_realm_policies(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    let realm_id = match recovery_target_realm(&auth, &realm_id_str) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let identity = Arc::clone(&state.identity);
+    match tokio::task::spawn_blocking(move || identity.list_cross_realm_policies(&realm_id)).await {
+        Ok(Ok(policies)) => Json(serde_json::json!({"items": policies})).into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin_list_cross_realm_policies panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `POST /admin/realms/{realm_id}/cross-realm-policies`
+///
+/// Authors a cross-realm trust policy INTO the named realm. Without this an
+/// operator had no way to write a policy for a tenant realm, so the deny branch
+/// enforced by [`scoped_realm`] was reachable only through data written before
+/// the system-source rule existed.
+async fn admin_create_cross_realm_policy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+    Json(body): Json<crate::identity::CreateCrossRealmPolicyRequest>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    let realm_id = match recovery_target_realm(&auth, &realm_id_str) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // Task 25.11 holds here too: a tenant admin must not author a policy that
+    // names the reserved system realm as its source, or they could revoke the
+    // platform operator.
+    if let Err(e) =
+        super::advanced::reject_tenant_authored_system_source(&auth.realm_id, &body.source_realm_id)
+    {
+        return e;
+    }
+    let identity = Arc::clone(&state.identity);
+    match tokio::task::spawn_blocking(move || identity.create_cross_realm_policy(&realm_id, &body))
+        .await
+    {
+        Ok(Ok(policy)) => (StatusCode::CREATED, Json(policy)).into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin_create_cross_realm_policy panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// `DELETE /admin/realms/{realm_id}/cross-realm-policies/{policy_id}`
+///
+/// Removes a policy from the named realm. This is the recovery action: a
+/// deletion can only ever relax the operator's access, never widen it.
+async fn admin_delete_cross_realm_policy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((realm_id_str, policy_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
+    let realm_id = match recovery_target_realm(&auth, &realm_id_str) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let identity = Arc::clone(&state.identity);
+    match tokio::task::spawn_blocking(move || {
+        identity.delete_cross_realm_policy(&realm_id, &policy_id)
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "admin_delete_cross_realm_policy panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }

@@ -4,6 +4,7 @@
 //! calls and serialize responses.
 
 pub mod admin_auth;
+pub(crate) mod audit_log;
 pub(crate) mod client_info;
 pub(crate) mod cluster_admin;
 pub mod convert;
@@ -13,5 +14,6 @@ pub mod http;
 pub mod proto;
 pub mod redact;
 pub mod scim;
+pub mod step_up;
 pub mod tls;
 pub mod web;

@@ -411,12 +411,13 @@ async fn backup_restore_requires_export_capability() {
 /// though no data is written, the audit record must be present.
 #[tokio::test]
 async fn backup_restore_emits_pre_restore_audit_event() {
+    set_master_key();
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
 
-    let archive = make_test_archive(&h, &realm);
+    let archive = export_archive(&h, &realm, &token).await;
     let (ct, body_bytes) = multipart_body(&archive);
 
     let app = build_app(&h).await;
@@ -501,9 +502,58 @@ async fn backup_restore_missing_file_field_returns_400() {
 
 // ===== Dry-run restore round-trip =====
 
-/// Builds a minimal valid backup archive by serializing the actual `Realm` object.
+/// Test master key for the wrapped DEK. Export encrypts every section with a
+/// DEK wrapped by this key; restore unwraps it from the same variable.
+const TEST_MASTER_KEY: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+/// Sets `HEARTH_MASTER_KEY` for this test process. `nextest` runs each test in
+/// its own process, so this cannot race a sibling test.
+fn set_master_key() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("HEARTH_MASTER_KEY", TEST_MASTER_KEY);
+    }
+}
+
+/// Exports a real archive through `POST /admin/backup` and returns its bytes.
 ///
-/// Uses the real `Realm` serde output so the importer can deserialize it correctly.
+/// Restore fails closed when an archive carries no restorable signing key
+/// (HEA-2168), and the HTTP handler never sets `allow_missing_signing_key`.
+/// A hand-built archive therefore cannot reach the restore path at all, so any
+/// test of restore behaviour must start from an archive the exporter produced.
+///
+/// The caller MUST have called [`set_master_key`] before building the harness.
+async fn export_archive(harness: &common::TestHarness, realm: &RealmId, token: &str) -> Vec<u8> {
+    let app = build_app(harness).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "export must succeed before a restore can be tested"
+    );
+    let bytes = resp_bytes(resp).await;
+    assert!(!bytes.is_empty(), "exported archive must not be empty");
+    bytes
+}
+
+/// Builds a minimal backup archive by serializing the actual `Realm` object.
+///
+/// The archive is unencrypted and carries no `signing_key.json`, so restore
+/// REFUSES it by design (HEA-2168). Use it only for tests that fail before the
+/// signing-key gate — the mode parser, the body limit, the auth checks. For a
+/// restore that must reach the importer, use [`export_archive`].
+#[allow(dead_code)]
 fn make_test_archive(harness: &common::TestHarness, realm_id: &RealmId) -> Vec<u8> {
     use hearth::backup::{BackupManifest, RealmManifest, RecordCounts};
 
@@ -535,6 +585,7 @@ fn make_test_archive(harness: &common::TestHarness, realm_id: &RealmId) -> Vec<u
         realm_id: format!("realm_{}", realm_id.as_uuid()),
         slug: realm_slug.clone(),
         record_counts: RecordCounts::default(),
+        audit_chain_included: false,
     }]);
     writer.finish(manifest).expect("finish archive");
 
@@ -555,12 +606,13 @@ fn multipart_body(archive_bytes: &[u8]) -> (String, Vec<u8>) {
 
 #[tokio::test]
 async fn backup_restore_dry_run_returns_counts() {
+    set_master_key();
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
 
-    let archive = make_test_archive(&h, &realm);
+    let archive = export_archive(&h, &realm, &token).await;
     let (ct, body_bytes) = multipart_body(&archive);
 
     let app = build_app(&h).await;
@@ -678,5 +730,370 @@ async fn backup_restore_body_limit_is_enforced() {
         resp.status(),
         StatusCode::PAYLOAD_TOO_LARGE,
         "restore endpoint must return 413 when body exceeds the configured limit"
+    );
+}
+
+// ===== B3: a restore completes or refuses; it never destroys the target =====
+//
+// Audit 2026-08-28 §3 B3, §4.9#2 (P12, BLOCKER). `mode=overwrite` deleted the
+// target realm and then failed to restore it: of 1,160 CLI runs none completed,
+// 975 left the realm destroyed or truncated, and one reported exit 0.
+//
+// The cause is a race with the deletion itself. `delete_realm` marks the realm
+// `DeletingInProgress` and, for a realm above `cascade_background_threshold`,
+// spawns the cascade on a background task and returns `Ok` while it is still
+// running (`src/identity/engine/mod.rs`). The importer then re-creates the
+// realm, and the cascade deletes the realm record, the name index, the signing
+// key and the freshly restored user, credential and session keys underneath it.
+//
+// A restore therefore never deletes a live realm. Restoring into an instance
+// where the realm is absent — the disaster-recovery case — is unaffected: the
+// first `import_realm` succeeds and the overwrite branch is never reached.
+
+/// Overwrite-restoring over a live realm must refuse and leave it intact.
+#[tokio::test]
+async fn backup_restore_overwrite_refuses_over_a_live_realm() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+
+    // Give the realm content, so a truncating restore is visible.
+    let user = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "victim@backup-test.example".into(),
+                display_name: "Victim".into(),
+                first_name: "Victim".into(),
+                last_name: "User".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let archive = export_archive(&h, &realm, &token).await;
+    let (ct, body_bytes) = multipart_body(&archive);
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?mode=overwrite")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "overwrite over a live realm must be refused, not half-executed"
+    );
+
+    // Left untouched: the realm and its content must both survive.
+    assert!(
+        h.identity().get_realm(&realm).expect("get realm").is_some(),
+        "a refused overwrite must leave the realm in place"
+    );
+    assert!(
+        h.identity()
+            .get_user(&realm, user.id())
+            .expect("get user")
+            .is_some(),
+        "a refused overwrite must leave the realm's users in place"
+    );
+}
+
+// ===== B1: the realm acted on comes from the caller's identity =====
+//
+// Audit 2026-08-28 §3 B1, §4.1#1 (P13, BLOCKER). Both backup routes took the
+// realm from a `?realm=<slug>` query parameter and resolved it against every
+// realm in the deployment, with no check that the caller owned it. With no
+// parameter at all, export covered every tenant and restore wrote every realm
+// the archive named. A tenant admin could export a peer tenant in full and
+// overwrite-restore it.
+
+/// Reads a realm's slug (its `name`).
+fn realm_slug(harness: &common::TestHarness, realm: &RealmId) -> String {
+    harness
+        .identity()
+        .get_realm(realm)
+        .expect("get realm")
+        .expect("realm exists")
+        .name()
+        .to_string()
+}
+
+/// Naming a peer tenant's slug on export must be refused, not served.
+#[tokio::test]
+async fn backup_create_refuses_peer_realm_slug() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_a = h.create_realm();
+    h.rbac().seed_realm(&realm_a).expect("seed a");
+    let token_a = make_admin_token(&h, &realm_a).await;
+
+    let realm_b = h.create_realm();
+    h.rbac().seed_realm(&realm_b).expect("seed b");
+    let slug_b = realm_slug(&h, &realm_b);
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/admin/backup?realm={slug_b}"))
+                .header("Authorization", format!("Bearer {token_a}"))
+                .header("X-Realm-ID", realm_a.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a realm admin must not export a peer tenant by naming its slug"
+    );
+}
+
+/// Omitting the parameter must export the caller's realm, not every realm.
+#[tokio::test]
+async fn backup_create_without_realm_param_exports_only_caller_realm() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_a = h.create_realm();
+    h.rbac().seed_realm(&realm_a).expect("seed a");
+    let token_a = make_admin_token(&h, &realm_a).await;
+    let slug_a = realm_slug(&h, &realm_a);
+
+    // A second tenant that must not appear in realm A's archive.
+    let realm_b = h.create_realm();
+    h.rbac().seed_realm(&realm_b).expect("seed b");
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup")
+                .header("Authorization", format!("Bearer {token_a}"))
+                .header("X-Realm-ID", realm_a.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "own-realm export must succeed"
+    );
+
+    let body = resp_bytes(resp).await;
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(tmp.path(), &body).expect("write archive");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+
+    let slugs: Vec<&str> = reader.realms().iter().map(|r| r.slug.as_str()).collect();
+    assert_eq!(
+        slugs,
+        vec![slug_a.as_str()],
+        "an export with no realm parameter must carry the caller's realm only"
+    );
+}
+
+/// Restoring an archive that names a peer tenant must be refused before any
+/// write. `mode=overwrite` is used because it is the destructive path: if the
+/// check does not fire, the peer realm is deleted.
+#[tokio::test]
+async fn backup_restore_refuses_archive_naming_a_peer_realm() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_a = h.create_realm();
+    h.rbac().seed_realm(&realm_a).expect("seed a");
+    let token_a = make_admin_token(&h, &realm_a).await;
+
+    let realm_b = h.create_realm();
+    h.rbac().seed_realm(&realm_b).expect("seed b");
+    let token_b = make_admin_token(&h, &realm_b).await;
+
+    // Realm B's own admin exports realm B — that part is legitimate.
+    let archive_b = export_archive(&h, &realm_b, &token_b).await;
+    let (ct, body_bytes) = multipart_body(&archive_b);
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?mode=overwrite")
+                .header("Authorization", format!("Bearer {token_a}"))
+                .header("X-Realm-ID", realm_a.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a realm admin must not restore over a peer tenant"
+    );
+
+    // Fail closed: realm B must be untouched.
+    assert!(
+        h.identity()
+            .get_realm(&realm_b)
+            .expect("get realm b")
+            .is_some(),
+        "the refused restore must not have deleted the peer realm"
+    );
+}
+
+// ===== POST /admin/backup/restore — integrity (task 26.42) =====
+
+/// Rewrites a `.hearth-backup` blob with one member deleted, leaving
+/// `manifest.json` — and therefore that member's checksum — untouched.
+fn archive_without_member(archive: &[u8], drop_member: &str) -> Vec<u8> {
+    use std::io::Read as _;
+
+    let src = tempfile::NamedTempFile::new().expect("src tempfile");
+    std::fs::write(src.path(), archive).expect("write src");
+    let dst = tempfile::NamedTempFile::new().expect("dst tempfile");
+
+    let decoder =
+        zstd::Decoder::new(std::fs::File::open(src.path()).expect("open src")).expect("dec");
+    let mut tar_in = tar::Archive::new(decoder);
+    let encoder =
+        zstd::Encoder::new(std::fs::File::create(dst.path()).expect("create dst"), 0).expect("enc");
+    let mut builder = tar::Builder::new(encoder);
+    let mut dropped = false;
+    for entry in tar_in.entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let path = entry.path().expect("path").to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("read");
+        if path.ends_with(drop_member) {
+            dropped = true;
+            continue;
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, &path, bytes.as_slice())
+            .expect("append");
+    }
+    builder
+        .into_inner()
+        .expect("into_inner")
+        .finish()
+        .expect("finish");
+    assert!(
+        dropped,
+        "'{drop_member}' was not in the archive — the mutation this helper exists \
+         to make did not happen"
+    );
+    std::fs::read(dst.path()).expect("read dst")
+}
+
+/// The HTTP restore must verify the archive before importing anything.
+///
+/// It opened the archive and imported. Nothing called `verify_checksums`, so an
+/// archive with a member deleted from it — which `hearth backup verify` also
+/// called "OK", because verification walked the tar rather than the manifest —
+/// imported a realm with zero users and answered 200 (audit re-run 23.5, B-3
+/// and B-7). Unlike the CLI this route has no opt-out.
+#[tokio::test]
+async fn backup_restore_refuses_an_archive_that_fails_verification() {
+    set_master_key();
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+
+    h.identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "integrity@backup-test.example".into(),
+                display_name: "Integrity".into(),
+                first_name: "In".into(),
+                last_name: "Tegrity".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let archive = export_archive(&h, &realm, &token).await;
+
+    // Control: the unmodified archive is accepted, so the refusal below is
+    // attributable to the elision and not to the export or the multipart body.
+    let (ct, body_bytes) = multipart_body(&archive);
+    let ok = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        ok.status(),
+        StatusCode::OK,
+        "control: an untouched archive must restore"
+    );
+
+    let elided = archive_without_member(&archive, "users.ndjson");
+    let (ct, body_bytes) = multipart_body(&elided);
+    let resp = build_app(&h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an archive missing a member the manifest checksums must be refused"
+    );
+    let body = String::from_utf8_lossy(&resp_bytes(resp).await).into_owned();
+    assert!(
+        body.contains("integrity") && body.contains("users.ndjson"),
+        "the refusal must say what is wrong and name the missing member; got: {body}"
     );
 }

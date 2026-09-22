@@ -46,8 +46,12 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-web:$springBootVersion")
     testImplementation("org.springframework.boot:spring-boot-starter-security:$springBootVersion")
 
-    // SLF4J binding for test output
-    testImplementation("org.slf4j:slf4j-simple:2.0.13")
+    // No slf4j-simple here on purpose: spring-boot-starter-test and
+    // spring-boot-starter-web both pull logback-classic, and Spring Boot's
+    // LoggingApplicationListener aborts context startup with
+    // "LoggerFactory is not a Logback LoggerContext but Logback is on the
+    // classpath" when a second binding wins the service lookup. That is what
+    // made every @SpringBootTest in this module fail (audit 2026-08-28 §25.8).
 }
 
 tasks.test {

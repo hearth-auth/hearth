@@ -108,15 +108,28 @@ This usually indicates one of:
    authoritative for any key range that was already flushed to that SST at
    backup time:
 
+   Restore into a **fresh** data directory, then cut over. Restore refuses to
+   replace a realm that is already present (audit 2026-08-28 §3 B3), so
+   restoring on top of the damaged directory will not work — and the
+   `--mode overwrite` this step used to prescribe is what destroyed the realm
+   in 975 of 1,160 recorded runs.
+
    ```bash
-   # Restore the entire realm that owns the corrupt SST.
+   # Restore the entire realm that owns the corrupt SST into a new directory.
    # Use --realm if you know which realm's data is in the file (one SST
    # may contain entries from multiple realms — restoring all realms is
    # always safe).
+   systemctl stop hearth
+
    hearth backup restore \
      --input /backups/latest.hearth-backup \
-     --data-dir /var/lib/hearth/data \
-     --mode overwrite
+     --data-dir /var/lib/hearth/data-restored
+
+   # Cut over only after the restore reports success.
+   mv /var/lib/hearth/data /var/lib/hearth/data.corrupt.$(date -u +%Y%m%dT%H%M%SZ)
+   mv /var/lib/hearth/data-restored /var/lib/hearth/data
+
+   systemctl start hearth
    ```
 
 4. **If no backup is available**, you must accept the data loss in the
@@ -185,6 +198,95 @@ intervene for the normal torn-write case.
   legitimately discard tail records that conflict with the leader. The
   Raft log replay supersedes the local WAL in that case — no operator
   action needed.
+
+### Partial WAL header
+
+A WAL segment starts with an 82-byte header: a 4-byte `HWAL` magic, a 2-byte
+format version, and a 76-byte encryption header. Hearth writes it in one call,
+when it creates a segment and again each time it rotates one. A write fault at
+that moment (a full disk, a failing device) can still leave the header short.
+
+You see this at startup:
+
+```
+WARN storage: WAL recovery: header is shorter than one complete header
+              (write fault during segment creation or rotation) —
+              re-initialising an empty segment; no record can be lost
+              because the record region starts at byte 82
+```
+
+This is **handled automatically**, and it loses nothing. Records begin at byte
+82, and the shortest record is 24 bytes, so a segment of 81 bytes or fewer holds
+no record at all. Hearth re-initialises it as an empty segment and starts.
+
+If the fault happened during a *rotation*, the writes that segment held were
+already flushed to an SST before the truncation, so they are still on disk.
+Hearth also fences the WAL at that point, so every write after the fault is
+refused rather than acknowledged:
+
+```
+ERROR storage: WAL rotation failed after the segment was truncated;
+               the next start re-initialises the segment
+```
+
+**When operator action is required.** If the warning returns on every restart,
+the device is rejecting writes. Stop writing to it, copy the data directory to
+known-good storage, and restart there. There is no manual repair command: do
+**not** hand-edit or delete a WAL segment that is 82 bytes or longer, because
+that one does hold records.
+
+---
+
+## WAL write fence
+
+### Failure shape
+
+A write fault in the WAL fences it. A fenced node serves reads normally and
+refuses **every** write, because bytes written after a torn record are discarded
+on replay: acknowledging them would acknowledge data that recovery throws away.
+
+You see this once, when it engages:
+
+```
+ERROR storage: WAL write fence engaged — every subsequent write is refused
+               for the life of this process; restart to clear it.
+               /readyz reports not-ready.
+```
+
+`reason` names the fault that engaged it: `group_commit_write_fault`,
+`rotation_write_fault`, `write_rollback_failed`, or
+`record_counter_unreleasable`.
+
+### How to detect it
+
+| Signal | What you see |
+|--------|--------------|
+| `/readyz` | `503`, body `{"status":"not_ready","storage":"write_fenced"}` |
+| `/metrics` | `hearth_wal_write_fenced{reason="..."} 1` |
+| Logs | the `ERROR storage: WAL write fence engaged` line above |
+
+The metric time series is **absent** during normal operation. Its presence on a
+live scrape means that node accepts no writes. Alert on presence, not on value:
+
+```yaml
+- alert: HearthWalWriteFenced
+  expr: hearth_wal_write_fenced == 1
+  for: 0m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Hearth node {{ $labels.instance }} refuses all writes (WAL fenced)"
+```
+
+### Recovery
+
+**A fence is permanent for the life of the process.** Restart Hearth to clear
+it. In a cluster, `/readyz` already removed the node from the load balancer, so
+a restart is not a further outage.
+
+A fence that returns after the restart means the device is rejecting writes.
+Follow **Partial WAL header** above: move the data directory to known-good
+storage.
 
 ---
 
@@ -457,11 +559,15 @@ property is required: every pre-incident JWT must be invalidated. Examples:
 
 ### Rotation procedure
 
-The `IdentityEngine::rotate_realm_signing_key` API (see
-`src/identity/engine.rs:2944`) issues a new key, marks the old one
-*retiring* with a grace period, and serves both via JWKS until the
-grace deadline so in-flight RPs can re-fetch keys without an immediate
-verification failure.
+Rotation issues a new key and, by default, **revokes every retired key
+for the realm**. A token signed with the old key stops validating at
+once. That is what makes rotation a remedy for a leaked key: while the
+old key stays valid, whoever holds it keeps minting new credentials.
+
+A *planned* rotation — routine key hygiene, no incident — may keep
+existing sessions alive by opting into a grace window, during which
+JWKS serves both keys so relying parties can re-fetch before their
+tokens fail. Never use a window after a compromise.
 
 1. **Issue the rotation.** Call the admin API with the realm's UUID:
 
@@ -478,13 +584,39 @@ verification failure.
    The token must carry `hearth.realm.admin` and be scoped to the same
    realm named in the path; a token from another realm gets `403`.
 
-   The grace period is read from `hearth.yaml`
-   (`token.signing_key_rotation_grace_period`; default: 86400 s / 24 h).
-   Adjust that config value and restart the server before rotating if you
-   need a shorter or longer window. Choose a grace period that matches
-   your slowest RP's JWKS cache TTL plus a margin — 24 hours is the
-   conservative default; 1 hour is fine for an internally-controlled fleet
-   that polls the JWKS endpoint every 5 minutes.
+   The response reports `"grace_period_secs":0` — the retired key is
+   revoked. This is the correct call for an incident.
+
+   For a **planned** rotation, ask for a window explicitly:
+
+   ```bash
+   curl -s -X POST \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: <realm-uuid>" \
+     "https://auth.example.com/admin/realms/<realm-uuid>/rotate-signing-key?grace_period_secs=3600"
+   ```
+
+   Choose a window that matches your slowest RP's JWKS cache TTL plus a
+   margin — 1 hour suits an internally-controlled fleet that polls JWKS
+   every 5 minutes. A value that is not a non-negative integer is
+   rejected with `400`.
+
+   `token.signing_key_rotation_grace_period` in `hearth.yaml` sets the
+   window for the config-driven rotation (`rotate_signing_key: true` on a
+   realm, applied at startup). Left unset it defaults to the longest
+   refresh-token lifetime the config can issue, so a planned rotation does
+   not sign out sessions whose refresh tokens are still valid. It does
+   **not** change this endpoint, which revokes unless the request says
+   otherwise.
+
+   Both paths write a `realm_updated` audit event carrying
+   `metadata.action = "rotate_signing_key"`; the config-driven one adds
+   `metadata.source = "config"` and an actor of `system`.
+
+   In a cluster, rotation is visible to every node: the rotation epoch is
+   persisted alongside the key material and replicated, and each node drops
+   its local signing-key and token-claims caches when it sees the epoch
+   move. You do not need to restart the other nodes.
 
 2. **Force re-issuance of all in-flight tokens.** Existing access tokens
    stay valid until they hit `exp`. To invalidate all active sessions
@@ -503,9 +635,9 @@ verification failure.
    Also requires `hearth.realm.admin`. This is a heavy operation — it
    generates one delta entry per active session.
 
-3. **Verify rotation took effect.** The realm's JWKS should now contain
-   two keys (active + retiring); after the grace deadline, only the new
-   key remains:
+3. **Verify rotation took effect.** After a revoking rotation the
+   realm's JWKS carries only the new key. After a rotation with a
+   window it carries two (active + retiring) until the deadline:
 
    ```bash
    curl https://auth.example.com/realms/production/.well-known/jwks.json

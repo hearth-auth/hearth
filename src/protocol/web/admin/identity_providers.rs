@@ -23,7 +23,12 @@ pub struct IdpRow {
 impl From<IdpConfig> for IdpRow {
     fn from(c: IdpConfig) -> Self {
         Self {
-            id: c.id.to_string(),
+            // 22.18 (audit 2026-08-28 §4.22#10): the bare UUID, matching what
+            // `admin_idp_detail` and the linked-accounts views use in their
+            // paths. `IdpId`'s Display is the prefixed `idp_<uuid>` form, so
+            // emitting `c.id.to_string()` here produced a link the detail
+            // handler could not resolve.
+            id: c.id.as_uuid().to_string(),
             name: c.name,
             display_name: c.display_name,
             kind: c.kind.label().to_string(),
@@ -195,13 +200,20 @@ pub async fn admin_idp_detail(
     target: TargetRealm,
     AxumPath((_realm_name, id_str)): AxumPath<(String, String)>,
 ) -> Response {
-    let idp_id = match id_str.parse::<uuid::Uuid>() {
-        Ok(u) => IdpId::new(u),
+    // 22.18: accept both the bare UUID and the prefixed `idp_<uuid>` display
+    // form. `IdpId: FromStr` strips the prefix when present, so a link built
+    // from either spelling resolves.
+    let idp_id = match id_str.parse::<IdpId>() {
+        Ok(id) => id,
         Err(_) => return super::handlers_common::not_found("Identity provider not found"),
     };
 
     let realm_name = target.0.name().to_string();
-    let callback_url = format!("/realms/{realm_name}/federation/callback");
+    // 22.16 (audit 2026-08-28 §4.22#8): publish the exact absolute URL Hearth
+    // transmits as `redirect_uri`, from the one seam that builds it. The old
+    // value was a relative, realm-scoped path missing the `/ui` prefix, and it
+    // matched neither a real route nor what the connector sent upstream.
+    let callback_url = state.federation_callback_url(&realm_name);
 
     match state.identity.get_idp(target.id(), &idp_id) {
         Ok(Some(config)) => render(&IdpDetailTemplate {

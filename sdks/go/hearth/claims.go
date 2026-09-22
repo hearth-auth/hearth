@@ -18,6 +18,7 @@ type Claims struct {
 	issuer      string
 	audiences   []string
 	expiry      int64
+	notBefore   int64
 	issuedAt    int64
 	jwtID       string
 	scope       string
@@ -37,6 +38,7 @@ type rawClaims struct {
 	Iss             string          `json:"iss"`
 	Aud             audClaim        `json:"aud"`
 	Exp             int64           `json:"exp"`
+	Nbf             int64           `json:"nbf"`
 	Iat             int64           `json:"iat"`
 	Jti             string          `json:"jti"`
 	Scope           string          `json:"scope"`
@@ -99,6 +101,7 @@ func ParseClaims(token string) (*Claims, error) {
 		issuer:      rc.Iss,
 		audiences:   []string(rc.Aud),
 		expiry:      rc.Exp,
+		notBefore:   rc.Nbf,
 		issuedAt:    rc.Iat,
 		jwtID:       rc.Jti,
 		scope:       rc.Scope,
@@ -127,6 +130,9 @@ func (c *Claims) Audiences() []string { return c.audiences }
 
 // Expiry returns the exp claim as a Unix timestamp, or 0 if absent.
 func (c *Claims) Expiry() int64 { return c.expiry }
+
+// NotBefore returns the nbf claim as a Unix timestamp, or 0 if absent.
+func (c *Claims) NotBefore() int64 { return c.notBefore }
 
 // IssuedAt returns the iat claim as a Unix timestamp, or 0 if absent.
 func (c *Claims) IssuedAt() int64 { return c.issuedAt }

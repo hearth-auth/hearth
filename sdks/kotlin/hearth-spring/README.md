@@ -33,7 +33,15 @@ hearth:
   client-secret: s3cr3t                   # optional — required for introspection
 ```
 
-### 2. Wire the filter into your security chain
+### 2. (Optional) Override the security chain
+
+With `hearth.issuer-url` set you are already done. The adapter installs a stateless
+bearer-token `SecurityFilterChain`: CSRF off, no session, the Hearth filter in place,
+every request authenticated, and a `HearthAuthenticationEntryPoint` that answers a
+missing or unusable token with **`401`** and `WWW-Authenticate: Bearer`.
+
+Declare your own `SecurityFilterChain` only when you need public routes or per-route
+authorities — doing so replaces the default entirely, **including the entry point**:
 
 ```kotlin
 import io.hearth.sdk.spring.HearthJwtAuthenticationFilter
@@ -41,6 +49,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
+import org.springframework.security.web.AuthenticationEntryPoint
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 
@@ -50,7 +59,8 @@ class SecurityConfig {
     @Bean
     fun securityFilterChain(
         http: HttpSecurity,
-        hearthFilter: HearthJwtAuthenticationFilter,   // auto-configured from application.yml
+        hearthFilter: HearthJwtAuthenticationFilter,      // auto-configured from application.yml
+        hearthEntryPoint: AuthenticationEntryPoint,       // auto-configured
     ): SecurityFilterChain {
         http
             .csrf { it.disable() }
@@ -60,6 +70,12 @@ class SecurityConfig {
                 auth.requestMatchers("/public/**").permitAll()
                 auth.anyRequest().authenticated()
             }
+            // Required. Spring Security registers an authentication entry point only
+            // for `httpBasic`, `formLogin` or `oauth2ResourceServer`. A chain with
+            // none of those falls back to `Http403ForbiddenEntryPoint`, so a request
+            // carrying no token at all is answered `403` with no `WWW-Authenticate`
+            // header instead of `401`.
+            .exceptionHandling { it.authenticationEntryPoint(hearthEntryPoint) }
         return http.build()
     }
 }
@@ -117,7 +133,8 @@ Roles receive the standard Spring `ROLE_` prefix, enabling `hasRole("admin")` / 
 
 ## Overriding Auto-configuration
 
-Declare your own `@Bean` to replace either auto-configured bean:
+Declare your own `@Bean` to replace any auto-configured bean — the client, the entry
+point, the filter, or the whole `SecurityFilterChain`:
 
 ```kotlin
 @Bean
@@ -137,10 +154,10 @@ fun hearthJwtAuthenticationFilter(client: HearthClient): HearthJwtAuthentication
 
 | Scenario | Result |
 |---|---|
-| No `Authorization` header | Passes through — Spring Security's `ExceptionTranslationFilter` issues 401 for protected routes. |
+| No `Authorization` header | Passes through — the chain's `AuthenticationEntryPoint` answers. The auto-configured `HearthAuthenticationEntryPoint` sends `401` + `WWW-Authenticate: Bearer`. A hand-written chain that omits it gets Spring Security's fallback `403`. |
 | `Authorization: Bearer <valid-jwt>` | Sets `HearthAuthentication` in `SecurityContextHolder`, continues chain. |
-| `Authorization: Bearer <expired-jwt>` | Clears context, returns HTTP 401 immediately. |
-| `Authorization: Bearer <invalid-jwt>` | Clears context, returns HTTP 401 immediately. |
+| `Authorization: Bearer <expired-jwt>` | Clears context, returns `401` + `WWW-Authenticate: Bearer error="invalid_token"` immediately. |
+| `Authorization: Bearer <invalid-jwt>` | Clears context, returns `401` + `WWW-Authenticate: Bearer error="invalid_token"` immediately. |
 
 ## License
 

@@ -4,6 +4,13 @@ All notable changes to `@hearth-auth/browser` and `@hearth-auth/node` are docume
 
 ## [Unreleased]
 
+### Changed
+- **`startWebAuthnRegistration` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
+  the server refuses passkey enrolment carried by an access token alone with
+  `403 step_up_required`, because a stolen token would otherwise mint a permanent
+  credential. The method takes a second `stepUp: StepUpProof` argument: `{ password }`,
+  `{ totp_code }`, or `{ assertion }`.
+
 ### Removed
 - **`admin.createRealm()` and the `CreateRealmParams` type** — realms are
   provisioned via `hearth.yaml` and reconciled at startup, not through the admin

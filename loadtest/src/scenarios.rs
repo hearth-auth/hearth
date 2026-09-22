@@ -593,19 +593,70 @@ async fn tier_lookup(user: &mut GooseUser, index: u64, name: &'static str) -> Tr
         mut request,
         response,
     } = request_timed(user, req, name).await?;
-    match response {
-        Ok(resp) if resp.status().is_success() => Ok(()),
-        Ok(resp) => {
-            let status = resp.status();
-            user.set_failure(&format!("{name}: HTTP {status}"), &mut request, None, None)
+    let resp = match response {
+        Ok(r) => r,
+        Err(e) => {
+            return user.set_failure(
+                &format!("{name}: transport error: {e}"),
+                &mut request,
+                None,
+                None,
+            )
         }
-        Err(e) => user.set_failure(
-            &format!("{name}: transport error: {e}"),
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return user.set_failure(&format!("{name}: HTTP {status}"), &mut request, None, None);
+    }
+    // A status check alone is not enough here. `/dev/probe-user` returns 200
+    // whether or not the user exists — its handler says so in as many words
+    // ("Return 200 regardless of found/not-found — the measurement is latency,
+    // not correctness ... A missing user contributes a fast cached-miss path,
+    // which is fine noise for the sweep", `src/protocol/http/admin.rs:3021`).
+    //
+    // That is only true while misses are a small minority, and nothing
+    // measured that. Point a tier-miss run at a realm whose corpus was never
+    // seeded, or overstate `--tier-miss-corpus-size`, and every probe misses:
+    // every request returns 200, the failure rate reads 0%, and the report
+    // publishes `hot_p50_ms`, `cold_p50_ms` and the tier delta computed
+    // entirely over not-found lookups — a storage-tier measurement of a corpus
+    // that is not there (audit 2026-09-21, task 23.14).
+    //
+    // The handler already returns the resolved `user_id` (null on a miss); the
+    // sweep simply ignored it. A miss is now a failed request, so the 5%
+    // MAX_FAILURE_RATE budget bounds how much of the sample may be misses and
+    // the run's exit code turns non-zero past that.
+    let json = match resp.json::<serde_json::Value>().await {
+        Ok(j) => j,
+        Err(e) => {
+            return user.set_failure(
+                &format!("{name}: invalid JSON: {e}"),
+                &mut request,
+                None,
+                None,
+            )
+        }
+    };
+    if probe_found_user(&json) {
+        Ok(())
+    } else {
+        user.set_failure(
+            &format!("{name}: no user for {email} — the corpus is smaller than --tier-miss-corpus-size, or was never seeded"),
             &mut request,
             None,
             None,
-        ),
+        )
     }
+}
+
+/// Whether a `/dev/probe-user` body reports an actual user.
+///
+/// The handler answers `{"ok":true,"user_id":null}` for a miss and
+/// `{"ok":true,"user_id":"<uuid>"}` for a hit, both with status 200.
+fn probe_found_user(body: &serde_json::Value) -> bool {
+    body.get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// Hot-tier journey: repeatedly hits the small resident working set.
@@ -880,6 +931,26 @@ mod tests {
 
     fn tier_ctx_for(corpus: u64, hot: u64) -> TierMissContext {
         TierMissContext::new("realm-1".into(), "bulk.demo".into(), corpus, hot)
+    }
+
+    #[test]
+    fn a_probe_that_found_no_user_is_not_a_successful_lookup() {
+        // Audit 2026-09-21 (task 23.14). `/dev/probe-user` answers 200 for a
+        // miss as well as a hit, so a status-only check let a tier-miss sweep
+        // report a full hot/cold latency split measured entirely against a
+        // corpus that was never seeded.
+        assert!(!probe_found_user(
+            &serde_json::json!({"ok": true, "user_id": null})
+        ));
+        assert!(!probe_found_user(&serde_json::json!({"ok": true})));
+        assert!(!probe_found_user(
+            &serde_json::json!({"ok": true, "user_id": ""})
+        ));
+        assert!(!probe_found_user(&serde_json::json!("not an object")));
+        assert!(probe_found_user(&serde_json::json!({
+            "ok": true,
+            "user_id": "11111111-1111-1111-1111-111111111111"
+        })));
     }
 
     #[test]

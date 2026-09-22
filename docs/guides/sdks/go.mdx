@@ -302,29 +302,33 @@ HTTP 429 is surfaced as `*hearth.APIError` with `StatusCode == 429`.
 
 ## RBAC checks
 
-### Synchronous (zero-network) helpers
+### Local RBAC predicates
 
-These decode the JWT **locally** — no network call, no lock. They return
-`false` for an empty or malformed token.
+These read the claims out of the JWT itself rather than asking the server for a
+freshly-resolved permission set. They still **verify the token first** — the
+signature is checked against the realm JWKS (cached, so usually no network
+round-trip) and `exp`/`nbf`/`iss` are enforced before any claim is read. Each
+takes a `context.Context` for that verification and returns `false` for an
+empty, malformed, unsigned, expired or unknown-key token.
 
 ```go
-// Returns true if the JWT permissions claim contains this permission.
-if client.HasPermission(accessToken, "invoices.write") {
+// Returns true if the token verifies and its permissions claim contains this permission.
+if client.HasPermission(ctx, accessToken, "invoices.write") {
     renderInvoiceForm()
 }
 
-// Returns true if the JWT roles claim contains this role.
-if client.HasRole(accessToken, "billing-admin") {
+// Returns true if the token verifies and its roles claim contains this role.
+if client.HasRole(ctx, accessToken, "billing-admin") {
     renderBillingPanel()
 }
 
-// Returns true if the JWT groups claim contains this slug.
-if client.InGroup(accessToken, "engineering") {
+// Returns true if the token verifies and its groups claim contains this slug.
+if client.InGroup(ctx, accessToken, "engineering") {
     renderInternalTooling()
 }
 
-// Returns true if the JWT oid claim equals this org ID.
-if client.InOrg(accessToken, "org_acme") {
+// Returns true if the token verifies and its oid claim equals this org ID.
+if client.InOrg(ctx, accessToken, "org_acme") {
     renderAcmeContent()
 }
 ```

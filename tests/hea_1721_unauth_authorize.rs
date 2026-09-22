@@ -109,12 +109,18 @@ async fn setup() -> TestEnv {
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         let _harness = harness;
-        axum::serve(listener, router(state))
-            .with_graceful_shutdown(async {
-                rx.await.ok();
-            })
-            .await
-            .ok();
+        axum::serve(
+            listener,
+            // Production installs `ConnectInfo` on both accept loops, and the
+            // dev-endpoint loopback guard (task 20.1) fails CLOSED without it —
+            // a test server that omits it answers 404 on `/admin/bootstrap`.
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            rx.await.ok();
+        })
+        .await
+        .ok();
     });
 
     TestEnv {

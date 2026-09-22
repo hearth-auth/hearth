@@ -17,13 +17,33 @@ Work through this list for every upgrade, including patch releases.
 - [ ] **Read the CHANGELOG.** Check `CHANGELOG.md` for your target version. Look for `### Changed`, `### Removed`, and `### Security` entries that affect your configuration or integration. Breaking changes are prefixed `**Breaking:**`.
 - [ ] **Take a backup.** Run this immediately before the upgrade — even if you took one last night.
 
+  > **Stop the server first.** `hearth backup create` opens the store directly and
+  > the data directory carries an exclusive `LOCK`. Against a running instance it
+  > exits `2` with `data directory '…' is already locked by another process`. So the
+  > real order is: stop the service (step 1 of the [upgrade procedure](#upgrade-procedure)),
+  > take the backup, install the new binary, start. Budget the backup into your
+  > downtime window rather than treating it as a pre-flight step.
+
+  > **Give it the key-encryption key.** A production store's signing keys are
+  > encrypted at rest, and the command cannot read them without the KEK. Export
+  > `HEARTH_KEK`, or pass `--config` pointing at the `hearth.yaml` that carries
+  > `security.key_encryption_key`. `HEARTH_MASTER_KEY` must be set as well, just
+  > as it is for `serve`.
+
   ```bash
+  export HEARTH_KEK=$(cat /etc/hearth/kek.hex)
+
   hearth backup create \
     --data-dir /var/lib/hearth/data \
     --include-audit \
     --output /backups/pre-upgrade-$(date +%Y%m%d-%H%M%S).hearth-backup
   ```
 
+  > **A bad `--data-dir` now fails loudly.** `backup create` refuses a path that
+  > does not exist and refuses a store with no realms in it, and `backup verify`
+  > refuses an archive with zero files. Until task 26.26 all three exited `0`, so
+  > a typo'd path produced an empty archive that verified clean. Still read the
+  > realm list from `backup inspect` (below) before trusting an archive.
   Verify it was written cleanly:
 
   ```bash
@@ -43,16 +63,25 @@ Work through this list for every upgrade, including patch releases.
   hearth backup inspect \
     --input /backups/pre-upgrade-<timestamp>.hearth-backup
   # Archive:           /backups/pre-upgrade-<timestamp>.hearth-backup
-  #   format version : 1
-  #   hearth version : 1.6.9        ← the binary that wrote the archive
-  #   created at     : 2026-08-11T20:45:16Z
-  #   signing key DEK: absent       ← "present (passphrase-protected)" if --encrypt was used
+  #   format version : 2
+  #   hearth version : 1.6.11-143-gcfb6c4f5   ← the binary that wrote the archive
+  #   created at     : 2026-09-21T16:57:00Z
+  #   signing key DEK: present (passphrase-protected)
   #   checksummed files: 42
   #   realms (2): …
   ```
 
-  If `signing key DEK` reports `present (passphrase-protected)`, you will be prompted for the
-  passphrase on restore — make sure you still have it before relying on this archive for rollback.
+  `format version` is the **archive** format (currently `2`) and is unrelated to the WAL format
+  version checked below.
+
+  The `signing key DEK` line reports `present (passphrase-protected)` on every archive this
+  build writes, whether or not `--encrypt` was passed — it is not a reliable signal for "was
+  this archive encrypted". You are prompted for a passphrase on restore only when the archive
+  was actually created with `--encrypt`; if you used that flag, make sure you still have the
+  passphrase before relying on this archive for rollback.
+
+  **`checksummed files: 0` or an empty `realms` list means the archive is empty** — re-check the
+  `--data-dir` path and take it again.
 
 - [ ] **Check the WAL format version.** The WAL header layout is `[4B magic "HWAL"][2B version, little-endian]`. Read the current version directly:
 
@@ -144,6 +173,11 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    ```bash
    docker pull ghcr.io/hearth-auth/hearth:<new-version>
    ```
+
+   > **Known gap:** re-checked 2026-09-21, an anonymous manifest fetch for this package returns
+   > **401** for every tag. Run `docker login ghcr.io` with a token carrying `read:packages`
+   > first, or upgrade via the release binary and the systemd path below. Tracked as remediation
+   > task 3.4.
 
 2. **Update the image tag** in your `docker-compose.yml` (or `.env` file, if you parameterise the tag):
 
@@ -264,8 +298,13 @@ Run these checks immediately after bringing the new binary up, regardless of dep
 
   ```bash
   curl -fsS -H "Authorization: Bearer <admin-token>" \
+    -H "X-Realm-ID: <realm-uuid>" \
     http://localhost:8420/admin/realms | jq .
   ```
+
+  `X-Realm-ID` is mandatory on every `/admin/*` route. Omit it and the call answers
+  `400 {"error":"missing X-Realm-ID header"}` — which is easy to misread as an upgrade
+  regression when it is a missing header.
 
 - [ ] **No unexpected WARN or ERROR lines in the log** since startup. On systemd:
 
@@ -426,10 +465,16 @@ compiled-in defaults without running validation at all. The defaults now pass th
 gates, so a bare `hearth serve` refuses to start until a config satisfying the production
 checklist is provided (or `--dev` is passed for local development).
 
-**Key-encryption caveat:** setting `HEARTH_KEK` for the first time on an existing data directory
-is safe — legacy plaintext key records remain readable and are flagged with a startup warning.
-Keys written after the change are encrypted. To supersede the plaintext copies, rotate each
-realm's signing key after the upgrade (`POST /admin/realms/{id}/rotate-signing-key`).
+**Key encryption:** setting `HEARTH_KEK` for the first time on an existing data directory is safe.
+The first KEK-configured start re-encrypts every signing key already on disk — the server-wide key,
+every realm's active key, and every retiring key — logs how many it re-wrapped, and marks the store
+enrolled. From then on an unenveloped signing key is **refused**, not silently accepted, so an
+attacker who strips the envelope cannot downgrade the deployment. No rotation is needed to supersede
+the plaintext copies, and no tokens are invalidated. Take a backup before the first KEK-enabled boot,
+as with any in-place key migration.
+
+Earlier releases encrypted only *subsequent* writes and accepted unenveloped keys indefinitely; the
+previous advice here — rotate every realm's key after the upgrade — is no longer necessary.
 
 ### v1.6.x → later
 

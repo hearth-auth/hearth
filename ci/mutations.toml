@@ -1,0 +1,142 @@
+# ci/mutations.toml — the mutation spot-check manifest.
+#
+# Production-readiness task 24.3 (audit 2026-08-28 §9 item 3).
+#
+# The audit's sharpest instrument was never run: "comment out five
+# security-critical checks and see whether anything goes red". Its verdict was
+#
+#     "We therefore cannot say whether this test suite can fail."
+#
+# This file turns that from a habit into a gate. Each entry names a
+# security-critical check in the source, the exact bytes that implement it, the
+# bytes to put in their place, and the ONE test that must go red as a result.
+#
+# `scripts/mutation-spot-check.sh` reads this file and, for every entry:
+#
+#   1. runs the named test UNMUTATED — it must PASS (a test that is already red
+#      proves nothing when it is red again; this is also the 24.4 red-test gate
+#      for exactly these guards),
+#   2. applies the mutation,
+#   3. runs the same test — it must FAIL, and must fail as a *test failure*, not
+#      as a compile error (a mutation that does not build proves nothing either),
+#   4. restores the file from a byte snapshot taken before step 2 and verifies
+#      the SHA-256 matches.
+#
+# Rules for adding an entry:
+#
+#   * `find` MUST occur EXACTLY ONCE in `file`. The runner refuses the manifest
+#     otherwise — a two-occurrence anchor silently mutates the wrong call site.
+#   * `test` MUST be the exact test-function name. The runner selects it with
+#     nextest's `test(=<name>)` exact-match filter.
+#   * `cargo_args` narrows the build to the one target that holds the test.
+#     Without it a single entry rebuilds every test binary in the workspace.
+#   * The mutation must MODEL A REMOVED CHECK, not a broken program. Deleting
+#     the guard and watching the test notice is the proof; corrupting an
+#     unrelated line is not.
+#   * Verify a new entry locally (`bash scripts/mutation-spot-check.sh --only
+#     <id>`) BEFORE committing it. An entry that does not go red is worse than
+#     no entry: it is a green badge over an untested guard.
+#
+# `scripts/mutation-spot-check.sh --check` validates this file without building
+# anything (~1 s) and runs on every PR from ci.yml's `filter` job. The full run
+# builds four test targets twice each and is nightly — see
+# .github/workflows/mutation-spot-check.yml.
+
+# ── 1. WAL fsync-before-ack (audit §4.11#11 — BLOCKER-adjacent) ──────────────
+#
+# CLAUDE.md: "WAL MUST be `fsync`'d before acknowledging any write." The audit
+# found that NO test in the repository could distinguish fsync-before-ack from
+# no fsync at all. Task 24.2 wrote one. This entry proves it can still fail:
+# discard the sync result instead of propagating it, and the WAL acknowledges a
+# write the kernel never promised.
+[[mutation]]
+id = "wal-fsync-before-ack"
+file = "src/storage/wal.rs"
+test = "simulation_append_is_refused_when_the_fsync_fails"
+cargo_args = "--package hearth-simulation --lib"
+why = "Group commit must propagate the fsync error; discarding it acks a lost write."
+find = '''
+            file.sync_data()?;
+'''
+replace = '''
+            let _ = file.sync_data();
+'''
+
+# ── 2. CSRF header on JSON /ui/admin mutations (audit §4.23#1b) ──────────────
+#
+# Eight authenticated /ui/admin JSON mutations — including the whole-file
+# hearth.yaml rewrite — were tokenless. Task 21.2 put `RequireCsrf` on them.
+# This entry removes the comparison and accepts any header (or none), which is
+# precisely the audited shape.
+[[mutation]]
+id = "csrf-header-required-on-json-mutations"
+file = "src/protocol/web/auth.rs"
+test = "json_mutations_without_csrf_header_are_forbidden"
+cargo_args = "--test csrf_admin_json_mutations"
+why = "RequireCsrf must reject an absent or mismatched X-CSRF-Token on a mutation."
+find = '''
+        match header_val {
+            Some(h) if ct_eq_str(h, cookie) => Ok(RequireCsrf),
+            _ => Err(csrf_failure_response()),
+        }
+'''
+replace = '''
+        let _ = (header_val, cookie);
+        Ok(RequireCsrf)
+'''
+
+# ── 3. Admin console authorization gate (audit §4.19, §4.23) ─────────────────
+#
+# `RequireAdmin` resolves the caller's permissions against the RBAC engine at
+# every admin request — session cookies carry no claims. Short-circuit the
+# decision to "yes" and every /ui/admin page opens to any system-realm session.
+[[mutation]]
+id = "admin-console-requires-hearth-admin"
+file = "src/protocol/web/auth.rs"
+#
+# The first entry written here named `non_admin_user_gets_403_on_admin_pages`,
+# and the mutation SURVIVED it: that test's cookie names a tenant realm, so
+# `RequireAdmin`'s realm gate refuses the request before the permission lookup
+# ever runs. The permission gate had no coverage at all. This is what the
+# instrument is for — `system_realm_user_without_admin_permission_gets_403` was
+# written in response and is the test that notices.
+test = "system_realm_user_without_admin_permission_gets_403"
+cargo_args = "--test web_ui_admin"
+why = "RequireAdmin must 403 a system-realm session without the hearth.admin permission."
+find = '''
+        if is_admin {
+            Ok(RequireAdmin(session))
+'''
+replace = '''
+        if is_admin || true {
+            Ok(RequireAdmin(session))
+'''
+
+# ── 4. Realm isolation in the storage engine (CLAUDE.md storage rule) ────────
+#
+# "All keys are prefixed with realm ID. Scans bounded to a single realm."
+# `Memtable::scan_realm` is that bound. Replace the realm-bounded range with a
+# whole-map iteration and one tenant's scan returns another tenant's rows — the
+# multi-tenant failure this database exists to prevent.
+[[mutation]]
+id = "memtable-scan-bounded-to-one-realm"
+file = "src/storage/memtable.rs"
+test = "realm_isolation_no_cross_realm_reads"
+cargo_args = "--lib"
+why = "A realm scan must start at the realm's prefix and stop at its end."
+find = '''
+        let start = CompositeKey {
+            realm_id: realm_id.clone(),
+            key: vec![],
+        };
+        map.range(start..)
+            .take_while(|entry| entry.key().realm_id == *realm_id)
+            .map(|entry| (entry.key().key.clone(), entry.value().clone()))
+            .collect()
+'''
+replace = '''
+        let _ = realm_id;
+        map.iter()
+            .map(|entry| (entry.key().key.clone(), entry.value().clone()))
+            .collect()
+'''

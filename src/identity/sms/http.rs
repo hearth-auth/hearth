@@ -42,10 +42,44 @@ pub trait SmsHttpTransport: Send + Sync {
 /// runtime is detected (same pattern as the email SMTP/HTTP senders).
 pub struct UreqSmsTransport;
 
+/// Connect timeout for one SMS-provider API call.
+const SMS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Total timeout for one SMS-provider API call, connect included.
+const SMS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Builds the `ureq` configuration every SMS-provider API call uses.
+///
+/// [`UreqSmsTransport::post`] previously called bare `ureq::post`, which uses
+/// `Config::default()`. In ureq 3.3.0 that leaves **every** timeout unset
+/// except `await_100` — no global, connect, resolve, send or receive bound.
+/// The call runs inside `tokio::task::block_in_place`, so it occupies a Tokio
+/// *worker* thread rather than a `spawn_blocking` thread: a provider that
+/// completes the TCP handshake and then stops responding costs one core's
+/// worth of runtime capacity permanently, and nothing ever unsticks it. An
+/// OTP send sits on the login path, so the queue behind it is user-facing.
+///
+/// The values match `federation_agent_config`, the closest sibling egress
+/// path (`src/identity/federation/http.rs`), and the redirect cap is the
+/// shared `webhook::ssrf::MAX_WEBHOOK_REDIRECTS`. `https_only` is safe to
+/// assert here because every provider endpoint this transport is given is
+/// built from a hard-coded `https://` constant (`twilio.rs`, `sns.rs`) —
+/// neither is operator-configurable.
+fn sms_agent_config() -> ureq::config::Config {
+    ureq::config::Config::builder()
+        .timeout_connect(Some(SMS_CONNECT_TIMEOUT))
+        .timeout_global(Some(SMS_REQUEST_TIMEOUT))
+        .https_only(true)
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build()
+}
+
 impl SmsHttpTransport for UreqSmsTransport {
     fn post(&self, request: &SmsHttpRequest) -> Result<SmsHttpResponse, SmsError> {
         let do_request = || {
-            let mut req = ureq::post(&request.url).header("Content-Type", &request.content_type);
+            let agent = ureq::Agent::new_with_config(sms_agent_config());
+            let mut req = agent
+                .post(&request.url)
+                .header("Content-Type", &request.content_type);
 
             for (name, value) in &request.headers {
                 req = req.header(name.as_str(), value.as_str());
@@ -156,6 +190,63 @@ mod tests {
         assert_eq!(recorded[0].url, "https://api.example.com/sms");
         assert_eq!(recorded[0].headers[0].0, "Authorization");
         assert_eq!(recorded[0].body, b"hello");
+    }
+
+    // ── Egress hardening on the SMS provider transport (finding E-4) ───────
+
+    /// `UreqSmsTransport::post` called bare `ureq::post`, which uses
+    /// `Config::default()`. In ureq 3.3.0 every timeout there is `None` except
+    /// `await_100`. The call runs inside `block_in_place`, so a provider that
+    /// completes the TCP handshake and then stops responding pins a Tokio
+    /// *worker* thread permanently. Matches `federation_agent_config`.
+    #[test]
+    fn sms_agent_config_bounds_timeouts_and_caps_redirects() {
+        let config = sms_agent_config();
+        let timeouts = config.timeouts();
+        assert_eq!(
+            timeouts.connect,
+            Some(SMS_CONNECT_TIMEOUT),
+            "SMS provider egress must bound connect time"
+        );
+        assert_eq!(
+            timeouts.global,
+            Some(SMS_REQUEST_TIMEOUT),
+            "SMS provider egress must bound total request time"
+        );
+        assert!(
+            config.https_only(),
+            "every SMS provider endpoint is https; plaintext must be refused"
+        );
+        assert_eq!(
+            config.max_redirects(),
+            crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS,
+            "SMS provider egress must use the shared redirect cap"
+        );
+    }
+
+    /// Proves the configuration above is the one `post` actually applies.
+    /// Under ureq's default config a plaintext URL is permitted and this call
+    /// would fail with a connection error instead of an https-only refusal,
+    /// so the assertion is on the refusal reason, not merely on `is_err()`.
+    #[test]
+    fn ureq_sms_transport_applies_its_config_to_every_send() {
+        let req = SmsHttpRequest {
+            // Port 1 refuses instantly, so this test never waits on the network
+            // whichever way the guard goes.
+            url: "http://127.0.0.1:1/Messages.json".to_string(),
+            headers: vec![],
+            body: b"To=%2B15551234567".to_vec(),
+            content_type: "application/x-www-form-urlencoded".to_string(),
+        };
+        // `SmsHttpResponse` is not `Debug`, so match rather than `expect_err`.
+        let msg = match UreqSmsTransport.post(&req) {
+            Ok(_) => panic!("a plaintext provider URL must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("configured for https only"),
+            "post() must use the hardened agent config; got: {msg}"
+        );
     }
 
     #[test]

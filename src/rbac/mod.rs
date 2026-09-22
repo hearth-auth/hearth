@@ -29,11 +29,11 @@ pub use registry::RegistryError;
 pub use seed::seed_permission_description;
 pub use types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
-    GroupId, GroupMember, GroupMembership, Page, Permission, PermissionDefinition,
-    PermissionRecord, PermissionStatus, ProtectedResource, ResolvedPermissions, Role,
-    RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeBundle,
-    ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest,
-    UserPermissionGrant,
+    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission,
+    PermissionDefinition, PermissionRecord, PermissionStatus, ProtectedResource,
+    ResolvedPermissions, Role, RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus,
+    RoleSubject, Scope, ScopeBundle, ScopeExport, ScopeSpec, Subject, TraversalKind,
+    UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 
 use crate::core::{ImportOutcome, OrganizationId, PageRequest, PagedResult, RealmId, Uri, UserId};
@@ -108,6 +108,30 @@ pub trait RbacEngine: Send + Sync {
         resource: Option<&Uri>,
     ) -> Result<ResolvedPermissions, RbacError>;
 
+    // ------- Replicated-write invalidation (cluster mode) -------
+
+    /// Notifies the engine that `key` was written or deleted for `realm_id` by
+    /// the replication layer rather than by this node's own mutation path.
+    ///
+    /// Implementations MUST drop any cached decision the row could change.
+    /// Without this a follower keeps serving a pre-revocation permission set:
+    /// the decision cache is invalidated by a per-realm generation counter
+    /// that only the node serving the mutation bumps, while the revocation
+    /// itself reaches other nodes as a plain replicated storage write. The
+    /// `/ui/admin` authorization gate resolves through that cache on an
+    /// ordinary GET, which a follower is free to serve, so the stale hit is a
+    /// privilege-escalation window bounded only by cache eviction.
+    ///
+    /// Called on the Raft state-machine apply path: it MUST be fast,
+    /// non-blocking and infallible. Keys that are not this engine's concern
+    /// MUST be ignored cheaply.
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]);
+
+    /// Notifies the engine that the entire key space was replaced beneath it
+    /// (a Raft snapshot install). Implementations MUST drop every cached
+    /// decision, for every realm.
+    fn on_replicated_snapshot(&self);
+
     /// Grants a direct permission to a user outside any role.
     fn grant_user_permission(
         &self,
@@ -159,6 +183,34 @@ pub trait RbacEngine: Send + Sync {
         org_id: &OrganizationId,
         user_id: &UserId,
     ) -> Result<Vec<String>, RbacError>;
+
+    /// Deletes every extra org-scoped role row for one user in one
+    /// organization, returning how many rows were removed.
+    ///
+    /// Called by the identity layer from `remove_member`. Without it an
+    /// offboarded member's extra roles survive removal and are silently
+    /// restored the moment the same `UserId` is re-added, because
+    /// `resolve_permissions` expands the rows without consulting membership
+    /// (subsystem audit 2026-09-21, finding O-1). Idempotent.
+    fn purge_org_roles_for_user(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<usize, RbacError>;
+
+    /// Deletes every extra org-scoped role row in an organization, for every
+    /// user, returning how many rows were removed.
+    ///
+    /// Called by the identity layer from `delete_organization`. Sweeps the
+    /// whole org rather than iterating the membership index, so rows left
+    /// behind for users who are no longer members are removed too.
+    /// Idempotent.
+    fn purge_org_roles_for_org(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+    ) -> Result<usize, RbacError>;
 
     // ------- Roles -------
 
@@ -297,8 +349,9 @@ pub trait RbacEngine: Send + Sync {
         limit: usize,
     ) -> Result<Page<RoleSubject>, RbacError>;
 
-    /// Removes all role assignments where this user is the subject, and removes
-    /// the user from all groups within the realm.
+    /// Removes all role assignments where this user is the subject, removes
+    /// the user from all groups within the realm, and deletes every extra
+    /// org-scoped role row the user holds in any organization of the realm.
     ///
     /// Called by the identity layer during `delete_user` to keep RBAC state
     /// consistent. Idempotent: calling on a user with no assignments is a no-op.
@@ -390,6 +443,17 @@ pub trait RbacEngine: Send + Sync {
     /// Returns all role-assignment records in a realm for backup export.
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
 
+    /// Returns every group-membership edge in a realm for backup export.
+    ///
+    /// Groups and the role assignments bound to them already round-trip; the
+    /// edges between a group and its members did not, so a restored realm
+    /// presented a correct-looking RBAC graph that resolved to nothing
+    /// (OpenSpec 26.40).
+    fn export_all_group_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<GroupMembershipEdge>, RbacError>;
+
     // ------- Backup import helpers -------
     //
     // These restore records **verbatim**, preserving the record's own ID and
@@ -443,6 +507,19 @@ pub trait RbacEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         scope: &ScopeExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores a group-membership edge, writing **both** index entries.
+    ///
+    /// The reverse (`member → group`) entry is the one permission resolution
+    /// scans; an implementation that wrote only the forward entry would
+    /// restore memberships that are visible in a member listing and invisible
+    /// to authorization.
+    fn import_group_membership(
+        &self,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
         overwrite: bool,
     ) -> Result<ImportOutcome, RbacError>;
 }

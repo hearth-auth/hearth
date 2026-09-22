@@ -55,7 +55,12 @@ use crate::types::{AccessTokenAuthorization, CheckPermissionOpts};
 
 // ── Verified-token marker ─────────────────────────────────────────────────────
 
-/// Raw bearer token string stored in request extensions after successful authentication.
+/// Bearer token whose signature this middleware has verified against the
+/// realm's JWKS, stored in request extensions after successful authentication.
+///
+/// The name is load-bearing: nothing is inserted here until
+/// [`HearthClient::verify_token`] has returned `Ok`, so anything reading it may
+/// treat the payload as authenticated.
 ///
 /// Internal marker; downstream handlers should use [`RequirePermission`] instead.
 #[doc(hidden)]
@@ -77,8 +82,10 @@ struct MiddlewareConfig {
 /// enforces **one** permission with **one** explicit mode; compose multiple layers for
 /// multi-permission routes.
 ///
-/// On success, the raw bearer token is stored in request extensions so that the
-/// [`RequirePermission`] extractor can decode [`Claims`] without an additional network call.
+/// The middleware verifies the bearer token's signature against the realm's JWKS
+/// before any permission check. On success the verified token is stored in request
+/// extensions so that the [`RequirePermission`] extractor can decode [`Claims`]
+/// without an additional network call.
 ///
 /// # Mode-mismatch handling
 /// If the server echoes a mode different from `expected_mode` (introspection), the middleware
@@ -169,10 +176,22 @@ where
 
             // Spec §6 rule 6: required_action tokens must never be accepted for general API
             // access — short-circuit before any permission check or network call.
+            //
+            // This read is deliberately unverified: it can only ever *reject*, so a
+            // forged token_type costs the forger their own request and grants nothing.
             if let Ok(claims) = Claims::decode(&token) {
                 if claims.tokenType() == "required_action" {
                     return short_circuit(req, actix_web::http::StatusCode::UNAUTHORIZED);
                 }
+            }
+
+            // Verify the signature before anything downstream may read a claim.
+            // `VerifiedToken` below promises exactly this, and the RequirePermission
+            // extractor decodes the token on that promise. Embedded mode verifies
+            // again inside check_permission; the JWKS is cached, so the repeat is a
+            // local signature check.
+            if config.client.verify_token(&token).await.is_err() {
+                return short_circuit(req, actix_web::http::StatusCode::UNAUTHORIZED);
             }
 
             let opts = config.opts.clone();
@@ -183,7 +202,8 @@ where
 
             match result {
                 Ok(true) => {
-                    // Store the verified token so `RequirePermission` can decode claims.
+                    // Store the token — verified above — so `RequirePermission`
+                    // can decode authenticated claims from it.
                     req.extensions_mut().insert(VerifiedToken(token));
                     let resp = service.call(req).await?;
                     Ok(resp.map_into_left_body())

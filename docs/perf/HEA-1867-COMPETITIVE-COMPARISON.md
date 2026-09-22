@@ -1,6 +1,25 @@
 # HEA-1867 — Hearth vs. competitors: what the published numbers actually say
 
-**Date:** 2026-07-29 · **Author:** CEO · **Status:** board answer, not a marketing artifact yet
+**Date:** 2026-07-29 · **Author:** CEO · **Status:** ⛔ **SUPERSEDED — do not quote any figure in this document.**
+
+> **Superseded 2026-07-29 by `docs/perf/PUBLISHED_FIGURES.md`, and re-confirmed superseded on
+> 2026-09-21.** Every comparison below is withdrawn. Three independent reasons, all recorded in
+> `PUBLISHED_FIGURES.md`:
+>
+> 1. **Every HTTP-plane competitive multiplier is retracted** (§4.1, §6 "Do not publish"). The
+>    `/userinfo` 44–63× and `/introspect` 2.3–2.6× ratios moved by 2–4× on re-measurement at
+>    `1b6b7745`, and HEA-1974 then established that **no host currently available can reproduce
+>    them at all** — `dev-ryzen-7840hs` is a mobile part under DVFS and is disqualified as a
+>    like-for-like denominator against server-class competitor figures at any load.
+> 2. **The T4 session-creation figure graded `PASS` here (41,255 ops/s @T=256) is retracted**
+>    (§2.1). Five alternating runs on 2026-07-30 spanned 10,047–33,888 ops/s, median ~16,281 —
+>    the earlier number was inside the host's jitter.
+> 3. **The project publishes no competitor comparison.** That is the standing position stated in
+>    the README: "We would rather ship no multiplier than a wrong one." This document predates
+>    that decision and contradicts it.
+>
+> Kept in the repository as the record of how the comparison was constructed and why it was
+> withdrawn. The cleared-for-publication list is `PUBLISHED_FIGURES.md` §6 and nothing else.
 
 Answers the board question: *"How do these metrics compare against our major competitors?"*
 

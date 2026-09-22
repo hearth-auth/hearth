@@ -68,14 +68,24 @@ def _extract_bearer_environ(environ: dict) -> Optional[str]:
     return None
 
 
-def _check_embedded(token: str, permission: str) -> bool:
-    """Decode JWT locally and check ``permissions`` claim.
+def _check_embedded(
+    client: Optional["HearthClient"], token: str, permission: str
+) -> bool:
+    """Verify the JWT, then check its ``permissions`` claim.
+
+    *client* verifies the token end-to-end — Ed25519 signature against the
+    realm's cached JWKS, plus ``exp``, ``nbf`` and ``iss`` — before any claim is
+    read.  A token that does not verify grants nothing, and neither does a
+    missing *client*: embedded mode has no way to verify without one, so it
+    denies rather than falling back to trusting the payload.
 
     Returns ``False`` when the claim is absent — never falls back to a network
     mode (design constraint: absence of claim ≠ switch mode).
     """
+    if client is None:
+        return False
     try:
-        claims = Claims.decode(token)
+        claims = client.verify_token(token)
         perms = claims.get("permissions") or []
         return permission in perms
     except Exception:
@@ -225,7 +235,7 @@ class RequirePermissionMiddleware:
 
     async def _check(self, token: str) -> bool:
         if self._mode == "embedded":
-            return _check_embedded(token, self._permission)
+            return _check_embedded(self._client, token, self._permission)
 
         if self._mode == "decision":
             # Run sync network call in thread pool to avoid blocking event loop.
@@ -321,7 +331,7 @@ class WsgiPermissionMiddleware:
 
     def _check(self, token: str) -> bool:
         if self._mode == "embedded":
-            return _check_embedded(token, self._permission)
+            return _check_embedded(self._client, token, self._permission)
 
         if self._mode == "decision":
             result = self._client.check_permission(

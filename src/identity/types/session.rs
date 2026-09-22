@@ -4,6 +4,69 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{SessionId, Timestamp, UserId};
 
+/// What the authentication behind a session can say about a second factor.
+///
+/// A realm's `mfa_required` policy gates factor **use**, not factor enrolment
+/// (audit 2026-08-28 §4.18#3). The caller states what happened in this
+/// ceremony; the engine decides. `MfaProof::None` is the default, so a login
+/// path that says nothing is refused on an MFA-required realm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MfaProof {
+    /// No second factor was proved in this authentication.
+    #[default]
+    None,
+    /// A second factor was proved in this authentication by a factor that is
+    /// **not** phishing-resistant: a TOTP code, a recovery code, an SMS or an
+    /// email OTP.
+    ///
+    /// This satisfies `mfa_required`. It does not satisfy `webauthn_required`
+    /// — that key names a passkey specifically (audit 2026-08-28 §4.18#3).
+    Proved,
+    /// A WebAuthn (passkey) ceremony proved the second factor **and** proved
+    /// user verification — the authenticator collected a PIN, a biometric, or
+    /// an equivalent local check and set the UV flag.
+    ///
+    /// A passkey ceremony that proved user *presence* only is a touch:
+    /// possession alone, one factor, and it must not set this (or
+    /// [`MfaProof::Proved`]) — audit 2026-08-28 B10.
+    ///
+    /// This is the only proof a realm with `webauthn_required: true` accepts
+    /// from a fresh authentication.
+    ProvedWebAuthn,
+    /// This session derives from an earlier authentication that already passed
+    /// the realm's MFA gate: an authorization code, an approved device code, or
+    /// a completed required-action flow. Those artefacts can only be minted for
+    /// a principal who already holds a session, and a session can only be
+    /// created by a path that satisfied this same gate.
+    ///
+    /// Use it only where that upstream gate can be named in a comment.
+    Inherited,
+}
+
+impl MfaProof {
+    /// Returns whether this proof satisfies a realm's `mfa_required` policy.
+    pub fn satisfies_mfa_required(self) -> bool {
+        matches!(self, Self::Proved | Self::ProvedWebAuthn | Self::Inherited)
+    }
+
+    /// Returns whether this proof satisfies a realm's `webauthn_required`
+    /// policy.
+    ///
+    /// `webauthn_required` was enforced only at *enrolment* — the user had to
+    /// possess a passkey, but any factor could then satisfy the login
+    /// (audit 2026-08-28 §4.18#3, task 25.26). Only a WebAuthn assertion that
+    /// proved user verification counts here; a TOTP code, a recovery code or
+    /// an OTP does not, however many passkeys the account holds.
+    ///
+    /// [`MfaProof::Inherited`] passes for the same reason it passes
+    /// `mfa_required`: the artefact behind it can only be minted for a
+    /// principal who already holds a session, and a session on this realm can
+    /// only be created by a path that cleared this same gate.
+    pub fn satisfies_webauthn_required(self) -> bool {
+        matches!(self, Self::ProvedWebAuthn | Self::Inherited)
+    }
+}
+
 /// Device and network context captured at session creation time.
 ///
 /// All fields are optional — API-originated sessions (no browser) or
@@ -16,11 +79,9 @@ pub struct SessionContext {
     pub user_agent_raw: Option<String>,
     /// Pre-parsed device label, e.g. `"Chrome, Mac OSX"`.
     pub device_label: Option<String>,
-    /// Set to `true` when the session originates from a completed WebAuthn
-    /// (passkey) ceremony. Passkeys are inherently multi-factor
-    /// (possession + biometric/PIN), so they satisfy a realm's `mfa_required`
-    /// policy without requiring a separate TOTP enrollment check.
-    pub satisfies_mfa_via_passkey: bool,
+    /// What this authentication can prove about a second factor. Read by the
+    /// `mfa_required` gate in `create_session`.
+    pub mfa_proof: MfaProof,
 }
 
 /// An authentication session bound to a user.

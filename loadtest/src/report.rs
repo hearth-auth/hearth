@@ -133,10 +133,16 @@ pub enum Ceiling {
     /// ceiling. The limit is the load generator (or simply untested headroom —
     /// raise `--users` to push further).
     LoadGeneratorOrHeadroom,
-    /// Elevated failure rate without a latency breach — the offered load
-    /// exceeded what the generator/host could faithfully drive (ephemeral-port
-    /// exhaustion, `ulimit -n`, `TIME_WAIT`). Tune the generator (README
-    /// "Driving high concurrency") and re-run before trusting the numbers.
+    /// Elevated failure rate — the offered load exceeded what the
+    /// generator/host could faithfully drive (ephemeral-port exhaustion,
+    /// `ulimit -n`, `TIME_WAIT`). Tune the generator (README "Driving high
+    /// concurrency") and re-run before trusting the numbers.
+    ///
+    /// This verdict now takes precedence over [`Self::Server`] rather than
+    /// being reached only in its absence (audit 2026-09-21): once a meaningful
+    /// share of requests is failing, the response-time percentiles are made of
+    /// timeouts, so a budget "breach" computed from them says nothing about
+    /// server latency.
     GeneratorSaturated,
     /// A latency breach was observed but the server resource data needed to
     /// confirm it was absent (`--server-pid` not supplied, or fewer than two
@@ -198,22 +204,31 @@ pub fn summarize(rows: &[JourneyRow], achieved_users: usize, achieved_rps: f64) 
         }
     };
 
-    let (ceiling, ceiling_reason) = if any_breach(rows) {
+    // Failure rate is tested FIRST (audit 2026-09-21, task 23.14). A latency
+    // percentile computed over a sample that is mostly client-side timeouts is
+    // not a latency measurement, so "a budget breached" cannot be evidence that
+    // *server latency* is the limiter. Testing `any_breach` first labelled
+    // every collapsed run `ceiling: server` — see
+    // `loadtest/reports/hea1812/steady-600u.json` (failure_rate 1.0, 13 RPS,
+    // `ceiling: "server"`) against the README's own account of that step, where
+    // server CPU fell to 5.8% and the co-resident generator was what collapsed.
+    let (ceiling, ceiling_reason) = if failure_rate > GENERATOR_SATURATION_FAILURE_RATE {
+        (
+            Ceiling::GeneratorSaturated,
+            format!(
+                "failure rate {:.2}% exceeds {:.0}% — the response-time samples are dominated by \
+                 failed requests, so no latency attribution is admissible; suspect load-generator \
+                 saturation (ephemeral ports, ulimit -n, TIME_WAIT) and re-run",
+                failure_rate * 100.0,
+                GENERATOR_SATURATION_FAILURE_RATE * 100.0,
+            ),
+        )
+    } else if any_breach(rows) {
         (
             Ceiling::Server,
             "a budgeted journey's p99 breached its HTTP budget — server latency is the limiter; \
              the observed ceiling is the server under test"
                 .to_string(),
-        )
-    } else if failure_rate > GENERATOR_SATURATION_FAILURE_RATE {
-        (
-            Ceiling::GeneratorSaturated,
-            format!(
-                "failure rate {:.2}% exceeds {:.0}% with no latency breach — suspect load-generator \
-                 saturation (ephemeral ports, ulimit -n, TIME_WAIT); tune the generator and re-run",
-                failure_rate * 100.0,
-                GENERATOR_SATURATION_FAILURE_RATE * 100.0,
-            ),
         )
     } else {
         (
@@ -531,12 +546,34 @@ pub fn journey_rows(
     rows
 }
 
-/// Whether every journey that has a budget stayed within it. Journeys with no
-/// budget (revoke) do not affect the verdict. An all-unbudgeted set passes
-/// vacuously.
+/// Journeys whose failure rate exceeded [`budget::MAX_FAILURE_RATE`], by name.
+///
+/// Applies to **every** row, budgeted or not. The compound revoke journey
+/// (`revoke_mint` / `revoke` / `revoke_revalidate`) has no atomic latency
+/// budget, so `JourneyRow::pass` is `None` for it — but "the server answered
+/// `active:true` after a revoke, on every request" is the single most
+/// security-relevant thing this harness can observe, and before this gate it
+/// was discarded by [`overall_pass`]'s `unwrap_or(true)`. A journey that is
+/// failing its own response assertions is never a pass, budget or no budget.
+///
+/// Rows with zero requests contribute a `0.0` failure rate (see
+/// [`budget::failure_rate`]) and are therefore never reported here.
+#[must_use]
+pub fn failing_journeys(rows: &[JourneyRow]) -> Vec<String> {
+    rows.iter()
+        .filter(|r| r.failure_rate > budget::MAX_FAILURE_RATE)
+        .map(|r| r.journey.clone())
+        .collect()
+}
+
+/// Whether every journey that has a budget stayed within it **and** no journey
+/// — budgeted or not — exceeded [`budget::MAX_FAILURE_RATE`].
+///
+/// Journeys with no latency budget (the compound revoke sub-requests) still
+/// cannot pass while they are erroring; see [`failing_journeys`].
 #[must_use]
 pub fn overall_pass(rows: &[JourneyRow]) -> bool {
-    rows.iter().all(|r| r.pass.unwrap_or(true))
+    rows.iter().all(|r| r.pass.unwrap_or(true)) && failing_journeys(rows).is_empty()
 }
 
 /// Whether any budgeted journey in `rows` breached its HTTP p99 budget.
@@ -660,6 +697,53 @@ mod tests {
     }
 
     #[test]
+    fn an_all_failing_unbudgeted_journey_sinks_the_overall_verdict() {
+        // Audit 2026-09-21 (task 23.14). `budget_for` returns None for the
+        // compound revoke sub-requests, so their JourneyRow::pass is None.
+        // `overall_pass` used to read that as `unwrap_or(true)`, so a run in
+        // which every single `revoke_revalidate` came back `active:true` —
+        // i.e. revocation silently not taking effect — still reported
+        // `pass: true` and exited 0. Every request here failed.
+        let rows = vec![
+            row("revoke", 1_000, 1_000, None),
+            row("revoke_revalidate", 1_000, 1_000, None),
+            row("validate", 1_000, 0, Some(true)),
+        ];
+        assert_eq!(
+            failing_journeys(&rows),
+            vec!["revoke".to_string(), "revoke_revalidate".to_string()],
+        );
+        assert!(
+            !overall_pass(&rows),
+            "a 100%-failing journey must not pass just because it has no latency budget"
+        );
+        // It is a health failure, not a latency knee: ramp mode must not treat
+        // it as the saturation point.
+        assert!(!any_breach(&rows));
+    }
+
+    #[test]
+    fn an_unbudgeted_journey_inside_the_error_budget_still_passes() {
+        // The gate is MAX_FAILURE_RATE (5%), not zero — flaky-but-healthy
+        // runs stay green so the new gate cannot become a false alarm.
+        let rows = vec![
+            row("revoke", 1_000, 40, None),
+            row("validate", 1_000, 0, Some(true)),
+        ];
+        assert!(failing_journeys(&rows).is_empty());
+        assert!(overall_pass(&rows));
+    }
+
+    #[test]
+    fn a_journey_with_no_requests_is_not_reported_as_failing() {
+        // 0/0 is 0.0, not NaN — an absent journey must not manufacture a
+        // failure (a zero-weight journey is simply never dispatched).
+        let rows = vec![row("issuance", 0, 0, None)];
+        assert!(failing_journeys(&rows).is_empty());
+        assert!(overall_pass(&rows));
+    }
+
+    #[test]
     fn all_within_budget_passes_overall() {
         let mut requests: GooseRequestMetrics = std::collections::HashMap::new();
         let (k, v) = agg("validate", GooseMethod::Post, timing(&[(1, 100)]));
@@ -753,6 +837,41 @@ mod tests {
         let s = summarize(&rows, 10_000, 30_000.0);
         assert_eq!(s.ceiling, Ceiling::GeneratorSaturated);
         assert!(s.failure_rate > GENERATOR_SATURATION_FAILURE_RATE);
+    }
+
+    #[test]
+    fn a_mostly_failing_run_is_never_attributed_to_server_latency() {
+        // Audit 2026-09-21 (task 23.14). The attribution used to test
+        // `any_breach` first, so a run in which every request timed out
+        // client-side was labelled `ceiling: server` — "server latency is the
+        // limiter" — off percentiles computed entirely from timeouts.
+        //
+        // That is not hypothetical: `loadtest/reports/hea1812/steady-600u.json`
+        // is committed in this repo with `failure_rate: 1.0`, `achieved_rps:
+        // 13.3` and `ceiling: "server"`, while the README's prose two sections
+        // away explains the server went *idle* at that step (CPU 178% → 5.8%)
+        // and the generator was the thing that collapsed. The machine-readable
+        // verdict contradicted the human one, and the machine-readable verdict
+        // is what a nightly regression diff reads.
+        let rows = vec![row("validate", 1_000, 1_000, Some(false))];
+        let s = summarize(&rows, 600, 13.3);
+        assert_eq!(
+            s.ceiling,
+            Ceiling::GeneratorSaturated,
+            "percentiles over a 100%-failing sample are timeouts, not latency"
+        );
+        // A breach is still recorded on the row; only the attribution changes.
+        assert!(any_breach(&rows));
+    }
+
+    #[test]
+    fn a_clean_breach_is_still_attributed_to_the_server() {
+        // The new precedence must not swallow the real signal: a breach with a
+        // healthy failure rate is still the server.
+        let rows = vec![row("validate", 100_000, 1_000, Some(false))];
+        let s = summarize(&rows, 500, 1_677.0);
+        assert!(s.failure_rate <= GENERATOR_SATURATION_FAILURE_RATE);
+        assert_eq!(s.ceiling, Ceiling::Server);
     }
 
     #[test]
@@ -960,7 +1079,13 @@ mod tests {
         // A run with a latency breach but no --server-pid cannot claim server
         // attribution — 0% CPU and 30-second client timeouts both look the same
         // without evidence. Pin to Unknown (inadmissible for grading).
-        let rows = vec![row("session_lookup", 1_357, 1_357, Some(false))]; // breach
+        //
+        // The failures are 0 here: since the 2026-09-21 audit, a run whose
+        // failure rate exceeds GENERATOR_SATURATION_FAILURE_RATE never reaches
+        // a Server attribution in the first place (see
+        // `a_mostly_failing_run_is_never_attributed_to_server_latency`), so the
+        // pre-condition this post-pass corrects is a *clean* breach.
+        let rows = vec![row("session_lookup", 1_357, 0, Some(false))]; // breach
         let mut s = summarize(&rows, 700, 30.0);
         assert_eq!(
             s.ceiling,
@@ -974,11 +1099,15 @@ mod tests {
 
     #[test]
     fn server_ceiling_with_zero_cpu_becomes_generator_saturated() {
-        // Reproduces steady-700u through steady-2000u from HEA-1812: 100% failure
-        // rate, latency breach (30 s timeout), server CPU mean=0.0% peak=0.0%.
-        // The server did no work — the generator saturated (port exhaustion /
-        // TIME_WAIT), not the server.
-        let rows = vec![row("session_lookup", 1_357, 1_357, Some(false))]; // breach
+        // A latency breach the server did no work for: CPU mean=0.0% peak=0.0%.
+        // The server was idle — the generator saturated, not the server.
+        //
+        // HEA-1812's steady-700u..2000u also had a 100% failure rate; that half
+        // of the signal is now caught by `summarize` itself and never reaches
+        // this post-pass. What is left for the post-pass — and what this test
+        // pins — is the harder case: a breach with a *healthy* failure rate but
+        // an idle server, which only the resource samples can distinguish.
+        let rows = vec![row("session_lookup", 1_357, 0, Some(false))]; // breach
         let mut s = summarize(&rows, 700, 30.0);
         assert_eq!(
             s.ceiling,
@@ -1032,7 +1161,7 @@ mod tests {
         // cpu_peak_pct=15% exceeds SERVER_CPU_FLOOR_PEAK_PCT (10%) so the override
         // does not fire — we cannot rule out a brief server spike that collapsed the
         // generator after a short burst.
-        let rows = vec![row("validate", 1_000, 1_000, Some(false))]; // breach
+        let rows = vec![row("validate", 1_000, 0, Some(false))]; // clean breach
         let mut s = summarize(&rows, 100, 10.0);
         assert_eq!(s.ceiling, Ceiling::Server, "pre-condition");
         let res = resource_report(3.0, 15.0); // mean below floor, peak above

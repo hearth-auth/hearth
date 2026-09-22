@@ -120,8 +120,10 @@ impl AdminClient {
     // ------------------------------------------------------------------
 
     // Realms are provisioned via hearth.yaml, not the admin API. There is no
-    // `create_realm` method: the server returns 405 for POST /admin/realms
-    // (HEA-2171). Only read paths are exposed.
+    // `create_realm` and no `update_realm` method: the server answers 405 with
+    // "Realms are managed via hearth.yaml" to both POST /admin/realms and
+    // PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+    // paths and deletion are exposed.
 
     pub async fn list_realms(&self) -> Result<Vec<Realm>, HearthError> {
         let resp = self
@@ -142,21 +144,6 @@ impl AdminClient {
         let resp = self
             .http
             .get(format!("{}/admin/realms/{realm_id}", self.base_url))
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(resp.json().await?)
-    }
-
-    pub async fn update_realm(
-        &self,
-        realm_id: &str,
-        req: &UpdateRealmRequest,
-    ) -> Result<Realm, HearthError> {
-        let resp = self
-            .http
-            .put(format!("{}/admin/realms/{realm_id}", self.base_url))
-            .json(req)
             .send()
             .await?;
         Self::check(&resp)?;
@@ -184,7 +171,7 @@ impl AdminClient {
     ) -> Result<OAuthClient, HearthError> {
         let resp = self
             .http
-            .post(format!("{}/admin/clients", self.base_url))
+            .post(format!("{}/admin/applications", self.base_url))
             .json(req)
             .send()
             .await?;
@@ -204,7 +191,7 @@ impl AdminClient {
         }
         let resp = self
             .http
-            .get(format!("{}/admin/clients", self.base_url))
+            .get(format!("{}/admin/applications", self.base_url))
             .query(&params)
             .send()
             .await?;
@@ -216,7 +203,7 @@ impl AdminClient {
     pub async fn get_client(&self, client_id: &str) -> Result<OAuthClient, HearthError> {
         let resp = self
             .http
-            .get(format!("{}/admin/clients/{client_id}", self.base_url))
+            .get(format!("{}/admin/applications/{client_id}", self.base_url))
             .send()
             .await?;
         Self::check(&resp)?;
@@ -231,7 +218,7 @@ impl AdminClient {
     ) -> Result<OAuthClient, HearthError> {
         let resp = self
             .http
-            .patch(format!("{}/admin/clients/{client_id}", self.base_url))
+            .patch(format!("{}/admin/applications/{client_id}", self.base_url))
             .json(req)
             .send()
             .await?;
@@ -243,7 +230,7 @@ impl AdminClient {
     pub async fn delete_client(&self, client_id: &str) -> Result<(), HearthError> {
         let resp = self
             .http
-            .delete(format!("{}/admin/clients/{client_id}", self.base_url))
+            .delete(format!("{}/admin/applications/{client_id}", self.base_url))
             .send()
             .await?;
         Self::check(&resp)?;
@@ -399,79 +386,15 @@ impl AdminClient {
     }
 
     // ------------------------------------------------------------------
-    // Organization Memberships
+    // Organization Memberships — removed
     // ------------------------------------------------------------------
-
-    /// List members of an organization (paginated).
-    pub async fn list_org_members(
-        &self,
-        org_id: &str,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<PageResponse<OrgMember>, HearthError> {
-        let mut params = vec![("limit", limit.to_string())];
-        if let Some(c) = cursor {
-            params.push(("cursor", c.to_string()));
-        }
-        let resp = self
-            .http
-            .get(format!("{}/admin/orgs/{org_id}/members", self.base_url))
-            .query(&params)
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(resp.json().await?)
-    }
-
-    /// Add a user to an organization.
-    pub async fn add_org_member(
-        &self,
-        org_id: &str,
-        req: &AddOrgMemberRequest,
-    ) -> Result<OrgMember, HearthError> {
-        let resp = self
-            .http
-            .post(format!("{}/admin/orgs/{org_id}/members", self.base_url))
-            .json(req)
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(resp.json().await?)
-    }
-
-    /// Update an organization member's role.
-    pub async fn update_org_member(
-        &self,
-        org_id: &str,
-        user_id: &str,
-        req: &UpdateOrgMemberRequest,
-    ) -> Result<OrgMember, HearthError> {
-        let resp = self
-            .http
-            .patch(format!(
-                "{}/admin/orgs/{org_id}/members/{user_id}",
-                self.base_url
-            ))
-            .json(req)
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(resp.json().await?)
-    }
-
-    /// Remove a user from an organization.
-    pub async fn remove_org_member(&self, org_id: &str, user_id: &str) -> Result<(), HearthError> {
-        let resp = self
-            .http
-            .delete(format!(
-                "{}/admin/orgs/{org_id}/members/{user_id}",
-                self.base_url
-            ))
-            .send()
-            .await?;
-        Self::check(&resp)?;
-        Ok(())
-    }
+    //
+    // Hearth serves no organization route over HTTP: there is no /admin/orgs,
+    // no /admin/orgs/{id}/members and no per-member route anywhere in the
+    // router, so list_org_members, add_org_member, update_org_member and
+    // remove_org_member every one 404'd (audit 2026-08-28 §25.19).
+    // Organization membership is administered through the admin console, not
+    // the admin API.
 
     fn check(resp: &reqwest::Response) -> Result<(), HearthError> {
         let status = resp.status().as_u16();
@@ -498,12 +421,10 @@ mod tests {
         let client_id = "client_123";
         let role_id = "role_456";
         let group_id = "group_789";
-        let org_id = "org_abc";
-        let user_id = "user_def";
 
         assert_eq!(
-            format!("{base}/admin/clients/{client_id}"),
-            "https://auth.example.com/admin/clients/client_123"
+            format!("{base}/admin/applications/{client_id}"),
+            "https://auth.example.com/admin/applications/client_123"
         );
         assert_eq!(
             format!("{base}/admin/roles/{role_id}"),
@@ -512,10 +433,6 @@ mod tests {
         assert_eq!(
             format!("{base}/admin/groups/{group_id}"),
             "https://auth.example.com/admin/groups/group_789"
-        );
-        assert_eq!(
-            format!("{base}/admin/orgs/{org_id}/members/{user_id}"),
-            "https://auth.example.com/admin/orgs/org_abc/members/user_def"
         );
     }
 
@@ -544,16 +461,6 @@ mod tests {
         let json = serde_json::to_string(&group).unwrap();
         let back: Group = serde_json::from_str(&json).unwrap();
         assert_eq!(back.slug, Some("engineers".into()));
-
-        let member = OrgMember {
-            user_id: "u1".into(),
-            org_id: "o1".into(),
-            role: "member".into(),
-            joined_at: None,
-        };
-        let json = serde_json::to_string(&member).unwrap();
-        let back: OrgMember = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.role, "member");
     }
 
     #[test]
@@ -567,16 +474,5 @@ mod tests {
         assert_eq!(json["name"], "editor");
         assert_eq!(json["permissions"][0], "docs.write");
         assert!(json.get("description").is_none());
-    }
-
-    #[test]
-    fn add_org_member_request_serializes() {
-        let req = AddOrgMemberRequest {
-            user_id: "user_abc".into(),
-            role: "owner".into(),
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["user_id"], "user_abc");
-        assert_eq!(json["role"], "owner");
     }
 }

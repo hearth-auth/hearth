@@ -37,10 +37,10 @@ use tempfile::tempdir;
 
 use hearth::audit::EmbeddedAuditEngine;
 use hearth::config::{AuthConfig, RealmAuthYaml, RealmTokenYaml, RealmYamlConfig};
-use hearth::core::{Clock, FakeClock, Timestamp};
+use hearth::core::{Clock, FakeClock, RealmId, Timestamp};
 use hearth::identity::{
     CreateOrganizationRequest, CreateRealmRequest, EmbeddedIdentityEngine, IdentityConfig,
-    IdentityEngine, IdentityError, WebAuthnAttestationPolicy,
+    IdentityEngine, IdentityError, RealmStatus, UpdateRealmRequest, WebAuthnAttestationPolicy,
 };
 use hearth::protocol::admin_auth::{
     JwksRateLimiter, JWKS_RATE_LIMIT_PER_SEC, JWKS_RATE_WINDOW_MICROS,
@@ -185,6 +185,7 @@ fn a5_realm_delete_enters_and_expires_cooldown() {
         })
         .expect("create realm");
 
+    archive_realm(&fx, realm.id());
     fx.identity()
         .delete_realm(realm.id())
         .expect("delete realm");
@@ -455,4 +456,21 @@ fn a14_valid_ttls_are_parsed_correctly() {
         Some(15 * 60 * 1_000_000),
         "magic_link_ttl 15m in µs"
     );
+}
+
+/// Retires `realm_id` so `delete_realm` will accept it.
+///
+/// The archival gate lives in `delete_realm` rather than in each protocol
+/// adapter (audit 2026-08-28 §4.20#10), so a test that deletes a realm it just
+/// created must archive it first, exactly as an operator would.
+fn archive_realm(fx: &EngineFixture, realm_id: &RealmId) {
+    fx.identity()
+        .update_realm(
+            realm_id,
+            &UpdateRealmRequest {
+                status: Some(RealmStatus::Archived),
+                ..Default::default()
+            },
+        )
+        .expect("archive realm");
 }

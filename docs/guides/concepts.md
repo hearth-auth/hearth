@@ -112,7 +112,7 @@ A scope bundle maps a scope string to a subset of permissions. Even if a user ha
         │
         ▼
   POST /token      ──►  access token  (15-min TTL, signed JWT)
-                   ──►  refresh token (7-day TTL, opaque, rotates on use)
+                   ──►  refresh token (7-day TTL, signed JWT, rotates on use)
         │
         │  access token expires
         ▼
@@ -129,6 +129,19 @@ A scope bundle maps a scope string to a subset of permissions. Even if a user ha
 ### Refresh token rotation
 
 Every use of a refresh token issues a *new* refresh token and invalidates the old one. If a refresh token is presented a second time (i.e., a token was stolen and used in parallel), Hearth detects the reuse and revokes the **entire grant family** — all access and refresh tokens derived from that original login. This prevents silent session hijacking.
+
+Rotation is not optional and has no fallback path. Every grant that mints a refresh
+token — authorization code, ROPC, step-up MFA, device code and password reset alike —
+records a grant family and embeds its id in the token as `fid`. A refresh token that
+carries no `fid` is **refused**, not served: the branch that used to honour one had
+neither rotation, nor reuse detection, nor the client-authentication, DPoP and consent
+gates, so a token minted before this behaviour shipped must re-authenticate rather than
+be served under weaker guarantees.
+
+A grant family also dies with the authority it was issued under. Revoking the session,
+revoking the token (RFC 7009), deleting the client, and revoking the user's consent for
+that application each mark the family revoked; the next refresh on it fails with
+`invalid_grant`.
 
 ### Key endpoints
 
@@ -218,7 +231,7 @@ When a federated login arrives with an email that matches an existing local acco
 | Value | Behavior |
 |---|---|
 | `confirm` (default) | User must re-authenticate with their local credential before the external identity is linked. Safe default — prevents account takeover via email spoofing. |
-| `auto` | External identity is linked immediately on verified-email match. Suitable when the upstream IdP verifies emails. |
+| `auto` | External identity is linked immediately on verified-email match. **Account-takeover risk:** an upstream IdP that does not verify email (GitHub, or a generic OIDC IdP that can assert `email_verified: true`) lets an attacker register with a victim's address and sign into the victim's existing Hearth account with its roles and permissions. Use only when the realm federates to exactly one high-trust, email-verifying IdP. |
 | `disabled` | Always JIT-provision a new account; never link to an existing one. |
 
 → See [Federation examples](hearth-yaml-examples/federation.md) for YAML configuration for each provider type.

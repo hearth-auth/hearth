@@ -44,7 +44,7 @@ Every storage location in the browser involves a trade-off between **XSS risk** 
 Use the PKCE Authorization Code flow (the TypeScript `createHearthAuth` browser facade wraps this for you). After the token exchange:
 
 - **Access token**: keep in a module-scoped JavaScript variable. Never write it to `localStorage` or `sessionStorage`. On page reload, silently re-acquire it with the refresh token or a `prompt=none` silent redirect.
-- **Refresh token**: for most SPAs, store in-memory alongside the access token. Hearth rotates refresh tokens automatically on each use — a stolen token can only be replayed once before the server detects the theft and revokes the entire grant family.
+- **Refresh token**: for most SPAs, store in-memory alongside the access token. Hearth rotates refresh tokens on every use, so a copied token stops working the moment the legitimate client refreshes, and presenting a rotated-out token revokes the entire grant family and its session. Note what rotation does *not* buy you: if the thief redeems the stolen token before the legitimate client does, the thief gets the live chain and the legitimate client's next refresh is the presentation that trips detection. Rotation bounds the damage and guarantees you find out; it does not decide who wins the race.
 
 The `createHearthAuth` browser facade from `@hearth-auth/sdk` implements this pattern and handles PKCE, token storage, scheduled silent refresh, and RP-initiated logout:
 

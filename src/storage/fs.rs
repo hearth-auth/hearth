@@ -93,6 +93,22 @@ pub trait Fs: Send + Sync {
     /// Reads the entire contents of a file into a byte vector.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
 
+    /// Reads at most the first `len` bytes of a file.
+    ///
+    /// Returns fewer bytes only when the file is shorter than `len`; callers
+    /// validate the length they need.
+    ///
+    /// The default implementation reads the whole file and truncates, which is
+    /// correct for any filesystem but costs the whole file. [`RealFs`]
+    /// overrides it with a bounded read, which is what keeps a memtable flush
+    /// from re-reading every byte of every live SST to fetch a 60-byte header
+    /// (audit 2026-08-28 §4.21#5).
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        let mut data = self.read(path)?;
+        data.truncate(len);
+        Ok(data)
+    }
+
     /// Maps a file read-only for random access without decrypting it eagerly.
     ///
     /// The default implementation reads the whole file into a heap buffer,
@@ -191,17 +207,36 @@ impl Fs for RealFs {
         std::fs::read(path)
     }
 
+    fn read_prefix(&self, path: &Path, len: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let file = std::fs::File::open(path)?;
+        let mut buf = Vec::with_capacity(len);
+        file.take(len as u64).read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
     #[cfg(unix)]
     fn map_readonly(&self, path: &Path) -> io::Result<FileBacking> {
         let file = std::fs::File::open(path)?;
         // SAFETY: `Mmap::map` is unsafe because the mapping's bytes may change
-        // if another process truncates or writes the file concurrently. Hearth
-        // SST files are write-once: created via a temp file + atomic rename,
-        // fsync'd, and never modified in place afterward — the compaction path
-        // writes a *new* file number and unlinks the old one, and an unlinked
-        // file's pages remain valid for the lifetime of this mapping. No other
-        // writer ever mutates a live SST, so the mapped range is stable for as
-        // long as this `FileBacking` (and the `SstReader` owning it) lives.
+        // if another process truncates or writes the file concurrently. The
+        // invariant Hearth upholds is about the *inode*, not the path: an SST
+        // inode is written once — to a temp file, fsync'd, then published by an
+        // atomic rename — and no writer ever mutates it afterwards.
+        //
+        // A path CAN be reused. `compact_partial` renames its merge output over
+        // the run's highest-numbered file (audit 2026-08-28 §4.21#6), so the
+        // name `{num:06}.sst` may point at a different inode afterwards.
+        // `rename(2)` replaces the directory entry; it does not write through to
+        // the inode this mapping holds. The replaced inode stays alive, with its
+        // pages intact, until the last reference — this mapping among them — is
+        // dropped. So the mapped range is stable for as long as this
+        // `FileBacking` (and the `SstReader` owning it) lives, even when the
+        // path it was opened from now resolves elsewhere.
+        //
+        // The one shape this argument does NOT cover is a truncation of the live
+        // inode. Nothing in the storage engine truncates an SST; a `set_len` on
+        // a published SST would make every existing mapping fault with SIGBUS.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         Ok(FileBacking::Mmap(mmap))
     }

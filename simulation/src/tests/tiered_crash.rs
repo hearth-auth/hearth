@@ -63,20 +63,21 @@ fn simulation_tier_transitions_concurrent() {
         handle.join().expect("thread panicked");
     }
 
-    // Post-join accessibility check on the LIVE engine. We only assert the value
-    // is one of the two legal states ("initial" or "updated"), never torn/garbage.
-    // We deliberately do NOT pin the exact value here: a reader thread can read
-    // "initial" before a writer's put+invalidate and then finish promoting that
-    // stale value into the hot tier *after* the invalidation, leaving the
-    // volatile cache momentarily stale. That is a cache-coherence race, not a
-    // durability loss — the durable WAL/SST still holds the latest value, which
-    // the crash-recovery check below proves.
+    // Post-join accessibility check on the LIVE engine. With all threads
+    // joined, the values are deterministic: writer batch b overwrote keys
+    // b*10+i (i in 0..10) to "updated", so keys 0..40 read "updated" and keys
+    // 40..50 keep "initial". This includes the volatile hot tier: a reader's
+    // in-flight fill that overlaps a writer's put+invalidate is discarded by
+    // the fill guard (audit 2026-08-28 §4.21#3), so the cache can never hold
+    // the pre-write value once the writer has returned.
     for i in 0u32..50 {
         let key = format!("conc-{i:04}");
-        let v = engine.get(&realm, key.as_bytes()).expect("get");
-        assert!(
-            v.as_deref() == Some(b"initial") || v.as_deref() == Some(b"updated"),
-            "key {key} returned a torn/unexpected value {v:?} after concurrent ops (seed={seed})"
+        let expected: &[u8] = if i < 40 { b"updated" } else { b"initial" };
+        assert_eq!(
+            engine.get(&realm, key.as_bytes()).expect("get").as_deref(),
+            Some(expected),
+            "key {key} must read its committed value on the live engine, \
+             including through the hot tier (seed={seed})"
         );
     }
 

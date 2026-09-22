@@ -430,11 +430,20 @@ fn cli_config_example_prints_yaml() {
 
 #[test]
 fn cli_config_validate_accepts_valid_file() {
-    // `dev_mode: true` relaxes data_dir / oidc-issuer requirements, so this
-    // minimal file validates cleanly.
+    // `dev_mode` may no longer be set in a config file — `hearth serve --dev`
+    // is the only way to reach dev mode (audit 2026-08-28 §4.7#3), and the
+    // validator refuses the key outright. So this fixture is a minimal but
+    // genuinely valid PRODUCTION config instead.
     let path = write_temp_config(
         "valid",
-        "dev_mode: true\nserver:\n  bind_address: \"127.0.0.1\"\n  port: 8420\n",
+        concat!(
+            "server:\n  bind_address: \"127.0.0.1\"\n  port: 8420\n",
+            "  trust_forwarded_proto: true\n  trusted_proxies: [\"127.0.0.1\"]\n",
+            "storage:\n  data_dir: \"/tmp/hearth-cli-validate\"\n",
+            "oidc:\n  issuer: \"https://auth.example.com\"\n",
+            "security:\n  key_encryption_key: \"",
+            "1111111111111111111111111111111111111111111111111111111111111111\"\n",
+        ),
     );
     let output = Command::new(hearth_bin())
         .args(["config", "validate"])
@@ -473,5 +482,145 @@ fn cli_config_validate_rejects_invalid_file() {
     assert!(
         stderr.contains("invalid") || stderr.contains("error"),
         "failure output must explain the validation error; got:\n{stderr}"
+    );
+}
+
+// ===== §4.9#8, §4.14#6: the backup CLI family must say what happened =====
+
+/// `hearth backup <verb>` installs no tracing subscriber, so every
+/// `tracing::error!` on those paths was written to a dispatcher that does not
+/// exist. A failed `verify` exited 3 with an empty stderr — the operator saw a
+/// number and no reason. Same for `create` failing on the data-directory lock.
+#[test]
+fn backup_verify_failure_reports_the_reason() {
+    let missing = std::env::temp_dir().join("hearth-no-such-archive-4f2a.tar.gz");
+    let _ = std::fs::remove_file(&missing);
+
+    let out = Command::new(hearth_bin())
+        .args(["backup", "verify", "--input"])
+        .arg(&missing)
+        .output()
+        .expect("run hearth backup verify");
+
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a failed verify exits 3; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // CLI diagnostics follow the same convention as `serve`: the tracing fmt
+    // layer writes to stdout. `examples/auth0-migration/run.sh` parses the
+    // migration summary off stdout, so the stream must not move.
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        output.contains("integrity failure"),
+        "the failure reason must be emitted, got: {output:?}"
+    );
+}
+
+/// `hearth backup create` against a data directory another process holds fails
+/// on the flock. That failure was also silent.
+#[test]
+fn backup_create_lock_failure_reports_the_reason() {
+    use fs2::FileExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Hold the same exclusive flock `EmbeddedStorageEngine::open` takes, so the
+    // child fails on the lock rather than on a missing directory.
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data_dir.join("LOCK"))
+        .expect("open LOCK");
+    lock_file.try_lock_exclusive().expect("hold the lock");
+
+    let out = Command::new(hearth_bin())
+        .args(["backup", "create", "--data-dir"])
+        .arg(&data_dir)
+        .arg("--output")
+        .arg(dir.path().join("archive.tar.gz"))
+        .output()
+        .expect("run hearth backup create");
+
+    assert_ne!(out.status.code(), Some(0), "create must fail on the lock");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        output.contains("locked"),
+        "a lock failure must name the lock, got: {output:?}"
+    );
+}
+
+// ===== §4.13#5: security.backup.verify_key must reach the server =====
+
+/// `security.backup.verify_key` was parsed and then dropped: nothing ever put
+/// it on `AppState`, so the restore handler's signature check could not fire on
+/// any deployment. This guards the config → server link that was missing; the
+/// check itself is covered in `tests/backup_http.rs`.
+#[test]
+fn configured_backup_verify_key_reaches_the_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = find_available_port();
+    let config_path = dir.path().join("hearth.yaml");
+    let data_dir = dir.path().join("data");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+server:
+  port: {port}
+  bind_address: "127.0.0.1"
+dev_mode: true
+storage:
+  data_dir: "{}"
+oidc:
+  issuer: "http://127.0.0.1:{port}"
+email:
+  transport: log
+security:
+  backup:
+    verify_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+"#,
+            data_dir.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut child = Command::new(hearth_bin())
+        .args(["serve", "--dev", "-c"])
+        .arg(&config_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hearth server");
+
+    let up = wait_for_server(port, Duration::from_secs(30));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("collect server output");
+
+    assert!(
+        up,
+        "the server must start with a backup verify key configured"
+    );
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        logs.contains("backup restore signature verification ENABLED"),
+        "the configured verify key must reach the server; logs: {logs}"
     );
 }

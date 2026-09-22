@@ -28,6 +28,8 @@ use hearth::identity::{
 #[derive(Clone)]
 struct ApprovalCapture {
     deliveries: Arc<Mutex<Vec<CapturedDelivery>>>,
+    /// The `timeout_ms` each delivery was handed (task 26.37).
+    timeouts_seen: Arc<Mutex<Vec<u64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,7 +46,13 @@ impl ApprovalCapture {
     fn new() -> Self {
         Self {
             deliveries: Arc::new(Mutex::new(Vec::new())),
+            timeouts_seen: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Returns the `timeout_ms` values the transport was handed, in order.
+    fn timeouts_seen(&self) -> Vec<u64> {
+        self.timeouts_seen.lock().expect("lock").clone()
     }
 
     fn captured(&self) -> Vec<CapturedDelivery> {
@@ -60,7 +68,9 @@ impl ApprovalWebhookTransport for ApprovalCapture {
         event_type: &str,
         delivery_id: &str,
         signature: Option<&str>,
+        timeout_ms: u64,
     ) -> Result<(), String> {
+        self.timeouts_seen.lock().expect("lock").push(timeout_ms);
         self.deliveries
             .lock()
             .expect("lock")
@@ -463,4 +473,180 @@ async fn approval_webhook_ssrf_blocked_at_delivery() {
     // Compile/behavior note: SSRF-blocking of the delivery itself is silent at the
     // API level (outbox persists for retry) and is not observable through a public
     // return value here — the guard is exercised in the production transport path.
+}
+
+// ─── Task 26.13: the RETRY half of "durable at-least-once" ───────────────────
+
+/// A transport that refuses every delivery until it is told to stop.
+///
+/// The capture transport above always succeeds, which is why every test in
+/// this file passed while the retry path had no caller at all: a delivery that
+/// never fails never needs retrying.
+#[derive(Clone)]
+struct FlakyApprovalTransport {
+    failing: Arc<std::sync::atomic::AtomicBool>,
+    attempts: Arc<Mutex<Vec<String>>>,
+}
+
+impl FlakyApprovalTransport {
+    fn new() -> Self {
+        Self {
+            failing: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            attempts: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recover(&self) {
+        self.failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn delivered(&self) -> Vec<String> {
+        self.attempts.lock().expect("lock").clone()
+    }
+}
+
+impl ApprovalWebhookTransport for FlakyApprovalTransport {
+    fn send(
+        &self,
+        _url: &str,
+        _body: &[u8],
+        _event_type: &str,
+        delivery_id: &str,
+        _signature: Option<&str>,
+        _timeout_ms: u64,
+    ) -> Result<(), String> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("endpoint down".to_string());
+        }
+        self.attempts
+            .lock()
+            .expect("lock")
+            .push(delivery_id.to_string());
+        Ok(())
+    }
+}
+
+/// Task 26.13 — a webhook the endpoint refused must be redelivered later.
+///
+/// `flush_approval_webhook_outbox_inner` existed, was correct, and had **zero
+/// callers**; `#[allow(dead_code)]` kept the compiler quiet. Its own doc
+/// comment named "the startup recovery scan and the periodic background task",
+/// and neither existed. So this file's header claim of "durable at-least-once
+/// delivery" was at-MOST-once: a refused notification was never retried, and
+/// its outbox row leaked forever, because only a successful delivery deletes
+/// it.
+///
+/// The test drives the real sequence: refuse the first attempt, bring the
+/// endpoint back, flush, and require the notification to arrive.
+#[tokio::test]
+async fn a_refused_approval_webhook_is_redelivered_by_the_outbox_flush() {
+    let transport = Arc::new(FlakyApprovalTransport::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&transport) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, None);
+
+    let created = h
+        .identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id,
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::json!({"reason": "endpoint is down"}),
+                delegation_chain: vec![],
+                expires_in_secs: None,
+            },
+        )
+        .expect("creating the request must succeed even when the webhook does not");
+
+    assert!(
+        transport.delivered().is_empty(),
+        "sanity: the endpoint refused, so nothing was delivered yet"
+    );
+
+    // Still refusing: the flush must report the entry as outstanding, not
+    // quietly drop it. Without this, a flush that deleted rows on failure
+    // would pass the assertion below and lose the notification for good.
+    let (delivered, remaining) = h.identity().flush_approval_webhook_outbox(&realm_id);
+    assert_eq!(
+        (delivered, remaining),
+        (0, 1),
+        "a still-failing endpoint must leave the outbox entry in place"
+    );
+
+    transport.recover();
+    let (delivered, remaining) = h.identity().flush_approval_webhook_outbox(&realm_id);
+
+    assert_eq!(
+        (delivered, remaining),
+        (1, 0),
+        "once the endpoint is back, the flush must deliver the entry and clear it"
+    );
+    assert_eq!(
+        transport.delivered(),
+        vec![format!("approval:{}", created.request_id)],
+        "the redelivery must carry the same stable delivery id as the first attempt"
+    );
+
+    // And the row is gone, so it cannot be delivered a third time on the next
+    // tick — the outbox must drain, not accumulate.
+    let (delivered, remaining) = h.identity().flush_approval_webhook_outbox(&realm_id);
+    assert_eq!(
+        (delivered, remaining),
+        (0, 0),
+        "a drained outbox must stay drained"
+    );
+}
+
+// ─── Task 26.37: the operator's timeout must reach the wire ─────────────────
+
+/// The realm's `approval_webhook.timeout_ms` must reach the transport.
+///
+/// It parsed, it validated, it reached `ApprovalWebhookConfig` — and `deliver`
+/// never handed it on, so the production transport built a `ureq` config with
+/// `https_only` and `max_redirects` and no timeout of any kind. ureq 3.3.0's
+/// `Timeouts::default()` leaves every field `None` except `await_100`, and the
+/// call runs inside `tokio::task::block_in_place`, so an approver's endpoint
+/// that completes the handshake and then stops responding took a Tokio worker
+/// thread out of service permanently.
+///
+/// A dead config key and an unbounded egress path are the same bug here, and
+/// this test is the only thing that can tell either of them apart from working
+/// code — every other test in this file uses a transport that ignores it.
+#[tokio::test]
+async fn the_realms_configured_timeout_reaches_the_transport() {
+    let capture = Arc::new(ApprovalCapture::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+
+    // `make_realm_with_webhook` configures `timeout_ms: 2000`.
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, None);
+    h.identity()
+        .create_approval_request(
+            &realm_id,
+            &CreateApprovalRequestInput {
+                agent_id,
+                tool: "delete_file".to_string(),
+                action: "invoke".to_string(),
+                context: serde_json::json!({}),
+                delegation_chain: vec![],
+                expires_in_secs: None,
+            },
+        )
+        .expect("create approval request");
+
+    assert_eq!(
+        capture.timeouts_seen(),
+        vec![2000],
+        "the realm's configured timeout_ms must reach the transport, not be \
+         dropped on the way"
+    );
 }

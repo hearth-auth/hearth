@@ -1,0 +1,49 @@
+name: Await a green verdict on this commit
+description: >-
+  Block until a named check run reports success on the commit being published.
+  Fails closed when the verdict is red, never arrives, or cannot be read.
+  Audit 2026-08-28 blockers B2 (§4.8#1) and B6 (§4.12#1).
+
+inputs:
+  check-name:
+    description: >-
+      The check-run name to await. Use the release-validation job name for server
+      release tags, and "required-summary" for commits on main.
+    required: true
+  sha:
+    description: The commit the artefact is built from.
+    required: false
+    default: ${{ github.sha }}
+  repository:
+    description: owner/repo to query.
+    required: false
+    default: ${{ github.repository }}
+  timeout-seconds:
+    description: >-
+      How long to wait for the verdict. The default exceeds the release-validation
+      job's own 90-minute timeout, so a slow suite is waited out, not published past.
+    required: false
+    default: "7200"
+  poll-seconds:
+    description: Seconds between polls.
+    required: false
+    default: "30"
+  github-token:
+    description: Token used to read the Checks API.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # A local action only resolves after actions/checkout, so the repository —
+    # and this script — are always present in the workspace here.
+    - name: Await a green verdict on this commit
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CHECK_NAME: ${{ inputs.check-name }}
+        COMMIT_SHA: ${{ inputs.sha }}
+        REPO: ${{ inputs.repository }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        POLL_SECONDS: ${{ inputs.poll-seconds }}
+      run: bash "${GITHUB_WORKSPACE}/scripts/await-green-commit.sh"

@@ -1,21 +1,25 @@
-//! Integration tests for the `/certs` JWKS endpoint (HEA-51 / OIDC M1).
+//! Integration tests for the `/certs` JWKS endpoint.
 //!
 //! Verifies that:
 //!
 //! - `GET /certs` returns an RFC 7517 JWKS document.
-//! - The response includes one entry per supported algorithm: `EdDSA`
-//!   (the primary signer), `RS256`, and `ES256` (ecosystem-compat keys
-//!   for OIDC clients like `jose` / `python-jose`).
-//! - Each entry has the field set required by its key type
-//!   (`OKP`/Ed25519 has `crv` + `x`; `RSA` has `n` + `e`; `EC` has
-//!   `crv` + `x` + `y`).
+//! - **Every published entry is `EdDSA`/`OKP`** — the only algorithm Hearth
+//!   signs with. This file previously asserted the opposite, requiring an
+//!   `RS256` and an `ES256` entry "for ecosystem compatibility". Hearth signed
+//!   with neither: the RSA private key existed only to fill the JWKS (and was
+//!   the one key family stored without the HKEY envelope), and the EC private
+//!   key was regenerated on every process start, so a relying party that
+//!   selected the ES256 entry cached — for `max-age=3600` — a public key whose
+//!   private half no longer existed (audit 2026-08-28 §4.2#4, §4.15#5).
+//! - Each entry has the field set required by its key type: `OKP`/Ed25519
+//!   carries `crv` + `x` and no `n`/`e`/`y`.
 //! - Aliases `/jwks` and `/.well-known/jwks.json` return identical
 //!   documents.
 //!
-//! Acceptance for HEA-51 calls for the JWKS to be consumable by `jose`
-//! / `python-jose`. Asserting field-level RFC 7517 conformance here is
-//! the in-process Rust equivalent — anything that passes these checks
-//! is parseable by spec-compliant JOSE libraries.
+//! Asserting field-level RFC 7517 conformance here is the in-process Rust
+//! equivalent of consuming the document with `jose` / `python-jose` —
+//! anything that passes these checks is parseable by spec-compliant JOSE
+//! libraries.
 
 mod common;
 
@@ -57,13 +61,14 @@ async fn fetch_jwks(app: &axum::Router, path: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn certs_returns_rfc7517_jwks_with_all_three_algorithms() {
+async fn certs_publishes_only_the_algorithm_hearth_signs_with() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let app = build_app(&h).await;
 
     let body = fetch_jwks(&app, "/certs").await;
 
     let keys = body["keys"].as_array().expect("keys array");
+    assert!(!keys.is_empty(), "JWKS must not be empty");
     let algs: Vec<&str> = keys
         .iter()
         .map(|k| k["alg"].as_str().unwrap_or_default())
@@ -71,15 +76,11 @@ async fn certs_returns_rfc7517_jwks_with_all_three_algorithms() {
 
     assert!(
         algs.contains(&"EdDSA"),
-        "JWKS must include EdDSA (primary signer); got {algs:?}"
+        "JWKS must include EdDSA (the signer); got {algs:?}"
     );
     assert!(
-        algs.contains(&"RS256"),
-        "JWKS must include RS256 per HEA-51; got {algs:?}"
-    );
-    assert!(
-        algs.contains(&"ES256"),
-        "JWKS must include ES256 per HEA-51; got {algs:?}"
+        algs.iter().all(|a| *a == "EdDSA"),
+        "JWKS must publish only algorithms Hearth signs with; got {algs:?}"
     );
 
     // RFC 7517 invariants: every entry has kty, kid, use="sig", alg.
@@ -92,49 +93,14 @@ async fn certs_returns_rfc7517_jwks_with_all_three_algorithms() {
 
     // Per-algorithm field invariants.
     for entry in keys {
-        match entry["alg"].as_str() {
-            Some("EdDSA") => {
-                assert_eq!(entry["kty"].as_str(), Some("OKP"));
-                assert_eq!(entry["crv"].as_str(), Some("Ed25519"));
-                let x = entry["x"].as_str().expect("OKP entry must include x");
-                let decoded = URL_SAFE_NO_PAD.decode(x).expect("x is base64url");
-                assert_eq!(decoded.len(), 32, "Ed25519 public key is 32 bytes");
-                assert!(entry.get("y").map_or(true, |v| v.is_null()));
-                assert!(entry.get("n").map_or(true, |v| v.is_null()));
-                assert!(entry.get("e").map_or(true, |v| v.is_null()));
-            }
-            Some("RS256") => {
-                assert_eq!(entry["kty"].as_str(), Some("RSA"));
-                let n = entry["n"].as_str().expect("RSA entry must include n");
-                let e = entry["e"].as_str().expect("RSA entry must include e");
-                let n_bytes = URL_SAFE_NO_PAD.decode(n).expect("n is base64url");
-                let e_bytes = URL_SAFE_NO_PAD.decode(e).expect("e is base64url");
-                // RSA-2048 modulus is 256 bytes; allow shorter for leading
-                // zero stripping but reject anything obviously off-spec.
-                assert!(
-                    (250..=257).contains(&n_bytes.len()),
-                    "RSA-2048 modulus length looks wrong: {}",
-                    n_bytes.len()
-                );
-                assert!(!e_bytes.is_empty(), "RSA exponent must be non-empty");
-                assert!(entry.get("crv").map_or(true, |v| v.is_null()));
-                assert!(entry.get("x").map_or(true, |v| v.is_null()));
-                assert!(entry.get("y").map_or(true, |v| v.is_null()));
-            }
-            Some("ES256") => {
-                assert_eq!(entry["kty"].as_str(), Some("EC"));
-                assert_eq!(entry["crv"].as_str(), Some("P-256"));
-                let x = entry["x"].as_str().expect("EC entry must include x");
-                let y = entry["y"].as_str().expect("EC entry must include y");
-                let x_bytes = URL_SAFE_NO_PAD.decode(x).expect("x is base64url");
-                let y_bytes = URL_SAFE_NO_PAD.decode(y).expect("y is base64url");
-                assert_eq!(x_bytes.len(), 32, "P-256 x coordinate is 32 bytes");
-                assert_eq!(y_bytes.len(), 32, "P-256 y coordinate is 32 bytes");
-                assert!(entry.get("n").map_or(true, |v| v.is_null()));
-                assert!(entry.get("e").map_or(true, |v| v.is_null()));
-            }
-            other => panic!("unexpected alg in JWKS: {other:?}"),
-        }
+        assert_eq!(entry["kty"].as_str(), Some("OKP"));
+        assert_eq!(entry["crv"].as_str(), Some("Ed25519"));
+        let x = entry["x"].as_str().expect("OKP entry must include x");
+        let decoded = URL_SAFE_NO_PAD.decode(x).expect("x is base64url");
+        assert_eq!(decoded.len(), 32, "Ed25519 public key is 32 bytes");
+        assert!(entry.get("y").map_or(true, |v| v.is_null()));
+        assert!(entry.get("n").map_or(true, |v| v.is_null()));
+        assert!(entry.get("e").map_or(true, |v| v.is_null()));
     }
 }
 
@@ -257,8 +223,8 @@ async fn jwt_kid_header_matches_a_jwks_entry() {
             )
         });
 
-    // Cross-check: the matched entry should be the EdDSA signer
-    // (current primary; HEA-53 may add RS256/ES256 signers later).
+    // Cross-check: the matched entry is the EdDSA signer — the only
+    // algorithm Hearth signs with, and the only one it publishes.
     assert_eq!(matched["alg"].as_str(), Some("EdDSA"));
 
     // The matched key should successfully verify the access token.

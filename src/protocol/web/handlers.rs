@@ -41,10 +41,13 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
 
+use crate::abuse::device_approval::{DeviceApprovalDecision, DeviceApprovalGuard};
+use crate::abuse::runtime::PreAuthVerdict;
+use crate::core::RealmId;
 use crate::identity::onboarding::OnboardingError;
 use crate::identity::{
     admin_gate, gate, AuthenticationOptions, CleartextPassword, CompleteAuthenticationParams,
-    IdentityError, KdfGateError, SessionContext,
+    IdentityError, KdfGateError, MfaProof, SessionContext,
 };
 use crate::protocol::client_info::{build_session_context, PeerAddr};
 
@@ -514,6 +517,412 @@ impl MfaChallengeTemplate {
     }
 }
 
+/// OTP second-factor challenge shown by the direct browser login when the
+/// user's only usable factor is SMS or email OTP (audit 2026-08-28 §4.18#6).
+///
+/// `/ui/mfa-challenge` can only render a TOTP / recovery-code form, so the
+/// login page used to treat those users as having no factor at all.
+#[derive(Template)]
+#[template(path = "ui/mfa_otp_challenge.html")]
+struct MfaOtpChallengeTemplate {
+    error: Option<String>,
+    /// One line telling the user where the code went, e.g. the masked phone.
+    prompt: String,
+    /// `"sms"` or `"email_otp"` — echoed so the POST verifies the right factor.
+    factor: &'static str,
+    /// Opaque nonce returned by `issue_sms_otp` / `issue_email_otp`. The
+    /// pending record is keyed by it, so it is a server-side handle, not a
+    /// secret — the same shape the required-action OTP pages already use.
+    otp_nonce: String,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+impl MfaOtpChallengeTemplate {
+    fn new(
+        error: Option<String>,
+        prompt: String,
+        factor: &'static str,
+        otp_nonce: String,
+        product_name: String,
+        logo_url: String,
+    ) -> Self {
+        Self {
+            error,
+            prompt,
+            factor,
+            otp_nonce,
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: None,
+            narrow: true,
+            product_name,
+            logo_url,
+            realm_theme_url: None,
+            inline_theme_css: None,
+        }
+    }
+}
+
+/// Which OTP second factor a realm offers *and* this user actually holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum OtpFactor {
+    /// SMS OTP to the user's verified phone number.
+    Sms,
+    /// Email OTP to the user's address.
+    Email,
+}
+
+impl OtpFactor {
+    /// The wire name, matching the `mfa_methods` vocabulary.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sms => "sms",
+            Self::Email => "email_otp",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "sms" => Some(Self::Sms),
+            "email_otp" => Some(Self::Email),
+            _ => None,
+        }
+    }
+}
+
+/// Returns the OTP factor the browser login should challenge, if any.
+///
+/// Mirrors `IdentityEngine::has_second_factor` minus its TOTP arm: the realm
+/// must offer the method (`mfa_methods`), the user must have enrolled it, and
+/// the transport that delivers the code must be configured — a factor we
+/// cannot send a code for is not a factor we can challenge.
+pub(super) fn otp_factor_for(
+    state: &Arc<WebState>,
+    realm: &crate::identity::Realm,
+    user: &crate::identity::User,
+) -> Option<OtpFactor> {
+    // An ABSENT `mfa_methods` restricts nothing — that is the semantics
+    // `EmbeddedIdentityEngine::require_mfa_method` enforces, and the same rule
+    // the TOTP branch below applies. `unwrap_or_default()` inverted it here,
+    // producing an empty list that allowed NO factor, so a realm that had
+    // simply never configured the key could never route to an OTP challenge.
+    let methods = realm.config().mfa_methods.clone();
+    let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
+    if offers("sms") && user.phone_verified() && state.sms.is_some() {
+        return Some(OtpFactor::Sms);
+    }
+    if offers("email_otp") && user.email_otp_enabled() && state.email.is_some() {
+        return Some(OtpFactor::Email);
+    }
+    None
+}
+
+/// Issues an OTP for `factor` and returns `(nonce, prompt)`.
+fn issue_login_otp(
+    state: &Arc<WebState>,
+    realm_id: &RealmId,
+    user: &crate::identity::User,
+    factor: OtpFactor,
+) -> Result<(String, String), IdentityError> {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match factor {
+        OtpFactor::Sms => {
+            let sender = state.sms.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
+            let phone = user.phone_number().ok_or(IdentityError::MfaNotEnabled)?;
+            let key = super::required_action::sms_otp_hmac_key_bytes(state);
+            let nonce =
+                state
+                    .identity
+                    .issue_sms_otp(realm_id, phone, &key, sender.as_ref(), now_ts)?;
+            let masked = user
+                .masked_phone_number()
+                .unwrap_or_else(|| "your phone".to_string());
+            Ok((nonce, format!("We sent a 6-digit code to {masked}.")))
+        }
+        OtpFactor::Email => {
+            let email_service = state.email.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
+            let key = super::required_action::email_otp_hmac_key_bytes(state);
+            let nonce = state.identity.issue_email_otp(
+                realm_id,
+                user.email(),
+                &key,
+                email_service,
+                None,
+                now_ts,
+            )?;
+            Ok((
+                nonce,
+                "We sent a 6-digit code to your email address.".to_string(),
+            ))
+        }
+    }
+}
+
+/// Renders the OTP challenge after the password step (audit §4.18#6).
+///
+/// Requires the MFA pending cookie, which proves the password was verified.
+/// Issuing a fresh code on every render is deliberate: the page is the only
+/// way to request one, and the engine throttles resends.
+pub async fn mfa_otp_challenge_form(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
+        return Redirect::to("/ui/login").into_response();
+    };
+    let Some(pending) = parse_mfa_pending_cookie(&state.cookie_secret, raw) else {
+        return Redirect::to("/ui/login").into_response();
+    };
+
+    let (Ok(Some(realm)), Ok(Some(user))) = (
+        state.identity.get_realm(&pending.realm_id),
+        state.identity.get_user(&pending.realm_id, &pending.user_id),
+    ) else {
+        return Redirect::to("/ui/login").into_response();
+    };
+    let Some(factor) = otp_factor_for(&state, &realm, &user) else {
+        // The factor went away between login and here — start over rather
+        // than silently dropping the second-factor requirement.
+        return Redirect::to("/ui/login").into_response();
+    };
+
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_cookie) =
+        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+
+    let (nonce, prompt) = match issue_login_otp(&state, &pending.realm_id, &user, factor) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, factor = factor.as_str(), "mfa-otp-challenge: issue failed");
+            let tmpl = MfaOtpChallengeTemplate::new(
+                Some("We could not send a code right now. Please try again.".to_string()),
+                String::new(),
+                factor.as_str(),
+                String::new(),
+                state.product_name.clone(),
+                state.logo_url.clone(),
+            );
+            return render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let mut tmpl = MfaOtpChallengeTemplate::new(
+        None,
+        prompt,
+        factor.as_str(),
+        nonce,
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    tmpl.csrf = Some(csrf_value);
+    let mut resp = render(&tmpl);
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
+}
+
+/// Form body for `POST /ui/mfa-otp-challenge`.
+#[derive(Debug, Deserialize)]
+pub struct MfaOtpChallengeForm {
+    /// The 6-digit code the user typed.
+    #[serde(default)]
+    pub code: String,
+    /// `"sms"` or `"email_otp"`, echoed from the rendered form.
+    #[serde(default)]
+    pub factor: String,
+    /// Opaque handle for the pending OTP record.
+    #[serde(default)]
+    pub otp_nonce: String,
+    /// CSRF token echoed from the hidden `_csrf` field.
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
+}
+
+/// Verifies an SMS / email OTP and completes the login.
+///
+/// Carries the same three protections as `mfa_challenge_submit`: CSRF
+/// double-submit, single-use redemption of the pending-cookie nonce, and the
+/// engine's own per-OTP attempt budget.
+pub async fn mfa_otp_challenge_submit(
+    State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
+    headers: HeaderMap,
+    Form(form): Form<MfaOtpChallengeForm>,
+) -> Response {
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
+    let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+    };
+    let Some(pending) = parse_mfa_pending_cookie(&state.cookie_secret, raw) else {
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+    };
+
+    let Some(factor) = OtpFactor::parse(&form.factor) else {
+        return Redirect::to("/ui/mfa-otp-challenge").into_response();
+    };
+
+    let otp_err = |msg: &str, status: StatusCode| {
+        let tmpl = MfaOtpChallengeTemplate::new(
+            Some(msg.to_string()),
+            String::new(),
+            factor.as_str(),
+            String::new(),
+            state.product_name.clone(),
+            state.logo_url.clone(),
+        );
+        render_status(&tmpl, status)
+    };
+
+    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        return otp_err(
+            "Your session has expired. Please reload the page and try again.",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let code = form.code.trim();
+    let verified = match factor {
+        OtpFactor::Sms => state.identity.verify_sms_otp(
+            &pending.realm_id,
+            &form.otp_nonce,
+            code,
+            &super::required_action::sms_otp_hmac_key_bytes(&state),
+            now_ts,
+        ),
+        OtpFactor::Email => state.identity.verify_email_otp(
+            &pending.realm_id,
+            &form.otp_nonce,
+            code,
+            &super::required_action::email_otp_hmac_key_bytes(&state),
+            now_ts,
+        ),
+    };
+    if let Err(e) = verified {
+        tracing::debug!(error = %e, "mfa-otp-challenge: verification failed");
+        return otp_err("Invalid code. Please try again.", StatusCode::UNAUTHORIZED);
+    }
+
+    // Single-use pending cookie, exactly as `mfa_challenge_submit` does.
+    let exp_secs = now_ts.saturating_add(super::auth::MFA_PENDING_TTL_SECS);
+    match state
+        .identity
+        .redeem_mfa_nonce(&pending.realm_id, &pending.nonce, exp_secs)
+    {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+        }
+    }
+
+    let now_ra = crate::core::Timestamp::from_micros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_micros()).ok())
+            .unwrap_or(0),
+    );
+    if let Some(ra_response) = super::required_action::required_action_check_browser(
+        &state,
+        &pending.realm_id,
+        &pending.user_id,
+        pending.return_to.as_deref(),
+        &headers,
+        now_ra,
+    ) {
+        state.set_current_realm(pending.realm_id.clone());
+        return ra_response;
+    }
+
+    finish_otp_login(&state, &headers, &pending, session_ctx)
+}
+
+/// Issues the session once an OTP second factor has been proved.
+///
+/// Split out of `mfa_otp_challenge_submit` to keep that handler under the
+/// line limit; it is the whole "the factor checked out, now log them in" tail.
+fn finish_otp_login(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    pending: &super::auth::MfaPending,
+    session_ctx: SessionContext,
+) -> Response {
+    revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
+
+    // An OTP the realm delivered out of band and the user typed back is a
+    // proved second factor — the `mfa_required` gate reads exactly this
+    // (audit 2026-08-28 §4.18#3, §4.18#6).
+    let session_ctx = SessionContext {
+        mfa_proof: MfaProof::Proved,
+        ..session_ctx
+    };
+
+    match state
+        .identity
+        .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
+    {
+        Ok(session) => {
+            let secure = state.is_secure_request(headers);
+            let IssuedCookies {
+                session_cookie,
+                csrf_cookie,
+            } = issue_auth_cookies(
+                &state.cookie_secret,
+                &pending.realm_id,
+                session.id(),
+                secure,
+            );
+            let location = pending.return_to.as_deref().unwrap_or("/ui");
+            let mut response = Redirect::to(location).into_response();
+            append_cookie(&mut response, &session_cookie);
+            append_cookie(&mut response, &csrf_cookie);
+            append_cookie(&mut response, &clear_mfa_pending_cookie(secure));
+            append_cookie(
+                &mut response,
+                &super::auth::last_realm_cookie(
+                    &super::auth::last_realm_value(state.identity.as_ref(), &pending.realm_id),
+                    secure,
+                ),
+            );
+            response
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "mfa-otp-challenge: create_session failed");
+            internal_error_response()
+        }
+    }
+}
+
 // ============================================================================
 // Setup form
 // ============================================================================
@@ -852,14 +1261,13 @@ fn login_form_impl(
     // the POST handler can verify the double-submit. If not, generate a fresh
     // token and set a new cookie on this response.
     let secure = state.is_secure_request(&headers);
-    let (csrf_value, fresh_cookie) =
-        match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
-            Some(existing) => (existing.to_string(), None),
-            None => {
-                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-                (val, Some(cookie))
-            }
-        };
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(&headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
     tmpl.csrf = Some(csrf_value);
 
     let mut resp = render(&tmpl);
@@ -1118,6 +1526,13 @@ struct PreparedLogin {
     /// `true` for the `/ui/admin/login` surface — routed to the reserved admin
     /// gate (HEA-1892 / F2).
     is_admin: bool,
+    /// Parsed client IP for the abuse guards (task 20.13). `None` when no IP
+    /// could be determined — every guard skips in that case.
+    guard_ip: Option<std::net::IpAddr>,
+    /// A-17 tarpit delay owed by this attempt. Awaited by
+    /// [`login_submit_gated`] **before** the KDF gate; it must not be slept on
+    /// synchronously, which would park an executor thread.
+    tarpit_delay: Option<std::time::Duration>,
 }
 
 /// Orchestrates a login submission across the bounded KDF admission gate
@@ -1148,6 +1563,13 @@ async fn login_submit_gated(
         // Rejected pre-gate: no KDF permit was ever acquired.
         Err(response) => return response,
     };
+
+    // A-17 tarpit: the delay is owed before any further work and is awaited,
+    // never slept on, so a tarpitted flood costs the server a timer rather
+    // than an executor thread.
+    if let Some(delay) = prepared.tarpit_delay {
+        tokio::time::sleep(delay).await;
+    }
 
     let is_admin = prepared.is_admin;
     // Extract shed context before all values are moved into the closure.
@@ -1237,7 +1659,7 @@ fn login_prepare(
     // In production (dev_mode = false), an absent hearth_ui_csrf cookie is
     // treated as a CSRF failure (not a pass-through). In dev mode the bypass
     // is preserved so direct-POST tooling continues to work.
-    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(headers) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
@@ -1284,6 +1706,43 @@ fn login_prepare(
         return Err(render_ctx.generic_error(&email));
     }
 
+    // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, P-2 IP
+    // reputation, P-3 bot signal, A-16 challenge, A-3 cardinality and A-17
+    // tarpit all run here, before a KDF permit is acquired, for the same
+    // reason the rate limit does: rejected traffic must not consume admission
+    // capacity. Every arm collapses into the one generic page, so login
+    // enumeration properties are unchanged. All are fail-open until the
+    // operator enables them in `security:`.
+    let guard_ip = session_ctx
+        .ip_address
+        .as_deref()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
+    let mut tarpit_delay = None;
+    match state.abuse_guards.pre_auth_login(
+        guard_ip,
+        &email,
+        headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+        realm.config().cidr_policy.as_ref(),
+    ) {
+        PreAuthVerdict::Allow => {}
+        PreAuthVerdict::Deny { reason } => {
+            tracing::warn!(ip = %client_ip, guard = reason, "login: refused by abuse guard");
+            return Err(render_ctx.generic_error(&email));
+        }
+        PreAuthVerdict::Challenge { reason } => {
+            // No inline challenge surface exists on this form yet, so the
+            // signal is recorded and the attempt is refused rather than
+            // silently allowed — a challenge the caller cannot answer is a
+            // denial, and saying otherwise would be the same class of claim
+            // defect this task closes.
+            tracing::warn!(ip = %client_ip, guard = reason, "login: challenged by abuse guard");
+            return Err(render_ctx.generic_error(&email));
+        }
+        PreAuthVerdict::Delay(d) => tarpit_delay = Some(d),
+    }
+
     Ok(PreparedLogin {
         realm,
         render_ctx,
@@ -1291,6 +1750,8 @@ fn login_prepare(
         client_ip,
         email,
         is_admin,
+        guard_ip,
+        tarpit_delay,
     })
 }
 
@@ -1316,6 +1777,8 @@ fn login_finish(
         client_ip,
         email,
         is_admin: _,
+        guard_ip,
+        tarpit_delay: _,
     } = prepared;
     let return_to = render_ctx.return_to.clone();
 
@@ -1328,6 +1791,32 @@ fn login_finish(
         state
             .identity
             .record_ip_login_attempt(realm.id(), &client_ip);
+        // A login attempt against an address that has no account was audited
+        // NOWHERE: `verify_password` — which is what emits `LoginFailed` — is
+        // never reached, so a credential-stuffing run against a realm's whole
+        // address space left the audit trail empty while the per-IP counter
+        // ticked in memory (audit 2026-08-28 §4.14#7).
+        //
+        // Resource id is the literal `unknown`, not the submitted address: the
+        // realm's audit log is readable by realm admins, and echoing arbitrary
+        // attacker-supplied addresses into it would turn the log into a
+        // reflected store of third-party email addresses. The client IP is the
+        // actionable field and is recorded.
+        crate::protocol::audit_log::record(
+            state.audit.as_ref(),
+            &crate::audit::CreateAuditEvent {
+                realm_id: realm.id().clone(),
+                actor: "anonymous".to_string(),
+                action: crate::audit::AuditAction::LoginFailed,
+                resource_type: "credential".to_string(),
+                resource_id: "unknown".to_string(),
+                metadata: Some(serde_json::json!({
+                    "reason": "unknown_account",
+                    "ip": client_ip,
+                })),
+            },
+        );
+        state.abuse_guards.record_login_failure(guard_ip);
         return render_ctx.generic_error(&email);
     };
 
@@ -1336,11 +1825,12 @@ fn login_finish(
         .identity
         .verify_password(realm.id(), user.id(), &password)
     {
-        Ok(true) => {}
+        Ok(true) => state.abuse_guards.record_login_success(guard_ip),
         Ok(false) => {
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
+            state.abuse_guards.record_login_failure(guard_ip);
             return render_ctx.generic_error(&email);
         }
         Err(e) => {
@@ -1348,17 +1838,55 @@ fn login_finish(
             state
                 .identity
                 .record_ip_login_attempt(realm.id(), &client_ip);
+            state.abuse_guards.record_login_failure(guard_ip);
             return render_ctx.generic_error(&email);
         }
     }
 
     // --- MFA gate ---
+    // TOTP takes the inline form on this page; an SMS or email-OTP factor
+    // takes `/ui/mfa-otp-challenge`. Until 19.13 this gate asked `mfa_enabled`
+    // alone, so a user whose sole factor was SMS or email OTP was invisible
+    // to it: on an `mfa_required` realm they were pushed into forced TOTP
+    // enrolment as though they held nothing, and on any other realm their
+    // enrolled factor was skipped and the session issued straight away
+    // (audit 2026-08-28 §4.18#6). Neither branch decides whether the policy
+    // is met: the engine gate reads factor use from
+    // `SessionContext::mfa_proof` (§4.18#3).
     let mfa_on = state
         .identity
         .mfa_enabled(realm.id(), user.id())
         .unwrap_or(false);
+    let otp_factor = if mfa_on {
+        None
+    } else {
+        otp_factor_for(&state, &realm, &user)
+    };
     let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
+    // An absent `mfa_methods` restricts nothing, so TOTP is on offer.
+    let realm_offers_totp = realm
+        .config()
+        .mfa_methods
+        .as_ref()
+        .is_none_or(|m| m.iter().any(|x| x == "totp"));
     let secure = state.is_secure_request(&headers);
+    if let Some(factor) = otp_factor {
+        let cookie = issue_mfa_pending_cookie(
+            &state.cookie_secret,
+            realm.id(),
+            user.id(),
+            return_to.as_deref(),
+            secure,
+        );
+        state.set_current_realm(realm.id().clone());
+        tracing::debug!(
+            factor = factor.as_str(),
+            "login: routing to OTP second factor"
+        );
+        let mut response = Redirect::to("/ui/mfa-otp-challenge").into_response();
+        append_cookie(&mut response, &cookie);
+        return response;
+    }
     if mfa_on {
         let cookie = issue_mfa_pending_cookie(
             &state.cookie_secret,
@@ -1388,9 +1916,16 @@ fn login_finish(
         let mut response = render(&tmpl);
         append_cookie(&mut response, &cookie);
         return response;
-    } else if realm_requires_mfa {
+    } else if realm_requires_mfa && realm_offers_totp {
         // Realm mandates MFA but this user has none enrolled. Issue the same
         // pending cookie (proves identity) and redirect to forced enrollment.
+        //
+        // Only when the realm actually offers TOTP: since `mfa_methods`
+        // became a restriction (§4.18#10) a realm listing only `sms` or
+        // `email_otp` would have its forced-TOTP page refused by the engine.
+        // Those realms fall through to the required-action gate below, which
+        // injects the matching OTP enrolment. The engine's own `mfa_required`
+        // gate is the backstop if neither fires.
         let cookie = issue_mfa_pending_cookie(
             &state.cookie_secret,
             realm.id(),
@@ -1644,10 +2179,12 @@ fn passkey_login_complete_impl(
     peer_addr: SocketAddr,
 ) -> Response {
     use base64::Engine as _;
-    let mut session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
-    // Passkeys are inherently multi-factor (possession + biometric/PIN), so they
-    // satisfy any realm-level mfa_required policy without a separate TOTP gate.
-    session_ctx.satisfies_mfa_via_passkey = true;
+    // `mfa_proof` is deliberately left at `None` here. Only the completed
+    // ceremony knows whether the authenticator proved user verification, so
+    // `passkey_complete_for_user` sets it from the result (audit 2026-08-28
+    // B10). Setting it up front asserted a second factor before anything had
+    // been verified.
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
 
     let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -1720,6 +2257,69 @@ fn passkey_login_complete_impl(
     )
 }
 
+/// Decides whether a completed passkey ceremony still owes a second factor,
+/// and returns the response that collects it.
+///
+/// `Some(response)` means no session may be issued: the caller must return
+/// it. `None` means the ceremony satisfies the realm's policy.
+///
+/// Two realm settings reach here:
+///
+/// * `passkey_requires_mfa` — a regulated deployment wants a separate factor
+///   after *any* passkey, verified or not.
+/// * `mfa_required` — satisfied by a passkey only when that passkey proved
+///   user verification. A UV-less passkey is possession alone, so it owes a
+///   second factor like a password does (audit 2026-08-28 B10).
+fn passkey_second_factor_gate(
+    state: &Arc<WebState>,
+    realm: &Realm,
+    user_id: &crate::core::UserId,
+    user_verified: bool,
+    secure: bool,
+) -> Option<Response> {
+    let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
+    let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
+    // True when this ceremony is possession alone against a realm that
+    // mandates a second factor.
+    let passkey_is_not_a_second_factor = realm_requires_mfa && !user_verified;
+
+    if !(require_mfa_after_passkey || passkey_is_not_a_second_factor) {
+        return None;
+    }
+
+    let mfa_on = state
+        .identity
+        .mfa_enabled(realm.id(), user_id)
+        .unwrap_or(false);
+
+    // Nothing enrolled to challenge, and the passkey already counts as the
+    // second factor: only `passkey_requires_mfa` asked, and its behaviour is
+    // unchanged — the session proceeds.
+    if !(mfa_on || passkey_is_not_a_second_factor) {
+        return None;
+    }
+
+    let cookie = issue_mfa_pending_cookie(
+        &state.cookie_secret,
+        realm.id(),
+        user_id,
+        None, // no return_to for passkey flow
+        secure,
+    );
+    state.set_current_realm(realm.id().clone());
+
+    // An enrolled factor is challenged. With none enrolled the realm still
+    // mandates one, so force enrolment — either way no session is issued.
+    let redirect = if mfa_on {
+        "/ui/mfa-challenge"
+    } else {
+        "/ui/mfa-enroll-required"
+    };
+    let mut response = axum::Json(serde_json::json!({ "redirect": redirect })).into_response();
+    append_cookie(&mut response, &cookie);
+    Some(response)
+}
+
 /// Completes the `WebAuthn` authentication against the resolved realm
 /// and creates a session. Extracted so the bare and scoped variants
 /// share the same completion logic.
@@ -1768,43 +2368,40 @@ fn passkey_complete_for_user(
         }
     };
 
-    // Check realm policy: some regulated environments require TOTP
-    // even after passkey auth despite its inherent multi-factor nature.
-    let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
+    // A passkey counts as two factors only when the ceremony proved user
+    // verification — a PIN, a biometric, or an equivalent local check. The
+    // UP flag alone is a touch, which proves possession and nothing else.
+    // Treating every passkey as inherently multi-factor let a UV-less
+    // authenticator satisfy `mfa_required` outright (audit 2026-08-28 B10).
+    let user_verified = auth_result.user_verified();
 
-    if require_mfa_after_passkey {
-        let mfa_on = state
-            .identity
-            .mfa_enabled(realm.id(), auth_result.user_id())
-            .unwrap_or(false);
-        if mfa_on {
-            let cookie = issue_mfa_pending_cookie(
-                &state.cookie_secret,
-                realm.id(),
-                auth_result.user_id(),
-                None, // no return_to for passkey flow
-                secure,
-            );
-            state.set_current_realm(realm.id().clone());
-            let response_json = axum::Json(serde_json::json!({
-                "redirect": "/ui/mfa-challenge",
-            }));
-            let mut response = response_json.into_response();
-            append_cookie(&mut response, &cookie);
-            return response;
-        }
+    if let Some(response) =
+        passkey_second_factor_gate(state, realm, auth_result.user_id(), user_verified, secure)
+    {
+        return response;
     }
 
-    // Passkey authentication bypasses the TOTP gate — a passkey
-    // is inherently multi-factor (possession + biometric/PIN).
-    // Only reached if passkey_requires_mfa is false or user has no MFA enrolled.
+    // Reaching here means either the realm asks for no second factor, or the
+    // passkey proved user verification and is itself the second factor.
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
+    // The engine's own `mfa_required` gate reads this proof, so it must carry
+    // what the ceremony proved rather than an assumption made before it ran.
+    // `ProvedWebAuthn` rather than the generic `Proved`: a realm that sets
+    // `webauthn_required` accepts only a WebAuthn assertion, and this is the
+    // one path that can produce it (audit 2026-08-28 §4.18#3, task 25.26).
+    let mut session_ctx = session_ctx.clone();
+    session_ctx.mfa_proof = if user_verified {
+        crate::identity::MfaProof::ProvedWebAuthn
+    } else {
+        crate::identity::MfaProof::None
+    };
+
     match state
         .identity
-        .create_session(realm.id(), auth_result.user_id(), session_ctx)
+        .create_session(realm.id(), auth_result.user_id(), &session_ctx)
     {
         Ok(session) => {
             let IssuedCookies {
@@ -1870,14 +2467,13 @@ pub async fn mfa_challenge_form(
     };
 
     let secure = state.is_secure_request(&headers);
-    let (csrf_value, fresh_cookie) =
-        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
-            Some(existing) => (existing.to_string(), None),
-            None => {
-                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-                (val, Some(cookie))
-            }
-        };
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(&headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
 
     let mut tmpl = MfaChallengeTemplate::new(
         None,
@@ -1916,7 +2512,7 @@ pub async fn mfa_challenge_submit(
     };
 
     // F6: CSRF double-submit check — fail-closed in non-dev mode.
-    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(&headers) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode, // dev: bypass; prod: fail-closed
     };
@@ -2044,6 +2640,14 @@ pub async fn mfa_challenge_submit(
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
 
+    // The challenge above verified a TOTP or a recovery code, so this
+    // authentication proved a second factor. The realm's `mfa_required` gate
+    // reads exactly this (audit 2026-08-28 §4.18#3).
+    let session_ctx = SessionContext {
+        mfa_proof: MfaProof::Proved,
+        ..session_ctx
+    };
+
     match state
         .identity
         .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
@@ -2128,11 +2732,24 @@ pub async fn mfa_enroll_required_form(
         }
     };
 
+    // The activation POST now carries a CSRF token, so the page that renders
+    // the form must mint one (audit 2026-08-28 §4.18#7). Reuse the visitor's
+    // existing token when they have one, exactly as `mfa_challenge_form` does.
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_csrf_cookie) =
+        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+
     match enroll_result {
         Ok(enrollment) => {
             use super::account::generate_qr_svg;
             let qr_svg = generate_qr_svg(&enrollment.provisioning_uri);
-            let tmpl = MfaEnrollRequiredTemplate::new(
+            let mut tmpl = MfaEnrollRequiredTemplate::new(
                 None,
                 enrollment.secret_base32,
                 enrollment.provisioning_uri,
@@ -2141,7 +2758,12 @@ pub async fn mfa_enroll_required_form(
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            render(&tmpl)
+            tmpl.csrf = Some(csrf_value);
+            let mut resp = render(&tmpl);
+            if let Some(cookie) = fresh_csrf_cookie {
+                append_cookie(&mut resp, &cookie);
+            }
+            resp
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
             // User somehow got here with MFA already set up — send to challenge.
@@ -2168,6 +2790,12 @@ pub async fn mfa_enroll_required_form(
 pub struct MfaEnrollRequiredForm {
     #[serde(default)]
     pub code: String,
+    /// CSRF token echoed from the hidden `_csrf` field. Mirrors
+    /// [`MfaChallengeForm`] — this route completes a login exactly as the
+    /// challenge does and had no CSRF check at all (audit 2026-08-28
+    /// §4.18#7).
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
 }
 
 /// Verifies the TOTP code during forced enrollment and completes the login.
@@ -2189,6 +2817,33 @@ pub async fn mfa_enroll_required_submit(
         return Redirect::to("/ui/login").into_response();
     };
 
+    // CSRF double-submit — fail-closed outside dev mode. This route ends in
+    // `create_session` exactly as `mfa_challenge_submit` does, and had no
+    // check of any kind: a cross-site POST that guessed the code completed
+    // someone else's forced enrolment and logged them in (audit 2026-08-28
+    // §4.18#7). Same mechanism as the sibling, same dev-mode carve-out.
+    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        let secure = state.is_secure_request(&headers);
+        let (csrf_value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+        let mut tmpl = MfaEnrollRequiredTemplate::new(
+            Some("Your session has expired. Please reload the page and try again.".to_string()),
+            String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            state.product_name.clone(),
+            state.logo_url.clone(),
+        );
+        tmpl.csrf = Some(csrf_value);
+        let mut resp = render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        append_cookie(&mut resp, &csrf_cookie);
+        return resp;
+    }
+
     let realm_id = pending.realm_id.clone();
     let user_id = pending.user_id.clone();
     let code = form.code.trim().to_string();
@@ -2206,7 +2861,7 @@ pub async fn mfa_enroll_required_submit(
         }
     };
 
-    let err_response = |msg: &str| {
+    let err_status = |msg: &str, status: StatusCode| {
         let tmpl = MfaEnrollRequiredTemplate::new(
             Some(msg.to_string()),
             String::new(),
@@ -2216,11 +2871,20 @@ pub async fn mfa_enroll_required_submit(
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
+        render_status(&tmpl, status)
     };
+    let err_response = |msg: &str| err_status(msg, StatusCode::UNPROCESSABLE_ENTITY);
 
     match verify_result {
         Ok(()) => {}
+        Err(IdentityError::RateLimited) => {
+            // `verify_totp_enrollment` now shares the challenge form's
+            // attempt budget (audit 2026-08-28 §4.18#7).
+            return err_status(
+                "Too many failed attempts. Please wait a few minutes and try again.",
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
         Err(IdentityError::InvalidMfaCode) => {
             return err_response("Invalid code. Please re-scan the QR code and try again.");
         }
@@ -2235,6 +2899,31 @@ pub async fn mfa_enroll_required_submit(
 
     // Enrollment confirmed — complete login.
     let secure = state.is_secure_request(&headers);
+
+    // Redeem the single-use pending-cookie nonce before a session exists, the
+    // way `mfa_challenge_submit` does. Without it one captured pending cookie
+    // could be replayed for as long as it lived, each replay minting another
+    // session (audit 2026-08-28 §4.18#7).
+    {
+        let exp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_add(super::auth::MFA_PENDING_TTL_SECS);
+        match state
+            .identity
+            .redeem_mfa_nonce(&pending.realm_id, &pending.nonce, exp_secs)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "forced enrol: nonce redemption failed");
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+        }
+    }
 
     // --- Required-action gate (D1 / HEA-1752) ---
     // Completing forced MFA enrollment satisfies the enrollment requirement but
@@ -2263,6 +2952,13 @@ pub async fn mfa_enroll_required_submit(
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+
+    // Forced enrolment ends with the user submitting a live TOTP code, which
+    // `verify_totp_enrollment` checked above. That is a proved second factor.
+    let session_ctx = SessionContext {
+        mfa_proof: MfaProof::Proved,
+        ..session_ctx
+    };
 
     match state
         .identity
@@ -2934,6 +3630,26 @@ pub async fn admin_forgot_password_submit(
     forgot_password_submit_impl(state, headers, form, RealmSource::Admin, captcha_ok)
 }
 
+/// Runs `job` on the blocking pool without waiting for it.
+///
+/// Used for outbound mail on pre-auth flows: a transport that takes hundreds
+/// of milliseconds must not make the "this address exists" arm of a handler
+/// distinguishable from the silent one (audit 2026-08-28 §4.24#3 / #4).
+///
+/// Falls back to running `job` inline when no Tokio runtime is available
+/// (unit tests calling the impl directly) — correctness before latency.
+fn spawn_off_request_path<F>(job: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(job);
+        }
+        Err(_) => job(),
+    }
+}
+
 /// Shared implementation. Looks up the user in the resolved realm.
 /// Always redirects to the "check your email" page regardless of outcome
 /// (enumeration resistance).
@@ -2980,22 +3696,53 @@ fn forgot_password_submit_impl(
                 &headers,
             );
             let reset_url = format!("{base}{action_prefix}/reset-password?token={token}");
-            if let Some(ref email_service) = state.email {
+            if let Some(email_service) = state.email.clone() {
                 let realm_branding = realm.config().email_branding.clone();
                 let stored = realm
                     .config()
                     .email_templates
                     .get("password_reset")
                     .cloned();
-                if let Err(e) = email_service.send_password_reset_email(
-                    email,
-                    &reset_url,
-                    realm_branding.as_ref(),
-                    stored.as_ref(),
-                    None,
-                ) {
-                    tracing::warn!(error = %e, "forgot_password: failed to send email");
-                }
+                // Hand the send to the blocking pool and return immediately.
+                // Keeping the SMTP round-trip on the request path made the
+                // "account exists" arm measurably slower than the silent one,
+                // which is an enumeration oracle (audit 2026-08-28 §4.24#3).
+                let recipient = email.to_string();
+                // A-4 + A-50 (task 20.13): the per-realm outbound breadth
+                // budget and the cross-realm per-recipient fan-out cap. Both
+                // are fail-open until the operator enables them. The check
+                // runs inside the off-request-path closure so a refused send
+                // costs the caller exactly what an allowed one does — the
+                // arm is invisible in the response either way (§4.24#3).
+                let guards = Arc::clone(&state.abuse_guards);
+                let realm_key = realm.id().as_uuid().to_string();
+                spawn_off_request_path(move || {
+                    match guards.check_outbound_email(&realm_key, &recipient) {
+                        crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                            tracing::warn!(
+                                guard = reason,
+                                "forgot_password: outbound cap reached; reset email not sent"
+                            );
+                            return;
+                        }
+                        crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                            tracing::warn!(
+                                guard = reason,
+                                "forgot_password: outbound soft cap reached"
+                            );
+                        }
+                        crate::abuse::runtime::OutboundVerdict::Allow => {}
+                    }
+                    if let Err(e) = email_service.send_password_reset_email(
+                        &recipient,
+                        &reset_url,
+                        realm_branding.as_ref(),
+                        stored.as_ref(),
+                        None,
+                    ) {
+                        tracing::warn!(error = %e, "forgot_password: failed to send email");
+                    }
+                });
             } else {
                 tracing::warn!(
                     reset_url = %crate::protocol::redact::Redact(&reset_url),
@@ -3058,7 +3805,7 @@ pub async fn reset_password_form(
     State(state): State<Arc<WebState>>,
     Query(query): Query<ResetPasswordQuery>,
 ) -> Response {
-    reset_password_form_impl(state, query, None)
+    reset_password_form_impl(state, query, RealmSource::Path(None))
 }
 
 /// Renders the reset-password form at `/ui/realms/<name>/reset-password`.
@@ -3067,18 +3814,30 @@ pub async fn reset_password_form_scoped(
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     Query(query): Query<ResetPasswordQuery>,
 ) -> Response {
-    reset_password_form_impl(state, query, Some(realm_name))
+    reset_password_form_impl(state, query, RealmSource::Path(Some(realm_name)))
+}
+
+/// Renders the admin reset-password form at `/ui/admin/reset-password`.
+///
+/// `admin_forgot_password_submit` emails a link under `/ui/admin`; without
+/// this route that link 404s and the admin account is unrecoverable
+/// (audit 2026-08-28 §4.24#7).
+pub async fn admin_reset_password_form(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<ResetPasswordQuery>,
+) -> Response {
+    reset_password_form_impl(state, query, RealmSource::Admin)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn reset_password_form_impl(
     state: Arc<WebState>,
     query: ResetPasswordQuery,
-    path_realm: Option<String>,
+    source: RealmSource,
 ) -> Response {
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, false) {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -3118,6 +3877,15 @@ pub struct ResetPasswordFormData {
     pub password_confirm: String,
 }
 
+/// Minimum password length the browser forms enforce before spending an
+/// Argon2id permit.
+///
+/// Mirrors the engine's unconditional floor
+/// (`identity::validation::MIN_PASSWORD_LENGTH_FLOOR`). Keeping the two in
+/// step is what lets the form name the real requirement instead of failing
+/// deep in the engine with a generic message (audit 2026-08-28 §4.24#5).
+const MIN_BROWSER_PASSWORD_LENGTH: usize = 12;
+
 /// Context resolved pre-gate for reset-password submissions. Built outside the
 /// KDF admission gate so cheap validation rejects (password mismatch, minimum
 /// length) never consume a permit (HEA-1981 / F4).
@@ -3133,9 +3901,9 @@ struct PreparedReset {
 fn reset_prepare(
     state: &Arc<WebState>,
     form: &ResetPasswordFormData,
-    path_realm: Option<String>,
+    source: RealmSource,
 ) -> Result<PreparedReset, Response> {
-    let (realm, action_prefix) = match resolve_pre_auth_realm(state, path_realm, true) {
+    let (realm, action_prefix) = match resolve_for_source(state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -3167,10 +3935,14 @@ fn reset_prepare(
             "Passwords do not match.".to_string(),
         ));
     }
-    if form.password.len() < 8 {
+    // The pre-gate threshold must be the real policy floor. It used to be 8
+    // while the message said 12, so an 8-to-11-character password sailed past
+    // here, was rejected deep inside the engine, and came back as a generic
+    // "try again" that named no requirement (audit 2026-08-28 §4.24#5).
+    if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
         return Err(reset_err(
             form.token.clone(),
-            "Password must be at least 12 characters.".to_string(),
+            format!("Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."),
         ));
     }
     Ok(PreparedReset {
@@ -3187,7 +3959,7 @@ pub async fn reset_password_submit(
 ) -> Response {
     // Cheap pre-gate validation — password mismatch/length never consumes a KDF
     // permit (HEA-1981 / F4).
-    let prepared = match reset_prepare(&state, &form, None) {
+    let prepared = match reset_prepare(&state, &form, RealmSource::Path(None)) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -3212,7 +3984,36 @@ pub async fn reset_password_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<ResetPasswordFormData>,
 ) -> Response {
-    let prepared = match reset_prepare(&state, &form, Some(realm_name)) {
+    let prepared = match reset_prepare(&state, &form, RealmSource::Path(Some(realm_name))) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let shed_state = Arc::clone(&state);
+    let shed_headers = headers.clone();
+    match gate()
+        .run(move || reset_password_submit_impl(state, form, prepared))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(KdfGateError::Overloaded { retry_after }) => {
+            kdf_shed_html_response(&shed_state, &shed_headers, retry_after, None, None, None)
+        }
+        Err(KdfGateError::Join(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Handles reset-password form submission at `/ui/admin/reset-password`.
+///
+/// Completes the loop opened by `admin_forgot_password_submit`, whose emailed
+/// link previously pointed at a route that did not exist — leaving an admin
+/// account with a forgotten password unrecoverable through the UI
+/// (audit 2026-08-28 §4.24#7).
+pub async fn admin_reset_password_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<ResetPasswordFormData>,
+) -> Response {
+    let prepared = match reset_prepare(&state, &form, RealmSource::Admin) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -3279,6 +4080,21 @@ fn reset_password_submit_impl(
             String::new(),
             "This reset link is invalid or has expired. Please request a new one.".to_string(),
         ),
+        // The realm's password policy refused the new password. The token is
+        // NOT consumed on this path, so hand back the reason AND the token so
+        // the user can retry on the same link rather than being told to "try
+        // again" with no idea what to change (audit 2026-08-28 §4.24#5).
+        Err(IdentityError::InvalidInput { ref reason }) => {
+            let mut msg = reason.clone();
+            if let Some(first) = msg.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            reset_err(form.token, format!("{msg}."))
+        }
+        Err(IdentityError::PasswordReused) => reset_err(
+            form.token,
+            "That password has been used before. Please choose a different one.".to_string(),
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "reset_password: error resetting password");
             reset_err(
@@ -3287,6 +4103,135 @@ fn reset_password_submit_impl(
             )
         }
     }
+}
+
+// ============================================================================
+// Magic-link redemption
+// ============================================================================
+
+/// Query parameters for the magic-link redemption route.
+#[derive(Debug, Deserialize)]
+pub struct MagicLinkQuery {
+    /// The opaque single-use token from the emailed link.
+    pub token: Option<String>,
+}
+
+/// `GET /ui/magic-link` — redeems a magic link and starts a browser session.
+///
+/// Before this existed the flow had no terminal step: a token could be minted
+/// and mailed but never exchanged for anything (audit 2026-08-28 §4.24#6).
+pub async fn magic_link_redeem(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Query(query): Query<MagicLinkQuery>,
+) -> Response {
+    magic_link_redeem_impl(state, &headers, query, RealmSource::Path(None))
+}
+
+/// `GET /ui/realms/<name>/magic-link` — realm-scoped magic-link redemption.
+pub async fn magic_link_redeem_scoped(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<MagicLinkQuery>,
+) -> Response {
+    magic_link_redeem_impl(state, &headers, query, RealmSource::Path(Some(realm_name)))
+}
+
+/// Shared implementation for both magic-link redemption routes.
+///
+/// On success: revoke any prior cookie session, mint a new one, and redirect
+/// into the signed-in UI. On any failure: render the login page with a
+/// neutral "expired or already used" banner — never a hint about whether the
+/// address exists.
+#[allow(clippy::needless_pass_by_value)]
+fn magic_link_redeem_impl(
+    state: Arc<WebState>,
+    headers: &HeaderMap,
+    query: MagicLinkQuery,
+    source: RealmSource,
+) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
+        PreAuthRealm::Ok {
+            realm,
+            action_prefix,
+        } => (realm, action_prefix),
+        PreAuthRealm::Handled(resp) => return resp,
+    };
+
+    let expired = |state: &Arc<WebState>| -> Response {
+        let mut tmpl = LoginTemplate::new(
+            Some(
+                "This sign-in link has expired or has already been used. \
+                 Request a new one."
+                    .to_string(),
+            ),
+            None,
+            &action_prefix,
+            registration_enabled(&realm),
+            DEFAULT_LOGIN_LOCALE,
+            state.product_name.clone(),
+            state.logo_url.clone(),
+        );
+        tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+        tmpl.inline_theme_css = state.inline_theme_css();
+        tmpl.new_magic_link_url = Some(format!("{action_prefix}/login"));
+        render_status(&tmpl, StatusCode::BAD_REQUEST)
+    };
+
+    let Some(token) = query.token.filter(|t| !t.trim().is_empty()) else {
+        return expired(&state);
+    };
+
+    let user_id = match state.identity.validate_magic_link(realm.id(), &token) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::info!(error = %e, "magic_link: redemption rejected");
+            return expired(&state);
+        }
+    };
+
+    // A-41: destroy any pre-existing session cookie before issuing a new one.
+    revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
+
+    let session_ctx = crate::identity::SessionContext {
+        ip_address: None,
+        user_agent_raw: headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        device_label: None,
+        ..Default::default()
+    };
+    let session = match state
+        .identity
+        .create_session(realm.id(), &user_id, &session_ctx)
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "magic_link: create_session failed");
+            return internal_error_response();
+        }
+    };
+
+    let secure = state.is_secure_request(headers);
+    let IssuedCookies {
+        session_cookie,
+        csrf_cookie,
+    } = issue_auth_cookies(&state.cookie_secret, realm.id(), session.id(), secure);
+    state.set_current_realm(realm.id().clone());
+
+    let mut response = Redirect::to("/ui").into_response();
+    append_cookie(&mut response, &session_cookie);
+    append_cookie(&mut response, &csrf_cookie);
+    append_cookie(
+        &mut response,
+        &super::auth::last_realm_cookie(
+            &super::auth::last_realm_value(state.identity.as_ref(), realm.id()),
+            secure,
+        ),
+    );
+    response
 }
 
 // ============================================================================
@@ -3497,14 +4442,13 @@ fn register_form_impl(
 
     // Issue or reuse the CSRF cookie so the register form can double-submit.
     let secure = state.is_secure_request(headers);
-    let (csrf_value, fresh_cookie) =
-        match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
-            Some(existing) => (existing.to_string(), None),
-            None => {
-                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
-                (val, Some(cookie))
-            }
-        };
+    let (csrf_value, fresh_cookie) = match super::auth::csrf_cookie_value_from_headers(headers) {
+        Some(existing) => (existing.to_string(), None),
+        None => {
+            let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+            (val, Some(cookie))
+        }
+    };
     tmpl.csrf = Some(csrf_value);
     let mut resp = render(&tmpl);
     if let Some(cookie) = fresh_cookie {
@@ -3630,7 +4574,7 @@ fn register_pre_gate(
     let captcha_widget_html = state.captcha_provider.widget_html().to_string();
 
     // CSRF double-submit check — fail-closed in non-dev mode (HEA-1981 / F3).
-    let csrf_ok = match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
+    let csrf_ok = match super::auth::csrf_cookie_value_from_headers(headers) {
         Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
         None => state.dev_mode,
     };
@@ -3811,10 +4755,31 @@ fn register_submit_impl(
     if form.password != form.password_confirm {
         return render_err("Passwords do not match.".to_string(), form.email);
     }
-    if form.password.len() < 8 {
+    if form.password.len() < MIN_BROWSER_PASSWORD_LENGTH {
         return render_err(
-            "Password must be at least 12 characters.".to_string(),
+            format!("Password must be at least {MIN_BROWSER_PASSWORD_LENGTH} characters."),
             form.email,
+        );
+    }
+
+    // P-5 email reputation (task 20.13). The adapter was never constructed on
+    // a production path, so `security.providers.email_reputation` did nothing
+    // at all. It is opt-in and only the disposable-domain signal refuses:
+    // role addresses (`admin@`, `support@`) and a missing MX are legitimate in
+    // plenty of tenants and are recorded, not blocked (§6.1 fail-open).
+    let reputation = state.abuse_guards.check_email_reputation(form.email.trim());
+    if reputation.is_disposable {
+        tracing::warn!("register_submit: refused a disposable email domain");
+        return render_err(
+            "That email provider is not accepted. Please use a different address.".to_string(),
+            form.email,
+        );
+    }
+    if reputation.is_role_address || reputation.domain_has_no_mx {
+        tracing::info!(
+            role_address = reputation.is_role_address,
+            no_mx = reputation.domain_has_no_mx,
+            "register_submit: email reputation signal recorded"
         );
     }
 
@@ -3845,7 +4810,7 @@ fn register_submit_impl(
         }
     };
 
-    if let Some(email_service) = state.email.as_ref() {
+    if let Some(email_service) = state.email.clone() {
         let base = derive_base_url(
             state
                 .config
@@ -3860,15 +4825,39 @@ fn register_submit_impl(
         );
         let branding = realm.config().email_branding.clone();
         let stored_verification = realm.config().email_templates.get("verification").cloned();
-        if let Err(e) = email_service.send_verification_email(
-            &form.email,
-            &verify_url,
-            branding.as_ref(),
-            stored_verification.as_ref(),
-            None,
-        ) {
-            tracing::warn!(error = %e, "register_submit: failed to send verification email");
-        }
+        // Off the request path: the mail send must not add latency that
+        // distinguishes a fresh address from a registered one
+        // (audit 2026-08-28 §4.24#4).
+        let recipient = form.email.clone();
+        // A-4 + A-50 (task 20.13) — see the identical block in
+        // `forgot_password_submit_impl`. Inside the off-request-path closure
+        // so the arm adds no measurable latency to either outcome.
+        let guards = Arc::clone(&state.abuse_guards);
+        let realm_key = realm.id().as_uuid().to_string();
+        spawn_off_request_path(move || {
+            match guards.check_outbound_email(&realm_key, &recipient) {
+                crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
+                    tracing::warn!(
+                        guard = reason,
+                        "register_submit: outbound cap reached; verification email not sent"
+                    );
+                    return;
+                }
+                crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
+                    tracing::warn!(guard = reason, "register_submit: outbound soft cap reached");
+                }
+                crate::abuse::runtime::OutboundVerdict::Allow => {}
+            }
+            if let Err(e) = email_service.send_verification_email(
+                &recipient,
+                &verify_url,
+                branding.as_ref(),
+                stored_verification.as_ref(),
+                None,
+            ) {
+                tracing::warn!(error = %e, "register_submit: failed to send verification email");
+            }
+        });
     } else {
         tracing::warn!(
             "register_submit: no email transport configured; verification cannot be delivered"
@@ -4292,9 +5281,18 @@ pub async fn device_approve_form(
 }
 
 /// POST `/ui/device` — processes the device approval form.
+///
+/// Guarded by [`crate::abuse::device_approval::DeviceApprovalGuard`]
+/// (task 22.26, audit 2026-08-28 §4.25#4): an authenticated session gets a
+/// bounded number of wrong user codes before an escalating lockout, and the
+/// endpoint is rate-shaped per IP and per realm. Without a ceiling an
+/// attacker does not need to guess a *specific* code — any code currently
+/// pending in the realm approves a device they control.
 pub async fn device_approve_submit(
     State(state): State<Arc<WebState>>,
     session: super::auth::UiSession,
+    headers: HeaderMap,
+    PeerAddr(peer_addr): PeerAddr,
     Form(form): Form<DeviceApproveForm>,
 ) -> Response {
     // F5: verify CSRF before mutating. csrf_token is always present in the
@@ -4305,9 +5303,29 @@ pub async fn device_approve_submit(
         return resp;
     }
 
+    let guard_key = format!(
+        "{}:{}",
+        session.realm_id.as_uuid(),
+        session.user_id.as_uuid()
+    );
+    let peer_ip = captcha_client_ip(&headers, peer_addr, &state.trusted_proxies);
+    let realm_key = session.realm_id.as_uuid().to_string();
+
+    match state
+        .device_approval_guard
+        .check(&guard_key, peer_ip, &realm_key)
+    {
+        DeviceApprovalDecision::Allow => {}
+        decision => return device_approval_refusal(decision),
+    }
+
     let code = form.user_code.trim().to_uppercase();
 
     if code.is_empty() || code.len() > 8 {
+        let decision = state.device_approval_guard.record_failure(&guard_key);
+        if decision != DeviceApprovalDecision::Allow {
+            return device_approval_refusal(decision);
+        }
         return Redirect::to("/ui/device?flash=invalid").into_response();
     }
 
@@ -4315,15 +5333,44 @@ pub async fn device_approve_submit(
         .identity
         .approve_device(&session.realm_id, &code, &session.user_id)
     {
-        Ok(()) => Redirect::to("/ui/device?flash=approved").into_response(),
+        Ok(()) => {
+            state.device_approval_guard.record_success(&guard_key);
+            Redirect::to("/ui/device?flash=approved").into_response()
+        }
         Err(IdentityError::DeviceCodeExpired) => {
+            // An expired code is a code that really existed, so it is not a
+            // guess. Do not charge it against the attempt budget.
             Redirect::to("/ui/device?flash=expired").into_response()
         }
         Err(e) => {
             tracing::warn!(error = %e, "device_approve: approve_device failed");
+            let decision = state.device_approval_guard.record_failure(&guard_key);
+            if decision != DeviceApprovalDecision::Allow {
+                return device_approval_refusal(decision);
+            }
             Redirect::to("/ui/device?flash=invalid").into_response()
         }
     }
+}
+
+/// Renders a 429 for a shaped or locked-out device-approval attempt.
+///
+/// Both cases carry `Retry-After` so a well-behaved client backs off instead
+/// of hammering, and neither reveals whether the submitted code existed.
+fn device_approval_refusal(decision: DeviceApprovalDecision) -> Response {
+    let retry_after = match decision {
+        DeviceApprovalDecision::LockedOut { until, .. } => {
+            DeviceApprovalGuard::retry_after_secs(until)
+        }
+        _ => 1,
+    };
+    tracing::warn!(?decision, "device_approve: refused by brute-force guard");
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, retry_after.to_string())],
+        "Too many device approval attempts. Please wait and try again.",
+    )
+        .into_response()
 }
 
 // ============================================================================
@@ -4654,8 +5701,11 @@ pub async fn ra_verify_email_page(
 /// message indicating success or rate-limit.
 pub async fn ra_verify_email_resend(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<RaResendForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     let Some(realm_id) = realm_id_from_ra_token(&form.ra_token) else {
         return internal_error_response();
     };
@@ -4689,11 +5739,13 @@ pub async fn ra_verify_email_resend(
             &return_url,
             "Verification email sent. Check your inbox.",
             "success",
+            secure,
         ),
         Err(IdentityError::RateLimited) => super::templates::redirect_with_flash(
             &return_url,
             "Please wait a moment before requesting another email.",
             "error",
+            secure,
         ),
         Err(e) => {
             tracing::warn!(error = %e, "ra_verify_email_resend: request_email_verification failed");
@@ -4701,6 +5753,7 @@ pub async fn ra_verify_email_resend(
                 &return_url,
                 "Failed to send verification email. Please try again.",
                 "error",
+                secure,
             )
         }
     }

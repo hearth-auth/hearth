@@ -18,7 +18,7 @@ use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SystemClock};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
-    IdentityConfig, IdentityEngine, RealmConfig, SessionContext, UpdateRealmRequest,
+    IdentityConfig, IdentityEngine, RealmConfig, RealmStatus, SessionContext, UpdateRealmRequest,
 };
 use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -464,5 +464,120 @@ async fn scim_patch_over_operation_cap_rejected() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "PATCH with {} operations must be rejected with 413 (got {over_status}): {over_body}",
         MAX_SCIM_OPERATIONS + 1
+    );
+}
+
+/// GET the SCIM user directory for `realm_id`.
+async fn get_scim_users(
+    app: &axum::Router,
+    realm_id: &RealmId,
+    auth_header: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/scim/v2/Users")
+        .header("x-realm-id", realm_id.as_uuid().to_string())
+        .header("authorization", auth_header)
+        .body(Body::empty())
+        .expect("build request");
+
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let val: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
+/// Move `realm_id` to `status` without touching its config.
+fn set_realm_status(rig: &Rig, realm_id: &RealmId, status: RealmStatus) {
+    rig.identity
+        .update_realm(
+            realm_id,
+            &UpdateRealmRequest {
+                status: Some(status),
+                ..UpdateRealmRequest::default()
+            },
+        )
+        .expect("update realm status");
+}
+
+/// §4.1#5 — a suspended realm must not serve its user directory to the
+/// pre-shared SCIM bearer token. Realm status is an incident-response freeze
+/// control, so it has to hold on the SCIM plane too, not only on writes.
+#[tokio::test]
+async fn scim_bearer_token_refused_on_suspended_realm() {
+    const PLAINTEXT_TOKEN: &str = "scim-token-for-suspended-realm-directory-read";
+
+    let rig = build_rig();
+    let realm_id = setup_realm_with_scim_token(&rig, "scim-suspended", PLAINTEXT_TOKEN);
+    let auth_header = format!("Bearer {PLAINTEXT_TOKEN}");
+
+    // Precondition: the token reads the directory while the realm is Active.
+    let (active_status, active_body) = get_scim_users(&rig.app, &realm_id, &auth_header).await;
+    assert_eq!(
+        active_status,
+        StatusCode::OK,
+        "precondition: an active realm must serve the directory (got {active_status}): {active_body}"
+    );
+
+    set_realm_status(&rig, &realm_id, RealmStatus::Suspended);
+
+    let (status, body) = get_scim_users(&rig.app, &realm_id, &auth_header).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a suspended realm must refuse the SCIM directory read (got {status}): {body}"
+    );
+}
+
+/// §4.1#5 — the same gate on an archived realm, and on the write path.
+#[tokio::test]
+async fn scim_bearer_token_refused_on_archived_realm() {
+    const PLAINTEXT_TOKEN: &str = "scim-token-for-archived-realm-directory-read";
+
+    let rig = build_rig();
+    let realm_id = setup_realm_with_scim_token(&rig, "scim-archived", PLAINTEXT_TOKEN);
+    let auth_header = format!("Bearer {PLAINTEXT_TOKEN}");
+
+    set_realm_status(&rig, &realm_id, RealmStatus::Archived);
+
+    let (read_status, read_body) = get_scim_users(&rig.app, &realm_id, &auth_header).await;
+    assert_eq!(
+        read_status,
+        StatusCode::FORBIDDEN,
+        "an archived realm must refuse the SCIM directory read (got {read_status}): {read_body}"
+    );
+
+    let (write_status, write_body) =
+        post_scim_user(&rig.app, &realm_id, &auth_header, "ghost@example.com").await;
+    assert_eq!(
+        write_status,
+        StatusCode::FORBIDDEN,
+        "an archived realm must refuse SCIM provisioning (got {write_status}): {write_body}"
+    );
+}
+
+/// §4.1#5 — the admin-JWT fallback path carries the same gate, so a realm
+/// with no `scim_bearer_token_hash` is not a way around the freeze.
+#[tokio::test]
+async fn scim_admin_jwt_fallback_refused_on_suspended_realm() {
+    let rig = build_rig();
+    let (realm_id, jwt) = setup_realm_with_admin(&rig, "scim-fallback-suspended");
+    let auth_header = format!("Bearer {jwt}");
+
+    let (active_status, active_body) = get_scim_users(&rig.app, &realm_id, &auth_header).await;
+    assert_eq!(
+        active_status,
+        StatusCode::OK,
+        "precondition: the fallback path must work while active (got {active_status}): {active_body}"
+    );
+
+    set_realm_status(&rig, &realm_id, RealmStatus::Suspended);
+
+    let (status, body) = get_scim_users(&rig.app, &realm_id, &auth_header).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a suspended realm must refuse the SCIM fallback path (got {status}): {body}"
     );
 }

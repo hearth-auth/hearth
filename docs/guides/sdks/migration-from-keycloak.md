@@ -237,9 +237,10 @@ if err != nil {
     // typed error: *hearth.TokenError
 }
 
-// Role and permission checks — synchronous, zero-network, no introspect call
-if client.HasRole(token, "admin") { ... }
-if client.HasPermission(token, "billing.read") { ... }
+// Role and permission checks — no introspect call. Each verifies the token
+// against the cached JWKS before reading a claim, so pass the request context.
+if client.HasRole(ctx, token, "admin") { ... }
+if client.HasPermission(ctx, token, "billing.read") { ... }
 ```
 
 ### Authorization model translation
@@ -250,7 +251,7 @@ the JWT at issuance time:
 
 | Keycloak pattern | Hearth equivalent |
 |-----------------|-------------------|
-| Realm role check via adapter | `hearth.hasRole("role")` or `HasRole(token, "role")` |
+| Realm role check via adapter | `hearth.hasRole("role")` or `HasRole(ctx, token, "role")` |
 | Resource role check | `hearth.hasPermission("resource.action")` |
 | UMA policy enforcement point | Local JWT claim — no PEP needed |
 | `realm_access.roles[]` in token | `roles: string[]` claim |

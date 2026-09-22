@@ -381,6 +381,12 @@ pub struct RealmConfig {
     /// `None` → scorer disabled (fail-open per §6.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_scorer_config: Option<RiskScorerConfig>,
+    /// A-9 tenant-managed CIDR allow/deny lists for this realm.
+    ///
+    /// `None` → no network restriction (fail-open per §6.1). Populated from
+    /// `realms.<name>.security.cidr_policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cidr_policy: Option<CidrPolicy>,
     /// Per-realm resource quota limits (A-24).
     ///
     /// `None` means no quotas (unlimited). When set, create operations for the
@@ -655,6 +661,31 @@ pub enum SessionLimitPolicy {
     /// victim's sessions via repeated login. Only use when the application
     /// requires single-session semantics and the threat model accepts it.
     EvictOldest,
+}
+
+/// Per-realm CIDR allow/deny lists (A-9).
+///
+/// Stored as the operator's literal CIDR strings so an unparseable entry can
+/// be reported against the exact text they wrote. The compiled
+/// [`crate::abuse::cidr::CidrFilter`] is built from these at the call site;
+/// entries that do not parse are dropped there (fail-open per §6.1) after the
+/// start-up validator has already refused them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CidrPolicy {
+    /// CIDRs permitted to authenticate. Empty = no allow-list restriction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// CIDRs refused outright. Evaluated before `allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+}
+
+impl CidrPolicy {
+    /// Whether this policy restricts anything at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.allow.is_empty() && self.deny.is_empty()
+    }
 }
 
 /// Per-realm resource quota configuration (A-24).

@@ -135,7 +135,7 @@
           <div>
             <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">fsync Writes</dt>
             <dd class="mt-1 text-sm text-ht-content-secondary">
-              {% if cfg.storage.fsync %}
+              {% if cfg.fsync_effective() %}
                 <span class="inline-flex items-center rounded-full bg-success/[0.12] px-2 py-0.5 text-xs font-medium text-success-fg">Enabled</span>
               {% else %}
                 <span class="inline-flex items-center rounded-full bg-warning/[0.12] px-2 py-0.5 text-xs font-medium text-warning-fg">Disabled</span>

@@ -157,6 +157,10 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         domain::AuditAction::SpiffeIdMapped => pb::AuditAction::SpiffeIdMapped,
         domain::AuditAction::SpiffeAuthSuccess => pb::AuditAction::SpiffeAuthSuccess,
         domain::AuditAction::AuditLogPruned => pb::AuditAction::AuditLogPruned,
+        // Organization invitation lifecycle (subsystem audit 2026-09-21, O-4).
+        domain::AuditAction::InvitationCreated => pb::AuditAction::InvitationCreated,
+        domain::AuditAction::InvitationAccepted => pb::AuditAction::InvitationAccepted,
+        domain::AuditAction::InvitationRevoked => pb::AuditAction::InvitationRevoked,
     }
 }
 
@@ -350,6 +354,10 @@ pub(crate) fn proto_audit_action_to_domain(a: pb::AuditAction) -> Option<domain:
         pb::AuditAction::SpiffeIdMapped => Some(domain::AuditAction::SpiffeIdMapped),
         pb::AuditAction::SpiffeAuthSuccess => Some(domain::AuditAction::SpiffeAuthSuccess),
         pb::AuditAction::AuditLogPruned => Some(domain::AuditAction::AuditLogPruned),
+        // Organization invitation lifecycle (subsystem audit 2026-09-21, O-4).
+        pb::AuditAction::InvitationCreated => Some(domain::AuditAction::InvitationCreated),
+        pb::AuditAction::InvitationAccepted => Some(domain::AuditAction::InvitationAccepted),
+        pb::AuditAction::InvitationRevoked => Some(domain::AuditAction::InvitationRevoked),
     }
 }
 

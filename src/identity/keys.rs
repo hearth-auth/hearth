@@ -97,6 +97,9 @@ const CLIENT_ASSERTION_JTI_PREFIX: &str = "oauth:ca-jti:";
 /// Prefix for JAR (RFC 9101) signed request object JTI replay store.
 const JAR_JTI_PREFIX: &str = "oauth:jar-jti:";
 
+/// Prefix for the OIDC `nonce` replay store (22.21).
+const OIDC_NONCE_PREFIX: &str = "oauth:nonce:";
+
 /// Prefix for OAuth consent record storage.
 const OAUTH_CONSENT_PREFIX: &str = "oauth:consent:";
 
@@ -156,6 +159,9 @@ const EMAIL_CHANGE_TOKEN_PREFIX: &str = "email:change:";
 
 /// Prefix for password reset token storage (stored by SHA-256 hash).
 const PASSWORD_RESET_PREFIX: &str = "rst:token:";
+
+/// Prefix for the per-user password-reset invalidation watermark.
+const PASSWORD_RESET_WATERMARK_PREFIX: &str = "rst:wm:";
 
 /// Prefix for organization primary keys.
 const ORG_ID_PREFIX: &str = "org:id:";
@@ -221,17 +227,17 @@ const MFA_TRACKER_PREFIX: &str = "rl:mfa:";
 
 /// Prefix for WAL-persisted per-email magic-link request rate-limit counters.
 ///
-/// Format: `rl:rml:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rml:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 const MAGIC_LINK_RL_PREFIX: &str = "rl:rml:";
 
 /// Prefix for WAL-persisted per-email password-reset request rate-limit counters.
 ///
-/// Format: `rl:rpwreset:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rpwreset:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 const PASSWORD_RESET_RL_PREFIX: &str = "rl:rpwreset:";
 
 /// Prefix for WAL-persisted per-email registration rate-limit counters.
 ///
-/// Format: `rl:rreg-email:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rreg-email:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 const REGISTRATION_EMAIL_RL_PREFIX: &str = "rl:rreg-email:";
 
 /// Prefix for `prompt=none` silent-auth probe counters (A-37).
@@ -364,6 +370,13 @@ pub(crate) fn encode_user_id(user_id: &UserId) -> Vec<u8> {
 /// before calling this function.
 pub(crate) fn encode_user_email(email: &str) -> Vec<u8> {
     format!("{USER_EMAIL_PREFIX}{email}").into_bytes()
+}
+
+/// Returns the scan prefix for every user email-index entry in a realm.
+///
+/// Format: `usr:email:`
+pub(crate) fn user_email_scan_prefix() -> Vec<u8> {
+    USER_EMAIL_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the *value* stored under an email-index key: 16 raw UUID bytes.
@@ -590,48 +603,59 @@ pub(crate) fn encode_global_signing_key() -> Vec<u8> {
     b"sys:global:key".to_vec()
 }
 
-/// Storage key for the server-wide OIDC RSA-2048 signing key.
+/// Scan prefix covering every legacy server-wide OIDC RSA key row.
 ///
-/// Format: `sys:oidc:rsa:key` — JSON `{"pkcs8": [...], "cert": [...]}`.
-/// Stored under the system realm. Generated once on first JWKS request and
-/// persisted so the `kid` survives restarts (HEA-1655).
-pub(crate) fn encode_oidc_rsa_key() -> Vec<u8> {
-    b"sys:oidc:rsa:key".to_vec()
+/// Two families lived under it: `sys:oidc:rsa:key` (the active keypair) and
+/// `sys:oidc:rsa:retiring:{deadline:020}:{kid}` (grace-window keys), both
+/// serialised as plain JSON `{"pkcs8": [...], "cert": [...]}` — an
+/// **unencrypted** RSA-2048 private key, while every other key family went
+/// through the HKEY envelope (audit 2026-08-28 §4.15#4).
+///
+/// Nothing signs with these keys any more: the JWKS publishes Ed25519 only
+/// (§4.2#4, §4.15#5). The prefix is retained so startup can delete what an
+/// older build wrote.
+pub(crate) fn legacy_oidc_rsa_scan_prefix() -> Vec<u8> {
+    b"sys:oidc:rsa:".to_vec()
 }
 
-/// Storage key for a retiring OIDC RSA key during its grace window.
+/// Storage key for a realm's signing-key rotation epoch.
 ///
-/// Format: `sys:oidc:rsa:retiring:{deadline_secs:020}:{kid}`
+/// Format: `realm:keygen:{uuid}` → 8-byte little-endian `u64`.
 ///
-/// `deadline_secs` is zero-padded to 20 digits so lexicographic order
-/// matches time order, enabling efficient range scan.
-/// Stored under the system realm.
-///
-/// Called by the OIDC RSA key-rotation function (and by tests). Suppressing
-/// `dead_code` because the production write-path (rotation) is a follow-up.
-#[allow(dead_code)]
-pub(crate) fn encode_oidc_rsa_retiring_key(deadline_secs: u64, kid: &str) -> Vec<u8> {
-    format!("sys:oidc:rsa:retiring:{deadline_secs:020}:{kid}").into_bytes()
+/// Stored under the system realm and therefore replicated through Raft like
+/// any other write, which is what makes it visible to every node. The
+/// in-process `realm_signing_keys` cache is keyed against it so a rotation
+/// performed on one node invalidates the others' caches instead of leaving
+/// them publishing and trusting the pre-rotation key (audit 2026-08-28
+/// §4.15#6).
+pub(crate) fn encode_realm_key_epoch(realm_id: &RealmId) -> Vec<u8> {
+    format!("realm:keygen:{}", realm_id.as_uuid()).into_bytes()
 }
 
-/// Scan prefix for all retiring OIDC RSA keys.
+/// Storage key for the cluster-wide **control epoch**.
 ///
-/// Used to enumerate grace-window keys for inclusion in JWKS.
-pub(crate) fn oidc_rsa_retiring_scan_prefix() -> Vec<u8> {
-    b"sys:oidc:rsa:retiring:".to_vec()
+/// A single `u64` row under the system realm, bumped whenever a node asserts a
+/// control whose enforcement lives in an authoritative process-local cache:
+/// realm suspend/archive, token revocation, and the DPoP key blocklist. Every
+/// other node observes the bump on its next validation and reloads those
+/// caches from storage (audit 2026-08-28 §4.1 objection, §4.16#5, §4.19#12).
+///
+/// It is an ordinary storage row on purpose: it replicates through Raft with
+/// the rows it describes, needing no new transport. A `StorageEngine` trait
+/// default would silently no-op, because `serve` always installs a
+/// `ClusterStorageAdapter`.
+pub(crate) fn encode_control_epoch() -> Vec<u8> {
+    b"sys:control:epoch".to_vec()
 }
 
-/// Parses the deadline (Unix seconds) from a retiring OIDC RSA storage key.
+/// Storage key for the KEK enrolment marker.
 ///
-/// Expected format: `sys:oidc:rsa:retiring:{deadline:020}:{kid}`.
-/// Returns `None` when the key does not match.
-pub(crate) fn parse_oidc_rsa_retiring_deadline(key_bytes: &[u8]) -> Option<u64> {
-    const PREFIX: &str = "sys:oidc:rsa:retiring:";
-    let s = std::str::from_utf8(key_bytes).ok()?;
-    let after = s.strip_prefix(PREFIX)?;
-    // First 20 characters are the zero-padded deadline.
-    let deadline_str = after.get(..20)?;
-    deadline_str.parse::<u64>().ok()
+/// Written once, the first time a KEK-configured process opens a store. Its
+/// presence means every signing key in the store has been through the HKEY
+/// envelope, so an unenveloped signing key read afterwards is a downgrade and
+/// is refused rather than migrated (audit 2026-08-28 §4.15#7).
+pub(crate) fn encode_kek_enrollment_marker() -> Vec<u8> {
+    b"sys:kek:enrolled".to_vec()
 }
 
 /// Encodes the storage key for a retiring realm signing key.
@@ -659,6 +683,49 @@ pub(crate) fn encode_realm_retiring_key(
 /// Format: `realm:retiring:{realm_uuid}:`
 pub(crate) fn realm_retiring_key_scan_prefix(realm_id: &RealmId) -> Vec<u8> {
     format!("{REALM_RETIRING_KEY_PREFIX}{}:", realm_id.as_uuid()).into_bytes()
+}
+
+/// Scan prefix covering every realm's active signing key.
+///
+/// Format: `realm:key:` — used by the KEK enrolment sweep, which must reach
+/// every stored signing key regardless of realm.
+pub(crate) fn realm_signing_key_scan_prefix() -> Vec<u8> {
+    REALM_KEY_PREFIX.as_bytes().to_vec()
+}
+
+/// Scan prefix covering every realm's retiring signing keys.
+///
+/// Format: `realm:retiring:` — the realm-agnostic counterpart of
+/// [`realm_retiring_key_scan_prefix`], used by the KEK enrolment sweep.
+pub(crate) fn realm_retiring_key_all_scan_prefix() -> Vec<u8> {
+    REALM_RETIRING_KEY_PREFIX.as_bytes().to_vec()
+}
+
+/// Scan prefix covering every realm's SAML signing key.
+///
+/// Format: `realm:saml_key:` — like the Ed25519 signing keys these live
+/// under the system realm, so the KEK enrolment sweep reaches them with one
+/// bounded scan rather than a realm walk.
+pub(crate) fn realm_saml_key_scan_prefix() -> Vec<u8> {
+    REALM_SAML_KEY_PREFIX.as_bytes().to_vec()
+}
+
+/// Parses the key id (`kid`) encoded in a retiring-key storage key.
+///
+/// The inverse of the trailing segment of [`encode_realm_retiring_key`]. The
+/// backup importer must write a restored retiring key back under the *same*
+/// `kid`, because that is the `kid` in the JWT header of every token the
+/// outgoing key signed. Returns `None` when the key does not match the
+/// expected format.
+pub(crate) fn parse_retiring_key_id(key_bytes: &[u8]) -> Option<String> {
+    let key_str = std::str::from_utf8(key_bytes).ok()?;
+    let after_prefix = key_str.strip_prefix(REALM_RETIRING_KEY_PREFIX)?;
+    // "{uuid}:" is 37 chars, "{deadline:020}:" is 21 more.
+    let key_id = after_prefix.get(58..)?;
+    if key_id.is_empty() {
+        return None;
+    }
+    Some(key_id.to_string())
 }
 
 /// Parses the deadline (Unix seconds) encoded in a retiring-key storage key.
@@ -710,7 +777,6 @@ pub(crate) fn encode_grant_family(family_id: &str) -> Vec<u8> {
 /// Returns the scan prefix for all grant families.
 ///
 /// Format: `oauth:family:`
-#[allow(dead_code)]
 pub(crate) fn grant_family_scan_prefix() -> Vec<u8> {
     GRANT_FAMILY_PREFIX.as_bytes().to_vec()
 }
@@ -798,6 +864,14 @@ pub(crate) fn encode_webauthn_credentials_prefix(user_id: &UserId) -> Vec<u8> {
     format!("{WEBAUTHN_CRED_PREFIX}{}:", user_id.as_uuid()).into_bytes()
 }
 
+/// Returns the scan-start prefix for every `WebAuthn` credential in a realm,
+/// across all users. Used by the backup exporter (audit 2026-08-28 §4.18#5).
+///
+/// Format: `webauthn:cred:`
+pub(crate) fn webauthn_credential_scan_prefix() -> Vec<u8> {
+    WEBAUTHN_CRED_PREFIX.as_bytes().to_vec()
+}
+
 /// Encodes the discoverable credential index key.
 ///
 /// Format: `webauthn:disc:{credential_id_b64url}`
@@ -873,6 +947,21 @@ pub(crate) fn password_reset_scan_prefix() -> Vec<u8> {
     PASSWORD_RESET_PREFIX.as_bytes().to_vec()
 }
 
+/// Encodes the storage key for a user's password-reset invalidation watermark.
+///
+/// Format: `rst:wm:{user_uuid}`
+///
+/// The value is a JSON object carrying the microsecond timestamp at which every
+/// reset token older than it stopped being valid. Written when a password is
+/// set and when a newer reset token is issued (audit 2026-08-28 §4.24#1).
+pub(crate) fn encode_password_reset_watermark(user_id: &UserId) -> Vec<u8> {
+    format!(
+        "{PASSWORD_RESET_WATERMARK_PREFIX}{}",
+        user_id.as_uuid().as_hyphenated()
+    )
+    .into_bytes()
+}
+
 /// Encodes the storage key for a revoked token JTI.
 ///
 /// Format: `oauth:revjti:{jti}`
@@ -901,13 +990,6 @@ pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
     format!("{JWT_BEARER_JTI_PREFIX}{jti}").into_bytes()
 }
 
-/// Returns the scan prefix for all JWT bearer assertion JTIs in a realm.
-///
-/// Used during cascade realm deletion to purge the replay store.
-pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
-    JWT_BEARER_JTI_PREFIX.as_bytes().to_vec()
-}
-
 /// Encodes the storage key for a consumed `private_key_jwt` assertion JTI.
 ///
 /// Format: `oauth:ca-jti:{jti}`
@@ -915,13 +997,6 @@ pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
 /// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention.
 pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
     format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
-}
-
-/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
-///
-/// Used during cascade realm deletion to purge the replay store.
-pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
-    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a JAR (RFC 9101) signed request object JTI.
@@ -938,6 +1013,38 @@ pub(crate) fn encode_jar_jti(jti: &str) -> Vec<u8> {
 /// Used during cascade realm deletion to purge the replay store.
 pub(crate) fn jar_jti_scan_prefix() -> Vec<u8> {
     JAR_JTI_PREFIX.as_bytes().to_vec()
+}
+
+// ===== OIDC nonce replay key encoding (22.21) =====
+
+/// Encodes the OIDC `nonce` replay sentinel key.
+///
+/// Format: `oauth:nonce:{client_uuid}:{sha256_hex(nonce)}`. Realm scoping is
+/// implicit — every `StorageEngine` call takes a `RealmId` and every key is
+/// realm-prefixed — so, unlike the process-local map this replaced, the realm
+/// need not appear in the key itself. Scoping to the client as well keeps one
+/// client's nonce choice from spuriously rejecting an identical nonce picked
+/// independently by another (HEA-1757 / O3).
+///
+/// The nonce is hashed rather than interpolated: it is caller-supplied and
+/// unbounded, and a raw key would put attacker-chosen bytes of arbitrary
+/// length into the keyspace. Nothing ever reads the nonce back out of the key
+/// — the sweeper reads only the value — so the hash loses nothing.
+pub(crate) fn encode_oidc_nonce(client_id: &ClientId, nonce: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{OIDC_NONCE_PREFIX}{}:{}",
+        client_id.as_uuid(),
+        hex::encode(Sha256::digest(nonce.as_bytes()))
+    )
+    .into_bytes()
+}
+
+/// Returns the scan prefix for every OIDC nonce sentinel in a realm.
+///
+/// Used by the periodic cleanup sweep and by cascade realm deletion.
+pub(crate) fn oidc_nonce_scan_prefix() -> Vec<u8> {
+    OIDC_NONCE_PREFIX.as_bytes().to_vec()
 }
 
 // ===== OAuth consent key encoding =====
@@ -974,6 +1081,16 @@ pub(crate) fn encode_consent_prefix_for_user(user_id: &UserId) -> Vec<u8> {
 /// (which then filters by the trailing `:{client_uuid}` segment).
 pub(crate) fn oauth_consent_scan_prefix() -> Vec<u8> {
     OAUTH_CONSENT_PREFIX.as_bytes().to_vec()
+}
+
+/// Returns `true` iff `key` is inside the consent key space.
+///
+/// The backup importer writes consent records back at the exact key the
+/// exporter read them from, because neither the legacy nor the extended key
+/// shape is recoverable from the record's own fields. This guard is what stops
+/// a hand-edited archive using that member to write anywhere else in the realm.
+pub(crate) fn is_oauth_consent_key(key: &str) -> bool {
+    key.starts_with(OAUTH_CONSENT_PREFIX) && key.len() > OAUTH_CONSENT_PREFIX.len()
 }
 
 /// Encodes the extended consent key for a `(user, client, org_key, resource_key)` tuple.
@@ -1096,7 +1213,6 @@ pub(crate) fn membership_by_user_prefix(user_id: &UserId) -> Vec<u8> {
 /// Returns the scan prefix for all membership-by-org entries (realm-wide).
 ///
 /// Format: `orgm:org:`
-#[allow(dead_code)]
 pub(crate) fn membership_org_scan_prefix() -> Vec<u8> {
     ORGM_ORG_PREFIX.as_bytes().to_vec()
 }
@@ -1119,7 +1235,6 @@ pub(crate) fn encode_invitation_id(invitation_id: &InvitationId) -> Vec<u8> {
 /// Returns the scan prefix for all invitation records.
 ///
 /// Format: `orgi:id:`
-#[allow(dead_code)]
 pub(crate) fn invitation_id_scan_prefix() -> Vec<u8> {
     ORGI_ID_PREFIX.as_bytes().to_vec()
 }
@@ -1316,10 +1431,28 @@ pub(crate) fn encode_federation_ext_fwd_prefix_for_user(user_id: &UserId) -> Vec
 ///
 /// Format: `fed:ext_fwd:`
 ///
-/// Used by `delete_realm` cascade.
-#[allow(dead_code)]
+/// Used by `delete_realm` cascade and by the backup exporter.
 pub(crate) fn fed_ext_fwd_scan_prefix() -> Vec<u8> {
     FED_EXT_FWD_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers `(user_id, idp_id)` from a forward federation-link index key.
+///
+/// The exact inverse of [`encode_federation_ext_fwd_key`]. The forward index
+/// stores only the `external_sub` in its *value*, so the two identifiers the
+/// backup importer needs to rebuild **both** link directions live in the key.
+/// A rehydrator that re-derives a key must share the writer's encoding, so the
+/// unit test `fed_ext_fwd_decoder_inverts_encoder` asserts exactly that.
+///
+/// Returns `None` for any key outside the forward index or whose segments are
+/// not parseable UUIDs.
+pub(crate) fn decode_federation_ext_fwd(key: &[u8]) -> Option<(UserId, IdpId)> {
+    let text = std::str::from_utf8(key).ok()?;
+    let rest = text.strip_prefix(FED_EXT_FWD_PREFIX)?;
+    let (user_str, idp_str) = rest.split_once(':')?;
+    let user = uuid::Uuid::parse_str(user_str).ok()?;
+    let idp = uuid::Uuid::parse_str(idp_str).ok()?;
+    Some((UserId::new(user), IdpId::new(idp)))
 }
 
 /// Encodes the SCIM `externalId` → `UserId` index key.
@@ -1334,10 +1467,25 @@ pub(crate) fn encode_scim_ext_user_key(external_id: &str) -> Vec<u8> {
 
 /// Returns the scan prefix for every SCIM external-id-to-user mapping.
 ///
-/// Format: `scim:ext_user:` — used by `delete_realm` cascade.
-#[allow(dead_code)]
+/// Format: `scim:ext_user:` — used by `delete_realm` cascade and the backup
+/// exporter.
 pub(crate) fn scim_ext_user_scan_prefix() -> Vec<u8> {
     SCIM_EXT_USER_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers the SCIM `externalId` from a `scim:ext_user:` index key.
+///
+/// The exact inverse of [`encode_scim_ext_user_key`]: the external id is the
+/// whole remainder after the prefix, so it round-trips verbatim even when it
+/// contains `:` or other separators. The unit test
+/// `scim_external_id_decoders_invert_encoders` asserts that.
+pub(crate) fn decode_scim_ext_user_external_id(key: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(key).ok()?;
+    let id = text.strip_prefix(SCIM_EXT_USER_PREFIX)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 /// Encodes the reverse `UserId` → SCIM `externalId` index key.
@@ -1367,10 +1515,22 @@ pub(crate) fn encode_scim_ext_group_key(external_id: &str) -> Vec<u8> {
 
 /// Returns the scan prefix for every SCIM group external-id mapping.
 ///
-/// Format: `scim:ext_group:` — used by `delete_realm` cascade.
-#[allow(dead_code)]
+/// Format: `scim:ext_group:` — used by `delete_realm` cascade and the backup
+/// exporter.
 pub(crate) fn scim_ext_group_scan_prefix() -> Vec<u8> {
     SCIM_EXT_GROUP_PREFIX.as_bytes().to_vec()
+}
+
+/// Recovers the SCIM `externalId` from a `scim:ext_group:` index key.
+///
+/// The exact inverse of [`encode_scim_ext_group_key`].
+pub(crate) fn decode_scim_ext_group_external_id(key: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(key).ok()?;
+    let id = text.strip_prefix(SCIM_EXT_GROUP_PREFIX)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 /// Encodes the reverse `OrganizationId` → SCIM `externalId` index key.
@@ -1418,7 +1578,6 @@ pub(crate) fn encode_saml_state_key(state_token: &str) -> Vec<u8> {
 }
 
 /// Returns the scan prefix for SAML outbound request state.
-#[allow(dead_code)]
 pub(crate) fn saml_state_scan_prefix() -> Vec<u8> {
     SAML_STATE_PREFIX.as_bytes().to_vec()
 }
@@ -1437,7 +1596,6 @@ pub(crate) fn encode_saml_assertion_prefix_for_idp(idp_id: &IdpId) -> Vec<u8> {
 }
 
 /// Returns the scan prefix for all SAML assertion sentinels in the realm.
-#[allow(dead_code)]
 pub(crate) fn saml_assertion_scan_prefix() -> Vec<u8> {
     SAML_ASSERTION_PREFIX.as_bytes().to_vec()
 }
@@ -1490,6 +1648,33 @@ pub(crate) fn encode_session_grant_family(session_id: &SessionId, family_id: &st
 /// Format: `oauth:session_fam:{session_uuid}:`.
 pub(crate) fn encode_session_grant_family_prefix(session_id: &SessionId) -> Vec<u8> {
     format!("{SESSION_GRANT_FAMILY_PREFIX}{}:", session_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix for the whole session → grant-family index.
+///
+/// Format: `oauth:session_fam:`. Used by the background cleanup sweep to
+/// reclaim index rows whose grant family no longer exists (audit
+/// 2026-08-28 §4.16#13).
+pub(crate) fn session_grant_family_scan_prefix() -> Vec<u8> {
+    SESSION_GRANT_FAMILY_PREFIX.as_bytes().to_vec()
+}
+
+/// Splits a `oauth:session_fam:{session_uuid}:{family_id}` key into its
+/// `family_id` suffix.
+///
+/// Returns `None` when `key` does not carry the index prefix, is not valid
+/// UTF-8, or has no `:` separating the session UUID from the family id — the
+/// sweep leaves such a row alone rather than guessing.
+pub(crate) fn decode_session_grant_family_id(key: &[u8]) -> Option<&str> {
+    let rest = key.strip_prefix(SESSION_GRANT_FAMILY_PREFIX.as_bytes())?;
+    let rest = std::str::from_utf8(rest).ok()?;
+    // `{session_uuid}:{family_id}` — the family id may itself contain `:`,
+    // so split once at the first separator.
+    let (_session, family_id) = rest.split_once(':')?;
+    if family_id.is_empty() {
+        return None;
+    }
+    Some(family_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1799,11 +1984,30 @@ pub(crate) fn mfa_tracker_scan_prefix() -> Vec<u8> {
     MFA_TRACKER_PREFIX.as_bytes().to_vec()
 }
 
+/// Hashes an email address into a stable rate-limit bucket identifier.
+///
+/// Returns the lowercase hex of `SHA-256(email)`. The caller MUST pass the
+/// normalized address, so that two spellings of one address share a bucket.
+///
+/// A rate-limit counter outlives its subject: the maintenance sweep only
+/// reaches a live realm, so a counter written shortly before the user or the
+/// realm is deleted stays on disk. Hashing keeps the bucket stable while
+/// keeping the address out of the key space (§4.20#7).
+///
+/// The digest is unkeyed. It stops an address being read out of residue; it
+/// does not stop a holder of the data confirming an address they already
+/// guessed. A keyed digest would need a realm secret at
+/// `rehydrate_rate_trackers` time, before the realm's key material is loaded.
+pub(crate) fn hash_rate_limit_email(email: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(email.as_bytes()))
+}
+
 /// Encodes the WAL storage key for a per-email magic-link rate-limit counter.
 ///
-/// Format: `rl:rml:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rml:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 pub(crate) fn encode_magic_link_rl_tracker(email: &str) -> Vec<u8> {
-    format!("{MAGIC_LINK_RL_PREFIX}{email}").into_bytes()
+    format!("{MAGIC_LINK_RL_PREFIX}{}", hash_rate_limit_email(email)).into_bytes()
 }
 
 /// Returns the scan prefix for all persisted magic-link rate-limit trackers.
@@ -1815,9 +2019,9 @@ pub(crate) fn magic_link_rl_scan_prefix() -> Vec<u8> {
 
 /// Encodes the WAL storage key for a per-email password-reset rate-limit counter.
 ///
-/// Format: `rl:rpwreset:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rpwreset:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 pub(crate) fn encode_password_reset_rl_tracker(email: &str) -> Vec<u8> {
-    format!("{PASSWORD_RESET_RL_PREFIX}{email}").into_bytes()
+    format!("{PASSWORD_RESET_RL_PREFIX}{}", hash_rate_limit_email(email)).into_bytes()
 }
 
 /// Returns the scan prefix for all persisted password-reset rate-limit trackers.
@@ -1829,9 +2033,13 @@ pub(crate) fn password_reset_rl_scan_prefix() -> Vec<u8> {
 
 /// Encodes the WAL storage key for a per-email registration rate-limit counter.
 ///
-/// Format: `rl:rreg-email:{email}` — realm-scoped via `StorageEngine` handle.
+/// Format: `rl:rreg-email:{sha256_hex(email)}` — realm-scoped via `StorageEngine` handle.
 pub(crate) fn encode_registration_email_rl_tracker(email: &str) -> Vec<u8> {
-    format!("{REGISTRATION_EMAIL_RL_PREFIX}{email}").into_bytes()
+    format!(
+        "{REGISTRATION_EMAIL_RL_PREFIX}{}",
+        hash_rate_limit_email(email)
+    )
+    .into_bytes()
 }
 
 /// Returns the scan prefix for all persisted registration email rate-limit trackers.
@@ -2349,6 +2557,41 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_email_keys_are_hashed_and_distinct() {
+        // §4.20#7: the three per-email rate-limit key families must carry a digest,
+        // not the address, and must still separate two addresses.
+        let alice = "alice@example.com";
+        let bob = "bob@example.com";
+        for (a, b) in [
+            (
+                encode_magic_link_rl_tracker(alice),
+                encode_magic_link_rl_tracker(bob),
+            ),
+            (
+                encode_password_reset_rl_tracker(alice),
+                encode_password_reset_rl_tracker(bob),
+            ),
+            (
+                encode_registration_email_rl_tracker(alice),
+                encode_registration_email_rl_tracker(bob),
+            ),
+        ] {
+            let a_str = std::str::from_utf8(&a).expect("utf8");
+            assert!(!a_str.contains(alice), "key carries the address: {a_str}");
+            assert!(
+                !a_str.contains("alice"),
+                "key carries the local part: {a_str}"
+            );
+            assert_ne!(a, b, "two addresses must not share a bucket");
+        }
+        assert_eq!(
+            encode_magic_link_rl_tracker(alice),
+            encode_magic_link_rl_tracker(alice),
+            "the digest must be stable across calls"
+        );
+    }
+
+    #[test]
     fn encode_session_id_format() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("valid uuid");
         let session_id = SessionId::new(uuid);
@@ -2811,5 +3054,60 @@ mod tests {
             assert!(!fed.starts_with(p));
             assert!(!p.starts_with(&fed));
         }
+    }
+
+    /// A rehydrator that rebuilds a storage key MUST share the writer's
+    /// encoding. The backup exporter reads federation links out of the forward
+    /// index and recovers `(user, idp)` from the *key* — the value holds only
+    /// the external subject — so a drift between encoder and decoder would
+    /// restore links pointing at the wrong user, silently (OpenSpec 26.40).
+    #[test]
+    fn fed_ext_fwd_decoder_inverts_encoder() {
+        let user =
+            UserId::new(Uuid::parse_str("3f2504e0-4f89-41d3-9a0c-0305e82c3301").expect("uuid"));
+        let idp =
+            IdpId::new(Uuid::parse_str("9c858901-8a57-4791-81fe-4c455b099bc9").expect("uuid"));
+        let encoded = encode_federation_ext_fwd_key(&user, &idp);
+        let (decoded_user, decoded_idp) =
+            decode_federation_ext_fwd(&encoded).expect("decoder must invert the encoder");
+        assert_eq!(decoded_user, user);
+        assert_eq!(decoded_idp, idp);
+
+        // A key from a different family must be refused, not misread: the
+        // importer uses this decode to decide what it is about to write.
+        assert!(decode_federation_ext_fwd(&encode_federation_ext_key(&idp, "sub-123")).is_none());
+        assert!(decode_federation_ext_fwd(b"fed:ext_fwd:not-a-uuid:also-not").is_none());
+    }
+
+    /// The SCIM external id is the whole remainder after the prefix, so it
+    /// round-trips verbatim even when the IdP put a `:` in it.
+    #[test]
+    fn scim_external_id_decoders_invert_encoders() {
+        for raw in ["ext-1", "urn:ietf:params:scim:x", "with spaces"] {
+            let encoded = encode_scim_ext_user_key(raw);
+            assert_eq!(
+                decode_scim_ext_user_external_id(&encoded).as_deref(),
+                Some(raw)
+            );
+            let encoded = encode_scim_ext_group_key(raw);
+            assert_eq!(
+                decode_scim_ext_group_external_id(&encoded).as_deref(),
+                Some(raw)
+            );
+        }
+        assert!(decode_scim_ext_user_external_id(b"scim:ext_user:").is_none());
+        assert!(decode_scim_ext_user_external_id(b"usr:id:whatever").is_none());
+    }
+
+    /// The restored retiring key must land under the same `kid` it was signed
+    /// with, or the tokens it is meant to keep alive stop resolving.
+    #[test]
+    fn retiring_key_decoders_invert_encoder() {
+        let realm =
+            RealmId::new(Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid"));
+        let encoded = encode_realm_retiring_key(&realm, 1_764_000_000, "kid-abc");
+        assert_eq!(parse_retiring_key_deadline(&encoded), Some(1_764_000_000));
+        assert_eq!(parse_retiring_key_id(&encoded).as_deref(), Some("kid-abc"));
+        assert!(parse_retiring_key_id(b"realm:key:whatever").is_none());
     }
 }

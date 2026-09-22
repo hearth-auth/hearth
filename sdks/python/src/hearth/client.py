@@ -385,10 +385,31 @@ class HearthClient:
     # ------------------------------------------------------------------
 
     def webauthn_register_begin(
-        self, rp_id: str = "", discoverable: bool = True
+        self,
+        rp_id: str = "",
+        discoverable: bool = True,
+        *,
+        password: Optional[str] = None,
+        totp_code: Optional[str] = None,
+        assertion: Optional[Dict[str, Any]] = None,
     ) -> dict:
-        """Start a WebAuthn registration ceremony."""
-        body = {"rp_id": rp_id, "discoverable": discoverable}
+        """Start a WebAuthn registration ceremony.
+
+        Supply exactly one step-up proof: ``password``, ``totp_code``, or
+        ``assertion`` (an assertion from an already-enrolled passkey, with
+        base64url ``credential_id``, ``client_data_json``,
+        ``authenticator_data`` and ``signature`` fields).
+
+        The server answers ``403 step_up_required`` without one: an access
+        token alone is one factor and does not enrol a credential.
+        """
+        body: Dict[str, Any] = {"rp_id": rp_id, "discoverable": discoverable}
+        if password is not None:
+            body["password"] = password
+        if totp_code is not None:
+            body["totp_code"] = totp_code
+        if assertion is not None:
+            body["assertion"] = assertion
         resp = self._http.post(f"{self._base}/webauthn/register/begin", json=body)
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
@@ -461,13 +482,14 @@ class HearthClient:
     ) -> Claims:
         """Verify a JWT locally using JWKS-based Ed25519 signature verification.
 
-        Performs all five mandatory validation steps (spec §2) in order:
+        Performs all mandatory validation steps (spec §2) in order:
 
         1. Verify Ed25519 signature against cached JWKS keys.
         2. Verify ``exp`` claim (reject if expired).
         3. Verify ``iss`` matches the configured ``base_url`` (or *issuer_url*).
         4. Verify ``aud`` contains *audience* (server SDKs only; skipped when None).
-        5. Verify ``iat`` is not more than 5 s in the future.
+        5. Verify ``nbf`` is not more than 5 s in the future.
+        6. Verify ``iat`` is not more than 5 s in the future.
 
         :param token: Raw JWT string.
         :param audience: Expected ``aud`` value.  When ``None``, audience is not checked.
@@ -477,7 +499,7 @@ class HearthClient:
         :raises TokenExpiredError: ``exp`` is in the past.
         :raises TokenIssuerError: ``iss`` does not match.
         :raises TokenAudienceError: ``aud`` does not include the expected value.
-        :raises TokenNotYetValidError: ``iat`` is more than 5 s in the future.
+        :raises TokenNotYetValidError: ``nbf`` or ``iat`` is more than 5 s in the future.
         :raises JWKSFetchError: JWKS endpoint unreachable.
         """
         from cryptography.exceptions import InvalidSignature
@@ -548,7 +570,13 @@ class HearthClient:
             if audience not in aud:
                 raise TokenAudienceError(expected=audience, actual=list(aud))
 
-        # Step 5: iat — must not be more than 5 s in the future
+        # Step 5: nbf — the token is not usable before it (RFC 7519 §4.1.5).
+        # Same 5 s clock-skew allowance as the iat check below.
+        nbf = payload.get("nbf")
+        if nbf is not None and int(nbf) > now + 5:
+            raise TokenNotYetValidError(int(nbf))
+
+        # Step 6: iat — must not be more than 5 s in the future
         iat = payload.get("iat")
         if iat is not None and int(iat) > now + 5:
             raise TokenNotYetValidError(int(iat))

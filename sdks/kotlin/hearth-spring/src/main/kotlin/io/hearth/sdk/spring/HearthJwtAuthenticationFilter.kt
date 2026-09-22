@@ -6,8 +6,9 @@ import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
-import org.springframework.http.HttpStatus
+import org.springframework.security.authentication.BadCredentialsException
 import org.springframework.security.core.context.SecurityContextHolder
+import org.springframework.security.web.AuthenticationEntryPoint
 import org.springframework.web.filter.OncePerRequestFilter
 
 /**
@@ -36,13 +37,17 @@ import org.springframework.web.filter.OncePerRequestFilter
  *
  * **Request lifecycle:**
  * 1. Extracts the bearer token from the `Authorization: Bearer <jwt>` header.
- * 2. If no token is present, the request passes through untouched — Spring Security's
- *    own exception translation will issue HTTP 401 for protected endpoints.
+ * 2. If no token is present, the request passes through untouched — the chain's
+ *    [org.springframework.security.web.AuthenticationEntryPoint] decides what a
+ *    protected endpoint answers. Use [HearthAuthenticationEntryPoint] (the default
+ *    filter chain installs it) so that answer is 401 rather than Spring Security's
+ *    fallback 403.
  * 3. If a token is present, [HearthClient.verifyToken] verifies the signature and expiry
  *    via JWKS (cached, no network call on the hot path after the first fetch).
  * 4. On success, a [HearthAuthentication] is stored in the [SecurityContextHolder].
- * 5. On failure (expired, bad signature, malformed), the context is cleared and
- *    HTTP 401 is returned immediately.
+ * 5. On failure (expired, bad signature, malformed), the context is cleared and the
+ *    entry point issues 401 with a `WWW-Authenticate: Bearer error="invalid_token"`
+ *    challenge immediately.
  *
  * The verified [io.hearth.sdk.Claims] are available via `@AuthenticationPrincipal`:
  * ```kotlin
@@ -56,6 +61,7 @@ import org.springframework.web.filter.OncePerRequestFilter
  */
 class HearthJwtAuthenticationFilter(
     private val client: HearthClient,
+    private val entryPoint: AuthenticationEntryPoint = HearthAuthenticationEntryPoint(),
 ) : OncePerRequestFilter() {
 
     private val log = LoggerFactory.getLogger(HearthJwtAuthenticationFilter::class.java)
@@ -78,7 +84,10 @@ class HearthJwtAuthenticationFilter(
         } catch (ex: Exception) {
             log.debug("Hearth JWT verification failed: {}", ex.message)
             SecurityContextHolder.clearContext()
-            response.status = HttpStatus.UNAUTHORIZED.value()
+            // Through the entry point, not a bare `response.status = 401`: a bearer
+            // 401 must carry a WWW-Authenticate challenge (RFC 6750 §3), and this
+            // path used to send none (audit 2026-08-28 §25.22).
+            entryPoint.commence(request, response, BadCredentialsException("invalid bearer token", ex))
         }
     }
 

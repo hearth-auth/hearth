@@ -126,12 +126,13 @@ describe("AdminClient — Realms CRUD", () => {
     expect(url).toBe("https://auth.example.com/admin/realms/realm_1");
   });
 
-  it("updateRealm sends PATCH /admin/realms/{id}", async () => {
-    fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ id: "realm_1" }) });
-    await client.updateRealm("realm_1", { name: "Updated" });
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://auth.example.com/admin/realms/realm_1");
-    expect(init.method).toBe("PATCH");
+  // Realms are provisioned from hearth.yaml. POST /admin/realms and
+  // PATCH /admin/realms/{id} both answer 405 with "Realms are managed via
+  // hearth.yaml", so no verb makes updateRealm work and the SDK must not
+  // offer it (audit 2026-08-28 §25.4).
+  it("does not offer updateRealm or createRealm", () => {
+    expect((client as unknown as Record<string, unknown>).updateRealm).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>).createRealm).toBeUndefined();
   });
 
   it("deleteRealm sends DELETE /admin/realms/{id}", async () => {
@@ -165,19 +166,19 @@ describe("AdminClient — Clients, Roles, Groups, OrgMembers", () => {
     vi.unstubAllGlobals();
   });
 
-  it("createClient sends POST /admin/clients", async () => {
+  it("createClient sends POST /admin/applications", async () => {
     fetchSpy.mockResolvedValue({ ok: true, status: 201, json: async () => ({ client_id: "cli_1" }) });
     await client.createClient({ client_id: "my-app", client_name: "My App" });
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://auth.example.com/admin/clients");
+    expect(url).toBe("https://auth.example.com/admin/applications");
     expect(init.method).toBe("POST");
   });
 
-  it("listClients sends GET /admin/clients", async () => {
+  it("listClients sends GET /admin/applications", async () => {
     fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) });
     await client.listClients();
     const [url] = fetchSpy.mock.calls[0] as [string];
-    expect(url).toBe("https://auth.example.com/admin/clients");
+    expect(url).toBe("https://auth.example.com/admin/applications");
   });
 
   it("createRole sends POST /admin/roles", async () => {
@@ -210,27 +211,15 @@ describe("AdminClient — Clients, Roles, Groups, OrgMembers", () => {
     expect(url).toBe("https://auth.example.com/admin/groups");
   });
 
-  it("addOrgMember sends POST /admin/orgs/{orgId}/members", async () => {
-    fetchSpy.mockResolvedValue({ ok: true, status: 201, json: async () => ({}) });
-    await client.addOrgMember("org_1", { user_id: "usr_1", role: "member" });
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://auth.example.com/admin/orgs/org_1/members");
-    expect(init.method).toBe("POST");
-  });
-
-  it("listOrgMembers sends GET /admin/orgs/{orgId}/members", async () => {
-    fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ items: [], next_cursor: null }) });
-    await client.listOrgMembers("org_1");
-    const [url] = fetchSpy.mock.calls[0] as [string];
-    expect(url).toBe("https://auth.example.com/admin/orgs/org_1/members");
-  });
-
-  it("removeOrgMember sends DELETE /admin/orgs/{orgId}/members/{userId}", async () => {
-    fetchSpy.mockResolvedValue({ ok: true, status: 204, json: async () => ({}) });
-    await client.removeOrgMember("org_1", "usr_1");
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://auth.example.com/admin/orgs/org_1/members/usr_1");
-    expect(init.method).toBe("DELETE");
+  it("exposes no /admin/orgs method — Hearth serves no organization route", () => {
+    // There is no /admin/orgs, no /admin/orgs/{orgId}/members and no
+    // per-member route anywhere in the server's router, so addOrgMember,
+    // listOrgMembers and removeOrgMember every one 404'd
+    // (audit 2026-08-28 §25.19).
+    const admin = client as unknown as Record<string, unknown>;
+    const dead = ["addOrgMember", "listOrgMembers", "removeOrgMember", "getOrgMember", "updateOrgMember"];
+    const present = dead.filter((name) => typeof admin[name] === "function");
+    expect(present).toEqual([]);
   });
 });
 

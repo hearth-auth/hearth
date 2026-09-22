@@ -68,6 +68,13 @@ pub struct IdpMetadataParams<'a> {
     pub sso_url: &'a str,
     pub slo_url: Option<&'a str>,
     pub signing_cert_der: &'a [u8],
+    /// Advertised `WantAuthnRequestsSigned`.
+    ///
+    /// SPs configure themselves from this attribute, so it MUST report what
+    /// the SSO endpoint actually enforces. A realm that refuses unsigned
+    /// `<AuthnRequest>`s for any registered SP but advertises `false` leads
+    /// that SP to skip signing and be refused (audit 2026-08-28 §4.10#4).
+    pub want_authn_requests_signed: bool,
 }
 
 /// Builds an `<EntityDescriptor>` for Hearth acting as an IdP.
@@ -85,10 +92,15 @@ pub fn build_idp_metadata(p: &IdpMetadataParams<'_>) -> String {
         .unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<md:EntityDescriptor xmlns:md="{md}" entityID="{eid}"><md:IDPSSODescriptor WantAuthnRequestsSigned="false" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="{ds}"><ds:X509Data><ds:X509Certificate>{cert}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor>{slo}<md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat><md:NameIDFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:persistent</md:NameIDFormat><md:NameIDFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:transient</md:NameIDFormat><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{sso}"></md:SingleSignOnService><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{sso}"></md:SingleSignOnService></md:IDPSSODescriptor></md:EntityDescriptor>"#,
+<md:EntityDescriptor xmlns:md="{md}" entityID="{eid}"><md:IDPSSODescriptor WantAuthnRequestsSigned="{wars}" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="{ds}"><ds:X509Data><ds:X509Certificate>{cert}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor>{slo}<md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat><md:NameIDFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:persistent</md:NameIDFormat><md:NameIDFormat>urn:oasis:names:tc:SAML:2.0:nameid-format:transient</md:NameIDFormat><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="{sso}"></md:SingleSignOnService><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="{sso}"></md:SingleSignOnService></md:IDPSSODescriptor></md:EntityDescriptor>"#,
         md = ns::MD,
         ds = ns::DS,
         eid = escape_attr(p.entity_id),
+        wars = if p.want_authn_requests_signed {
+            "true"
+        } else {
+            "false"
+        },
         cert = cert_b64,
         slo = slo_redirect,
         sso = escape_attr(p.sso_url),
@@ -217,9 +229,11 @@ mod tests {
             sso_url: "https://hearth.example/ui/realms/acme/saml/sso",
             slo_url: Some("https://hearth.example/ui/realms/acme/saml/slo-idp"),
             signing_cert_der: b"fake-cert-bytes",
+            want_authn_requests_signed: false,
         };
         let xml = build_idp_metadata(&p);
         assert!(xml.contains("IDPSSODescriptor"));
+        assert!(xml.contains(r#"WantAuthnRequestsSigned="false""#));
         assert!(xml.contains("SingleSignOnService"));
         assert!(xml.contains("X509Certificate"));
     }
@@ -231,6 +245,7 @@ mod tests {
             sso_url: "https://idp.example/sso",
             slo_url: Some("https://idp.example/slo"),
             signing_cert_der: b"\x01\x02\x03\x04",
+            want_authn_requests_signed: false,
         });
         let parsed = parse_idp_metadata(xml.as_bytes()).expect("parse");
         assert_eq!(parsed.entity_id, "https://idp.example");

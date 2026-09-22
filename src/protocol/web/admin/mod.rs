@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use base64::Engine as _;
 use serde::Deserialize;
 
-use super::auth::{verify_csrf_form_field, RequireAdmin, TargetRealm};
+use super::auth::{verify_csrf_form_field, RequireAdmin, RequireCsrf, TargetRealm};
 use super::handlers_common::FriendlyForm;
 use super::templates::{render, Flash};
 use super::WebState;

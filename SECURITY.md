@@ -94,8 +94,8 @@ This page will be updated with the pentest report summary and firm name once the
 
 Encryption at rest is **active** in Hearth 1.0. All data written to disk — WAL records and SST file sections — is encrypted using a three-tier key hierarchy:
 
-1. **Host Key (32 B)** — loaded from `HEARTH_MASTER_KEY` env var or auto-generated to `hearth.host_key` on first start. Protects realm KEKs.
-2. **Realm KEK (32 B per realm)** — stored encrypted in `hearth.keys`; wraps per-file DEKs.
+1. **Host Key (32 B)** — loaded from `HEARTH_MASTER_KEY` env var or auto-generated to `hearth.host_key` on first start. Protects the KEKs in `hearth.keys`.
+2. **KEK (32 B)** — stored encrypted in `hearth.keys`; wraps per-file DEKs. The key registry is realm-keyed, but only the system realm's KEK is provisioned, so **one KEK covers every realm**. Size your key-compromise blast radius accordingly: recovering that one KEK exposes every realm's data, not one tenant's.
 3. **File DEK (32 B per SST/WAL segment)** — randomly generated per file; stored in the 76-byte encryption header at the start of each file.
 
 Key rotation re-wraps only the DEK header in each file (O(file count), not O(data size)) — the ciphertext on disk is unchanged.

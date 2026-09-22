@@ -65,14 +65,21 @@ export class JwksVerifier {
     return this.remoteJwkSet;
   }
 
-  /** Verify a JWT using the JWKS endpoint. Supports RS256 and ES256. */
+  /**
+   * Verify a JWT using the JWKS endpoint.
+   *
+   * `EdDSA` only. Hearth signs every access token with Ed25519 — there is no
+   * configuration in which it emits RS256 or ES256 — so accepting those
+   * algorithms only widens what a forged token can be signed with (audit
+   * 2026-08-28 §25.10).
+   */
   async verifyToken(token: string): Promise<VerifiedToken> {
     const jwkSet = await this.getJwkSet();
 
     const verifyOptions: JWTVerifyOptions = {
       issuer: this.config.issuer_url,
       clockTolerance: this.config.clock_skew_seconds,
-      algorithms: ["RS256", "ES256", "RS384", "ES384", "RS512", "ES512", "EdDSA"],
+      algorithms: ["EdDSA"],
     };
     if (this.config.audience.length > 0) {
       verifyOptions.audience = this.config.audience;

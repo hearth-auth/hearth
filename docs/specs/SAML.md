@@ -1,11 +1,20 @@
 # SAML 2.0 — Normative Specification
 
 Status: **Normative.** Requirement levels follow RFC 2119 (MUST / SHOULD / MAY).
-Scope: Hearth's SAML 2.0 **Service Provider (SP)** Web-SSO and Single-Logout
-support for inbound federation. The implementation lives under
+Scope: Hearth's SAML 2.0 Web-SSO and Single-Logout support in **both** roles —
+**Service Provider (SP)** for inbound federation and **Identity Provider (IdP)**
+for asserting to third-party SPs. The implementation lives under
 `src/identity/federation/saml/`; this document is the authoritative contract for
 its security-relevant behavior. Where code and this document disagree, that is a
 bug in one of them — file an issue.
+
+> **Correction (documentation-truth sweep, 2026-09-21).** §1 previously stated that
+> Hearth "acts **only** as a SAML SP" and "is not a SAML IdP for third parties."
+> That was never true: `saml/idp.rs` and the four IdP routes listed in §1 have been
+> registered since the initial SAML commit (`8fd2f02b`). The normative content of
+> this document is almost entirely about the **SP** assertion-consumption path;
+> the IdP side is described in §1 and §8 but is **not** comprehensively specified
+> here. Do not read silence in §§2–7 as a normative statement about IdP behaviour.
 
 Related specs: `docs/specs/AUTHORIZATION.md` (claim mapping after login),
 `docs/specs/OIDC.md` (the OIDC federation path), `docs/specs/ARCHITECTURE.md`
@@ -19,13 +28,51 @@ observable has a corresponding rejection test.
 
 ## 1. Role and profile
 
-- Hearth acts **only as a SAML SP** (Relying Party). It is not a SAML IdP for
-  third parties. (Hearth issues its own metadata as an SP; see §7.)
+Hearth implements both SAML roles. They are independent surfaces with separate
+routes, separate registries and separate keys.
+
+**As a Service Provider (Relying Party)** — inbound federation, the subject of
+§§2–7 below:
+
+| Route | Purpose |
+|---|---|
+| `GET /realms/{realm}/federation/saml/metadata` | Hearth's own SP metadata |
+| `GET /realms/{realm}/federation/saml/begin` | SP-initiated `AuthnRequest` |
+| `POST /realms/{realm}/federation/saml/acs` | Assertion Consumer Service |
+
+Assertions are consumed at the ACS URL and translated into a Hearth
+`ExternalIdentity`, which is then linked/provisioned per the federation link
+policy. A successful consumption establishes a real Hearth session; the
+completed-login audit event is emitted **only** when a session cookie was
+actually issued (`issued_session_cookie`, `src/protocol/web/saml.rs`).
+
+**As an Identity Provider** — Hearth asserts to third-party SPs registered in
+the realm's SP registry:
+
+| Route | Purpose |
+|---|---|
+| `GET /realms/{realm}/saml/metadata` | Hearth's IdP metadata |
+| `GET`/`POST /realms/{realm}/saml/sso` | SSO endpoint (Redirect + POST bindings) |
+| `GET /realms/{realm}/saml/sso/init` | IdP-initiated (unsolicited) SSO |
+| `GET`/`POST /realms/{realm}/saml/slo-idp` | IdP-side Single Logout |
+
+Every IdP route requires a live Hearth session (the `UiSession` extractor) whose
+realm matches the path realm; the asserted `NameID` is that session's user
+email. Hearth signs IdP responses with the realm's RSA key (§4's algorithm rules
+apply in both directions).
+
+`want_authn_requests_signed` on a registered SP is **enforced** at
+`src/protocol/web/saml.rs`: when the flag is set, the `<AuthnRequest>` MUST carry
+a signature that verifies against the SP's `sp_certificate_pem`, and an SP with
+the flag set but **no** certificate registered is refused with `403` — it fails
+closed. The signature is read from the XML, so an SP that sets this flag MUST
+use the **HTTP-POST** binding; the HTTP-Redirect binding carries its signature as
+query parameters and is not accepted for signed `AuthnRequest`s. The audit found
+this flag parsed, validated and never consulted (2026-08-28 §4.10#4); it is
+consulted now.
+
 - Supported profile: **Web Browser SSO Profile** and **Single Logout Profile**
   of SAML 2.0 (`urn:oasis:names:tc:SAML:2.0:protocol`).
-- Assertions are consumed at the SP **Assertion Consumer Service (ACS)** URL and
-  translated into a Hearth `ExternalIdentity`, which is then linked/provisioned
-  per the federation link policy.
 
 ## 2. Bindings
 
@@ -34,8 +81,8 @@ observable has a corresponding rejection test.
 | SP → IdP (`AuthnRequest`, `LogoutRequest`) | HTTP-Redirect (`DEFLATE` + base64 + URL) | MUST |
 | SP → IdP | HTTP-POST (form) | MUST |
 | IdP → SP (`Response`, `LogoutResponse`) at ACS | HTTP-POST (base64, **no** DEFLATE) | MUST |
-| Any | HTTP-Artifact | **Not supported** — MUST reject |
-| Any | SOAP / PAOS (ECP) | **Not supported** |
+| Any | HTTP-Artifact | **Not supported.** No artifact-resolution endpoint is registered, so an `SAMLart` flow has nowhere to land — it 404s. There is no explicit "artifact rejected" branch; the strings `artifact`, `SOAP` and `PAOS` appear nowhere under `src/identity/federation/saml/`. |
+| Any | SOAP / PAOS (ECP) | **Not supported** — same: no endpoint exists. |
 
 - Inbound HTTP-Redirect payloads are DEFLATE-inflated with a hard cap of
   **1 MiB** (`MAX_INFLATED_SAML_BYTES`). A payload that would inflate past the
@@ -74,11 +121,23 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
   (`http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`) only.
 - **Digest algorithm:** SHA-256 (`http://www.w3.org/2001/04/xmlenc#sha256`) only.
 - **Canonicalization:** Exclusive C14N (`http://www.w3.org/2001/10/xml-exc-c14n#`)
-  only. Inclusive C14N is rejected.
-- **Reference transforms:** `enveloped-signature` + `exc-c14n` only.
-- **Algorithm downgrade is rejected.** SHA-1 digests, RSA-SHA1 signatures, and
-  inclusive C14N MUST all produce `SamlError::UnsupportedAlgorithm` /
-  `SamlError::Signature`. There is no negotiation and no "legacy" opt-in.
+  is the only form Hearth computes. It is applied **unconditionally** — the
+  declared `<ds:CanonicalizationMethod Algorithm>` is not read.
+- **Reference transforms:** Hearth signs with `enveloped-signature` + `exc-c14n`.
+  On the verify path the `<ds:Transforms>` list is **not** parsed or checked.
+- **Algorithm downgrade is rejected — for the signature and digest algorithms
+  only.** `verify_signed_element` rejects a `SignedInfo` containing the SHA-1 or
+  RSA-SHA1 algorithm identifiers, and requires it to name both RSA-SHA256 and
+  SHA-256, with `SamlError::UnsupportedAlgorithm`. There is no negotiation and
+  no "legacy" opt-in.
+- **Not enforced: canonicalization and transform downgrade.** A document
+  declaring inclusive C14N or an unexpected `<ds:Transform>` produces no
+  `UnsupportedAlgorithm` rejection. Because Hearth canonicalizes exclusively
+  regardless of what the document declares, such a document is very likely to
+  fail the digest or signature comparison — but that is a byte-comparison
+  side effect, not an algorithm check, and it MUST NOT be relied on as one.
+  Closing this is a code change, tracked separately; this section describes
+  what ships today.
 - **Signing key:** the IdP's registered certificate (PEM, RSA public key). No
   key material is trusted from the assertion itself (no inline cert trust).
 
@@ -87,21 +146,74 @@ Hearth requires a **valid enveloped XML signature** on inbound assertions.
 XSW attacks move or duplicate a signed element so a validator checks one node
 but consumes another. Hearth defends structurally:
 
-- **Single assertion only.** A `<Response>` carrying more than one
-  `<Assertion>` MUST be rejected as `SamlError::Parse` (reason names the
-  multiple-assertion condition). This kills the "inject a second unsigned
-  assertion" class outright.
+- **Single assertion only, counted over the whole document.** Before any
+  signature work, `sp.rs::complete_inner` counts every `<saml:Assertion>`
+  element at any depth and rejects the document as `SamlError::Signature`
+  unless the count is exactly one. This kills the "inject a second unsigned
+  assertion" class outright, at every placement rather than only as a direct
+  child of `<Response>`. `extract_and_validate_assertion` keeps an independent
+  `SamlError::Parse` rejection for a multi-assertion `<Response>`, but on the SP
+  path the `Signature` rejection fires first.
   (Test: `a29c_saml_multiple_assertions_rejected`.)
+- **Exactly one `<ds:Reference>`.** `<ds:SignedInfo>` MUST carry exactly one
+  `<ds:Reference>`; zero or more than one MUST be rejected with
+  `SamlError::Parse`. Hearth reads only the first reference's `URI` and
+  `DigestValue`, so an unchecked list would let every later entry — naming
+  some other part of the document, with a digest nobody computes — pass
+  unverified. The count is bounded: the scan stops on the second reference, so
+  a padded list cannot drive work proportional to its length.
+  (Tests: `second_reference_in_signed_info_rejected`,
+  `many_references_in_signed_info_rejected`,
+  `signed_info_with_no_reference_rejected`,
+  `single_reference_document_still_verifies`.)
 - **Reference-URI ↔ element-ID binding.** `verify_signed_element` extracts the
   signed element's `ID`, builds the expected `#<id>` URI, and requires the
   `<ds:Reference URI>` to match it. A moved or mismatched signature resolves to
   a non-existent range and MUST fail with `SamlError::Signature`.
   (Tests: `a29c_saml_find_element_range_nonexistent_id_returns_none`,
   `a29c_saml_find_element_range_finds_correct_assertion`.)
+- **Verified element ↔ consumed element binding.** When an assertion-level
+  signature was verified, `complete_inner` requires the `ID` of the assertion
+  that `extract_and_validate_assertion` returns to equal the `ID` of the element
+  whose signature was verified; a mismatch MUST fail with
+  `SamlError::Signature`. `verify_signed_element` alone does **not** provide
+  this — it only binds the Reference URI to the ID of the element it verified.
 - **`WantAssertionsSigned`.** When the IdP registration sets
   `want_assertions_signed`, an assertion-level signature is **required**; a
   Response-level-only signature MUST be rejected. When it is unset, Hearth falls
   back to accepting a valid Response-level signature.
+
+### 4.2 Account linking and the asserted email
+
+SAML carries no `email_verified` signal, so Hearth treats a SAML-asserted
+address as **unverified by default**. `ExternalIdentity::is_linkable_by_email`
+is then false, and `FederationService::resolve_identity` skips its whole
+email-match arm: **both** `link_existing_accounts` modes — `confirm` and
+`auto` — are unreachable for SAML. A SAML login by a user who already exists
+locally falls through to just-in-time provisioning, which detects the address
+collision and creates a **second** account under a synthetic address.
+
+An operator opts in per connector:
+
+```yaml
+realms:
+  corp:
+    federation:
+      providers:
+        corp-okta:
+          type: saml
+          trust_asserted_email: true   # default: false
+```
+
+With it `true`, the address the IdP asserts counts as verified and the realm's
+`link_existing_accounts` mode applies as it does for OIDC. Turn it on only for
+an IdP that owns its users' mailboxes: it lets that IdP claim **any** address
+in the realm. The key is ignored for non-SAML connectors, which carry the
+upstream's own `email_verified` claim.
+
+(Tests: `saml_confirm_link_is_reachable_only_when_the_asserted_email_is_trusted`
+proves the consumer; `reconcile_federation_carries_trust_asserted_email_to_the_idp`
+proves the YAML reaches it.)
 
 ## 5. Assertion validation
 
@@ -115,14 +227,50 @@ order (all rejections use the listed `SamlError` variant):
    SP ACS URL; else `DestinationMismatch` (cookie-less CSRF defense).
 4. **Issuer** — the assertion/Response issuer MUST equal the registered IdP
    entity ID; else `IssuerMismatch`.
-5. **Audience** — `AudienceRestriction` MUST include this SP's entity ID; else
-   `AudienceMismatch`.
+5. **Audience** — the parsed `AudienceRestriction/Audience` value MUST equal
+   this SP's entity ID; else `AudienceMismatch`. A single audience value is
+   parsed, so this is an equality check, not a membership test over a list.
+   The SP entity ID it is compared against comes from `onboarding.base_url`,
+   or from `oidc.issuer` when that is unset. Forwarded headers
+   (`X-Forwarded-Host`, `X-Forwarded-Proto`) are **never** consulted: anyone who
+   can reach the port can set them, and an origin the attacker chose is not an
+   origin. With neither key configured, only a **loopback** `Host`
+   (`localhost`, `127.0.0.1`, `[::1]`) is accepted, for dev and tests; any other
+   unconfigured `Host` makes the endpoint refuse with `500` rather than validate
+   against a header (`trusted_base_url` in `src/protocol/web/saml.rs`).
 6. **Validity window** — see §6.
-7. **InResponseTo** — see §6.2.
+7. **InResponseTo** (`<Response>` level) — see §6.2.
+8. **Bearer `<SubjectConfirmationData>`** — the assertion MUST carry exactly one
+   bearer `<SubjectConfirmation Method="…:cm:bearer">` whose
+   `<SubjectConfirmationData>` sits *inside* that assertion (SAML 2.0 profiles
+   §4.1.4.3). Zero is rejected as `InvalidAuthnRequest`, and so are two or more —
+   a second one makes "the" `Recipient` ambiguous, which is precisely what a
+   wrapping attack wants. Within it:
+   - `Recipient` MUST equal this SP's ACS URL; else `DestinationMismatch`.
+   - `NotOnOrAfter` is **mandatory** and is its own window, independent of (and
+     typically far tighter than) `Conditions/NotOnOrAfter`; a missing or
+     elapsed bound is `Expired`.
+   - `InResponseTo` MUST equal the `AuthnRequest` ID we issued, when we issued
+     one; else `InvalidAuthnRequest`. For an unsolicited (IdP-initiated)
+     response there is no request to bind against and the attribute is not
+     consulted.
+
+   These are the copies that matter: the `<Response>`-level `Destination` and
+   `InResponseTo` sit outside the signature whenever only the assertion is
+   signed, while these three are inside the element the IdP signed. They are
+   read from the same parsed assertion the ACS has already tied to the verified
+   signature — never from a re-parse of the raw document.
 
 Replay protection (assertion-ID uniqueness) is enforced by the ACS handler
 against storage, **outside** `extract_and_validate_assertion`; a re-used
 assertion ID MUST be rejected as `SamlError::Replay`.
+
+On acceptance the ACS runs the asserted identity through the same federation
+pipeline the OIDC callback uses — existing link, auto-link, confirm-to-link, or
+JIT provisioning — and issues a Hearth session cookie. `saml_login_completed`
+is recorded **only** when that cookie was actually set: a confirm-to-link hop is
+a redirect without one, and the audit log must not report a login that did not
+happen.
 
 ## 6. Time and correlation windows
 
@@ -173,7 +321,8 @@ All SAML failures map to `SamlError` (`saml/error.rs`), converted to
 
 | Condition | Variant | Wire code |
 |-----------|---------|-----------|
-| Parse / DOCTYPE / event-cap / multi-assertion | `Parse` | `HEARTH_SAML_INVALID` |
+| Parse / DOCTYPE / event-cap | `Parse` | `HEARTH_SAML_INVALID` |
+| Multi-assertion document (SP path) | `Signature` | `HEARTH_SAML_INVALID` |
 | Bad/missing/wrapped signature, algorithm downgrade | `Signature`, `UnsupportedAlgorithm` | `HEARTH_SAML_INVALID` |
 | Outside validity window / missing `NotOnOrAfter` | `Expired` | `HEARTH_SAML_INVALID` |
 | Replayed assertion ID | `Replay` | `HEARTH_SAML_INVALID` |
@@ -189,9 +338,12 @@ All SAML failures map to `SamlError` (`saml/error.rs`), converted to
 ## 9. Security invariants (summary — all MUST)
 
 1. No DTD/DOCTYPE, no entity expansion, ≤ 10 000 XML events.
-2. Ed25519-independent: signatures are RSA-SHA256 + exc-C14N only; SHA-1 and
-   inclusive C14N are rejected.
-3. Exactly one assertion; Reference URI bound to the signed element ID.
+2. Ed25519-independent: signatures MUST be RSA-SHA256 with SHA-256 digests;
+   SHA-1 and RSA-SHA1 are rejected. Canonicalization is always exclusive C14N,
+   but the declared canonicalization and transform algorithms are not checked
+   — inclusive C14N is not rejected as such (§4).
+3. Exactly one `<Assertion>` in the whole document; Reference URI bound to the
+   signed element ID; the consumed assertion's ID bound to the verified one.
 4. Mandatory `NotOnOrAfter`; 60 s skew; inclusive upper-edge rejection.
 5. Audience, Issuer, Destination, and (solicited) InResponseTo all checked.
 6. Assertion-ID replay rejected at the ACS handler.

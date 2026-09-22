@@ -5,8 +5,10 @@
 //! cached thereafter). On any transport failure the channel is invalidated so
 //! the next call attempts a fresh connection.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use openraft::{
     error::{InstallSnapshotError, NetworkError as OraftNetworkError, RPCError, RaftError},
@@ -37,6 +39,107 @@ pub(crate) struct TlsCredentials {
     pub(crate) ca_pem: Vec<u8>,
 }
 
+// ── Fault injection ──────────────────────────────────────────────────────────
+
+/// Drop-and-delay control over this node's **outbound** Raft RPCs, per peer.
+///
+/// This is the seam that lets a test partition a real, socket-backed cluster.
+/// It exists because a failover test cannot be written any other way: killing
+/// a leader's own gRPC server does not depose it (the leader is the one that
+/// *dials*, so it keeps reaching its followers and keeps their leases alive),
+/// and killing the followers' servers leaves nobody able to elect. What has to
+/// be cut is the leader's outbound edge, which is exactly what this cuts. It
+/// is the `FaultFs` pattern from `simulation/src/lib.rs` moved one layer up:
+/// a real transport with a controllable failure surface, not a mock.
+///
+/// A partition is directional. To sever a link both ways, isolate each end
+/// from the other:
+///
+/// ```text
+/// leader_faults.isolate(follower_id);
+/// follower_faults.isolate(leader_id);
+/// ```
+///
+/// An isolated peer's RPCs are failed with
+/// [`TransportError::InjectedPartition`] *before* the channel is touched, so
+/// nothing reaches the socket and openraft sees the same `RPCError::Network`
+/// it would see from an unreachable host. A delay is applied before the drop
+/// check, so a peer can be both slow and reachable.
+///
+/// Production never constructs one: [`HearthNetworkFactory::new`] leaves the
+/// slot `None` and the gate is a null check on an `Option`.
+#[derive(Debug, Default)]
+pub struct PeerFaults {
+    state: Mutex<FaultState>,
+}
+
+#[derive(Debug, Default)]
+struct FaultState {
+    isolated: HashSet<u64>,
+    delays: HashMap<u64, Duration>,
+}
+
+impl PeerFaults {
+    /// A fresh injector with no faults armed.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Drop every outbound RPC to `peer` until [`Self::heal`] is called.
+    pub fn isolate(&self, peer: u64) {
+        self.with_state(|s| {
+            s.isolated.insert(peer);
+        });
+    }
+
+    /// Stop dropping outbound RPCs to `peer`.
+    pub fn heal(&self, peer: u64) {
+        self.with_state(|s| {
+            s.isolated.remove(&peer);
+        });
+    }
+
+    /// Clear every drop and every delay.
+    pub fn heal_all(&self) {
+        self.with_state(|s| {
+            s.isolated.clear();
+            s.delays.clear();
+        });
+    }
+
+    /// Delay every outbound RPC to `peer` by `delay` before sending it.
+    pub fn delay(&self, peer: u64, delay: Duration) {
+        self.with_state(|s| {
+            s.delays.insert(peer, delay);
+        });
+    }
+
+    /// Whether outbound RPCs to `peer` are currently being dropped.
+    #[must_use]
+    pub fn is_isolated(&self, peer: u64) -> bool {
+        self.plan(peer).0
+    }
+
+    /// Reads the fault plan for `peer` under one short lock. The guard is
+    /// dropped before the caller awaits anything.
+    fn plan(&self, peer: u64) -> (bool, Option<Duration>) {
+        match self.state.lock() {
+            Ok(s) => (s.isolated.contains(&peer), s.delays.get(&peer).copied()),
+            // A poisoned injector must not silently become "no faults": that
+            // would make a partition test pass for the wrong reason. Fail
+            // closed — treat the peer as isolated.
+            Err(_) => (true, None),
+        }
+    }
+
+    fn with_state(&self, f: impl FnOnce(&mut FaultState)) {
+        if let Ok(mut s) = self.state.lock() {
+            f(&mut s);
+        }
+    }
+}
+
 // ── HearthNetworkFactory ─────────────────────────────────────────────────────
 
 /// Creates per-peer gRPC connections on demand.
@@ -45,6 +148,10 @@ pub(crate) struct TlsCredentials {
 /// `new_client(target, node)` whenever it needs a connection to a peer.
 pub struct HearthNetworkFactory {
     creds: Arc<TlsCredentials>,
+    /// Test-only outbound-RPC fault injector. `None` on every node built by
+    /// `ClusterEngine::build_clustered`, which is the only constructor
+    /// `serve` reaches.
+    faults: Option<Arc<PeerFaults>>,
 }
 
 impl HearthNetworkFactory {
@@ -59,7 +166,17 @@ impl HearthNetworkFactory {
                 key_pem,
                 ca_pem,
             }),
+            faults: None,
         }
+    }
+
+    /// Routes every outbound RPC this factory's peers send through `faults`.
+    ///
+    /// Test-only. See [`PeerFaults`].
+    #[must_use]
+    pub fn with_peer_faults(mut self, faults: Arc<PeerFaults>) -> Self {
+        self.faults = Some(faults);
+        self
     }
 }
 
@@ -73,6 +190,7 @@ impl RaftNetworkFactory<HearthRaftConfig> for HearthNetworkFactory {
             addr: node.addr.clone(),
             creds: Arc::clone(&self.creds),
             channel: Mutex::new(None),
+            faults: self.faults.clone(),
         }
     }
 }
@@ -95,6 +213,8 @@ pub struct HearthPeerNetwork {
     /// Lock is held only long enough to clone the channel value — NEVER across
     /// an `.await`. Drop the guard, then await the cloned channel.
     channel: Mutex<Option<Channel>>,
+    /// Test-only fault injector; `None` in production. See [`PeerFaults`].
+    faults: Option<Arc<PeerFaults>>,
 }
 
 impl HearthPeerNetwork {
@@ -141,6 +261,27 @@ impl HearthPeerNetwork {
             })
     }
 
+    /// Applies any injected delay, then fails the call if this peer is
+    /// currently isolated. A no-op (one `Option` check) when no injector is
+    /// installed, which is every production node.
+    async fn gate(&self) -> Result<(), TransportError> {
+        let Some(faults) = self.faults.as_ref() else {
+            return Ok(());
+        };
+        let (isolated, delay) = faults.plan(self.target);
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
+        if isolated {
+            debug!(
+                node_id = self.target,
+                "outbound RPC dropped by injected partition"
+            );
+            return Err(TransportError::InjectedPartition(self.target));
+        }
+        Ok(())
+    }
+
     /// Drops the cached channel so the next call reconnects.
     fn invalidate_channel(&self) {
         if let Ok(mut guard) = self.channel.lock() {
@@ -158,6 +299,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         rpc: AppendEntriesRequest<HearthRaftConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, HearthNode, RaftError<u64>>> {
+        self.gate().await.map_err(net_err)?;
         let payload = json_enc(&rpc).map_err(|e| net_err(TransportError::Serialize(e)))?;
         let ch = self.get_or_connect().await.map_err(net_err)?;
         let mut client = RaftServiceClient::new(ch);
@@ -181,6 +323,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         InstallSnapshotResponse<u64>,
         RPCError<u64, HearthNode, RaftError<u64, InstallSnapshotError>>,
     > {
+        self.gate().await.map_err(net_err_ise)?;
         let payload = json_enc(&rpc).map_err(|e| net_err_ise(TransportError::Serialize(e)))?;
         let ch = self.get_or_connect().await.map_err(net_err_ise)?;
         let mut client = RaftServiceClient::new(ch);
@@ -202,6 +345,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         rpc: VoteRequest<u64>,
         _option: RPCOption,
     ) -> Result<VoteResponse<u64>, RPCError<u64, HearthNode, RaftError<u64>>> {
+        self.gate().await.map_err(net_err)?;
         let payload = json_enc(&rpc).map_err(|e| net_err(TransportError::Serialize(e)))?;
         let ch = self.get_or_connect().await.map_err(net_err)?;
         let mut client = RaftServiceClient::new(ch);

@@ -19,8 +19,14 @@ pub const MANIFEST_VERSION: u32 = 2;
 pub struct RecordCounts {
     /// Number of user records.
     pub users: u64,
-    /// Number of credential records (passwords, TOTP, passkeys, etc.).
+    /// Number of password credential records (PHC hash strings). Second
+    /// factors are counted separately in `mfa_factors`.
     pub credentials: u64,
+    /// Number of second-factor records: TOTP/recovery-code state and
+    /// `WebAuthn` passkeys (audit 2026-08-28 §4.18#5). Zero for archives
+    /// created before `mfa_factors.ndjson` existed.
+    #[serde(default)]
+    pub mfa_factors: u64,
     /// Number of OAuth 2.0 client registrations.
     pub clients: u64,
     /// Number of RBAC role definitions.
@@ -29,10 +35,51 @@ pub struct RecordCounts {
     pub permissions: u64,
     /// Number of RBAC group records.
     pub groups: u64,
+    /// Number of group-membership edges (OpenSpec 26.40). Zero for archives
+    /// created before `group_memberships.ndjson` existed — in those, every
+    /// group restores empty.
+    #[serde(default)]
+    pub group_memberships: u64,
     /// Number of role-assignment records.
     pub assignments: u64,
     /// Number of organization records.
     pub organizations: u64,
+    /// Number of organization-membership records (OpenSpec 26.40). Zero for
+    /// archives created before `organization_memberships.ndjson` existed.
+    #[serde(default)]
+    pub organization_memberships: u64,
+    /// Number of OAuth consent records (OpenSpec 26.40). Zero for archives
+    /// created before `consents.ndjson` existed.
+    #[serde(default)]
+    pub consents: u64,
+    /// Number of agents exported, each carrying its own credentials
+    /// (OpenSpec 26.40). Zero for archives created before `agents.ndjson`
+    /// existed — in those, every agent and all of its authority is lost.
+    #[serde(default)]
+    pub agents: u64,
+    /// Number of external IdP connectors (OpenSpec 26.40).
+    #[serde(default)]
+    pub identity_providers: u64,
+    /// Number of federation account links (OpenSpec 26.40).
+    #[serde(default)]
+    pub federation_links: u64,
+    /// Number of webhook registrations (OpenSpec 26.40).
+    #[serde(default)]
+    pub webhooks: u64,
+    /// Number of SAML service-provider registrations (OpenSpec 26.40).
+    #[serde(default)]
+    pub saml_service_providers: u64,
+    /// Number of SCIM `externalId` mappings, users and groups together
+    /// (OpenSpec 26.40).
+    #[serde(default)]
+    pub scim_mappings: u64,
+    /// Number of organization invitations (OpenSpec 26.40).
+    #[serde(default)]
+    pub invitations: u64,
+    /// Number of retiring signing keys still inside their rotation grace
+    /// window at export time (OpenSpec 26.40).
+    #[serde(default)]
+    pub retiring_signing_keys: u64,
     /// Number of OAuth scope definitions.
     pub scopes: u64,
     /// Number of audit events exported (0 when audit export was omitted).
@@ -48,6 +95,19 @@ pub struct RealmManifest {
     pub slug: String,
     /// Record counts per entity type for this realm.
     pub record_counts: RecordCounts,
+    /// Whether `audit_chain.json` accompanies `audit.ndjson` for this realm.
+    ///
+    /// Restore re-signs every imported audit event under the destination
+    /// realm's key, so the source hashes are only checked when the source
+    /// chain material travels with them. Recording the fact here — inside the
+    /// checksum-covered, optionally signed manifest — stops an attacker
+    /// deleting the chain file to reach the unverified path
+    /// (audit 2026-08-28 §4.14#5).
+    ///
+    /// Absent in archives written before this field existed, which restore
+    /// treats as "unverifiable" and reports rather than refuses.
+    #[serde(default)]
+    pub audit_chain_included: bool,
 }
 
 /// Argon2id parameters used to derive a passphrase-based wrapping key for the DEK.
@@ -214,6 +274,7 @@ mod tests {
                     users: 5,
                     ..Default::default()
                 },
+                audit_chain_included: false,
             }],
             checksums: [("realms/acme/users.ndjson".to_string(), "abc123".to_string())]
                 .into_iter()
@@ -242,8 +303,7 @@ mod tests {
     fn manifest_new_stamps_release_version_not_placeholder() {
         let manifest = BackupManifest::new(vec![]);
         assert_ne!(
-            manifest.hearth_version,
-            "1.0.0",
+            manifest.hearth_version, "1.0.0",
             "hearth_version must not be the stale Cargo.toml placeholder; \
              build.rs must resolve via HEARTH_RELEASE_VERSION, git describe, or \
              an up-to-date Cargo.toml version field"

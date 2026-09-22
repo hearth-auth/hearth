@@ -11,9 +11,10 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// forgeJWT builds a syntactically valid three-segment JWT with the given claim
-// body. The signature segment is a constant stub — the SDK's HasPermission
-// decodes claims locally without verifying the signature.
+// forgeJWT builds a syntactically valid three-segment JWT with a garbage
+// signature segment. It models an attacker's token: HearthMiddleware verifies
+// every bearer token against the realm's JWKS, so this must always be refused.
+// Use testIssuer.sign for a token the middleware should accept.
 func forgeJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	header := map[string]string{"alg": "EdDSA", "typ": "JWT"}
@@ -55,8 +56,9 @@ func serve(e *echo.Echo, token string) *httptest.ResponseRecorder {
 // ─── HearthMiddleware ────────────────────────────────────────────────────────
 
 func TestHearthMiddlewareAllowsValidToken(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
 	rr := serve(newEcho(client), token)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -64,7 +66,8 @@ func TestHearthMiddlewareAllowsValidToken(t *testing.T) {
 }
 
 func TestHearthMiddlewareMissingTokenReturns401(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
+	ti := newTestIssuer(t)
+	client := ti.client()
 	rr := serve(newEcho(client), "")
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for missing token, got %d", rr.Code)
@@ -72,8 +75,9 @@ func TestHearthMiddlewareMissingTokenReturns401(t *testing.T) {
 }
 
 func TestHearthMiddlewareStoresTokenInContext(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
 
 	e := echo.New()
 	e.HideBanner = true
@@ -95,8 +99,9 @@ func TestHearthMiddlewareStoresTokenInContext(t *testing.T) {
 }
 
 func TestHearthMiddlewareCustomExtractor(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
 
 	// Extract from X-Auth-Token header instead of Authorization.
 	extractor := func(c echo.Context) string {
@@ -119,7 +124,8 @@ func TestHearthMiddlewareCustomExtractor(t *testing.T) {
 }
 
 func TestHearthMiddlewareCustomUnauthorizedHandler(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
+	ti := newTestIssuer(t)
+	client := ti.client()
 
 	customHandler := func(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "no token"})
@@ -160,8 +166,9 @@ func TestGetTokenReturnsEmptyWhenNotSet(t *testing.T) {
 // ─── RequirePermission ───────────────────────────────────────────────────────
 
 func TestRequirePermissionAllowed(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
 
 	e := echo.New()
 	e.HideBanner = true
@@ -176,8 +183,9 @@ func TestRequirePermissionAllowed(t *testing.T) {
 }
 
 func TestRequirePermissionDenied(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"permissions": []string{"docs.view"}})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	token := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 
 	e := echo.New()
 	e.HideBanner = true
@@ -229,9 +237,10 @@ func TestRequirePermissionNoClientInContext(t *testing.T) {
 // ─── Integration: route-group-level protection ───────────────────────────────
 
 func TestRouteGroupProtection(t *testing.T) {
-	client := hearth.NewClient("http://localhost", "r1")
-	editToken := forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})
-	viewToken := forgeJWT(t, map[string]any{"permissions": []string{"docs.view"}})
+	ti := newTestIssuer(t)
+	client := ti.client()
+	editToken := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
+	viewToken := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 
 	e := echo.New()
 	e.HideBanner = true

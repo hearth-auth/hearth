@@ -456,19 +456,61 @@ pub fn login_url_for_realm(realm_name: Option<&str>) -> String {
 /// Parses `Cookie` header(s) on a request and returns the value of the
 /// named cookie, if present.
 fn cookie_value<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
-    let prefix = format!("{name}=");
-    for value in parts.headers.get_all(header::COOKIE) {
+    cookie_value_from_headers(&parts.headers, name)
+}
+
+/// Returns the CSRF cookie value **only when exactly one is present**
+/// (audit §4.23#3, task 21.4).
+///
+/// [`cookie_value`] returns the first match positionally. That is not safe for
+/// a double-submit token: a sibling host on the same registrable domain
+/// (`evil.example.com` when Hearth runs at `admin.example.com`) can
+/// `Set-Cookie: hearth_ui_csrf=…; Domain=.example.com` — "cookie tossing".
+/// The browser then sends two `hearth_ui_csrf` cookies, and RFC 6265 §5.4 lets
+/// the attacker decide which is serialised first (longest `Path` wins, ties
+/// broken by creation time — both attacker-controlled). Reading positionally
+/// therefore compares the attacker's chosen value against itself and the
+/// forgery passes.
+///
+/// A host cookie is indistinguishable from a domain cookie once it reaches the
+/// server — the `Cookie` header carries no `Domain` attribute — so the server
+/// cannot pick the genuine one out of a pair. The only honest answer is to
+/// refuse: with two or more tokens present, *no* value is trustworthy, so this
+/// returns `None` and every caller fails closed. Legitimate clients only ever
+/// have one, because Hearth issues the cookie from a single `Path=/ui` scope.
+///
+/// (The alternative — binding the token to the session record server-side —
+/// was rejected because the same cookie is issued on pre-auth pages where no
+/// session exists yet, so it would need a second mechanism for the login,
+/// register and required-action forms.)
+#[must_use]
+pub fn csrf_cookie_value_from_headers(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let mut found: Option<&str> = None;
+    for value in headers.get_all(header::COOKIE) {
         let Ok(header_str) = value.to_str() else {
             continue;
         };
         for pair in header_str.split(';') {
-            let trimmed = pair.trim();
-            if let Some(v) = trimmed.strip_prefix(&prefix) {
-                return Some(v);
+            let candidate = pair
+                .trim()
+                .strip_prefix(CSRF_COOKIE)
+                .and_then(|rest| rest.strip_prefix('='));
+            if let Some(v) = candidate {
+                if found.is_some() {
+                    // Two or more `hearth_ui_csrf` cookies: cookie tossing is
+                    // indistinguishable from a stale duplicate, so fail closed.
+                    return None;
+                }
+                found = Some(v);
             }
         }
     }
-    None
+    found
+}
+
+/// [`csrf_cookie_value_from_headers`] against request `Parts`.
+fn csrf_cookie_value(parts: &Parts) -> Option<&str> {
+    csrf_cookie_value_from_headers(&parts.headers)
 }
 
 /// Parsed session cookie, validated and ready to use.
@@ -535,6 +577,12 @@ pub fn revoke_prior_session_cookie(
 ) {
     if let Some(raw) = cookie_value_from_headers(headers, SESSION_COOKIE) {
         if let Some((session_id, realm_id)) = parse_session_cookie(secret, raw) {
+            // DISCARD-OK: this function returns `()` and has no operation to
+            // abort, and the doc comment above states the invariant — the
+            // security property comes from the freshness of the *new* session,
+            // not from confirmed deletion of the old one. The cookie may name a
+            // session that is expired, already revoked, or from a prior server
+            // instance (task 24.1).
             let _ = engine.revoke_session(&realm_id, &session_id);
         }
     }
@@ -578,7 +626,10 @@ where
             user_id: session.user_id().clone(),
             user_email: user.email().to_string(),
             user_display_name: user.display_name().to_string(),
-            csrf: cookie_value(parts, CSRF_COOKIE).map(ToString::to_string),
+            // Unique-cookie read (task 21.4): a tossed duplicate must not be
+            // echoed into the page, or `verify_csrf_form_field` would compare an
+            // attacker-chosen value against itself.
+            csrf: csrf_cookie_value(parts).map(ToString::to_string),
         })
     }
 }
@@ -933,7 +984,7 @@ where
             return Ok(CsrfToken);
         }
 
-        let Some(cookie) = cookie_value(parts, CSRF_COOKIE) else {
+        let Some(cookie) = csrf_cookie_value(parts) else {
             return Err(csrf_failure_response());
         };
 
@@ -953,6 +1004,44 @@ where
 
         // No header: accept so the handler can check the form field.
         Ok(CsrfToken)
+    }
+}
+
+/// Extractor that requires a matching `X-CSRF-Token` header on every
+/// mutation request (POST/PUT/DELETE/PATCH). GET and HEAD are pass-through.
+///
+/// Unlike [`CsrfToken`], an absent header is a failure, not a pass-through.
+/// Use this on bodyless or JSON `/ui` mutations, which have no `_csrf` form
+/// field to check. A cross-site top-level form POST cannot set a custom
+/// header, so requiring one is a complete CSRF defence for those routes.
+/// The admin console supplies the header from the `<meta name="csrf">` tag
+/// (`admin.js`, `passkey.js`) and from the layout's `hx-headers` attribute.
+#[derive(Debug)]
+pub struct RequireCsrf;
+
+impl<S> FromRequestParts<S> for RequireCsrf
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        if !method_mutates(&parts.method) {
+            return Ok(RequireCsrf);
+        }
+
+        let Some(cookie) = csrf_cookie_value(parts) else {
+            return Err(csrf_failure_response());
+        };
+        let header_val = parts
+            .headers
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok());
+
+        match header_val {
+            Some(h) if ct_eq_str(h, cookie) => Ok(RequireCsrf),
+            _ => Err(csrf_failure_response()),
+        }
     }
 }
 
@@ -986,7 +1075,12 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
     a_bytes.ct_eq(b_bytes).into()
 }
 
-fn csrf_failure_response() -> Response {
+/// The shared 403 answer to a failed CSRF check.
+///
+/// `pub(super)` so pre-auth handlers that carry no [`UiSession`] — and so
+/// cannot use [`verify_csrf_form_field`] — answer identically to the session
+/// path rather than inventing their own status and body.
+pub(super) fn csrf_failure_response() -> Response {
     let tmpl = ForbiddenTemplate::new(None);
     render_status(&tmpl, StatusCode::FORBIDDEN)
 }

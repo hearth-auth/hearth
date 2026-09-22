@@ -99,7 +99,7 @@ func TestAdminListRealms(t *testing.T) {
 
 func TestAdminCreateClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/clients" || r.Method != "POST" {
+		if r.URL.Path != "/admin/applications" || r.Method != "POST" {
 			http.NotFound(w, r)
 			return
 		}
@@ -123,7 +123,7 @@ func TestAdminCreateClient(t *testing.T) {
 
 func TestAdminGetClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/clients/cl1" {
+		if r.URL.Path != "/admin/applications/cl1" {
 			http.NotFound(w, r)
 			return
 		}
@@ -142,9 +142,12 @@ func TestAdminGetClient(t *testing.T) {
 	}
 }
 
+// The server mounts the whole client family at /admin/applications*: the
+// mutation route is PATCH /admin/applications/{id}. /admin/clients* is not a
+// route at all — every call to it 404s (audit 2026-08-28 §25.4, §25.18).
 func TestAdminUpdateClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/clients/cl1" || r.Method != "PATCH" {
+		if r.URL.Path != "/admin/applications/cl1" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}
@@ -167,7 +170,7 @@ func TestAdminUpdateClient(t *testing.T) {
 func TestAdminDeleteClient(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/clients/cl1" && r.Method == "DELETE" {
+		if r.URL.Path == "/admin/applications/cl1" && r.Method == "DELETE" {
 			called = true
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -181,13 +184,13 @@ func TestAdminDeleteClient(t *testing.T) {
 		t.Fatalf("DeleteClient: %v", err)
 	}
 	if !called {
-		t.Error("DELETE /admin/clients/cl1 was not called")
+		t.Error("DELETE /admin/applications/cl1 was not called")
 	}
 }
 
 func TestAdminListClients(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/clients" {
+		if r.URL.Path != "/admin/applications" {
 			http.NotFound(w, r)
 			return
 		}
@@ -429,111 +432,7 @@ func TestAdminListGroups(t *testing.T) {
 }
 
 // ─── Org Membership CRUD ──────────────────────────────────────────────────────
-
-func TestAdminAddOrgMember(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/orgs/org1/members" || r.Method != "POST" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(OrgMember{UserID: "u1", OrgID: "org1", Role: "member"})
-	}))
-	defer srv.Close()
-
-	admin := newTestAdminClient(srv)
-	m, err := admin.AddOrgMember(context.Background(), "org1", AddOrgMemberRequest{UserID: "u1", Role: "member"})
-	if err != nil {
-		t.Fatalf("AddOrgMember: %v", err)
-	}
-	if m.UserID != "u1" || m.OrgID != "org1" {
-		t.Errorf("member: %+v", m)
-	}
-}
-
-func TestAdminGetOrgMember(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/orgs/org1/members/u1" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(OrgMember{UserID: "u1", OrgID: "org1", Role: "owner"})
-	}))
-	defer srv.Close()
-
-	admin := newTestAdminClient(srv)
-	m, err := admin.GetOrgMember(context.Background(), "org1", "u1")
-	if err != nil {
-		t.Fatalf("GetOrgMember: %v", err)
-	}
-	if m.Role != "owner" {
-		t.Errorf("Role = %q", m.Role)
-	}
-}
-
-func TestAdminUpdateOrgMember(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/orgs/org1/members/u1" || r.Method != "PATCH" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(OrgMember{UserID: "u1", OrgID: "org1", Role: "admin"})
-	}))
-	defer srv.Close()
-
-	admin := newTestAdminClient(srv)
-	role := "admin"
-	m, err := admin.UpdateOrgMember(context.Background(), "org1", "u1", UpdateOrgMemberRequest{Role: &role})
-	if err != nil {
-		t.Fatalf("UpdateOrgMember: %v", err)
-	}
-	if m.Role != "admin" {
-		t.Errorf("Role = %q", m.Role)
-	}
-}
-
-func TestAdminRemoveOrgMember(t *testing.T) {
-	called := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/orgs/org1/members/u1" && r.Method == "DELETE" {
-			called = true
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-
-	admin := newTestAdminClient(srv)
-	if err := admin.RemoveOrgMember(context.Background(), "org1", "u1"); err != nil {
-		t.Fatalf("RemoveOrgMember: %v", err)
-	}
-	if !called {
-		t.Error("DELETE /admin/orgs/org1/members/u1 was not called")
-	}
-}
-
-func TestAdminListOrgMembers(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/orgs/org1/members" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(PageResponse[OrgMember]{
-			Items: []OrgMember{{UserID: "u1", OrgID: "org1", Role: "owner"}},
-		})
-	}))
-	defer srv.Close()
-
-	admin := newTestAdminClient(srv)
-	page, err := admin.ListOrgMembers(context.Background(), "org1", ListOptions{Limit: 10})
-	if err != nil {
-		t.Fatalf("ListOrgMembers: %v", err)
-	}
-	if len(page.Items) != 1 || page.Items[0].UserID != "u1" {
-		t.Fatalf("items: %v", page.Items)
-	}
-}
+//
+// Removed with the methods. Hearth serves no organization route over HTTP, so
+// these tests only ever proved that the SDK could talk to a stub server that
+// the real server does not resemble (audit 2026-08-28 §25.19).

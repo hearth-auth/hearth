@@ -6,9 +6,6 @@
 //! - Stateless HMAC-SHA256 nonce generation with 5-minute sliding windows
 //! - In-memory JTI replay cache
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use base64::Engine as _;
 use ring::{digest, hmac, signature};
 use serde::{Deserialize, Serialize};
@@ -149,6 +146,51 @@ pub fn compute_jwk_thumbprint(jwk: &DPopJwk) -> Result<String, IdentityError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.as_ref()))
 }
 
+// ===== alg / kty agreement =====
+
+/// Cross-checks the proof header's `alg` against the JWK's `kty` and `crv`
+/// (audit 2026-08-28 §4.2#5).
+///
+/// `alg` selects the verifier in [`verify_dpop_signature`] while `kty` selects
+/// the canonical form in [`compute_jwk_thumbprint`], and nothing compared the
+/// two. An `alg: "EdDSA"` proof carrying `kty: "EC"` is therefore verified
+/// against `x` alone — the Ed25519 branch never looks at `y` — and then
+/// fingerprinted over `{"crv","kty","x","y"}`. The holder of one Ed25519
+/// private key can vary `y` freely and mint an unbounded family of distinct
+/// `jkt` values from it, so a `cnf.jkt` kill-switch entry binds none of the
+/// others and two bindings that name "the same key" may disagree.
+///
+/// Each algorithm Hearth verifies has exactly one key shape, so requiring
+/// agreement removes no supported case.
+fn check_alg_matches_jwk(alg: &str, jwk: &DPopJwk) -> Result<(), IdentityError> {
+    let (want_kty, want_crv) = match alg {
+        "ES256" => ("EC", "P-256"),
+        "EdDSA" => ("OKP", "Ed25519"),
+        other => {
+            return Err(IdentityError::InvalidDPopProof {
+                reason: format!("unsupported DPoP algorithm: {other}"),
+            })
+        }
+    };
+    if jwk.kty != want_kty {
+        return Err(IdentityError::InvalidDPopProof {
+            reason: format!(
+                "alg {alg} requires kty {want_kty}, got {got}",
+                got = jwk.kty
+            ),
+        });
+    }
+    match jwk.crv.as_deref() {
+        Some(crv) if crv == want_crv => Ok(()),
+        Some(crv) => Err(IdentityError::InvalidDPopProof {
+            reason: format!("alg {alg} requires crv {want_crv}, got {crv}"),
+        }),
+        None => Err(IdentityError::InvalidDPopProof {
+            reason: format!("alg {alg} requires crv {want_crv}, but the JWK has none"),
+        }),
+    }
+}
+
 // ===== Signature verification =====
 
 fn verify_dpop_signature(
@@ -240,6 +282,7 @@ pub fn normalize_htu(htu: &str) -> Result<String, IdentityError> {
 /// Checks (in order):
 /// 1. JWT structure (3 parts, valid base64url)
 /// 2. Header: `typ == "dpop+jwt"`, supported `alg`, valid `jwk`, no private key
+/// 2b. `alg` agrees with the JWK's `kty`/`crv` (§4.2#5)
 /// 3. Signature verifies against `jwk`
 /// 4. Claims: `jti` non-empty, `htm` matches, `htu` matches (after normalisation)
 /// 5. `iat` within clock skew + max age window
@@ -287,6 +330,12 @@ pub fn validate_dpop_proof(
             reason: "JWK in header must not contain private key material".to_string(),
         });
     }
+
+    // 2b. `alg` and `kty`/`crv` must name the same key family before either is
+    //     used: `alg` picks the verifier, `kty` picks the thumbprint, and a
+    //     proof that mixes them is authenticated as one key and identified as
+    //     another (audit 2026-08-28 §4.2#5).
+    check_alg_matches_jwk(&header.alg, &header.jwk)?;
 
     // 3. Verify signature
     verify_dpop_signature(header_b64, payload_b64, sig_b64, &header.jwk, &header.alg)?;
@@ -414,64 +463,24 @@ pub fn compute_access_token_hash(access_token: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
-// ===== JTI replay cache =====
-
-/// Thread-safe in-memory cache for DPoP proof JTI values.
-///
-/// Prevents replay of DPoP proof JWTs within a configurable time window.
-/// Entries are lazily evicted when the cache is checked.
-pub struct DPopJtiCache {
-    /// Maps JTI → expiry timestamp (Unix seconds).
-    inner: Mutex<HashMap<String, i64>>,
-}
-
-impl DPopJtiCache {
-    /// Creates an empty cache.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Checks whether `jti` is already in the cache (replay), then inserts it.
-    ///
-    /// Returns `Err(DPopProofReplay)` if the JTI was already present. On
-    /// success, records the JTI with an expiry of `now_secs + ttl_secs`.
-    pub fn check_and_insert(
-        &self,
-        jti: &str,
-        now_secs: i64,
-        ttl_secs: i64,
-    ) -> Result<(), IdentityError> {
-        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Evict expired entries
-        map.retain(|_, exp| *exp > now_secs);
-
-        if map.contains_key(jti) {
-            return Err(IdentityError::DPopProofReplay);
-        }
-        map.insert(jti.to_string(), now_secs + ttl_secs);
-        Ok(())
-    }
-}
-
-impl Default for DPopJtiCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ===== DPoP processor =====
 
-/// Encapsulates DPoP state (replay cache + nonce secret) that belongs in the
-/// identity layer rather than the HTTP protocol layer.
+/// Holds the per-process DPoP nonce secret.
 ///
-/// The protocol layer holds an `Arc<DPopProcessor>` and delegates all DPoP
-/// enforcement through this type — keeping the HTTP adapter thin and stateless.
+/// # What this does NOT do (task 26.50)
+///
+/// It used to carry a second, in-memory JTI replay cache and a doc comment
+/// saying the protocol layer "delegates all DPoP enforcement through this
+/// type". Neither the cache nor its `check_and_insert_jti` wrapper had a
+/// single production caller: replay protection is
+/// `IdentityEngine::check_and_record_dpop_jti`, which writes a durable
+/// `agt:dpop:jti:*` row and therefore works across a restart and across
+/// cluster nodes, which an in-process `HashMap` cannot.
+///
+/// The dead copy is removed rather than left, because someone auditing DPoP
+/// replay safety — for cluster mode, say — finds it first and reasons about
+/// the wrong mechanism.
 pub struct DPopProcessor {
-    jti_cache: DPopJtiCache,
     nonce_secret: [u8; 32],
 }
 
@@ -479,10 +488,7 @@ impl DPopProcessor {
     /// Creates a new processor with the given HMAC nonce secret.
     #[must_use]
     pub fn new(nonce_secret: [u8; 32]) -> Self {
-        Self {
-            jti_cache: DPopJtiCache::new(),
-            nonce_secret,
-        }
+        Self { nonce_secret }
     }
 
     /// Returns the current DPoP nonce for inclusion in the `DPoP-Nonce` response header.
@@ -495,12 +501,6 @@ impl DPopProcessor {
     #[must_use]
     pub fn is_valid_nonce(&self, nonce: &str, now_secs: i64) -> bool {
         is_valid_dpop_nonce(&self.nonce_secret, nonce, now_secs)
-    }
-
-    /// Records `jti` in the replay cache. Returns `Err(DPopProofReplay)` on replay.
-    pub fn check_and_insert_jti(&self, jti: &str, now_secs: i64) -> Result<(), IdentityError> {
-        self.jti_cache
-            .check_and_insert(jti, now_secs, DPOP_MAX_AGE_SECS)
     }
 }
 
@@ -525,32 +525,6 @@ mod tests {
         // SHA-256({"crv":"P-256","kty":"EC","x":"f83…","y":"x_F…"}) base64url-nopad
         let expected = "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U";
         assert_eq!(compute_jwk_thumbprint(&jwk).expect("thumbprint"), expected);
-    }
-
-    #[test]
-    fn jti_cache_rejects_replay() {
-        let cache = DPopJtiCache::new();
-        assert!(cache.check_and_insert("jti-1", 1000, 120).is_ok());
-        assert!(matches!(
-            cache.check_and_insert("jti-1", 1001, 120),
-            Err(IdentityError::DPopProofReplay)
-        ));
-    }
-
-    #[test]
-    fn jti_cache_allows_different_jtis() {
-        let cache = DPopJtiCache::new();
-        assert!(cache.check_and_insert("jti-a", 1000, 120).is_ok());
-        assert!(cache.check_and_insert("jti-b", 1000, 120).is_ok());
-    }
-
-    #[test]
-    fn jti_cache_evicts_expired() {
-        let cache = DPopJtiCache::new();
-        // Insert with 1s TTL
-        assert!(cache.check_and_insert("jti-old", 1000, 1).is_ok());
-        // At t=1002, the entry has expired (exp=1001 < 1002)
-        assert!(cache.check_and_insert("jti-old", 1002, 120).is_ok());
     }
 
     #[test]
@@ -593,6 +567,148 @@ mod tests {
             normalize_htu("https://server.example.com/token").expect("normalize"),
             "https://server.example.com/token"
         );
+    }
+
+    // ==================================================================
+    // 18.2 (audit 2026-08-28 §4.2#5) — `alg` selects the verifier and `kty`
+    // selects the thumbprint, so the two must agree.
+    // ==================================================================
+
+    /// Fixed instant used by the `alg`/`kty` proofs below, so `iat` is always
+    /// inside the acceptance window.
+    const PROOF_NOW: i64 = 1_700_000_000;
+
+    /// Generates an Ed25519 key and returns it with its base64url `x`.
+    fn ed25519_key() -> (signature::Ed25519KeyPair, String) {
+        use ring::rand::SystemRandom;
+        use ring::signature::KeyPair as _;
+        let rng = SystemRandom::new();
+        let pkcs8 = signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
+        let kp = signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("keypair");
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(kp.public_key().as_ref());
+        (kp, x)
+    }
+
+    /// Builds a DPoP proof genuinely signed by `kp`, with a caller-chosen
+    /// header `alg` and a caller-chosen `jwk` object.
+    fn signed_proof(kp: &signature::Ed25519KeyPair, alg: &str, jwk: &serde_json::Value) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = serde_json::json!({ "typ": "dpop+jwt", "alg": alg, "jwk": jwk });
+        let claims = serde_json::json!({
+            "jti": "jti-alg-kty",
+            "htm": "POST",
+            "htu": "https://rs.example/resource",
+            "iat": PROOF_NOW,
+        });
+        let h = b64.encode(serde_json::to_vec(&header).expect("header json"));
+        let c = b64.encode(serde_json::to_vec(&claims).expect("claims json"));
+        let msg = format!("{h}.{c}");
+        let sig = b64.encode(kp.sign(msg.as_bytes()).as_ref());
+        format!("{msg}.{sig}")
+    }
+
+    fn validate_fixture(proof: &str) -> Result<ValidatedDPopProof, IdentityError> {
+        validate_dpop_proof(
+            proof,
+            "POST",
+            "https://rs.example/resource",
+            PROOF_NOW,
+            None,
+            None,
+        )
+    }
+
+    /// Control: `alg: EdDSA` with a matching `kty: OKP` JWK is accepted, so
+    /// the rejection tests below cannot pass vacuously.
+    #[test]
+    fn eddsa_proof_with_okp_jwk_is_accepted() {
+        let (kp, x) = ed25519_key();
+        let jwk = serde_json::json!({ "crv": "Ed25519", "kty": "OKP", "x": x });
+        let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+        assert!(
+            res.is_ok(),
+            "a well-formed EdDSA/OKP proof must be accepted, got {res:?}"
+        );
+    }
+
+    /// §4.2#5: an `alg: EdDSA` proof whose JWK claims `kty: "EC"` verifies on
+    /// `x` alone but is fingerprinted over `{crv,kty,x,y}`. The `y` is never
+    /// authenticated, so the same private key yields a different `jkt` for
+    /// every `y` the holder picks. Refuse the mismatch.
+    #[test]
+    fn eddsa_proof_with_ec_jwk_is_rejected() {
+        let (kp, x) = ed25519_key();
+        let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
+        let jwk = serde_json::json!({ "crv": "P-256", "kty": "EC", "x": x, "y": y });
+        let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+        assert!(
+            matches!(res, Err(IdentityError::InvalidDPopProof { .. })),
+            "an EdDSA proof carrying an EC JWK must be refused, got {res:?}"
+        );
+    }
+
+    /// The consequence the check removes: two proofs from one Ed25519 key,
+    /// differing only in the unauthenticated `y`, once produced two distinct
+    /// thumbprints. Both must now be refused — a single key must not be able
+    /// to present two identities.
+    #[test]
+    fn one_key_cannot_mint_two_thumbprints_via_unauthenticated_y() {
+        let (kp, x) = ed25519_key();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let first = serde_json::json!({
+            "crv": "P-256", "kty": "EC", "x": x.clone(), "y": b64.encode([1u8; 32]),
+        });
+        let second = serde_json::json!({
+            "crv": "P-256", "kty": "EC", "x": x, "y": b64.encode([2u8; 32]),
+        });
+        // Establish the premise: the two JWKs really do fingerprint apart.
+        let jkt1 = compute_jwk_thumbprint(&serde_json::from_value(first.clone()).expect("jwk"))
+            .expect("thumbprint");
+        let jkt2 = compute_jwk_thumbprint(&serde_json::from_value(second.clone()).expect("jwk"))
+            .expect("thumbprint");
+        assert_ne!(jkt1, jkt2, "fixture must vary the thumbprint");
+
+        for jwk in [first, second] {
+            let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+            assert!(
+                matches!(res, Err(IdentityError::InvalidDPopProof { .. })),
+                "each variant must be refused, got {res:?}"
+            );
+        }
+    }
+
+    /// §4.2#5, the other direction: `alg: ES256` with an OKP JWK would be
+    /// fingerprinted in OKP form while the ES256 verifier reads EC
+    /// coordinates. Refused on the `kty` disagreement, before the signature
+    /// step reports a missing `y`.
+    #[test]
+    fn es256_proof_with_okp_jwk_is_rejected_on_kty() {
+        let (kp, x) = ed25519_key();
+        let jwk = serde_json::json!({ "crv": "Ed25519", "kty": "OKP", "x": x });
+        let res = validate_fixture(&signed_proof(&kp, "ES256", &jwk));
+        match res {
+            Err(IdentityError::InvalidDPopProof { reason }) => assert!(
+                reason.contains("kty"),
+                "the kty disagreement must be what refuses this, got {reason}"
+            ),
+            other => panic!("an ES256 proof carrying an OKP JWK must be refused, got {other:?}"),
+        }
+    }
+
+    /// The curve is part of the key's identity: `alg: EdDSA` with
+    /// `kty: "OKP", crv: "X25519"` is a key-agreement key, not a signing key.
+    #[test]
+    fn eddsa_proof_with_wrong_curve_is_rejected() {
+        let (kp, x) = ed25519_key();
+        let jwk = serde_json::json!({ "crv": "X25519", "kty": "OKP", "x": x });
+        let res = validate_fixture(&signed_proof(&kp, "EdDSA", &jwk));
+        match res {
+            Err(IdentityError::InvalidDPopProof { reason }) => assert!(
+                reason.contains("crv"),
+                "the crv disagreement must be what refuses this, got {reason}"
+            ),
+            other => panic!("an EdDSA proof on a non-Ed25519 curve must be refused, got {other:?}"),
+        }
     }
 
     #[test]

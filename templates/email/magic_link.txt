@@ -1,0 +1,11 @@
+{{ product_name }} — Your Sign-In Link
+
+Click the link below to sign in. No password required.
+
+{{ magic_link_url }}
+
+This link expires in 15 minutes and can be used once. If you didn't ask to sign in, you can safely ignore this message — nobody gains access to your account.
+{% if support_email.is_some() %}
+Need help? Contact {{ support_email.as_deref().unwrap_or_default() }}
+{% endif %}
+{% if custom_footer_text.is_some() %}{{ custom_footer_text.as_deref().unwrap_or_default() }}{% endif %}

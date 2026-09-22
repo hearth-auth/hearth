@@ -190,7 +190,7 @@
           }
         }
       },
-      "put": {
+      "patch": {
         "operationId": "ApplicationAdminService_UpdateApplication",
         "tags": [
           "ApplicationAdminService"
@@ -1352,6 +1352,7 @@
     "/admin/realms/{id}/rotate-signing-key": {
       "post": {
         "summary": "Rotate the realm's Ed25519 signing key",
+        "description": "Publishes a new signing key and revokes every retired key for the realm. Tokens signed with the old key stop validating immediately, which is what makes this a usable remedy for a leaked key. A planned rotation may opt into a grace window with `grace_period_secs`; do not use it after a compromise, because the window protects whoever holds the leaked key too.",
         "operationId": "adminRotateRealmSigningKey",
         "tags": [
           "Admin"
@@ -1364,11 +1365,26 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "grace_period_secs",
+            "in": "query",
+            "required": false,
+            "description": "Seconds the retired key stays valid. Omit, or pass 0, to revoke it immediately. A value that is not a non-negative integer is rejected with 400.",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "default": 0
+            }
           }
         ],
         "responses": {
           "200": {
             "description": "New signing key published"
+          },
+          "400": {
+            "description": "grace_period_secs was not a non-negative integer"
           }
         }
       }
@@ -3475,6 +3491,7 @@
     "/webauthn/register/begin": {
       "post": {
         "summary": "Begin WebAuthn credential registration",
+        "description": "Requires a step-up proof. An access token alone is one factor, so enrolling with it would turn a stolen token into a permanent credential. Supply exactly one of `password`, `totp_code`, or `assertion`. An account that holds none of those credentials needs no proof.\n",
         "operationId": "webauthnRegisterBegin",
         "tags": [
           "Auth"
@@ -3484,9 +3501,69 @@
             "bearerAuth": []
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rp_id": {
+                    "type": "string",
+                    "description": "Accepted but ignored; the RP ID is pinned server-side."
+                  },
+                  "discoverable": {
+                    "type": "boolean"
+                  },
+                  "password": {
+                    "type": "string",
+                    "description": "Step-up proof \u2014 the account's current password."
+                  },
+                  "totp_code": {
+                    "type": "string",
+                    "description": "Step-up proof \u2014 a current authenticator code."
+                  },
+                  "assertion": {
+                    "type": "object",
+                    "description": "Step-up proof \u2014 an assertion from an already-enrolled passkey. All fields are base64url without padding.\n",
+                    "required": [
+                      "credential_id",
+                      "client_data_json",
+                      "authenticator_data",
+                      "signature"
+                    ],
+                    "properties": {
+                      "credential_id": {
+                        "type": "string"
+                      },
+                      "client_data_json": {
+                        "type": "string"
+                      },
+                      "authenticator_data": {
+                        "type": "string"
+                      },
+                      "signature": {
+                        "type": "string"
+                      },
+                      "user_handle": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "PublicKeyCredentialCreationOptions JSON"
+          },
+          "403": {
+            "description": "`step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
+          },
+          "503": {
+            "description": "`temporarily_unavailable` \u2014 the KDF admission gate shed the password verification. Retry after the `Retry-After` hint.\n"
           }
         }
       }

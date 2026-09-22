@@ -173,7 +173,7 @@ func extractIssuer(raw string) (string, error) {
 func (s *server) requirePermission(permission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := rawToken(c)
-		if !s.hearth.HasPermission(raw, permission) {
+		if !s.hearth.HasPermission(c.Request.Context(), raw, permission) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":              "forbidden",
 				"required_permission": permission,
@@ -188,7 +188,7 @@ func (s *server) requirePermission(permission string) gin.HandlerFunc {
 func (s *server) requireRole(role string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := rawToken(c)
-		if !s.hearth.HasRole(raw, role) {
+		if !s.hearth.HasRole(c.Request.Context(), raw, role) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":         "forbidden",
 				"required_role": role,

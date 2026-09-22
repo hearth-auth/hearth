@@ -135,6 +135,21 @@
       </button>
     </div>
 
+    {# Step-up: a signed-in session alone must not add a credential. #}
+    <div id="passkey-step-up" class="mb-4 rounded-md border border-divider-subtle bg-ht-surface px-4 py-3">
+      <label for="passkey-step-up-secret" class="block text-sm font-medium text-ht-content-secondary">Confirm it is you</label>
+      <p class="mt-1 text-sm text-ht-content-muted">
+        Enter your password, or the 6-digit code from your authenticator app. Being signed in is not enough to add a passkey.
+      </p>
+      <input type="password" id="passkey-step-up-secret" autocomplete="current-password"
+             placeholder="Password or 6-digit code"
+             class="mt-2 input">
+      <button id="passkey-step-up-existing" type="button" hidden
+              class="mt-2 text-sm font-medium text-ht-content-brand hover:text-ht-brand-deep">
+        Use an existing passkey instead
+      </button>
+    </div>
+
     <div id="passkey-register-error" hidden
          class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert"></div>
 

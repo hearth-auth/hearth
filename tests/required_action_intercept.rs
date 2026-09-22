@@ -368,9 +368,10 @@ async fn single_required_action_completion_resumes_oidc_flow() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=NewSecurePass1!&confirm_password=NewSecurePass1!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=NewSecurePass1!\
+                     &confirm_password=NewSecurePass1!"
+                )))
                 .expect("req"),
         )
         .await
@@ -488,9 +489,10 @@ async fn multiple_required_actions_sequential_completion() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token_2}"))
-                .body(Body::from(
-                    "new_password=NewSecurePass1!&confirm_password=NewSecurePass1!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=NewSecurePass1!\
+                     &confirm_password=NewSecurePass1!"
+                )))
                 .expect("req"),
         )
         .await

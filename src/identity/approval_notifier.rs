@@ -44,6 +44,15 @@ pub trait ApprovalWebhookTransport: Send + Sync {
     /// - `event_type`: value for `X-Hearth-Event` header
     /// - `delivery_id`: value for `X-Hearth-Delivery` header
     /// - `signature`: optional `X-Hearth-Signature-256` value (`"sha256=<hex>"`)
+    /// - `timeout_ms`: the realm's `approval_webhook.timeout_ms`
+    ///
+    /// `timeout_ms` is part of the signature because it had nowhere else to
+    /// go (task 26.37). It parsed, validated and reached
+    /// `ApprovalWebhookConfig` — and `deliver` never handed it to the
+    /// transport, which built a `ureq` config with no timeout of any kind.
+    /// The call runs inside `tokio::task::block_in_place`, so an approver's
+    /// endpoint that completes the handshake and then stops responding took a
+    /// Tokio worker thread out of service permanently.
     fn send(
         &self,
         url: &str,
@@ -51,7 +60,34 @@ pub trait ApprovalWebhookTransport: Send + Sync {
         event_type: &str,
         delivery_id: &str,
         signature: Option<&str>,
+        timeout_ms: u64,
     ) -> Result<(), String>;
+}
+
+/// Connect timeout as a fraction of the realm's overall budget.
+///
+/// A connect that has not completed in half the total budget will not leave
+/// time for a response, so splitting the operator's single number this way
+/// needs no second config key.
+fn approval_connect_timeout(timeout_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(timeout_ms.max(1) / 2 + 1)
+}
+
+/// Builds the `ureq` config for one approval-webhook delivery.
+///
+/// # Task 26.37
+///
+/// ureq 3.3.0's `Timeouts::default()` leaves every field `None` except
+/// `await_100`, so the previous config — `https_only` and `max_redirects`
+/// only — bounded nothing. `timeout_ms` was already in
+/// `ApprovalWebhookConfig`, already validated, and simply never reached here.
+pub(crate) fn approval_agent_config(timeout_ms: u64) -> ureq::config::Config {
+    ureq::config::Config::builder()
+        .timeout_connect(Some(approval_connect_timeout(timeout_ms)))
+        .timeout_global(Some(std::time::Duration::from_millis(timeout_ms.max(1))))
+        .https_only(true)
+        .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
+        .build()
 }
 
 // ── Production ureq transport (with SSRF guard) ──────────────────────────────
@@ -71,6 +107,7 @@ impl ApprovalWebhookTransport for UreqApprovalTransport {
         event_type: &str,
         delivery_id: &str,
         signature: Option<&str>,
+        timeout_ms: u64,
     ) -> Result<(), String> {
         let url = url.to_string();
         let body = body.to_vec();
@@ -89,10 +126,7 @@ impl ApprovalWebhookTransport for UreqApprovalTransport {
             // ssrf_agent SSRF-validates the connect-time DNS lookup, closing
             // the DNS-rebinding TOCTOU left open by the pre-flight check above
             // (W1 residual risk, HEA-1762).
-            let config = ureq::config::Config::builder()
-                .https_only(true)
-                .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
-                .build();
+            let config = approval_agent_config(timeout_ms);
             let agent = crate::webhook::ssrf::ssrf_agent(config);
 
             let mut req = agent
@@ -172,6 +206,7 @@ impl ApprovalWebhookClient {
             EVENT_TYPE,
             &payload.delivery_id,
             signature.as_deref(),
+            config.timeout_ms,
         )
     }
 }
@@ -211,6 +246,63 @@ pub(crate) fn log_delivery_success(request_id: &str, url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 26.37 — the realm's `timeout_ms` must become a real bound.
+    ///
+    /// ureq 3.3.0's `Timeouts::default()` leaves every field `None` except
+    /// `await_100`, so the previous config — `https_only` and `max_redirects`
+    /// only — bounded nothing. The call runs inside
+    /// `tokio::task::block_in_place`, so an approver's endpoint that completes
+    /// the handshake and then stops responding took a Tokio *worker* thread
+    /// out of service permanently.
+    #[test]
+    fn approval_agent_config_bounds_both_timeouts() {
+        let config = approval_agent_config(2000);
+        let timeouts = config.timeouts();
+
+        assert_eq!(
+            timeouts.global,
+            Some(std::time::Duration::from_secs(2)),
+            "the global bound must be the operator's number, not a default"
+        );
+        let connect = timeouts
+            .connect
+            .expect("a connect bound must be set, or a half-open handshake never returns");
+        assert!(
+            connect > std::time::Duration::ZERO && connect <= std::time::Duration::from_secs(2),
+            "the connect bound must be positive and inside the overall budget; got {connect:?}"
+        );
+        assert!(
+            config.https_only(),
+            "approval webhook egress stays https-only"
+        );
+        assert_eq!(
+            config.max_redirects(),
+            crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS,
+            "approval webhook egress must use the shared redirect cap"
+        );
+    }
+
+    /// Control — a pathological `timeout_ms` must still produce a usable bound.
+    ///
+    /// `0` would otherwise build a zero-duration connect timeout, which is not
+    /// a tighter limit but a delivery that can never succeed.
+    #[test]
+    fn approval_agent_config_survives_a_zero_timeout() {
+        let timeouts = approval_agent_config(0).timeouts();
+        assert!(
+            timeouts
+                .connect
+                .is_some_and(|d| d > std::time::Duration::ZERO),
+            "a zero budget must not become a zero connect timeout"
+        );
+        assert!(
+            timeouts
+                .global
+                .is_some_and(|d| d > std::time::Duration::ZERO),
+            "a zero budget must not become a zero global timeout"
+        );
+    }
 
     #[test]
     fn sign_body_format() {

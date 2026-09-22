@@ -278,7 +278,24 @@ async fn tamper_detection_detects_modified_entries() {
         .expect("query");
     assert_eq!(events.len(), 5);
 
-    // Take the third event, modify its actor, and write it back
+    // Take the third event, modify its actor, and write it back over its OWN
+    // storage key. The key is read back off storage rather than rebuilt from a
+    // format string: the engine's key encoding changed to packed binary
+    // (HEA-1899), and the old `audit:evt:{ts:019}:{uuid}` string wrote a NEW
+    // junk key inside the scan range instead of overwriting the event — so the
+    // test passed on a decode failure, not on tamper detection
+    // (audit 2026-08-28 §4.14#10).
+    let stored = storage
+        .scan(&realm_id, b"audit:evt:", b"audit:evt;")
+        .expect("scan audit event keys");
+    assert_eq!(stored.len(), 5, "five events are stored");
+    let target = stored
+        .iter()
+        .find(|e| {
+            EmbeddedAuditEngine::decode_for_test(&e.value).is_ok_and(|ev| ev.id == events[2].id)
+        })
+        .expect("the third event must be in storage");
+
     let mut tampered_event = events[2].clone();
     tampered_event.actor = "TAMPERED_ACTOR".to_string();
     // Keep the same integrity_hash (which is now wrong).
@@ -286,15 +303,19 @@ async fn tamper_detection_detects_modified_entries() {
     let tampered_value =
         EmbeddedAuditEngine::encode_for_test(&tampered_event).expect("encode tampered");
 
-    // Reconstruct the storage key for this event
-    let key = format!(
-        "audit:evt:{:019}:{}",
-        tampered_event.timestamp.as_micros(),
-        tampered_event.id.as_uuid()
-    );
     storage
-        .put(&realm_id, key.as_bytes(), &tampered_value)
+        .put(&realm_id, &target.key, &tampered_value)
         .expect("put tampered");
+
+    // The tamper must REPLACE the event, not add a key beside it.
+    let after = storage
+        .scan(&realm_id, b"audit:evt:", b"audit:evt;")
+        .expect("rescan audit event keys");
+    assert_eq!(
+        after.len(),
+        5,
+        "the tamper must overwrite the event, not add a key next to it"
+    );
 
     // Verify integrity after tampering — should detect the modification
     let valid_after = audit

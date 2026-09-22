@@ -10,7 +10,6 @@ from .types import (
     CreateUserRequest,
     UpdateUserRequest,
     Realm,
-    UpdateRealmRequest,
     PageResponse,
     OAuthClient,
     CreateClientRequest,
@@ -21,8 +20,6 @@ from .types import (
     Group,
     CreateGroupRequest,
     UpdateGroupRequest,
-    OrgMember,
-    AddOrgMemberRequest,
 )
 
 
@@ -85,7 +82,7 @@ class AdminClient:
 
     def update_user(self, user_id: str, req: UpdateUserRequest) -> User:
         """Update an existing user."""
-        resp = self._http.put(
+        resp = self._http.patch(
             f"{self._base}/admin/users/{user_id}",
             json=req.model_dump(exclude_none=True),
         )
@@ -104,8 +101,10 @@ class AdminClient:
     # ------------------------------------------------------------------
 
     # Realms are provisioned via hearth.yaml, not the admin API. There is no
-    # ``create_realm`` method: the server returns 405 for POST /admin/realms
-    # (HEA-2171). Only read paths are exposed.
+    # ``create_realm`` and no ``update_realm`` method: the server returns 405
+    # with "Realms are managed via hearth.yaml" for both POST /admin/realms and
+    # PATCH /admin/realms/{id} (HEA-2171, audit 2026-08-28 §25.4). Only read
+    # paths and deletion are exposed.
 
     def list_realms(self) -> List[Realm]:
         """List all realms."""
@@ -118,16 +117,6 @@ class AdminClient:
     def get_realm(self, realm_id: str) -> Realm:
         """Get a realm by ID."""
         resp = self._http.get(f"{self._base}/admin/realms/{realm_id}")
-        if resp.status_code != 200:
-            raise HearthError(resp.status_code, resp.text)
-        return Realm(**resp.json())
-
-    def update_realm(self, realm_id: str, req: UpdateRealmRequest) -> Realm:
-        """Update an existing realm."""
-        resp = self._http.put(
-            f"{self._base}/admin/realms/{realm_id}",
-            json=req.model_dump(exclude_none=True),
-        )
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
         return Realm(**resp.json())
@@ -145,7 +134,7 @@ class AdminClient:
     def create_client(self, req: CreateClientRequest) -> OAuthClient:
         """Create a new OAuth client."""
         resp = self._http.post(
-            f"{self._base}/admin/clients", json=req.model_dump(exclude_none=True)
+            f"{self._base}/admin/applications", json=req.model_dump(exclude_none=True)
         )
         if resp.status_code not in (200, 201):
             raise HearthError(resp.status_code, resp.text)
@@ -158,7 +147,7 @@ class AdminClient:
         params = {"limit": str(limit)}
         if cursor:
             params["cursor"] = cursor
-        resp = self._http.get(f"{self._base}/admin/clients", params=params)
+        resp = self._http.get(f"{self._base}/admin/applications", params=params)
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
         data = resp.json()
@@ -166,15 +155,15 @@ class AdminClient:
 
     def get_client(self, client_id: str) -> OAuthClient:
         """Get an OAuth client by ID."""
-        resp = self._http.get(f"{self._base}/admin/clients/{client_id}")
+        resp = self._http.get(f"{self._base}/admin/applications/{client_id}")
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
         return OAuthClient(**resp.json())
 
     def update_client(self, client_id: str, req: UpdateClientRequest) -> OAuthClient:
         """Update an existing OAuth client."""
-        resp = self._http.put(
-            f"{self._base}/admin/clients/{client_id}",
+        resp = self._http.patch(
+            f"{self._base}/admin/applications/{client_id}",
             json=req.model_dump(exclude_none=True),
         )
         if resp.status_code != 200:
@@ -183,7 +172,7 @@ class AdminClient:
 
     def delete_client(self, client_id: str) -> None:
         """Delete an OAuth client."""
-        resp = self._http.delete(f"{self._base}/admin/clients/{client_id}")
+        resp = self._http.delete(f"{self._base}/admin/applications/{client_id}")
         if resp.status_code not in (200, 204):
             raise HearthError(resp.status_code, resp.text)
 
@@ -222,7 +211,7 @@ class AdminClient:
 
     def update_role(self, role_id: str, req: UpdateRoleRequest) -> Role:
         """Update an existing role."""
-        resp = self._http.put(
+        resp = self._http.patch(
             f"{self._base}/admin/roles/{role_id}",
             json=req.model_dump(exclude_none=True),
         )
@@ -271,7 +260,7 @@ class AdminClient:
 
     def update_group(self, group_id: str, req: UpdateGroupRequest) -> Group:
         """Update an existing group."""
-        resp = self._http.put(
+        resp = self._http.patch(
             f"{self._base}/admin/groups/{group_id}",
             json=req.model_dump(exclude_none=True),
         )
@@ -286,37 +275,14 @@ class AdminClient:
             raise HearthError(resp.status_code, resp.text)
 
     # ------------------------------------------------------------------
-    # Organization Memberships
+    # Organization Memberships — removed
     # ------------------------------------------------------------------
-
-    def list_org_members(
-        self, org_id: str, cursor: Optional[str] = None, limit: int = 50
-    ) -> PageResponse[OrgMember]:
-        """List members of an organization with cursor-based pagination."""
-        params = {"limit": str(limit)}
-        if cursor:
-            params["cursor"] = cursor
-        resp = self._http.get(f"{self._base}/admin/orgs/{org_id}/members", params=params)
-        if resp.status_code != 200:
-            raise HearthError(resp.status_code, resp.text)
-        data = resp.json()
-        return PageResponse[OrgMember](**data)
-
-    def add_org_member(self, org_id: str, req: AddOrgMemberRequest) -> OrgMember:
-        """Add a user to an organization."""
-        resp = self._http.post(
-            f"{self._base}/admin/orgs/{org_id}/members",
-            json=req.model_dump(exclude_none=True),
-        )
-        if resp.status_code not in (200, 201):
-            raise HearthError(resp.status_code, resp.text)
-        return OrgMember(**resp.json())
-
-    def remove_org_member(self, org_id: str, user_id: str) -> None:
-        """Remove a user from an organization."""
-        resp = self._http.delete(f"{self._base}/admin/orgs/{org_id}/members/{user_id}")
-        if resp.status_code not in (200, 204):
-            raise HearthError(resp.status_code, resp.text)
+    #
+    # Hearth serves no organization route over HTTP: there is no /admin/orgs,
+    # no /admin/orgs/{id}/members and no per-member route anywhere in the
+    # router, so list_org_members, add_org_member and remove_org_member every
+    # one 404'd (audit 2026-08-28 §25.19). Organization membership is
+    # administered through the admin console, not the admin API.
 
     def close(self):
         """Close the underlying HTTP client."""

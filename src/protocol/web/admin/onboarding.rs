@@ -617,10 +617,19 @@ pub async fn admin_onboarding_invite_post(
             qenc(&realm_name),
             token
         );
+        // `reset_url` carries a live, single-use password-reset token — a
+        // bearer-equivalent credential for the realm administrator this step
+        // is creating. `src/protocol/redact.rs` names `reset_url` as a field
+        // that MUST always be wrapped, and the sibling site in
+        // `web/handlers.rs` (the no-transport arm of `forgot_password`) does
+        // wrap it. This one did not, so every run of the onboarding wizard
+        // wrote an account-takeover credential into the operator log, where
+        // it outlives the token's own expiry in whatever aggregator collects
+        // it (task 23.12; audit §4.14 did not reach this site).
         tracing::warn!(
-            reset_url = %reset_url,
+            reset_url = %crate::protocol::redact::Redact(&reset_url),
             invited = %email,
-            "onboarding: invitation link (check logs if email delivery fails)"
+            "onboarding: invitation link issued (configure email.transport to deliver it)"
         );
 
         if let Some(ref email_service) = state.email {

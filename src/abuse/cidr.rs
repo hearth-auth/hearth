@@ -3,7 +3,7 @@
 //! Operators load per-realm allow/deny CIDR lists from storage (key prefix
 //! `abuse:{realm}:cidr:*`) and build a [`CidrFilter`] for fast in-memory
 //! lookup.  The filter is replaced atomically on reload — store it behind an
-//! `Arc<ArcSwap<CidrFilter>>` at the call site.
+//! `Arc<crate::core::SwapCell<CidrFilter>>` at the call site.
 //!
 //! # Evaluation order
 //!
@@ -138,7 +138,7 @@ pub enum CidrOutcome {
 /// Per-realm CIDR allow/deny filter (A-9).
 ///
 /// Build once from the stored configuration and share via `Arc`.  Replace the
-/// entire filter on policy change (arc-swap pattern).  The `check` method is
+/// entire filter on policy change (read-copy-update).  The `check` method is
 /// lock-free and allocation-free.
 #[derive(Debug, Clone)]
 pub struct CidrFilter {

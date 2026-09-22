@@ -182,6 +182,7 @@ fn ensure_setup_token_creates_file_on_first_run() {
         Some("https://auth.example.com"),
         None,
         None,
+        false,
     )
     .expect("ensure")
     .expect("token expected on first run");
@@ -193,12 +194,26 @@ fn ensure_setup_token_creates_file_on_first_run() {
 #[test]
 fn ensure_setup_token_is_idempotent_on_restart() {
     let env = TestEnv::new();
-    let a = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("first call")
-        .expect("token");
-    let b = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("second call")
-        .expect("token");
+    let a = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("first call")
+    .expect("token");
+    let b = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("second call")
+    .expect("token");
     assert_eq!(a, b, "restart must not rotate an uncompleted setup token");
 }
 
@@ -218,9 +233,16 @@ fn ensure_setup_token_preserves_file_when_realms_exist() {
 
     // Token file is the source of truth — its presence means setup is
     // still in progress, regardless of realm count.
-    let token = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token preserved when file exists");
+    let token = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token preserved when file exists");
 
     assert_eq!(token, "existing-token");
     assert!(
@@ -234,9 +256,16 @@ fn ensure_setup_token_preserves_file_when_realms_exist() {
 #[test]
 fn consume_setup_token_accepts_matching_token() {
     let env = TestEnv::new();
-    let token = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token");
+    let token = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token");
 
     consume_setup_token(env.identity.as_ref(), env.data_dir(), &token).expect("match");
 }
@@ -244,9 +273,16 @@ fn consume_setup_token_accepts_matching_token() {
 #[test]
 fn consume_setup_token_rejects_mismatch() {
     let env = TestEnv::new();
-    let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token");
+    let _ = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token");
 
     let err = consume_setup_token(env.identity.as_ref(), env.data_dir(), "wrong-token")
         .expect_err("mismatch");
@@ -265,9 +301,16 @@ fn consume_setup_token_rejects_when_file_absent() {
 #[test]
 fn consume_setup_token_accepts_when_realms_exist_and_file_present() {
     let env = TestEnv::new();
-    let token = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token");
+    let token = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token");
 
     // Simulate reconciliation creating a realm before setup completes.
     // The token file is the source of truth, not realm count.
@@ -286,9 +329,16 @@ fn consume_setup_token_accepts_when_realms_exist_and_file_present() {
 fn setup_token_survives_realm_reconciliation() {
     let env = TestEnv::new();
     // Generate setup token on a fresh instance.
-    let token = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token on fresh instance");
+    let token = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token on fresh instance");
 
     // Simulate reconciliation creating a "default" realm.
     env.identity
@@ -301,9 +351,16 @@ fn setup_token_survives_realm_reconciliation() {
     // Re-run ensure_setup_token (as happens on server restart). The token
     // file should still be returned — its presence is the source of truth,
     // not the realm count.
-    let token2 = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure after reconciliation")
-        .expect("token should survive");
+    let token2 = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure after reconciliation")
+    .expect("token should survive");
 
     assert_eq!(token, token2, "token must be the same across restarts");
 
@@ -319,9 +376,16 @@ fn complete_setup_creates_admin_and_sends_email() {
     let env = TestEnv::new();
     // Mirrors real startup: ensure_setup_token runs first (fresh instance),
     // then realm reconciliation creates the realm from YAML.
-    let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token");
+    let _ = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token");
     // Seeding an application realm is no longer required — admins live
     // in the auto-seeded system realm. We still create one to verify it
     // is *not* picked (regression test on the old behavior).
@@ -393,7 +457,14 @@ fn complete_setup_creates_admin_and_sends_email() {
 #[test]
 fn session_creation_blocked_for_pending_verification_user() {
     let env = TestEnv::new();
-    let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None);
+    let _ = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    );
     env.seed_realm("RealmX");
     let pw = CleartextPassword::new(b"a-password12".to_vec());
     let outcome = env
@@ -425,7 +496,14 @@ fn session_creation_blocked_for_pending_verification_user() {
 #[test]
 fn verify_email_token_activates_user_and_unblocks_session() {
     let env = TestEnv::new();
-    let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None);
+    let _ = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    );
     env.seed_realm("RealmY");
     let pw = CleartextPassword::new(b"another-password".to_vec());
     let outcome = env
@@ -475,7 +553,14 @@ fn verify_email_token_activates_user_and_unblocks_session() {
 #[test]
 fn verify_email_token_rejects_reuse() {
     let env = TestEnv::new();
-    let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None);
+    let _ = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    );
     env.seed_realm("RealmZ");
     let pw = CleartextPassword::new(b"password1-reuse".to_vec());
     let outcome = env
@@ -560,9 +645,16 @@ fn complete_setup_refuses_when_setup_token_absent() {
 fn complete_setup_succeeds_without_app_realms() {
     let env = TestEnv::new();
     // No application realms created — reconciliation did not run.
-    let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None)
-        .expect("ensure")
-        .expect("token");
+    let _ = ensure_setup_token(
+        env.identity.as_ref(),
+        env.data_dir(),
+        None,
+        None,
+        None,
+        false,
+    )
+    .expect("ensure")
+    .expect("token");
 
     let pw = CleartextPassword::new(b"correct-horse-battery-staple".to_vec());
     let outcome = env
@@ -630,7 +722,7 @@ fn complete_setup_surfaces_email_delivery_failure() {
 
     // Seed the setup token first (mirrors real startup: ensure_setup_token
     // runs before realm reconciliation).
-    let _ = ensure_setup_token(identity.as_ref(), temp.path(), None, None, None)
+    let _ = ensure_setup_token(identity.as_ref(), temp.path(), None, None, None, false)
         .expect("ensure")
         .expect("token");
 
@@ -682,6 +774,7 @@ fn ensure_setup_token_sends_notification_email_when_configured() {
         Some("https://auth.example.com"),
         Some(&email_service),
         Some("ops@example.com"),
+        false,
     )
     .expect("ensure")
     .expect("token on first run");
@@ -722,6 +815,7 @@ fn ensure_setup_token_absolute_url_when_base_url_absent() {
         None,
         Some(&email_service),
         Some("ops@example.com"),
+        false,
     )
     .expect("ensure")
     .expect("token on first run");
@@ -744,6 +838,7 @@ fn ensure_setup_token_no_email_when_sender_absent() {
         Some("https://auth.example.com"),
         None,
         Some("ops@example.com"),
+        false,
     )
     .expect("ensure")
     .expect("token on first run");
@@ -771,6 +866,7 @@ fn ensure_setup_token_failing_email_is_non_fatal() {
         Some("https://auth.example.com"),
         Some(&email_service),
         Some("ops@example.com"),
+        false,
     )
     .expect("ensure must succeed even when email fails")
     .expect("token on first run");

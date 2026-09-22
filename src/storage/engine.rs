@@ -2,8 +2,32 @@
 //!
 //! `EmbeddedStorageEngine` implements the `StorageEngine` trait by layering:
 //! - **Read path**: hot tier → memtable → SST files (newest first)
-//! - **Write path**: WAL append → memtable insert → hot tier invalidate
+//! - **Write path**: memtable insert → hot tier invalidate → WAL append +
+//!   `fsync` (the acknowledgement)
 //! - **Recovery**: WAL replay into fresh memtable on open
+//!
+//! ## Apply before acknowledge
+//!
+//! Every mutating operation applies its change to the memtable *before* it
+//! waits for the WAL `fsync` that acknowledges it. The rule it upholds: **a
+//! record that is durable is never missing from the memtable.**
+//!
+//! The reverse order — append, `fsync`, acknowledge, then apply — leaves a
+//! window in which a record is durable and the memtable does not have it.
+//! WAL rotation flushes the memtable and then truncates the segment, so a
+//! rotation driven by a second writer inside that window flushes a memtable
+//! without the record and then erases the record. The write was acknowledged
+//! and it is gone. Two concurrent writers were enough; no crash, no attacker,
+//! no disk fault (audit 2026-08-28 §3 B4, §4.11#1).
+//!
+//! The order has one cost, and it is deliberate. Between the memtable apply
+//! and the acknowledgement a value is readable inside this process before it
+//! is durable. If the WAL write then fails, the operation returns an error
+//! while its value stays readable. That state is bounded: a WAL write fault
+//! fences the WAL, every later write is rejected, and the operator must
+//! restart — and the restart rebuilds the memtable from the WAL, which never
+//! held the record. Losing an acknowledged write is the worse failure, and it
+//! is the one this order removes.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -45,14 +69,15 @@ fn record_sst_file_count(count: usize) {
 /// Returned (wrapped in a [`StorageDurabilityHandle`]) by
 /// [`EmbeddedStorageEngine::enqueue_batch`] when `SyncMode::EveryWrite` is active.
 /// Passed back to [`EmbeddedStorageEngine::await_batch_durable`], which runs the
-/// WAL leader loop (or waits as a follower) and then applies the entries to the
-/// memtable once the `fsync` succeeds.
+/// WAL leader loop (or waits as a follower) until the `fsync` succeeds.
+///
+/// The handle carries only the commit position. The batch's entries are applied
+/// to the memtable at enqueue time, before the durability wait, so a durable
+/// record is never missing from the memtable (audit 2026-08-28 §3 B4).
 pub(crate) struct PendingBatchHandle {
     pub(crate) am_leader: bool,
     /// Position in the WAL commit stream this batch is waiting on.
     pub(crate) ticket: u64,
-    pub(crate) realm_id: crate::core::RealmId,
-    pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Name of the marker file written before a two-phase snapshot restore and
@@ -219,6 +244,7 @@ impl StorageConfig {
                 // Bound promote-path write-lock/clone churn under cold-read load
                 // in production (HEA-1775). Dev/embedded keeps rate=1.
                 promote_sample_rate: PRODUCTION_PROMOTE_SAMPLE_RATE,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -239,6 +265,20 @@ impl StorageConfig {
     /// [`StorageConfig::production`] instead.
     pub fn set_hot_tier_capacity(&mut self, capacity: usize) {
         self.tiered_config.hot_tier_capacity = capacity;
+    }
+
+    /// Turns the `realm`-labelled hot-tier counters on or off.
+    ///
+    /// The hot tier is one cache shared by every tenant, so the unlabelled
+    /// eviction and promotion totals cannot say which realm the tier is
+    /// holding or which realm is evicting the others (audit 2026-08-28
+    /// §4.9#6). On (the default) each eviction and admitted promotion also
+    /// increments `hearth_storage_hot_tier_evictions_by_realm_total` /
+    /// `hearth_storage_hot_tier_promotions_by_realm_total`. The cardinality is
+    /// one series per realm; `storage.hot_tier_per_realm_metrics: false` turns
+    /// it off on a deployment with too many realms to pay for it.
+    pub fn set_hot_tier_per_realm_metrics(&mut self, enabled: bool) {
+        self.tiered_config.per_realm_metrics = enabled;
     }
 
     /// Overrides the memtable flush threshold (bytes) on an already-built config.
@@ -268,6 +308,7 @@ impl StorageConfig {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig {
@@ -369,6 +410,33 @@ pub struct EmbeddedStorageEngine {
     /// every reader so decrypted cold-tier residency is `O(cache_cap)`, not
     /// `O(corpus)` (HEA-1914).
     block_cache: Arc<crate::storage::block_cache::BlockCache>,
+    /// Whether an SST whose KEK is missing or whose DEK will not unwrap may be
+    /// skipped instead of failing the operation.
+    ///
+    /// Carried from [`StorageConfig::allow_missing_keks`] so
+    /// [`Self::reload_sst_readers`] applies the same policy start-up does.
+    /// Without it the reload path skipped unconditionally, and a silently
+    /// dropped SST makes the next partial compaction discard tombstones it must
+    /// keep (B11, audit 2026-08-28 §3 B11, §4.21#2).
+    allow_missing_keks: bool,
+    /// Test-only hook fired inside a mutating operation immediately after the
+    /// WAL has acknowledged the write as durable, and before the operation
+    /// returns.
+    ///
+    /// A simulation test uses it to park one writer at exactly that point and
+    /// drive a WAL rotation from another thread, which is the interleaving
+    /// behind blocker B4 (audit 2026-08-28 §3 B4, §4.11#1).
+    #[cfg(feature = "test-hooks")]
+    post_ack_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test-only hook fired inside `get`'s fall-through path, after the
+    /// authoritative memtable/SST read has resolved to data and immediately
+    /// before the hot-tier fill.
+    ///
+    /// A simulation test uses it to park a reader at exactly that point and
+    /// drive a `delete` from another thread, which is the fill/invalidation
+    /// race behind audit 2026-08-28 §4.21#3.
+    #[cfg(feature = "test-hooks")]
+    pre_promote_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Process-local guard: removes `data_dir` from `OPEN_DIRS` on drop.
     ///
     /// Must be declared after all fields that use `data_dir` so it is dropped
@@ -486,6 +554,30 @@ impl EmbeddedStorageEngine {
         let entries = wal.read_all()?;
         for entry in &entries {
             memtable.apply_wal_entry(entry)?;
+        }
+
+        // Sweep staging orphans before discovery. An interrupted SST write
+        // strands a `*.staging` file (memtable flush) or a `*.tmp` file
+        // (compaction merge); nothing ever references either — the rename
+        // onto the live name is what publishes a file — so they are dead
+        // bytes from a crash (audit 2026-08-28 §4.11#4). Removal failure is
+        // logged, not fatal: a stale orphan is harmless to correctness.
+        for p in fs.read_dir(&config.data_dir)? {
+            if p.extension()
+                .is_some_and(|ext| ext == "tmp" || ext == "staging")
+            {
+                match fs.remove_file(&p) {
+                    Ok(()) => tracing::warn!(
+                        path = %p.display(),
+                        "removed orphaned staging file left by an interrupted write"
+                    ),
+                    Err(e) => tracing::warn!(
+                        path = %p.display(),
+                        error = %e,
+                        "failed to remove orphaned staging file"
+                    ),
+                }
+            }
         }
 
         // Discover existing SST files, sorted newest-first by filename
@@ -681,9 +773,64 @@ impl EmbeddedStorageEngine {
             compaction_notify: Arc::new(tokio::sync::Notify::new()),
             compaction_records_written: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             block_cache,
+            allow_missing_keks: config.allow_missing_keks,
+            #[cfg(feature = "test-hooks")]
+            post_ack_hook: Mutex::new(None),
+            #[cfg(feature = "test-hooks")]
+            pre_promote_hook: Mutex::new(None),
             _process_lock: dir_lock_guard,
             _dir_lock: lock_file,
         })
+    }
+
+    /// Installs the test-only post-acknowledgement hook.
+    ///
+    /// The hook runs on the writer's own thread inside `put`, `delete` and
+    /// `put_batch`, after the WAL reports the record durable. Simulation tests
+    /// use it to hold a writer at its acknowledgement point.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_post_ack_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.post_ack_hook.lock() {
+            *slot = Some(hook);
+        }
+    }
+
+    /// Runs the post-acknowledgement hook, if one is installed.
+    #[cfg(feature = "test-hooks")]
+    fn run_post_ack_hook(&self) {
+        let hook = self
+            .post_ack_hook
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Installs the test-only pre-promotion hook.
+    ///
+    /// The hook runs on the reader's own thread inside `get`, after the
+    /// memtable/SST read and before the hot-tier fill. Simulation tests use
+    /// it to hold a reader inside the fill/invalidation race window.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_pre_promote_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.pre_promote_hook.lock() {
+            *slot = Some(hook);
+        }
+    }
+
+    /// Runs the pre-promotion hook, if one is installed.
+    #[cfg(feature = "test-hooks")]
+    fn run_pre_promote_hook(&self) {
+        let hook = self
+            .pre_promote_hook
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Flushes the memtable to a new SST file and clears it.
@@ -772,8 +919,21 @@ impl EmbeddedStorageEngine {
     /// Vec from on-disk state. Files are sorted by SST number descending so the
     /// resulting Vec order matches the recency order that recovery
     /// ([`Self::open_with_fs`]) reconstructs — the invariant reads rely on
-    /// (newest wins). Individual files that fail to open (missing KEK, corrupt
-    /// header) are skipped with a warning rather than aborting the rebuild.
+    /// (newest wins).
+    ///
+    /// A file that cannot be opened is a hard error, under the same policy
+    /// [`Self::open_with_fs`] applies at start-up: a missing KEK or a failed DEK
+    /// unwrap is skipped only when the operator set `allow_missing_keks`, and an
+    /// unreadable header or a failed reader open always fails.
+    ///
+    /// This function used to `warn!` and skip on all four paths regardless of
+    /// that setting (B11, audit 2026-08-28 §3 B11, §4.21#2). A silently dropped
+    /// SST does more than hide its own data: the reader list is what
+    /// [`Self::compact_partial`] measures to decide `drop_tombstones`. If the
+    /// genuinely-oldest SST is missing from the list, the next partial
+    /// compaction concludes its run reaches the oldest SST and discards
+    /// tombstones that still shadow values in that file, so those deletes come
+    /// back. No crash and no restart is needed.
     ///
     /// Callers MUST hold `flush_lock` so the directory scan cannot race a flush
     /// writing a new file.
@@ -792,56 +952,55 @@ impl EmbeddedStorageEngine {
 
         let mut readers = Vec::with_capacity(all_sst_paths.len());
         for (path, sst_num) in &all_sst_paths {
-            let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to read encryption header"
-                    );
-                    continue;
-                }
-            };
+            let (kek_id, enc_header) = sst::read_encryption_header(path, &*self.fs)?;
             let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-            let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
-                Some(k) => k,
-                None => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        realm = %realm_for_kek,
-                        "SST file skipped: KEK not found"
-                    );
-                    continue;
-                }
+            let kek = if let Some(k) = self.key_registry.get_kek_for_realm(&realm_for_kek) {
+                k
+            } else if self.allow_missing_keks {
+                tracing::warn!(
+                    path = %path.display(),
+                    realm = %realm_for_kek,
+                    "SST file skipped: KEK not found in registry"
+                );
+                continue;
+            } else {
+                return Err(StorageError::Crypto {
+                    reason: format!(
+                        "SST {} references KEK for realm {} but no KEK is registered; refusing \
+                         to rebuild the reader set without it — a dropped SST makes the next \
+                         partial compaction discard tombstones it must keep",
+                        path.display(),
+                        realm_for_kek
+                    ),
+                });
             };
             let dek = match encryption::unwrap_dek(&enc_header, &kek) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: DEK unwrapping failed"
-                    );
-                    continue;
+                    if self.allow_missing_keks {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: DEK unwrapping failed"
+                        );
+                        continue;
+                    }
+                    return Err(StorageError::Crypto {
+                        reason: format!("SST {} DEK unwrapping failed: {}", path.display(), e),
+                    });
                 }
             };
-            match SstReader::open_with_fs(
+            let reader = SstReader::open_with_fs(
                 path,
                 &*self.fs,
                 *sst_num,
                 &dek,
                 Arc::clone(&self.block_cache),
-            ) {
-                Ok(reader) => readers.push(reader),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to open reader"
-                    );
-                }
-            }
+            )
+            .map_err(|e| StorageError::Crypto {
+                reason: format!("SST {} failed to open reader: {}", path.display(), e),
+            })?;
+            readers.push(reader);
         }
         Ok(readers)
     }
@@ -916,11 +1075,24 @@ impl EmbeddedStorageEngine {
     /// # Crash Safety
     ///
     /// The compacted SST is written to a `.sst.tmp` path and atomically
-    /// renamed to `{num:06}.sst`. If the process crashes **after** the
-    /// rename but **before** old SST files are deleted, both old and new
-    /// SSTs coexist on disk. Recovery handles this correctly — the newer
-    /// SST (higher number) takes priority for duplicate keys. The leaked
-    /// old files are harmless orphans cleaned up by the next compaction.
+    /// renamed to `{num:06}.sst`. A crash **before** the rename leaves the
+    /// inputs intact and costs only the temp file.
+    ///
+    /// A crash **after** the rename but **before** the inputs are unlinked
+    /// leaves old and new SSTs coexisting. For a key the output still carries,
+    /// recovery resolves this correctly: the newer SST (higher number) wins.
+    /// For a **deleted** key it does not. This is a full merge, so the output
+    /// drops every tombstone; a surviving input still holds the pre-delete
+    /// value, and no tombstone shadows it any more, so the delete is undone
+    /// (§4.21#6). The inputs are therefore unlinked oldest-first — see the
+    /// commit phase — so any partial prefix of unlinks leaves more tombstones
+    /// than values, never a value ahead of its shadowing tombstone. A runtime
+    /// unlink failure aborts the commit. A crash landing mid-unlink is bounded
+    /// by the same ordering; closing that window durably needs a compaction
+    /// manifest (HEA-1857).
+    ///
+    /// Leaked old files are otherwise harmless orphans, cleaned up by the next
+    /// compaction.
     pub fn compact_ssts(&self, min_sst_count: usize) -> Result<usize, StorageError> {
         // Serialize against other compactions for the whole operation, but hold
         // `flush_lock` only for two brief phases — the snapshot+number allocation
@@ -1137,11 +1309,30 @@ impl EmbeddedStorageEngine {
         };
 
         // `sst_readers` is newest-first; index `start` is the newest run member
-        // (highest number) and `end` the oldest. The merged output reuses the
-        // newest number/path so it splices back at the correct recency slot.
+        // (highest number) and `end` the oldest.
+        //
+        // B7: the merged output takes the run's OLDEST number, not its newest
+        // (audit 2026-08-28 §3 B7, §4.11#2, §4.12#2, §4.21#1).
+        //
+        // It used to reuse the newest number, which meant the commit renamed the
+        // merged file over the run's tombstone-bearing member and only then
+        // unlinked the older, value-bearing members. A crash in that window left
+        // the merged output (tombstones dropped) live above an untouched
+        // value-bearing SST, so every key deleted in the run came back.
+        //
+        // Writing to the oldest slot is recency-correct because the run is
+        // contiguous (`start..=end`): everything merged in is older than any SST
+        // above the run and newer than any SST below it, so no non-member can
+        // fall between them. It is also crash-safe in every window — the
+        // tombstone-bearing newest member stays on disk until the values it
+        // shadows are gone, and the merged output is durable before anything is
+        // unlinked, so a failure cannot lose live data either.
         let run = &sst_readers[start..=end];
-        let target_num = run[0].sst_number();
-        let other_nums: Vec<u64> = run[1..].iter().map(SstReader::sst_number).collect();
+        let target_num = run[run.len() - 1].sst_number();
+        let other_nums: Vec<u64> = run[..run.len() - 1]
+            .iter()
+            .map(SstReader::sst_number)
+            .collect();
         let input_count = run.len();
 
         // Merge inputs oldest-to-newest (newest value wins, matching read order).
@@ -1190,26 +1381,31 @@ impl EmbeddedStorageEngine {
             )));
         };
 
-        // Atomically replace the run's newest file with the merged output, then
+        // Atomically install the merged output at the run's OLDEST number, then
         // fsync the directory so the rename is durable (HEA-1855).
+        //
+        // At this point every original run member is still on disk, and all of
+        // them are newer than the merged output, so they shadow it. A crash here
+        // therefore reads exactly as it did before the compaction started: the
+        // run's tombstones are intact and no deleted key is visible. The merged
+        // output is redundant until the unlinks below remove what shadows it,
+        // which is what makes those unlinks safe to attempt.
         self.fs.rename(&tmp_path, &final_path)?;
         self.fs.sync_dir(&self.data_dir)?;
 
-        // Delete the other (older) run members. A failure here is FATAL to the
-        // commit. When `drop_tombstones` was set (the run reached the oldest SST)
-        // the merged output carries no delete markers, so an older run member that
-        // survives would resurrect a deleted key on the next reload (HEA-1982);
-        // warn-and-continue then let `reload_sst_readers()` re-open that orphan.
-        // Aborting instead leaves the pre-commit reader set in place, so the
-        // original (tombstone-bearing) run members keep shadowing deleted keys
-        // until a retry succeeds.
+        // Delete the remaining run members — every member except the oldest,
+        // whose number the merged output now occupies. A failure here is FATAL
+        // to the commit: aborting leaves the merged output shadowed by the
+        // surviving originals, which is a correct (if redundant) state that a
+        // retry converges from. A `NotFound` means a prior aborted attempt
+        // already removed the member; treat it as success.
         //
-        // Unlink OLDEST-first (`other_nums` is newest-first, so iterate reversed):
-        // a value-bearing member is always removed before the newer tombstone that
-        // shadows it, so any partial prefix — mid-loop error or crash — can only
-        // leave more tombstones than values on disk, never a resurrectable orphan
-        // (HEA-1986). A `NotFound` means a prior aborted attempt already removed the
-        // member; treat it as success so a retry converges.
+        // Unlink OLDEST-first (`other_nums` is newest-first, so iterate
+        // reversed): a value-bearing member is always removed before the newer
+        // tombstone that shadows it, so any partial prefix — mid-loop error or
+        // crash — can only leave more tombstones than values on disk, never a
+        // resurrectable orphan (HEA-1986). The run's newest member, which
+        // carries the newest tombstones, is unlinked last of all.
         for old_num in other_nums.iter().rev() {
             let old_path = self.data_dir.join(format!("{old_num:06}.sst"));
             match self.fs.remove_file(&old_path) {
@@ -1232,12 +1428,14 @@ impl EmbeddedStorageEngine {
         self.fs.sync_dir(&self.data_dir)?;
 
         // Rematerialise the reader list from disk (newest-first). The merged file
-        // now sits at `target_num`, exactly where the run's newest member was.
+        // now sits at `target_num`, the run's oldest slot — correct, because the
+        // run was contiguous, so nothing outside it falls between the run's
+        // oldest and newest members.
         let rebuilt = self.reload_sst_readers()?;
         let live_count = rebuilt.len();
         record_sst_file_count(live_count);
         // Attribute the merged output's record count to write amplification. The
-        // output reused `target_num`, so it is the reader now sitting at that
+        // output took `target_num`, so it is the reader now sitting at that
         // number (see the recency-ordering contract above).
         if let Some(merged) = rebuilt.iter().find(|r| r.sst_number() == target_num) {
             self.compaction_records_written.fetch_add(
@@ -1297,6 +1495,10 @@ fn select_partial_run(readers: &[SstReader], merge_min: usize) -> Option<(usize,
 }
 
 impl StorageEngine for EmbeddedStorageEngine {
+    fn is_write_fenced(&self) -> bool {
+        self.wal.is_fenced()
+    }
+
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let metrics = crate::metrics::metrics();
 
@@ -1318,6 +1520,13 @@ impl StorageEngine for EmbeddedStorageEngine {
         // latency and SST-probe count to the tier that resolves the read.
         let started = std::time::Instant::now();
 
+        // Open the fill window BEFORE the authoritative read. A delete or
+        // update landing after this point bumps the invalidation epoch, and
+        // the promote below discards the then-stale fill — otherwise the
+        // pre-write value would be served for the life of the process
+        // (audit 2026-08-28 §4.21#3).
+        let fill = self.hot_tier.begin_fill(realm_id, key);
+
         // 2. Active memtable — O(log n) BTreeMap lookup.
         // `get_entry` distinguishes a tombstone from an absent key so we can
         // stop searching deeper layers on a delete. This MUST NOT fall back to
@@ -1327,7 +1536,9 @@ impl StorageEngine for EmbeddedStorageEngine {
         match self.active_memtable.get_entry(realm_id, key) {
             Some(MemtableValue::Data(data)) => {
                 // Promote to hot tier on memtable hit
-                self.hot_tier.promote(realm_id, key, &data);
+                #[cfg(feature = "test-hooks")]
+                self.run_pre_promote_hook();
+                self.hot_tier.promote(fill, realm_id, key, &data);
                 metrics.record_get_fallthrough("memtable_hit", started.elapsed(), 0);
                 return Ok(Some(data));
             }
@@ -1348,7 +1559,9 @@ impl StorageEngine for EmbeddedStorageEngine {
                 match value {
                     MemtableValue::Data(data) => {
                         // Cold hit — promote to hot tier
-                        self.hot_tier.promote(realm_id, key, &data);
+                        #[cfg(feature = "test-hooks")]
+                        self.run_pre_promote_hook();
+                        self.hot_tier.promote(fill, realm_id, key, &data);
                         metrics.record_get_fallthrough("sst_hit", started.elapsed(), ssts_probed);
                         return Ok(Some(data));
                     }
@@ -1373,7 +1586,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["put"])
             .start_timer();
 
-        // 1. WAL append + fsync
         let entry = WalEntry {
             timestamp: crate::core::Timestamp::now(),
             realm_id: realm_id.clone(),
@@ -1381,14 +1593,24 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: key.to_vec(),
             value: value.to_vec(),
         };
+
+        // 1. Memtable insert, *before* the WAL durability wait. See
+        //    `apply-before-acknowledge` in this module's docs: a record that is
+        //    durable must never be absent from the memtable, because a
+        //    concurrent writer's rotation flushes the memtable and then
+        //    truncates the segment (audit 2026-08-28 §3 B4, §4.11#1).
+        self.active_memtable.put(realm_id, key, value)?;
+
+        // 2. Hot tier invalidate (stale cached value)
+        self.hot_tier.invalidate(realm_id, key);
+
+        // 3. WAL append + fsync. The write is acknowledged only when this
+        //    returns `Ok`.
         self.wal
             .append_with_pre_rotate(&entry, || self.trigger_flush())?;
 
-        // 2. Memtable insert
-        self.active_memtable.put(realm_id, key, value)?;
-
-        // 3. Hot tier invalidate (stale cached value)
-        self.hot_tier.invalidate(realm_id, key);
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
 
         // 4. Check flush threshold
         if self.active_memtable.should_flush() {
@@ -1406,7 +1628,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             .with_label_values(&["delete"])
             .start_timer();
 
-        // 1. WAL append + fsync
         let entry = WalEntry {
             timestamp: crate::core::Timestamp::now(),
             realm_id: realm_id.clone(),
@@ -1414,14 +1635,22 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: key.to_vec(),
             value: vec![],
         };
+
+        // 1. Memtable tombstone, before the durability wait — same ordering
+        //    rule as `put` (audit 2026-08-28 §3 B4). A tombstone that is
+        //    durable but absent from the memtable is a deletion that comes
+        //    back.
+        self.active_memtable.delete(realm_id, key)?;
+
+        // 2. Hot tier invalidate
+        self.hot_tier.invalidate(realm_id, key);
+
+        // 3. WAL append + fsync
         self.wal
             .append_with_pre_rotate(&entry, || self.trigger_flush())?;
 
-        // 2. Memtable tombstone
-        self.active_memtable.delete(realm_id, key)?;
-
-        // 3. Hot tier invalidate
-        self.hot_tier.invalidate(realm_id, key);
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
 
         // 4. Check flush threshold
         if self.active_memtable.should_flush() {
@@ -1469,21 +1698,24 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        self.wal
-            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
-
-        // 2. Apply all sub-entries to the in-memory state. The memtable update
-        //    is done in a single copy-on-write cycle (one map clone for the
-        //    whole batch, not one per entry) so bulk loads stay O(N), then we
-        //    invalidate any cached reads. If a failure occurs here (e.g.,
-        //    memtable mutex poisoned), the WAL record is already durable;
-        //    recovery on the next open replays the batch in full.
+        // 2. Apply all sub-entries to the in-memory state *before* the
+        //    durability wait (audit 2026-08-28 §3 B4). The memtable update is
+        //    a single copy-on-write cycle (one map clone for the whole batch,
+        //    not one per entry) so bulk loads stay O(N), then we invalidate any
+        //    cached reads.
         self.active_memtable.put_batch(realm_id, entries)?;
         for (key, _value) in entries {
             self.hot_tier.invalidate(realm_id, key);
         }
 
-        // 3. Single flush check at the tail — the batch may have pushed us
+        // 3. WAL append + fsync — the batch is acknowledged here.
+        self.wal
+            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
+
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
+
+        // 4. Single flush check at the tail — the batch may have pushed us
         //    over the threshold, but we don't need to check per-entry.
         if self.active_memtable.should_flush() {
             self.trigger_flush()?;
@@ -1506,10 +1738,8 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         // Block while a backup export holds the consistency barrier (HEA-2167).
-        // In `SyncMode::None` the memtable is applied inline below; in
-        // `EveryWrite` the apply is deferred to `await_batch_durable`, which
-        // takes the barrier again. Either way no memtable mutation lands while
-        // an export's read pass is in flight.
+        // The memtable apply happens here in both sync modes, so no memtable
+        // mutation lands while an export's read pass is in flight.
         let _barrier = self.enter_write();
         let sub_entries: Vec<BatchEntry> = entries
             .iter()
@@ -1532,13 +1762,24 @@ impl StorageEngine for EmbeddedStorageEngine {
             .wal
             .enqueue_entry(&wal_entry, || self.trigger_flush())?;
 
+        // Apply to the memtable here, in both sync modes, rather than after the
+        // fsync in `await_batch_durable` (audit 2026-08-28 §3 B4, §4.11#1).
+        //
+        // This was the widest instance of the defect: the entry became durable
+        // when the group-commit leader fsync'd it, and only became visible to a
+        // memtable flush once *this* thread was scheduled again. A rotation in
+        // that gap flushed a memtable without the entry and then truncated the
+        // segment holding it. Applying at enqueue time also keeps memtable
+        // order equal to WAL order, because callers enqueue while holding
+        // whatever lock serialises them (HEA-1948).
+        self.active_memtable.put_batch(realm_id, entries)?;
+        for (key, _) in entries {
+            self.hot_tier.invalidate(realm_id, key);
+        }
+
         match wal_handle {
             WalDurabilityHandle::Immediate => {
-                // SyncMode::None path: write already committed, apply to memtable now.
-                self.active_memtable.put_batch(realm_id, entries)?;
-                for (key, _) in entries {
-                    self.hot_tier.invalidate(realm_id, key);
-                }
+                // SyncMode::None path: the record is already written.
                 if self.active_memtable.should_flush() {
                     self.trigger_flush()?;
                 }
@@ -1547,15 +1788,11 @@ impl StorageEngine for EmbeddedStorageEngine {
                 ))
             }
             WalDurabilityHandle::Pending { am_leader, ticket } => {
-                // EveryWrite path: WAL entry is queued but not yet fsync'd.
-                // Store entries for post-durability memtable update in await_batch_durable.
+                // EveryWrite path: the WAL entry is queued but not yet fsync'd.
+                // `await_batch_durable` waits for the fsync; the memtable is
+                // already up to date, so it has no apply left to do.
                 Ok(StorageDurabilityHandle(
-                    StorageDurabilityHandleKind::Pending(PendingBatchHandle {
-                        am_leader,
-                        ticket,
-                        realm_id: realm_id.clone(),
-                        entries: entries.to_vec(),
-                    }),
+                    StorageDurabilityHandleKind::Pending(PendingBatchHandle { am_leader, ticket }),
                 ))
             }
         }
@@ -1567,8 +1804,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             StorageDurabilityHandleKind::Pending(p) => p,
         };
 
-        // Block while a backup export holds the consistency barrier so the
-        // deferred memtable apply below cannot land mid-snapshot (HEA-2167).
+        // Block while a backup export holds the consistency barrier, so the
+        // flush check below cannot run mid-snapshot (HEA-2167).
         let _barrier = self.enter_write();
 
         // Run the group-commit leader loop (or wait as a follower) until the
@@ -1581,20 +1818,14 @@ impl StorageEngine for EmbeddedStorageEngine {
             || self.trigger_flush(),
         );
 
-        // Apply entries to the memtable only after confirmed durability. On WAL
-        // failure we skip the memtable update; the WAL is fenced after a write
-        // fault, so callers that retry will see the fence error. On the next
-        // open, WAL replay restores the memtable from the last successfully
-        // committed record.
-        if wal_result.is_ok() {
-            self.active_memtable
-                .put_batch(&pending.realm_id, &pending.entries)?;
-            for (key, _) in &pending.entries {
-                self.hot_tier.invalidate(&pending.realm_id, key);
-            }
-            if self.active_memtable.should_flush() {
-                self.trigger_flush()?;
-            }
+        // The memtable was updated in `enqueue_batch`, before this wait: a
+        // durable record must never be missing from the memtable, or a
+        // concurrent rotation flushes without it and then truncates the segment
+        // that holds it (audit 2026-08-28 §3 B4). Nothing to apply here; only
+        // the threshold check remains, and it runs after durability so a flush
+        // is never driven by an unacknowledged write.
+        if wal_result.is_ok() && self.active_memtable.should_flush() {
+            self.trigger_flush()?;
         }
 
         wal_result
@@ -1674,12 +1905,9 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        self.wal
-            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
-
         // 2. Apply puts to in-memory state in a single copy-on-write cycle
-        //    (one map clone for the whole batch). If this fails after the WAL
-        //    write, recovery on next open will replay the full batch.
+        //    (one map clone for the whole batch), before the durability wait
+        //    (audit 2026-08-28 §3 B4).
         self.active_memtable.put_batch(realm_id, puts)?;
         for (key, _value) in puts {
             self.hot_tier.invalidate(realm_id, key);
@@ -1691,7 +1919,14 @@ impl StorageEngine for EmbeddedStorageEngine {
             self.hot_tier.invalidate(realm_id, key);
         }
 
-        // 4. Single flush check at the tail.
+        // 4. WAL append + fsync — the batch is acknowledged here.
+        self.wal
+            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
+
+        #[cfg(feature = "test-hooks")]
+        self.run_post_ack_hook();
+
+        // 5. Single flush check at the tail.
         if self.active_memtable.should_flush() {
             self.trigger_flush()?;
         }
@@ -1705,6 +1940,12 @@ impl StorageEngine for EmbeddedStorageEngine {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, StorageError> {
+        // `[start, end)` is only meaningful when `start <= end`. A reversed
+        // window reaching an SST body panics and aborts the process
+        // (audit §4.9#7), so refuse it at the boundary.
+        if start > end {
+            return Err(StorageError::InvalidRange);
+        }
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["scan"])
@@ -1757,6 +1998,10 @@ impl StorageEngine for EmbeddedStorageEngine {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<Vec<u8>>, crate::storage::StorageError> {
+        // Same reversed-window guard as `scan` (audit §4.9#7).
+        if start > end {
+            return Err(StorageError::InvalidRange);
+        }
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["scan_keys"])
@@ -1837,6 +2082,10 @@ impl StorageEngine for EmbeddedStorageEngine {
     fn backup_barrier(&self) -> Option<Arc<RwLock<()>>> {
         Some(Arc::clone(&self.backup_barrier))
     }
+
+    fn flush_memtable(&self) -> Result<(), StorageError> {
+        self.trigger_flush()
+    }
 }
 
 impl std::fmt::Debug for EmbeddedStorageEngine {
@@ -1891,6 +2140,161 @@ mod tests {
             engine.get(&realm, b"jti").expect("get"),
             Some(b"1".to_vec())
         );
+    }
+
+    /// The shutdown path calls `flush_memtable`, so it must actually write the
+    /// buffered records out to an SST rather than being a name with no effect
+    /// (audit 2026-08-28 §3 B4, §4.11#1).
+    #[test]
+    fn flush_memtable_writes_the_buffer_out_to_an_sst() {
+        let (dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine
+            .put(&realm, b"shutdown-key", b"shutdown-value")
+            .expect("put");
+
+        let ssts_before = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count();
+
+        engine.flush_memtable().expect("flush on shutdown");
+
+        let ssts_after = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count();
+        assert_eq!(
+            ssts_after,
+            ssts_before + 1,
+            "flush_memtable must write one SST"
+        );
+        assert_eq!(
+            engine.get(&realm, b"shutdown-key").expect("get"),
+            Some(b"shutdown-value".to_vec()),
+            "the flushed record must still read back"
+        );
+    }
+
+    /// Audit 2026-08-28 §4.11#4: an interrupted SST body write left a short
+    /// file at the live `NNNNNN.sst` name, and the next startup refused to
+    /// open the whole data directory. The body is now staged at a `.tmp`
+    /// sibling and renamed into place, so the torn bytes never occupy a live
+    /// name, and the reopen recovers everything from the WAL.
+    #[test]
+    fn torn_sst_body_write_does_not_brick_the_data_directory() {
+        use crate::storage::fs::{Fs, FsFile, RealFs};
+        use std::io;
+        use std::path::{Path, PathBuf};
+
+        /// Fails every body write to a file whose name contains `.sst` —
+        /// the torn-write shape: the file exists, its body never lands.
+        struct TornSstFs;
+        struct FailingFile;
+
+        impl FsFile for FailingFile {
+            fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
+                Err(io::Error::other("injected torn SST body write"))
+            }
+            fn read_to_end(&mut self, _buf: &mut Vec<u8>) -> io::Result<usize> {
+                Err(io::Error::other("injected"))
+            }
+            fn sync_all(&self) -> io::Result<()> {
+                Ok(())
+            }
+            fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+            fn set_len(&self, _size: u64) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Fs for TornSstFs {
+            fn open_append(&self, path: &Path) -> io::Result<Box<dyn FsFile>> {
+                RealFs.open_append(path)
+            }
+            fn create(&self, path: &Path) -> io::Result<Box<dyn FsFile>> {
+                let inner = RealFs.create(path)?;
+                let is_sst = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(".sst"));
+                if is_sst {
+                    drop(inner);
+                    Ok(Box::new(FailingFile))
+                } else {
+                    Ok(inner)
+                }
+            }
+            fn open_read(&self, path: &Path) -> io::Result<Box<dyn FsFile>> {
+                RealFs.open_read(path)
+            }
+            fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+                RealFs.read(path)
+            }
+            fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+                RealFs.write(path, data)
+            }
+            fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+                RealFs.create_dir_all(path)
+            }
+            fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+                RealFs.read_dir(path)
+            }
+            fn remove_file(&self, path: &Path) -> io::Result<()> {
+                RealFs.remove_file(path)
+            }
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                RealFs.rename(from, to)
+            }
+            fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+                RealFs.sync_dir(dir)
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        // Put through a torn-write filesystem, then tear the flush.
+        {
+            let config = StorageConfig::test_config(dir.path().to_path_buf());
+            let engine = EmbeddedStorageEngine::open_with_fs(config, Arc::new(TornSstFs))
+                .expect("open with fault fs");
+            engine
+                .put(&realm, b"survives", b"the-torn-write")
+                .expect("put");
+            engine
+                .flush_memtable()
+                .expect_err("the torn SST body write must surface as an error");
+        }
+
+        // The crash: reopen with the real filesystem. The torn bytes must not
+        // occupy a live SST name, so the directory opens and the WAL replays.
+        {
+            let config = StorageConfig::test_config(dir.path().to_path_buf());
+            let engine = EmbeddedStorageEngine::open(config)
+                .expect("a torn SST body write must not make the data directory unopenable");
+            assert_eq!(
+                engine.get(&realm, b"survives").expect("get"),
+                Some(b"the-torn-write".to_vec()),
+                "the acknowledged write must be recovered from the WAL"
+            );
+        }
+
+        // The staging orphan from the interrupted write is swept at open.
+        let leftover = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "tmp" || ext == "staging")
+            })
+            .count();
+        assert_eq!(leftover, 0, "orphaned staging files must be swept at open");
     }
 
     // HEA-2167: while a backup export holds the consistency barrier in write
@@ -2119,6 +2523,7 @@ mod tests {
                 hot_tier_capacity: 100,
                 eviction_batch_size: 10,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -2180,6 +2585,7 @@ mod tests {
                 hot_tier_capacity: 64,
                 eviction_batch_size: 8,
                 promote_sample_rate: 1,
+                per_realm_metrics: true,
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
@@ -2251,6 +2657,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -2281,6 +2688,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -2468,6 +2876,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -2528,6 +2937,7 @@ mod tests {
                     hot_tier_capacity: 100,
                     eviction_batch_size: 10,
                     promote_sample_rate: 1,
+                    per_realm_metrics: true,
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
@@ -3381,8 +3791,11 @@ mod tests {
             &self,
             path: &std::path::Path,
         ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
-            let is_tmp = path.extension().is_some_and(|e| e == "tmp");
-            if is_tmp {
+            // The compaction merge streams to a `*.tmp` target. A memtable
+            // flush stages at `*.sst.staging` (audit §4.11#4) and must NOT be
+            // gated, or the setup puts would park here forever.
+            let is_merge_tmp = path.extension().is_some_and(|e| e == "tmp");
+            if is_merge_tmp {
                 // Signal once, then park until the test releases the gate.
                 if let Some(tx) = self.reached.lock().expect("reached lock").take() {
                     let _ = tx.send(());
@@ -3555,11 +3968,11 @@ mod tests {
     struct FlushGateFs {
         inner: RealFs,
         armed: Arc<std::sync::atomic::AtomicBool>,
-        /// Fires once when the armed flush `*.sst` create is entered.
+        /// Fires once when the armed flush `*.sst.staging` create is entered.
         flush_reached: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
         /// Set to `true` (with notify) by the test to release the parked flush.
         flush_release: Arc<(Mutex<bool>, std::sync::Condvar)>,
-        /// Fires once when a compaction merge `*.tmp` create is entered.
+        /// Fires once when a compaction merge `*.tmp.tmp` create is entered.
         comp_reached: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
     }
 
@@ -3577,9 +3990,10 @@ mod tests {
         ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
             if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
                 match path.extension().and_then(|e| e.to_str()) {
-                    // Flush writes `NNNNNN.sst` directly — park it (while it holds
-                    // `flush_lock`) until the test releases the gate.
-                    Some("sst") => {
+                    // Flush stages `NNNNNN.sst.staging` (audit §4.11#4) — park
+                    // it (while it holds `flush_lock`) until the test releases
+                    // the gate.
+                    Some("staging") => {
                         if let Some(tx) = self.flush_reached.lock().expect("flush_reached").take() {
                             let _ = tx.send(());
                             let (lock, cv) = &*self.flush_release;
@@ -3890,9 +4304,10 @@ mod tests {
             hot_tier_capacity: 10,
             eviction_batch_size: 10,
             promote_sample_rate: 1,
+            per_realm_metrics: true,
         });
         let realm = RealmId::generate();
-        tier.promote(&realm, b"key", b"data");
+        tier.promote_now(&realm, b"key", b"data");
 
         let first = tier.get(&realm, b"key").expect("should be cached");
         let second = tier.get(&realm, b"key").expect("should still be cached");
@@ -3959,6 +4374,37 @@ mod tests {
                 "rot-key-{i:04} must survive WAL rotation + reopen (flushed, not truncated away)"
             );
         }
+    }
+
+    /// Audit §4.9#7: a reversed window must be refused at the engine boundary,
+    /// so it never reaches an SST body. `[start, end)` is only meaningful when
+    /// `start <= end`; equal bounds stay legal and return nothing.
+    #[test]
+    fn scan_refuses_a_reversed_window() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"usr:alice", b"a").expect("put");
+        engine.put(&realm, b"usr:bob", b"b").expect("put");
+
+        let err = engine
+            .scan(&realm, b"usr:z", b"usr:a")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+        let err = engine
+            .scan_keys(&realm, b"usr:z", b"usr:a")
+            .expect_err("reversed window must be refused");
+        assert!(
+            matches!(err, StorageError::InvalidRange),
+            "expected InvalidRange, got: {err:?}"
+        );
+
+        assert!(engine
+            .scan(&realm, b"usr:a", b"usr:a")
+            .expect("equal bounds are legal")
+            .is_empty());
     }
 
     // ===== scan_keys tests (HEA-1622) =====

@@ -209,6 +209,18 @@ pub struct WebState {
     /// the CSRF bypass must call `.with_dev_mode(true)` explicitly.
     /// Production startup calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
     pub dev_mode: bool,
+    /// Abuse-prevention guards (A-3, A-4, A-9, A-16, A-17, A-50, P-2, P-3, P-5).
+    ///
+    /// Built once at start-up from the `security:` block. Every guard is
+    /// fail-open until an operator enables it, so the default — `disabled()`
+    /// — reproduces the behaviour these surfaces had before task 20.13.
+    pub abuse_guards: Arc<crate::abuse::runtime::AbuseGuards>,
+    /// Brute-force guard for `POST /ui/device` (task 22.26, audit §4.25#4).
+    ///
+    /// Bounds both the rate and the total number of user-code guesses an
+    /// authenticated session may make. Shared via `Arc` so the router can be
+    /// cloned per request without resetting the counters.
+    pub device_approval_guard: Arc<crate::abuse::device_approval::DeviceApprovalGuard>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -247,6 +259,20 @@ fn resolve_public_origin(issuer: Option<&str>, is_secure: bool, host: &str) -> S
 }
 
 impl WebState {
+    /// The operator's `security.allowed_return_to_origins` allowlist.
+    ///
+    /// Every `validate_return_to` call site used to pass `&[]`, so the key was
+    /// parsed, validated, documented — and never reached its consumer, which
+    /// is the exact defect class the start-up key registry exists to catch
+    /// (audit 2026-08-28 §1A item 5). Empty means same-origin paths only,
+    /// which is the previous behaviour and remains the default.
+    #[must_use]
+    pub fn allowed_return_to_origins(&self) -> &[String] {
+        self.config
+            .as_ref()
+            .map_or(&[], |c| c.security.allowed_return_to_origins.as_slice())
+    }
+
     /// Builds a new [`WebState`].
     #[must_use]
     pub fn new(
@@ -291,7 +317,24 @@ impl WebState {
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
             dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
+            abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
+            device_approval_guard: Arc::new(
+                crate::abuse::device_approval::DeviceApprovalGuard::new(),
+            ),
         }
+    }
+
+    /// Replaces the device-approval brute-force guard (task 22.26).
+    ///
+    /// Tests that need a specific attempt ceiling — or none at all — install
+    /// their own guard here.
+    #[must_use]
+    pub fn with_device_approval_guard(
+        mut self,
+        guard: Arc<crate::abuse::device_approval::DeviceApprovalGuard>,
+    ) -> Self {
+        self.device_approval_guard = guard;
+        self
     }
 
     /// Replaces the bytes served at `/ui/static/app.css` with operator-supplied
@@ -502,6 +545,16 @@ impl WebState {
         self
     }
 
+    /// Installs the abuse-prevention guard set (task 20.13).
+    ///
+    /// When not called, the state carries
+    /// [`crate::abuse::runtime::AbuseGuards::disabled`] and no guard fires.
+    #[must_use]
+    pub fn with_abuse_guards(mut self, guards: Arc<crate::abuse::runtime::AbuseGuards>) -> Self {
+        self.abuse_guards = guards;
+        self
+    }
+
     /// Sets dev mode. When `false`, the CSRF cookie MUST be present on
     /// pre-auth form POSTs (login, register, MFA challenge); when `true`
     /// an absent cookie is allowed so direct-POST tooling keeps working.
@@ -601,6 +654,32 @@ impl WebState {
             }
             None => "http://localhost".to_string(),
         }
+    }
+
+    /// Absolute federation callback URL for `realm_name`.
+    ///
+    /// This is the single seam that decides the `redirect_uri` Hearth sends
+    /// upstream **and** the callback URL the admin Identity Provider page
+    /// publishes for operators to paste into the upstream console. They are the
+    /// same string by construction so they cannot drift (audit 2026-08-28
+    /// §4.22#8): upstream IdPs compare `redirect_uri` byte-for-byte against the
+    /// registered value, so a published URL that differs from the transmitted
+    /// one makes every federated login fail with `redirect_uri_mismatch`.
+    ///
+    /// The URL is realm-scoped — a multi-realm deployment must not funnel every
+    /// realm's callback through the bare `/ui/federation/callback` route, which
+    /// resolves the *default* realm rather than the one the login started in.
+    #[must_use]
+    pub fn federation_callback_url(&self, realm_name: &str) -> String {
+        let base = self
+            .config
+            .as_ref()
+            .and_then(|c| c.onboarding.base_url.clone())
+            .unwrap_or_else(|| self.fallback_base_url());
+        format!(
+            "{}/ui/realms/{realm_name}/federation/callback",
+            base.trim_end_matches('/')
+        )
     }
 
     /// Pins a realm as the "current" one for this process. Called by
@@ -748,6 +827,7 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/login` | GET/POST | Login form + submit |
 /// | `/ui` | GET | Signed-in dashboard (redirects to login when unauthenticated) |
 /// | `/ui/logout` | POST | Revoke session + clear cookies |
+/// | `/ui/mfa-otp-challenge` | GET/POST | SMS / email-OTP second factor after the password step |
 /// | `/ui/account` | GET | My-account page (password, MFA status) |
 /// | `/ui/account/password` | POST | Change password |
 /// | `/ui/account/totp` | GET | MFA enrol / disable page |
@@ -800,6 +880,15 @@ pub fn router(state: WebState) -> Router {
             axum::routing::get(handlers::mfa_challenge_form).post(handlers::mfa_challenge_submit),
         )
         .route(
+            // SMS / email-OTP second factor for the direct browser login. The
+            // TOTP-only `/mfa-challenge` cannot render either one, which is
+            // why those factors were invisible here (audit 2026-08-28
+            // §4.18#6).
+            "/mfa-otp-challenge",
+            axum::routing::get(handlers::mfa_otp_challenge_form)
+                .post(handlers::mfa_otp_challenge_submit),
+        )
+        .route(
             "/mfa-enroll-required",
             axum::routing::get(handlers::mfa_enroll_required_form),
         )
@@ -823,6 +912,11 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/reset-password",
             axum::routing::get(handlers::reset_password_form).post(handlers::reset_password_submit),
+        )
+        // Magic-link redemption — the terminal step of the passwordless flow.
+        .route(
+            "/magic-link",
+            axum::routing::get(handlers::magic_link_redeem),
         )
         .route(
             "/register",
@@ -871,6 +965,10 @@ pub fn router(state: WebState) -> Router {
                 .post(handlers::reset_password_submit_scoped),
         )
         .route(
+            "/realms/{realm}/magic-link",
+            axum::routing::get(handlers::magic_link_redeem_scoped),
+        )
+        .route(
             "/realms/{realm}/verify-email",
             axum::routing::get(handlers::verify_email_scoped),
         )
@@ -906,6 +1004,14 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/forgot-password/sent",
             axum::routing::get(handlers::admin_forgot_password_sent),
+        )
+        // The target of the link `/ui/admin/forgot-password` emails. Without
+        // it an admin who forgets their password cannot recover
+        // (audit 2026-08-28 §4.24#7).
+        .route(
+            "/admin/reset-password",
+            axum::routing::get(handlers::admin_reset_password_form)
+                .post(handlers::admin_reset_password_submit),
         )
         // Convenience alias: /ui/admin is the admin home per R-2 (UI_ROUTING.md).
         // Redirects to the realms list which is the canonical admin landing page.
@@ -965,8 +1071,12 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(account::totp_regenerate_codes),
         )
         .route(
+            "/account/passkeys/step-up-begin",
+            axum::routing::post(account::passkey_step_up_begin),
+        )
+        .route(
             "/account/passkeys/register-begin",
-            axum::routing::get(account::passkey_register_begin),
+            axum::routing::post(account::passkey_register_begin),
         )
         .route(
             "/account/passkeys/register-complete",
@@ -1053,14 +1163,27 @@ pub fn router(state: WebState) -> Router {
             "/realms/{realm}/federation/callback",
             axum::routing::get(federation::callback_scoped).post(federation::callback_scoped_post),
         )
+        // 22.19: realm-scoped confirm-to-link. The bare route above resolves
+        // the default realm; the ticket lives under the realm the login
+        // started in, so multi-realm deployments must land here.
+        .route(
+            "/realms/{realm}/federation/confirm-link",
+            axum::routing::get(federation::confirm_link_page_scoped)
+                .post(federation::confirm_link_submit_scoped),
+        )
         // --- SAML 2.0 SP + IdP endpoints ---
         .route(
             "/realms/{realm}/federation/saml/metadata",
             axum::routing::get(saml::sp_metadata),
         )
+        // Task 21.1: SAML front-channel POSTs carry base64-inflated signed XML
+        // with an embedded certificate chain, so they get `BODY_LIMIT_SAML`
+        // rather than the 1 MiB JSON default the shared stack installs.
         .route(
             "/realms/{realm}/federation/saml/acs",
-            axum::routing::post(saml::sp_acs),
+            axum::routing::post(saml::sp_acs).route_layer(axum::extract::DefaultBodyLimit::max(
+                crate::protocol::http::BODY_LIMIT_SAML,
+            )),
         )
         .route(
             "/realms/{realm}/federation/saml/begin",
@@ -1072,7 +1195,11 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/realms/{realm}/saml/sso",
-            axum::routing::get(saml::idp_sso_get).post(saml::idp_sso_post),
+            axum::routing::get(saml::idp_sso_get)
+                .post(saml::idp_sso_post)
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_SAML,
+                )),
         )
         .route(
             "/realms/{realm}/saml/sso/init",
@@ -1080,7 +1207,11 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/realms/{realm}/saml/slo-idp",
-            axum::routing::get(saml::idp_slo_get).post(saml::idp_slo_post),
+            axum::routing::get(saml::idp_slo_get)
+                .post(saml::idp_slo_post)
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_SAML,
+                )),
         )
         // --- Browser-facing OAuth authorize + consent flow ---
         .route(
@@ -1147,7 +1278,11 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/admin-users/import",
             axum::routing::get(admin::admin_admin_users_import_form)
-                .post(admin::admin_admin_users_import_submit),
+                .post(admin::admin_admin_users_import_submit)
+                // Task 21.1: the only browser file upload — a CSV of users.
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_CSV_IMPORT,
+                )),
         )
         .route(
             "/admin/admin-users/import/template.csv",
@@ -1572,7 +1707,11 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/realms/{realm}/users/import",
             axum::routing::get(admin::admin_users_import_form)
-                .post(admin::admin_users_import_submit),
+                .post(admin::admin_users_import_submit)
+                // Task 21.1: the only browser file upload — a CSV of users.
+                .route_layer(axum::extract::DefaultBodyLimit::max(
+                    crate::protocol::http::BODY_LIMIT_CSV_IMPORT,
+                )),
         )
         .route(
             "/admin/realms/{realm}/users/import/template.csv",
@@ -1634,6 +1773,13 @@ pub fn router(state: WebState) -> Router {
     // and `/ui/*`. Add a permanent redirect so bookmarks and old links
     // still work.
     let tls_enabled = shared.tls_enabled;
+    // 21.9 (audit §4.23#8): in the modal deployment TLS terminates at a proxy
+    // and `tls_enabled` is false, so HSTS was never emitted even though the
+    // browser reached Hearth over HTTPS. When the operator has declared a
+    // trusted proxy, believe its `X-Forwarded-Proto` for this decision — the
+    // same attestation `WebState::is_secure_request` already uses to set the
+    // `Secure` cookie attribute.
+    let hsts_on_forwarded_proto = shared.trust_forwarded_proto;
     // HEA-2072/HEA-2084: the reference-integration Playwright suite POSTs the
     // hosted login/consent forms back to the demo SPA's dev server. Advertise
     // those plaintext-http localhost origins in the CSP `form-action` directive
@@ -1722,6 +1868,7 @@ pub fn router(state: WebState) -> Router {
         .layer(security::SecurityHeadersLayer::new(
             security::SecurityConfig {
                 hsts_enabled: tls_enabled,
+                hsts_on_forwarded_proto,
                 coop_coep_enabled: true,
                 extra_form_action_origins,
             },

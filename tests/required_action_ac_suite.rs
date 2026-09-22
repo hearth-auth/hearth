@@ -296,9 +296,10 @@ async fn completing_second_action_first_does_not_skip_first_action() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=ValidPass-ac3!&confirm_password=ValidPass-ac3!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=ValidPass-ac3!\
+                     &confirm_password=ValidPass-ac3!"
+                )))
                 .expect("req"),
         )
         .await
@@ -382,9 +383,10 @@ async fn tampered_ra_token_sub_is_rejected() {
                     header::COOKIE,
                     format!("hearth_ra_session={tampered_token}"),
                 )
-                .body(Body::from(
-                    "new_password=ValidPass-ac4!&confirm_password=ValidPass-ac4!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=ValidPass-ac4!\
+                     &confirm_password=ValidPass-ac4!"
+                )))
                 .expect("req"),
         )
         .await
@@ -524,9 +526,10 @@ async fn update_password_completion_emits_audit_event() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=AuditTestPass-8!&confirm_password=AuditTestPass-8!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=AuditTestPass-8!\
+                     &confirm_password=AuditTestPass-8!"
+                )))
                 .expect("req"),
         )
         .await

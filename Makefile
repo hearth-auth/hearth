@@ -85,11 +85,21 @@ else
 	PROTOC=$(PROTOC) cargo run --release --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS) -- $(ARGS)
 endif
 
-## Check the loadtest crate: typecheck + unit tests.
+## Check the loadtest crate: typecheck + clippy + unit tests.
 ## Unit tests cover LoadContext construction and scenario weights — a pure
 ## cargo check cannot catch runtime "no live tokens" aborts (HEA-1991).
+##
+## Clippy is NOT optional here (production-readiness task 26.32, audit
+## reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7). The crate is in the
+## root Cargo.toml's `exclude` list, so `make clippy --all-targets` over the
+## workspace never reaches it and for its whole life nothing in the repo linted
+## it. `cargo clippy --manifest-path loadtest/Cargo.toml --all-targets -- -D
+## warnings` was red at HEAD with three dead_code errors — one of which was
+## `SeedClient::revoke`, the zero-caller function behind L-5's phantom
+## `--revoked-frac` parameter. The lint would have named the defect outright.
 loadtest-check:
 	PROTOC=$(PROTOC) cargo check --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo clippy --manifest-path loadtest/Cargo.toml --all-targets $(CARGO_FLAGS) -- -D warnings
 	PROTOC=$(PROTOC) cargo nextest run --manifest-path loadtest/Cargo.toml $(CARGO_FLAGS)
 
 ## Run a short loadtest smoke against a fresh dev instance (CI gate, HEA-1991).
@@ -135,8 +145,31 @@ coverage:
 fmt:
 	cargo fmt --check
 
-## Run all Rust checks (build + clippy + fmt + tests + test-quality guardrail).
-check: clippy fmt test-quality test
+## Run all Rust checks (clippy + fmt + test-quality guardrail + tests).
+##
+## Every gate runs to completion and reports its own result. The exit code
+## reflects the worst result, not the first. Prerequisite-style chaining
+## (`check: clippy fmt test-quality test`) aborted the whole target on the
+## first failure, so a denied clippy lint meant `cargo fmt --check` and the
+## test suite never executed on that commit (audit 2026-08-28 §1, §2.3).
+check:
+	@failed=""; \
+	for gate in clippy fmt test-quality test; do \
+	  echo ""; \
+	  echo "===> make $$gate"; \
+	  if $(MAKE) --no-print-directory $$gate; then \
+	    echo "===> $$gate: PASS"; \
+	  else \
+	    echo "===> $$gate: FAIL"; \
+	    failed="$$failed $$gate"; \
+	  fi; \
+	done; \
+	echo ""; \
+	if [ -n "$$failed" ]; then \
+	  echo "make check: FAILED gates:$$failed"; \
+	  exit 1; \
+	fi; \
+	echo "make check: all gates passed"
 
 ## Grep-based guardrail against false-confidence test patterns
 ## (weak is_ok/is_err asserts, unconditional sleeps, untracked #[ignore]).
@@ -169,6 +202,93 @@ security-gate: ## Assert the ROPC password grant is unreachable (HEA-1814/1816/1
 ## leave a stale cached resolution live — a privilege-escalation bug.
 rbac-storage-check: ## Lint for un-invalidating RBAC storage writes (HEA-1781)
 	@bash scripts/check-rbac-storage-writes.sh
+
+## Guard: every publish job must wait for a green verdict on its own commit
+## (audit 2026-08-28 blockers B2 §4.8#1 and B6 §4.12#1). The container image,
+## the Helm chart and seven SDK releases published from a red commit; the
+## v1.6.11 image and chart went out 37 minutes before release validation wrote
+## "Release is NOT cleared to publish". Runs in ci.yml's filter job.
+publish-gate-check: ## Assert no release channel publishes ahead of its verdict
+	@bash scripts/check-publish-gating.sh
+	@bash scripts/tests/check-publish-gating.test.sh
+	@bash scripts/tests/await-green-commit.test.sh
+
+## Guard: the release-validation summary must report what the suite actually
+## did (audit 2026-08-28 §4.8#6 and §4.12#9). The old inline parser could not
+## read nextest's coloured output, so a completed 4-failure suite was reported
+## as "suite did not complete". Runs in ci.yml's filter job.
+validation-summary-check: ## Assert the release-validation summary parser is honest
+	@bash scripts/tests/summarize-nextest.test.sh
+
+## Guard: the generated-SDK freshness check must be reachable from every path
+## that can cause drift (audit 2026-08-28 §4.8#8). It used to sit behind
+## `make check` in a job gated on the `rust` filter, which names codegen's
+## inputs but not its outputs. Runs in ci.yml's proto-freshness job.
+proto-freshness-check: ## Assert nothing can drift generated SDK types past the PR gate
+	@bash scripts/check-proto-freshness-gate.sh
+	@bash scripts/tests/check-proto-freshness-gate.test.sh
+
+## Guard: the attribution freshness key must move on a licence change and stay
+## put on the release's own version bump (audit 2026-08-28 §4.8#10).
+attribution-key-check: ## Assert the THIRD_PARTY_LICENSES freshness key is honest
+	@bash scripts/tests/attribution-key.test.sh
+
+## Guard: every command in the release-verification guide must execute, and the
+## README's install step must verify something an attacker cannot forge
+## (audit 2026-08-28 §4.8#12). Runs in ci.yml's filter job.
+verify-docs-check: ## Assert the documented release-verification path works
+	@bash scripts/check-release-verification-docs.sh
+	@bash scripts/tests/check-release-verification-docs.test.sh
+
+## Guard: the SLSA provenance generator must still be the commit we reviewed
+## (audit 2026-08-28 §4.8#13). Upstream refuses a @<sha> reference, so the pin
+## lives in .github/slsa-generator.pin. Needs network. Runs in ci.yml's filter
+## job and as a hard gate in release.yml's validation job.
+slsa-pin-check: ## Assert the SLSA generator tag still resolves to the reviewed commit
+	@bash scripts/check-slsa-generator-pin.sh
+	@bash scripts/tests/check-slsa-generator-pin.test.sh
+
+## Guard: every directive in a shipped systemd unit must sit in a section
+## systemd actually reads (audit 2026-08-28 §4.8#14). Runs in ci.yml's filter job.
+systemd-check: ## Assert shipped systemd units have no silently-ignored directives
+	@bash scripts/check-systemd-units.sh
+	@bash scripts/tests/check-systemd-units.test.sh
+
+## Guard: the Dockerfile must not describe a build other than the one it
+## defines (audit 2026-08-28 §4.8#15). Runs in ci.yml's filter job.
+dockerfile-claims-check: ## Assert the Dockerfile's checkable claims are true
+	@bash scripts/check-dockerfile-claims.sh
+	@bash scripts/tests/check-dockerfile-claims.test.sh
+
+## Guard: scanner configuration must not claim coverage it does not have
+## (audit 2026-08-28 §4.8#16, §4.12#15). Runs in ci.yml's filter job.
+scanner-coverage-check: ## Assert every scanner gate and suppression is live
+	@bash scripts/check-scanner-coverage.sh
+	@bash scripts/tests/check-scanner-coverage.test.sh
+
+## Guard: a shipped compose file must not source an env file this repo does not
+## define the scope of (audit 2026-08-28 §4.8#17). Runs in ci.yml's filter job.
+compose-env-check: ## Assert shipped compose files source only scoped env files
+	@bash scripts/check-compose-env-scope.sh
+	@bash scripts/tests/check-compose-env-scope.test.sh
+
+## Guard: every verification job must reach the one required check
+## (audit 2026-08-28 §4.12#12). Runs in ci.yml's filter job.
+required-summary-check: ## Assert every CI job can fail the required check
+	@bash scripts/check-required-summary-coverage.sh
+	@bash scripts/tests/check-required-summary-coverage.test.sh
+
+## Guard: a script that boots `serve --dev` must control which config the
+## server reads (audit 2026-08-28 §4.12#13). Runs in ci.yml's filter job.
+dev-config-isolation-check: ## Assert every serve --dev launch is config-isolated
+	@bash scripts/check-dev-server-config-isolation.sh
+	@bash scripts/tests/check-dev-server-config-isolation.test.sh
+
+## Guard: a declared nextest profile must be selected somewhere, or it is a
+## comment (audit 2026-08-28 §4.12#18). Runs in ci.yml's filter job.
+nextest-profile-check: ## Assert every declared nextest profile is selected
+	@bash scripts/check-nextest-profile-live.sh
+	@bash scripts/tests/check-nextest-profile-live.test.sh
 
 # ── Proto ─────────────────────────────────────────────
 
@@ -234,14 +354,20 @@ openapi-check: openapi
 ## Regenerate THIRD_PARTY_LICENSES from the current Cargo.lock (requires cargo-about).
 ## Also updates THIRD_PARTY_LICENSES.sha256 for the staleness check.
 ## Run after any dependency update: `cargo update && make notice`.
+##
+## The stored key is scripts/attribution-key.sh, NOT a whole-file hash of
+## Cargo.lock. Audit 2026-08-28 §4.8#10: the workspace's own packages are
+## entries in that file, so every release version bump changed the hash and
+## failed the gate with nothing attributable to regenerate.
 notice:
 	@command -v cargo-about >/dev/null 2>&1 || cargo install cargo-about --features cli
 	cargo about generate about.hbs -o THIRD_PARTY_LICENSES
-	sha256sum Cargo.lock > THIRD_PARTY_LICENSES.sha256
+	@echo "$$(bash scripts/attribution-key.sh)  Cargo.lock (third-party packages only)" \
+		> THIRD_PARTY_LICENSES.sha256
 	@echo "✓ THIRD_PARTY_LICENSES regenerated. Commit both files if the tree changed."
 
 ## CI gate: fail if THIRD_PARTY_LICENSES is stale relative to Cargo.lock.
-## Does not regenerate — just checks the stored sha256 fingerprint.
+## Does not regenerate — just checks the stored attribution key.
 notice-check:
 	@if [ ! -f THIRD_PARTY_LICENSES ]; then \
 		echo "ERROR: THIRD_PARTY_LICENSES missing. Run 'make notice' and commit."; \
@@ -252,9 +378,12 @@ notice-check:
 		exit 1; \
 	fi
 	@STORED=$$(awk '{print $$1}' THIRD_PARTY_LICENSES.sha256); \
-	CURRENT=$$(sha256sum Cargo.lock | awk '{print $$1}'); \
+	CURRENT=$$(bash scripts/attribution-key.sh); \
 	if [ "$$STORED" != "$$CURRENT" ]; then \
-		echo "ERROR: THIRD_PARTY_LICENSES is stale (Cargo.lock changed). Run 'make notice' and commit."; \
+		echo "ERROR: THIRD_PARTY_LICENSES is stale (a third-party dependency changed)."; \
+		echo "       Run 'make notice' and commit both files."; \
+		echo "       stored:  $$STORED"; \
+		echo "       current: $$CURRENT"; \
 		exit 1; \
 	fi
 	@echo "✓ THIRD_PARTY_LICENSES is up to date."

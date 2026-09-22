@@ -21,9 +21,10 @@ use crate::protocol::proto::identity::v1 as pb;
 
 use super::now_micros;
 use super::{
-    check_token_rate_limit, extract_bearer_token, extract_realm_id, extract_user_auth,
-    identity_error_to_response, make_ip_rate_limit_response, proto_to_rest_json,
-    rbac_error_to_response, resolve_realm_by_name, validate_user_token_with_dpop, AppState,
+    check_anonymous_token_rate_limit, check_token_rate_limit, extract_bearer_token,
+    extract_realm_id, extract_user_auth, identity_error_to_response, make_ip_rate_limit_response,
+    proto_to_rest_json, rbac_error_to_response, resolve_realm_by_name,
+    validate_user_token_with_dpop, AppState,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -39,7 +40,6 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
         .route("/jwks", get(jwks))
         .route("/certs", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
-        .route("/clients", post(register_client))
         .route(
             "/register",
             post(register_client_dynamic)
@@ -83,6 +83,19 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             "/oauth/consents/{client_id}",
             axum::routing::delete(self_revoke_consent),
         )
+}
+
+/// The one administratively-authenticated route in the OAuth family.
+///
+/// `POST /clients` is the only handler here that goes through
+/// `extract_admin_auth`, so it is the only one that needs the DPoP
+/// sender-constraint layer (task 25.17). It is split out of [`routes`] rather
+/// than layered in place because the rest of that router must **not** get the
+/// layer: those handlers call `validate_user_token_with_dpop` themselves, and
+/// validating the proof twice would record its `jti` on the first pass and then
+/// reject the second as a replay (RFC 9449 §11.1).
+pub(super) fn admin_routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new().route("/clients", axum::routing::post(register_client))
 }
 
 /// Registers realm-scoped OAuth/OIDC routes (mounted under `/realms/{realm_name}`).
@@ -196,15 +209,19 @@ async fn protected_resource_metadata(State(state): State<Arc<AppState>>) -> impl
 /// JWKS endpoint (`/jwks`, `/certs`, and `/.well-known/jwks.json`).
 ///
 /// Returns the JSON Web Key Set containing the server's public signing
-/// keys for external token verification, per RFC 7517. Includes one entry
-/// per supported algorithm — Ed25519 (`EdDSA`) as the primary signer,
-/// plus RSA-2048 (`RS256`) and EC P-256 (`ES256`) for ecosystem
-/// compatibility with OIDC clients (e.g. `jose` / `python-jose`).
+/// keys for external token verification, per RFC 7517.
+///
+/// **Ed25519 (`EdDSA`) only** — the sole algorithm Hearth signs with, and the
+/// sole one `id_token_signing_alg_values_supported` advertises. RSA-2048
+/// (`RS256`) and EC P-256 (`ES256`) entries were also published "for ecosystem
+/// compatibility"; Hearth signed with neither, and the ES256 private key was
+/// regenerated on every process start, so a relying party that selected that
+/// entry cached — for the `max-age=3600` below — a public key whose private
+/// half no longer existed (audit 2026-08-28 §4.2#4, §4.15#5).
 ///
 /// Renders the domain [`crate::identity::tokens::JwksDocument`] directly
-/// as JSON, bypassing the proto `JsonWebKey` type — that proto only
-/// carries the OKP/Ed25519 field set and would drop RSA `n`/`e` and EC
-/// `y` coordinates.
+/// as JSON rather than through the proto `JsonWebKey` type, which carries
+/// only a subset of the RFC 7517 field set.
 ///
 /// A-10: subject to the per-IP JWKS rate cap (default 60 rps).
 async fn jwks(
@@ -293,6 +310,44 @@ where
     }
 }
 
+/// Hearth's private grant type for redeeming a magic link at `/token`.
+///
+/// All seven SDKs post this value; the endpoint had no arm for it, so the
+/// passwordless flow could not complete (audit 2026-08-28 §4.24#6).
+const MAGIC_LINK_GRANT_TYPE: &str = "urn:hearth:grant-type:magic-link";
+
+/// Redeems a magic-link token and issues an access/refresh pair.
+///
+/// Single use is enforced by `validate_magic_link`, which marks the record
+/// consumed before returning. The resulting session is a normal browserless
+/// session, so revocation and the session-version feed behave as usual.
+fn exchange_magic_link(
+    state: &Arc<AppState>,
+    realm_id: &crate::core::RealmId,
+    token: &str,
+    dpop_jkt: Option<&str>,
+) -> Result<serde_json::Value, crate::identity::IdentityError> {
+    let user_id = state.identity.validate_magic_link(realm_id, token)?;
+    let session = state.identity.create_session(
+        realm_id,
+        &user_id,
+        &crate::identity::SessionContext::default(),
+    )?;
+    let tokens = state
+        .identity
+        .issue_tokens(realm_id, &user_id, session.id())?;
+    crate::metrics::metrics()
+        .tokens_issued_total
+        .with_label_values(&[realm_id.as_uuid().to_string().as_str(), "magic_link"])
+        .inc();
+    Ok(serde_json::json!({
+        "access_token": tokens.access_token(),
+        "refresh_token": tokens.refresh_token(),
+        "token_type": if dpop_jkt.is_some() { "DPoP" } else { "Bearer" },
+        "expires_in": 900,
+    }))
+}
+
 /// HTTP request body for token exchange.
 ///
 /// Uses a flat struct because the proto `TokenExchangeRequest` doesn't cover
@@ -339,6 +394,10 @@ struct HttpTokenRequest {
     client_assertion_type: Option<String>,
     #[serde(default)]
     client_assertion: Option<String>,
+    // Magic-link grant (`urn:hearth:grant-type:magic-link`) — the opaque
+    // single-use token from the emailed link (audit 2026-08-28 §4.24#6).
+    #[serde(default)]
+    token: Option<String>,
     // RFC 8693 Token Exchange fields
     #[serde(default)]
     subject_token: Option<String>,
@@ -470,6 +529,47 @@ fn basic_body_mismatch_response() -> Response {
         .into_response()
 }
 
+/// Resolves the one effective client credential pair for a request, applying
+/// RFC 6749 §2.3.1 to the `client_secret_basic` header and the
+/// `client_secret_post` body fields.
+///
+/// This is the single place the two mechanisms are reconciled. `Authorization:
+/// Basic` wins when present; when both are supplied they must agree, because
+/// §2.3.1 forbids using more than one client authentication mechanism per
+/// request. An explicitly empty body field (`client_id=` / `client_secret=`)
+/// normalizes to absent so it cannot read as a disagreeing credential
+/// (HEA-2112).
+///
+/// Returns `(None, None)` when the request carries no client identity at all —
+/// each caller decides whether that is an error, since the token grant arms and
+/// the endpoint-auth helper report it differently. Audit §4.22#5 (task 22.14):
+/// the `client_credentials` arm previously read `body` alone, so a client
+/// following the `client_secret_basic` method that discovery and DCR advertise
+/// arrived with an empty secret and could never authenticate.
+fn resolve_client_credentials(
+    headers: &HeaderMap,
+    body_client_id: Option<&str>,
+    body_client_secret: Option<&str>,
+) -> Result<(Option<String>, Option<String>), Response> {
+    // Normalize at the helper boundary so every endpoint that authenticates
+    // through here gets the empty-field-is-absent rule by construction —
+    // applying it callsite-by-callsite is how /introspect and /revoke were
+    // missed (HEA-2112).
+    let body_client_id = body_client_id.and_then(non_empty_credential);
+    let body_client_secret = body_client_secret.and_then(non_empty_credential);
+
+    if let Some((id, sec)) = parse_basic_auth(headers) {
+        if body_client_id.is_some_and(|b| b != id) || body_client_secret.is_some_and(|b| b != sec) {
+            return Err(basic_body_mismatch_response());
+        }
+        return Ok((Some(id), Some(sec)));
+    }
+    Ok((
+        body_client_id.map(str::to_string),
+        body_client_secret.map(str::to_string),
+    ))
+}
+
 /// Extracts client credentials from HTTP Basic Auth or body parameters and
 /// verifies them against the stored client record.
 ///
@@ -484,32 +584,19 @@ fn verify_endpoint_client(
     body_client_id: Option<&str>,
     body_client_secret: Option<&str>,
 ) -> Result<ClientId, Response> {
-    // Normalize at the helper boundary so every endpoint that authenticates
-    // through here gets the empty-field-is-absent rule by construction —
-    // applying it callsite-by-callsite is how /introspect and /revoke were
-    // missed (HEA-2112).
-    let body_client_id = body_client_id.and_then(non_empty_credential);
-    let body_client_secret = body_client_secret.and_then(non_empty_credential);
-
     // Prefer Basic Auth (RFC 6749 §2.3.1); fall back to body parameters.
-    // When both are present they must agree — §2.3.1 forbids using more
-    // than one client authentication mechanism per request, so a
-    // disagreement is rejected rather than silently resolved (HEA-2112).
-    let (raw_id, secret) = if let Some((id, sec)) = parse_basic_auth(headers) {
-        if body_client_id.is_some_and(|b| b != id) || body_client_secret.is_some_and(|b| b != sec) {
-            return Err(basic_body_mismatch_response());
-        }
-        (id, Some(sec))
-    } else if let Some(id) = body_client_id {
-        (id.to_string(), body_client_secret.map(str::to_string))
-    } else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            [("www-authenticate", "Basic realm=\"hearth\"")],
-            Json(serde_json::json!({"error": "client_id required"})),
-        )
-            .into_response());
-    };
+    let (raw_id, secret) =
+        match resolve_client_credentials(headers, body_client_id, body_client_secret)? {
+            (Some(id), secret) => (id, secret),
+            (None, _) => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    [("www-authenticate", "Basic realm=\"hearth\"")],
+                    Json(serde_json::json!({"error": "client_id required"})),
+                )
+                    .into_response())
+            }
+        };
 
     // RFC 6749 §5.2: the `error` field MUST be a registered code. Use
     // `invalid_client` uniformly across every arm that authenticates the
@@ -581,7 +668,19 @@ fn non_empty_credential(field: &str) -> Option<&str> {
 ///   authenticates them (RFC 9700 §2.1.1);
 /// - confidential clients → the secret (HTTP Basic Auth preferred, body
 ///   `client_secret` fallback) must verify, else `Err` with a 401.
-fn enforce_confidential_client_auth(
+///
+/// 22.25 (audit 2026-08-28 §4.25#3): the *decision* above is unchanged, but the
+/// *work* is no longer a function of what the lookup found. Equalising
+/// `IdentityEngine::authenticate_client` alone did not close the oracle,
+/// because this gate short-circuits on the unknown and public arms before ever
+/// reaching the engine — so `POST /token` still answered an unknown
+/// `client_id` in microseconds and a registered confidential one in
+/// Argon2id-milliseconds. Hashing now depends only on the caller's own input:
+/// a presented secret costs exactly one verification on every arm (against a
+/// realm-parameterised dummy hash when there is no stored one), and presenting
+/// no secret costs none, which keeps the public-client browser flow off the
+/// Argon2id path entirely.
+pub(super) fn enforce_confidential_client_auth(
     state: &AppState,
     realm_id: &RealmId,
     headers: &HeaderMap,
@@ -611,32 +710,46 @@ fn enforce_confidential_client_auth(
     };
     let client_id = ClientId::new(uuid);
     let client = match state.identity.get_client(realm_id, &client_id) {
-        Ok(Some(c)) => c,
-        Ok(None) => return Ok(()),
+        Ok(c) => c,
         Err(e) => return Err(identity_error_to_response(&e).into_response()),
+    };
+    // A valid secret is mandatory for a confidential client. Prefer HTTP Basic
+    // Auth credentials (RFC 6749 §2.3.1), fall back to the body
+    // `client_secret`.
+    let secret = basic
+        .map(|(_, s)| s)
+        .or_else(|| body_client_secret.map(str::to_string));
+
+    // 22.25: run the verification before the outcome is decided, on every arm,
+    // whenever the caller presented a secret. `authenticate_client` performs
+    // exactly one Argon2id verification for a presented secret regardless of
+    // whether the client exists or holds a hash, so the unknown and public arms
+    // below now cost what the confidential arm costs. The result is discarded
+    // on the arms that do not consult it — the work is the point.
+    let verified = secret.as_deref().map(|s| {
+        state
+            .identity
+            .authenticate_client(realm_id, &client_id, Some(s))
+    });
+
+    let Some(client) = client else {
+        return Ok(());
     };
     if !client.is_confidential() {
         return Ok(());
     }
-    // Confidential client: a valid secret is mandatory. Prefer HTTP Basic Auth
-    // credentials (RFC 6749 §2.3.1), fall back to the body `client_secret`.
-    let secret = basic
-        .map(|(_, s)| s)
-        .or_else(|| body_client_secret.map(str::to_string));
-    state
-        .identity
-        .authenticate_client(realm_id, &client_id, secret.as_deref())
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Basic realm=\"hearth\"")],
-                Json(serde_json::json!({
-                    "error": "invalid_client",
-                    "error_description": "client authentication failed"
-                })),
-            )
-                .into_response()
-        })
+    match verified {
+        Some(Ok(())) => Ok(()),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            [("www-authenticate", "Basic realm=\"hearth\"")],
+            Json(serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "client authentication failed"
+            })),
+        )
+            .into_response()),
+    }
 }
 
 /// Returns the CORS `Access-Control-Allow-Origin` value for `origin` if it
@@ -901,14 +1014,17 @@ async fn register_client(
 
     match state.identity.register_client(&auth.realm_id, &request) {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::ClientRegistered,
-                resource_type: "client".to_string(),
-                resource_id: client.client_id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "clients_api"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: auth.realm_id.clone(),
+                    actor: auth.user_id.as_uuid().to_string(),
+                    action: crate::audit::AuditAction::ClientRegistered,
+                    resource_type: "client".to_string(),
+                    resource_id: client.client_id().as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "clients_api"})),
+                },
+            );
             (
                 StatusCode::CREATED,
                 Json(proto_to_rest_json(&pb::OAuthClient::from(&client))),
@@ -1040,14 +1156,17 @@ async fn register_client_dynamic(
 
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: realm_id.clone(),
-                actor: "anonymous".to_string(),
-                action: crate::audit::AuditAction::ClientRegistered,
-                resource_type: "client".to_string(),
-                resource_id: client.client_id().as_uuid().to_string(),
-                metadata: Some(serde_json::json!({"via": "dynamic_registration"})),
-            });
+            crate::protocol::audit_log::record(
+                state.audit.as_ref(),
+                &CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: "anonymous".to_string(),
+                    action: crate::audit::AuditAction::ClientRegistered,
+                    resource_type: "client".to_string(),
+                    resource_id: client.client_id().as_uuid().to_string(),
+                    metadata: Some(serde_json::json!({"via": "dynamic_registration"})),
+                },
+            );
 
             let response = DcrResponse {
                 client_id: client.client_id().as_uuid().to_string(),
@@ -1420,20 +1539,30 @@ async fn token_exchange_impl(
         Err(e) => return e.into_response(),
     };
 
-    // Rate limit per client_id before any grant-type dispatch.
-    if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
-        let client_id = ClientId::new(client_uuid);
-        if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-            return resp;
-        }
+    // Per-IP client address, resolved through the trusted-proxy walk. Needed
+    // before the rate limiter so a request with no client identity still has
+    // a bucket to fall back on.
+    //
+    // The real peer is threaded from the outer handler via `peer_addr`; it
+    // falls back to FALLBACK_PEER only in tests that bypass
+    // `into_make_service_with_connect_info`.
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
+
+    // Rate limit before any grant-type dispatch. Prefer the per-client
+    // bucket; a request with no parseable `client_id` — the clientless
+    // `refresh_token` session-refresh shape — is bucketed by client IP so it
+    // cannot flood the endpoint unbounded (audit 2026-08-28 §4.16#8).
+    let rate_limited = match body.client_id.parse::<uuid::Uuid>() {
+        Ok(client_uuid) => check_token_rate_limit(&state, &realm_id, &ClientId::new(client_uuid)),
+        Err(_) => check_anonymous_token_rate_limit(&state, &realm_id, &client_ip),
+    };
+    if let Err(resp) = rate_limited {
+        return resp;
     }
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the step-up-mfa grant. The real peer is
-    // threaded from the outer handler via `peer_addr`; falls back to
-    // FALLBACK_PEER only in tests that bypass `into_make_service_with_connect_info`.
-    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
+    // Per-IP login rate limiting for the step-up-mfa grant.
     if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
         && state
             .identity
@@ -1630,9 +1759,23 @@ async fn token_exchange_impl(
             }
         }
         "client_credentials" => {
+            // Audit §4.22#5: read `client_secret_basic` through the shared
+            // resolver instead of the request body alone. Discovery and DCR
+            // both tell clients to authenticate with the Authorization header,
+            // and this arm used to ignore it. The engine's own `None` arm on
+            // `client_secret` is `InvalidClientSecret`, so an unresolved
+            // credential still fails closed.
+            let (cc_client_id, cc_client_secret) = match resolve_client_credentials(
+                &headers,
+                Some(body.client_id.as_str()),
+                body.client_secret.as_deref(),
+            ) {
+                Ok(pair) => pair,
+                Err(resp) => return resp,
+            };
             let proto_req = pb::ClientCredentialsRequest {
-                client_id: body.client_id,
-                client_secret: body.client_secret.unwrap_or_default(),
+                client_id: cc_client_id.unwrap_or_default(),
+                client_secret: cc_client_secret.unwrap_or_default(),
                 scope: body.scope,
             };
 
@@ -1677,6 +1820,19 @@ async fn token_exchange_impl(
             }
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
+            // RFC 8628 §3.4: the device access token request authenticates the
+            // client exactly as the `authorization_code` arm does
+            // (audit §4.19#4, §4.22#6).
+            if let Err(resp) = enforce_confidential_client_auth(
+                &state,
+                &realm_id,
+                &headers,
+                &body.client_id,
+                body.client_secret.as_deref(),
+            ) {
+                return resp;
+            }
+
             let Some(device_code) = body.device_code else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -1899,6 +2055,25 @@ async fn token_exchange_impl(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        // Magic-link grant — completes the passwordless flow the SDKs start
+        // with `requestMagicLink`. Previously unimplemented, so every SDK's
+        // exchange was rejected (audit 2026-08-28 §4.24#6).
+        MAGIC_LINK_GRANT_TYPE => {
+            let Some(link_token) = body.token.clone() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "token is required for the magic-link grant"
+                    })),
+                )
+                    .into_response();
+            };
+            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+                Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -2114,6 +2289,20 @@ async fn device_authorization(
         return resp;
     }
 
+    // RFC 8628 §3.1: a confidential client authenticates here exactly as it
+    // does at the token endpoint. Without this, a party holding only the
+    // client identifier ran the whole flow under that client's identity
+    // (audit §4.19#4, §4.22#6). Public clients pass through unchanged.
+    if let Err(resp) = enforce_confidential_client_auth(
+        &state,
+        &realm_id,
+        &headers,
+        &body.client_id,
+        body.client_secret.as_deref(),
+    ) {
+        return resp;
+    }
+
     let request = crate::identity::DeviceAuthorizationRequest {
         client_id,
         scope: body.scope,
@@ -2235,11 +2424,23 @@ async fn me_permissions(
     };
     let user_id = UserId::new(user_uuid);
 
-    let org_id = params.get("org_id").and_then(|s| {
-        uuid::Uuid::parse_str(s)
-            .ok()
-            .map(crate::core::OrganizationId::new)
-    });
+    // A suspended or archived organisation grants nothing: drop the org
+    // context so only realm-scoped authority is reported
+    // (subsystem audit 2026-09-21, finding O-2).
+    let org_id = params
+        .get("org_id")
+        .and_then(|s| {
+            uuid::Uuid::parse_str(s)
+                .ok()
+                .map(crate::core::OrganizationId::new)
+        })
+        .filter(|oid| {
+            matches!(
+                state.identity.get_organization(&realm_id, oid),
+                Ok(Some(ref org))
+                    if org.status() == crate::identity::OrganizationStatus::Active
+            )
+        });
     let scope = params.get("scope").cloned();
 
     let resolved =
@@ -2472,18 +2673,25 @@ async fn realm_token_exchange(
     // (RFC 6749 §3.2.1) — adopt the Basic username before the rate limiter
     // and grant dispatch key off the client identity.
     backfill_client_id_from_basic(&headers, &mut body);
-    // Rate limit per client_id before any grant-type dispatch.
-    if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
-        let client_id = ClientId::new(client_uuid);
-        if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
-            return resp;
-        }
+
+    // Real peer threaded from the outer handler; FALLBACK_PEER only in tests
+    // without ConnectInfo. Resolved before the rate limiter so a request with
+    // no client identity still has a bucket.
+    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
+
+    // Rate limit before any grant-type dispatch — per client when one is
+    // supplied, per client IP for the clientless `refresh_token` shape that
+    // otherwise bypasses the limiter entirely (audit 2026-08-28 §4.16#8).
+    let rate_limited = match body.client_id.parse::<uuid::Uuid>() {
+        Ok(client_uuid) => check_token_rate_limit(&state, &realm_id, &ClientId::new(client_uuid)),
+        Err(_) => check_anonymous_token_rate_limit(&state, &realm_id, &client_ip),
+    };
+    if let Err(resp) = rate_limited {
+        return resp;
     }
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the step-up-mfa grant. Real peer threaded from
-    // the outer handler; FALLBACK_PEER only in tests without ConnectInfo.
-    let client_ip = extract_client_ip(&headers, peer_addr, &state.trusted_proxies);
+    // Per-IP login rate limiting for the step-up-mfa grant.
     if grant_type == "urn:hearth:params:grant-type:step-up-mfa"
         && state
             .identity
@@ -2668,9 +2876,19 @@ async fn realm_token_exchange(
             }
         }
         "client_credentials" => {
+            // Audit §4.22#5 — same shared credential resolution as the global
+            // `/token` arm above.
+            let (cc_client_id, cc_client_secret) = match resolve_client_credentials(
+                &headers,
+                Some(body.client_id.as_str()),
+                body.client_secret.as_deref(),
+            ) {
+                Ok(pair) => pair,
+                Err(resp) => return resp,
+            };
             let proto_req = pb::ClientCredentialsRequest {
-                client_id: body.client_id,
-                client_secret: body.client_secret.unwrap_or_default(),
+                client_id: cc_client_id.unwrap_or_default(),
+                client_secret: cc_client_secret.unwrap_or_default(),
                 scope: body.scope,
             };
             let mut request = match proto_client_creds_to_domain(&proto_req) {
@@ -2705,6 +2923,18 @@ async fn realm_token_exchange(
             }
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
+            // RFC 8628 §3.4 — same rule as the header-routed twin
+            // (audit §4.19#4, §4.22#6).
+            if let Err(resp) = enforce_confidential_client_auth(
+                &state,
+                &realm_id,
+                &headers,
+                &body.client_id,
+                body.client_secret.as_deref(),
+            ) {
+                return resp;
+            }
+
             let Some(device_code) = body.device_code else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -2909,6 +3139,25 @@ async fn realm_token_exchange(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        // Magic-link grant — completes the passwordless flow the SDKs start
+        // with `requestMagicLink`. Previously unimplemented, so every SDK's
+        // exchange was rejected (audit 2026-08-28 §4.24#6).
+        MAGIC_LINK_GRANT_TYPE => {
+            let Some(link_token) = body.token.clone() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "token is required for the magic-link grant"
+                    })),
+                )
+                    .into_response();
+            };
+            match exchange_magic_link(&state, &realm_id, &link_token, dpop_jkt.as_deref()) {
+                Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("unsupported grant_type: {other}")})),
@@ -2930,67 +3179,99 @@ async fn realm_token_exchange(
     resp
 }
 
+/// `POST /realms/{realm}/revoke` — realm-scoped twin of `/revoke`.
+///
+/// Requires client authentication and applies the same rate limit and RFC
+/// 7009 semantics as the header-form twin. Before this the route read no
+/// client credentials at all, so an anonymous internet caller could destroy
+/// any session it held a token string for (audit 2026-08-28 §4.1#3,
+/// §4.19#2, §4.22#1, §4.25#1).
 async fn realm_token_revocation(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    JsonOrForm(body): JsonOrForm<serde_json::Value>,
+    headers: HeaderMap,
+    JsonOrForm(body): JsonOrForm<HttpRevocationBody>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
-    let token = match body.get("token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "token required"})),
-            )
-                .into_response()
-        }
+    let client_id = match verify_endpoint_client(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        body.client_secret.as_deref(),
+    ) {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
-    let request = crate::identity::TokenRevocationRequest {
-        token,
-        token_type_hint: None,
-    };
-    match state.identity.revoke_token(&realm_id, &request) {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
     }
+
+    let request = crate::identity::TokenRevocationRequest {
+        token: body.token,
+        token_type_hint: body.token_type_hint,
+    };
+    let mut resp = match state.identity.revoke_token(&realm_id, &request) {
+        Ok(()) => {
+            // A successful revoke ends a session; keep the gauge consistent.
+            crate::metrics::metrics().active_sessions.dec();
+            StatusCode::OK.into_response()
+        }
+        Err(crate::identity::IdentityError::InvalidToken) => {
+            // RFC 7009: always return 200 OK
+            StatusCode::OK.into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    };
+    apply_cors_to_response(&mut resp, &state, &realm_id, &client_id, &headers);
+    resp
 }
 
+/// `POST /realms/{realm}/introspect` — realm-scoped twin of `/introspect`.
+///
+/// Requires client authentication, applies the RFC 7662 §2 audience
+/// restriction via `introspecting_client_id`, and answers with the same
+/// wire format as the header-form twin — the domain type always emits
+/// `active: false` for inactive tokens, where the previous proto3
+/// serialization omitted it (audit 2026-08-28 §4.1#3, §4.1#4).
 async fn realm_token_introspection(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
-    JsonOrForm(body): JsonOrForm<serde_json::Value>,
+    headers: HeaderMap,
+    JsonOrForm(body): JsonOrForm<HttpIntrospectionBody>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
     };
-    let token = match body.get("token").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "token required"})),
-            )
-                .into_response()
-        }
+    let client_id = match verify_endpoint_client(
+        &state,
+        &realm_id,
+        &headers,
+        body.client_id.as_deref(),
+        body.client_secret.as_deref(),
+    ) {
+        Ok(id) => id,
+        Err(resp) => return resp,
     };
-    let request = crate::identity::TokenIntrospectionRequest {
-        token,
-        token_type_hint: None,
-        introspecting_client_id: None,
-    };
-    match state.identity.introspect_token(&realm_id, &request) {
-        Ok(info) => (
-            StatusCode::OK,
-            Json(proto_to_rest_json(&pb::IntrospectionResponse::from(&info))),
-        )
-            .into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+    if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
+        return resp;
     }
+
+    let request = crate::identity::TokenIntrospectionRequest {
+        token: body.token,
+        token_type_hint: body.token_type_hint,
+        introspecting_client_id: Some(client_id.clone()),
+    };
+    let mut resp = match state.identity.introspect_token(&realm_id, &request) {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    };
+    apply_cors_to_response(&mut resp, &state, &realm_id, &client_id, &headers);
+    resp
 }
 
 async fn realm_userinfo(
@@ -3039,6 +3320,7 @@ async fn realm_userinfo(
 async fn realm_device_authorization(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
     JsonOrForm(body): JsonOrForm<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
@@ -3068,6 +3350,17 @@ async fn realm_device_authorization(
     if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
         return resp;
     }
+    // RFC 8628 §3.1 — same confidential-client rule as the header-routed twin
+    // (audit §4.19#4, §4.22#6).
+    if let Err(resp) = enforce_confidential_client_auth(
+        &state,
+        &realm_id,
+        &headers,
+        &client_id_str,
+        body.get("client_secret").and_then(|v| v.as_str()),
+    ) {
+        return resp;
+    }
     let request = crate::identity::DeviceAuthorizationRequest {
         client_id,
         scope: body
@@ -3085,6 +3378,19 @@ async fn realm_device_authorization(
             .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
+}
+
+/// Builds the RFC 7591 §3.2.2 `invalid_client_metadata` rejection for a
+/// dynamic registration whose metadata this server cannot honour.
+fn dcr_invalid_metadata(description: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid_client_metadata",
+            "error_description": description,
+        })),
+    )
+        .into_response()
 }
 
 async fn realm_register_client_dynamic(
@@ -3171,6 +3477,37 @@ async fn realm_register_client_dynamic(
                 .collect()
         })
         .unwrap_or_default();
+    // Audit §4.22#9: honour the RFC 7591 `grant_types` metadata instead of
+    // silently overwriting it with `authorization_code`. A grant type this
+    // deployment does not support is refused with `invalid_client_metadata`
+    // (RFC 7591 §3.2.2) rather than narrowed to something the caller did not
+    // ask for — silent narrowing hands back a client that cannot run the flow
+    // it registered for.
+    let grant_types: Vec<String> = match body.get("grant_types") {
+        None | Some(serde_json::Value::Null) => vec!["authorization_code".to_string()],
+        Some(serde_json::Value::Array(items)) => {
+            let supported = state.identity.oidc_discovery().grant_types_supported;
+            let mut requested = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(name) = item.as_str() else {
+                    return dcr_invalid_metadata("grant_types entries must be strings");
+                };
+                if !supported.iter().any(|s| s == name) {
+                    return dcr_invalid_metadata(&format!(
+                        "grant_type '{name}' is not supported by this authorization server"
+                    ));
+                }
+                if !requested.iter().any(|g: &String| g == name) {
+                    requested.push(name.to_string());
+                }
+            }
+            if requested.is_empty() {
+                return dcr_invalid_metadata("grant_types must not be empty");
+            }
+            requested
+        }
+        Some(_) => return dcr_invalid_metadata("grant_types must be an array of strings"),
+    };
     let base_slug = client_name
         .to_lowercase()
         .chars()
@@ -3182,7 +3519,7 @@ async fn realm_register_client_dynamic(
         redirect_uris,
         cors_origins: Vec::new(),
         client_secret: None,
-        grant_types: vec!["authorization_code".to_string()],
+        grant_types,
         require_consent: true,
         client_logo_url: None,
         slug: Some(slug),
@@ -3202,8 +3539,13 @@ async fn realm_register_client_dynamic(
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {
+            // Audit §4.22#9: every token-endpoint arm parses `client_id` with
+            // `uuid::Uuid::parse_str`. The `ClientId` `Display` impl prefixes
+            // the UUID (`client_<uuid>`), so rendering it here handed back an
+            // id that could never authenticate. Emit the bare UUID, matching
+            // the global `POST /register` response.
             let resp = serde_json::json!({
-                "client_id": client.client_id().to_string(),
+                "client_id": client.client_id().as_uuid().to_string(),
                 "client_name": client.client_name(),
                 "redirect_uris": client.redirect_uris(),
                 "grant_types": client.grant_types(),

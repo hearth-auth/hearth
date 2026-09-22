@@ -50,11 +50,15 @@
       if (btnLabel) btnLabel.textContent = 'Sending\u2026';
       if (resultDiv) resultDiv.classList.add('hidden');
 
+      // Task 21.2: the endpoint now requires the double-submit CSRF token.
+      // The layout publishes it as <meta name="csrf">.
+      var csrfMeta = document.querySelector('meta[name="csrf"]');
       fetch(pingUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Requested-With': 'XMLHttpRequest'
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-CSRF-Token': csrfMeta ? csrfMeta.content : ''
         },
         body: JSON.stringify({ url: url, secret: secret })
       })

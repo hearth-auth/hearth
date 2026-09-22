@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// forgeJWT builds a syntactically valid three-segment JWT with the
-// given claim body. The signature segment is arbitrary — the SDK does
-// not verify it for local boolean checks (the caller trusts its own
-// token).
+// forgeJWT builds a syntactically valid three-segment JWT with the given claim
+// body and a garbage signature segment. It models an attacker's token: every
+// authorization gate in this package must refuse it. Use testIssuer.sign for a
+// token a gate should accept.
 func forgeJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
 	header := map[string]string{"alg": "EdDSA", "typ": "JWT"}
@@ -29,21 +29,23 @@ func forgeJWT(t *testing.T, claims map[string]any) string {
 }
 
 func TestHasPermission(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{
 		"permissions": []string{"docs.edit", "docs.view"},
 	})
 
-	if !c.HasPermission(token, "docs.edit") {
+	if !c.HasPermission(context.Background(), token, "docs.edit") {
 		t.Error("expected HasPermission(docs.edit) = true")
 	}
-	if c.HasPermission(token, "docs.delete") {
+	if c.HasPermission(context.Background(), token, "docs.delete") {
 		t.Error("expected HasPermission(docs.delete) = false")
 	}
 }
 
 func TestHasPermissionNegativeCases(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
+	ti := newTestIssuer(t)
+	c := ti.client()
 
 	cases := []struct {
 		name  string
@@ -54,11 +56,12 @@ func TestHasPermissionNegativeCases(t *testing.T) {
 		{"two segments", "aa.bb"},
 		{"bad base64 payload", "aa.!!!.cc"},
 		{"bad json payload", "aa." + base64.RawURLEncoding.EncodeToString([]byte("not json")) + ".cc"},
+		{"unsigned but well-formed", forgeJWT(t, map[string]any{"permissions": []string{"docs.edit"}})},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if c.HasPermission(tc.token, "docs.edit") {
+			if c.HasPermission(context.Background(), tc.token, "docs.edit") {
 				t.Errorf("expected false for %q", tc.name)
 			}
 		})
@@ -66,57 +69,61 @@ func TestHasPermissionNegativeCases(t *testing.T) {
 }
 
 func TestHasPermissionMissingClaim(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"sub": "user_1"})
-	if c.HasPermission(token, "docs.edit") {
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"sub": "user_1"})
+	if c.HasPermission(context.Background(), token, "docs.edit") {
 		t.Error("expected false when permissions claim is absent")
 	}
 }
 
 func TestHasRole(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"roles": []string{"admin", "editor"}})
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"roles": []string{"admin", "editor"}})
 
-	if !c.HasRole(token, "admin") {
+	if !c.HasRole(context.Background(), token, "admin") {
 		t.Error("expected HasRole(admin) = true")
 	}
-	if c.HasRole(token, "viewer") {
+	if c.HasRole(context.Background(), token, "viewer") {
 		t.Error("expected HasRole(viewer) = false")
 	}
-	if c.HasRole("", "admin") {
+	if c.HasRole(context.Background(), "", "admin") {
 		t.Error("expected HasRole over empty token = false")
 	}
 }
 
 func TestInGroup(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"groups": []string{"engineering", "security"}})
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"groups": []string{"engineering", "security"}})
 
-	if !c.InGroup(token, "engineering") {
+	if !c.InGroup(context.Background(), token, "engineering") {
 		t.Error("expected InGroup(engineering) = true")
 	}
-	if c.InGroup(token, "marketing") {
+	if c.InGroup(context.Background(), token, "marketing") {
 		t.Error("expected InGroup(marketing) = false")
 	}
 }
 
 func TestInOrg(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	token := forgeJWT(t, map[string]any{"oid": "org_42"})
+	ti := newTestIssuer(t)
+	c := ti.client()
+	token := ti.sign(t, map[string]any{"oid": "org_42"})
 
-	if !c.InOrg(token, "org_42") {
+	if !c.InOrg(context.Background(), token, "org_42") {
 		t.Error("expected InOrg(org_42) = true")
 	}
-	if c.InOrg(token, "org_7") {
+	if c.InOrg(context.Background(), token, "org_7") {
 		t.Error("expected InOrg(org_7) = false")
 	}
 	// missing oid
-	tokenNoOid := forgeJWT(t, map[string]any{"sub": "user_1"})
-	if c.InOrg(tokenNoOid, "org_42") {
+	tokenNoOid := ti.sign(t, map[string]any{"sub": "user_1"})
+	if c.InOrg(context.Background(), tokenNoOid, "org_42") {
 		t.Error("expected false when oid claim absent")
 	}
 	// empty arg
-	if c.InOrg(token, "") {
+	if c.InOrg(context.Background(), token, "") {
 		t.Error("expected false for empty org id arg")
 	}
 }

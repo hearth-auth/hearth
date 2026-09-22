@@ -881,17 +881,34 @@ pub struct AuthorizationResponse {
     jarm_jwt: Option<String>,
     /// The effective response mode for this response.
     response_mode: ResponseMode,
+    /// The redirect URI this response must actually be delivered to.
+    ///
+    /// 22.3 (audit 2026-08-28 §4.3#5): when a JAR (RFC 9101 signed request
+    /// object) carries its own `redirect_uri`, that value overrides the outer
+    /// query parameter and is the one validated against the client's
+    /// registration — the outer one is never checked at all. Callers that
+    /// build a 302 from their own copy of `redirect_uri` would therefore send
+    /// `code` and `state` to an unvalidated, attacker-chosen URI. The
+    /// authoritative value travels with the response so a caller cannot get
+    /// this wrong; it is also the URI the issued code is bound to, so the
+    /// subsequent token exchange only succeeds against this one.
+    redirect_uri: String,
 }
 
 impl AuthorizationResponse {
     /// Creates a new authorization response.
-    pub(crate) fn new(code: String, state: String, iss: String) -> Self {
+    ///
+    /// `redirect_uri` MUST be the *effective*, registration-validated URI —
+    /// the JAR-supplied one when a signed request object overrode the query
+    /// parameter (22.3).
+    pub(crate) fn new(code: String, state: String, iss: String, redirect_uri: String) -> Self {
         Self {
             code,
             state,
             iss,
             jarm_jwt: None,
             response_mode: ResponseMode::Query,
+            redirect_uri,
         }
     }
 
@@ -902,6 +919,7 @@ impl AuthorizationResponse {
         iss: String,
         jarm_jwt: String,
         response_mode: ResponseMode,
+        redirect_uri: String,
     ) -> Self {
         Self {
             code,
@@ -909,6 +927,7 @@ impl AuthorizationResponse {
             iss,
             jarm_jwt: Some(jarm_jwt),
             response_mode,
+            redirect_uri,
         }
     }
 
@@ -935,6 +954,15 @@ impl AuthorizationResponse {
     /// Returns the effective response mode.
     pub fn response_mode(&self) -> &ResponseMode {
         &self.response_mode
+    }
+
+    /// Returns the redirect URI this response must be delivered to (22.3).
+    ///
+    /// Always prefer this over the caller's own copy: with a JAR present they
+    /// differ, and only this one has been validated against the client's
+    /// registered URIs.
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
     }
 }
 
@@ -1519,9 +1547,16 @@ pub(crate) struct StoredDeviceCode {
 
 /// Tracks a grant family for refresh token rotation and theft detection.
 ///
-/// Each authorization code exchange or client credentials grant creates
-/// a family. On refresh, the hash is rotated. If a stale hash is presented,
-/// the entire family (and its session) is revoked.
+/// Every grant that issues a refresh token creates one: the authorization-code
+/// exchange, and — through `issue_tokens_with_context` — ROPC, step-up MFA, the
+/// device grant, password reset and Hearth's own session tokens. The
+/// `client_credentials` and `jwt-bearer` grants issue no refresh token (RFC 6749
+/// §4.4.3) and so create no family.
+///
+/// On refresh, the hash is rotated. If a stale hash is presented, the entire
+/// family (and its session) is revoked. Revocation sets `revoked`; the row
+/// survives until the expiry sweep, because it is what a later presentation of
+/// a rotated-out token is checked against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredGrantFamily {
     /// Unique family identifier.
@@ -1817,9 +1852,11 @@ mod tests {
             "code123".to_string(),
             "state456".to_string(),
             "https://auth.example.com".to_string(),
+            "https://app.example.com/cb".to_string(),
         );
         assert_eq!(resp.code(), "code123");
         assert_eq!(resp.state(), "state456");
+        assert_eq!(resp.redirect_uri(), "https://app.example.com/cb");
         assert_eq!(resp.iss(), "https://auth.example.com");
     }
 

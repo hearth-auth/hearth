@@ -85,7 +85,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -96,7 +96,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1047,7 +1047,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1301,9 +1301,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.14"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "171fefbc92fe4a4de27e0698d6a5b392d6a0e333506bc49133760b3bcf948733"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "hearth"
-version = "1.6.9"
+version = "1.6.11"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -1383,6 +1383,7 @@ dependencies = [
  "hex",
  "hmac",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "ldap3",
  "lettre",
@@ -1390,6 +1391,7 @@ dependencies = [
  "memmap2",
  "openraft",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
@@ -1838,7 +1840,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2160,7 +2162,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2298,8 +2300,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
- "reqwest",
+ "tokio",
 ]
 
 [[package]]
@@ -2314,7 +2319,6 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -3101,9 +3105,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-channel",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -3252,16 +3254,15 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
- "aws-lc-rs",
  "log",
  "once_cell",
  "ring",
@@ -3295,11 +3296,10 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
- "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted",
@@ -3598,7 +3598,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3705,7 +3705,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4348,9 +4348,9 @@ dependencies = [
 
 [[package]]
 name = "validit"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4efba0434d5a0a62d4f22070b44ce055dc18cb64d4fa98276aa523dadfaba0e7"
+checksum = "4417835826b78aa6265724624d424df2b1e6e71a33329227d8b04a88950780dc"
 dependencies = [
  "anyerror",
 ]
@@ -4559,7 +4559,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

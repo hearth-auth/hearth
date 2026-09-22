@@ -85,6 +85,8 @@ export type {
   RegisterClientParams,
   Realm,
   SessionVersionConfig,
+  StepUpAssertion,
+  StepUpProof,
   TokenExchangeParams,
   DeviceAuthorizationResponse,
   TokenResponse,

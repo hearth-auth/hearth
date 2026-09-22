@@ -35,8 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Exchange an auth code for tokens
     let tokens = client.exchange_code("code", "client_id", "client_secret", "https://...", None).await?;
 
-    // Local RBAC predicate (no network call)
-    let allowed = HearthClient::has_permission(&tokens.access_token, "documents.read")?;
+    // RBAC predicate — verifies the token against the realm's JWKS (cached),
+    // then reads its permissions claim.
+    let allowed = client.has_permission(&tokens.access_token, "documents.read").await?;
 
     Ok(())
 }
@@ -49,7 +50,7 @@ The mode must match the `access_token_authorization` field configured on the OAu
 
 | Mode | How it works | Network calls |
 |------|--------------|---------------|
-| `Embedded` (default) | RBAC claims baked into the JWT at issuance | None |
+| `Embedded` (default) | RBAC claims baked into the JWT at issuance; the SDK verifies the signature against the cached JWKS before reading them | JWKS fetch only (cached) |
 | `Introspection` | JWT carries only identity; resource server calls `/introspect` | Per-request |
 | `Decision` | JWT carries only identity; resource server calls `POST /oauth/authorize` | Per-request |
 
@@ -63,7 +64,7 @@ use hearth_sdk::{HearthClient, AccessTokenAuthorization, CheckPermissionOpts};
 
 let client = HearthClient::new("https://hearth.example.com", "my-realm");
 
-// Embedded — local check, no network
+// Embedded — verify against the cached JWKS, then read the claims locally
 let allowed = client.check_permission(
     &access_token,
     "documents.write",
@@ -137,9 +138,11 @@ if resp.active {
 | `HearthClient::new(base_url, realm_id)` | Construct a new client |
 | `check_permission(token, permission, mode, opts)` | Mode-aware async permission check |
 | `introspect(token, client_id, client_secret)` | Call `POST /introspect` (RFC 7662) |
-| `has_permission(token, permission)` | Local JWT decode check (sync) |
-| `has_role(token, role)` | Local JWT decode check (sync) |
-| `in_group(token, group_slug)` | Local JWT decode check (sync) |
+| `verify_token(token)` | Verify signature + `exp`/`nbf`/`iss`/`aud`; returns `Claims` |
+| `has_permission(token, permission)` | Verify, then check `permissions` (async) |
+| `has_role(token, role)` | Verify, then check `roles` (async) |
+| `in_group(token, group_slug)` | Verify, then check `groups` (async) |
+| `in_org(token, org_id)` | Verify, then check `oid` (async) |
 | `authorize(...)` | Begin OAuth authorization code flow |
 | `exchange_code(...)` | Exchange auth code for tokens |
 | `refresh_tokens(...)` | Refresh an access token |

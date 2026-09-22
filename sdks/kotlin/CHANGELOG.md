@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`startWebAuthnRegistration` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
+  the server refuses passkey enrolment carried by an access token alone with
+  `403 step_up_required`, because a stolen token would otherwise mint a permanent
+  credential. The method takes a new `stepUp: StepUpProof` argument; build one with
+  `StepUpProof.password`, `StepUpProof.totpCode`, or `StepUpProof.assertion`.
+
 ### Removed
 - **`AdminClient.createRealm` and the `CreateRealmRequest` type** — realms are
   provisioned via `hearth.yaml` and reconciled at startup, not through the admin

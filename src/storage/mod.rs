@@ -12,8 +12,6 @@
 pub mod auto_size;
 #[allow(dead_code)]
 pub(crate) mod block_cache;
-#[allow(dead_code)]
-pub(crate) mod breach_corpus;
 pub mod encryption;
 mod engine;
 pub mod error;
@@ -89,6 +87,50 @@ pub trait StorageEngine: Send + Sync {
 
     /// Deletes a key for the given realm.
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError>;
+
+    /// Whether a write proposed on this handle right now would be accepted.
+    ///
+    /// Local storage always accepts one, hence the `true` default. In cluster
+    /// mode every write is a Raft proposal, so only the current leader accepts
+    /// one — a follower, or any node before a leader has been elected, answers
+    /// `NotLeader`. Start-up paths that would otherwise write on a cold data
+    /// directory consult this before attempting the write; see
+    /// [`crate::identity::EmbeddedIdentityEngine::await_cold_start_window`].
+    ///
+    /// This is advisory, not a lock: the leader can change between the check
+    /// and the write. It exists so start-up does not *begin* a write set that
+    /// cannot possibly succeed, not to make writes infallible.
+    fn accepts_writes(&self) -> bool {
+        true
+    }
+
+    /// Writes a row that belongs to **this node only** and must not replicate.
+    ///
+    /// Defaults to [`Self::put`], which is correct for local storage: there is
+    /// exactly one node. In cluster mode the cluster adapter overrides it to
+    /// write straight to the node's own engine instead of proposing through
+    /// Raft.
+    ///
+    /// Use it only for state that is per-node *by design* — the rehydration
+    /// rows behind the in-memory rate-limit trackers are the case this exists
+    /// for. Proposing those through Raft makes them fail with `NotLeader` on
+    /// every follower, which silently breaks both directions: a failure a
+    /// follower counted is never persisted, and a lockout row the leader
+    /// replicated can never be cleared by the follower that later sees the
+    /// successful attempt.
+    fn put_node_local(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), StorageError> {
+        self.put(realm_id, key, value)
+    }
+
+    /// Deletes a row written by [`Self::put_node_local`]. Same contract.
+    fn delete_node_local(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        self.delete(realm_id, key)
+    }
 
     /// Scans a range of keys for the given realm (half-open interval `[start, end)`).
     ///
@@ -317,6 +359,12 @@ pub trait StorageEngine: Send + Sync {
     /// in-memory `known_realms` set is empty would skip Phase 1 entirely and
     /// leave stale on-disk data in place (HEA-2131).
     ///
+    /// The cluster snapshot **build** path enumerates realms through this same
+    /// call.  Build and install must agree on which realms exist: install
+    /// clears every realm this call reports and then replays only the realms
+    /// the payload carries, so a realm the build path omits is deleted from
+    /// every follower (audit 2026-08-28 §4.9#3).
+    ///
     /// Implementors that do not support multi-realm enumeration (e.g. test
     /// doubles) should return `Ok(vec![])` explicitly.  There is no silent
     /// default: a missing override that returns empty would silently skip the
@@ -375,5 +423,35 @@ pub trait StorageEngine: Send + Sync {
     /// overrides this with a real reader-writer barrier.
     fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
         None
+    }
+
+    /// Writes the in-memory write buffer out to a durable file.
+    ///
+    /// Called on the graceful-shutdown path. Durability does **not** depend on
+    /// it: every acknowledged write is in the WAL before it is acknowledged,
+    /// and recovery replays the WAL on the next open. Flushing on shutdown
+    /// shortens that replay and leaves the data directory in a state a file
+    /// copy can read without one (audit 2026-08-28 §3 B4, §4.11#1).
+    ///
+    /// The default is a no-op — correct for test doubles and for wrappers with
+    /// no buffer of their own. [`EmbeddedStorageEngine`] overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Reports whether the write-ahead log has fenced writes after a write
+    /// fault (audit 2026-08-28 §4.11#8).
+    ///
+    /// A fenced engine refuses every write for the life of the process, while
+    /// reads keep working. `/readyz` reads this so a fenced node stops
+    /// receiving traffic it cannot accept; restart it to clear the fence.
+    ///
+    /// The default returns `false`, which is correct for engines with no WAL.
+    fn is_write_fenced(&self) -> bool {
+        false
+    }
+
+    /// Returns any error from writing the SST.
+    fn flush_memtable(&self) -> Result<(), StorageError> {
+        Ok(())
     }
 }

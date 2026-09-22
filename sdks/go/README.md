@@ -7,12 +7,17 @@ Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 ## Installation
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go@v1.0.0
+go get github.com/hearth-auth/hearth/sdks/go@v1.6.11
 ```
 
 | SDK version | Minimum Hearth server |
 |-------------|----------------------|
 | 1.0.x       | 1.0.0                |
+
+The module is versioned in lockstep with the server. `v1.6.11` is the newest version on
+`proxy.golang.org` as of 2026-09-21; the full list is
+`https://proxy.golang.org/github.com/hearth-auth/hearth/sdks/go/@v/list`. This guide previously
+pinned `v1.0.0`, which resolves but returns a 2026-06-23 build.
 
 ## Quick start
 
@@ -99,44 +104,54 @@ func main() {
 
 ## RBAC capabilities
 
-All synchronous helpers decode the JWT **locally** — no network call, no lock, no cache. They return `false` for an empty or malformed token.
+Every helper below **verifies the token before reading any claim**: the EdDSA
+signature against the realm's JWKS, plus `exp`, `nbf` and `iss`. They return
+`false` for an empty, malformed, expired, foreign or unverifiable token. The
+JWKS is cached, so the first call costs one HTTP round trip and later calls are
+CPU-only.
 
-### `HasPermission(token, permission string) bool`
+> **Breaking change (security).** These four helpers gained a leading
+> `ctx context.Context` parameter and now verify. Earlier releases decoded the
+> JWT without checking its signature, so an `alg: none` forgery carrying
+> `permissions: ["admin.write"]` was accepted. Pass your request context:
+> `client.HasPermission(r.Context(), token, "…")`.
 
-Returns `true` iff the JWT `permissions` claim contains `permission`.
+### `HasPermission(ctx, token, permission string) bool`
+
+Returns `true` iff the token verifies and its `permissions` claim contains `permission`.
 
 ```go
-if client.HasPermission(accessToken, "docs.versions.read") {
+if client.HasPermission(r.Context(), accessToken, "docs.versions.read") {
     renderVersionHistory()
 }
 ```
 
-### `HasRole(token, role string) bool`
+### `HasRole(ctx, token, role string) bool`
 
-Returns `true` iff the JWT `roles` claim contains `role`. Useful for UI personalization and coarse-grained access.
+Returns `true` iff the token verifies and its `roles` claim contains `role`.
 
 ```go
-if client.HasRole(accessToken, "billing-admin") {
+if client.HasRole(r.Context(), accessToken, "billing-admin") {
     renderBillingPanel()
 }
 ```
 
-### `InGroup(token, groupSlug string) bool`
+### `InGroup(ctx, token, groupSlug string) bool`
 
-Returns `true` iff the JWT `groups` claim contains the group slug.
+Returns `true` iff the token verifies and its `groups` claim contains the group slug.
 
 ```go
-if client.InGroup(accessToken, "engineering") {
+if client.InGroup(r.Context(), accessToken, "engineering") {
     renderInternalToolingLink()
 }
 ```
 
-### `InOrg(token, orgID string) bool`
+### `InOrg(ctx, token, orgID string) bool`
 
-Returns `true` iff the JWT `oid` claim equals the given org ID.
+Returns `true` iff the token verifies and its `oid` claim equals the given org ID.
 
 ```go
-if client.InOrg(accessToken, "org_acme") {
+if client.InOrg(r.Context(), accessToken, "org_acme") {
     renderAcmeContent()
 }
 ```
@@ -212,16 +227,12 @@ err = admin.DeleteUser(ctx, "<user-id>")
 
 ```go
 // Realms are provisioned via hearth.yaml, not the admin API — there is no
-// CreateRealm client method (the server returns 405). Only read paths exist.
+// CreateRealm and no UpdateRealm client method. The server answers 405 with
+// "Realms are managed via hearth.yaml" to both POST /admin/realms and
+// PATCH /admin/realms/{id}. Only read paths and deletion exist.
 
 // Get a realm by ID
 realm, err := admin.GetRealm(ctx, "<realm-id>")
-
-// Update a realm
-suspended := "suspended"
-updated, err := admin.UpdateRealm(ctx, "<realm-id>", hearth.UpdateRealmRequest{
-    Status: &suspended,
-})
 
 // Delete a realm (cascades users, sessions, clients, assignments)
 err = admin.DeleteRealm(ctx, "<realm-id>")
@@ -356,7 +367,8 @@ type User struct {
     UpdatedAt   int64  `json:"updated_at,omitempty"`
 }
 
-// UpdateRealmRequest — argument to AdminClient.UpdateRealm (nil fields = no change)
+// UpdateRealmRequest — realm patch shape. No client method sends it: realms are
+// provisioned from hearth.yaml and PATCH /admin/realms/{id} answers 405.
 type UpdateRealmRequest struct {
     Name   *string `json:"name,omitempty"`
     Status *string `json:"status,omitempty"`
@@ -408,8 +420,10 @@ always rejected, never silently downgraded.
 
 ### `ModeEmbedded` (default)
 
-Permissions are baked into the JWT at issuance. The middleware decodes
-claims locally with zero network overhead.
+Permissions are baked into the JWT at issuance. The middleware verifies the
+token's signature against the cached JWKS and then reads the claims locally —
+no per-request network call. A token that fails verification is rejected with
+HTTP 401 before any permission is read.
 
 ```go
 mw := hearth.RequirePermission(client, "docs.edit", hearth.MiddlewareConfig{

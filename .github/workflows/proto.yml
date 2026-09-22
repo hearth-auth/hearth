@@ -1,6 +1,7 @@
 # Proto governance gates (HEA-973).
 #
-# Runs on every PR or push that touches proto sources. Three checks:
+# Called by ci.yml on every PR or push that touches proto sources; ci.yml's
+# `proto` filter output decides. Three checks:
 #   1. buf lint       — STANDARD lint rules (exceptions tracked in buf.yaml)
 #   2. buf format     — canonical style, fails if any file is unformatted
 #   3. buf breaking   — backwards-compatibility check against main
@@ -8,25 +9,21 @@
 # This workflow is intentionally lightweight (no Rust compilation) so
 # proto-only PRs get fast feedback without burning the full CI matrix.
 
+# Audit 2026-08-28 §4.12#12: the PR run reached no required check, so a proto
+# lint, format or breaking-change failure could not block a merge. The PR entry
+# point is now ci.yml, which calls this as a reusable workflow and lists it in
+# `required-summary`'s `needs:`. ci.yml runs on both pull_request and push to
+# main, so the push trigger that used to live here is not duplicated.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'proto/**'
-      - 'buf.yaml'
-      - 'buf.gen.yaml'
-  push:
-    branches: [main]
-    paths:
-      - 'proto/**'
-      - 'buf.yaml'
-      - 'buf.gen.yaml'
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Literal prefix, not ${{ github.workflow }}: when ci.yml calls this workflow,
+  # github.workflow is "CI", and a shared group would cancel ci.yml's own run.
+  group: proto-governance-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

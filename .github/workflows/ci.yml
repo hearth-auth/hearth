@@ -4,14 +4,24 @@ name: CI
 #
 # Architecture (post-HEA-680 mega-consolidation):
 #
-#   filter ─┬─> quality       (Rust changes)
-#           ├─> ui            (UI changes — replaces ui-tests + ui-tests-exploratory)
-#           ├─> sdk-node      (sdks/node changes — folded from node-sdk-ci.yml)
+#   filter ─┬─> quality        (Rust changes)
+#           ├─> proto-freshness (proto/ or generated SDK types — audit §4.8#8)
+#           ├─> ui             (UI changes — replaces ui-tests + ui-tests-exploratory)
+#           ├─> sdk-node       (sdks/node changes — folded from node-sdk-ci.yml)
 #           └─> sdk-conformance (any SDK / spec / script change — folded from sdk-conformance.yml)
 #
 # Downstream jobs gate on the `filter` job's outputs so doc-only PRs run
 # only the filter job, while broad changes still run the full matrix.
-# On pushes to main and scheduled runs we bypass the filter and always run.
+# On pushes to main we bypass the filter and always run.
+#
+# There is no `schedule:` trigger, and therefore no scheduled full-matrix run.
+# Audit 2026-08-28 §4.8#16: fifteen jobs carried a
+# `|| github.event_name == 'schedule'` disjunct and this comment claimed
+# scheduled runs bypassed the filter. Neither was reachable — the workflow has
+# only ever run on pull_request and push. The dead disjuncts are removed rather
+# than made live: a nightly full matrix is a separate decision, and the periodic
+# sweeps that do exist live in security.yml and ui-nightly.yml, which declare
+# their own cron. Guard: scripts/check-scanner-coverage.sh (R1).
 #
 # This workflow is the prerequisite gate for Dependabot auto-merge
 # (see HEA-275 / .github/workflows/dependabot-automerge.yml).
@@ -19,6 +29,14 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # `edited` is here for the commit-lint call below: the PR title becomes the
+    # squash-merge message semantic-release reads, and it can be edited after a
+    # green run. The alternative — running only commit-lint on an `edited` event
+    # — is fail-open: GitHub takes the LATEST conclusion for a required context,
+    # so a run with every other job skipped would report success over an earlier
+    # real failure. The cost is a re-run on a description edit, bounded by the
+    # cancel-in-progress concurrency group below (audit §4.12#12).
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
 
@@ -54,12 +72,10 @@ jobs:
       sdks-typescript: ${{ steps.filter.outputs.sdks-typescript }}
       sdks-any: ${{ steps.filter.outputs.sdks-any }}
       proto: ${{ steps.filter.outputs.proto }}
-      fuzz-targets: ${{ steps.filter.outputs.fuzz-targets }}
-      bench-targets: ${{ steps.filter.outputs.bench-targets }}
+      loadtest: ${{ steps.filter.outputs.loadtest }}
       docs-only: ${{ steps.filter.outputs.docs-only }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
       ldap: ${{ steps.filter.outputs.ldap }}
-      deny: ${{ steps.filter.outputs.deny }}
 
     steps:
       - name: Checkout
@@ -152,18 +168,41 @@ jobs:
               - 'scripts/check-sdk-conformance.sh'
               - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
+            # Gates the proto-freshness job. Audit §4.8#8: generated SDK types
+            # could drift from proto/ past the PR gate, because the only
+            # freshness check lived in `quality` — gated on the `rust` filter,
+            # which names codegen's INPUTS (proto/**) but not its OUTPUTS. A PR
+            # that edited only sdks/*/generated (a hand-edit, a bad merge
+            # resolution, a revert) ran no freshness check at all. Both the
+            # inputs and the outputs are listed here, and
+            # scripts/check-proto-freshness-gate.sh fails CI if either is lost.
             proto:
+              # Inputs: buf.yaml, buf.gen.yaml and buf.lock all live under proto/.
               - 'proto/**'
-              - 'buf.yaml'
-              - 'buf.gen.yaml'
-            fuzz-targets:
-              - 'fuzz/**'
+              # Outputs: the two directories `make proto-check` diffs.
+              - 'sdks/typescript/src/generated/**'
+              - 'sdks/go/generated/**'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
+            # Reproduces loadtest-smoke.yml's old pull_request paths exactly,
+            # now that its PR entry point is ci.yml's `loadtest-smoke` job
+            # (production-readiness task 26.29).
+            loadtest:
+              - 'loadtest/**'
               - 'src/**'
+              - 'Cargo.toml'
               - 'Cargo.lock'
-            bench-targets:
-              - 'src/storage/**'
-              - 'benches/**'
-              - 'Cargo.lock'
+              - 'Makefile'
+              - '.github/workflows/loadtest-smoke.yml'
+            # NOTE (production-readiness task 26.33): there were once
+            # `fuzz-targets` and `bench-targets` filters here. No job ever read
+            # them — they were computed, printed into the summary table, and
+            # discarded. Worse, printing them next to the real gates suggested
+            # fuzz and bench were wired into `required-summary`; they are
+            # deliberately NOT (fuzz.yml:9-31, bench-regression.yml:27-46, each
+            # with its own paths trigger, its own reasons and a named owner).
+            # Deleted rather than wired: wiring them would fold an advisory
+            # workflow into the required check against an explicit decision.
             docs-only:
               - 'docs/**'
               - '**.md'
@@ -179,11 +218,11 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
-            deny:
-              - 'deny.toml'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/ci.yml'
+            # The `deny` filter was deleted with the same reasoning (task 26.33,
+            # real count: THREE dead outputs, not the two the finding named).
+            # cargo-deny was deliberately un-gated by audit §4.8#7 — "an advisory
+            # can arrive with no diff at all" — so the leftover output told a
+            # reader the job was path-gated when it runs on every PR.
 
       - name: Summarize filter results
         run: |
@@ -197,12 +236,10 @@ jobs:
             echo "| sdks-node | ${{ steps.filter.outputs.sdks-node }} |"
             echo "| sdks-any | ${{ steps.filter.outputs.sdks-any }} |"
             echo "| proto | ${{ steps.filter.outputs.proto }} |"
-            echo "| fuzz-targets | ${{ steps.filter.outputs.fuzz-targets }} |"
-            echo "| bench-targets | ${{ steps.filter.outputs.bench-targets }} |"
+            echo "| loadtest | ${{ steps.filter.outputs.loadtest }} |"
             echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
             echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
-            echo "| deny | ${{ steps.filter.outputs.deny }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -244,19 +281,295 @@ jobs:
       - name: README version drift — guard self-test
         run: bash scripts/tests/check-readme-version.test.sh
 
+      # Audit §4.8#12: the verification guide told the reader to run two
+      # commands that cannot execute (`cosign triangulate` on a detached blob
+      # signature, and `brew install slsa-verifier`, which has no formula), and
+      # the README's headline install step downloaded the binary and SHA256SUMS
+      # from the same release page and ran `sha256sum -c` — a check anyone who
+      # can replace the binary can also pass. This guard refuses a doc that
+      # names an unpublished asset, tells the reader to run either dead command,
+      # or trusts SHA256SUMS without a pinned cosign verification first.
+      - name: Release-verification docs (check-release-verification-docs.sh)
+        run: bash scripts/check-release-verification-docs.sh
+
+      # Proof the guard can go red: it must reject both dead commands and the
+      # pre-fix forgeable install step.
+      - name: Release-verification docs — guard self-test
+        run: bash scripts/tests/check-release-verification-docs.test.sh
+
+      # Audit §4.8#13: slsa-github-generator is the one third-party reference
+      # that cannot be a commit SHA — upstream requires a tag — and it runs with
+      # contents: write + id-token: write. .github/slsa-generator.pin records the
+      # commit the tag must resolve to; this guard refuses a mismatch, so a moved
+      # upstream tag surfaces on a PR rather than at release time.
+      - name: SLSA generator pin (check-slsa-generator-pin.sh)
+        run: bash scripts/check-slsa-generator-pin.sh
+
+      # Proof the guard can go red: it must reject a moved tag, a workflow/pin
+      # disagreement, a malformed pin, and an unresolvable upstream.
+      - name: SLSA generator pin — guard self-test
+        run: bash scripts/tests/check-slsa-generator-pin.test.sh
+
+      # Audit §4.8#14: deploy/systemd/hearth.service put StartLimitBurst and
+      # StartLimitIntervalSec in [Service], where systemd ignores them — the
+      # documented "3 restarts in 60 s" crash-loop bound was never in force.
+      # The failure is silent: the unit still starts and the warning goes to a
+      # journal nobody reads. This parser needs no systemd.
+      - name: systemd units (check-systemd-units.sh)
+        run: bash scripts/check-systemd-units.sh
+
+      # Proof the guard can go red: it must reject the pre-fix [Service]
+      # placement and an unbounded restart policy.
+      - name: systemd units — guard self-test
+        run: bash scripts/tests/check-systemd-units.test.sh
+
+      # Audit §4.8#15: the Dockerfile described a build other than the one it
+      # defines — a stale, "aspirational" MSRV, a "static-ish" binary on a
+      # Debian runtime, "pure-Rust" TLS, and a build context an order of
+      # magnitude smaller than the real one. This guard holds the two claims
+      # that rot silently: the MSRV and the static/dynamic linkage.
+      - name: Dockerfile claims (check-dockerfile-claims.sh)
+        run: bash scripts/check-dockerfile-claims.sh
+
+      # Proof the guard can go red: it must reject the pre-fix MSRV and static
+      # claims, and a builder older than the declared MSRV.
+      - name: Dockerfile claims — guard self-test
+        run: bash scripts/tests/check-dockerfile-claims.test.sh
+
+      # Audit §4.8#16 / §4.12#15: the scanner configuration claimed four kinds
+      # of cover it did not have — fifteen dead `event_name == 'schedule'`
+      # conditions in this very workflow, an advisory-only Trivy job, an
+      # unscanned published image, and two suppressions naming packages absent
+      # from the tree their rationale described. This guard fails the build if
+      # any of the four returns.
+      - name: Scanner coverage (check-scanner-coverage.sh)
+        run: bash scripts/check-scanner-coverage.sh
+
+      # Proof the guard can go red: it must reject each of the four audited
+      # shapes, not merely pass on the remediated tree.
+      - name: Scanner coverage — guard self-test
+        run: bash scripts/tests/check-scanner-coverage.test.sh
+
+      # Audit §4.8#17: deploy/docker-compose.yml sourced the repository-root
+      # `.env` into the container. Compose injects every key of an env_file into
+      # the runtime environment, so unrelated developer credentials reached the
+      # server process, and a stray HEARTH_* key silently overrode the
+      # bind-mounted hearth.yaml. This guard holds the env_file scope.
+      - name: Compose env scope (check-compose-env-scope.sh)
+        run: bash scripts/check-compose-env-scope.sh
+
+      # Proof the guard can go red: it must reject the audited `../.env` line in
+      # both compose spellings, and an example declaring an out-of-scope key.
+      - name: Compose env scope — guard self-test
+        run: bash scripts/tests/check-compose-env-scope.test.sh
+
+      # Audit §4.12#12: required-summary is the only required context on main,
+      # so a job blocks a merge exactly when it reaches that job. Three SDK jobs
+      # did not, and five workflows ran on their own pull_request trigger where
+      # no `needs:` could reach them. This guard holds the wiring — including
+      # the fail-open where a job joins `needs:` but not the results loop.
+      - name: Required-check coverage (check-required-summary-coverage.sh)
+        run: bash scripts/check-required-summary-coverage.sh
+
+      # Proof the guard can go red: it must reject a job outside `needs:`, a job
+      # outside the loop, and a folded workflow that regains a PR trigger.
+      - name: Required-check coverage — guard self-test
+        run: bash scripts/tests/check-required-summary-coverage.test.sh
+
+      # Audit §4.12#13: `make sdk-smoke-local` booted `serve --dev` from the
+      # repo root with no --config. That auto-detects ./hearth.yaml, which
+      # CLAUDE.md tells every contributor to create, so the smoke ran against
+      # the contributor's config — issuer https://auth.example.com, not the
+      # local port. CI never saw it: hearth.yaml is gitignored.
+      - name: Dev-server config isolation (check-dev-server-config-isolation.sh)
+        run: bash scripts/check-dev-server-config-isolation.sh
+
+      # Proof the guard can go red: it must reject the pre-fix bare launch and a
+      # cd into a directory the script did not create.
+      - name: Dev-server config isolation — guard self-test
+        run: bash scripts/tests/check-dev-server-config-isolation.test.sh
+
+      # Audit §4.12#18: [profile.ci] in .config/nextest.toml was dead — nothing
+      # selected it, so every run used [profile.default] (fail-fast, no
+      # retries). This guard fails the build if a declared profile stops being
+      # selected again.
+      - name: Nextest profile is live (check-nextest-profile-live.sh)
+        run: bash scripts/check-nextest-profile-live.sh
+
+      # Proof the guard can go red: it must reject the audited unselected
+      # [profile.ci], and must not accept a near-miss selector name.
+      - name: Nextest profile is live — guard self-test
+        run: bash scripts/tests/check-nextest-profile-live.test.sh
+
+      # Audit §9 item 3 / task 24.4: "Two regression tests for data-integrity
+      # defects were committed red and stayed red." A red test reaches main when
+      # something between `cargo nextest` and the one required context swallows
+      # its exit code. This guard holds shut the five mechanisms this repository
+      # has already been bitten by — a filter on the gate's own command,
+      # prerequisite chaining in `make check`, a continue-on-error step on the
+      # required path, a `| tee` with no pipefail, and a results loop that
+      # denylists failure instead of allowlisting success. Pure text, ~1 s.
+      - name: Red-test gate (check-red-test-gate.sh)
+        run: bash scripts/check-red-test-gate.sh
+
+      # Proof the guard can go red: it must reject each of those five shapes,
+      # and must NOT fire on the comment in the quality job that explains why
+      # the audited continue-on-error step was removed.
+      - name: Red-test gate — guard self-test
+        run: bash scripts/tests/check-red-test-gate.test.sh
+
+      # Task 26.30 / audit reports/subsystem-audit-fuzz-loadtest-2026-09-21.md
+      # F-7: `cargo fuzz run <target> "$SEEDS"` made the TRACKED seed corpus
+      # libFuzzer's write directory — two 2 000-run passes left 14-364
+      # generated files in each seed directory, and the documented local
+      # command dirtied the repository. The rule is argument ORDER, so it is
+      # pure text and builds nothing.
+      - name: Fuzz corpus write path (check-fuzz-corpus-paths.sh)
+        run: bash scripts/check-fuzz-corpus-paths.sh
+
+      # Proof the guard can go red: it must reject "$SEEDS" first, a literal
+      # seeds path first, no corpus at all, a fuzz workflow whose invocation
+      # has vanished, an un-gitignored corpus, and the wrong fix of
+      # gitignoring the reviewed seeds instead.
+      - name: Fuzz corpus write path — guard self-test
+        run: bash scripts/tests/check-fuzz-corpus-paths.test.sh
+
+      # Task 26.27 / audit reports/cold-first-run-2026-09-21.md C-7: the
+      # `quickstart` block POST /admin/bootstrap hands a brand-new operator
+      # hard-coded port 8420 and cited docs/guides/getting-started.md, which
+      # does not exist (it is .mdx). The first commands a stranger copies.
+      - name: Bootstrap quickstart is runnable (check-bootstrap-quickstart.sh)
+        run: bash scripts/check-bootstrap-quickstart.sh
+
+      # Proof the guard can go red: a hard-coded host:port, a snippet with no
+      # runtime host at all, a cited path that does not exist, and a renamed
+      # generator — while NOT firing on the Rust-side fallback literal.
+      - name: Bootstrap quickstart — guard self-test
+        run: bash scripts/tests/check-bootstrap-quickstart.test.sh
+
+      # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
+      # positive: it matched the literal text `#[ignore` anywhere on a line, so
+      # prose saying a test must NOT be ignored reported itself. A gate that
+      # cries wolf gets switched off, and a merge gate switched off is the
+      # fail-open task 24.4 exists to prevent.
+      - name: Test-quality #[ignore] rule — guard self-test
+        run: bash scripts/tests/check-test-quality.test.sh
+
+      # Audit §9 item 3 / task 24.3: the cheap half of the mutation spot-check.
+      # Refuses a manifest whose anchor string has moved, become ambiguous, or
+      # whose test has been renamed away — the ways a mutation manifest rots.
+      # Builds nothing; the expensive half runs nightly in
+      # .github/workflows/mutation-spot-check.yml.
+      - name: Mutation manifest is live (mutation-spot-check.sh --check)
+        run: bash scripts/mutation-spot-check.sh --check
+
+      # Proof the runner can report a failure: it must refuse a guard that
+      # survives its own mutation, a test that is already red at HEAD, and a
+      # mutation that does not compile — and must restore every file it touched.
+      - name: Mutation spot-check runner — self-test
+        run: bash scripts/tests/mutation-spot-check.test.sh
+
+      # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
+      # Helm chart and seven SDK releases published from a commit whose suite was
+      # red, because only the binary channel was gated. The v1.6.11 image and
+      # chart went out 37 minutes BEFORE the verdict said no. This guard fails
+      # the build if any publish job stops waiting for that verdict.
+      # Pure bash over .github/workflows — no Rust build required.
+      - name: Publish gating (check-publish-gating.sh)
+        run: bash scripts/check-publish-gating.sh
+
+      # The guard is the deliverable for B2/B6, so it needs a test proving it
+      # FAILS on an ungated publish job — otherwise an `exit 0` stub passes CI
+      # forever, which is the same class of defect the audit found.
+      - name: Publish gating — guard self-test
+        run: bash scripts/tests/check-publish-gating.test.sh
+
+      # The runtime half of the same fix: the wait itself. Its test proves it
+      # refuses on a red verdict, an absent verdict, and an unreadable API.
+      - name: Await-green-commit gate — self-test
+        run: bash scripts/tests/await-green-commit.test.sh
+
+      # Audit finding §4.8#3: the audited commit merged 41 minutes before its
+      # one required context reported failure, via an always-on admin bypass on
+      # the "Protect main" ruleset. This guard reads the live ruleset and fails
+      # if the required-summary context is not required, changes can reach main
+      # outside a PR, or ANY bypass actor exists. An unreadable API is a FAIL,
+      # not a skip.
+      - name: Branch protection (check-branch-protection.sh)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/check-branch-protection.sh
+
+      # The guard is the deliverable for §4.8#3, so it needs a test proving it
+      # FAILS on the audited shape — the always-on bypass — otherwise an
+      # `exit 0` stub passes CI forever.
+      - name: Branch protection — guard self-test
+        run: bash scripts/tests/check-branch-protection.test.sh
+
+      # Audit findings §4.8#7 / §4.12#3: both dependency-advisory gates were
+      # continue-on-error with no re-raise (a 70-vulnerability scan produced a
+      # success job), and the cargo-deny job was skipped on every PR that did
+      # not touch the lockfile. This guard fails the build if an advisory
+      # scanner is disarmed again or the gate regains a paths filter.
+      - name: Advisory gates (check-advisory-gates.sh)
+        run: bash scripts/check-advisory-gates.sh
+
+      # Proof the guard can go red: it must reject both audited shapes.
+      - name: Advisory gates — guard self-test
+        run: bash scripts/tests/check-advisory-gates.test.sh
+
+      # Audit §4.8#4 / §4.12#6: the Helm chart's default image tag was the bare
+      # appVersion (`hearth:1.6.8`), but the Docker workflow publishes only
+      # v-prefixed semver tags, so a default `helm install` could not pull an
+      # image. This guard refuses a chart whose default tag names something the
+      # image workflow never pushes, or whose appVersion is stale.
+      - name: Chart image tag (check-chart-image-tag.sh)
+        run: bash scripts/check-chart-image-tag.sh
+
+      # Proof the guard can go red: it must reject the pre-fix bare-appVersion
+      # default and a stale appVersion.
+      - name: Chart image tag — guard self-test
+        run: bash scripts/tests/check-chart-image-tag.test.sh
+
+      # Audit §4.8#6 / §4.12#9: release.yml's inline summary parser could not
+      # read nextest's ANSI-coloured output, so a suite that completed with
+      # four named failures was reported to the release engineer as one that
+      # never ran. The parser now lives in scripts/summarize-nextest.sh; this
+      # self-test proves the old regex is red on the coloured fixture and the
+      # new parser reports a completed suite and names every failure.
+      - name: Release-validation summary parser — self-test
+        run: bash scripts/tests/summarize-nextest.test.sh
+
+      # Audit §4.8#11 / §4.12#5: release SBOMs described a stale version
+      # because cargo-cyclonedx reads Cargo.toml. release.yml and docker.yml
+      # stamp the tag's version with scripts/stamp-version.sh first; this
+      # test proves the stamp touches the [package] version and nothing else.
+      - name: Version stamp — self-test
+        run: bash scripts/tests/stamp-version.test.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:
-    name: quality (clippy + fmt + nextest + css/proto check)
+    name: quality (clippy + fmt + nextest + css check)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` so a filter-job
     # failure causes downstream jobs to FAIL (not silently SKIP). Without the
     # guard, `needs.filter.outputs.rust` evaluates to '' on filter failure,
     # `'' == 'true'` is false, and branch protection treats `skipped` as
     # passing — allowing a PR to merge with zero quality checks run.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # `nextest --workspace` links 307 test binaries. Measured on one of them:
+      # 429 MB, of which 388 MB (90%) is debug sections. At that size the set
+      # does not fit the runner's ~108 GB, and `ld` dies mid-link with
+      # "collect2: fatal error: ld terminated with signal 7 [Bus error]" —
+      # SIGBUS because the mmap'd output cannot be extended on a full disk, not
+      # a compiler bug. Line tables keep file and line in test backtraces, which
+      # is all a CI failure report needs, and drop roughly 90% of the bytes.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
       - name: Checkout
@@ -286,19 +599,12 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
-        with:
-          tool: cargo-audit
-
-      # HEA-1370: cargo-audit complements cargo-deny with the RustSec advisory
-      # database. --deny warnings promotes unmaintained/unsound advisories to
-      # hard failures; .cargo/audit.toml carries the sim-only bincode exception.
-      # HEA-1714: continue-on-error so an advisory never masks nextest failures.
-      # cargo-deny advisory/license/ban checks run in the dedicated cargo-deny job.
-      - name: Security audit (cargo audit --deny warnings)
-        continue-on-error: true
-        run: cargo audit --deny warnings
+      # cargo-audit and cargo-deny run in the dedicated cargo-deny job below,
+      # which runs on EVERY PR and can fail. The audit 2026-08-28 (§4.12#3)
+      # found the step here was continue-on-error with no re-raise, so a
+      # 70-vulnerability scan produced a `success` job. Do not re-add a
+      # disarmed advisory step; scripts/check-advisory-gates.sh fails if one
+      # appears.
 
       - name: make test-quality (block false-confidence test patterns — HEA-571)
         run: make test-quality
@@ -310,14 +616,27 @@ jobs:
       - name: make security-gate (assert ROPC password grant is unreachable — HEA-1862)
         run: make security-gate
 
+      # Audit §4.12#18: `[profile.ci]` in .config/nextest.toml (retries = 2,
+      # fail-fast = false) was dead — nothing selected it, so every run used
+      # `[profile.default]` (retries = 0, fail-fast = true). A red suite stopped
+      # at the first failure and under-reported the rest, and a genuine flake
+      # failed the build with no retry. nextest reads NEXTEST_PROFILE, so this
+      # one variable makes the profile live without changing `make check`, and
+      # leaves the local TDD loop on the fail-fast default where it belongs.
       - name: make check (clippy -D warnings + fmt --check + nextest --workspace)
+        env:
+          NEXTEST_PROFILE: ci
         run: make check
 
       - name: make css-check (rebuild Tailwind and fail if app.css drifts)
         run: make css-check
 
-      - name: make proto-check (regenerate SDKs and fail if generated code drifts)
-        run: make proto-check
+      # `make proto-check` deliberately does NOT run here. Audit §4.8#8: it sat
+      # after `make check` in this job, so a clippy or test failure meant the
+      # freshness verdict was never produced — and this job is gated on the
+      # `rust` filter, which does not name the generated directories at all.
+      # It now runs in the dedicated `proto-freshness` job below, gated on the
+      # `proto` filter and independent of the Rust toolchain.
 
       - name: Install PyYAML (needed by make openapi-check)
         # Use the distro package manager instead of an unpinned pip install —
@@ -334,6 +653,60 @@ jobs:
       - name: make notice-check (fail if THIRD_PARTY_LICENSES is stale — HEA-1268)
         run: make notice-check
 
+      # Audit §4.8#10: the freshness key was a whole-file hash of Cargo.lock,
+      # which includes the workspace's own packages, so every release version
+      # bump failed this gate with nothing attributable to regenerate. The key
+      # is now scripts/attribution-key.sh. This self-test proves it ignores a
+      # workspace version bump and a re-pointed dependency edge, and still moves
+      # on anything that can change a licence.
+      - name: Attribution freshness key — self-test
+        run: bash scripts/tests/attribution-key.test.sh
+
+  # ── Generated-SDK freshness (audit 2026-08-28 §4.8#8) ──────────────────────
+  #
+  # `make proto-check` regenerates the TypeScript and Go types from proto/ and
+  # fails if the committed output differs. It used to be the last step of the
+  # `quality` job, which gave it two ways to miss drift:
+  #
+  #   1. `quality` is gated on the `rust` filter, which lists codegen's inputs
+  #      (proto/**) but never its outputs. A PR touching only
+  #      sdks/typescript/src/generated or sdks/go/generated skipped the job.
+  #   2. The step ran after `make check`. Any clippy or test failure ended the
+  #      job first, so the freshness verdict was never produced.
+  #
+  # This job removes both. It is gated on the `proto` filter (inputs AND
+  # outputs), needs only buf — no Rust toolchain — and nothing runs ahead of it.
+  proto-freshness:
+    name: proto-freshness (generated SDK types match proto/)
+    needs: filter
+    # Same HEA-685 shape as `quality`: a filter-job failure must FAIL this job,
+    # not silently skip it, because branch protection treats `skipped` as pass.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.proto == 'true') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+        with:
+          github_token: ${{ github.token }}
+
+      # Proof the gate cannot silently lose coverage: the `proto` filter must
+      # keep naming every codegen input and both generated output directories.
+      - name: Freshness-gate coverage — guard self-test
+        run: bash scripts/tests/check-proto-freshness-gate.test.sh
+
+      - name: Freshness-gate coverage (check-proto-freshness-gate.sh)
+        run: bash scripts/check-proto-freshness-gate.sh
+
+      - name: make proto-check (regenerate SDKs and fail if generated code drifts)
+        run: make proto-check
+
   # ── UI tests — merged smoke/regression/accessibility + exploratory ──────────
   #
   # Previously two separate jobs (ci.ui-tests + ci.ui-tests-exploratory), each
@@ -345,7 +718,7 @@ jobs:
     name: ui (Playwright — smoke + regression + accessibility + exploratory)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.ui == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.ui == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -451,7 +824,7 @@ jobs:
     name: sdk-node (${{ matrix.node-version }}.x)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -499,7 +872,7 @@ jobs:
     name: sdk-conformance (docs/specs/SDK.md)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -529,7 +902,7 @@ jobs:
   sdk-rust:
     name: sdk-rust
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -547,7 +920,7 @@ jobs:
   sdk-python:
     name: sdk-python
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-python == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-python == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -570,7 +943,7 @@ jobs:
   sdk-php:
     name: sdk-php
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-php == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-php == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -595,7 +968,7 @@ jobs:
   sdk-kotlin:
     name: sdk-kotlin
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-kotlin == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-kotlin == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -623,7 +996,7 @@ jobs:
   sdk-go:
     name: sdk-go
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-go == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-go == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -653,7 +1026,7 @@ jobs:
   sdk-typescript:
     name: sdk-typescript
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-typescript == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-typescript == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -663,10 +1036,21 @@ jobs:
           persist-credentials: false
       - name: Free disk space (hearth debug build needs headroom)
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-      - name: Setup Rust toolchain + protoc (builds the hearth test server)
+      - name: Setup Rust toolchain + protoc
         uses: ./.github/actions/setup-rust
         with:
           toolchain: stable
+      # The suite's `ensureBinary()` shells out to `cargo build` from inside a
+      # vitest `beforeAll`, which vitest caps at 60 s. A cold debug build of
+      # hearth cannot finish in that, so every server-backed file (admin-crud,
+      # auth-flow, jwks) died on "Hook timed out in 60000ms" rather than on
+      # anything it asserted. Building here leaves `ensureBinary()` a no-op.
+      # Exactly `cargo build`, not `cargo build --bin hearth`: `ensureBinary()`
+      # runs the former, which also compiles every example in the package, so a
+      # narrower build here leaves work in front of the 60 s hook and the
+      # timeout comes back.
+      - name: Build the hearth test server
+        run: cargo build
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -697,7 +1081,7 @@ jobs:
     name: abuse-coverage (§3.41 adversarial test gate)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.abuse-coverage == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.abuse-coverage == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
@@ -728,7 +1112,7 @@ jobs:
   ldap-integration:
     name: ldap-integration (OpenLDAP — HEA-1331)
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -745,6 +1129,11 @@ jobs:
       HEARTH_TEST_LDAP_BASE_DN: dc=hearth,dc=test
       HEARTH_TEST_LDAP_USER: hearthldaptest
       HEARTH_TEST_LDAP_USER_PASSWORD: HearthLdapUser1!
+      # Same reason as the quality job: this run died on "ld terminated with
+      # signal 7 [Bus error]" followed by "No space left on device". Full debug
+      # info is ~90% of every test binary's bytes.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
       - name: Checkout
@@ -869,7 +1258,7 @@ jobs:
     name: cluster-chaos (Raft AC-1 through AC-7)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # AC-5–7 each have election windows (up to 10–15 s) and write loops.
     # 10 minutes is generous; typical runtime is ~90 s.
@@ -916,25 +1305,29 @@ jobs:
             echo "| AC-7: write contention, 2 leadership changes | cluster_chaos.rs |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Dependency advisory gate (HEA-1652) ─────────────────────────────────────
+  # ── Dependency advisory gate (HEA-1652, audit 2026-08-28 §4.8#7, §4.12#3) ───
   #
-  # Dedicated cargo-deny job so advisory/license/ban violations appear as their
-  # own named CI check rather than being buried in the 30-minute quality job.
+  # Dedicated job so advisory/license/ban violations appear as their own named
+  # CI check rather than being buried in the 30-minute quality job.
   #
-  # Gated on the `deny` filter (deny.toml, Cargo.toml, Cargo.lock) so it only
-  # runs when dependency state actually changes. Always runs on pushes to main
-  # and schedule events (security.yml's weekly cron also fires cargo-deny, but
-  # that workflow does not feed required-summary — this one does).
+  # Runs on EVERY PR, unconditionally. It was gated on the `deny` paths filter
+  # (deny.toml, Cargo.toml, Cargo.lock), so a PR that did not touch dependency
+  # state never ran it, and a week-old advisory failure never blocked a merge
+  # (audit §4.8#7). An advisory can arrive with no diff at all: the advisory
+  # database moves while the tree stands still.
   #
-  # No Rust build needed: cargo-deny reads Cargo.lock and deny.toml directly.
-  # Runtime is ~30 s vs ~25 min for the full quality job.
+  # cargo-audit runs here too. It sat in the quality job as a continue-on-error
+  # step with no re-raise (audit §4.12#3): a 70-vulnerability scan produced a
+  # `success` job. Neither step here is continue-on-error — a finding fails
+  # this job, and required-summary needs this job, so it blocks the merge.
+  # scripts/check-advisory-gates.sh pins this shape.
+  #
+  # No Rust build needed: both tools read Cargo.lock directly. Runtime ~60 s.
 
   cargo-deny:
-    name: cargo-deny (advisories + licenses + bans)
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.deny == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    name: dependency-advisories (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -942,13 +1335,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install cargo-deny
+      - name: Install cargo-deny + cargo-audit
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
         with:
-          tool: cargo-deny
+          tool: cargo-deny,cargo-audit
 
       - name: cargo deny check (advisories + licenses + bans)
         run: cargo deny check
+
+      # HEA-1370: cargo-audit complements cargo-deny with the RustSec advisory
+      # database. --deny warnings promotes unmaintained/unsound advisories to
+      # hard failures; .cargo/audit.toml carries the sim-only bincode exception.
+      - name: cargo audit (RustSec advisories, --deny warnings)
+        run: cargo audit --deny warnings
 
   # ── MSRV gate (HEA-2115) ─────────────────────────────────────────────────────
   #
@@ -963,7 +1362,7 @@ jobs:
   msrv:
     name: msrv (1.88.0)
     needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -996,10 +1395,86 @@ jobs:
   # A single always-running summary gate eliminates that gap: one required check
   # name, always reported, correctly aggregates pass/skip/fail (HEA-693).
 
+  # ── Folded-in workflows (audit 2026-08-28 §4.12#12) ─────────────────────────
+  #
+  # `required-summary` below is the ONLY required context on main
+  # (scripts/check-branch-protection.sh asserts it), and GitHub cannot express
+  # `needs:` across workflows. Five workflows therefore ran on their own
+  # pull_request trigger and could not fail a merge, however red they went.
+  #
+  # Each is now a reusable workflow called from here and listed in
+  # `required-summary`'s `needs:`. Their own files keep the push, schedule and
+  # workflow_dispatch triggers that ci.yml has no equivalent for; only the
+  # pull_request entry point moved. Gating below reproduces each one's old
+  # paths filter using the `filter` job's outputs.
+
+  commit-lint:
+    name: commit-lint
+    # PR-only: a push to main has no PR title to lint.
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/commit-lint.yml
+    permissions:
+      pull-requests: read
+
+  proto-governance:
+    name: proto-governance
+    needs: [filter]
+    # Old trigger: proto/**, buf.yaml, buf.gen.yaml. The `proto` filter output
+    # covers those plus codegen's outputs, so this runs at least as often.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.proto == 'true') || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/proto.yml
+    permissions:
+      contents: read
+
+  sdk-smoke:
+    name: sdk-smoke
+    needs: [filter]
+    # Old trigger: sdks/**, examples/{typescript-nextjs,go-gin}/**, src/**.
+    # `sdks-any` covers the first, `rust` covers src/**.
+    if: (needs.filter.result == 'success' && (needs.filter.outputs.sdks-any == 'true' || needs.filter.outputs.rust == 'true')) || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/sdk-smoke.yml
+    permissions:
+      contents: read
+
+  security:
+    name: security
+    needs: [filter]
+    # Old trigger: every PR except doc-only ones (paths-ignore docs/**, **.md).
+    if: (needs.filter.result == 'success' && needs.filter.outputs.docs-only != 'true') || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  loadtest-smoke:
+    name: loadtest-smoke
+    needs: [filter]
+    # Old trigger: loadtest/**, src/**, Cargo.toml, Cargo.lock, Makefile and
+    # the workflow file itself — reproduced by the `loadtest` filter output.
+    # Task 26.29: it ran on its own pull_request trigger and so could not fail
+    # a merge, however red it went. Worth folding in only now that `run_load`
+    # returns a real exit code instead of a bare Ok(()).
+    if: (needs.filter.result == 'success' && needs.filter.outputs.loadtest == 'true') || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/loadtest-smoke.yml
+    permissions:
+      contents: read
+
+  # ADVISORY — deliberately absent from required-summary's needs below.
+  # HEA-2106 holds the switch until the false-positive rate against stacked PRs
+  # is measured clean, and the job itself is still `continue-on-error: true`.
+  # Folding it in puts it one line from blocking; it does not block today.
+  pr-head-ancestor-guard:
+    name: pr-head-ancestor-guard (advisory)
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/pr-head-ancestor-guard.yml
+    permissions:
+      contents: read
+
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv]
+    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny, msrv, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1008,23 +1483,41 @@ jobs:
         env:
           FILTER: ${{ needs.filter.result }}
           QUALITY: ${{ needs.quality.result }}
+          PROTO_FRESHNESS: ${{ needs.proto-freshness.result }}
           UI: ${{ needs.ui.result }}
           SDK_NODE: ${{ needs.sdk-node.result }}
           SDK_RUST: ${{ needs.sdk-rust.result }}
           SDK_PYTHON: ${{ needs.sdk-python.result }}
           SDK_PHP: ${{ needs.sdk-php.result }}
+          SDK_KOTLIN: ${{ needs.sdk-kotlin.result }}
+          SDK_GO: ${{ needs.sdk-go.result }}
+          SDK_TYPESCRIPT: ${{ needs.sdk-typescript.result }}
           SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
           ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
           LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
           CARGO_DENY: ${{ needs.cargo-deny.result }}
           MSRV: ${{ needs.msrv.result }}
+          COMMIT_LINT: ${{ needs.commit-lint.result }}
+          PROTO_GOVERNANCE: ${{ needs.proto-governance.result }}
+          SDK_SMOKE: ${{ needs.sdk-smoke.result }}
+          SECURITY: ${{ needs.security.result }}
+          LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV"
-          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV"; do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              echo "A required job failed or was cancelled."
-              exit 1
-            fi
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY msrv=$MSRV commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          # ALLOWLIST, not a denylist (production-readiness task 24.4). This
+          # loop used to fail only on "failure" or "cancelled". That is
+          # fail-open by construction: any result GitHub adds, and any empty
+          # string from an expression that did not evaluate, would have been
+          # read as "fine". `success` and `skipped` are the only two results
+          # that may pass; everything else — including "" — blocks the merge.
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY" "$MSRV" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "A required job reported '${result:-<empty>}' — not success or skipped."
+                exit 1
+                ;;
+            esac
           done
           echo "All jobs passed or were legitimately skipped."

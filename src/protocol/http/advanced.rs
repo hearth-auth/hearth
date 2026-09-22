@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use crate::core::AgentId;
+use crate::core::{AgentId, RealmId};
 use crate::identity::{
     CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest, DeriveAatRequest, IdentityError,
     IssueAatRequest, RegisterSpiffeIdRequest,
@@ -128,6 +128,12 @@ async fn validate_aat(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // `extract_admin_auth` admits every `hearth.*.admin` sub-admin; the
+    // per-handler gate is what confines this route to the agent domain. It was
+    // missing here (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, PERM) {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id.clone();
     let aat = match body.get("aat").and_then(|v| v.as_str()).map(str::to_string) {
         Some(s) => s,
@@ -239,6 +245,11 @@ async fn consume_transaction_token(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Missing per-handler gate — see the note on `validate_aat`
+    // (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, PERM) {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id.clone();
     let token = match body
         .get("token")
@@ -309,6 +320,11 @@ async fn get_spiffe_mapping(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Missing per-handler gate — see the note on `validate_aat`
+    // (audit 2026-08-28 §4.1#9). Its `register` and `delete` twins already gate.
+    if let Err(e) = require_admin_permission(&auth, PERM) {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id.clone();
     let agent_id = match agent_id_str.parse::<AgentId>() {
         Ok(a) => a,
@@ -381,6 +397,49 @@ async fn delete_spiffe_mapping(
 
 // ── Cross-realm trust policy handlers ────────────────────────────────────────
 
+/// Refuses a tenant-realm actor authoring a cross-realm trust policy that names
+/// the reserved **system realm** as its source.
+///
+/// Every write on this route stores the policy in the actor's *own* realm
+/// (`auth.realm_id`); the route carries no target-realm parameter. The
+/// `scoped_realm` guard in `admin.rs` reads those policies out of the target
+/// realm when a nil-UUID system-realm operator reaches into a tenant realm
+/// (audit 2026-08-28 §4.1#8). Without this gate a tenant admin could author a
+/// policy naming the system realm as source, withhold `hearth.admin`, and
+/// revoke the platform operator's `/admin/realms/{id}/*` access to their own
+/// realm — a tenant denying service to the operator.
+///
+/// Policies between two tenant realms are unaffected: only a source of the
+/// reserved system realm is restricted, and only for a non-system actor.
+///
+/// Deletion is deliberately **not** gated. A cross-realm policy that names the
+/// system realm can only ever narrow the operator's access — the ungoverned
+/// default is permissive — so removing one always relaxes, never tightens.
+/// Gating the delete would make a policy stored before this rule existed
+/// unrecoverable from either side: the operator cannot reach these routes on a
+/// tenant realm (they are keyed on the actor's own realm and
+/// `extract_admin_auth` requires a token valid in it), so the tenant admin's
+/// `DELETE` is the only recovery valve there is.
+pub(super) fn reject_tenant_authored_system_source(
+    actor_realm: &RealmId,
+    source_realm: &RealmId,
+) -> Result<(), Response> {
+    use crate::identity::keys::is_system_realm;
+
+    if is_system_realm(source_realm) && !is_system_realm(actor_realm) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "system_realm_source_forbidden",
+                "message": "only a system-realm actor may author a cross-realm trust \
+                            policy that names the reserved system realm as its source"
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 async fn create_cross_realm_policy(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -393,6 +452,9 @@ async fn create_cross_realm_policy(
     let realm_id = auth.realm_id.clone();
     if let Err(e) = require_admin_permission(&auth, PERM) {
         return e.into_response();
+    }
+    if let Err(e) = reject_tenant_authored_system_source(&realm_id, &body.source_realm_id) {
+        return e;
     }
     let identity = Arc::clone(&state.identity);
     match tokio::task::spawn_blocking(move || identity.create_cross_realm_policy(&realm_id, &body))
@@ -415,6 +477,11 @@ async fn list_cross_realm_policies(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Missing per-handler gate — see the note on `validate_aat`
+    // (audit 2026-08-28 §4.1#9). Its `create` and `delete` twins already gate.
+    if let Err(e) = require_admin_permission(&auth, PERM) {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id.clone();
     let identity = Arc::clone(&state.identity);
     match tokio::task::spawn_blocking(move || identity.list_cross_realm_policies(&realm_id)).await {
@@ -436,6 +503,11 @@ async fn get_cross_realm_policy(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // Missing per-handler gate — see the note on `validate_aat`
+    // (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, PERM) {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id.clone();
     let identity = Arc::clone(&state.identity);
     match tokio::task::spawn_blocking(move || identity.get_cross_realm_policy(&realm_id, &id)).await

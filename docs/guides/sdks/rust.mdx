@@ -233,14 +233,20 @@ client.initiate_magic_link("user@example.com").await?;
 // Err(HearthError::RateLimitExceeded) on HTTP 429
 ```
 
-## Synchronous RBAC checks
+## Local RBAC checks
 
-These decode the JWT locally — no network call, no lock:
+These read the claims out of the JWT itself rather than asking the server for a
+freshly-resolved permission set. They still **verify the token first** — the
+signature is checked against the realm JWKS (cached, so usually no network
+round-trip) and `exp`/`nbf`/`iss` are enforced before any claim is read. They
+are therefore `async` methods on `&self`, and return `Err` when the token is
+malformed, unsigned, expired, not yet valid, or signed by an unknown key:
 
 ```rust
-let allowed  = HearthClient::has_permission(&access_token, "documents.write")?;
-let is_admin = HearthClient::has_role(&access_token, "admin")?;
-let in_eng   = HearthClient::in_group(&access_token, "engineering")?;
+let allowed  = client.has_permission(&access_token, "documents.write").await?;
+let is_admin = client.has_role(&access_token, "admin").await?;
+let in_eng   = client.in_group(&access_token, "engineering").await?;
+let in_acme  = client.in_org(&access_token, "org_acme").await?;
 ```
 
 ## Permission delivery modes
@@ -371,9 +377,10 @@ See the [Actix-web guide](./rust-actix.md) for `RequirePermission` as an extract
 | `start_device_flow(scope?)` | Begin Device Authorization Flow (RFC 8628) |
 | `poll_device_token(device_code, interval)` | Poll for device flow completion |
 | `initiate_magic_link(email)` | Initiate passwordless magic-link email ⚠ |
-| `has_permission(token, permission)` | Sync local JWT decode — no network |
-| `has_role(token, role)` | Sync local JWT decode — no network |
-| `in_group(token, group_slug)` | Sync local JWT decode — no network |
+| `has_permission(token, permission).await` | Verifies, then reads the `permissions` claim |
+| `has_role(token, role).await` | Verifies, then reads the `roles` claim |
+| `in_group(token, group_slug).await` | Verifies, then reads the `groups` claim |
+| `in_org(token, org_id).await` | Verifies, then reads the `oid` claim |
 | `check_permission(token, perm, mode, opts)` | Async, mode-aware permission check |
 | `introspect(token)` | RFC 7662 introspection |
 | `authorize(request)` | Begin OAuth authorization code flow |

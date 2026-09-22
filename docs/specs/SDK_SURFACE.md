@@ -51,7 +51,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | **C-01** | Client configuration | Single entry point (`HearthClient`/`NewClient`/etc.) accepting `issuerUrl`, optional `clientId`, `clientSecret`, `jwksTtl`, `introspectionEndpoint`, `httpTimeout`. Validates required params at construction. Throws `ConfigurationError` on invalid URL. See SDK.md §1. |
 | **C-02** | OIDC discovery | Auto-discovers all endpoint URLs from `{issuerUrl}/.well-known/openid-configuration` on first use. Hard-coded paths are prohibited. Caches the document for the session lifetime. Throws `DiscoveryError` on failure. |
 | **C-03** | JWKS fetch & cache | Fetches keys from the discovered `jwks_uri`. Caches by `kid`. Respects `Cache-Control: max-age`, 24 h ceiling. On `kid` miss: re-fetches once before failing. Skips unrecognized `kty` values. Throws `JWKSFetchError` on failure. See SDK.md §2. |
-| **C-04** | Token verification (`verifyToken`) | Verifies signature against JWKS, then validates `exp`, `iss`, `aud` (optional), `iat` (±5 s clock skew) in that order. **EdDSA (`alg: "EdDSA"`, `kty: "OKP"`) must be the primary algorithm selector; RS256/ES256 are federation fallbacks only.** Returns typed `Claims`. Throws typed errors (§C-07). On `kid` miss: re-fetches once. See SDK.md §2 and §6.1 below. |
+| **C-04** | Token verification (`verifyToken`) | Verifies signature against JWKS, then validates `exp`, `iss`, `aud` (optional), `iat` (±5 s clock skew) in that order. **EdDSA (`alg: "EdDSA"`, `kty: "OKP"`) is the only accepted algorithm; every other `alg` — RS256 and ES256 included — must be rejected.** Returns typed `Claims`. Throws typed errors (§C-07). On `kid` miss: re-fetches once. See SDK.md §2 and §6.1 below. |
 | **C-05** | Token introspection | RFC 7662 `POST /introspect`. Never cached. Requires `clientId` + `clientSecret`. Returns typed `IntrospectionResult` (`active`, `sub`, `exp`, `iat`, `iss`, `aud`, `scope`, `client_id`, `extra`). Throws `IntrospectionError` on failure. See SDK.md §3. |
 | **C-06** | Claims API | 17 typed accessors on a `Claims` (or `VerifiedToken`) object. All accessors return `false`/empty (never error) when the claim is absent. Full accessor list in §6.2 below. See SDK.md §4. |
 | **C-07** | Error taxonomy | 10 named error types. Language-native error handling applies (Go: sentinel errors; Python: exceptions; TS/Node: Error subclasses; PHP: `\Throwable`; Rust: enum variants; Kotlin: exceptions). Errors must never include token values. See SDK.md §5. |
@@ -91,7 +91,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 
 | C-ID | Capability | Behavioral contract |
 |------|-----------|---------------------|
-| **C-19** | Admin SDK | `AdminClient` separate from `HearthClient`. Takes `(baseUrl, adminToken, realmId)`. Sends `X-Realm-ID` header. CRUD + list for: users, realms, OAuth clients, roles, groups, org members. Pagination via `limit` + `cursor`. 403 = typed `AdminPermissionError` (or equivalent HTTP error type). See SDK.md §12. |
+| **C-19** | Admin SDK | `AdminClient` separate from `HearthClient`. Takes `(baseUrl, adminToken, realmId)`. Sends `X-Realm-ID` header. CRUD + list for: users, realms (read + delete only), OAuth clients (at `/admin/applications*`, **not** `/admin/clients*`), roles, groups. **No org-membership methods** — Hearth serves no `/admin/orgs` route (audit 2026-08-28 §25.19). Pagination via `limit` + `cursor`. 403 = typed `AdminPermissionError` (or equivalent HTTP error type). See SDK.md §12. |
 
 ### Tier 7 — Optional Advanced
 
@@ -158,7 +158,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 
 ### C-04 — Token Verification (`verifyToken`) — §7.1 Required in Every SDK
 
-> **EdDSA requirement:** The verifier MUST select `alg: "EdDSA"` (`kty: "OKP"`, `crv: "Ed25519"`) as the primary algorithm. RS256 and ES256 are accepted for federation relay tokens only. The implementation must use a composite selector that tries EdDSA first. See §6.1.
+> **EdDSA requirement:** The verifier MUST accept `alg: "EdDSA"` (`kty: "OKP"`, `crv: "Ed25519"`) and MUST reject every other algorithm, RS256 and ES256 included. There is no federation relay and therefore no federation fallback — see SDK.md §2 and §6.1 below.
 
 | SDK | Symbol | Status |
 |-----|--------|--------|
@@ -192,7 +192,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 
 | Logical accessor | TS | Node | Go | PHP | Python | Rust | Kotlin |
 |-----------------|-------|------|-----|-----|--------|------|--------|
-| `subject()` | `Claims.subject()` | `VerifiedToken.subject` (getter) | `Client.HasPermission` (local decode) | `Claims::subject()` | `Claims.subject()` | `Claims::subject()` | `Claims.subject()` |
+| `subject()` | `Claims.subject()` | `VerifiedToken.subject` (getter) | — (see the Go note below) | `Claims::subject()` | `Claims.subject()` | `Claims::subject()` | `Claims.subject()` |
 | `issuer()` | `Claims.issuer()` | — | — | `Claims::issuer()` | `Claims.issuer()` | `Claims::issuer()` | `Claims.issuer()` |
 | `audiences()` | `Claims.audiences()` | — | — | `Claims::audiences()` | `Claims.audiences()` | `Claims::audiences()` | `Claims.audiences()` |
 | `expiry()` | `Claims.expiry()` | — | — | `Claims::expiry()` | `Claims.expiry()` | `Claims::expiry()` | `Claims.expiry()` |
@@ -201,16 +201,16 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | `scope()` | `Claims.scope()` | — | — | `Claims::scope()` | `Claims.scope()` | `Claims::scope()` | `Claims.scope()` |
 | `scopes()` | `Claims.scopes()` | — | — | `Claims::scopes()` | `Claims.scopes()` | `Claims::scopes()` | `Claims.scopes()` |
 | `hasScope(s)` | `Claims.hasScope(s)` | — | — | `Claims::hasScope(s)` | `Claims.hasScope(s)` | `Claims::hasScope(s)` | `Claims.hasScope(s)` |
-| `hasRole(r)` | `Claims.hasRole(r)` | — | `Client.HasRole(token, role)` | `Claims::hasRole(r)` | `Claims.hasRole(r)` | `Claims::hasRole(r)` | `Claims.hasRole(r)`; `HearthClient.hasRole(token, role)` |
-| `hasPermission(p)` | `Claims.hasPermission(p)` | — | `Client.HasPermission(token, perm)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)`; `HearthClient.hasPermission(token, perm)` |
-| `inGroup(g)` | `Claims.inGroup(g)` | — | `Client.InGroup(token, slug)` | `Claims::inGroup(g)` | `Claims.in_group(g)` | `Claims::inGroup(g)` | — |
-| `inOrg(o)` | `Claims.inOrg(o)` | — | `Client.InOrg(token, orgID)` | `Claims::inOrg(o)` | `Claims.in_org(o)` | `Claims::inOrg(o)` | — |
+| `hasRole(r)` | `Claims.hasRole(r)` | — | `Client.HasRole(ctx, token, role)` | `Claims::hasRole(r)` | `Claims.hasRole(r)` | `Claims::hasRole(r)` | `Claims.hasRole(r)`; `HearthClient.hasRole(token, role)` |
+| `hasPermission(p)` | `Claims.hasPermission(p)` | — | `Client.HasPermission(ctx, token, perm)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)` | `Claims::hasPermission(p)` | `Claims.hasPermission(p)`; `HearthClient.hasPermission(token, perm)` |
+| `inGroup(g)` | `Claims.inGroup(g)` | — | `Client.InGroup(ctx, token, slug)` | `Claims::inGroup(g)` | `Claims.in_group(g)` | `Claims::inGroup(g)` | — |
+| `inOrg(o)` | `Claims.inOrg(o)` | — | `Client.InOrg(ctx, token, orgID)` | `Claims::inOrg(o)` | `Claims.in_org(o)` | `Claims::inOrg(o)` | — |
 | `tokenType()` | `Claims.tokenType()` | — | — | `Claims::tokenType()` | `Claims.token_type()` | `Claims::tokenType()` | — |
 | `organizationId()` | `Claims.organizationId()` | — | — | `Claims::organizationId()` | `Claims.organization_id()` | `Claims::organizationId()` | — |
 | `orgGroups()` | `Claims.orgGroups()` | — | — | `Claims::orgGroups()` | `Claims.org_groups()` | `Claims::orgGroups()` | — |
 | `get(claim)` | `Claims.get(claim)` | — | — | `Claims::get(claim)` | `Claims.get(key)` | `Claims::get(key)` | — |
 
-> **Go note:** Go uses top-level client methods (`Client.HasPermission`, `HasRole`, `InGroup`, `InOrg`) that local-decode the JWT without network. The remaining 13 accessors (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `tokenType`, `organizationId`, `orgGroups`, `get`) must be added to a `Claims` struct in Go. Use snake_case for `in_group`/`in_org`/`token_type`/`organization_id`/`org_groups` per Go convention for exported accessors that are multi-word — or PascalCase exported methods: `InGroup`, `InOrg`, `TokenType`, `OrganizationId`, `OrgGroups`.
+> **Go note:** Go uses top-level client methods (`Client.HasPermission`, `HasRole`, `InGroup`, `InOrg`). Each takes a leading `context.Context` and verifies the token against the realm JWKS before reading any claim — the JWKS is cached, so there is usually no network round-trip, but the check is a signature verification, not a bare decode (audit 2026-08-28 §25.1). The remaining 13 accessors (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `tokenType`, `organizationId`, `orgGroups`, `get`) must be added to a `Claims` struct in Go. Use snake_case for `in_group`/`in_org`/`token_type`/`organization_id`/`org_groups` per Go convention for exported accessors that are multi-word — or PascalCase exported methods: `InGroup`, `InOrg`, `TokenType`, `OrganizationId`, `OrgGroups`.
 >
 > **Node note:** `VerifiedToken` currently exposes raw payload. Add typed accessor methods matching this table.
 >
@@ -419,7 +419,7 @@ Grant type wire value: `urn:hearth:grant-type:magic-link`. Token parameter name:
 
 | SDK | Symbol | Status |
 |-----|--------|--------|
-| TS | `AdminClient` (separate type); CRUD users/realms/clients/roles/groups/org-members | ✅ |
+| TS | `AdminClient` (separate type); CRUD users/realms/applications/roles/groups | ✅ |
 | Node | `AdminClient` (separate type) | ✅ |
 | Go | `AdminClient` via `Client.Admin(accessToken)` | ✅ |
 | PHP | **`→ AdminClient`** | ❌ not seen — add separate class |
@@ -477,22 +477,29 @@ The Kotlin SDK targets JVM servers and Android applications. Token storage and s
 
 Every SDK implementing `verifyToken` (C-04) **must** enforce the following algorithm selection:
 
-1. **Primary:** `alg: "EdDSA"` (`kty: "OKP"`, `crv: "Ed25519"`) — all Hearth-issued tokens
-2. **Federation fallbacks:** `alg: "RS256"` and `alg: "ES256"` — relayed tokens from third-party IdPs
+1. **Accepted:** `alg: "EdDSA"` (`kty: "OKP"`, `crv: "Ed25519"`) — every Hearth-issued token
+2. **Rejected:** every other `alg`, **including `RS256` and `ES256`**
 
-The verifier **must** try EdDSA first and only attempt RS256/ES256 if the JWKS key for the token's `kid` is of those types. A verifier that accepts any of the three without ordering (or that omits EdDSA entirely) is non-conforming.
+**There is no federation exception.** An earlier revision of this section listed RS256 and ES256 as
+"federation fallbacks" for relayed third-party IdP tokens. Hearth relays no such token: a federated
+login is exchanged for a Hearth-issued Ed25519 token, and the JWKS has never carried a third-party
+key. The RS256 and ES256 entries it once published were Hearth's own and were withdrawn (audit
+2026-08-28 §4.2#4). A verifier that accepts an algorithm other than EdDSA is non-conforming —
+accepting more only widens the set of keys an attacker can steer it onto.
 
-**Reference implementation:** Kotlin `TokenVerifier` uses `CompositeKeySelector(edDSASelector, rs256Selector, es256Selector)` which tries each in order and returns keys from the first matching selector.
+**Reference implementation:** Kotlin `TokenVerifier.processJwt` dispatches on the JWS header
+algorithm and throws `TokenInvalidError` for anything that is not `EdDSA`. The rejection is decided
+without consulting a key, so it does not trigger the `kid`-miss JWKS re-fetch.
 
 ```kotlin
-// Kotlin reference — CompositeKeySelector priority
-val edSelector  = JWSVerificationKeySelector(JWSAlgorithm.EdDSA, source)  // primary
-val rsaSelector = JWSVerificationKeySelector(JWSAlgorithm.RS256, source)  // federation fallback
-val ecSelector  = JWSVerificationKeySelector(JWSAlgorithm.ES256, source)  // federation fallback
-jwsKeySelector  = CompositeKeySelector(edSelector, rsaSelector, ecSelector)
+// Kotlin reference — EdDSA or nothing
+when (jwt.header.algorithm) {
+    JWSAlgorithm.EdDSA -> processEdDSA(jwt, keySet)
+    else -> throw ClaimsError(
+        TokenInvalidError("Unsupported JWT algorithm: expected EdDSA, got ${jwt.header.algorithm}"),
+    )
+}
 ```
-
-**Node-specific gap:** `HearthClient.verifyToken()` documentation currently states "Supports RS256 and ES256" without mentioning EdDSA. C5 (Node SDK) must verify the `jose`-based `jwtVerify` call explicitly handles OKP keys and update the documentation to list EdDSA as the primary algorithm.
 
 **OKP key parsing constraint:** Parsers must not require a `y` coordinate on OKP keys. Hearth's JWKS emits OKP keys with only `kty: "OKP"`, `crv: "Ed25519"`, `x: "<base64url>"`. Any parser that assumes `y` is always present will fail to load Hearth signing keys.
 

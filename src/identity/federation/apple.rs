@@ -354,6 +354,9 @@ struct AppleIdTokenClaims {
     #[serde(default)]
     #[allow(dead_code)]
     iat: Option<i64>,
+    /// Authorized party (OIDC Core §2) — checked per §3.1.3.7 (22.20).
+    #[serde(default)]
+    azp: Option<String>,
     #[serde(default)]
     nonce: Option<String>,
     #[serde(default)]
@@ -385,6 +388,13 @@ fn verify_apple_claims(
     if !audience_contains(&claims.aud, &cfg.client_id) {
         return Err(IdentityError::FederationTokenVerificationFailed);
     }
+    // 22.20 (audit 2026-08-28 §4.22#13) — OIDC Core §3.1.3.7 steps 3-4.
+    // Shared with the generic OIDC connector so the two cannot drift.
+    crate::identity::federation::oidc::verify_azp(
+        &claims.aud,
+        claims.azp.as_deref(),
+        &cfg.client_id,
+    )?;
     let leeway = i64::from(cfg.leeway_seconds);
     if claims.exp + leeway < now_unix_secs {
         return Err(IdentityError::FederationTokenVerificationFailed);
@@ -526,6 +536,7 @@ mod tests {
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
             want_assertions_signed: false,
+            trust_asserted_email: false,
             apple: Some(AppleConfig {
                 team_id: "TEAM123456".to_string(),
                 key_id: "KEY123456".to_string(),
@@ -815,6 +826,7 @@ mod tests {
             exp: now + 600,
             nbf: None,
             iat: Some(now),
+            azp: None,
             nonce: Some(nonce.to_string()),
             email: Some("alice@privaterelay.appleid.com".to_string()),
             email_verified: Some(serde_json::Value::Bool(true)),
@@ -891,6 +903,7 @@ mod tests {
             exp: 0,
             nbf: None,
             iat: None,
+            azp: None,
             nonce: None,
             email: None,
             email_verified: Some(serde_json::Value::String("true".to_string())),
@@ -907,6 +920,7 @@ mod tests {
             exp: 0,
             nbf: None,
             iat: None,
+            azp: None,
             nonce: None,
             email: None,
             email_verified: Some(serde_json::Value::String("false".to_string())),

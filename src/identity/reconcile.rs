@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use tracing::{info, trace, warn};
+use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::config::{
@@ -33,8 +33,8 @@ use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientReques
 use crate::identity::{
     CleartextPassword, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
     DemoSeedSpec, IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus,
-    RealmConfig, RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
-    UserStatus,
+    Realm, RealmConfig, RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest,
+    UpdateUserRequest, UserStatus,
 };
 use crate::rbac::{
     AssignRoleRequest, Group, GroupId, Permission, ProtectedResource, RbacEngine, Scope,
@@ -194,6 +194,14 @@ pub struct ReconcileReport {
     pub archived: Vec<String>,
     /// Names of realms un-archived (reappeared in YAML).
     pub unarchived: Vec<String>,
+    /// Names of declared realms skipped because they are wedged mid-delete.
+    ///
+    /// A realm stamped `DeletingInProgress` had a cascade start and not
+    /// finish. Every mutating call refuses it, so reconciliation skips it
+    /// rather than aborting startup (audit 2026-08-28 §4.20#3). Converge it
+    /// with `DELETE /admin/realms/{id}` as a system-realm admin; the next
+    /// startup recreates it from its YAML block.
+    pub wedged: Vec<String>,
     /// Application reconciliation results per realm.
     pub applications: Vec<AppReconcileEntry>,
     /// Organization reconciliation results per realm.
@@ -761,6 +769,72 @@ fn reconcile_demo_seeding(
 }
 
 /// Reconciles a declared `realms:` map.
+/// Reports a realm wedged mid-delete and tells the caller to skip it.
+///
+/// A realm stamped `DeletingInProgress` had a delete cascade start and not
+/// finish — the process died between the `204` and the end of the sweep. Every
+/// mutating call refuses that status, so reconciling the realm would fail and
+/// abort the whole startup: one wedged realm and the server never boots
+/// (audit 2026-08-28 §4.20#3).
+///
+/// Skipping it loudly lets the other declared realms reconcile. The operator
+/// converges it with `DELETE /admin/realms/{id}` as a system-realm admin — the
+/// realm's own admins hold no token that still authenticates — and the next
+/// startup recreates it from the same YAML block.
+fn report_wedged_realm(
+    status: RealmStatus,
+    name: &str,
+    realm_id: &RealmId,
+    report: &mut ReconcileReport,
+) -> bool {
+    if status != RealmStatus::DeletingInProgress {
+        return false;
+    }
+    error!(
+        realm = name,
+        realm_id = %realm_id.as_uuid(),
+        "reconcile_realms: realm is wedged mid-delete and was skipped; finish the \
+         delete with DELETE /admin/realms/{} as a system-realm admin, then restart \
+         to recreate it from hearth.yaml",
+        realm_id.as_uuid()
+    );
+    report.wedged.push(name.to_string());
+    true
+}
+
+/// Applies a YAML realm block to a realm that already exists.
+///
+/// Writes only when the stored config drifted from YAML or the realm is
+/// archived and has reappeared in YAML, and records which of the two happened
+/// in `report`.
+fn update_existing_realm(
+    engine: &dyn IdentityEngine,
+    existing: &Realm,
+    name: &str,
+    realm_config: RealmConfig,
+    report: &mut ReconcileReport,
+) -> Result<(), IdentityError> {
+    let needs_config_update = existing.config() != &realm_config;
+    let needs_unarchive = existing.status() == RealmStatus::Archived;
+    if !needs_config_update && !needs_unarchive {
+        return Ok(());
+    }
+
+    let mut update = UpdateRealmRequest::default();
+    if needs_config_update {
+        update.config = Some(realm_config);
+    }
+    if needs_unarchive {
+        update.status = Some(RealmStatus::Active);
+        report.unarchived.push(name.to_string());
+    }
+    engine.update_realm(existing.id(), &update)?;
+    if needs_config_update && !needs_unarchive {
+        report.updated.push(name.to_string());
+    }
+    Ok(())
+}
+
 fn reconcile_declared_realms(
     engine: &dyn IdentityEngine,
     rbac: &dyn RbacEngine,
@@ -797,12 +871,13 @@ fn reconcile_declared_realms(
             continue;
         }
 
-        let realm_config = yaml_cfg
+        let mut realm_config = yaml_cfg
             .to_realm_config(&config.auth, config.email.branding.as_ref())
             .map_err(|errors| IdentityError::ConfigInvalid {
                 realm_name: name.clone(),
                 errors,
             })?;
+        apply_global_security_defaults(&mut realm_config, config);
 
         let realm_id = match engine.get_realm_by_name(name)? {
             None => {
@@ -816,24 +891,11 @@ fn reconcile_declared_realms(
                 realm.id().clone()
             }
             Some(existing) => {
-                // Update if config changed or status needs un-archiving
-                let needs_config_update = existing.config() != &realm_config;
-                let needs_unarchive = existing.status() == RealmStatus::Archived;
-
-                if needs_config_update || needs_unarchive {
-                    let mut update = UpdateRealmRequest::default();
-                    if needs_config_update {
-                        update.config = Some(realm_config);
-                    }
-                    if needs_unarchive {
-                        update.status = Some(RealmStatus::Active);
-                        report.unarchived.push(name.clone());
-                    }
-                    engine.update_realm(existing.id(), &update)?;
-                    if needs_config_update && !needs_unarchive {
-                        report.updated.push(name.clone());
-                    }
+                if report_wedged_realm(existing.status(), name, existing.id(), report) {
+                    continue;
                 }
+
+                update_existing_realm(engine, &existing, name, realm_config, report)?;
                 // Re-run seed on existing realms too. `seed_realm` is
                 // idempotent: it skips already-correct records and rewrites
                 // only roles whose `scope_kind` drifted from the spec (e.g.
@@ -921,8 +983,26 @@ fn reconcile_declared_realms(
 /// Uses a default (empty) `RealmYamlConfig`, so validation always succeeds.
 fn default_realm_config(auth: &AuthConfig, config: &Config) -> RealmConfig {
     let yaml = RealmYamlConfig::default();
-    yaml.to_realm_config(auth, config.email.branding.as_ref())
-        .expect("default RealmYamlConfig must always pass validation")
+    let mut cfg = yaml
+        .to_realm_config(auth, config.email.branding.as_ref())
+        .expect("default RealmYamlConfig must always pass validation");
+    apply_global_security_defaults(&mut cfg, config);
+    cfg
+}
+
+/// Folds global `security:` settings that have no per-realm YAML key into a
+/// freshly built [`RealmConfig`].
+///
+/// `RealmYamlConfig::to_realm_config` is handed the `auth:` defaults but not
+/// the `security:` ones, so `risk_scorer_config` was hard-coded to `None` and
+/// the A-49 refresh-context check ran against `RiskScorerConfig::default()` —
+/// permanently disabled, whatever `security.risk_scorer` said (audit §4.17#9,
+/// task 20.13). This is the one place realm records are written from config,
+/// so it is the one place the fold belongs.
+fn apply_global_security_defaults(realm_config: &mut RealmConfig, config: &Config) {
+    if realm_config.risk_scorer_config.is_none() {
+        realm_config.risk_scorer_config = Some(config.security.risk_scorer.to_domain());
+    }
 }
 
 /// UUID v5 namespace for deterministic application client IDs.
@@ -1439,11 +1519,16 @@ fn build_idp_config(
     // Resolve the preset (if any) and derive defaults, letting explicit
     // YAML fields override.
     let preset = preset_lookup(&provider.kind);
-    let kind = match provider.kind.as_str() {
-        "oidc" => IdpKind::Oidc,
-        "google" | "microsoft" | "apple" => IdpKind::Oidc,
-        "github" => IdpKind::GitHub,
-        other => {
+    // 22.22 (audit 2026-08-28 §4.22#3): the kind comes from the preset when
+    // there is one. This used to hard-code `apple => IdpKind::Oidc`, which
+    // silently downgraded the Apple preset to `GenericOidcConnector` — no
+    // `private_key_jwt` client assertion, no `response_mode=form_post`, so
+    // Sign In with Apple could never complete. `presets.rs` already declared
+    // `kind: IdpKind::Apple`; only this mapping disagreed.
+    let kind = match (preset, provider.kind.as_str()) {
+        (Some(p), _) => p.kind,
+        (None, "oidc") => IdpKind::Oidc,
+        (None, other) => {
             return Err(IdentityError::InvalidInput {
                 reason: format!(
                     "unknown federation provider type '{other}' \
@@ -1503,6 +1588,12 @@ fn build_idp_config(
             ]
         });
 
+    let apple_cfg = if kind == IdpKind::Apple {
+        build_apple_config(idp_name, provider)?
+    } else {
+        None
+    };
+
     let now = Timestamp::from_micros(0); // engine persists as-is; reconcile uses epoch
 
     Ok(IdpConfig {
@@ -1523,10 +1614,60 @@ fn build_idp_config(
         leeway_seconds: cap_federation_leeway(provider.leeway_seconds),
         // Non-SAML connectors don't consume this flag.
         want_assertions_signed: false,
-        apple: None,
+        trust_asserted_email: false,
+        apple: apple_cfg,
         created_at: now,
         updated_at: now,
     })
+}
+
+/// Builds the Apple-specific half of an [`IdpConfig`] for `type: apple`.
+///
+/// Returns `Ok(None)` for every other connector kind. `AppleConnector::new`
+/// refuses an `IdpConfig` whose `apple` is `None`, so all three fields are
+/// required here rather than silently producing a connector that fails at the
+/// first token exchange (22.22).
+fn build_apple_config(
+    idp_name: &str,
+    provider: &FederationProviderYaml,
+) -> Result<Option<crate::identity::federation::AppleConfig>, IdentityError> {
+    use crate::identity::federation::{AppleConfig, FederationSecret};
+
+    let missing = |field: &str| IdentityError::InvalidInput {
+        reason: format!(
+            "federation connector '{idp_name}' has `type: apple` but is missing `{field}` \
+             (Sign In with Apple authenticates with an ES256 private_key_jwt assertion, \
+             not a static client_secret)"
+        ),
+    };
+    let team_id = provider
+        .apple_team_id
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| missing("apple_team_id"))?;
+    let key_id = provider
+        .apple_key_id
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| missing("apple_key_id"))?;
+    let private_key_pem = provider
+        .apple_private_key_pem
+        .clone()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| missing("apple_private_key_pem"))?;
+    if !private_key_pem.contains("-----BEGIN") {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "federation connector '{idp_name}': `apple_private_key_pem` is not PEM \
+                 (expected a `-----BEGIN PRIVATE KEY-----` block)"
+            ),
+        });
+    }
+    Ok(Some(AppleConfig {
+        team_id,
+        key_id,
+        private_key_pem: FederationSecret::new(private_key_pem),
+    }))
 }
 
 fn build_saml_idp_config(
@@ -1583,6 +1724,7 @@ fn build_saml_idp_config(
         // field is required in the shared struct — use the default value.
         leeway_seconds: crate::identity::federation::IdpConfig::default_leeway_seconds(),
         want_assertions_signed: provider.want_assertions_signed.unwrap_or(false),
+        trust_asserted_email: provider.trust_asserted_email.unwrap_or(false),
         apple: None,
         created_at: now,
         updated_at: now,
@@ -1709,6 +1851,9 @@ pub fn save_snapshot(
 ///
 /// Returns `Err` on storage I/O failures from data-action handlers.
 /// Returns a list of realm names whose `rotate_signing_key` flag was consumed.
+///
+/// `audit` receives one event per config-driven signing-key rotation, matching
+/// what the HTTP rotation route records (audit 2026-08-28 §4.14#9).
 /// The caller should clear those flags in the config snapshot before saving so
 /// subsequent restarts with the flag still in YAML do not re-rotate.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
@@ -1717,6 +1862,7 @@ pub fn apply_diff(
     config: &Config,
     engine: &dyn IdentityEngine,
     rbac: &dyn RbacEngine,
+    audit: &dyn crate::audit::AuditEngine,
 ) -> Result<Vec<String>, IdentityError> {
     let mut consumed_rotations: Vec<String> = Vec::new();
     for diff in diffs {
@@ -1839,7 +1985,7 @@ pub fn apply_diff(
             // ── Signing key rotation ──────────────────────────────────────────
             ConfigDiff::RealmSigningKeyRotationRequested { realm } => {
                 info!(realm, "config diff: signing key rotation requested");
-                match apply_signing_key_rotation(config, engine, realm) {
+                match apply_signing_key_rotation(config, engine, audit, realm) {
                     Ok(()) => {
                         consumed_rotations.push(realm.clone());
                     }
@@ -1853,14 +1999,96 @@ pub fn apply_diff(
     Ok(consumed_rotations)
 }
 
-/// Looks up a realm by name and rotates its Ed25519 signing key.
+/// Compiled-in default refresh-token lifetime, in seconds (7 days).
+///
+/// Mirrors `TokenConfig::default().refresh_token_ttl`; kept here so
+/// [`config_refresh_ttl_secs`] can answer for a config that leaves the key
+/// unset.
+const DEFAULT_REFRESH_TOKEN_TTL_SECS: u64 = 7 * 86_400;
+
+/// Parses a duration string into whole seconds, discarding a malformed value.
+fn duration_secs(raw: Option<&str>) -> Option<u64> {
+    let micros = crate::config::parse_duration_to_micros(raw?).ok()?;
+    u64::try_from(micros / 1_000_000).ok()
+}
+
+/// Returns the longest refresh-token lifetime this config can issue, in
+/// seconds — the maximum of `token.refresh_token_ttl` and every
+/// `realms.<name>.auth.token.refresh_token_ttl` override.
+///
+/// A signing-key rotation that retires the old key sooner than this cuts off
+/// refresh tokens that are still inside their own validity window (audit
+/// 2026-08-28 §4.15#3).
+#[must_use]
+pub fn config_refresh_ttl_secs(config: &Config) -> u64 {
+    let global = duration_secs(config.token.refresh_token_ttl.as_deref())
+        .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS);
+    config
+        .realms
+        .as_ref()
+        .map(|realms| {
+            realms
+                .values()
+                .filter_map(|r| {
+                    duration_secs(
+                        r.auth
+                            .as_ref()
+                            .and_then(|a| a.token.as_ref())
+                            .and_then(|t| t.refresh_token_ttl.as_deref()),
+                    )
+                })
+                .fold(global, u64::max)
+        })
+        .unwrap_or(global)
+}
+
+/// Returns the grace window, in seconds, that a **config-driven** rotation
+/// (`rotate_signing_key: true` on a realm) gives the outgoing key.
+///
+/// An explicit `token.signing_key_rotation_grace_period` is honoured verbatim
+/// — an operator who names a window owns the consequence. When the key is
+/// absent the default is the longest refresh-token lifetime the config can
+/// issue rather than a fixed 24 hours, so a *planned* rotation does not
+/// silently invalidate refresh tokens that still have days left to run.
+///
+/// This does not touch `POST /admin/realms/{id}/rotate-signing-key`, whose
+/// default is still `0` — a revoking rotation, the remedy for a leaked key
+/// (audit 2026-08-28 B9).
+#[must_use]
+pub fn config_rotation_grace_secs(config: &Config) -> u64 {
+    let refresh_ttl = config_refresh_ttl_secs(config);
+    match duration_secs(config.token.signing_key_rotation_grace_period.as_deref()) {
+        Some(explicit) => {
+            if explicit < refresh_ttl {
+                warn!(
+                    grace_period_secs = explicit,
+                    refresh_token_ttl_secs = refresh_ttl,
+                    "token.signing_key_rotation_grace_period is shorter than the longest \
+                     refresh-token lifetime; a config-driven rotation will invalidate \
+                     refresh tokens that have not yet reached their own exp"
+                );
+            }
+            explicit
+        }
+        None => refresh_ttl,
+    }
+}
+
+/// Looks up a realm by name, rotates its Ed25519 signing key, and records the
+/// rotation in the realm's audit log.
 ///
 /// Returns `Ok(())` on success. The caller is responsible for recording the
 /// consumed realm name so the snapshot's `rotate_signing_key` flag can be
 /// cleared before it is saved.
+///
+/// The audit event mirrors the one the HTTP rotation route writes, with
+/// [`Actor::System`](crate::audit::Actor) in place of an admin user: without it
+/// a config-driven re-key left no trace in the log at all (audit 2026-08-28
+/// §4.14#9).
 fn apply_signing_key_rotation(
     config: &Config,
     engine: &dyn IdentityEngine,
+    audit: &dyn crate::audit::AuditEngine,
     realm_name: &str,
 ) -> Result<(), IdentityError> {
     let realm = match engine.get_realm_by_name(realm_name) {
@@ -1874,14 +2102,25 @@ fn apply_signing_key_rotation(
         }
         Err(e) => return Err(e),
     };
-    let grace_period_secs = config
-        .token
-        .signing_key_rotation_grace_period
-        .as_deref()
-        .and_then(|s| crate::config::parse_duration_to_micros(s).ok())
-        .map(|micros| (micros / 1_000_000) as u64)
-        .unwrap_or(86_400); // default: 24 hours
-    engine.rotate_realm_signing_key(realm.id(), grace_period_secs)
+    let grace_period_secs = config_rotation_grace_secs(config);
+    engine.rotate_realm_signing_key(realm.id(), grace_period_secs)?;
+
+    if let Err(e) = audit.append(&crate::audit::CreateAuditEvent {
+        realm_id: realm.id().clone(),
+        actor: "system".to_string(),
+        action: crate::audit::AuditAction::RealmUpdated,
+        resource_type: "realm".to_string(),
+        resource_id: realm.id().as_uuid().to_string(),
+        metadata: Some(serde_json::json!({
+            "action": "rotate_signing_key",
+            "grace_period_secs": grace_period_secs,
+            "source": "config",
+        })),
+    }) {
+        // The key is already rotated; a failed audit write must not undo it.
+        warn!(realm = realm_name, error = %e, "config-driven signing key rotation: audit append failed");
+    }
+    Ok(())
 }
 
 /// Looks up a realm by name and reconciles its organization set from config.
@@ -2183,4 +2422,143 @@ pub fn load_orphaned_realms(storage: &dyn StorageEngine) -> Vec<OrphanRecord> {
         .into_iter()
         .filter_map(|entry| serde_json::from_slice(&entry.value).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod apple_connector_tests {
+    use super::build_idp_config;
+    use crate::config::FederationProviderYaml;
+    use crate::core::{IdpId, RealmId};
+    use crate::identity::federation::IdpKind;
+    use crate::identity::IdentityError;
+
+    fn apple_yaml() -> FederationProviderYaml {
+        FederationProviderYaml {
+            kind: "apple".to_string(),
+            client_id: Some("com.example.service".to_string()),
+            apple_team_id: Some("A1B2C3D4E5".to_string()),
+            apple_key_id: Some("ABCDE12345".to_string()),
+            apple_private_key_pem: Some(
+                "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----".to_string(),
+            ),
+            ..FederationProviderYaml::default_oidc()
+        }
+    }
+
+    fn build(
+        provider: &FederationProviderYaml,
+    ) -> Result<crate::identity::federation::IdpConfig, IdentityError> {
+        build_idp_config(
+            &RealmId::new(uuid::Uuid::nil()),
+            &IdpId::new(uuid::Uuid::nil()),
+            "apple",
+            provider,
+        )
+    }
+
+    /// 22.22 (§4.22#3): `type: apple` must reach `AppleConnector`.
+    ///
+    /// The kind mapping hard-coded `"apple" => IdpKind::Oidc`, so the preset's
+    /// own `kind: IdpKind::Apple` was overruled and every Apple connector was
+    /// built as a generic OIDC one — no ES256 `private_key_jwt` assertion, no
+    /// `response_mode=form_post`, so the login could never complete.
+    #[test]
+    fn apple_type_yields_the_apple_kind() {
+        let cfg = build(&apple_yaml()).expect("apple config");
+        assert_eq!(
+            cfg.kind,
+            IdpKind::Apple,
+            "apple must not become generic OIDC"
+        );
+    }
+
+    /// The Apple credentials reach the stored config; `AppleConnector::new`
+    /// refuses an `IdpConfig` whose `apple` is `None`.
+    #[test]
+    fn apple_signing_key_reaches_the_config() {
+        let cfg = build(&apple_yaml()).expect("apple config");
+        let apple = cfg.apple.as_ref().expect("apple block must be populated");
+        assert_eq!(apple.team_id, "A1B2C3D4E5");
+        assert_eq!(apple.key_id, "ABCDE12345");
+        assert!(apple
+            .private_key_pem
+            .expose_secret()
+            .contains("BEGIN PRIVATE KEY"));
+    }
+
+    /// The connector the service will actually build accepts this config.
+    #[test]
+    fn apple_config_constructs_an_apple_connector() {
+        use crate::identity::federation::{AppleConnector, StubFederationTransport};
+        use std::sync::Arc;
+
+        let cfg = build(&apple_yaml()).expect("apple config");
+        AppleConnector::new(
+            cfg,
+            Arc::new(StubFederationTransport::new()),
+            "https://auth.example.com/ui/realms/demo/federation/callback".to_string(),
+        )
+        .expect("AppleConnector must accept a reconciled apple IdpConfig");
+    }
+
+    /// Each missing credential is refused by name at start-up rather than
+    /// producing a connector that fails at the first token exchange.
+    #[test]
+    fn missing_apple_credentials_are_named() {
+        for (field, mutate) in [
+            ("apple_team_id", 0usize),
+            ("apple_key_id", 1),
+            ("apple_private_key_pem", 2),
+        ] {
+            let mut y = apple_yaml();
+            match mutate {
+                0 => y.apple_team_id = None,
+                1 => y.apple_key_id = None,
+                _ => y.apple_private_key_pem = None,
+            }
+            let err = build(&y).expect_err("missing credential must be refused");
+            let msg = err.to_string();
+            assert!(msg.contains(field), "error must name `{field}`, got: {msg}");
+        }
+    }
+
+    /// A non-PEM value is refused too — it would only fail later, inside the
+    /// first ES256 assertion.
+    #[test]
+    fn non_pem_apple_key_is_refused() {
+        let mut y = apple_yaml();
+        y.apple_private_key_pem = Some("not-a-pem-blob".to_string());
+        let err = build(&y).expect_err("non-PEM key must be refused");
+        assert!(err.to_string().contains("PEM"), "got: {err}");
+    }
+
+    /// Non-Apple presets are untouched by the new mapping.
+    #[test]
+    fn other_presets_keep_their_kinds() {
+        for (kind, expected) in [
+            ("google", IdpKind::Oidc),
+            ("microsoft", IdpKind::Oidc),
+            ("github", IdpKind::GitHub),
+        ] {
+            let y = FederationProviderYaml {
+                kind: kind.to_string(),
+                client_id: Some("cid".to_string()),
+                ..FederationProviderYaml::default_oidc()
+            };
+            let cfg = build(&y).unwrap_or_else(|e| panic!("{kind} config: {e}"));
+            assert_eq!(cfg.kind, expected, "{kind}");
+            assert!(cfg.apple.is_none(), "{kind} must carry no apple block");
+        }
+    }
+
+    /// An unknown type is still refused with the documented message.
+    #[test]
+    fn unknown_type_is_still_refused() {
+        let y = FederationProviderYaml {
+            kind: "facebook".to_string(),
+            ..FederationProviderYaml::default_oidc()
+        };
+        let err = build(&y).expect_err("unknown type must be refused");
+        assert!(err.to_string().contains("unknown federation provider type"));
+    }
 }

@@ -675,6 +675,86 @@ struct RecordScan {
     valid_len: usize,
 }
 
+/// How many record numbers past the last good record the survivor probe tries
+/// when authenticating a candidate frame. Bounds the number of corrupt records
+/// a damaged region may span while survivors are still recognised.
+const SURVIVOR_PROBE_RECORD_WINDOW: u64 = 32;
+
+/// Scans `region[from..]` for a frame whose CRC verifies and whose ciphertext
+/// authenticates under `dek` — an acknowledged record surviving beyond a
+/// corrupt one. Returns its offset relative to the region start.
+///
+/// The scan is byte-granular because a corrupted length field destroys frame
+/// alignment. A CRC-32 collision on garbage is ~2^-32 per offset, and a
+/// candidate additionally has to pass AEAD with a positional nonce, so a false
+/// positive is not a practical concern.
+fn probe_survivors(
+    region: &[u8],
+    from: usize,
+    next_record_num: u64,
+    dek: &DataEncryptionKey,
+) -> Option<usize> {
+    // Minimum frame: 4B length + 16B GCM tag + 4B CRC.
+    const MIN_FRAME: usize = 4 + 16 + 4;
+
+    let mut off = from;
+    while off + MIN_FRAME <= region.len() {
+        let len_bytes: [u8; 4] = match region[off..off + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        if len < 16 || off + 4 + len + 4 > region.len() {
+            off += 1;
+            continue;
+        }
+        let ciphertext = &region[off + 4..off + 4 + len];
+        let crc_bytes: [u8; 4] = match region[off + 4 + len..off + 4 + len + 4].try_into() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        if u32::from_le_bytes(crc_bytes) != crc32fast::hash(ciphertext) {
+            off += 1;
+            continue;
+        }
+        // CRC-valid frame — confirm it authenticates as a record of this
+        // segment generation at a plausible position.
+        for record_num in next_record_num..next_record_num + SURVIVOR_PROBE_RECORD_WINDOW {
+            let nonce = counter_nonce(record_num);
+            let aad = record_num.to_le_bytes();
+            if encryption::decrypt_section(ciphertext, dek, &nonce, &aad).is_ok() {
+                return Some(off);
+            }
+        }
+        off += 1;
+    }
+    None
+}
+
+/// Refuses the scan when a corrupt record at `corrupt_start` is followed by at
+/// least one cryptographically valid record (audit 2026-08-28 §4.11#3).
+///
+/// Truncating in that state would physically destroy acknowledged writes while
+/// `open()` reports `Ok`. The returned error carries absolute file offsets so
+/// the operator can copy the segment aside, restore from backup, or truncate
+/// explicitly. Offsets are absolute because the record region always starts at
+/// [`V1_RECORD_OFFSET`] in a v1 segment.
+fn refuse_if_survivors(
+    region: &[u8],
+    corrupt_start: usize,
+    recovered_records: u64,
+    dek: &DataEncryptionKey,
+) -> Result<(), StorageError> {
+    match probe_survivors(region, corrupt_start + 1, recovered_records + 1, dek) {
+        Some(survivor_off) => Err(StorageError::WalMidSegmentCorruption {
+            corrupt_offset: V1_RECORD_OFFSET + corrupt_start as u64,
+            survivor_offset: V1_RECORD_OFFSET + survivor_off as u64,
+            recovered_records,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Scans the record region of a WAL segment, stopping at the first record that
 /// is torn, CRC-invalid, or undecodable.
 ///
@@ -682,6 +762,10 @@ struct RecordScan {
 /// through this function so the "last valid record" boundary they compute can
 /// never diverge. A divergence is exactly what let post-recovery appends land
 /// beyond a corrupt tail and then vanish on the next restart (HEA-1853).
+///
+/// A corrupt record followed by cryptographically valid records is refused
+/// outright rather than truncated — see [`refuse_if_survivors`]
+/// (audit 2026-08-28 §4.11#3).
 fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, StorageError> {
     let mut entries = Vec::new();
     let mut pos: usize = 0;
@@ -704,7 +788,12 @@ fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, St
         // or missing CRC) are intentionally silent truncation:
         // the process crashed mid-write, and we return the valid
         // prefix from before the crash.
+        //
+        // A corrupted length field can fake this shape while acknowledged
+        // records still follow (audit 2026-08-28 §4.11#3), so probe before
+        // treating it as torn.
         if pos + payload_len + 4 > region.len() {
+            refuse_if_survivors(region, record_start, record_num, dek)?;
             break;
         }
 
@@ -721,23 +810,22 @@ fn scan_records(region: &[u8], dek: &DataEncryptionKey) -> Result<RecordScan, St
         pos += 4;
 
         if stored_crc != computed_crc {
-            // CRC mismatch at any position means the record was not
-            // durably written. Stop replay here and discard everything
-            // that follows — entries after a corrupt record cannot be
-            // applied safely since they may depend on state that the
-            // corrupt entry would have established.
-            //
-            // This covers both the tail-truncation case (process crashed
-            // mid-write, no records follow) and the concurrent write-fault
-            // case (another thread appended records after the crash, so
-            // bytes follow the corrupt entry). Both require the same
-            // response: truncate to the last fully-verified record.
+            // A CRC mismatch is either a torn tail (crash mid-write, nothing
+            // durable follows) or mid-segment corruption of a record that WAS
+            // durable — in which case acknowledged records follow it. The two
+            // must not get the same response: truncating the second physically
+            // destroys acknowledged writes while `open()` reports `Ok`
+            // (audit 2026-08-28 §4.11#3). Probe for cryptographically valid
+            // survivors and refuse the open when any exist; only a tail with
+            // no valid record after it is truncated.
+            refuse_if_survivors(region, record_start, record_num, dek)?;
+
             if pos < region.len() {
                 tracing::warn!(
                     offset = record_start,
-                    "WAL replay: CRC mismatch with trailing data — \
-                     truncating to last good record (possible concurrent \
-                     write fault or unclean shutdown)"
+                    "WAL replay: CRC mismatch with trailing data but no \
+                     surviving records — truncating to last good record \
+                     (torn write from an unclean shutdown)"
                 );
             }
             break;
@@ -833,6 +921,85 @@ fn rebuild_truncated_segment(
     Ok((new_dek, new_header))
 }
 
+/// Writes a fresh 82-byte header to an empty WAL segment and returns its DEK.
+///
+/// The header goes out in one `write_all`, so a short write has one chance to
+/// leave a stub rather than three; [`repair_partial_header`] handles the stub
+/// that a fault can still leave.
+fn write_fresh_header(
+    path: &Path,
+    file: &mut dyn FsFile,
+    fs: &dyn Fs,
+    kek: &encryption::KeyEncryptionKey,
+    kek_id: KekId,
+) -> Result<(DataEncryptionKey, EncryptionHeader), StorageError> {
+    let dek = encryption::generate_dek()?;
+    let enc_header = encryption::wrap_dek(&dek, kek, kek_id)?;
+
+    let mut header = Vec::with_capacity(V1_RECORD_OFFSET as usize);
+    header.extend_from_slice(&WAL_MAGIC);
+    header.extend_from_slice(&WAL_VERSION_CURRENT.to_le_bytes());
+    header.extend_from_slice(&enc_header.to_bytes());
+    file.write_all(&header)?;
+    file.sync_all()?;
+
+    // Fsync the parent directory so the freshly created segment's directory
+    // entry is durable; otherwise a power loss before the dir update commits
+    // can make the whole file vanish on restart (HEA-1855).
+    if let Some(parent) = path.parent() {
+        fs.sync_dir(parent)?;
+    }
+
+    Ok((dek, enc_header))
+}
+
+/// Re-initialises a WAL segment whose header is shorter than one complete
+/// header, and returns the size to continue the open with.
+///
+/// A write fault during segment creation or rotation can leave a header of
+/// 1-81 bytes for v1, or 1-75 bytes for v0. `open()` used to refuse every such
+/// file, and no repair was documented, so one short write left the data
+/// directory permanently unopenable (audit 2026-08-28 §4.11#6).
+///
+/// No acknowledged record can be in those bytes: the v1 record region starts at
+/// byte 82 and the v0 region at byte 76, and the shortest record is 24 bytes.
+/// Re-initialising therefore discards nothing, and it is the only outcome that
+/// lets the process start.
+fn repair_partial_header(
+    path: &Path,
+    file: &mut dyn FsFile,
+    file_size: u64,
+) -> Result<u64, StorageError> {
+    if file_size == 0 || file_size >= V1_RECORD_OFFSET {
+        return Ok(file_size);
+    }
+
+    let mut head = Vec::new();
+    file.seek(SeekFrom::Start(0))?;
+    file.read_to_end(&mut head)?;
+
+    let partial_v1 = head.starts_with(&WAL_MAGIC);
+    let partial_v0 = !partial_v1 && head.len() < ENCRYPTION_HEADER_SIZE;
+    if !(partial_v1 || partial_v0) {
+        // A complete v0 header with no records: the legacy migration path
+        // handles it.
+        file.seek(SeekFrom::Start(0))?;
+        return Ok(file_size);
+    }
+
+    tracing::warn!(
+        path = %path.display(),
+        header_bytes = file_size,
+        "WAL recovery: header is shorter than one complete header (write fault \
+         during segment creation or rotation) — re-initialising an empty \
+         segment; no record can be lost because the record region starts at \
+         byte 82"
+    );
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(0)
+}
+
 impl Wal {
     /// Opens or creates a WAL file at the given path using a custom filesystem.
     ///
@@ -847,21 +1014,10 @@ impl Wal {
         let mut file = fs.open_append(path)?;
         let file_size = file.seek(SeekFrom::End(0))?;
 
+        let file_size = repair_partial_header(path, &mut *file, file_size)?;
+
         let (dek, enc_header, record_count) = if file_size == 0 {
-            // New file: write version header then encryption header.
-            let dek = encryption::generate_dek()?;
-            let enc_header = encryption::wrap_dek(&dek, kek, kek_id)?;
-            file.write_all(&WAL_MAGIC)?;
-            file.write_all(&WAL_VERSION_CURRENT.to_le_bytes())?;
-            file.write_all(&enc_header.to_bytes())?;
-            file.sync_all()?;
-            // Fsync the parent directory so the freshly created segment's
-            // directory entry is durable; otherwise a power loss before the dir
-            // update commits can make the whole file vanish on restart
-            // (HEA-1855).
-            if let Some(parent) = path.parent() {
-                fs.sync_dir(parent)?;
-            }
+            let (dek, enc_header) = write_fresh_header(path, &mut *file, fs.as_ref(), kek, kek_id)?;
             (dek, enc_header, 0u64)
         } else {
             // Existing file: read all bytes, detect format version, migrate if needed.
@@ -870,7 +1026,17 @@ impl Wal {
             file.read_to_end(&mut all_data)?;
 
             // Detect v0 (no magic) vs v1+ (starts with HWAL).
-            let all_data = if all_data.starts_with(&WAL_MAGIC) {
+            //
+            // The migration is applied in memory only. It used to be written
+            // back before anything had validated it, with `set_len(0)` +
+            // `write_all` on the live file. A v1 segment whose magic lost a
+            // single byte is indistinguishable from a v0 segment by shape, so
+            // that path shifted every record six bytes and destroyed the
+            // original in place — and the open still failed afterwards, because
+            // the encryption header no longer unwrapped (audit 2026-08-28
+            // §4.11#7). The rewrite now waits until the migrated form has
+            // proven it unwraps its DEK and scans its records.
+            let (all_data, persist_migration) = if all_data.starts_with(&WAL_MAGIC) {
                 // Versioned file — validate version.
                 if all_data.len() < WAL_VERSION_HEADER_SIZE {
                     return Err(StorageError::Crypto {
@@ -881,14 +1047,11 @@ impl Wal {
                 if version > WAL_VERSION_CURRENT {
                     return Err(StorageError::UnsupportedWalVersion { found: version });
                 }
-                all_data
+                (all_data, false)
             } else {
-                // Legacy v0 file — migrate to current version in-place.
+                // Legacy v0 file — migrate to the current version in memory.
                 let migrated = migrations::apply_migrations(&all_data, 0, WAL_VERSION_CURRENT)?;
-                file.set_len(0)?;
-                file.write_all(&migrated)?;
-                file.sync_all()?;
-                migrated
+                (migrated, true)
             };
 
             // After detection/migration, layout is: [6B ver][76B enc][records...].
@@ -917,11 +1080,21 @@ impl Wal {
             let scan = scan_records(record_data, &dek)?;
 
             if scan.valid_len == record_data.len() {
+                if persist_migration {
+                    // The migrated form unwrapped its DEK and scanned clean, so
+                    // it is safe to make it the on-disk form.
+                    file.set_len(0)?;
+                    file.seek(SeekFrom::Start(0))?;
+                    file.write_all(&all_data)?;
+                    file.sync_all()?;
+                }
                 file.seek(SeekFrom::End(0))?;
                 (dek, enc_header, scan.count)
             } else {
                 // Corrupt or torn tail (HEA-1853) — rebuild the segment from
-                // the surviving prefix. See `rebuild_truncated_segment`.
+                // the surviving prefix. See `rebuild_truncated_segment`. It
+                // writes a complete v1 segment via a staging file and a rename,
+                // so it persists a pending v0 migration too.
                 tracing::warn!(
                     discarded_bytes = record_data.len() - scan.valid_len,
                     recovered_records = scan.count,
@@ -1004,6 +1177,41 @@ impl Wal {
     //                              MUST be called outside the serialising lock so
     //                              concurrent writers can enqueue and coalesce into
     //                              the same group-commit batch.
+
+    /// Engages the WAL write fence, and makes it observable.
+    ///
+    /// The fence rejects every subsequent write for the life of the process:
+    /// bytes written after a torn record are discarded by `scan_records` on
+    /// replay, so acking them would ack data that recovery throws away.
+    ///
+    /// It used to engage silently — no log line, no metric, no accessor — so a
+    /// node that refused every write kept reporting itself ready
+    /// (audit 2026-08-28 §4.11#8). Every fence site goes through here.
+    ///
+    /// `reason` is a short static label, not free text: it becomes a metric
+    /// label value, so it must have bounded cardinality.
+    pub(crate) fn engage_fence(&self, reason: &'static str) {
+        // Only the first fence of a process logs and meters: the state is
+        // permanent, so a repeat carries no new information.
+        if self.fenced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        tracing::error!(
+            reason,
+            path = %self.path.display(),
+            "WAL write fence engaged — every subsequent write is refused for the \
+             life of this process; restart to clear it. /readyz reports not-ready."
+        );
+        crate::metrics::metrics().mark_wal_write_fenced(reason);
+    }
+
+    /// Reports whether the WAL write fence is engaged.
+    ///
+    /// Once engaged it stays engaged until the process restarts. `/readyz`
+    /// reads this through [`crate::storage::StorageEngine::is_write_fenced`].
+    pub fn is_fenced(&self) -> bool {
+        self.fenced.load(Ordering::Acquire)
+    }
 
     /// Enqueue a WAL entry for group commit without blocking for the fsync.
     ///
@@ -1219,6 +1427,18 @@ impl Wal {
     /// Writes one entry directly to the file without fsync (`SyncMode::None`).
     ///
     /// The file mutex is held for the whole operation to preserve nonce ordering.
+    ///
+    /// A failed write must not consume the record number it reserved
+    /// (audit 2026-08-28 §4.11#5).  Replay derives each record's nonce and AAD
+    /// from a counter that starts at zero and advances one per record, so a gap
+    /// makes every following record fail its AEAD open — `Wal::open_with_fs`
+    /// then returns `Err` on every subsequent start, for the life of the
+    /// segment.  One transient `ENOSPC` used to be enough.
+    ///
+    /// The recovery is therefore: truncate the segment back to the length it
+    /// had before the attempt, then release the record number.  If the
+    /// truncation itself fails the file length is unknown, so the WAL fences
+    /// exactly as [`Self::commit_batch`] does after a torn write.
     fn write_entry_no_sync<F>(&self, plaintext: Vec<u8>, pre_rotate: F) -> Result<(), StorageError>
     where
         F: FnOnce() -> Result<(), StorageError>,
@@ -1231,12 +1451,28 @@ impl Wal {
         let file_size = file.seek(SeekFrom::End(0))?;
         #[allow(clippy::cast_possible_truncation)]
         let approx_record_size = 4 + plaintext.len() as u64 + encryption::TAG_SIZE as u64 + 4;
-        if self.config.max_size > 0 && file_size + approx_record_size > self.config.max_size {
-            pre_rotate()?;
-            self.rotate_locked(&mut **file)?;
-        }
+        let rotated =
+            if self.config.max_size > 0 && file_size + approx_record_size > self.config.max_size {
+                pre_rotate()?;
+                self.rotate_locked(&mut **file)?;
+                true
+            } else {
+                false
+            };
 
-        let (nonce, aad, dek) = {
+        // Length this record appends at.  Rotation truncates the segment, so
+        // re-measure after it rather than reusing the pre-rotation size.
+        let base_len = if rotated {
+            file.seek(SeekFrom::End(0))?
+        } else {
+            file_size
+        };
+
+        // INVARIANT: every mutation of `rotation.record_counter` — here, in
+        // `commit_batch`, and in `rotate_locked` — happens while this same file
+        // mutex is held.  No other writer can take a record number between the
+        // reservation below and the rollback, so releasing it is race-free.
+        let (record_num, nonce, aad, dek) = {
             let mut rot = self
                 .rotation
                 .lock()
@@ -1247,17 +1483,59 @@ impl Wal {
             let aad = record_num.to_le_bytes();
             let mut dek_bytes = [0u8; 32];
             dek_bytes.copy_from_slice(rot.dek.as_bytes());
-            (nonce, aad, DataEncryptionKey::from_bytes(dek_bytes))
+            (
+                record_num,
+                nonce,
+                aad,
+                DataEncryptionKey::from_bytes(dek_bytes),
+            )
         };
 
-        let ciphertext = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
-        let crc = crc32fast::hash(&ciphertext);
+        let write_result: Result<(), StorageError> = (|| {
+            let ciphertext = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
+            let crc = crc32fast::hash(&ciphertext);
 
-        #[allow(clippy::cast_possible_truncation)]
-        let payload_len = ciphertext.len() as u32;
-        file.write_all(&payload_len.to_le_bytes())?;
-        file.write_all(&ciphertext)?;
-        file.write_all(&crc.to_le_bytes())?;
+            // One `write_all` for the whole record.  Three partial writes gave
+            // three chances to tear a record; one gives one.
+            #[allow(clippy::cast_possible_truncation)]
+            let payload_len = ciphertext.len() as u32;
+            let mut buf = Vec::with_capacity(4 + ciphertext.len() + 4);
+            buf.extend_from_slice(&payload_len.to_le_bytes());
+            buf.extend_from_slice(&ciphertext);
+            buf.extend_from_slice(&crc.to_le_bytes());
+            file.write_all(&buf)?;
+            Ok(())
+        })();
+
+        if let Err(err) = write_result {
+            // Roll the segment back to its pre-write length, so no partial
+            // record survives, then release the reserved record number.
+            match file.set_len(base_len) {
+                Ok(()) => {
+                    if let Ok(mut rot) = self.rotation.lock() {
+                        rot.record_counter = record_num;
+                    } else {
+                        // Rotation mutex poisoned: the counter cannot be
+                        // released, so the next record would open a gap.
+                        self.engage_fence("record_counter_unreleasable");
+                    }
+                    // Restore the append cursor; `set_len` leaves it past EOF.
+                    file.seek(SeekFrom::End(0))?;
+                }
+                Err(truncate_err) => {
+                    // The on-disk length is now unknown.  Fence rather than
+                    // ack any later write that replay would discard.
+                    tracing::error!(
+                        error = %truncate_err,
+                        base_len,
+                        record_num,
+                        "WAL write fault: rollback truncation failed"
+                    );
+                    self.engage_fence("write_rollback_failed");
+                }
+            }
+            return Err(err);
+        }
 
         // Intentionally no fsync — this path is SyncMode::None (dev/test only).
         Ok(())
@@ -1444,7 +1722,7 @@ impl Wal {
         // WAL so subsequent appends are rejected rather than silently acking
         // data that replay will discard.
         if commit_result.is_err() {
-            self.fenced.store(true, Ordering::Release);
+            self.engage_fence("group_commit_write_fault");
         }
 
         // Propagate the outcome to every slot; errors travel as strings so
@@ -1595,14 +1873,37 @@ impl Wal {
             flush()?;
         }
 
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&WAL_MAGIC)?;
-        file.write_all(&WAL_VERSION_CURRENT.to_le_bytes())?;
-        file.write_all(&new_enc_header.to_bytes())?;
+        // Everything from here on is past the point of no return: the segment
+        // has been truncated. A failure now leaves a header shorter than 82
+        // bytes while `self.rotation` still names the OLD DEK and record
+        // counter, so any later append would encrypt under a key the on-disk
+        // header no longer carries. Fence instead (audit 2026-08-28 §4.11#6).
+        let rotate_result: Result<(), StorageError> = (|| {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
 
-        if self.config.sync_mode == SyncMode::EveryWrite {
-            file.sync_all()?;
+            // One `write_all` for the whole header: three gave three chances to
+            // leave a stub the next start had to repair.
+            let mut header = Vec::with_capacity(V1_RECORD_OFFSET as usize);
+            header.extend_from_slice(&WAL_MAGIC);
+            header.extend_from_slice(&WAL_VERSION_CURRENT.to_le_bytes());
+            header.extend_from_slice(&new_enc_header.to_bytes());
+            file.write_all(&header)?;
+
+            if self.config.sync_mode == SyncMode::EveryWrite {
+                file.sync_all()?;
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = rotate_result {
+            tracing::error!(
+                error = %err,
+                "WAL rotation failed after the segment was truncated; the next \
+                 start re-initialises the segment"
+            );
+            self.engage_fence("rotation_write_fault");
+            return Err(err);
         }
 
         // Swap DEK, enc header, and nonce counter atomically under one mutex
@@ -1707,6 +2008,197 @@ mod tests {
             "new empty WAL should be exactly {} bytes",
             V1_RECORD_OFFSET
         );
+    }
+
+    /// The WAL write fence must be observable: reported by an accessor,
+    /// counted in metrics, and therefore reflected in `/readyz`
+    /// (audit 2026-08-28 §4.11#8).
+    ///
+    /// The fence is permanent for the life of the process. It used to engage
+    /// silently — no log line, no metric, no accessor — so a node that refused
+    /// every write kept reporting itself ready.
+    #[test]
+    fn write_fence_is_reported_and_metered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+        let wal = open_test_wal(
+            &wal_path,
+            WalConfig {
+                max_size: 0,
+                sync_mode: SyncMode::None,
+            },
+        );
+
+        assert!(!wal.is_fenced(), "a healthy WAL must not report a fence");
+        assert!(
+            !crate::metrics::metrics()
+                .render()
+                .contains("hearth_wal_write_fenced"),
+            "the fence time series must be absent until a fence engages"
+        );
+
+        wal.engage_fence("test_fault");
+
+        assert!(wal.is_fenced(), "the fence must be reported once engaged");
+        wal.append(&make_entry(b"after-fence", b"v", WalOperation::Put))
+            .expect_err("a fenced WAL must refuse every write");
+
+        let rendered = crate::metrics::metrics().render();
+        assert!(
+            rendered.contains("hearth_wal_write_fenced{reason=\"test_fault\"} 1"),
+            "the fence must raise its metric; got: {rendered}"
+        );
+    }
+
+    /// The v0 -> v1 migration is now written back only after the migrated form
+    /// has proven it unwraps and scans (audit 2026-08-28 §4.11#7). A v0 segment
+    /// that holds records must still be migrated, persisted, and readable.
+    #[test]
+    fn legacy_v0_wal_with_records_migrated_and_persisted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("legacy-records.wal");
+        let config = WalConfig {
+            max_size: 0,
+            sync_mode: SyncMode::None,
+        };
+
+        let entry1 = make_entry(b"v0-key-1", b"v0-val-1", WalOperation::Put);
+        let entry2 = make_entry(b"v0-key-2", b"v0-val-2", WalOperation::Put);
+
+        // Build a v1 segment, then strip its 6-byte version header. What is
+        // left is exactly a v0 segment: [76B enc header][records].
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            wal.append(&entry1).expect("append 1");
+            wal.append(&entry2).expect("append 2");
+        }
+        let v1_bytes = std::fs::read(&wal_path).expect("read v1");
+        std::fs::write(&wal_path, &v1_bytes[WAL_VERSION_HEADER_SIZE..]).expect("write v0");
+
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            assert_eq!(
+                wal.read_all().expect("read migrated"),
+                vec![entry1.clone(), entry2.clone()],
+                "a v0 segment's records must survive the migration"
+            );
+        }
+
+        // The migration must be on disk, not only in memory.
+        let migrated = std::fs::read(&wal_path).expect("re-read");
+        assert_eq!(
+            migrated, v1_bytes,
+            "the migrated form must be written back to disk"
+        );
+
+        // And it must still read after a restart that takes the v1 path.
+        let wal = open_test_wal(&wal_path, config);
+        assert_eq!(
+            wal.read_all().expect("read after restart"),
+            vec![entry1, entry2],
+            "the persisted migration must reopen as a v1 segment"
+        );
+    }
+
+    /// A one-byte corruption of the WAL magic must not rewrite the segment
+    /// (audit 2026-08-28 §4.11#7).
+    ///
+    /// A file that does not start with `HWAL` is treated as a legacy v0
+    /// segment, and the v0 -> v1 migration prepends a 6-byte header and writes
+    /// the result back with `set_len(0)` + `write_all`. For a v1 segment whose
+    /// magic lost one byte, that shifted every record by six bytes and
+    /// destroyed the original in place — and the open still failed afterwards,
+    /// because the encryption header no longer unwrapped. The operator was left
+    /// with an unopenable segment that no longer held what it had held.
+    #[test]
+    fn corrupt_magic_does_not_rewrite_the_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+        let config = WalConfig {
+            max_size: 0,
+            sync_mode: SyncMode::None,
+        };
+
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            wal.append(&make_entry(b"key-1", b"value-1", WalOperation::Put))
+                .expect("append 1");
+            wal.append(&make_entry(b"key-2", b"value-2", WalOperation::Put))
+                .expect("append 2");
+        }
+
+        // Flip one byte of the magic: 'H' -> 'X'.
+        let mut bytes = std::fs::read(&wal_path).expect("read wal");
+        bytes[0] = b'X';
+        std::fs::write(&wal_path, &bytes).expect("write corrupted wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(&wal_path, config, Arc::new(RealFs), &kek, kek_id);
+        assert!(
+            result.is_err(),
+            "a corrupt magic must not open as a legacy v0 segment"
+        );
+
+        assert_eq!(
+            std::fs::read(&wal_path).expect("re-read wal"),
+            bytes,
+            "a failed open must leave the segment byte-identical, so the \
+             operator can still repair or copy it"
+        );
+    }
+
+    /// A write fault during segment creation or rotation can leave a header
+    /// shorter than the 82-byte v1 header. `open()` refused every such file
+    /// with `WAL file too small for headers`, and no repair was documented, so
+    /// one short write left the data directory permanently unopenable
+    /// (audit 2026-08-28 §4.11#6).
+    ///
+    /// No record can live in those bytes — the v1 record region starts at byte
+    /// 82 — so the segment is re-initialised instead.
+    #[test]
+    fn partial_wal_header_reinitialised_rather_than_refused() {
+        for truncate_to in [1u64, 3, 5, 40, 81] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wal_path = dir.path().join("test.wal");
+            let config = WalConfig {
+                max_size: 0,
+                sync_mode: SyncMode::None,
+            };
+
+            let entry = make_entry(b"after-repair", b"value", WalOperation::Put);
+
+            // Create a healthy segment, then cut its header short.
+            {
+                let wal = open_test_wal(&wal_path, config.clone());
+                drop(wal);
+            }
+            {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&wal_path)
+                    .expect("open for truncation");
+                file.set_len(truncate_to).expect("truncate header");
+            }
+
+            // Reopen: must succeed and present an empty, appendable segment.
+            {
+                let wal = open_test_wal(&wal_path, config.clone());
+                assert_eq!(
+                    wal.read_all().expect("read after repair"),
+                    vec![],
+                    "a {truncate_to}-byte header holds no record"
+                );
+                wal.append(&entry).expect("append after repair");
+            }
+
+            // And the repaired segment survives another restart.
+            let wal = open_test_wal(&wal_path, config);
+            assert_eq!(
+                wal.read_all().expect("read after restart"),
+                vec![entry],
+                "the record written after repair must replay (truncate_to={truncate_to})"
+            );
+        }
     }
 
     #[test]
@@ -1840,9 +2332,16 @@ mod tests {
     /// NOTE: this is a *persistence-across-reopen* check, not a proof of
     /// fsync-before-ack. Both writer and reader live in the same process, so the
     /// bytes would be served from the OS page cache even if `fsync` were never
-    /// called. The fsync-before-ack durability invariant (surviving a real
-    /// `kill -9` where the page cache is lost) is exercised by the
-    /// `hearth-simulation` crate's `wal_crash` real-thread/tempfile crash loop.
+    /// called.
+    ///
+    /// The fsync-before-ack invariant is proved by
+    /// `hearth-simulation`'s `wal_fsync_before_ack` module, which arms the
+    /// filesystem so the next sync fails and asserts the append is REFUSED — a
+    /// WAL that acknowledged first, or that ignored what `sync_data` returned,
+    /// answers `Ok` there. This doc comment previously cited a `wal_crash`
+    /// "crash loop" as the proof; no such loop exists, and every test in that
+    /// module runs under `SyncMode::None`, so none of them could distinguish
+    /// fsync-before-ack from no fsync at all (audit 2026-08-28 §4.11#11).
     #[test]
     fn wal_data_persists_across_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1990,6 +2489,117 @@ mod tests {
                 "post-recovery append must survive the next restart"
             );
         }
+    }
+
+    /// Walks the record frames of a WAL file and returns the absolute byte
+    /// offset of frame `index`'s first byte (its length field).
+    fn frame_offset(data: &[u8], index: usize) -> usize {
+        #[allow(clippy::cast_possible_truncation)]
+        let mut pos = V1_RECORD_OFFSET as usize;
+        for _ in 0..index {
+            let len =
+                u32::from_le_bytes(data[pos..pos + 4].try_into().expect("len bytes")) as usize;
+            pos += 4 + len + 4;
+        }
+        pos
+    }
+
+    /// Audit 2026-08-28 §4.11#3: a single mid-segment CRC mismatch made
+    /// `open()` return `Ok` after physically destroying every acknowledged
+    /// record that followed it. When valid records survive beyond the
+    /// corruption, the open must refuse, and the file must stay
+    /// byte-for-byte intact so the operator can decide.
+    #[test]
+    fn open_refuses_mid_segment_corruption_and_preserves_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+
+        let entries: Vec<WalEntry> = (0..4)
+            .map(|i| make_entry(format!("key-{i}").as_bytes(), b"val", WalOperation::Put))
+            .collect();
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            for e in &entries {
+                wal.append(e).expect("append");
+            }
+        }
+
+        // Flip one ciphertext byte in record 1 — records 2 and 3 remain
+        // acknowledged, durable and cryptographically valid after it.
+        let mut data = std::fs::read(&wal_path).expect("read wal");
+        let target = frame_offset(&data, 1) + 4;
+        data[target] ^= 0x01;
+        std::fs::write(&wal_path, &data).expect("write corrupted wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(
+            &wal_path,
+            WalConfig::default(),
+            Arc::new(RealFs),
+            &kek,
+            kek_id,
+        );
+        match result {
+            Err(StorageError::WalMidSegmentCorruption {
+                recovered_records, ..
+            }) => {
+                assert_eq!(
+                    recovered_records, 1,
+                    "one record replays before the corruption"
+                );
+            }
+            Err(other) => panic!("expected WalMidSegmentCorruption, got: {other}"),
+            Ok(_) => {
+                panic!("open must refuse a mid-segment corruption with valid records after it")
+            }
+        }
+
+        let after = std::fs::read(&wal_path).expect("read wal after refused open");
+        assert_eq!(after, data, "a refused open must not rewrite the segment");
+    }
+
+    /// Same loss class through a corrupted length field: the frame walk sees
+    /// a bogus torn tail, but acknowledged records still follow it. The
+    /// byte-scan probe must find them and the open must refuse.
+    #[test]
+    fn open_refuses_corrupt_length_field_hiding_survivors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("test.wal");
+
+        let entries: Vec<WalEntry> = (0..4)
+            .map(|i| make_entry(format!("key-{i}").as_bytes(), b"val", WalOperation::Put))
+            .collect();
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            for e in &entries {
+                wal.append(e).expect("append");
+            }
+        }
+
+        // Overwrite record 1's length field with a huge value. The frame walk
+        // now reads past EOF and would treat everything after record 0 as a
+        // torn tail — destroying records 2 and 3.
+        let mut data = std::fs::read(&wal_path).expect("read wal");
+        let len_field = frame_offset(&data, 1);
+        data[len_field..len_field + 4].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+        std::fs::write(&wal_path, &data).expect("write corrupted wal");
+
+        let (kek, kek_id) = test_kek();
+        let result = Wal::open_with_fs(
+            &wal_path,
+            WalConfig::default(),
+            Arc::new(RealFs),
+            &kek,
+            kek_id,
+        );
+        match result {
+            Err(StorageError::WalMidSegmentCorruption { .. }) => {}
+            Err(other) => panic!("expected WalMidSegmentCorruption, got: {other}"),
+            Ok(_) => panic!("open must refuse a corrupt length field that hides survivors"),
+        }
+
+        let after = std::fs::read(&wal_path).expect("read wal after refused open");
+        assert_eq!(after, data, "a refused open must not rewrite the segment");
     }
 
     // --- P1 fast ---

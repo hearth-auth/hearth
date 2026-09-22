@@ -7,6 +7,9 @@
 //!   GET  /v1/agents/{id}                  — get agent
 //!   PATCH /v1/agents/{id}                 — update agent
 //!   DELETE /v1/agents/{id}                — delete agent
+//!   POST /v1/agents/{id}/suspend          — suspend agent (reversible)
+//!   POST /v1/agents/{id}/reactivate       — reactivate a suspended agent
+//!   POST /v1/agents/{id}/revoke           — revoke agent (terminal)
 //!   POST /v1/agents/{id}/credentials/keys — issue API key
 //!   GET  /v1/agents/{id}/credentials      — list credentials
 //!   DELETE /v1/agents/{id}/credentials/{cred_id} — revoke credential
@@ -42,6 +45,9 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             "/v1/agents/{id}",
             get(get_agent).patch(update_agent).delete(delete_agent),
         )
+        .route("/v1/agents/{id}/suspend", post(suspend_agent))
+        .route("/v1/agents/{id}/reactivate", post(reactivate_agent))
+        .route("/v1/agents/{id}/revoke", post(revoke_agent))
         .route("/v1/agents/{id}/credentials/keys", post(create_api_key))
         .route("/v1/agents/{id}/credentials", get(list_credentials))
         .route(
@@ -158,6 +164,13 @@ async fn agent_card(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // `extract_admin_auth` admits every `hearth.*.admin` sub-admin; every other
+    // handler in this module names `hearth.agents.admin`, this one named
+    // nothing, so a `hearth.clients.admin` token read agent cards
+    // (audit 2026-08-28 §4.1#9).
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
     let realm_id = auth.realm_id;
 
     let agent_id_str = match query.agent_id {
@@ -287,8 +300,46 @@ async fn create_agent(
     }
 }
 
+/// Query parameters for `GET /v1/agents`.
+///
+/// AGENT_AUTH.md §1.3 requires the list endpoint to filter by `owner_id`,
+/// `status` and capability, and to paginate with the same cursor pattern as
+/// every other list endpoint. The handler previously passed
+/// `ListAgentsQuery::default()` and a fixed limit of 100 with no extractor at
+/// all, so none of that was reachable and a realm with more than 100 agents
+/// could not be enumerated past the first page.
+#[derive(Debug, Default, Deserialize)]
+struct ListAgentsParams {
+    /// `user` or `organization`; defaults to `user` when only `owner_id` is given.
+    owner_type: Option<String>,
+    /// UUID of the owning user or organization.
+    owner_id: Option<String>,
+    /// `active`, `suspended`, or `revoked`.
+    status: Option<String>,
+    /// Exact capability URI the agent must declare.
+    capability: Option<String>,
+    /// Opaque cursor from a previous page's `next_cursor`.
+    cursor: Option<String>,
+    /// Page size. Defaults to 100; the engine caps it.
+    limit: Option<usize>,
+}
+
+/// Parses `?status=` into an [`AgentStatus`].
+fn parse_agent_status(s: &str) -> Option<AgentStatus> {
+    match s {
+        "active" => Some(AgentStatus::Active),
+        "suspended" => Some(AgentStatus::Suspended),
+        "revoked" => Some(AgentStatus::Revoked),
+        _ => None,
+    }
+}
+
 /// `GET /v1/agents`
-async fn list_agents(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn list_agents(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<ListAgentsParams>,
+) -> impl IntoResponse {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
@@ -298,9 +349,51 @@ async fn list_agents(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     }
     let realm_id = auth.realm_id;
 
+    // An unparseable filter is a client error, not a silently wider listing:
+    // answering 200 with every agent in the realm would be the fail-open shape.
+    let owner = match &params.owner_id {
+        Some(oid) => {
+            let kind = params.owner_type.as_deref().unwrap_or("user");
+            match parse_owner(kind, oid) {
+                Ok(o) => Some(o),
+                Err(msg) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({"error": msg})),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        None => None,
+    };
+    let status = match &params.status {
+        Some(s) => match parse_agent_status(s) {
+            Some(st) => Some(st),
+            None => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "status must be 'active', 'suspended', or 'revoked'"
+                    })),
+                )
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+
+    let query = ListAgentsQuery {
+        owner_id: owner,
+        status,
+        capability: params.capability.clone(),
+    };
+    let cursor = params.cursor.clone();
+    let limit = params.limit.unwrap_or(100);
+
     let identity = Arc::clone(&state.identity);
     let result = tokio::task::spawn_blocking(move || {
-        identity.list_agents(&realm_id, &ListAgentsQuery::default(), None, 100)
+        identity.list_agents(&realm_id, &query, cursor.as_deref(), limit)
     })
     .await
     .unwrap_or_else(|e| {
@@ -471,6 +564,133 @@ async fn delete_agent(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
+}
+
+/// The `AgentStatus` transitions AGENT_AUTH.md §1.2 makes normative.
+#[derive(Clone, Copy)]
+enum LifecycleTransition {
+    Suspend,
+    Reactivate,
+    Revoke,
+}
+
+impl LifecycleTransition {
+    /// Route segment, used for tracing only.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Suspend => "suspend",
+            Self::Reactivate => "reactivate",
+            Self::Revoke => "revoke",
+        }
+    }
+}
+
+/// Shared body for `POST /v1/agents/{id}/{suspend,reactivate,revoke}`.
+///
+/// AGENT_AUTH.md §1.2 makes the state machine normative — `Active → Suspended
+/// → Active` (reversible) and `Active|Suspended → Revoked` (terminal) — and
+/// twelve enforcement points in the identity engine refuse a non-`Active`
+/// agent (AAT issue/validate/derive, approval create/approve, SPIFFE SVID
+/// validation, transaction-token requester and target, token-exchange actor
+/// and `act` chain, the delegation-depth ceiling, and API-key issuance).
+/// Until these routes existed no protocol could enter either state: the engine
+/// methods' only production caller was the abuse monitor's auto-suspension, so
+/// an operator whose agent key leaked could revoke one credential or delete the
+/// agent outright and nothing in between (subsystem audit 2026-09-21,
+/// finding A-1).
+///
+/// Gated on `hearth.agents.admin` like every other handler in this module. The
+/// realm is taken from the caller's own token, never from the path, so an
+/// agent in another realm resolves to `AgentNotFound` (404). Each transition
+/// emits its audit event from the engine (`AgentSuspended`,
+/// `AgentReactivated`, `AgentRevoked`); `AgentRevoked` carries the
+/// `FailOperation` failure policy, so an unrecorded revocation fails the
+/// request instead of silently succeeding.
+async fn agent_lifecycle_transition(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    id: &str,
+    transition: LifecycleTransition,
+) -> axum::response::Response {
+    let auth = match extract_admin_auth(headers, state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id.clone();
+    let agent_id = match id.parse::<AgentId>() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid agent id"})),
+            )
+                .into_response()
+        }
+    };
+
+    let caller = Some(auth.user_id.clone());
+    let identity = Arc::clone(&state.identity);
+    let result = tokio::task::spawn_blocking(move || match transition {
+        LifecycleTransition::Suspend => {
+            identity.suspend_agent(&realm_id, &agent_id, caller.as_ref())
+        }
+        LifecycleTransition::Reactivate => {
+            identity.reactivate_agent(&realm_id, &agent_id, caller.as_ref())
+        }
+        LifecycleTransition::Revoke => identity.revoke_agent(&realm_id, &agent_id, caller.as_ref()),
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            transition = transition.name(),
+            "agent lifecycle transition spawn_blocking panicked"
+        );
+        Err(crate::identity::IdentityError::Storage(Box::new(e)))
+    });
+
+    match result {
+        Ok(agent) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(agent_to_wire(&agent)).unwrap_or_default()),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// `POST /v1/agents/{id}/suspend` — `Active → Suspended` (reversible).
+async fn suspend_agent(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    agent_lifecycle_transition(&state, &headers, &id, LifecycleTransition::Suspend).await
+}
+
+/// `POST /v1/agents/{id}/reactivate` — `Suspended → Active`.
+///
+/// Refused with `403` for a revoked agent: §1.2 makes revocation terminal.
+async fn reactivate_agent(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    agent_lifecycle_transition(&state, &headers, &id, LifecycleTransition::Reactivate).await
+}
+
+/// `POST /v1/agents/{id}/revoke` — `Active|Suspended → Revoked` (terminal).
+///
+/// Idempotent: revoking an already-revoked agent answers `200`.
+async fn revoke_agent(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    agent_lifecycle_transition(&state, &headers, &id, LifecycleTransition::Revoke).await
 }
 
 #[derive(Deserialize)]

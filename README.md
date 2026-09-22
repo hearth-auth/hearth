@@ -28,15 +28,38 @@ Download pre-built v1.6.10 artifacts from the [Releases page](https://github.com
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/${ARTIFACT}"
-curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS
+BASE=https://github.com/hearth-auth/hearth/releases/download/v1.6.10
 
-# Verify the checksum
+curl -LO "${BASE}/${ARTIFACT}"
+curl -LO "${BASE}/SHA256SUMS"
+curl -LO "${BASE}/SHA256SUMS.sig"
+curl -LO "${BASE}/SHA256SUMS.pem"
+
+# 1. Verify the checksum manifest itself. Requires cosign v2+
+#    (brew install cosign). Without this step the checksum below proves
+#    nothing: anyone who can replace the binary can replace SHA256SUMS
+#    beside it. The signature is bound to Hearth's release workflow and
+#    logged to Sigstore's public transparency log, so it cannot be forged.
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature   SHA256SUMS.sig \
+  --certificate-identity-regexp \
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+# 2. Check the binary against the now-trusted manifest.
+#    macOS has no sha256sum — use: shasum -a 256 -c SHA256SUMS --ignore-missing
 sha256sum -c SHA256SUMS --ignore-missing
 
 chmod +x "${ARTIFACT}"
 "./${ARTIFACT}" --version
 ```
+
+> Run step 1. On its own, `sha256sum -c` only proves the file you downloaded matches
+> the manifest you downloaded from the same place. See
+> [docs/guides/verify-release.md](docs/guides/verify-release.md) for per-binary signature
+> and SLSA provenance verification.
 
 ### Released binary — Windows
 
@@ -44,11 +67,23 @@ chmod +x "${ARTIFACT}"
 Invoke-WebRequest `
   -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
-Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/SHA256SUMS" `
-  -OutFile SHA256SUMS
+foreach ($f in 'SHA256SUMS','SHA256SUMS.sig','SHA256SUMS.pem') {
+  Invoke-WebRequest `
+    -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/$f" `
+    -OutFile $f
+}
 
-# Verify the checksum
+# 1. Verify the checksum manifest itself (cosign v2+). Without this the
+#    checksum below proves nothing — see the note under the Linux/macOS block.
+cosign verify-blob `
+  --certificate SHA256SUMS.pem `
+  --signature   SHA256SUMS.sig `
+  --certificate-identity-regexp `
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+  SHA256SUMS
+
+# 2. Check the binary against the now-trusted manifest.
 $expected = (Select-String 'hearth-windows-amd64.exe' SHA256SUMS).Line.Split(' ')[0]
 $actual   = (Get-FileHash hearth-windows-amd64.exe -Algorithm SHA256).Hash.ToLower()
 if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
@@ -57,6 +92,16 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ```
 
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
+
+> **Known gap — these two commands do not work anonymously today.** Both GHCR packages
+> (`hearth-auth/hearth` and `hearth-auth/charts/hearth`) are still **private**: an
+> unauthenticated manifest fetch answers `401`, re-verified 2026-09-21. `docker pull` and
+> `helm install` below therefore fail at the first request unless you
+> `docker login ghcr.io` with an account that has read access. Release validation now gates on
+> an anonymous fetch (`scripts/check-install-paths.sh`), so newly published versions will be
+> public, but flipping the two existing packages needs a token with `write:packages` and has
+> not been done. Until then, use the released binary above or build from source. The claim
+> that these are turnkey public install paths is withdrawn, not restated.
 
 ```bash
 docker pull ghcr.io/hearth-auth/hearth:v1.6.10
@@ -115,7 +160,7 @@ The bootstrap call returns a realm, an admin user, and a signed JWT — everythi
 }
 ```
 
-`admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns an empty `admin_password`.
+`admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns `"admin_password": null` (JSON null, not `""` — `jq -r .admin_password` prints the string `null`).
 
 > **No Docker, no Postgres, no config required** — `--dev` mode is fully self-contained. The bootstrap endpoint is disabled in production (`404 Not Found`).
 
@@ -174,7 +219,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 **Protocols**
 - OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591; RFC 7592 management endpoints are roadmap)
 - Token Introspection (RFC 7662), Revocation (RFC 7009), RP-initiated logout
-- SAML 2.0 (SP-initiated and IdP-initiated)
+- SAML 2.0 in **both** roles: Service Provider (inbound federation — SP-initiated and IdP-initiated SSO, plus Single Logout) and Identity Provider (Hearth asserts to third-party SPs at `/realms/{realm}/saml/sso`). Encrypted assertions are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
 - Signed webhook subscriptions for auth and admin events
 - gRPC management API (RBAC admin surface)
@@ -216,9 +261,11 @@ All engine-plane figures were measured on `dev-ryzen-7840hs` as of 2026-07-29; f
 | Token introspection (RFC 7662) | **44.0 µs** | — | engine |
 | Permission check | — | **5,987,782 /core/s** · 52,048,086 /s @16T | engine |
 | Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** | — | engine |
-| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 · **41,255 /s** @T=256 | engine |
+| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 (floor) | engine |
 
 `W=1.000` at T=1 means one WAL `fsync` per durable write — the theoretical floor. No write is acknowledged before it is on stable storage. `SyncMode::Async` was evaluated as a default and rejected; every write figure above carries full durability.
+
+> **We publish no peak figure for durable session creation.** A previously published `41,255 /s @T=256` was **retracted** on 2026-07-30: five alternating runs on the same host measured 10,047–33,888 ops/s — a 3.4× spread with a median of ~16,281 — so the number was jitter, not a measurement. `W=1.000` held on every run, so durability is not in question; the *rate* is not reproducible on this host. Only the single-threaded 484 /s floor survives. A peak figure returns when a quiesced server-class host exists. See [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md) §2.1.
 
 ### Password login (HTTP plane, re-verified)
 
@@ -258,14 +305,16 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
 5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
-7. **Conformance** — OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, WebAuthn Level 2 ceremony.
+7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, FAPI 2.0, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs; **no certifying body's suite has been run against Hearth, and Hearth is not certified.**
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
 **Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **4,643 Rust tests (2,245 unit · 2,337 integration · 61 crash-recovery simulation) · TypeScript and Go SDK conformance tests — all green.**
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **5,387 Rust tests — 2,593 unit (`hearth` lib + bin) · 2,715 integration (`tests/`) · 79 crash-recovery simulation (`hearth-simulation`).** 14 of those carry `#[ignore]` (live-LDAP cases and one manual measurement) and do not run by default. Counted with `cargo nextest list --workspace` at `333c74e6` — reproduce it yourself rather than taking the number on faith.
+
+The Rust suite, the seven SDK suites and the SDK conformance check are all in the `needs:` list of the `required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite blocks merge. This README does not assert a green result for any particular commit: look at the CI badge above, or at the `validation-summary.txt` asset on a given release.
 
 > **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — `docs/specs/TEST_SCENARIOS.md` §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
 
@@ -276,6 +325,10 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 ### Prerequisites
 
 - **Rust 1.88.0+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
+- **`protoc`** — `build.rs` runs it on every build to generate the gRPC types.
+  Install it (`brew install protobuf`, `apt install protobuf-compiler`, or a
+  release from [protobuf/releases](https://github.com/protocolbuffers/protobuf/releases))
+  and make sure it is on `PATH`, or set `PROTOC=/path/to/protoc`.
 - `buf` (optional — only needed if you edit `proto/**/*.proto`; see [`CONTRIBUTING.md`](CONTRIBUTING.md))
 
 ### 1. Build
@@ -291,7 +344,9 @@ cargo build --release
 ./target/release/hearth serve --dev
 ```
 
-Dev mode uses in-memory storage in a temp directory, `debug` logging, `fsync` disabled, and enables the `/admin/bootstrap` endpoint. The server binds to `127.0.0.1:8420`.
+Dev mode uses `debug` logging, `fsync` disabled, and enables the `/admin/bootstrap` endpoint. The server binds to `127.0.0.1:8420`.
+
+Storage is still a real WAL + SST store, not a RAM-only mode — it just lives in a throwaway location. The effective directory follows a three-level rule: `HEARTH_DEV_DATA_DIR` if set, else an explicit non-default `storage.data_dir`, else a temp directory removed on exit. Bare `./target/release/hearth serve --dev` takes the third branch, so nothing survives a restart; **`make dev` takes the first** (it sets `HEARTH_DEV_DATA_DIR=./data/dev`, which is gitignored) and therefore **does** persist across restarts — `make dev-reset` wipes it. See [`docs/specs/CONFIGURATION.md`](docs/specs/CONFIGURATION.md#--dev-mode-and-hearth_dev_data_dir).
 
 ### 3. Verify
 
@@ -342,9 +397,45 @@ Response (JSON):
 }
 ```
 
-`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return an empty string. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap.
+`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return JSON `null` for that field. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap; without it the call answers `401`.
+
+Bootstrap creates **two** admin identities that share the returned `admin_password`:
+
+| Identity | Realm | Used for |
+|---|---|---|
+| `admin@dev.local` | the `dev-realm` it just created | the REST/OIDC walkthrough below — this is the `sub` behind `access_token` |
+| `admin@hearth.test` | the system realm (`00000000-…-0000`) | the browser admin console at `/ui/admin/login` |
+
+Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
+
+Every `/admin/*` JSON route is realm-scoped and requires an **`X-Realm-ID` header** alongside the bearer token. Without it the call answers `400 {"error":"missing X-Realm-ID header"}`, not `401`:
+
+```bash
+curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "X-Realm-ID: $REALM_ID" \
+     http://127.0.0.1:8420/admin/realms | jq .
+```
 
 In production mode the endpoint returns `404 Not Found`.
+
+### Creating the first admin outside `--dev`
+
+`/admin/bootstrap` does not exist in production. A fresh production data directory has no admin at all, and the server logs a `WARN` on every boot until one exists:
+
+```
+WARN first-run setup required: open this URL and supply the token from the
+     token file in the data directory  setup_url=https://auth.example.com/ui/setup
+     token_file=".setup_token"
+```
+
+The token itself is deliberately **not** logged in production. Read it from the data directory and append it as a query parameter — `/ui/setup` with no `token` answers `404`, by design, so the flow is not discoverable:
+
+```bash
+SETUP_TOKEN=$(cat /var/lib/hearth/data/.setup_token)
+echo "https://auth.example.com/ui/setup?token=$SETUP_TOKEN"
+```
+
+Open that URL once and create the operator account. The token is single-use and the admin lands in the system realm. Set `onboarding.enabled: false` afterwards to close the flow permanently.
 
 ---
 
@@ -359,9 +450,23 @@ In production mode the endpoint returns `404 Not Found`.
 
 CLI flags `--port` and `--bind` override any of the above.
 
-YAML files support `${VAR_NAME}` environment variable substitution (`src/config/env.rs`); a missing variable is a hard error.
+YAML files support `${VAR_NAME}` environment variable substitution (`src/config/env.rs`); a missing variable is a hard error. Substitution runs over the **raw file text before the YAML parse**, so a `${VAR}` inside a `#` comment is expanded too and an unset variable there fails the whole config. Delete commented-out `${…}` placeholders you are not using, or write them as `${VAR:-}` to declare the empty value intentional.
 
-Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Every section is `#[serde(default)]`, so you can omit anything you don't want to change.
+Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Every section is `#[serde(default)]`, so you can omit anything you don't want to change — but the example is a **catalogue, not a starting config**: it is not valid as copied, because of the commented `${…}` placeholders above and because production requires a KEK and an HTTPS decision. Run `hearth config validate hearth.yaml` after editing and work through the errors; the smallest config that validates is:
+
+```yaml
+server:
+  bind_address: "0.0.0.0"
+  port: 443
+  tls_cert_path: "/etc/hearth/tls/server.crt"   # or trust_forwarded_proto + trusted_proxies
+  tls_key_path:  "/etc/hearth/tls/server.key"
+storage:
+  data_dir: "/var/lib/hearth/data"
+oidc:
+  issuer: "https://auth.example.com"
+```
+
+plus `HEARTH_KEK` and `HEARTH_MASTER_KEY` in the environment. **`hearth config validate` does not check either environment variable**, so a config it calls valid can still abort `serve` with `HEARTH_MASTER_KEY is not set and auto-generation is disabled in production mode`. Validate, then do a real `serve` on the target host before cutting over.
 
 ### Config reference
 
@@ -407,8 +512,8 @@ Secrets are supplied through the environment rather than the YAML file so they n
 
 | Variable | Required? | Format | Generate | Purpose |
 |---|---|---|---|---|
-| `HEARTH_MASTER_KEY` | Recommended | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup fails** (auto-generation happens only under `--dev`). Set it so the key is not stored beside the data. |
-| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so existing realm KEKs can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
+| `HEARTH_MASTER_KEY` | **Required in production** | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. Optional only if a persisted `${data_dir}/hearth.host_key` file already exists; on a **fresh production start with no file, startup aborts** with `HEARTH_MASTER_KEY is not set and auto-generation is disabled in production mode` (auto-generation happens only under `--dev`). `hearth config validate` does not check for it. |
+| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so the existing KEKs in `hearth.keys` can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
 | `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
 | `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). Under the `log` transport (dev or production) it is optional and a deterministic dev key is substituted. |
 | `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
@@ -502,7 +607,7 @@ make dev          # cargo run -- serve --dev
 cargo run -- serve --dev
 ```
 
-`--dev` binds to `http://127.0.0.1:8420`, uses in-memory storage, and auto-enables the built-in **mailcatcher** email transport. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
+`--dev` binds to `http://127.0.0.1:8420` and auto-enables the built-in **mailcatcher** email transport. `make dev` keeps its store in `./data/dev`, so data survives restarts; `make dev-reset` wipes it. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
 
 The inbox password is printed to the terminal at startup:
 
@@ -523,16 +628,33 @@ Production deployment (containerised, persistent storage, real email) lives in [
 ## CLI Reference
 
 ```text
-hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>]
+hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>] [-v] [--allow-reflection-in-prod]
 hearth realm create
-hearth app create --server <url> --realm_id <uuid> --name <name> --redirect_uri <url>
+hearth app create --server <url> --realm-id <uuid> --name <name> --redirect-uri <url> --token <admin-bearer-token>
 hearth migrate keycloak --file <export.json> [--data-dir <path>] [--realm <uuid>] [--dry-run]
+hearth migrate auth0 --file <bundle.json> [--data-dir <path>] [--realm <uuid>] [--dry-run]
+hearth migrate rotate-pepper --data-dir <path> [--summary-only]
+hearth config validate [<path>]            # defaults to ./hearth.yaml
+hearth config example [-o <path>]          # print an annotated hearth.yaml
+hearth config reload [--url <url>] [--pid-file <path>]   # hot reload: POST, or SIGHUP via PID file
+hearth backup create  [-o <archive>] [--realm <name|uuid>] [--include-audit] [--encrypt] [--data-dir <path>] [--config <hearth.yaml>]
+hearth backup restore -i <archive> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run]
+                      [--allow-missing-signing-key] [--data-dir <path>]
+hearth backup verify  -i <archive>
+hearth backup inspect -i <archive>
+hearth rbac orphans list  [--realm <name|uuid>] [--data-dir <path>]
+hearth rbac orphans purge [--realm <name|uuid>] [--data-dir <path>] [--dry-run]
+hearth completions <bash|elvish|fish|powershell|zsh>
 ```
 
-- **`serve`** starts the HTTP(S) server. `--dev` implies in-memory storage, relaxed validation, and the bootstrap endpoint.
+Run `hearth <command> --help` for the authoritative flag list; the block above is the full set of subcommands as of this revision.
+
+- **`serve`** starts the HTTP(S) server. `--dev` implies a throwaway data directory, relaxed validation, and the bootstrap endpoint.
 - **`realm create`** prints `{"realm_id": "<uuid>"}` on stdout. It's a pure UUID generator and does not require a running server.
-- **`app create`** registers an OAuth 2.0 client by POSTing to `/clients` on a running Hearth server. The server URL must be reachable over HTTP.
-- **`migrate keycloak`** imports a Keycloak realm export directly into the embedded store. Operates on the data directory offline (no running server needed) — see [Migrating from Keycloak](#migrating-from-keycloak).
+- **`app create`** registers an OAuth 2.0 client by POSTing to `/clients` on a running Hearth server. The server URL must be reachable over HTTP. `--token` is **mandatory** — client registration is a privileged operation, so pass an admin bearer token carrying `hearth.clients.admin` (or `hearth.admin`); in dev mode, the `access_token` from `POST /admin/bootstrap`.
+- **`migrate keycloak` / `migrate auth0`** import a realm export directly into the embedded store. Both operate on the data directory offline (no running server needed) — see [Migrating from Keycloak](#migrating-from-keycloak).
+- **`config validate`** parses the YAML and validates every realm's permission registry without starting the server; exits 1 on any error. It does **not** check the `HEARTH_*` environment prerequisites — a config it accepts can still be refused by `serve` (for example when `HEARTH_MASTER_KEY` is unset on a fresh production data directory).
+- **`backup` / `rbac orphans` / `migrate`** all take `--data-dir` and open the store directly, so the server **must be stopped first** — the data directory carries an exclusive `LOCK`. See the [Backup guide](docs/guides/backup.md).
 
 ---
 
@@ -566,22 +688,33 @@ The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an
 
 ### 2. Register a client
 
+`POST /clients` **accepts** a `client_secret` and never returns one. You generate
+the secret, send it, and keep your copy — the response body carries only
+`client_id`, `client_name`, `created_at`, `grant_types` and `redirect_uris`.
+Reading `.client_secret` off the response yields `null`.
+
 ```bash
+CLIENT_SECRET=$(openssl rand -base64 32)
+
 CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
   -H "X-Realm-ID: $REALM_ID" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "client_name":   "my-app",
-    "redirect_uris": ["https://myapp.example.com/callback"]
-  }')
+  -d "{
+    \"client_name\":    \"my-app\",
+    \"redirect_uris\":  [\"https://myapp.example.com/callback\"],
+    \"client_secret\":  \"$CLIENT_SECRET\"
+  }")
 
 CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)
-CLIENT_SECRET=$(echo "$CLIENT" | jq -r .client_secret)
 
 echo "Client ID:     $CLIENT_ID"
-echo "Client secret: $CLIENT_SECRET"
+echo "Client secret: $CLIENT_SECRET"   # your value — store it now
 ```
+
+Omit `client_secret` to register a public client. A public client must then omit
+`client_secret` from the `/token` calls in steps 5 and 9 as well; PKCE is what
+protects it.
 
 ### 3. Generate PKCE verifier and challenge
 
@@ -655,13 +788,21 @@ echo "$ACCESS_TOKEN" \
   | jq .
 ```
 
-The decoded payload contains:
+Always present:
 - `sub` — stable user identifier
 - `roles` — array of role names assigned to the user
-- `groups` — array of group slugs
 - `permissions` — effective permission set resolved at issuance time
-- `oid` — organization ID (if the user belongs to an org)
-- `exp`, `iat`, `iss` — standard JWT claims
+- `exp`, `iat`, `iss`, `aud` — standard JWT claims
+- `sid`, `tid`, `jti`, `fid`, `token_type` — session, realm (tenant), token id,
+  refresh-family id, and token kind
+
+Present only when the user has them — **absent** from the token this walkthrough
+mints, because the bootstrap admin belongs to no group and no organization:
+- `groups` — array of group slugs
+- `oid` — organization ID
+
+`/v1/me/permissions` (step 8) always returns `groups`, as an empty array when
+there are none, so use it rather than the token to test group membership.
 
 ### 7. Fetch user info (scope-filtered claims)
 
@@ -747,7 +888,16 @@ That's enough. Restart Hearth and the realm's login page shows a "Sign in with G
 |---|---|---|
 | `disabled` | Never link. Always JIT-provision a new user per external identity. | Safest against IdP email spoofing; duplicate accounts are visible and expected |
 | `confirm` *(default)* | Redirect to `/ui/federation/confirm-link`; user must authenticate to the local account (password or passkey) before the link attaches. | Matches Keycloak's default First Broker Login flow |
-| `auto` | Silent link on `email_verified=true` email match. | Trusts the IdP entirely — only use when the realm federates to a single high-trust provider |
+| `auto` | Silent link on `email_verified=true` email match. | **Account-takeover risk** — trusts the IdP entirely; only use when the realm federates to a single high-trust provider |
+
+> ⚠️ **`auto` can hand an existing account to an upstream provider.** Hearth attaches the
+> upstream identity to whatever local account holds that email address, with no local
+> re-authentication, so every local account is only as safe as the weakest connector in the
+> realm. An IdP that does not verify email — GitHub's public profile email, or any generic
+> `type: oidc` IdP that can be made to assert `email_verified: true` — lets an attacker
+> register upstream with a victim's address and sign straight into the victim's Hearth
+> account with its roles and permissions. Keep `confirm` unless the realm federates to
+> exactly one IdP that verifies email addresses.
 
 Users can list and unlink their external identities at `/ui/account/linked-accounts`.
 
@@ -774,8 +924,8 @@ For the full feature spec see [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITEC
 |---|---|---|---|
 | Discovery | `GET` | `/health` | Liveness probe |
 | Discovery | `GET` | `/.well-known/openid-configuration` | OIDC Discovery 1.0 metadata |
-| Discovery | `GET` | `/jwks` | Per-realm public signing keys |
-| OAuth/OIDC | `POST` | `/authorize` | Authorization request |
+| Discovery | `GET` | `/jwks` | Per-realm public signing keys (aliases: `/certs`, `/.well-known/jwks.json`) |
+| OAuth/OIDC | `GET`/`POST` | `/authorize` | Authorization request — `GET` is the browser redirect entry point, `POST` the form-post variant |
 | OAuth/OIDC | `POST` | `/token` | Token exchange (code / refresh / client_credentials / device_code) |
 | OAuth/OIDC | `POST` | `/revoke` | RFC 7009 revocation |
 | OAuth/OIDC | `POST` | `/introspect` | RFC 7662 introspection |
@@ -788,20 +938,20 @@ For the full feature spec see [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITEC
 | Admin | `POST` | `/admin/users/bulk` | Bulk user creation (max 10,000 users per request) |
 | Admin | `POST` | `/admin/users/import` | Import users from JSON (max 10,000 users per request) |
 | Admin | `GET` | `/admin/users/export` | Export users as JSON |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/users/{id}` | CRUD a user |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/users/{id}` | Read / partially update / delete a user |
 | Admin | `GET`/`POST` | `/admin/users/{id}/roles` | List / assign roles to a user |
 | Admin | `GET` | `/admin/users/{id}/consents` | List a user's active OAuth consents |
 | Admin | `DELETE` | `/admin/users/{id}/consents/{client_id}` | Revoke a user's consent for a client |
 | Admin | `GET` | `/admin/users/{id}/effective-permissions` | Resolved permission set for a user |
 | Admin | `DELETE` | `/admin/assignments/{id}` | Remove a role assignment |
-| Admin | `GET`/`POST` | `/admin/realms` | List / create realms |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/realms/{id}` | CRUD a realm |
+| Admin | `GET` | `/admin/realms` | List realms (`POST` answers `405` — realms are declared in `hearth.yaml`) |
+| Admin | `GET`/`DELETE` | `/admin/realms/{id}` | Read a realm; delete one that is already `Archived` (`PATCH` answers `405` — realms are declared in `hearth.yaml`) |
 | Admin | `GET`/`POST` | `/admin/applications` | List / register OAuth clients |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/applications/{id}` | CRUD a client |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/applications/{id}` | Read / partially update / delete a client |
 | Admin | `GET`/`POST` | `/admin/roles` | List / create RBAC roles |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/roles/{id}` | CRUD a role |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/roles/{id}` | Read / partially update / delete a role |
 | Admin | `GET`/`POST` | `/admin/groups` | List / create groups |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/groups/{id}` | CRUD a group |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/groups/{id}` | Read / partially update / delete a group |
 | Admin | `GET`/`POST` | `/admin/groups/{id}/members` | List / add group members |
 | Admin | `DELETE` | `/admin/groups/{id}/members/{member_id}` | Remove a group member |
 | Admin | `GET` | `/admin/audit` | Query the audit log |
@@ -920,7 +1070,7 @@ Hearth administrators live in an invisible **system realm** — distinct from an
 
 - **Admin sign-in:** `GET /ui/admin/login`. The session cookie is bound to the system realm, not any app realm.
 - **Admin email verification:** `GET /ui/admin/verify-email?token=...` — the link embedded in the first-run setup email.
-- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time. `create_realm`, `delete_realm`, `register_user`, `register_client`, and `create_organization` all reject the reserved realm's UUID with a 403 `SystemRealmProtected`. The realm does not appear in `list_realms()`, `get_realm_by_name("system")` returns nothing, and `/ui/realms/system/...` URLs return 404.
+- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time (`src/config/validate.rs`). Fifteen engine entry points reject the reserved realm with a 403 `SystemRealmProtected` — by nil UUID where the request is id-addressed, and by the reserved name `system` where it is name-addressed: `create_realm`, `update_realm`, `delete_realm`, `create_user`, `create_user_attributed`, `register_user`, `register_client`, `create_organization`, `update_organization`, `create_agent`, `import_realm`, `import_user`, `import_client`, `seed_demo_users`, and realm reconciliation. **RBAC writes are gated at the protocol edge instead**, not in the engine: `reject_system_realm_write` guards ten REST admin routes (`src/protocol/http/admin.rs`) and seventeen gRPC `RbacAdmin` RPCs (`src/protocol/grpc/rbac_admin.rs`), because the operator console legitimately writes system-realm roles through the engine directly. The realm does not appear in `list_realms()` or `search_realms()`, `get_realm_by_name("system")` returns `None`, and `/ui/realms/system/...` URLs return 404.
 - **Operators run the first-run setup exactly once**, regardless of how many application realms they've declared. The admin user is always placed in the system realm; tenant realms stay empty of operators.
 
 Admins administer tenant realms via a `?realm=<name>` query parameter on admin URLs, which persists for the session via the `hearth_ui_admin_target` cookie. Switching realms is done either by visiting `/ui/admin/realms` and clicking "Administer this realm" next to the target, or by typing `?realm=<name>` in the URL. The admin's session cookie is always bound to the system realm; the target realm is orthogonal.

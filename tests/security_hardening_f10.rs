@@ -511,3 +511,103 @@ async fn agent_card_is_realm_scoped() {
         "agent.json cross-realm BOLA: system token must not access other realm (got {cross_status})"
     );
 }
+
+// ── §4.2#3 / §4.19#1: end_session must verify the id_token_hint signature ─────
+
+/// Splits `token` into its three JWT segments and returns it with the
+/// signature replaced by a well-formed but wrong Ed25519 signature. The
+/// header and payload — including the victim's real `sid`/`sub` — are intact;
+/// only the signature no longer verifies against the realm key.
+fn forge_signature(token: &str) -> String {
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "id_token must be a JWT");
+    // 64-byte all-zero Ed25519 signature, base64url no-pad — valid shape, wrong value.
+    let bogus_sig = data_encoding::BASE64URL_NOPAD.encode(&[0u8; 64]);
+    format!("{}.{}.{}", parts[0], parts[1], bogus_sig)
+}
+
+fn session_id_of(id_token: &str) -> hearth::core::SessionId {
+    let claims = decode_claims_unverified(id_token).expect("decode id token");
+    let uuid_str = claims
+        .sid
+        .strip_prefix("session_")
+        .expect("id token sid is session-scoped");
+    hearth::core::SessionId::new(uuid_str.parse().expect("session uuid"))
+}
+
+/// A hint whose signature does not verify must revoke no session and mint no
+/// logout token (audit 2026-08-28 §4.2#3, §4.19#1).
+#[tokio::test]
+async fn rp_logout_rejects_unsigned_id_token_hint() {
+    let (harness, realm_id, user_id, client) = setup_env().await;
+    let token_response = do_authcode_exchange(&harness, &realm_id, &user_id, &client);
+    let session_id = session_id_of(token_response.id_token());
+
+    // Precondition: the victim's session is live.
+    assert!(
+        harness
+            .identity()
+            .get_session(&realm_id, &session_id)
+            .expect("get session")
+            .is_some(),
+        "precondition: victim session is live"
+    );
+
+    let forged_hint = forge_signature(token_response.id_token());
+    let result = harness.identity().initiate_logout(
+        &realm_id,
+        &RpLogoutRequest {
+            id_token_hint: Some(forged_hint),
+            session_id: None,
+            post_logout_redirect_uri: None,
+            client_id: None,
+            state: None,
+        },
+    );
+
+    assert!(
+        matches!(result, Err(hearth::identity::IdentityError::InvalidToken)),
+        "a forged id_token_hint must be refused, got {result:?}"
+    );
+
+    // The victim's session must survive: no logout token, no revocation.
+    assert!(
+        harness
+            .identity()
+            .get_session(&realm_id, &session_id)
+            .expect("get session")
+            .is_some(),
+        "a forged id_token_hint must not revoke the victim's session (audit §4.19#1)"
+    );
+}
+
+/// A genuinely realm-signed id_token_hint still logs the session out.
+#[tokio::test]
+async fn rp_logout_accepts_valid_id_token_hint() {
+    let (harness, realm_id, user_id, client) = setup_env().await;
+    let token_response = do_authcode_exchange(&harness, &realm_id, &user_id, &client);
+    let session_id = session_id_of(token_response.id_token());
+
+    harness
+        .identity()
+        .initiate_logout(
+            &realm_id,
+            &RpLogoutRequest {
+                id_token_hint: Some(token_response.id_token().to_string()),
+                session_id: None,
+                post_logout_redirect_uri: None,
+                client_id: None,
+                state: None,
+            },
+        )
+        .expect("a validly signed hint must be accepted");
+
+    assert!(
+        harness
+            .identity()
+            .get_session(&realm_id, &session_id)
+            .expect("get session")
+            .is_none(),
+        "a valid hint must revoke the named session"
+    );
+}

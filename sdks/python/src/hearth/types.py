@@ -126,7 +126,7 @@ class RegisterClientRequest(BaseModel):
 
 
 class CreateClientRequest(BaseModel):
-    """Request body for POST /admin/clients."""
+    """Request body for POST /admin/applications."""
 
     name: str
     redirect_uris: List[str] = []
@@ -134,7 +134,7 @@ class CreateClientRequest(BaseModel):
 
 
 class UpdateClientRequest(BaseModel):
-    """Request body for PUT /admin/clients/{id}."""
+    """Request body for PATCH /admin/applications/{id}."""
 
     name: Optional[str] = None
     redirect_uris: Optional[List[str]] = None
@@ -185,19 +185,9 @@ class UpdateGroupRequest(BaseModel):
     description: Optional[str] = None
 
 
-class OrgMember(BaseModel):
-    """An organization membership record."""
-
-    user_id: str
-    org_id: str
-    role: Optional[str] = None
-
-
-class AddOrgMemberRequest(BaseModel):
-    """Request body for POST /admin/orgs/{orgId}/members."""
-
-    user_id: str
-    role: Optional[str] = None
+# OrgMember and AddOrgMemberRequest were removed with the org-membership
+# methods: Hearth serves no organization route over HTTP
+# (audit 2026-08-28 §25.19).
 
 
 class Jwk(BaseModel):

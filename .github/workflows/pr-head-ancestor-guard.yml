@@ -12,9 +12,14 @@ name: PR Head Ancestor Guard
 # Trigger: pull_request (needs HEAD SHA from event, not the merge-ref HEAD).
 # Requires: fetch-depth: 0 + git fetch --all --prune for full branch coverage.
 
+# Audit 2026-08-28 §4.12#12: the PR entry point is now ci.yml, which calls
+# this as a reusable workflow. NOTE the job below is still `continue-on-error`
+# and is deliberately NOT in `required-summary`'s `needs:` — HEA-2106 holds that
+# switch until the false-positive rate against stacked PRs is measured clean.
+# Folding it into ci.yml puts it one line from blocking when that measurement
+# lands; it does not make it blocking today.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
 
 permissions:
   contents: read

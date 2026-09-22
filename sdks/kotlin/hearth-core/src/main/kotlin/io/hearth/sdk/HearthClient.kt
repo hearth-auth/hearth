@@ -488,13 +488,19 @@ class HearthClient(
      * Returns `PublicKeyCredentialCreationOptions` for the browser's
      * `navigator.credentials.create()` call. [accessToken] identifies the user whose
      * account the credential will be bound to.
+     *
+     * [stepUp] proves possession of a credential the account already holds — the
+     * password, a current authenticator code, or an assertion from an enrolled
+     * passkey. The server answers `403 step_up_required` without it: an access
+     * token alone is one factor and does not enrol a credential.
      */
     suspend fun startWebAuthnRegistration(
         accessToken: String,
+        stepUp: StepUpProof,
     ): WebAuthnRegistrationBeginResponse =
         httpClient.post(
             url = "$issuerUrl/webauthn/register/begin",
-            payload = emptyMap<String, String>(),
+            payload = stepUp,
             headers = buildMap {
                 put("Authorization", "Bearer $accessToken")
                 realmId?.let { put("X-Realm-ID", it) }

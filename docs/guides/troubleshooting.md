@@ -24,10 +24,11 @@ This guide covers the most common errors operators encounter when running Hearth
 
 4. **Account disabled.** A user with `status: disabled` cannot log in. Re-enable via the admin UI (`/ui/admin/realms/<realm>/users/<id>`) or the API:
    ```bash
-   curl -X PUT http://127.0.0.1:8420/admin/realms/<realm-id>/users/<user-id> \
+   curl -X PATCH http://127.0.0.1:8420/admin/users/<user-id> \
      -H "Authorization: Bearer <admin-token>" \
+     -H "X-Realm-ID: <realm-id>" \
      -H "Content-Type: application/json" \
-     -d '{"status": "Active"}'
+     -d '{"status": "USER_STATUS_ACTIVE"}'
    ```
 
 ---
@@ -58,15 +59,17 @@ The response contains the new single-use recovery codes. Store or transmit them 
 
 **Cause:** The realm was explicitly suspended via the admin API or UI.
 
-**Remediation:**
-```bash
-curl -X PUT http://127.0.0.1:8420/admin/realms/<realm-id> \
-  -H "Authorization: Bearer <admin-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"status": "Active"}'
+**Remediation:** realm status is **not** settable over the REST admin API —
+`PATCH /admin/realms/{id}` answers `405 Method Not Allowed` (realms are declared in
+`hearth.yaml`). Clear a suspension through the gRPC management API:
+
+```
+hearth.identity.v1.IdentityService/UpdateRealm
+  { "id": "<realm-id>", "body": { "status": "REALM_STATUS_ACTIVE" } }
 ```
 
-You can also reactivate from the admin UI: navigate to `/ui/admin/realms/<realm-id>` and click **Reactivate**.
+Startup reconciliation restores an **Archived** realm to `Active` when it reappears in
+`hearth.yaml`, but it does not clear a `Suspended` status — that transition is explicit.
 
 ---
 

@@ -21,7 +21,7 @@ pub(crate) mod keys;
 mod types;
 
 pub use context::{Actor, AuditContext};
-pub use engine::EmbeddedAuditEngine;
+pub use engine::{first_broken_link, EmbeddedAuditEngine};
 pub use error::AuditError;
 pub use types::{
     AuditAction, AuditEvent, AuditFailurePolicy, AuditQuery, AuditRetentionConfig, CreateAuditEvent,
@@ -65,6 +65,27 @@ pub type AuditEnqueueFn<'a> =
 /// Events are append-only by design to maintain the tamper-evident hash chain.
 /// The only administrative deletion path is [`prune_before`], which is
 /// intentional and explicitly breaks the chain for the pruned window.
+/// The material a restore needs to verify an exported audit chain.
+///
+/// Carried in a backup archive next to `audit.ndjson`, encrypted with the
+/// archive DEK exactly like the realm's signing key.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditChainMaterial {
+    /// The realm's HMAC-SHA256 chain key, base64 (standard alphabet).
+    pub chain_key_b64: String,
+    /// The chain's anchor hash — `GENESIS_HASH` unless the chain was pruned.
+    pub anchor: String,
+}
+
+impl std::fmt::Debug for AuditChainMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditChainMaterial")
+            .field("chain_key_b64", &"[REDACTED]")
+            .field("anchor", &self.anchor)
+            .finish()
+    }
+}
+
 pub trait AuditEngine: Send + Sync {
     /// Appends a new audit event to the log.
     ///
@@ -85,6 +106,23 @@ pub trait AuditEngine: Send + Sync {
     /// the re-chained sequence matches the original ordering.
     fn import_event(&self, event: &AuditEvent) -> Result<(), AuditError>;
 
+    /// Returns the material a restore needs to verify an exported chain.
+    ///
+    /// `Ok(None)` means this realm has no audit chain — there is nothing to
+    /// export. `Ok(Some(..))` carries the realm's HMAC chain key and the
+    /// chain's current anchor, which is `GENESIS_HASH` on an un-pruned chain
+    /// and the last-pruned event's hash after a retention prune.
+    ///
+    /// Restore re-signs every imported event under the destination realm's key,
+    /// so without this the source hashes are discarded unchecked and a tampered
+    /// archive restores into a chain that verifies clean (audit 2026-08-28
+    /// §4.14#5). There is deliberately no default implementation: one that
+    /// answered `None` would silently reinstate that.
+    fn export_chain_material(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<AuditChainMaterial>, AuditError>;
+
     /// Queries audit events matching the given criteria.
     ///
     /// Results are returned in chronological order. All filters are
@@ -102,6 +140,25 @@ pub trait AuditEngine: Send + Sync {
         start: Option<Timestamp>,
         end: Option<Timestamp>,
     ) -> Result<bool, AuditError>;
+
+    /// A replicated row was applied on this node for `realm_id` (task 26.47).
+    ///
+    /// The append path caches each realm's signed [`chain head`](AuditEvent)
+    /// and prefers it over the persisted one, so a node that has appended for
+    /// a realm never re-reads the head. Leadership flapping then forks the
+    /// chain: node A leads and reaches sequence N, leadership moves to B which
+    /// advances the persisted head to N+50, leadership returns to A — whose
+    /// cache still says N — and A chains its next event off a stale
+    /// `prev_hash` while re-using sequence numbers that are already taken.
+    ///
+    /// The cache is dropped when the head row arrives from another node, so
+    /// the next append reloads it. There is deliberately no default
+    /// implementation: one that did nothing would silently reinstate the fork.
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]);
+
+    /// The whole key-space was replaced (snapshot install). Implementors MUST
+    /// drop every cached chain head.
+    fn on_replicated_snapshot(&self);
 
     /// Returns the retention configuration for a realm.
     ///

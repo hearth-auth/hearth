@@ -4,6 +4,9 @@
 #   cp hearth.example.yaml hearth.yaml      # edit to taste
 #   docker compose -f deploy/docker-compose.yml up -d
 #
+# Optional environment overrides (gitignored, and NOT the repo-root .env):
+#   cp deploy/hearth.env.example deploy/hearth.env
+#
 # With external mailpit SMTP sink (web UI at http://localhost:8025):
 #   docker compose -f deploy/docker-compose.yml --profile mail up -d
 #
@@ -30,8 +33,20 @@ services:
       # Bind-mount your local hearth.yaml (from the project root) read-only.
       # Adjust the path if your config lives elsewhere.
       - ../hearth.yaml:/etc/hearth/hearth.yaml:ro
+    # Optional per-deployment overrides, scoped to Hearth.
+    #
+    # Audit 2026-08-28 §4.8#17: this used to read `../.env` — the repository
+    # root .env, a gitignored developer-local file with no schema anywhere in
+    # this repo. Compose injects EVERY key of an env_file into the container, so
+    # any unrelated credential kept there was handed to the server process and
+    # readable via `docker inspect`. Worse, Hearth reads HEARTH_* variables as
+    # configuration, so a stray key silently overrode the hearth.yaml mounted
+    # above and the server did not run the config the operator was reading.
+    #
+    # deploy/hearth.env is gitignored and scoped: see hearth.env.example for the
+    # keys that belong in it. Guard: scripts/check-compose-env-scope.sh.
     env_file:
-      - path: ../.env
+      - path: ./hearth.env
         required: false
     environment:
       RUST_LOG: "info,hearth=debug"

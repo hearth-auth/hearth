@@ -227,3 +227,86 @@ async fn invalid_org_id_returns_400() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// Task 26.45 — a role cannot be scoped to an organisation that does not exist.
+///
+/// The handler parsed `org_id` into a `Scope::Org` and passed it straight to
+/// `assign_role`, which checks that the ROLE exists and that a group SUBJECT
+/// exists but never asks about the organisation. So a typo'd UUID answered 201
+/// and wrote an assignment that can never grant anything: the administrator was
+/// told the role was assigned, and it silently never took effect.
+///
+/// It is not a privilege hole *today* — task 26.16 made `active_org_context`
+/// fail closed on an unknown organisation, so the dangling assignment is inert.
+/// Before that it was one: anyone presenting that UUID as their org context
+/// would have been granted the role.
+///
+/// The check lives at the protocol edge rather than in `assign_role`, because
+/// organisations are an identity-layer concern and the RBAC layer may not call
+/// upward — the same reason the comment there says user existence is "the
+/// identity layer's concern".
+#[tokio::test]
+async fn assigning_a_role_to_an_unknown_org_is_refused() {
+    let c = ctx().await;
+    let role =
+        c.h.rbac()
+            .create_role(
+                &c.realm,
+                &CreateRoleRequest {
+                    name: "org-scoped".into(),
+                    description: None,
+                    permissions: vec![],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("role");
+
+    let (status, _) = send(
+        &c,
+        "POST",
+        &format!("/admin/users/{}/roles", c.subject_user.id()),
+        Some(json!({
+            "role_id": role.id.to_string(),
+            "org_id": uuid::Uuid::new_v4().to_string(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an organisation that does not exist must be refused, not written as a \
+         scope that can never grant anything"
+    );
+
+    // Control: a real organisation is still accepted, so the assertion above
+    // cannot pass because org-scoped assignment is refused outright.
+    let org =
+        c.h.identity()
+            .create_organization(
+                &c.realm,
+                &hearth::identity::CreateOrganizationRequest {
+                    name: "acme-assign".to_string(),
+                    slug: "acme-assign".to_string(),
+                    description: None,
+                    config: Some(hearth::identity::OrganizationConfig { max_members: None }),
+                    ..Default::default()
+                },
+            )
+            .expect("create organization");
+    let (status, _) = send(
+        &c,
+        "POST",
+        &format!("/admin/users/{}/roles", c.subject_user.id()),
+        Some(json!({
+            "role_id": role.id.to_string(),
+            "org_id": org.id().as_uuid().to_string(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a real organisation must still be assignable"
+    );
+}

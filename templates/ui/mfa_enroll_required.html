@@ -56,6 +56,11 @@
       <div class="min-w-0 flex-1">
         <p class="text-sm font-medium text-ht-content-primary">Enter the current 6-digit code to complete sign-in</p>
         <form method="post" action="/ui/mfa-enroll-required/activate" autocomplete="off" class="mt-3">
+          {% match csrf %}
+            {% when Some with (c) %}
+              <input type="hidden" name="_csrf" value="{{ c }}">
+            {% when None %}
+          {% endmatch %}
           <div class="flex items-end gap-3">
             <div class="flex-1">
               <label for="code" class="block text-sm font-medium text-ht-content-secondary">Authentication code</label>

@@ -30,7 +30,14 @@ JWT claim presence.**
 
 ### embedded (default)
 
-Permissions are embedded in the JWT at issuance. No network call on the hot path.
+Permissions are embedded in the JWT at issuance. The middleware verifies the
+token's Ed25519 signature against the realm's cached JWKS — plus `exp`, `nbf`
+and `iss` — before reading the `permissions` claim, so there is no per-request
+network call once the JWKS is warm. A token that does not verify is denied.
+
+Embedded mode therefore requires a `HearthClient` (it is what holds the JWKS
+cache); the Django decorator and middleware fall back to `settings.HEARTH_CLIENT`
+and deny when none is configured.
 
 ```python
 from hearth.middleware import WsgiPermissionMiddleware

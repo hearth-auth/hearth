@@ -36,9 +36,12 @@ pub enum SamlError {
     /// A SAML `<Response>` names a `Destination` that does not match this
     /// SP's ACS URL. Defense against cookie-less CSRF.
     DestinationMismatch,
-    /// A SAML XML-DSIG element uses an algorithm not supported by Hearth
-    /// (SHA-1 digests, RSA-SHA1 signatures, inclusive C14N). Algorithm
-    /// downgrade is rejected by design.
+    /// A SAML XML-DSIG `SignedInfo` names an algorithm Hearth does not
+    /// support: a SHA-1 digest or an RSA-SHA1 signature, or it fails to name
+    /// both RSA-SHA256 and SHA-256. Signature- and digest-algorithm downgrade
+    /// is rejected by design. The declared canonicalization and transform
+    /// algorithms are **not** inspected, so a document declaring inclusive
+    /// C14N does not produce this variant (see `docs/specs/SAML.md` §4).
     UnsupportedAlgorithm,
     /// Fetching SAML IdP metadata from the configured URL failed.
     MetadataFetch {

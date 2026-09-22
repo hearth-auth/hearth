@@ -145,6 +145,7 @@ async fn a40_coop_coep_headers_present() {
 
     let layer = SecurityHeadersLayer::new(SecurityConfig {
         hsts_enabled: false,
+        hsts_on_forwarded_proto: false,
         coop_coep_enabled: true,
         extra_form_action_origins: Vec::new(),
     });
@@ -195,6 +196,7 @@ async fn a40_coop_coep_absent_when_disabled() {
 
     let layer = SecurityHeadersLayer::new(SecurityConfig {
         hsts_enabled: false,
+        hsts_on_forwarded_proto: false,
         coop_coep_enabled: false,
         extra_form_action_origins: Vec::new(),
     });

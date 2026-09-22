@@ -77,6 +77,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 | `HEARTH_PASSWORD_EXPIRED` | Password has expired and must be reset before logging in. |
 | `HEARTH_PASSWORD_REUSED` | New password matches a previously used password. |
 | `HEARTH_AUTH_METHOD_NOT_ALLOWED` | Authentication method is not permitted by realm policy. |
+| `HEARTH_MFA_METHOD_NOT_ALLOWED` | Second factor is not listed in the realm's `auth.mfa_methods`, so it may be neither enrolled nor presented. |
 
 ### Resource Not Found
 
@@ -90,6 +91,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 | Code | Meaning |
 |------|---------|
 | `HEARTH_REALM_SUSPENDED` | Realm is suspended; all operations are denied. |
+| `HEARTH_REALM_NOT_ARCHIVED` | Permanent deletion was requested for a realm that is not archived. Remove it from `hearth.yaml` and restart to archive it first. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 
 ### Input Validation
 
@@ -103,6 +105,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 |------|---------|
 | `HEARTH_DUPLICATE_EMAIL` | A user with this email already exists in the realm. |
 | `HEARTH_DUPLICATE_REALM_NAME` | A realm with this name already exists. |
+| `HEARTH_YAML_MANAGED_RESOURCE` | The resource is declared in `hearth.yaml` and cannot be deleted at runtime; the next startup would re-create it. Remove the declaration and restart. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
 
 ### Organizations
 

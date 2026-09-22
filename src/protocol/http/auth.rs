@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::core::{ClientId, RealmId, UserId};
 use crate::protocol::admin_auth::{
-    ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome,
+    ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::rbac::RbacError;
 use base64::Engine as _;
@@ -134,16 +134,104 @@ pub(crate) fn extract_admin_auth(
     })
 }
 
+/// Enforces the DPoP sender-constraint (RFC 9449 §7.2) on the administrative
+/// surface.
+///
+/// `extract_admin_auth` (and SCIM's `authenticate`) validate the bearer token's
+/// signature, realm and permissions but never looked at `cnf`. A DPoP-bound
+/// admin token — one whose holder proved possession of a private key at
+/// issuance — was therefore accepted as a plain `Bearer` for every admin read
+/// and write, which is exactly the replay the binding exists to prevent
+/// (audit 2026-08-28 §4.19#8). The resource endpoints under `/oauth` have
+/// enforced this since HEA-2031 through `enforce_dpop_binding`; the admin
+/// surface simply never called it.
+///
+/// It runs as a layer rather than inside `extract_admin_auth` because the
+/// proof covers the request method and URI, and the extractor sees only
+/// headers. Applied with `route_layer`, so it never fires on an unmatched path.
+///
+/// Mounted on every router whose handlers authenticate through
+/// `extract_admin_auth`: the `/admin` and `/scim/v2` nests (18.18), and — since
+/// task 25.17 — `users::routes()`, `oauth::admin_routes()`, `agents::routes()`,
+/// `approval::routes()` and `advanced::routes()`, which are merged at the
+/// router root rather than nested and were therefore missed the first time.
+/// `tool_invocation::routes()` is deliberately excluded: it validates the proof
+/// itself, and a second validation would record the proof's `jti` on the first
+/// pass and reject the second as a replay (RFC 9449 §11.1). The list of mount
+/// points lives in `router_with`; a new `extract_admin_auth` call site in a new
+/// router must be added there.
+///
+/// Fail-open is deliberate for *unauthenticated* shapes only: a request with no
+/// bearer token, no realm header, or a token that does not validate is passed
+/// through untouched so the handler's own gate produces the usual `400`/`401`.
+/// A token that **would** be accepted and carries `cnf.jkt` must present a
+/// matching proof or the request is rejected here.
+pub(crate) async fn enforce_admin_dpop(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // `nest` strips the mount prefix from `Uri`, so the path the client signed
+    // survives only in `OriginalUri` (HEA-2031 hit the same trap on
+    // `/userinfo`). Fall back to the request URI when the extension is absent.
+    let path = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(|| req.uri().path().to_string(), |o| o.0.path().to_string());
+    let method = req.method().as_str().to_string();
+
+    let outcome = {
+        let headers = req.headers();
+        let token = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_owned);
+        match (token, extract_realm_id(headers)) {
+            (Some(token), Ok(realm_id)) => state
+                .identity
+                .validate_token(&realm_id, &token)
+                .ok()
+                .and_then(|claims| claims.cnf.as_ref().map(|cnf| cnf.jkt.clone()))
+                .map(|jkt| {
+                    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, path);
+                    enforce_dpop_binding(headers, &state, &realm_id, &token, &jkt, &method, &htu)
+                }),
+            _ => None,
+        }
+    };
+
+    match outcome {
+        Some(Err(rejection)) => rejection.into_response(),
+        _ => next.run(req).await,
+    }
+}
+
 /// Extracts and validates admin authentication for cluster-level operations.
 ///
-/// Identical to [`extract_admin_auth`] but additionally asserts that the
-/// `X-Realm-ID` header identifies the **system realm** (nil UUID). Cluster
-/// operations are node-wide, not realm-scoped; accepting a tenant-realm token
-/// would allow a tenant admin to transfer Raft leadership or bootstrap the
-/// cluster — a privilege-escalation vector (HEA-763).
+/// Identical to [`extract_admin_auth`] but additionally asserts **both** of:
 ///
-/// Returns `403 Forbidden` with `"cluster admin requires system realm"` if the
-/// realm is non-nil, even when the bearer token is otherwise valid.
+/// 1. The `X-Realm-ID` header identifies the **system realm** (nil UUID).
+///    Cluster operations are node-wide, not realm-scoped; accepting a
+///    tenant-realm token would allow a tenant admin to transfer Raft leadership
+///    or bootstrap the cluster — a privilege-escalation vector (HEA-763).
+/// 2. The caller holds `hearth.admin`. `extract_admin_auth` deliberately admits
+///    every `hearth.*.admin` sub-admin, so condition (1) alone let a system-realm
+///    operator delegated only `hearth.users.admin` bootstrap Raft membership or
+///    transfer leadership — the two most destructive operations in the product.
+///    There is no narrower permission for the cluster plane and inventing one
+///    would be a delegation boundary nobody asked for, so the gate is the
+///    superuser permission itself.
+///
+/// Returns `403 Forbidden` in both cases, even when the bearer token is
+/// otherwise valid.
+///
+/// The permission gate lives **here** rather than in each handler on purpose:
+/// all three cluster handlers call this function first, before any
+/// cluster-availability check, so a single-node deployment answers `403` to an
+/// unauthorized caller rather than disclosing `503 not in cluster mode` — and a
+/// future fourth cluster handler cannot forget the gate, which is exactly the
+/// defect this closes.
 ///
 /// **Future note:** if `extract_admin_auth` is ever changed to support
 /// non-realm-scoped tokens (e.g. a static allowlist), this function still
@@ -157,6 +245,15 @@ pub(crate) fn extract_cluster_admin_auth(
         return Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "cluster admin requires system realm"})),
+        ));
+    }
+    if !auth.permissions.iter().any(|p| p == "hearth.admin") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "hearth.admin permission required for cluster operations"
+            })),
         ));
     }
     Ok(auth)
@@ -360,14 +457,17 @@ pub(crate) fn emit_export_watermark(
     if let Some(slug) = realm_slug {
         metadata["realm_slug"] = serde_json::Value::String(slug.to_string());
     }
-    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: user_id.as_uuid().to_string(),
-        action: crate::audit::AuditAction::RealmExportWatermarked,
-        resource_type: "export".to_string(),
-        resource_id: export_id.to_string(),
-        metadata: Some(metadata),
-    });
+    crate::protocol::audit_log::record(
+        state.audit.as_ref(),
+        &crate::audit::CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: user_id.as_uuid().to_string(),
+            action: crate::audit::AuditAction::RealmExportWatermarked,
+            resource_type: "export".to_string(),
+            resource_id: export_id.to_string(),
+            metadata: Some(metadata),
+        },
+    );
 }
 
 /// Verifies a detached Ed25519 signature on a backup manifest (A-30).
@@ -436,16 +536,39 @@ pub(crate) fn check_token_rate_limit(
     realm_id: &RealmId,
     client_id: &ClientId,
 ) -> Result<(), Response> {
-    #[allow(clippy::cast_possible_truncation)]
-    let now_micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64;
+    token_rate_limit_outcome(
+        state
+            .token_rate_limiter
+            .check(realm_id, client_id, now_micros()),
+    )
+}
 
-    match state
-        .token_rate_limiter
-        .check(realm_id, client_id, now_micros)
-    {
+/// Checks the token endpoint rate limit for a request that carries **no**
+/// client identity, bucketing it by client IP instead.
+///
+/// A `grant_type=refresh_token` exchange with no `client_id` and no Basic
+/// auth (Hearth's clientless session refresh) never reaches
+/// [`check_token_rate_limit`], because there is no `ClientId` to key on. That
+/// left the endpoint's only unauthenticated shape completely unbucketed
+/// (audit 2026-08-28 §4.16#8). `client_ip` must come from
+/// `client_info::extract_client_ip`, which is trusted-proxy aware — a raw
+/// `X-Forwarded-For` would let the flooder pick its own bucket.
+pub(crate) fn check_anonymous_token_rate_limit(
+    state: &AppState,
+    realm_id: &RealmId,
+    client_ip: &str,
+) -> Result<(), Response> {
+    let bucket = TokenRateLimiter::anonymous_ip_bucket(client_ip);
+    token_rate_limit_outcome(
+        state
+            .token_rate_limiter
+            .check_bucket(realm_id, &bucket, now_micros()),
+    )
+}
+
+/// Maps a [`TokenRateLimitOutcome`] onto the shared 429 response shape.
+fn token_rate_limit_outcome(outcome: TokenRateLimitOutcome) -> Result<(), Response> {
+    match outcome {
         TokenRateLimitOutcome::Allowed => Ok(()),
         TokenRateLimitOutcome::Exceeded { retry_after_secs } => {
             let retry_str = retry_after_secs.to_string();
@@ -539,6 +662,14 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::NOT_FOUND, "not found")
         }
         IdentityError::RealmSuspended => (StatusCode::FORBIDDEN, "realm suspended"),
+        IdentityError::RealmNotArchived => (
+            StatusCode::CONFLICT,
+            "only archived realms can be permanently deleted",
+        ),
+        IdentityError::YamlManagedResource { .. } => (
+            StatusCode::CONFLICT,
+            "this resource is managed by hearth.yaml and cannot be deleted at runtime",
+        ),
         IdentityError::DuplicateRealmName => (StatusCode::CONFLICT, "duplicate realm name"),
         IdentityError::DuplicateEmail => (StatusCode::CONFLICT, "duplicate email"),
         IdentityError::InvalidInput { .. } => (StatusCode::BAD_REQUEST, "invalid input"),
@@ -688,6 +819,10 @@ pub(crate) fn identity_error_to_response(
         IdentityError::AuthMethodNotAllowed { .. } => {
             (StatusCode::FORBIDDEN, "authentication method not permitted")
         }
+        IdentityError::MfaMethodNotAllowed { .. } => (
+            StatusCode::FORBIDDEN,
+            "mfa method not offered by this realm",
+        ),
         IdentityError::PasswordExpired => (StatusCode::UNAUTHORIZED, "password expired"),
         IdentityError::PasswordReused => (
             StatusCode::UNPROCESSABLE_ENTITY,

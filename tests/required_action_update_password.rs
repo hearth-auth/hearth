@@ -59,6 +59,12 @@ struct Rig {
 }
 
 fn build_rig(clock: Arc<dyn Clock>, realm_config: RealmConfig) -> Rig {
+    build_rig_mode(clock, realm_config, true)
+}
+
+/// `dev_mode = false` is what makes the CSRF double-submit fail-closed on the
+/// pre-session required-action form (task 21.3), mirroring `login_submit_impl`.
+fn build_rig_mode(clock: Arc<dyn Clock>, realm_config: RealmConfig, dev_mode: bool) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -123,7 +129,7 @@ fn build_rig(clock: Arc<dyn Clock>, realm_config: RealmConfig) -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         None,
     )
-    .with_dev_mode(true);
+    .with_dev_mode(dev_mode);
 
     Rig {
         app: web::router(state),
@@ -357,7 +363,9 @@ async fn post_without_ra_cookie_returns_400() {
                 .method("POST")
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from("new_password=Abc123!&confirm_password=Abc123!"))
+                .body(Body::from(
+                    "current_password=x&new_password=Abc123!&confirm_password=Abc123!",
+                ))
                 .expect("req"),
         )
         .await
@@ -388,7 +396,8 @@ async fn post_valid_password_resumes_oidc_flow() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
                 .body(Body::from(format!(
-                    "new_password={}&confirm_password={}",
+                    "current_password={}&new_password={}&confirm_password={}",
+                    urlencode(PASSWORD),
                     urlencode(new_password),
                     urlencode(new_password)
                 )))
@@ -445,7 +454,8 @@ async fn post_valid_password_clears_required_action_from_user() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
                 .body(Body::from(format!(
-                    "new_password={}&confirm_password={}",
+                    "current_password={}&new_password={}&confirm_password={}",
+                    urlencode(PASSWORD),
                     urlencode(new_password),
                     urlencode(new_password)
                 )))
@@ -504,9 +514,9 @@ async fn post_policy_violation_rerenders_form_with_error() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=twelve-chars!&confirm_password=twelve-chars!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=twelve-chars!&confirm_password=twelve-chars!"
+                )))
                 .expect("req"),
         )
         .await
@@ -547,9 +557,9 @@ async fn post_password_mismatch_rerenders_form() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=SecurePassword1!&confirm_password=DifferentPassword1!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=SecurePassword1!&confirm_password=DifferentPassword1!"
+                )))
                 .expect("req"),
         )
         .await
@@ -623,9 +633,9 @@ async fn post_expired_ra_token_redirects_to_root() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={expired_token}"))
-                .body(Body::from(
-                    "new_password=SomePassword1!&confirm_password=SomePassword1!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=SomePassword1!&confirm_password=SomePassword1!"
+                )))
                 .expect("req"),
         )
         .await
@@ -670,9 +680,9 @@ async fn update_password_in_multi_action_flow_advances_to_next() {
                 .uri("/required-action/UPDATE_PASSWORD")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=MultiActionPass1!&confirm_password=MultiActionPass1!",
-                ))
+                .body(Body::from(format!(
+                    "current_password={PASSWORD}&new_password=MultiActionPass1!&confirm_password=MultiActionPass1!"
+                )))
                 .expect("req"),
         )
         .await
@@ -687,5 +697,270 @@ async fn update_password_in_multi_action_flow_advances_to_next() {
     assert!(
         loc.starts_with("https://app.example.com/cb?code="),
         "expected auth code redirect after completing last action, got: {loc}"
+    );
+}
+
+// ==========================================================================
+// Task 21.3 / audit §4.23#2 — CSRF token + old password on
+// POST /required-action/UPDATE_PASSWORD
+// ==========================================================================
+//
+// The route sets a password with nothing but the RA cookie. That cookie is
+// `SameSite=Strict`, but `SameSite` is a browser-version-dependent mitigation,
+// not a control: a cross-site POST that rides a live required-action session
+// took over the account outright, and a user who reached the page by any means
+// could set a password without proving they knew the current one.
+
+fn build_prod_rig() -> Rig {
+    build_rig_mode(
+        Arc::new(SystemClock) as Arc<dyn Clock>,
+        RealmConfig {
+            default_required_actions: vec![RequiredAction::UpdatePassword],
+            ..Default::default()
+        },
+        false,
+    )
+}
+
+/// Extracts the `hearth_ui_csrf` cookie value from a response.
+fn csrf_cookie_value(resp: &axum::response::Response) -> Option<String> {
+    for v in resp.headers().get_all(header::SET_COOKIE) {
+        let s = v.to_str().ok()?;
+        if let Some(rest) = s.strip_prefix("hearth_ui_csrf=") {
+            return Some(rest.split(';').next()?.to_string());
+        }
+    }
+    None
+}
+
+async fn post_update_password(
+    rig: &Rig,
+    ra_token: &str,
+    cookie_extra: Option<&str>,
+    body: String,
+) -> axum::response::Response {
+    let mut cookie = format!("hearth_ra_session={ra_token}");
+    if let Some(extra) = cookie_extra {
+        cookie.push_str("; ");
+        cookie.push_str(extra);
+    }
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/required-action/UPDATE_PASSWORD")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie)
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+/// Looks up the user the RA flow belongs to and reports whether `candidate`
+/// is still their password.
+fn password_still_matches(rig: &Rig, email: &str, candidate: &str) -> bool {
+    let user = rig
+        .identity
+        .get_user_by_email(&rig.realm_id, email)
+        .expect("lookup")
+        .expect("user exists");
+    rig.identity
+        .verify_password(
+            &rig.realm_id,
+            user.id(),
+            &CleartextPassword::from_string(candidate.to_string()),
+        )
+        .unwrap_or(false)
+}
+
+/// The GET must hand the browser a usable token: a `hearth_ui_csrf` cookie and
+/// the same value in the form's `_csrf` field, plus the new
+/// `current_password` input.
+#[tokio::test]
+async fn get_update_password_issues_csrf_and_asks_for_the_current_password() {
+    let rig = build_prod_rig();
+    let cookie = create_user_with_session(&rig, "csrf-get@example.com");
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/required-action/UPDATE_PASSWORD")
+                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let token = csrf_cookie_value(&resp).expect("GET must set a hearth_ui_csrf cookie");
+    let body = body_text(resp).await;
+    assert!(
+        body.contains(&format!(r#"name="_csrf" value="{token}""#)),
+        "the form must echo the cookie's token, got:\n{body}"
+    );
+    assert!(
+        body.contains(r#"name="current_password""#),
+        "the form must ask for the current password:\n{body}"
+    );
+}
+
+/// A cross-site POST cannot read the CSRF cookie, so it cannot produce a
+/// matching `_csrf` field. In production that must be refused.
+#[tokio::test]
+async fn post_without_csrf_token_is_forbidden_in_production() {
+    let rig = build_prod_rig();
+    let email = "csrf-missing@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+
+    let resp = post_update_password(
+        &rig,
+        &ra_token,
+        Some("hearth_ui_csrf=real-token"),
+        format!(
+            "current_password={}&new_password=Attacker-chosen-1!&confirm_password=Attacker-chosen-1!",
+            urlencode(PASSWORD)
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a POST with no _csrf field must be refused"
+    );
+    assert!(
+        password_still_matches(&rig, email, PASSWORD),
+        "the password was changed despite the CSRF failure"
+    );
+}
+
+/// A guessed token must not pass either.
+#[tokio::test]
+async fn post_with_wrong_csrf_token_is_forbidden_in_production() {
+    let rig = build_prod_rig();
+    let email = "csrf-wrong@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+
+    let resp = post_update_password(
+        &rig,
+        &ra_token,
+        Some("hearth_ui_csrf=real-token"),
+        format!(
+            "_csrf=guessed&current_password={}&new_password=Attacker-chosen-1!&confirm_password=Attacker-chosen-1!",
+            urlencode(PASSWORD)
+        ),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(
+        password_still_matches(&rig, email, PASSWORD),
+        "the password was changed despite the CSRF failure"
+    );
+}
+
+/// The real browser flow — matching cookie and field — still works.
+#[tokio::test]
+async fn post_with_matching_csrf_token_succeeds_in_production() {
+    let rig = build_prod_rig();
+    let email = "csrf-ok@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+    let new_password = "Csrf-ok-new-password-1!";
+
+    let resp = post_update_password(
+        &rig,
+        &ra_token,
+        Some("hearth_ui_csrf=real-token"),
+        format!(
+            "_csrf=real-token&current_password={}&new_password={}&confirm_password={}",
+            urlencode(PASSWORD),
+            urlencode(new_password),
+            urlencode(new_password)
+        ),
+    )
+    .await;
+
+    assert!(
+        resp.status().is_redirection(),
+        "a well-formed submission must complete the action, got {}",
+        resp.status()
+    );
+    assert!(
+        password_still_matches(&rig, email, new_password),
+        "the password was not actually changed"
+    );
+}
+
+/// Knowing the current password is now required: an attacker holding only the
+/// RA cookie must not be able to set a new one.
+#[tokio::test]
+async fn post_with_wrong_current_password_is_rejected_and_leaves_the_password_alone() {
+    let rig = build_rig_default();
+    let email = "oldpw-wrong@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+
+    let resp = post_update_password(
+        &rig,
+        &ra_token,
+        None,
+        "current_password=not-the-password&new_password=Attacker-chosen-1!\
+         &confirm_password=Attacker-chosen-1!"
+            .to_string(),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected the form re-rendered with an inline error"
+    );
+    let body = body_text(resp).await;
+    assert!(
+        body.contains("Current password is incorrect"),
+        "expected an inline current-password error, got:\n{body}"
+    );
+    assert!(
+        password_still_matches(&rig, email, PASSWORD),
+        "the password was changed without the current one"
+    );
+    assert!(
+        !password_still_matches(&rig, email, "Attacker-chosen-1!"),
+        "the attacker's password was installed"
+    );
+}
+
+/// An empty `current_password` is the shape a stripped-down cross-site form
+/// produces, and must fail like any other wrong password.
+#[tokio::test]
+async fn post_with_empty_current_password_is_rejected() {
+    let rig = build_rig_default();
+    let email = "oldpw-empty@example.com";
+    let cookie = create_user_with_session(&rig, email);
+    let ra_token = obtain_ra_cookie(&rig, &cookie).await;
+
+    let resp = post_update_password(
+        &rig,
+        &ra_token,
+        None,
+        "new_password=Attacker-chosen-1!&confirm_password=Attacker-chosen-1!".to_string(),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        password_still_matches(&rig, email, PASSWORD),
+        "an omitted current_password let the change through"
     );
 }

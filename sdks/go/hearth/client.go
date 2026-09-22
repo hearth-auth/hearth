@@ -138,21 +138,47 @@ func Bootstrap(ctx context.Context, baseURL string) (*BootstrapResponse, error) 
 }
 
 // RegisterClient registers a new OAuth 2.0 client.
-func (c *Client) RegisterClient(ctx context.Context, req RegisterClientRequest) (*OAuthClient, error) {
+//
+// Registration is an admin operation: the server answers
+// `401 missing authorization header` without a bearer token. Pass one as the
+// optional third argument — variadic so that existing callers still compile,
+// matching how StartDeviceFlow takes its optional scope.
+func (c *Client) RegisterClient(
+	ctx context.Context,
+	req RegisterClientRequest,
+	accessToken ...string,
+) (*OAuthClient, error) {
+	token := ""
+	if len(accessToken) > 0 {
+		token = accessToken[0]
+	}
 	var result OAuthClient
-	if err := c.post(ctx, "/clients", req, &result); err != nil {
+	if err := c.postWithToken(ctx, "/clients", req, &result, token); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
 // Authorize initiates an authorization code flow.
-func (c *Client) Authorize(ctx context.Context, req AuthorizeRequest) (*AuthorizeResponse, error) {
+//
+// A bearer token is required whenever UserID selects the subject directly
+// instead of the caller holding a session: that is an administrative act and
+// the server answers `401 invalid_token` without one. Variadic so existing
+// callers still compile.
+func (c *Client) Authorize(
+	ctx context.Context,
+	req AuthorizeRequest,
+	accessToken ...string,
+) (*AuthorizeResponse, error) {
 	if req.ResponseType == "" {
 		req.ResponseType = "code"
 	}
+	token := ""
+	if len(accessToken) > 0 {
+		token = accessToken[0]
+	}
 	var result AuthorizeResponse
-	if err := c.post(ctx, "/authorize", req, &result); err != nil {
+	if err := c.postWithToken(ctx, "/authorize", req, &result, token); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -198,9 +224,12 @@ type rbacClaims struct {
 }
 
 // decodeClaims returns the parsed RBAC claim set from a JWT's middle
-// segment. The signature is NOT verified — the app trusts its own
-// token. Returns nil when the token is absent, malformed, or the
-// claim segment fails to decode / parse.
+// segment. The signature is NOT verified.
+//
+// This is an internal helper and MUST NOT be used to make an authorization
+// decision on a token the process did not mint itself. Every authorization
+// gate in this package goes through verifiedClaims instead. Returns nil when
+// the token is absent, malformed, or the claim segment fails to decode/parse.
 func decodeClaims(token string) *rbacClaims {
 	if token == "" {
 		return nil
@@ -228,32 +257,48 @@ func contains(haystack []string, needle string) bool {
 	return slices.Contains(haystack, needle)
 }
 
-// HasPermission returns true iff the JWT's `permissions` claim contains
-// the given permission. Decoding is local — no network call. Returns
-// false for an empty or malformed token.
-func (c *Client) HasPermission(token, permission string) bool {
-	claims := decodeClaims(token)
+// verifiedClaims verifies token end-to-end via VerifyToken — EdDSA signature
+// against the issuer's JWKS, plus exp, nbf, iat and iss — and only then returns
+// the RBAC subset of the (now authenticated) payload.
+//
+// Returns nil when verification fails for any reason, so every caller is
+// fail-closed. The JWKS is cached, so the common case is CPU-only.
+func (c *Client) verifiedClaims(ctx context.Context, token string) *rbacClaims {
+	if _, err := c.VerifyToken(ctx, token); err != nil {
+		return nil
+	}
+	return decodeClaims(token)
+}
+
+// HasPermission returns true iff the token verifies against the realm's JWKS
+// and its `permissions` claim contains the given permission.
+//
+// The signature, exp, nbf and iss are all checked before any claim is read;
+// an unverifiable, expired or foreign token returns false. The first call
+// populates the JWKS cache (one HTTP round trip); subsequent calls are local.
+func (c *Client) HasPermission(ctx context.Context, token, permission string) bool {
+	claims := c.verifiedClaims(ctx, token)
 	return claims != nil && contains(claims.Permissions, permission)
 }
 
-// HasRole returns true iff the JWT's `roles` claim contains the given
-// role. Decoding is local.
-func (c *Client) HasRole(token, role string) bool {
-	claims := decodeClaims(token)
+// HasRole returns true iff the token verifies and its `roles` claim contains
+// the given role. See HasPermission for the verification performed.
+func (c *Client) HasRole(ctx context.Context, token, role string) bool {
+	claims := c.verifiedClaims(ctx, token)
 	return claims != nil && contains(claims.Roles, role)
 }
 
-// InGroup returns true iff the JWT's `groups` claim contains the given
-// group slug. Decoding is local.
-func (c *Client) InGroup(token, groupSlug string) bool {
-	claims := decodeClaims(token)
+// InGroup returns true iff the token verifies and its `groups` claim contains
+// the given group slug. See HasPermission for the verification performed.
+func (c *Client) InGroup(ctx context.Context, token, groupSlug string) bool {
+	claims := c.verifiedClaims(ctx, token)
 	return claims != nil && contains(claims.Groups, groupSlug)
 }
 
-// InOrg returns true iff the JWT's `oid` claim equals the given org
-// ID. Decoding is local.
-func (c *Client) InOrg(token, orgID string) bool {
-	claims := decodeClaims(token)
+// InOrg returns true iff the token verifies and its `oid` claim equals the
+// given org ID. See HasPermission for the verification performed.
+func (c *Client) InOrg(ctx context.Context, token, orgID string) bool {
+	claims := c.verifiedClaims(ctx, token)
 	return claims != nil && claims.OID == orgID && orgID != ""
 }
 
@@ -359,6 +404,16 @@ func (c *Client) Admin(accessToken string) *AdminClient {
 }
 
 func (c *Client) post(ctx context.Context, path string, body, result any) error {
+	return c.postWithToken(ctx, path, body, result, "")
+}
+
+// postWithToken is post with an optional bearer token.
+//
+// The token is passed per call rather than attached to every request, because
+// the OAuth endpoints (/token, /authorize) authenticate the *client*, and an
+// unexpected Authorization header there changes how the server reads the
+// request. Only the admin-authenticated routes pass one.
+func (c *Client) postWithToken(ctx context.Context, path string, body, result any, token string) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -369,6 +424,9 @@ func (c *Client) post(ctx context.Context, path string, body, result any) error 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	if token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	return doRequest(c.http, httpReq, result)
 }

@@ -1045,12 +1045,18 @@ async fn start_fapi_http_server() -> (
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         let _harness = harness; // keeps TempDir alive
-        axum::serve(listener, router(state))
-            .with_graceful_shutdown(async {
-                rx.await.ok();
-            })
-            .await
-            .ok();
+        axum::serve(
+            listener,
+            // Production installs `ConnectInfo` on both accept loops, and the
+            // dev-endpoint loopback guard (task 20.1) fails CLOSED without it —
+            // a test server that omits it answers 404 on `/admin/bootstrap`.
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            rx.await.ok();
+        })
+        .await
+        .ok();
     });
 
     (
@@ -1460,9 +1466,42 @@ struct FapiAdvancedServer {
 /// Ed25519 JWKS (for JAR validation) and `authorization_signed_response_alg =
 /// "EdDSA"` (required by the Advanced JARM gate).  The raw pkcs8 bytes are
 /// returned so tests can sign JARs with the matching private key.
-async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
-    use hearth::protocol::http::{router, AppState};
+/// Binds a random loopback port and serves `router(state)` until the returned
+/// sender fires.
+///
+/// `ConnectInfo` is installed because production installs it on both accept
+/// loops, and the dev-endpoint loopback guard (task 20.1) fails CLOSED without
+/// it — a test server that omits it answers 404 on `/admin/bootstrap`.
+async fn spawn_http_server(
+    state: Arc<hearth::protocol::http::AppState>,
+    harness: common::TestHarness,
+) -> (u16, tokio::sync::oneshot::Sender<()>) {
+    use hearth::protocol::http::router;
     use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+    let port = listener.local_addr().expect("local addr").port();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _harness = harness; // keeps TempDir alive for the server's lifetime
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            rx.await.ok();
+        })
+        .await
+        .ok();
+    });
+    (port, tx)
+}
+
+async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
+    use hearth::protocol::http::AppState;
 
     let harness = common::TestHarness::embedded().await.expect("harness");
 
@@ -1546,21 +1585,7 @@ async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
         harness.audit_arc(),
     ));
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind random port");
-    let port = listener.local_addr().expect("local addr").port();
-
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        let _harness = harness; // keeps TempDir alive for the server's lifetime
-        axum::serve(listener, router(state))
-            .with_graceful_shutdown(async {
-                rx.await.ok();
-            })
-            .await
-            .ok();
-    });
+    let (port, tx) = spawn_http_server(state, harness).await;
 
     FapiAdvancedServer {
         base: format!("http://127.0.0.1:{port}"),

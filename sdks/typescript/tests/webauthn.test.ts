@@ -49,7 +49,9 @@ describe("HearthApiClient WebAuthn helpers (C-21)", () => {
     mockFetch(begin);
     const client = makeClient();
 
-    const res = await client.startWebAuthnRegistration("bearer-token");
+    const res = await client.startWebAuthnRegistration("bearer-token", {
+      password: "correct-horse-battery-staple",
+    });
 
     const [url, init] = lastCall();
     expect(url).toBe("https://auth.example.com/webauthn/register/begin");

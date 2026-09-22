@@ -511,6 +511,7 @@ pub struct TestPingBody {
 /// or destination resolves to a private/reserved IP).
 pub async fn admin_webhook_test_ping(
     RequireAdmin(_session): RequireAdmin,
+    _csrf: RequireCsrf,
     AxumPath(_realm_name): AxumPath<String>,
     axum::Json(body): axum::Json<TestPingBody>,
 ) -> Response {

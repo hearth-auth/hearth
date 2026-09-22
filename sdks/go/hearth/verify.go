@@ -179,7 +179,13 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 		}
 	}
 
-	// Step 4: verify iat is not in the future (5 s clock skew allowed).
+	// Step 4: verify nbf (RFC 7519 §4.1.5) — the token is not usable before it.
+	// 5 s clock skew allowed, matching the iat check below.
+	if nbf := claims.NotBefore(); nbf != 0 && nbf > now+5 {
+		return nil, &TokenNotYetValidError{NotBefore: nbf}
+	}
+
+	// Step 5: verify iat is not in the future (5 s clock skew allowed).
 	if claims.IssuedAt() != 0 && claims.IssuedAt() > now+5 {
 		return nil, &TokenNotYetValidError{NotBefore: claims.IssuedAt()}
 	}

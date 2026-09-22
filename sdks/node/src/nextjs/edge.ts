@@ -292,7 +292,8 @@ export function hearthEdgeMiddleware(options: EdgeMiddlewareOptions): (req: Requ
         issuer: issuerUrl,
         audience: options.audience,
         clockTolerance: clockSkewSeconds,
-        algorithms: ["EdDSA", "RS256", "ES256", "RS384", "ES384", "RS512", "ES512"],
+        // EdDSA only — Hearth never signs with RSA or ECDSA (§25.10).
+        algorithms: ["EdDSA"],
       });
       token = new EdgeToken(result.payload, result.protectedHeader as Record<string, unknown>);
     } catch {

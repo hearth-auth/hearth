@@ -21,10 +21,10 @@ use hearth::protocol::proto::identity::v1::{
 };
 use hearth::rbac::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, Group, GroupId,
-    GroupMember, GroupMembership, Page, Permission, PermissionRecord, ProtectedResource,
-    RbacEngine, RbacError, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec,
-    RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest, UpdateRoleRequest,
-    UserPermissionGrant,
+    GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission, PermissionRecord,
+    ProtectedResource, RbacEngine, RbacError, ResolvedPermissions, Role, RoleAssignment, RoleId,
+    RoleSpec, RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest,
+    UpdateRoleRequest, UserPermissionGrant,
 };
 use tonic::Request;
 
@@ -38,6 +38,14 @@ struct FailSeedRbac {
 impl RbacEngine for FailSeedRbac {
     fn seed_realm(&self, _realm_id: &RealmId) -> Result<(), RbacError> {
         Err(RbacError::Storage("injected seed failure for test".into()))
+    }
+
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
+        self.inner.on_replicated_row(realm_id, key);
+    }
+
+    fn on_replicated_snapshot(&self) {
+        self.inner.on_replicated_snapshot();
     }
 
     fn resolve_permissions(
@@ -231,6 +239,23 @@ impl RbacEngine for FailSeedRbac {
             .list_group_members(realm_id, group_id, cursor, limit)
     }
 
+    fn export_all_group_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<GroupMembershipEdge>, RbacError> {
+        self.inner.export_all_group_memberships(realm_id)
+    }
+
+    fn import_group_membership(
+        &self,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
+        overwrite: bool,
+    ) -> Result<hearth::core::ImportOutcome, RbacError> {
+        self.inner
+            .import_group_membership(realm_id, edge, overwrite)
+    }
+
     fn resolve_role_permissions(
         &self,
         realm_id: &RealmId,
@@ -344,6 +369,24 @@ impl RbacEngine for FailSeedRbac {
 
     fn purge_user_from_realm(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), RbacError> {
         self.inner.purge_user_from_realm(realm_id, user_id)
+    }
+
+    fn purge_org_roles_for_user(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<usize, RbacError> {
+        self.inner
+            .purge_org_roles_for_user(realm_id, org_id, user_id)
+    }
+
+    fn purge_org_roles_for_org(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+    ) -> Result<usize, RbacError> {
+        self.inner.purge_org_roles_for_org(realm_id, org_id)
     }
 
     fn import_role(

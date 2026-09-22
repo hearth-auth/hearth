@@ -809,8 +809,11 @@ pub async fn admin_group_delete(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, gid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -833,6 +836,7 @@ pub async fn admin_group_delete(
                 ),
                 &format!("Unable to delete group: {e}"),
                 "error",
+                secure,
             )
         }
     }
@@ -952,8 +956,11 @@ pub async fn admin_group_member_add(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, gid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<AddGroupMemberForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -972,6 +979,7 @@ pub async fn admin_group_member_add(
                 ),
                 "Invalid member ID.",
                 "error",
+                secure,
             );
         }
     };
@@ -1001,6 +1009,7 @@ pub async fn admin_group_member_add(
                 ),
                 "Member added.",
                 "success",
+                secure,
             )
         }
         Err(e) => {
@@ -1012,6 +1021,7 @@ pub async fn admin_group_member_add(
                 ),
                 &format!("Unable to add member: {e}"),
                 "error",
+                secure,
             )
         }
     }
@@ -1029,6 +1039,8 @@ pub async fn admin_group_member_remove(
     headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1075,6 +1087,7 @@ pub async fn admin_group_member_remove(
                     ),
                     "Member removed.",
                     "success",
+                    secure,
                 )
             }
         }
@@ -1104,6 +1117,7 @@ pub async fn admin_group_member_remove(
                     ),
                     &format!("Unable to remove member: {e}"),
                     "error",
+                    secure,
                 )
             }
         }
@@ -1142,8 +1156,11 @@ pub async fn admin_group_role_assign(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, gid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<GroupAssignRoleForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1157,7 +1174,12 @@ pub async fn admin_group_role_assign(
         group_id.as_uuid()
     );
     let Ok(role_uuid) = form.role_id.parse::<uuid::Uuid>() else {
-        return super::templates::redirect_with_flash(&detail_url, "Invalid role ID.", "error");
+        return super::templates::redirect_with_flash(
+            &detail_url,
+            "Invalid role ID.",
+            "error",
+            secure,
+        );
     };
     let role_id = crate::rbac::RoleId::new(role_uuid);
     let scope = match parse_rbac_scope(&form.scope) {
@@ -1168,6 +1190,7 @@ pub async fn admin_group_role_assign(
                 &detail_url,
                 "Invalid assignment scope.",
                 "error",
+                secure,
             );
         }
     };
@@ -1187,7 +1210,7 @@ pub async fn admin_group_role_assign(
                 true,
                 &form.role_id,
             );
-            super::templates::redirect_with_flash(&detail_url, "Role assigned.", "success")
+            super::templates::redirect_with_flash(&detail_url, "Role assigned.", "success", secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, "group assign_role failed");
@@ -1195,6 +1218,7 @@ pub async fn admin_group_role_assign(
                 &detail_url,
                 &format!("Unable to assign role: {e}"),
                 "error",
+                secure,
             )
         }
     }
@@ -1210,8 +1234,11 @@ pub async fn admin_group_role_unassign(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, gid, aid)): AxumPath<(String, String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
+    // Task 21.6: `hearth_ui_flash` must carry `Secure` over TLS.
+    let secure = state.is_secure_request(&headers);
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
     }
@@ -1231,7 +1258,7 @@ pub async fn admin_group_role_unassign(
     match state.rbac.unassign_role(target.id(), &assignment_id) {
         Ok(()) => {
             audit_group_role_event(&state, &session, target.id(), &group_id, false, &aid);
-            super::templates::redirect_with_flash(&detail_url, "Role removed.", "success")
+            super::templates::redirect_with_flash(&detail_url, "Role removed.", "success", secure)
         }
         Err(e) => {
             tracing::warn!(error = %e, "group unassign_role failed");
@@ -1239,6 +1266,7 @@ pub async fn admin_group_role_unassign(
                 &detail_url,
                 &format!("Unable to remove role: {e}"),
                 "error",
+                secure,
             )
         }
     }

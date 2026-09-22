@@ -1,0 +1,1 @@
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:Assertion ID="_a"><saml:Subject><saml:NameID><![CDATA[<script>alert(1)</script>]]></saml:NameID></saml:Subject></saml:Assertion></samlp:Response>

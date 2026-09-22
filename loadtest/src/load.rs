@@ -336,6 +336,17 @@ pub enum LoadError {
     HostGuard(String),
     /// The open-loop saturate driver could not initialize (C4, HEA-1872).
     Saturate(String),
+    /// One or more journeys exceeded [`crate::budget::MAX_FAILURE_RATE`].
+    ///
+    /// This is the run's only non-zero exit condition (audit 2026-09-21, task
+    /// 23.14). A *latency* breach deliberately does NOT fail the process: the
+    /// sub-ms budgets are documented to read `pass:false` on an ordinary dev
+    /// box (see `loadtest/README.md` § "Budgets"), so gating the exit code on
+    /// them would make `make loadtest` fail everywhere and mean nothing. A
+    /// journey that is *erroring* is a different thing entirely — it means the
+    /// harness measured the reject path, or the server is broken — and before
+    /// this variant existed the process exited 0 regardless.
+    JourneyFailures(Vec<String>),
 }
 
 impl std::fmt::Display for LoadError {
@@ -349,6 +360,14 @@ impl std::fmt::Display for LoadError {
             Self::TierMissConfig(m) => write!(f, "tier-miss configuration: {m}"),
             Self::HostGuard(m) => write!(f, "host guard: {m}"),
             Self::Saturate(m) => write!(f, "saturate driver: {m}"),
+            Self::JourneyFailures(names) => write!(
+                f,
+                "journeys exceeded the {:.0}% error budget: {} — the run measured \
+                 the reject path, not the hot path; the reported latencies are \
+                 not a valid measurement",
+                crate::budget::MAX_FAILURE_RATE * 100.0,
+                names.join(", "),
+            ),
         }
     }
 }
@@ -446,7 +465,43 @@ pub async fn run_load(params: &LoadParams) -> Result<(), LoadError> {
         .map_err(|e| LoadError::Report(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     std::fs::write(&json_path, json).map_err(LoadError::Report)?;
     println!("  report: {} (pass={})", json_path.display(), report.pass);
-    Ok(())
+
+    // Audit 2026-09-21 (task 23.14). Until now `run_load` returned `Ok(())`
+    // unconditionally, so `main` mapped every run to `ExitCode::SUCCESS` —
+    // including a run in which every request 4xx'd. `make loadtest-smoke` is
+    // the CI gate in `.github/workflows/loadtest-smoke.yml`; it could only
+    // ever prove the binary did not crash. Fail the process when a journey
+    // blew the error budget. Latency breaches stay advisory on purpose (see
+    // `LoadError::JourneyFailures`).
+    let failing = unhealthy_journeys(&report);
+    if failing.is_empty() {
+        Ok(())
+    } else {
+        Err(LoadError::JourneyFailures(failing))
+    }
+}
+
+/// Every journey in `report` that exceeded the error budget, deduplicated and
+/// sorted, across the primary rows **and** every ramp step / soak bucket.
+///
+/// A ramp stops at the knee and a soak keeps only its last bucket in
+/// `journeys`, so looking at the primary rows alone would miss an earlier step
+/// in which the corpus ran dry and every request started erroring.
+fn unhealthy_journeys(report: &LoadReport) -> Vec<String> {
+    let mut names: Vec<String> = report::failing_journeys(&report.journeys);
+    if let Some(steps) = &report.ramp_steps {
+        for step in steps {
+            names.extend(report::failing_journeys(&step.journeys));
+        }
+    }
+    if let Some(buckets) = &report.soak_buckets {
+        for bucket in buckets {
+            names.extend(report::failing_journeys(&bucket.journeys));
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Formats a byte count as MiB with one decimal, for the run's console line.
@@ -1262,5 +1317,130 @@ mod tests {
         assert_eq!(config.report_file, vec!["/tmp/r.html".to_string()]);
         assert!(config.no_telnet);
         assert!(config.no_websocket);
+    }
+
+    // ── Exit-code gate (audit 2026-09-21, task 23.14) ────────────────────────
+
+    /// A [`JourneyRow`] carrying only the fields the exit gate reads.
+    fn gate_row(journey: &str, requests: usize, failures: usize) -> crate::report::JourneyRow {
+        crate::report::JourneyRow {
+            journey: journey.to_string(),
+            method: "POST".to_string(),
+            requests,
+            failures,
+            failure_rate: crate::budget::failure_rate(failures, requests),
+            p50_ms: 1,
+            p95_ms: 1,
+            p99_ms: 1,
+            p999_ms: 1,
+            min_us: None,
+            max_us: None,
+            spec_engine_p99_us: None,
+            http_budget_p99_us: None,
+            pass: None,
+        }
+    }
+
+    fn gate_report(
+        journeys: Vec<crate::report::JourneyRow>,
+        ramp_steps: Option<Vec<RampStep>>,
+        soak_buckets: Option<Vec<SoakBucket>>,
+    ) -> LoadReport {
+        LoadReport {
+            schema: SCHEMA_VERSION,
+            metadata: RunMetadata {
+                git_sha: "test".to_string(),
+                timestamp_unix: 0,
+                mode: "steady".to_string(),
+                host: "http://127.0.0.1:1".to_string(),
+                seed: 1,
+                dataset_shape: "test".to_string(),
+                users: 1,
+                run_time: "1s".to_string(),
+                hatch_rate: "1".to_string(),
+            },
+            summary: crate::report::summarize(&journeys, 1, 1.0),
+            journeys,
+            ramp_steps,
+            knee_rps: None,
+            soak_buckets,
+            tier_miss: None,
+            resources: None,
+            pass: true,
+        }
+    }
+
+    #[test]
+    fn an_all_erroring_run_is_reported_as_unhealthy() {
+        // Regression: `run_load` used to end in a bare `Ok(())`, so `main`
+        // returned ExitCode::SUCCESS for a run in which every request 4xx'd.
+        // `make loadtest-smoke` is a CI gate; it could not fail.
+        let report = gate_report(
+            vec![gate_row("validate", 500, 500), gate_row("issuance", 500, 0)],
+            None,
+            None,
+        );
+        assert_eq!(unhealthy_journeys(&report), vec!["validate".to_string()]);
+    }
+
+    #[test]
+    fn a_healthy_run_reports_no_unhealthy_journeys() {
+        let report = gate_report(
+            vec![gate_row("validate", 500, 4), gate_row("revoke", 100, 0)],
+            None,
+            None,
+        );
+        assert!(unhealthy_journeys(&report).is_empty());
+    }
+
+    #[test]
+    fn an_earlier_ramp_step_that_ran_dry_is_still_caught() {
+        // Ramp keeps only the knee step in `journeys`; a step where the corpus
+        // ran out and every request errored must not be invisible to the gate.
+        let report = gate_report(
+            vec![gate_row("validate", 500, 0)],
+            Some(vec![
+                RampStep {
+                    users: 10,
+                    rps: 1.0,
+                    breached: false,
+                    journeys: vec![gate_row("session_lookup", 500, 500)],
+                },
+                RampStep {
+                    users: 20,
+                    rps: 2.0,
+                    breached: false,
+                    journeys: vec![gate_row("validate", 500, 0)],
+                },
+            ]),
+            None,
+        );
+        assert_eq!(
+            unhealthy_journeys(&report),
+            vec!["session_lookup".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_failing_soak_bucket_is_caught_and_names_dedupe() {
+        let report = gate_report(
+            vec![gate_row("revoke_revalidate", 100, 100)],
+            None,
+            Some(vec![
+                SoakBucket {
+                    bucket: 0,
+                    journeys: vec![gate_row("revoke_revalidate", 100, 100)],
+                },
+                SoakBucket {
+                    bucket: 1,
+                    journeys: vec![gate_row("revoke_revalidate", 100, 100)],
+                },
+            ]),
+        );
+        assert_eq!(
+            unhealthy_journeys(&report),
+            vec!["revoke_revalidate".to_string()],
+            "the same journey failing in several buckets is named once"
+        );
     }
 }

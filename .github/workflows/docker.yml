@@ -52,6 +52,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ── Gate: nothing is pushed before release validation reports green ────────
+  # Audit blockers B2 (§4.8#1) and B6 (§4.12#1). B6 is the concrete one: the
+  # v1.6.11 image was published 37 minutes BEFORE release.yml's validation job
+  # wrote "Release is NOT cleared to publish". Both workflows fire on the same
+  # tag push, so the image raced the verdict and won.
+  #
+  # This job waits for that verdict — the same signal the binary channel uses —
+  # and fails closed when it is red, absent, or unreadable.
+  gate:
+    name: Await release validation
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Must exceed the 120-minute wait in await-green-commit, which in turn
+    # exceeds release validation's own 90-minute timeout.
+    timeout-minutes: 130
+
+    permissions:
+      contents: read
+      checks: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Await a green verdict on this commit
+        uses: ./.github/actions/await-green-commit
+        with:
+          check-name: Release validation (test matrix + bench gate)
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
   # ── PR smoke test: amd64-only build, no registry push ──────────────────────
   # Validates Dockerfile correctness without QEMU (~5–10 min).
   # arm64 is intentionally skipped for PRs — native arm64 runners are only
@@ -71,12 +103,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v3.6.0
 
+      # `load: true` puts the built image in the local Docker daemon under a
+      # throwaway tag so the Trivy step below can read its layers. Without it
+      # the build result stays in the buildx cache and there is nothing to scan.
       - name: Build (linux/amd64, no push)
         uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
         with:
           context: .
           platforms: linux/amd64
           push: false
+          load: true
+          tags: hearth:pr-scan
           build-args: |
             BUILD_VERSION=pr-${{ github.event.pull_request.number }}
             BUILD_REVISION=${{ github.sha }}
@@ -84,15 +121,30 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
+      # Audit §4.8#16: the published container image was never scanned. The
+      # Trivy job in security.yml is `scan-type: fs` over the checkout — it
+      # never reads the base-OS packages or the linked binary that ship in the
+      # image. This scans the image the PR would publish, before it can merge.
+      - name: Scan the built image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
+        with:
+          scan-type: image
+          image-ref: hearth:pr-scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       - name: Summarize
         if: always()
-        run: echo "Build-only run (PR — no push, no signing)." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Build-only run (PR — no push, no signing). Image scanned by Trivy." >> "$GITHUB_STEP_SUMMARY"
 
   # ── Release: build linux/amd64 on native x86_64 runner ─────────────────────
   # Pushes a digest-only image (no tag). The merge-and-sign job assembles the
   # final tagged multi-arch index from this digest + the arm64 digest.
   build-amd64:
     name: Build linux/amd64
+    needs: [gate]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -149,6 +201,7 @@ jobs:
   # tag push from v1.0.6 through v1.0.14, HEA-1525).
   build-arm64:
     name: Build linux/arm64 (native)
+    needs: [gate]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 45
@@ -201,7 +254,7 @@ jobs:
   # Source images referenced by immutable digest (not mutable tag) for integrity.
   merge-and-sign:
     name: Merge manifest + sign + SBOM attest
-    needs: [build-amd64, build-arm64]
+    needs: [gate, build-amd64, build-arm64]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -209,7 +262,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write   # cosign keyless OIDC token exchange
+      id-token: write         # cosign keyless OIDC token exchange
+      security-events: write  # image-scan SARIF upload (audit §4.8#16)
 
     outputs:
       image-digest: ${{ steps.inspect.outputs.digest }}
@@ -269,6 +323,28 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Merged manifest digest: $DIGEST"
 
+      # Audit §4.8#16: scan the exact index that operators pull, by digest,
+      # BEFORE cosign signs it. A CRITICAL/HIGH finding fails this job, so the
+      # image is never signed, never SBOM-attested, and never passes the
+      # signature verification the README install path requires.
+      - name: Scan the published image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/hearth-auth/hearth@${{ steps.inspect.outputs.digest }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload image SARIF to GitHub Code Scanning
+        if: always() && hashFiles('trivy-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
       - name: Install cosign
         uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
@@ -293,6 +369,13 @@ jobs:
         with:
           tool: cargo-cyclonedx@0.5.9
 
+      # cargo-cyclonedx reads Cargo.toml, which carries the last manually
+      # bumped version, not the tag being released. Stamp the tag's version
+      # first so the attested SBOM describes the release it ships with
+      # (audit 2026-08-28 §4.8#11, §4.12#5).
+      - name: Stamp workspace version from the release tag
+        run: bash scripts/stamp-version.sh "${GITHUB_REF_NAME}"
+
       - name: Generate CycloneDX SBOM
         run: cargo cyclonedx --format json --spec-version 1.4
 
@@ -302,6 +385,42 @@ jobs:
             --predicate hearth.cdx.json \
             --type cyclonedx \
             "ghcr.io/hearth-auth/hearth@${{ steps.inspect.outputs.digest }}"
+
+      - name: Publish the package for anonymous pull
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          # GHCR packages default to PRIVATE even when the repository is public,
+          # so the README's very first install command failed for everyone
+          # (audit 2026-08-28 §4.8#5, §4.12#4 — task 3.4). Setting it on every
+          # publish is idempotent and survives a package being recreated.
+          #
+          # GITHUB_TOKEN cannot change visibility; that needs a PAT with
+          # write:packages in the PACKAGES_ADMIN_TOKEN secret. Without it this
+          # step warns and the verification step below is what actually fails
+          # the release, so a missing secret cannot silently ship a private image.
+          if gh api --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${{ github.repository_owner }}/packages/container/hearth" \
+              -f visibility=public 2>/dev/null; then
+            echo "::notice::ghcr.io/${{ github.repository }} is public"
+          else
+            echo "::warning::could not set package visibility — set the PACKAGES_ADMIN_TOKEN secret to a PAT with write:packages"
+          fi
+
+      - name: Verify the image is anonymously pullable
+        if: github.ref_type == 'tag'
+        run: |
+          # The acceptance criterion for task 3.4 is the README's own command
+          # working for a stranger, so this check MUST carry no credentials.
+          # `docker logout` drops the login this job made earlier.
+          docker logout ghcr.io
+          TAG="${GITHUB_REF_NAME}"
+          if ! docker pull "ghcr.io/${{ github.repository }}:${TAG}"; then
+            echo "::error::ghcr.io/${{ github.repository }}:${TAG} is not anonymously pullable — the README's Docker install path is broken"
+            exit 1
+          fi
 
       - name: Summarize build
         if: always()

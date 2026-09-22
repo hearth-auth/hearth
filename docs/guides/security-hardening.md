@@ -119,8 +119,10 @@ exact endpoint URL.
 
 ### Host key
 
-The host key (`HEARTH_MASTER_KEY`) encrypts all realm Key Encryption Keys (KEKs) at rest. It
-is the most sensitive secret in a Hearth deployment.
+The host key (`HEARTH_MASTER_KEY`) encrypts the Key Encryption Keys (KEKs) held in
+`hearth.keys` at rest. It is the most sensitive secret in a Hearth deployment. Note that the
+registry currently holds a **single** KEK — the system realm's — and that one KEK wraps the
+data key of every WAL segment and SST for every realm.
 
 > **Production requirement (HEA-1368):** In production mode (any startup without `--dev`),
 > Hearth **refuses to start** if `HEARTH_MASTER_KEY` is unset and no `hearth.host_key` file
@@ -133,8 +135,8 @@ is the most sensitive secret in a Hearth deployment.
 - If you previously ran Hearth without `HEARTH_MASTER_KEY` set, Hearth auto-generated and
   persisted the key to `<data-dir>/hearth.host_key` (mode 0600). You can export it:
   `export HEARTH_MASTER_KEY=$(xxd -p -c 32 /path/to/hearth.host_key | tr -d '\n')`
-- Rotate it by re-wrapping all realm KEKs (Hearth supports O(n files) rotation — only DEK
-  headers are re-wrapped, not bulk data).
+- Rotate it by re-wrapping the KEKs in `hearth.keys` (Hearth supports O(n files) rotation —
+  only DEK headers are re-wrapped, not bulk data).
 
 ### OAuth client secrets
 
@@ -210,7 +212,8 @@ time, never from a committed file. The supported chain is:
 fails the length check (env var unset → empty substitution + load warning, or value
 shorter than 32 bytes → length error), Hearth returns a hard configuration error on any
 code path that would derive a fingerprint. There is no silent fail-open. See
-`src/identity/engine.rs` (HEA-836 BLK-2 fix + HEA-861 LOW-1 hardening).
+`src/identity/engine/mod.rs` (HEA-836 BLK-2 fix + HEA-861 LOW-1 hardening); the engine was
+split from a single `engine.rs` into the `engine/` module after that note was written.
 
 #### Rotation runbook
 
@@ -378,11 +381,39 @@ supported.
 
 ### HSTS (HTTP Strict Transport Security)
 
-When TLS is enabled, Hearth automatically sets:
+Hearth emits, on every `/ui/*` response:
 
 ```
 Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
 ```
+
+in exactly two situations:
+
+| Deployment | HSTS emitted? |
+|---|---|
+| TLS terminated **at Hearth** (`server.tls_cert_path` set) | Yes, on every response. |
+| TLS terminated **at a proxy**, with `server.trust_forwarded_proto: true` and a non-empty `server.trusted_proxies` | Yes, on requests the proxy marks `X-Forwarded-Proto: https`. |
+| TLS terminated **at a proxy**, `trust_forwarded_proto` unset | **No.** Hearth sees only plaintext and cannot tell that the browser used HTTPS. Set the header at the proxy. |
+
+The third row is the trap. Hearth behind a TLS-terminating reverse proxy sees a plaintext
+hop and has no way to know the browser's scheme unless the proxy tells it. If you do not
+set `trust_forwarded_proto`, **HSTS is your proxy's job** — add it there:
+
+```nginx
+# nginx
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+```
+
+```yaml
+# Envoy
+route_config:
+  response_headers_to_add:
+    - header:
+        key: Strict-Transport-Security
+        value: "max-age=31536000; includeSubDomains; preload"
+```
+
+Read the `preload` warning below before you add either one.
 
 This enforces HTTPS for one year on the domain and all subdomains, and includes the
 `preload` directive. **The `preload` directive opts your domain into browser HSTS preload
@@ -390,7 +421,7 @@ lists** (maintained by Chrome, Firefox, Safari, etc.). Once submitted and accept
 browsers will refuse plain HTTP connections to your domain even on first visit — this
 cannot be undone quickly (removal from preload lists takes months to propagate).
 
-**Operator actions required before enabling TLS:**
+**Operator actions required before enabling TLS (or before adding the header at your proxy):**
 
 1. Confirm that _all_ subdomains of your Hearth domain can serve HTTPS. The `includeSubDomains`
    directive means `*.auth.example.com` is also covered.

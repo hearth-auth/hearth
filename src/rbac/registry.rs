@@ -284,7 +284,7 @@ impl RealmPermissionRegistry {
     ///
     /// This is a pure in-memory check — no storage I/O. It should be called
     /// after constructing the registry from YAML (in `to_realm_config`) and
-    /// on hot-reload before swapping the `ArcSwap`.
+    /// on hot-reload before swapping the `SwapCell`.
     ///
     /// Checks performed:
     /// 1. Every scope bundle name matches the bundle-name grammar.

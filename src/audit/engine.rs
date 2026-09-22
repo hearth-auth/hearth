@@ -211,12 +211,18 @@ impl EmbeddedAuditEngine {
         let storage_key = keys::audit_hmac_key();
         let key_bytes: [u8; 32] = match self.storage.get(realm_id, &storage_key)? {
             Some(raw) => {
+                // Strict: on a deployment with a KEK configured, an
+                // unenveloped chain key is not a legacy row — the KEK
+                // enrolment sweep re-wraps this key at startup — it is
+                // corruption or an attacker with storage write access
+                // stripping the envelope and substituting an HMAC key of
+                // their own, which would let them rewrite the audit log and
+                // re-chain it (audit 2026-08-28 §25.21).
                 let plaintext =
-                    crate::identity::key_encryption::unwrap_key(&raw, self.kek.as_ref()).map_err(
-                        |e| AuditError::Serialization {
+                    crate::identity::key_encryption::unwrap_key_strict(&raw, self.kek.as_ref())
+                        .map_err(|e| AuditError::Serialization {
                             reason: format!("audit HMAC key unwrap failed: {e}"),
-                        },
-                    )?;
+                        })?;
                 if plaintext.len() != 32 {
                     return Err(AuditError::Serialization {
                         reason: format!(
@@ -249,6 +255,82 @@ impl EmbeddedAuditEngine {
         Ok(key_bytes)
     }
 
+    /// Reads the realm's audit HMAC key without creating one.
+    ///
+    /// [`Self::get_realm_hmac_key`] generates and persists a key when none
+    /// exists, which is right on the append path and wrong on the verify path:
+    /// verifying an erased log would mint the very key whose absence is the
+    /// evidence (audit 2026-08-28 §4.14#4).
+    fn peek_realm_hmac_key(&self, realm_id: &RealmId) -> Result<Option<[u8; 32]>, AuditError> {
+        {
+            let cache = self.hmac_key_cache.lock().expect("hmac_key_cache poisoned");
+            if let Some(k) = cache.get(realm_id) {
+                return Ok(Some(*k));
+            }
+        }
+        let Some(raw) = self.storage.get(realm_id, &keys::audit_hmac_key())? else {
+            return Ok(None);
+        };
+        // Strict for the same reason as the append path: an unenveloped chain
+        // key under a configured KEK is a downgrade, and accepting one here
+        // would let a tampered log verify clean (§25.21).
+        let plaintext = crate::identity::key_encryption::unwrap_key_strict(&raw, self.kek.as_ref())
+            .map_err(|e| AuditError::Serialization {
+                reason: format!("audit HMAC key unwrap failed: {e}"),
+            })?;
+        let key_bytes =
+            <[u8; 32]>::try_from(plaintext.as_slice()).map_err(|_| AuditError::Serialization {
+                reason: format!(
+                    "audit HMAC key has wrong length: {} (expected 32)",
+                    plaintext.len()
+                ),
+            })?;
+        let mut cache = self.hmac_key_cache.lock().expect("hmac_key_cache poisoned");
+        cache.insert(realm_id.clone(), key_bytes);
+        Ok(Some(key_bytes))
+    }
+
+    /// The system realm, where per-realm audit-chain anchors live.
+    fn anchor_realm() -> RealmId {
+        RealmId::new(uuid::Uuid::nil())
+    }
+
+    /// Reports whether this realm has ever had an audit chain.
+    ///
+    /// Read from the system realm, so a wipe of the target realm's `audit:`
+    /// prefix cannot erase the answer (§4.14#4).
+    fn chain_was_established(&self, realm_id: &RealmId) -> Result<bool, AuditError> {
+        Ok(self
+            .storage
+            .get(&Self::anchor_realm(), &keys::chain_anchor_key(realm_id))?
+            .is_some())
+    }
+
+    /// Records that this realm has an audit chain, if not already recorded.
+    ///
+    /// Called only after an append is durable, so the anchor can never claim a
+    /// chain that no event ever reached.
+    fn record_chain_anchor(storage: &dyn StorageEngine, realm_id: &RealmId) {
+        let anchor_realm = Self::anchor_realm();
+        let key = keys::chain_anchor_key(realm_id);
+        match storage.get(&anchor_realm, &key) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(e) = storage.put(&anchor_realm, &key, b"1") {
+                    tracing::warn!(
+                        realm_id = %realm_id,
+                        error = %e,
+                        "failed to record the audit-chain anchor; an erased log for this \
+                         realm would not be distinguishable from one that never existed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(realm_id = %realm_id, error = %e, "audit-chain anchor read failed");
+            }
+        }
+    }
+
     /// Returns the per-realm chain lock, creating it on first access.
     fn realm_chain_lock(&self, realm_id: &RealmId) -> Arc<Mutex<Option<ChainHead>>> {
         let mut map = self.chain_locks.lock().expect("chain_locks mutex poisoned");
@@ -268,7 +350,11 @@ impl EmbeddedAuditEngine {
     /// The keyed MAC prevents a storage-layer attacker from recomputing a valid
     /// chain after deleting or modifying events — they would need the per-realm
     /// HMAC key (KEK-protected when configured) to forge a tag.
-    fn compute_hmac_hash(hmac_key_bytes: &[u8], prev_hash: &str, event: &AuditEvent) -> String {
+    pub(crate) fn compute_hmac_hash(
+        hmac_key_bytes: &[u8],
+        prev_hash: &str,
+        event: &AuditEvent,
+    ) -> String {
         let hashable = serde_json::json!({
             "id": event.id,
             "realm_id": event.realm_id,
@@ -458,6 +544,46 @@ impl EmbeddedAuditEngine {
 }
 
 impl AuditEngine for EmbeddedAuditEngine {
+    /// Drops this realm's cached chain head when the persisted head arrives
+    /// from another node (task 26.47).
+    ///
+    /// `try_lock`, not `lock`, and both branches are deliberate. Contention on
+    /// the realm's chain lock means an append is in flight *on this node* — so
+    /// this node is the leader and the row applying is its own write coming
+    /// back. Skipping it is correct: the cache is already ahead of the row.
+    /// Blocking instead would stall the Raft apply loop behind an fsync.
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
+        if key != keys::chain_head_key() {
+            return;
+        }
+        // Look the lock up without creating one: a realm this node has never
+        // appended for has nothing cached to invalidate.
+        let Ok(map) = self.chain_locks.lock() else {
+            return;
+        };
+        let Some(lock) = map.get(realm_id).map(Arc::clone) else {
+            return;
+        };
+        drop(map);
+        if let Ok(mut cached) = lock.try_lock() {
+            *cached = None;
+        }
+        drop(lock);
+    }
+
+    fn on_replicated_snapshot(&self) {
+        let Ok(map) = self.chain_locks.lock() else {
+            return;
+        };
+        let locks: Vec<Arc<Mutex<Option<ChainHead>>>> = map.values().map(Arc::clone).collect();
+        drop(map);
+        for lock in locks {
+            if let Ok(mut cached) = lock.try_lock() {
+                *cached = None;
+            }
+        }
+    }
+
     fn append(&self, request: &CreateAuditEvent) -> Result<AuditEvent, AuditError> {
         // Delegate to `with_pending_append`, passing a closure that enqueues only
         // the audit KV pairs (no merged caller data). This preserves the original
@@ -600,12 +726,39 @@ impl AuditEngine for EmbeddedAuditEngine {
             *c = None;
         });
 
+        // Record the chain anchor once the write is durable, so a later
+        // verification can tell an erased log from a realm that never wrote one
+        // (§4.14#4). Deferred to `on_success` so the anchor can never outlive a
+        // chain that was never persisted.
+        let anchor_storage = Arc::clone(&self.storage);
+        let anchor_realm_id = request.realm_id.clone();
+        let on_success: Box<dyn FnOnce() + Send> = Box::new(move || {
+            Self::record_chain_anchor(anchor_storage.as_ref(), &anchor_realm_id);
+        });
+
         Ok(super::AuditPendingWrite {
             event,
             handle: durable_handle,
             on_failure,
-            on_success: Box::new(|| {}),
+            on_success,
         })
+    }
+
+    fn export_chain_material(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<super::AuditChainMaterial>, AuditError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let Some(key) = self.peek_realm_hmac_key(realm_id)? else {
+            return Ok(None);
+        };
+        let anchor = self
+            .load_head(realm_id, &key)?
+            .map_or_else(|| GENESIS_HASH.to_string(), |h| h.anchor);
+        Ok(Some(super::AuditChainMaterial {
+            chain_key_b64: STANDARD.encode(key),
+            anchor,
+        }))
     }
 
     fn import_event(&self, source: &AuditEvent) -> Result<(), AuditError> {
@@ -685,6 +838,18 @@ impl AuditEngine for EmbeddedAuditEngine {
     }
 
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
+        // A reversed time window builds a reversed storage scan window, which
+        // used to abort the whole process (audit §4.9#7). Refuse it here so
+        // every caller — REST, gRPC and the admin UI — gets the same answer.
+        // Equal bounds are legal and select nothing.
+        if let (Some(start), Some(end)) = (query.start_time, query.end_time) {
+            if start > end {
+                return Err(AuditError::InvalidQuery {
+                    reason: "start_time must not be greater than end_time".to_string(),
+                });
+            }
+        }
+
         // Determine if we're scanning by actor, action, or just time range
         if let Some(ref actor) = query.actor {
             let mut events = self.query_by_actor(query, actor)?;
@@ -747,7 +912,18 @@ impl AuditEngine for EmbeddedAuditEngine {
 
         let entries = self.storage.scan(realm_id, &scan_start, &scan_end)?;
 
-        let hmac_key = self.get_realm_hmac_key(realm_id)?;
+        // Read the chain key; never mint one. A missing key means either the
+        // realm has written no audit event, or the `audit:` namespace was
+        // erased — the system-realm anchor tells the two apart (§4.14#4).
+        let Some(hmac_key) = self.peek_realm_hmac_key(realm_id)? else {
+            if entries.is_empty() && !self.chain_was_established(realm_id)? {
+                return Ok(true);
+            }
+            crate::metrics::metrics()
+                .audit_integrity_failures_total
+                .inc();
+            return Ok(false);
+        };
 
         // A tampered head (bad MAC) is itself a tamper signal.
         let head = match self.load_head(realm_id, &hmac_key) {
@@ -760,6 +936,17 @@ impl AuditEngine for EmbeddedAuditEngine {
             }
             Err(e) => return Err(e),
         };
+
+        // The head is written with the first event and updated with every one
+        // after, so a chain that exists always has one. Its absence is a
+        // deletion, not a fresh realm — and the head-absent branch below would
+        // otherwise skip the truncation check entirely and answer "valid".
+        if head.is_none() && (!entries.is_empty() || self.chain_was_established(realm_id)?) {
+            crate::metrics::metrics()
+                .audit_integrity_failures_total
+                .inc();
+            return Ok(false);
+        }
 
         let full_range = start.is_none() && end.is_none();
 
@@ -1079,6 +1266,25 @@ impl EmbeddedAuditEngine {
     }
 }
 
+/// Verifies that `events` form an intact HMAC chain from `anchor` under `key`.
+///
+/// The events must be in the order they were written — which is the order a
+/// realm export writes them. Returns the index of the first event whose stored
+/// `integrity_hash` does not match, or `None` when the whole run checks out.
+///
+/// Used by restore, which otherwise discards every source hash and re-signs the
+/// events under the destination realm's key (audit 2026-08-28 §4.14#5).
+pub fn first_broken_link(events: &[AuditEvent], key: &[u8], anchor: &str) -> Option<usize> {
+    let mut prev = anchor.to_string();
+    for (i, event) in events.iter().enumerate() {
+        if event.integrity_hash != EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event) {
+            return Some(i);
+        }
+        prev.clone_from(&event.integrity_hash);
+    }
+    None
+}
+
 /// Encodes bytes as lowercase hexadecimal.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -1138,6 +1344,110 @@ mod tests {
         );
         let realm_id = RealmId::generate();
         (engine, realm_id, clock)
+    }
+
+    // === Task 26.47: a replicated chain head drops the cached one ===========
+
+    /// Two engines over one storage engine stand in for two cluster nodes
+    /// whose state machines share a replicated key-space. It is deliberately
+    /// the weaker shape — one storage handle cannot distinguish "the row
+    /// replicated" from "there was nothing to replicate" — but the property
+    /// under test is purely about cache invalidation, and this is the shape
+    /// that isolates it.
+    fn two_engines_over_one_store() -> (
+        EmbeddedAuditEngine,
+        EmbeddedAuditEngine,
+        RealmId,
+        tempfile::TempDir,
+    ) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let a = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let b =
+            EmbeddedAuditEngine::new(storage as Arc<dyn StorageEngine>, clock as Arc<dyn Clock>);
+        (a, b, RealmId::generate(), temp_dir)
+    }
+
+    fn append_n(engine: &EmbeddedAuditEngine, realm_id: &RealmId, n: usize) {
+        for _ in 0..n {
+            engine
+                .append(&CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: "system".to_string(),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: uuid::Uuid::new_v4().to_string(),
+                    metadata: None,
+                })
+                .expect("append");
+        }
+    }
+
+    /// B-6 / task 26.47 — `chain_locks` caches each realm's signed
+    /// `ChainHead` and the append path prefers the cache, loading the
+    /// persisted head only when the cache is `None`. So once a node has
+    /// appended for a realm it never re-reads the head.
+    ///
+    /// Leadership flapping then forks the chain: node A leads and reaches
+    /// sequence N, leadership moves to B which advances the persisted head to
+    /// N+k, leadership returns to A — whose cache still says N — and A chains
+    /// its next event off a stale `prev_hash` with a sequence number that is
+    /// already taken.
+    ///
+    /// `on_replicated_row` is what the node's replicated-write observer calls
+    /// when the head row arrives from elsewhere; it drops the cache so the
+    /// next append reloads.
+    #[test]
+    fn a_replicated_chain_head_invalidates_this_node_s_cached_head() {
+        let (a, b, realm_id, _dir) = two_engines_over_one_store();
+
+        // A leads: its cache is now warm at sequence 2.
+        append_n(&a, &realm_id, 2);
+        // B leads: the persisted head advances well past what A cached.
+        append_n(&b, &realm_id, 5);
+
+        // The head row reaches A by replication.
+        a.on_replicated_row(&realm_id, &keys::chain_head_key());
+
+        // A leads again.
+        append_n(&a, &realm_id, 1);
+
+        assert!(
+            a.verify_integrity(&realm_id, None, None)
+                .expect("verify_integrity"),
+            "the chain does not verify: the event A appended after regaining leadership \
+             chained off a ChainHead five events stale, forking the HMAC chain and \
+             re-using sequence numbers that were already taken (task 26.47)"
+        );
+        assert_eq!(
+            a.count_events(&realm_id).expect("count_events"),
+            8,
+            "every appended event must survive exactly once"
+        );
+    }
+
+    /// A snapshot install replaces the whole key-space, so every cached head
+    /// must go — not just the realms whose head row happened to be observed.
+    #[test]
+    fn a_snapshot_install_drops_every_cached_chain_head() {
+        let (a, b, realm_id, _dir) = two_engines_over_one_store();
+
+        append_n(&a, &realm_id, 2);
+        append_n(&b, &realm_id, 5);
+
+        a.on_replicated_snapshot();
+        append_n(&a, &realm_id, 1);
+
+        assert!(
+            a.verify_integrity(&realm_id, None, None)
+                .expect("verify_integrity"),
+            "a cached ChainHead survived a snapshot install (task 26.47)"
+        );
     }
 
     // === Scenario: Security-critical mutations emit structured audit events ===
@@ -1737,9 +2047,117 @@ mod tests {
         assert!(!valid, "tail truncation must be detected against the head");
     }
 
+    /// §4.14#4: deleting the chain head along with the events left nothing to
+    /// contradict "this chain is fine". The head-absent branch skipped the
+    /// truncation check entirely, so an erased log verified clean.
+    #[test]
+    fn deleting_the_chain_head_with_the_events_is_detected() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let realm_id = RealmId::generate();
+
+        for i in 0..5_u32 {
+            engine
+                .append(&CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: format!("actor_{i}"),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: format!("u{i}"),
+                    metadata: None,
+                })
+                .expect("append");
+            clock.advance(1_000_000);
+        }
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+
+        // Erase the whole `audit:` namespace for this realm — events, head and
+        // chain key together, the shape a prefix-scoped wipe leaves.
+        let prefix = b"audit:".to_vec();
+        let end = keys::prefix_end(&prefix);
+        for entry in storage.scan(&realm_id, &prefix, &end).expect("scan") {
+            storage.delete(&realm_id, &entry.key).expect("delete");
+        }
+
+        let valid = engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify");
+        assert!(!valid, "a fully erased audit log must not verify clean");
+    }
+
+    /// The narrower shape: the head alone is deleted, the events are left. The
+    /// remaining events still chain from genesis, so only the missing head
+    /// gives it away.
+    #[test]
+    fn deleting_only_the_chain_head_is_detected() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let realm_id = RealmId::generate();
+
+        for i in 0..3_u32 {
+            engine
+                .append(&CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: format!("actor_{i}"),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: format!("u{i}"),
+                    metadata: None,
+                })
+                .expect("append");
+            clock.advance(1_000_000);
+        }
+
+        storage
+            .delete(&realm_id, &keys::chain_head_key())
+            .expect("delete head");
+
+        let valid = engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify");
+        assert!(!valid, "a missing chain head must not verify clean");
+    }
+
+    /// A realm that has never written an audit event has no chain, and that is
+    /// not a tamper signal — the check must not cry wolf on a fresh realm.
+    #[test]
+    fn a_realm_with_no_audit_events_verifies_clean() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+
+        let valid = engine
+            .verify_integrity(&RealmId::generate(), None, None)
+            .expect("verify");
+        assert!(
+            valid,
+            "a realm with no audit chain has nothing to contradict"
+        );
+    }
+
     /// U3 corollary: tampering with the persisted head itself (bad MAC) is a
     /// tamper signal — verification must fail rather than trusting the forged
     /// head.
+
     #[test]
     fn forged_chain_head_is_rejected() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -1877,6 +2295,166 @@ mod tests {
             .verify_integrity(&realm_id, None, None)
             .expect("verify");
         assert!(valid);
+    }
+
+    // ---------------------------------------------------------------
+    // 25.21 — the audit chain HMAC key is read with the STRICT unwrap
+    // ---------------------------------------------------------------
+
+    /// A KEK distinct from [`OTHER_KEK`], so "wrapped under a different KEK"
+    /// is expressible.
+    const ENGINE_KEK: [u8; 32] = [0x11; 32];
+    /// The KEK an attacker (or a mis-restored backup) wrapped the key under.
+    const OTHER_KEK: [u8; 32] = [0x22; 32];
+
+    /// Builds an engine over `storage` that wraps its chain key under
+    /// `ENGINE_KEK`.
+    fn kek_engine(storage: &Arc<EmbeddedStorageEngine>) -> EmbeddedAuditEngine {
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        EmbeddedAuditEngine::new(
+            Arc::clone(storage) as Arc<dyn StorageEngine>,
+            clock as Arc<dyn Clock>,
+        )
+        .with_kek(Some(ENGINE_KEK))
+    }
+
+    /// Fresh storage plus a realm id with no chain key yet.
+    fn kek_storage() -> (tempfile::TempDir, Arc<EmbeddedStorageEngine>, RealmId) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        (temp_dir, storage, RealmId::generate())
+    }
+
+    /// Plants `bytes` as the realm's stored chain key, bypassing the engine.
+    fn plant_chain_key(storage: &Arc<EmbeddedStorageEngine>, realm_id: &RealmId, bytes: &[u8]) {
+        storage
+            .put(realm_id, &keys::audit_hmac_key(), bytes)
+            .expect("plant chain key");
+    }
+
+    /// Site 1 — the append path (`get_realm_hmac_key`).
+    ///
+    /// The lenient unwrap passed any non-`HKEY` blob straight through, so a
+    /// 32-byte plaintext blob written by anyone with storage access became
+    /// *the* chain key: the attacker then knows the HMAC key, can rewrite
+    /// events and re-chain them, and `verify_integrity` reports clean.
+    #[test]
+    fn append_path_refuses_an_unenveloped_chain_key() {
+        let (_dir, storage, realm_id) = kek_storage();
+        plant_chain_key(&storage, &realm_id, &[0xAB; 32]);
+
+        let err = kek_engine(&storage)
+            .get_realm_hmac_key(&realm_id)
+            .expect_err("an unenveloped chain key must be refused under a configured KEK");
+        assert!(
+            matches!(err, AuditError::Serialization { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Site 2 — the verify path (`peek_realm_hmac_key`). Same substitution,
+    /// read through the other of the two call sites.
+    #[test]
+    fn verify_path_refuses_an_unenveloped_chain_key() {
+        let (_dir, storage, realm_id) = kek_storage();
+        plant_chain_key(&storage, &realm_id, &[0xAB; 32]);
+
+        let err = kek_engine(&storage)
+            .peek_realm_hmac_key(&realm_id)
+            .expect_err("an unenveloped chain key must be refused under a configured KEK");
+        assert!(
+            matches!(err, AuditError::Serialization { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// A chain key wrapped under a *different* KEK is refused at both sites.
+    /// Pairs with the two tests above: together they cover both ways the
+    /// stored bytes can fail to belong to this deployment's KEK.
+    #[test]
+    fn both_paths_refuse_a_chain_key_wrapped_under_another_kek() {
+        let (_dir, storage, realm_id) = kek_storage();
+        let foreign = crate::identity::key_encryption::wrap_key(&[0xCD; 32], Some(&OTHER_KEK))
+            .expect("wrap under the other KEK");
+        plant_chain_key(&storage, &realm_id, &foreign);
+
+        let engine = kek_engine(&storage);
+        engine
+            .get_realm_hmac_key(&realm_id)
+            .expect_err("append path must refuse a foreign-KEK chain key");
+        engine
+            .peek_realm_hmac_key(&realm_id)
+            .expect_err("verify path must refuse a foreign-KEK chain key");
+    }
+
+    /// The refusal is reachable through the public surface, not only through
+    /// the private key loaders: `append` and `verify_integrity` both fail
+    /// rather than silently adopting the substituted key.
+    #[test]
+    fn public_audit_surface_refuses_a_substituted_chain_key() {
+        let (_dir, storage, realm_id) = kek_storage();
+        plant_chain_key(&storage, &realm_id, &[0xAB; 32]);
+        let engine = kek_engine(&storage);
+
+        engine
+            .append(&CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: "a".to_string(),
+                action: AuditAction::RealmCreated,
+                resource_type: "realm".to_string(),
+                resource_id: "t1".to_string(),
+                metadata: None,
+            })
+            .expect_err("append must refuse a substituted chain key");
+        engine
+            .verify_integrity(&realm_id, None, None)
+            .expect_err("verify_integrity must refuse a substituted chain key");
+    }
+
+    /// The companion positive case. A key this engine wrapped itself round
+    /// trips through both sites, so the strict rule cannot be satisfied by
+    /// refusing everything — and a deployment with no KEK at all is
+    /// unaffected.
+    #[test]
+    fn a_properly_enveloped_chain_key_still_loads() {
+        let (_dir, storage, realm_id) = kek_storage();
+        let engine = kek_engine(&storage);
+
+        let minted = engine.get_realm_hmac_key(&realm_id).expect("mint");
+        let stored = storage
+            .get(&realm_id, &keys::audit_hmac_key())
+            .expect("get")
+            .expect("chain key persisted");
+        assert!(
+            crate::identity::key_encryption::is_enveloped(&stored),
+            "a KEK-configured engine must persist the chain key enveloped"
+        );
+
+        // A second engine over the same store reads it back through both
+        // sites without the benefit of the first engine's cache.
+        let fresh = kek_engine(&storage);
+        assert_eq!(fresh.get_realm_hmac_key(&realm_id).expect("reload"), minted);
+        assert_eq!(
+            kek_engine(&storage)
+                .peek_realm_hmac_key(&realm_id)
+                .expect("peek")
+                .expect("chain key present"),
+            minted
+        );
+
+        // No KEK configured: plaintext key material is still legitimate.
+        let (_dir2, storage2, realm2) = kek_storage();
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let plain = EmbeddedAuditEngine::new(
+            Arc::clone(&storage2) as Arc<dyn StorageEngine>,
+            clock as Arc<dyn Clock>,
+        );
+        plant_chain_key(&storage2, &realm2, &[0xAB; 32]);
+        assert_eq!(
+            plain.get_realm_hmac_key(&realm2).expect("no-KEK load"),
+            [0xAB; 32]
+        );
     }
 }
 

@@ -154,7 +154,7 @@ make seed ARGS="--users-per-realm 500 --sessions-frac 0.5 --revoked-frac 0.1"
 | `--realms` | `HEARTH_LOADTEST_REALMS` | `5` | Realms to seed (see constraint below) |
 | `--users-per-realm` | `HEARTH_LOADTEST_USERS_PER_REALM` | `200` | User records per realm |
 | `--sessions-frac` | `HEARTH_LOADTEST_SESSIONS_FRAC` | `0.5` | Fraction of users given a live token |
-| `--revoked-frac` | `HEARTH_LOADTEST_REVOKED_FRAC` | `0.1` | Fraction of live tokens pre-revoked |
+| `--revoked-frac` | `HEARTH_LOADTEST_REVOKED_FRAC` | `0.1` | Fraction of minted tokens pre-revoked, via a real `POST /revoke` per token. The count is derived from the *session* count, so it is capped at `minted - 1`: at least one token always stays live or the run would fail with `NoLiveTokens`. Before the 2026-09-21 audit this flag revoked nothing at all — the seed step never called the revoke client and wrote `revoked: false` for every token, so `dataset_shape`'s `revoked/realm=N` described a corpus property that did not exist. The seed summary now prints the count actually achieved. |
 | `--seed` | `HEARTH_LOADTEST_SEED` | `1` | Determinism seed (reproducible corpus) |
 | `--seed-out` | `HEARTH_LOADTEST_SEED_OUT` | `loadtest/reports/seed-handle.json` | Seed-handle output path |
 | `--admin-token` | `HEARTH_LOADTEST_ADMIN_TOKEN` | _(none)_ | Admin bearer token to attach to an **already-bootstrapped** instance (see below) |
@@ -273,6 +273,16 @@ per-tier percentiles stay flat as the corpus grows.
 > resident accounts (HEA-1804) — which is why the default hot set is `10000` (keep
 > it comfortably above `--users`). `hot_p50_ms`/`cold_p50_ms` and the p95 pair keep
 > the correct ordering and are the fields to compare across the sweep.
+
+> **A probe that finds no user is now a failed request** (audit 2026-09-21).
+> `GET /dev/probe-user` answers `200` whether or not the user exists, so a
+> status-only check let a sweep publish a full hot/cold split measured entirely
+> over not-found lookups — against a realm whose bulk corpus was never seeded,
+> or with `--tier-miss-corpus-size` set higher than what is actually resident.
+> Misses now count against the 5% error budget and, past it, fail the run. If a
+> sweep starts reporting `lookup_cold: no user for user0123456@…`, the corpus is
+> smaller than you told the harness it was; fix the size, do not read the
+> percentiles.
 
 ### 1. Boot a below-working-set instance
 
@@ -404,7 +414,7 @@ incompatible schemas):
 | `summary.achieved_users` | Peak concurrent Goose users the run actually reached. |
 | `summary.achieved_rps` | Achieved aggregate requests/sec (all journeys, total ÷ duration). |
 | `summary.{total_requests,total_failures,failure_rate}` | Aggregate volume + failure fraction. |
-| `summary.ceiling` | **Ceiling attribution** (HEA-1796): `server` (a budget p99 breached — the server is the limiter), `load_generator_or_headroom` (no breach, negligible failures — the server kept up, so raise `--users`), or `generator_saturated` (elevated failures with no latency breach — the load generator/host ran out of ports/fds; tune it and re-run). |
+| `summary.ceiling` | **Ceiling attribution** (HEA-1796): `generator_saturated` (failure rate above 2% — the percentiles are made of timeouts, so no latency attribution is admissible; the load generator/host ran out of ports/fds, tune it and re-run), `server` (failures under control *and* a budget p99 breached — the server is the limiter), or `load_generator_or_headroom` (no breach, negligible failures — the server kept up, so raise `--users`). **The failure test comes first** (audit 2026-09-21): a run in which most requests failed can never be attributed to server latency. |
 | `summary.ceiling_reason` | Human-readable rationale for the `ceiling` verdict. |
 | `journeys[]` | Per-journey rows (sorted by name for diff-stable output). |
 | `journeys[].{p50,p95,p99,p999}_ms` | Response-time percentiles (whole ms — Goose's granularity). |
@@ -468,6 +478,27 @@ HEA-1787 plan §6/§9.
 
 A pass also requires the journey's failure rate to stay at or below
 `MAX_FAILURE_RATE` (5%) — a 1 ms journey that 100%-errors must not read green.
+That gate applies to **every** journey, including the compound revoke
+sub-requests (`revoke_mint` / `revoke` / `revoke_revalidate`), which have no
+atomic latency budget. Before the 2026-09-21 audit their `pass: null` was read
+as "pass", so a run in which every single `revoke_revalidate` came back
+`active: true` — revocation silently not taking effect — still reported
+`"pass": true`.
+
+### Exit code
+
+`make loadtest` / `hearth-loadtest run` exits **non-zero when a journey exceeds
+the 5% error budget**, and zero otherwise. Before the 2026-09-21 audit it
+returned `ExitCode::SUCCESS` unconditionally: it computed `pass`, printed it,
+wrote it to `report.json` — and then threw it away, so
+`.github/workflows/loadtest-smoke.yml` could only ever prove that the binary did
+not crash.
+
+A **latency** breach deliberately does *not* fail the process. Per the paragraph
+below, the sub-ms budgets are expected to read `pass:false` on an ordinary dev
+box, so gating the exit code on them would make the command fail everywhere and
+mean nothing. Read `report.json`'s `pass` for the latency verdict; read the exit
+code for "were these numbers measured against a working server at all".
 
 **Expect `pass:false` for the sub-ms journeys on a normal dev machine.** Goose
 records response times in whole milliseconds, so the smallest non-zero p99 it
@@ -548,12 +579,22 @@ make loadtest MODE=ramp EXTRA_RUN_ARGS="--ramp-start-users 500 --ramp-step-users
 **Read `summary.ceiling` first.** It tells you honestly whether the number you
 got is the *server's* ceiling or the *load generator's*:
 
-- `server` — a budgeted journey's p99 breached; the server is the limiter. In
-  `ramp` mode `knee_rps` is the RPS at that step.
+- `generator_saturated` — the failure rate is above 2%. **Checked first**: once a
+  meaningful share of requests is timing out client-side, every percentile is
+  computed from timeouts and no latency attribution is admissible. Tune the host
+  (below) and re-run before trusting any number in the report.
+- `server` — failures under control *and* a budgeted journey's p99 breached; the
+  server is the limiter. In `ramp` mode `knee_rps` is the RPS at that step.
 - `load_generator_or_headroom` — no breach, failures negligible: the server kept
   up. You have **not** found the server ceiling — raise `USERS`.
-- `generator_saturated` — elevated failures with no latency breach: the generator
-  ran out of resources. Tune the host (below) and re-run before trusting numbers.
+
+> The archived reports under `reports/hea1812/` and `reports/hea1871/` predate
+> that ordering: `steady-600u.json` through `steady-5000u.json` carry
+> `"failure_rate": 1.0` **and** `"ceiling": "server"`, which the same README's
+> ["Failure onset"](#failure-onset-bisected-hea-1813--it-is-a-test-harness-ceiling-not-a-hearth-ceiling)
+> section correctly explains was a *generator* collapse (server CPU fell to
+> 5.8%). Re-running those sweeps today produces `generator_saturated`. Do not
+> read `ceiling` out of those archived files.
 
 ### Load-generator tuning (so the generator isn't the bottleneck)
 

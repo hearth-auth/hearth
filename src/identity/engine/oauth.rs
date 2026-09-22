@@ -5,7 +5,6 @@
 //! `impl IdentityEngine for EmbeddedIdentityEngine`.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -37,156 +36,78 @@ use super::validate_claim_payload;
 use super::EmbeddedIdentityEngine;
 use super::CLOCK_SKEW_SECS;
 
-/// JSON envelope used to persist an RSA keypair in storage.
-///
-/// Not logged or displayed; fields carry sensitive key material.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredRsaKey {
-    pkcs8: Vec<u8>,
-    cert: Vec<u8>,
-}
-
 impl EmbeddedIdentityEngine {
-    // ===== OIDC signing-key helpers (moved from mod.rs) =====
+    // ===== Legacy OIDC RSA key material =====
 
-    /// Returns the server-wide OIDC RSA signing key, loading from or
-    /// persisting to storage on first call so the `kid` survives restarts
-    /// (HEA-1655). Subsequent calls return the cached value from the OnceLock.
-    fn oidc_rsa_signing_key(
-        &self,
-    ) -> Result<Arc<crate::identity::tokens::RsaSigningKey>, IdentityError> {
-        if let Some(existing) = self.oidc_rsa_key.get() {
-            return Ok(Arc::clone(existing));
-        }
-        let key = Arc::new(self.load_or_persist_oidc_rsa_key()?);
-        // Race: if another thread initialized in parallel, prefer the
-        // already-stored value so all callers observe the same `kid`.
-        let _ = self.oidc_rsa_key.set(Arc::clone(&key));
-        Ok(Arc::clone(
-            self.oidc_rsa_key
-                .get()
-                .expect("oidc_rsa_key set above or by racing thread"),
-        ))
-    }
-
-    /// Loads the OIDC RSA keypair from storage, or generates a new one and
-    /// persists it (WAL-synced) on first startup.
+    /// Deletes every `sys:oidc:rsa:*` row left by an older build.
     ///
-    /// Stored under the system realm as `sys:oidc:rsa:key`.
-    fn load_or_persist_oidc_rsa_key(
-        &self,
-    ) -> Result<crate::identity::tokens::RsaSigningKey, IdentityError> {
+    /// That family held a server-wide RSA-2048 keypair serialised as plain
+    /// JSON — PKCS#8 **private** key included, with no HKEY envelope, while
+    /// every other key family was wrapped (audit 2026-08-28 §4.15#4). Its only
+    /// consumer was the `RS256` entry in the global JWKS, and Hearth never
+    /// signed anything with it, so the JWKS now publishes Ed25519 only
+    /// (§4.2#4, §4.15#5).
+    ///
+    /// Wrapping a key nothing uses would keep an unnecessary private key at
+    /// rest; the row is removed instead. Called once per process from the
+    /// constructor. Best-effort: a storage failure here is logged, never
+    /// fatal, and the sweep retries on the next start.
+    pub(super) fn purge_legacy_oidc_rsa_keys(&self) {
         let sys = keys::system_realm_id();
-        let storage_key = keys::encode_oidc_rsa_key();
-
-        if let Some(bytes) = self
-            .storage
-            .get(&sys, &storage_key)
-            .map_err(Self::storage_err)?
-        {
-            let stored: StoredRsaKey =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            return crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
-                &stored.pkcs8,
-                &stored.cert,
+        let prefix = keys::legacy_oidc_rsa_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = match self.storage.scan(&sys, &prefix, &end) {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not scan for legacy OIDC RSA key rows");
+                return;
+            }
+        };
+        let mut removed = 0_usize;
+        for entry in entries {
+            match self.storage.delete(&sys, &entry.key) {
+                Ok(()) => removed += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, "could not delete a legacy OIDC RSA key row");
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                "removed unencrypted legacy OIDC RSA key rows; the JWKS publishes Ed25519 only"
             );
         }
-
-        // First startup: generate, WAL-persist, then return.
-        let key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)?;
-        let body = serde_json::to_vec(&StoredRsaKey {
-            pkcs8: key.pkcs8_bytes().to_vec(),
-            cert: key.cert_der().to_vec(),
-        })
-        .map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(&sys, &storage_key, &body)
-            .map_err(Self::storage_err)?;
-
-        Ok(key)
-    }
-
-    pub(super) fn oidc_rsa_jwk(&self) -> Result<crate::identity::tokens::Jwk, IdentityError> {
-        self.oidc_rsa_signing_key()?.to_jwk()
-    }
-
-    /// Collects retiring OIDC RSA keys whose grace-window has not yet expired
-    /// and returns their JWKs for inclusion in `/certs`.
-    ///
-    /// Retiring keys are written by a key-rotation call and scanned via the
-    /// `sys:oidc:rsa:retiring:` prefix range under the system realm.
-    pub(super) fn oidc_rsa_retiring_jwks(&self) -> Vec<crate::identity::tokens::Jwk> {
-        let sys = keys::system_realm_id();
-        let prefix = keys::oidc_rsa_retiring_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
-
-        let Ok(entries) = self.storage.scan(&sys, &prefix, &end) else {
-            return vec![];
-        };
-
-        let kek = self
-            .config
-            .key_encryption_key
-            .as_ref()
-            .map(|k| k.as_bytes());
-        let mut out = Vec::new();
-        for entry in entries {
-            let Some(deadline) = keys::parse_oidc_rsa_retiring_deadline(&entry.key) else {
-                continue;
-            };
-            if deadline <= now_secs {
-                continue; // Grace period expired — omit.
-            }
-            let Ok(json_bytes) = crate::identity::key_encryption::unwrap_key(&entry.value, kek)
-            else {
-                continue;
-            };
-            let Ok(stored) = serde_json::from_slice::<StoredRsaKey>(&json_bytes) else {
-                continue;
-            };
-            let Ok(key) = crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
-                &stored.pkcs8,
-                &stored.cert,
-            ) else {
-                continue;
-            };
-            if let Ok(jwk) = key.to_jwk() {
-                out.push(jwk);
-            }
-        }
-        out
-    }
-
-    /// Returns the server-wide ECDSA P-256 signing key used to publish the
-    /// ES256 entry in the `/certs` JWKS.
-    fn oidc_ecdsa_signing_key(
-        &self,
-    ) -> Result<Arc<crate::identity::tokens::EcdsaSigningKey>, IdentityError> {
-        if let Some(existing) = self.oidc_ecdsa_key.get() {
-            return Ok(Arc::clone(existing));
-        }
-        let generated = Arc::new(crate::identity::tokens::EcdsaSigningKey::generate()?);
-        let _ = self.oidc_ecdsa_key.set(Arc::clone(&generated));
-        Ok(Arc::clone(
-            self.oidc_ecdsa_key
-                .get()
-                .expect("oidc_ecdsa_key set above or by racing thread"),
-        ))
-    }
-
-    pub(super) fn oidc_ecdsa_jwk(&self) -> Result<crate::identity::tokens::Jwk, IdentityError> {
-        Ok(self.oidc_ecdsa_signing_key()?.to_jwk())
     }
 }
 
 #[allow(clippy::too_many_lines)]
 impl EmbeddedIdentityEngine {
     // ===== OAuth / OIDC trait method implementations =====
+
+    /// Narrows a caller-supplied org context to `None` unless the
+    /// organisation exists and is `Active`.
+    ///
+    /// Suspension is a kill switch, not a label: a frozen organisation must
+    /// stop granting its org-scoped assignments and extra roles through the
+    /// live-RBAC paths (`/introspect`, `POST /oauth/authorize`), exactly as
+    /// it stops minting org-context tokens. Realm-scoped authority is
+    /// untouched — the control kills the organisation, not the member's
+    /// account. Fails closed on an unknown org or a storage error
+    /// (subsystem audit 2026-09-21, finding O-2).
+    pub(crate) fn active_org_context(
+        &self,
+        realm_id: &RealmId,
+        org_id: Option<crate::core::OrganizationId>,
+    ) -> Option<crate::core::OrganizationId> {
+        let org_id = org_id?;
+        match self.get_organization(realm_id, &org_id) {
+            Ok(Some(org)) if org.status() == crate::identity::OrganizationStatus::Active => {
+                Some(org_id)
+            }
+            _ => None,
+        }
+    }
 
     // ===== OIDC / OAuth 2.0 =====
 
@@ -459,31 +380,6 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::RealmSuspended);
         }
 
-        // 2b. Nonce replay protection (OIDC Core §3.1.2.1 — unconditional)
-        //
-        // O3 (HEA-1757): the replay set is keyed by `{realm}:{client}:{nonce}` so
-        // detection is scoped to a single client within a single realm. A raw
-        // (global) key would let one client's nonce usage collide with — and
-        // spuriously reject — an identical nonce chosen independently by a client
-        // in another realm, which is a cross-tenant availability leak.
-        if let Some(ref nonce) = request.nonce {
-            let now = self.clock.now();
-            let ttl_micros = self.config.oidc.authorization_code_ttl_secs * 1_000_000;
-            let scoped_key = format!(
-                "{}:{}:{nonce}",
-                realm_id.as_uuid(),
-                request.client_id.as_uuid()
-            );
-            let mut nonces = self.used_nonces.lock().expect("nonce lock");
-            // Sweep nonces older than the auth-code TTL to bound memory.
-            nonces.retain(|_, inserted_at| now.as_micros() - inserted_at.as_micros() < ttl_micros);
-            if nonces.insert(scoped_key, now).is_some() {
-                return Err(IdentityError::InvalidGrant {
-                    reason: "nonce has already been used".to_string(),
-                });
-            }
-        }
-
         // 3. Load and validate client
         let client_key = keys::encode_oauth_client(&request.client_id);
         let client_bytes = self
@@ -561,6 +457,74 @@ impl EmbeddedIdentityEngine {
         // 4. Validate redirect_uri matches a registered URI
         if !client.redirect_uris().contains(&request.redirect_uri) {
             return Err(IdentityError::InvalidRedirectUri);
+        }
+
+        // 4a. Nonce replay protection (OIDC Core §3.1.2.1 — unconditional)
+        //
+        // O3 (HEA-1757): detection is scoped to a single client within a single
+        // realm. A global key would let one client's nonce usage collide with —
+        // and spuriously reject — an identical nonce chosen independently by a
+        // client in another realm, which is a cross-tenant availability leak.
+        //
+        // 22.21 (audit 2026-08-28 §4.22#14) — this used to be a process-local
+        // `Mutex<HashMap>`, which was wrong twice over:
+        //
+        //  * **It did not replicate.** A nonce burned on one node was unknown
+        //    to every other node and to the same node after a restart, so the
+        //    replay guard was defeated by simply retrying against a different
+        //    node. The sentinel now goes through `self.storage`, which `serve`
+        //    always wraps in a `ClusterStorageAdapter`, so the write is a Raft
+        //    command and every node sees it.
+        //  * **It swept the entire set on every `/authorize`.** A `retain` over
+        //    the whole map, holding one global `std::sync::Mutex`, ran on every
+        //    authorization request in the process — O(n) work and a hard
+        //    serialisation point on a request path. Reclamation is now the
+        //    periodic cleanup sweep's job (`sweep_oidc_nonces`), exactly like
+        //    the JAR/DPoP JTI and SAML assertion sentinels.
+        //
+        // `put_if_absent` is atomic through the cluster adapter, so the
+        // check-and-burn has no TOCTOU window between nodes either.
+        //
+        // Placed *after* the client and redirect_uri checks rather than
+        // before them (where the in-memory version sat): the sentinel is now
+        // a durable, fsynced write, so burning one for a request that is
+        // about to be rejected for an unknown client or an unregistered
+        // redirect_uri would turn a doomed request into storage traffic. A
+        // replayed nonce on an otherwise-invalid request now reports the
+        // invalid request, which is also one oracle fewer.
+        if let Some(ref nonce) = request.nonce {
+            let now = self.clock.now();
+            let expires_at_secs =
+                now.as_micros() / 1_000_000 + self.config.oidc.authorization_code_ttl_secs;
+            let key = keys::encode_oidc_nonce(&request.client_id, nonce);
+            let fresh = self
+                .storage
+                .put_if_absent(realm_id, &key, &expires_at_secs.to_le_bytes())
+                .map_err(Self::storage_err)?;
+            if !fresh {
+                // Lazy expiry on the read path. Reclamation is the periodic
+                // sweep's job, but a sentinel must not outlive the
+                // authorization code it guards: between the code expiring and
+                // the next sweep tick, the nonce would still be refused even
+                // though replaying it can no longer buy the attacker anything.
+                // The JAR and DPoP JTI sentinels expire lazily for the same
+                // reason. A malformed or unreadable value fails CLOSED.
+                let stored_expiry = self
+                    .storage
+                    .get(realm_id, &key)
+                    .map_err(Self::storage_err)?
+                    .and_then(|v| v.as_slice().try_into().ok().map(i64::from_le_bytes));
+                let expired = stored_expiry
+                    .is_some_and(|expires_at| now.as_micros() / 1_000_000 >= expires_at);
+                if !expired {
+                    return Err(IdentityError::InvalidGrant {
+                        reason: "nonce has already been used".to_string(),
+                    });
+                }
+                self.storage
+                    .put(realm_id, &key, &expires_at_secs.to_le_bytes())
+                    .map_err(Self::storage_err)?;
+            }
         }
 
         self.validate_client_scope_request(&client, &request.scope)?;
@@ -715,6 +679,8 @@ impl EmbeddedIdentityEngine {
                 issuer,
                 jarm_jwt,
                 response_mode,
+                // 22.3: the JAR-effective, registration-validated URI.
+                request.redirect_uri.clone(),
             ));
         }
 
@@ -722,6 +688,9 @@ impl EmbeddedIdentityEngine {
             raw_code,
             request.state.clone(),
             issuer,
+            // 22.3: the JAR-effective, registration-validated URI — never the
+            // caller's outer `redirect_uri`, which a JAR may have overridden.
+            request.redirect_uri.clone(),
         ))
     }
 
@@ -956,9 +925,18 @@ impl EmbeddedIdentityEngine {
 
         // 9. (Code already consumed atomically in step 3 — no further write needed.)
 
-        // 10. Create a session for the user (OAuth code exchange — no browser context)
-        let session =
-            self.create_session(realm_id, &stored_code.user_id, &SessionContext::default())?;
+        // 10. Create a session for the user (OAuth code exchange — no browser context).
+        //     The MFA proof is inherited: an authorization code is only minted by
+        //     `/authorize`, which requires a live UI session, and that session
+        //     passed the same `mfa_required` gate at login.
+        let session = self.create_session(
+            realm_id,
+            &stored_code.user_id,
+            &SessionContext {
+                mfa_proof: crate::identity::MfaProof::Inherited,
+                ..Default::default()
+            },
+        )?;
 
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
@@ -1216,6 +1194,24 @@ impl EmbeddedIdentityEngine {
             });
         }
 
+        // 3a-bis. Realm-wide `mfa_required` (audit 2026-08-28 §4.18#3).
+        //    ROPC proves the password and nothing else, so it can never satisfy
+        //    a second-factor policy on its own. Send the caller to the step-up
+        //    MFA grant when a factor exists, and to enrolment when none does.
+        //    Without this the request would reach `create_session` and fail with
+        //    a bare `MfaRequired`, which tells the client nothing about what to
+        //    do next.
+        if self
+            .get_realm(realm_id)?
+            .is_some_and(|r| r.config().mfa_required.unwrap_or(false))
+        {
+            return if self.has_second_factor(realm_id, user.id())? {
+                Err(IdentityError::StepUpChallengeRequired)
+            } else {
+                Err(IdentityError::EnrollMfaRequired)
+            };
+        }
+
         // 3b. Adaptive step-up MFA check (HEA-836).
         //    Only runs when the request carries IP/UA context (ROPC via HTTP).
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
@@ -1259,7 +1255,9 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 4. Create session and issue token pair
+        // 4. Create session and issue token pair. Step 3a-bis has already
+        //    refused this path on an `mfa_required` realm, so the default
+        //    (unproven) context is correct here.
         let session = self.create_session(
             realm_id,
             user.id(),
@@ -1323,11 +1321,15 @@ impl EmbeddedIdentityEngine {
             return Err(e);
         }
 
-        // 4. Create session and issue token pair.
+        // 4. Create session and issue token pair. Step 3 verified a TOTP or a
+        //    recovery code, so this ceremony proved a second factor.
         let session = self.create_session(
             realm_id,
             user.id(),
-            &crate::identity::SessionContext::default(),
+            &crate::identity::SessionContext {
+                mfa_proof: crate::identity::MfaProof::Proved,
+                ..Default::default()
+            },
         )?;
         let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
 
@@ -1410,11 +1412,15 @@ impl EmbeddedIdentityEngine {
                 .client_secret
                 .as_deref()
                 .ok_or(IdentityError::InvalidClientSecret)?;
-            let secret_hash = client
-                .client_secret_hash()
-                .ok_or(IdentityError::InvalidClientSecret)?;
-            let valid = credentials::verify_raw_secret(secret.as_bytes(), secret_hash)?;
-            if !valid {
+            // 22.25 (audit 2026-08-28 §4.25#3): a presented secret costs one
+            // Argon2id verification whatever the client turns out to be. A
+            // client with no stored hash used to return before hashing, so the
+            // response time told the caller the client's type.
+            if !self.verify_presented_client_secret(
+                realm_id,
+                client.client_secret_hash(),
+                secret,
+            )? {
                 return Err(IdentityError::InvalidClientSecret);
             }
         }
@@ -2159,7 +2165,13 @@ impl EmbeddedIdentityEngine {
         Ok(crate::identity::oidc::DeviceAuthorizationResponse {
             device_code,
             user_code,
-            verification_uri: format!("{}/device", self.config.oidc.issuer),
+            // The end-user verification page is `handlers::device_approve_form`,
+            // registered on the web router, which `router_with` mounts under the
+            // `/ui` nest. Advertising `{issuer}/device` therefore handed every
+            // RFC 8628 client a URL that answers 404 — the user-facing half of
+            // the device grant was unreachable at the URI the server itself
+            // printed (audit re-run 23.7).
+            verification_uri: format!("{}/ui/device", self.config.oidc.issuer),
             expires_in,
             interval,
         })
@@ -2240,9 +2252,28 @@ impl EmbeddedIdentityEngine {
     ) -> Result<OidcTokenResponse, IdentityError> {
         use crate::identity::oidc::DeviceCodeStatus;
 
-        // 1. Look up device code by hash
+        // 1. Look up device code by hash, under the same per-code advisory lock
+        //    the authorization-code exchange uses (task 26.44).
+        //
+        // Device-code redemption was the one single-use path with no lock at
+        // all. `exchange_authorization_code` takes `code_exchange_lock` and
+        // deletes as its FIRST write, so a second concurrent caller finds the
+        // key gone; refresh-token redemption takes `token_redemption_lock`.
+        // This path read the code, checked its status, created a session,
+        // issued a token pair, and only then deleted — so two concurrent polls
+        // of an approved code could both pass the status check and both be
+        // served, each with its own session.
+        //
+        // The lock is held across the read, the poll-rate update and, on the
+        // approved arm, the delete. Everything expensive — session creation and
+        // token issuance — happens after it is released.
+        //
+        // INVARIANT: outer map guard is released inside `code_exchange_lock()`;
+        // the inner per-code guard is held only across this sync block (no .await).
         let dc_hash = Self::sha256_hex(device_code.as_bytes());
         let dc_key = keys::encode_device_code(&dc_hash);
+        let lock = self.code_exchange_lock(&dc_hash);
+        let poll_guard = lock.lock().expect("code_exchange_lock poisoned");
         let dc_bytes = self
             .storage
             .get(realm_id, &dc_key)
@@ -2289,8 +2320,44 @@ impl EmbeddedIdentityEngine {
             DeviceCodeStatus::Denied => Err(IdentityError::DeviceCodeDenied),
             DeviceCodeStatus::Expired => Err(IdentityError::DeviceCodeExpired),
             DeviceCodeStatus::Approved { user_id } => {
-                // Issue tokens like exchange_authorization_code (device flow — no browser context)
-                let session = self.create_session(realm_id, user_id, &SessionContext::default())?;
+                // Consume as the FIRST write, exactly as the authorization-code
+                // exchange does, and still under the lock — a second concurrent
+                // poll then finds nothing (task 26.44).
+                //
+                // The delete is PROPAGATED, not discarded. It used to be
+                // `let _ = self.storage.delete(..)` after the tokens had
+                // already been minted, so a failed delete returned a live token
+                // pair over a device code that stayed redeemable: the caller
+                // was told the flow completed, and the code could be redeemed
+                // again, and again.
+                self.storage
+                    .delete(realm_id, &dc_key)
+                    .map_err(Self::storage_err)?;
+                let uc_key = keys::encode_user_code(&stored.user_code);
+                // The user-code index is a secondary pointer to the device code
+                // that has just gone. A stale entry resolves to nothing, so it
+                // cannot grant anything; log rather than fail a completed
+                // authorization over it.
+                if let Err(e) = self.storage.delete(realm_id, &uc_key) {
+                    tracing::warn!(
+                        error = %e,
+                        "device code consumed but its user-code index entry was not removed"
+                    );
+                }
+                drop(poll_guard);
+
+                // Issue tokens like exchange_authorization_code (device flow — no browser context).
+                // The MFA proof is inherited: the device code reached `Approved`
+                // only because a browser user approved it from a live session,
+                // and that session passed the same `mfa_required` gate at login.
+                let session = self.create_session(
+                    realm_id,
+                    user_id,
+                    &SessionContext {
+                        mfa_proof: crate::identity::MfaProof::Inherited,
+                        ..Default::default()
+                    },
+                )?;
                 let token_pair = self.issue_tokens(realm_id, user_id, session.id())?;
 
                 // Issue ID token
@@ -2329,11 +2396,6 @@ impl EmbeddedIdentityEngine {
                         reason: format!("failed to issue ID token: {e}"),
                     }
                 })?;
-
-                // Clean up device code and user code
-                let _ = self.storage.delete(realm_id, &dc_key);
-                let uc_key = keys::encode_user_code(&stored.user_code);
-                let _ = self.storage.delete(realm_id, &uc_key);
 
                 Ok(OidcTokenResponse::new(
                     token_pair.access_token().to_string(),
@@ -2484,7 +2546,9 @@ impl EmbeddedIdentityEngine {
         let now = self.clock.now();
         let ttl_secs: i64 = 90;
         let expires_at = now.add_micros(ttl_secs * 1_000_000);
-        let request_uri_id = uuid::Uuid::new_v4().to_string();
+        // 22.27 (audit 2026-08-28 §4.25#5): RFC 9126 §7.1 makes 128 bits the
+        // normative floor for a `request_uri`. A UUID v4 carries only 122.
+        let request_uri_id = crate::core::random_secret_hex();
 
         let stored = StoredPushedAuthorizationRequest {
             request_uri_id: request_uri_id.clone(),
@@ -2561,6 +2625,25 @@ impl EmbeddedIdentityEngine {
         Ok(stored)
     }
 
+    /// Builds a non-reversible audit reference for a revoked token.
+    ///
+    /// The audit log is durable, CSV-exportable from the admin console, and
+    /// readable by every realm admin, so it MUST NOT carry credential
+    /// material (audit 2026-08-28 §4.16#9). Prefers the token's own `jti` —
+    /// a public identifier that is already recorded in the JTI blocklist —
+    /// and otherwise falls back to a truncated SHA-256 digest of the token,
+    /// which correlates repeated revocations of the same token without being
+    /// reversible. The raw token is never returned.
+    fn audit_token_reference(claims: &TokenClaims, token: &str) -> String {
+        if let Some(jti) = claims.jti.as_deref().filter(|j| !j.is_empty()) {
+            return format!("jti:{jti}");
+        }
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(token.as_bytes()));
+        // A hex SHA-256 is always 64 chars; `get` keeps this panic-free.
+        format!("sha256:{}", digest.get(..16).unwrap_or(digest.as_str()))
+    }
+
     pub(super) fn revoke_token_inner(
         &self,
         realm_id: &RealmId,
@@ -2581,26 +2664,61 @@ impl EmbeddedIdentityEngine {
         match claims.token_type.as_str() {
             "access" | "id_token" => {
                 if claims.sid != "none" {
-                    // Session-bound token: revoke via session
+                    // Session-bound token: revoke via session.
+                    //
+                    // The outcome is PROPAGATED, not discarded. RFC 7009 §2.2
+                    // lets a client read `200 OK` as "the token is now
+                    // invalid", so answering 200 after a failed revoke tells
+                    // the client a live credential is dead — the same
+                    // "reports success it never achieved" class as the failed
+                    // session write in `update_user` (audit §4.16#10) and the
+                    // reset mails that were minted and dropped (§4.24#10).
+                    // An ALREADY-absent session is not a failure: RFC 7009
+                    // requires 200 for a token that is already invalid.
                     let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
                     if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
                         let session_id = SessionId::new(uuid);
-                        let _ = self.revoke_session(realm_id, &session_id);
+                        match self.revoke_session(realm_id, &session_id) {
+                            Ok(()) | Err(IdentityError::SessionNotFound) => {}
+                            Err(e) => return Err(e),
+                        }
                     }
                 } else if let Some(ref jti) = claims.jti {
                     // Sessionless token (e.g., client_credentials): revoke via JTI blocklist.
                     // Store the token's exp so the hot-path projection can self-evict expired entries.
+                    // Propagated for the same reason as the session arm above:
+                    // the cache insert below would otherwise mask a failed
+                    // durable write, so the blocklist entry would vanish on
+                    // restart while the client believed the token was dead.
                     let jti_key = keys::encode_revoked_jti(jti);
-                    let _ = self
-                        .storage
-                        .put(realm_id, &jti_key, &claims.exp.to_le_bytes());
+                    self.storage
+                        .put(realm_id, &jti_key, &claims.exp.to_le_bytes())
+                        .map_err(Self::storage_err)?;
                     self.insert_revoked_jti_cache(realm_id, jti, claims.exp);
                 }
             }
             "refresh" => {
-                // Revoke via grant family
+                // Revoke via grant family.
+                //
+                // The load → set revoked → write sequence must hold the same
+                // per-family advisory lock `rotate_grant_family` holds, or it
+                // is a lost update: a rotation that has already read the family
+                // and is working through RBAC resolution and the pre-token
+                // webhook writes it back un-revoked afterwards. RFC 7009 §2.2
+                // lets the client read the resulting `200 OK` as "the token is
+                // now invalid" while the grant is still live
+                // (audit 2026-08-28 §4.16#7).
+                //
+                // The guard is scoped to this block: `revoke_session` below
+                // re-takes the same lock for its own cascade, and
+                // `std::sync::Mutex` is not reentrant.
                 if let Some(ref fid) = claims.fid {
                     let family_key = keys::encode_grant_family(fid);
+                    let lock = self.grant_family_lock(realm_id, fid);
+                    // INVARIANT: guard held only across the sync re-read + revoke-write; no .await in scope.
+                    let _guard = lock.lock().map_err(|_| IdentityError::Internal {
+                        reason: "grant family lock poisoned".to_string(),
+                    })?;
                     if let Some(family_bytes) = self
                         .storage
                         .get(realm_id, &family_key)
@@ -2623,24 +2741,38 @@ impl EmbeddedIdentityEngine {
                             .map_err(Self::storage_err)?;
                     }
                 }
-                // Also revoke session if present
+                // Also revoke the session if present.
+                //
+                // Task 24.1: this used to discard the result, so `POST /revoke`
+                // answered 200 while the session behind the refresh token
+                // stayed live. It is the same defect the access-token arm above
+                // carried, and RFC 7009's "silent success" applies to an
+                // *unknown* token, not to a revocation the server failed to
+                // perform. `SessionNotFound` is still success — the session is
+                // gone, which is what the caller asked for.
                 if claims.sid != "none" {
                     let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
                     if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
                         let session_id = SessionId::new(uuid);
-                        let _ = self.revoke_session(realm_id, &session_id);
+                        match self.revoke_session(realm_id, &session_id) {
+                            Ok(()) | Err(IdentityError::SessionNotFound) => {}
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
             }
             _ => {} // Unknown token type → silent success
         }
 
+        // Never persist the presented bearer token: `resource_id` is written
+        // verbatim to the append-only log (audit 2026-08-28 §4.16#9).
+        let token_ref = Self::audit_token_reference(&claims, &request.token);
         self.record_audit(
             realm_id,
             None,
             AuditAction::SessionRevoked,
             "token",
-            &request.token,
+            &token_ref,
         )?;
 
         Ok(())
@@ -2653,8 +2785,9 @@ impl EmbeddedIdentityEngine {
     ) -> Result<crate::identity::oidc::IntrospectionResponse, IdentityError> {
         use crate::identity::oidc::IntrospectionResponse;
 
-        // 1. Verify Ed25519 signature against realm key (with global-key
-        // fallback for Phase 0 realms). Forged or tampered tokens are
+        // 1. Verify the Ed25519 signature against the realm's own key (and any
+        // in-grace retiring key). There is no global-key fallback — a realm
+        // with no key of its own fails closed. Forged or tampered tokens are
         // cryptographically rejected; RFC 7662 semantics: return inactive.
         let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
             return Ok(IntrospectionResponse::inactive());
@@ -2717,8 +2850,23 @@ impl EmbeddedIdentityEngine {
         if claims.iat > claims.exp {
             return Ok(IntrospectionResponse::inactive());
         }
+        // RFC 7519 §4.1.5 — a token that is not yet valid is not active
+        // (audit 2026-08-28 §4.2#6, §4.19#10).
+        if let Some(nbf) = claims.nbf {
+            if now_secs < nbf - CLOCK_SKEW_SECS {
+                return Ok(IntrospectionResponse::inactive());
+            }
+        }
 
-        // 4. Check session validity (if session-bound) or JTI blocklist (if sessionless)
+        // 4. Consult the JTI revocation blocklist on BOTH branches. A
+        // session-bound OBO/delegation token carries a `jti` that delegation
+        // revocation projects into the blocklist; checking it only in the
+        // `sid == "none"` branch left a revoked delegation `active: true` with
+        // live permissions (audit 2026-08-28 §4.19#5). Mirrors the same guard
+        // in `validate_token` (G1).
+        if self.is_token_jti_revoked(realm_id, &claims) {
+            return Ok(IntrospectionResponse::inactive());
+        }
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
             if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
@@ -2726,12 +2874,6 @@ impl EmbeddedIdentityEngine {
                 if self.get_session(realm_id, &session_id)?.is_none() {
                     return Ok(IntrospectionResponse::inactive());
                 }
-            }
-        } else if let Some(ref jti) = claims.jti {
-            // Sessionless token — check JTI revocation projection (hot-path safe).
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            if self.revoked_jti_cache.contains_key(cache_key.as_str()) {
-                return Ok(IntrospectionResponse::inactive());
             }
         }
 
@@ -2776,12 +2918,14 @@ impl EmbeddedIdentityEngine {
                 let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
                 if let Ok(user_uuid) = uuid::Uuid::parse_str(user_uuid_str) {
                     let user_id = crate::core::UserId::new(user_uuid);
-                    let org_id: Option<crate::core::OrganizationId> =
+                    let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
+                        realm_id,
                         claims.oid.as_deref().and_then(|o| {
                             uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
                                 .ok()
                                 .map(crate::core::OrganizationId::new)
-                        });
+                        }),
+                    );
                     let resolved_live = self
                         .rbac
                         .resolve_permissions(&user_id, realm_id, org_id.as_ref(), None)
@@ -2837,25 +2981,44 @@ impl EmbeddedIdentityEngine {
             return Ok(DecidePermissionResponse { allowed: false });
         }
 
-        // Expiry check.
+        // Token-species guard: authorization decisions are defined for access
+        // tokens only. `introspect_token_inner` and `userinfo_inner` both
+        // refuse a non-access token here; without the same check a refresh
+        // token — realm-signed, same `sub`/`aud` — that the token endpoint
+        // refuses would return a live `allowed: true` (audit 2026-08-28
+        // §4.2#1, §4.19#9). This also refuses the gRPC `Decide` RPC's
+        // refresh-token replay, since it routes through here.
+        if claims.token_type != "access" {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+
+        // Expiry check. `nbf` joins it: RFC 7519 §4.1.5 says a token MUST NOT
+        // be accepted before its not-before time, and an authorization
+        // decision is an acceptance (audit 2026-08-28 §4.2#6, §4.19#10).
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         if now_secs >= claims.exp || claims.iat > now_secs + CLOCK_SKEW_SECS {
             return Ok(DecidePermissionResponse { allowed: false });
         }
+        if claims
+            .nbf
+            .is_some_and(|nbf| now_secs < nbf - CLOCK_SKEW_SECS)
+        {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
 
-        // Session / JTI revocation check.
+        // JTI revocation check on BOTH branches — a session-bound delegation
+        // token's `jti` is projected into the blocklist on revocation, and
+        // checking it only for `sid == "none"` left a revoked delegation
+        // returning `allowed: true` (audit 2026-08-28 §4.19#5).
+        if self.is_token_jti_revoked(realm_id, &claims) {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
             if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
                 if self.get_session(realm_id, &SessionId::new(uuid))?.is_none() {
                     return Ok(DecidePermissionResponse { allowed: false });
                 }
-            }
-        } else if let Some(ref jti) = claims.jti {
-            // Check JTI revocation projection (hot-path safe).
-            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
-            if self.revoked_jti_cache.contains_key(cache_key.as_str()) {
-                return Ok(DecidePermissionResponse { allowed: false });
             }
         }
 
@@ -2875,12 +3038,14 @@ impl EmbeddedIdentityEngine {
         };
 
         // Parse optional org scoping.
-        let org_id: Option<crate::core::OrganizationId> =
+        let org_id: Option<crate::core::OrganizationId> = self.active_org_context(
+            realm_id,
             request.organization_id.as_deref().and_then(|o| {
                 uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
                     .ok()
                     .map(crate::core::OrganizationId::new)
-            });
+            }),
+        );
 
         // Apply scope narrowing from the token if present.
         let scope_str = claims.scope.as_deref();
@@ -3006,20 +3171,62 @@ impl EmbeddedIdentityEngine {
         let client_bytes = self
             .storage
             .get(realm_id, &client_key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidClient)?;
-        let client: OAuthClient =
-            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        let secret_hash = client
-            .client_secret_hash()
-            .ok_or(IdentityError::InvalidClientSecret)?;
-        let valid = credentials::verify_raw_secret(client_secret.as_bytes(), secret_hash)?;
-        if !valid {
+            .map_err(Self::storage_err)?;
+        // 22.25 (audit 2026-08-28 §4.25#3): this used to `?`-return on the
+        // missing client and again on the missing hash, both before any
+        // hashing. An unregistered `client_id` therefore answered in
+        // microseconds while a registered confidential one answered in
+        // Argon2id-milliseconds — a clean existence-and-type oracle over an
+        // unauthenticated endpoint. A secret was presented, so one
+        // verification runs on every arm before the answer is decided.
+        let existing: Option<OAuthClient> = client_bytes
+            .map(|bytes| {
+                serde_json::from_slice::<OAuthClient>(&bytes).map_err(|e| {
+                    IdentityError::Serialization {
+                        reason: e.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
+        let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
+        let matched = self.verify_presented_client_secret(realm_id, stored_hash, client_secret)?;
+        // Only now is the outcome decided — every arm has already paid for the
+        // same single verification.
+        let Some(client) = existing.as_ref() else {
+            return Err(IdentityError::InvalidClient);
+        };
+        if client.client_secret_hash().is_none() || !matched {
             return Err(IdentityError::InvalidClientSecret);
         }
         Ok(())
+    }
+
+    /// Verifies a **presented** client secret, doing the same amount of
+    /// Argon2id work whether or not `stored_hash` exists (22.25).
+    ///
+    /// When the client is unknown, or is a public client with no stored
+    /// secret, the verification runs against a dummy hash minted from this
+    /// realm's own `CredentialConfig` — same algorithm, same cost parameters,
+    /// same wall-clock cost as a real one — and the answer is `false`.
+    ///
+    /// Callers must decide the outcome *after* this returns; returning early
+    /// on a missing client or missing hash is exactly the bug this closes.
+    pub(super) fn verify_presented_client_secret(
+        &self,
+        realm_id: &RealmId,
+        stored_hash: Option<&str>,
+        presented: &str,
+    ) -> Result<bool, IdentityError> {
+        match stored_hash {
+            Some(hash) => credentials::verify_raw_secret(presented.as_bytes(), hash),
+            None => {
+                let dummy = self.dummy_hash_for_realm(realm_id);
+                // Result discarded on purpose: the work is the point, and a
+                // dummy hash can never match a caller-supplied secret.
+                let _ = credentials::verify_raw_secret(presented.as_bytes(), &dummy)?;
+                Ok(false)
+            }
+        }
     }
 
     pub(super) fn list_clients_inner(
@@ -3081,18 +3288,43 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         // Return InvalidClientSecret (not ClientNotFound) on any failure to
         // prevent client enumeration via error differentiation.
-        let client = self
-            .get_client(realm_id, client_id)?
-            .ok_or(IdentityError::InvalidClientSecret)?;
+        //
+        // 22.25 (audit 2026-08-28 §4.25#3): error *shape* was already uniform,
+        // but the amount of work was not. An unknown `client_id` and a public
+        // client both returned without hashing, while a registered confidential
+        // client paid for one Argon2id verification — so response time revealed
+        // both existence and type. The rule below is that hashing work is a
+        // function of the caller's own input (did it present a secret?) and
+        // never of what the lookup found:
+        //
+        //   * a secret was presented  → exactly one verification on every arm,
+        //     against the stored hash when there is one and against a
+        //     realm-parameterised dummy when there is not;
+        //   * no secret was presented → no verification on any arm.
+        //
+        // Costing the no-secret case nothing keeps the public-client token path
+        // — the common browser flow, which legitimately authenticates by
+        // `client_id` alone — off the Argon2id path entirely.
+        let client = self.get_client(realm_id, client_id)?;
 
-        if let Some(hash) = client.client_secret_hash() {
-            // Confidential client: secret is required and must match.
-            let secret = client_secret.ok_or(IdentityError::InvalidClientSecret)?;
-            if !credentials::verify_raw_secret(secret.as_bytes(), hash)? {
-                return Err(IdentityError::InvalidClientSecret);
-            }
+        let Some(secret) = client_secret else {
+            return match client.as_ref() {
+                // Public client: no secret needed, client_id alone suffices.
+                Some(c) if c.client_secret_hash().is_none() => Ok(()),
+                _ => Err(IdentityError::InvalidClientSecret),
+            };
+        };
+
+        let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
+        let is_public = client.is_some() && stored_hash.is_none();
+        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        if is_public {
+            // A stray secret on a public client is ignored, as before.
+            return Ok(());
         }
-        // Public client: no secret needed, client_id alone suffices.
+        if !matched {
+            return Err(IdentityError::InvalidClientSecret);
+        }
         Ok(())
     }
 
@@ -3129,6 +3361,19 @@ impl EmbeddedIdentityEngine {
                     reason: "redirect_uris cannot be empty".to_string(),
                 });
             }
+            // Audit §4.3#3: re-run the register-time rules. `register_client_inner`
+            // routes every redirect URI through `validation::validate_redirect_uri`
+            // (no fragment, no wildcard, no dangerous scheme, http only for a
+            // loopback host). Applying them only at registration made all four
+            // bypassable by register-then-PATCH.
+            for uri in uris {
+                if uri.trim().is_empty() {
+                    return Err(IdentityError::InvalidInput {
+                        reason: "redirect URIs must not be empty".to_string(),
+                    });
+                }
+                validation::validate_redirect_uri(uri)?;
+            }
             client.set_redirect_uris(uris.clone());
         }
         if let Some(grant_types) = &request.grant_types {
@@ -3160,9 +3405,15 @@ impl EmbeddedIdentityEngine {
             client.set_consent_spans_orgs(consent_spans_orgs);
         }
         if let Some(uri) = &request.backchannel_logout_uri {
+            if let Some(value) = uri {
+                validation::validate_logout_uri("backchannel_logout_uri", value, false)?;
+            }
             client.set_backchannel_logout_uri(uri.clone());
         }
         if let Some(uri) = &request.frontchannel_logout_uri {
+            if let Some(value) = uri {
+                validation::validate_logout_uri("frontchannel_logout_uri", value, true)?;
+            }
             client.set_frontchannel_logout_uri(uri.clone());
         }
         if let Some(uris) = &request.post_logout_redirect_uris {
@@ -3319,8 +3570,13 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Cascade: scrub every consent record referencing this client.
-        // Consent keys are `oauth:consent:{user_uuid}:{client_uuid}`, so
-        // we scan the whole namespace and match the trailing client segment.
+        // A consent key is `oauth:consent:{user}:{client}` (legacy) or
+        // `oauth:consent:{user}:{client}:{org}:{resource}` (canonical). The
+        // client UUID is always the fourth colon-delimited field. The old
+        // scrub matched `ends_with(client_uuid)`, which caught only the legacy
+        // form — every extended-key consent survived and was handed to the
+        // deterministic YAML `ClientId`'s next occupant (audit 2026-08-28
+        // §4.20#1). Match the field, not the suffix.
         let consent_prefix = keys::oauth_consent_scan_prefix();
         let consent_end = keys::prefix_end(&consent_prefix);
         let consent_entries = self
@@ -3330,12 +3586,63 @@ impl EmbeddedIdentityEngine {
         let client_uuid_str = client_id.as_uuid().to_string();
         for entry in &consent_entries {
             if let Ok(key_str) = std::str::from_utf8(&entry.key) {
-                if key_str.ends_with(&client_uuid_str) {
+                // Fields: ["oauth", "consent", "{user}", "{client}", ...].
+                if key_str.split(':').nth(3) == Some(client_uuid_str.as_str()) {
                     self.storage
                         .delete(realm_id, &entry.key)
                         .map_err(Self::storage_err)?;
                 }
             }
+        }
+
+        // Cascade: revoke every outstanding grant family issued to this
+        // client. Deleting only the client record left its families live
+        // while removing the record `rotate_grant_family` reads its
+        // confidential-client and FAPI DPoP gates from, so a deleted client's
+        // refresh tokens kept rotating with LESS authentication than before
+        // the deletion (audit 2026-08-28 §4.16#3).
+        let family_prefix = keys::grant_family_scan_prefix();
+        let family_end = keys::prefix_end(&family_prefix);
+        let family_entries = self
+            .storage
+            .scan(realm_id, &family_prefix, &family_end)
+            .map_err(Self::storage_err)?;
+        for entry in &family_entries {
+            let listed: StoredGrantFamily =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if listed.client_id.as_ref() != Some(client_id) {
+                continue;
+            }
+            // Serialize with any in-flight rotation on this family, then
+            // re-read under the lock so this revocation neither clobbers a
+            // concurrent rotation's hash write nor is clobbered by it.
+            let lock = self.grant_family_lock(realm_id, &listed.family_id);
+            // INVARIANT: guard held only across the sync re-read + revoke-write window; no .await in scope.
+            let _guard = lock.lock().expect("grant family lock poisoned");
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &entry.key)
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let mut family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if family.revoked {
+                continue;
+            }
+            family.revoked = true;
+            let updated =
+                serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &entry.key, &updated)
+                .map_err(Self::storage_err)?;
         }
         self.record_audit(
             realm_id,
@@ -3514,6 +3821,85 @@ impl EmbeddedIdentityEngine {
         Ok(record)
     }
 
+    /// Revokes every outstanding refresh-token grant family this user holds for
+    /// `client_id`.
+    ///
+    /// Consent is the authority the grant was issued under. Deleting the
+    /// consent record alone left the families live, and
+    /// `rotate_grant_family`'s consent check only compares scope digests *when
+    /// a record exists* — so deleting the record removed the only thing that
+    /// check could fail on and the application refreshed forever
+    /// (audit 2026-08-28 §4.16#11).
+    ///
+    /// Returns the number of families revoked. Errors reading an individual row
+    /// are fatal: a consent revocation that silently skipped a family would
+    /// reintroduce the defect.
+    fn revoke_grant_families_for_consent(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: Option<&ClientId>,
+    ) -> Result<usize, IdentityError> {
+        let prefix = keys::grant_family_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut revoked = 0usize;
+        for entry in &entries {
+            let listed: StoredGrantFamily =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            let Some(ref family_client) = listed.client_id else {
+                // A clientless (session) grant carries no consent to revoke.
+                continue;
+            };
+            if client_id.is_some_and(|wanted| family_client != wanted) {
+                continue;
+            }
+            // The family records the session, not the subject; resolve the
+            // owner so one user's revocation cannot revoke another's grant.
+            // `load_session_raw` so an already-revoked session still resolves.
+            let owner = self.load_session_raw(realm_id, &listed.session_id)?;
+            if owner.as_ref().map(crate::identity::types::Session::user_id) != Some(user_id) {
+                continue;
+            }
+            // Serialize with any in-flight rotation, then re-read under the
+            // lock so this revocation is not a lost update (§4.16#2).
+            let lock = self.grant_family_lock(realm_id, &listed.family_id);
+            // INVARIANT: guard held only across the sync re-read + revoke-write; no .await in scope.
+            let _guard = lock.lock().map_err(|_| IdentityError::Internal {
+                reason: "grant family lock poisoned".to_string(),
+            })?;
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &entry.key)
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let mut family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if family.revoked {
+                continue;
+            }
+            family.revoked = true;
+            let updated =
+                serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &entry.key, &updated)
+                .map_err(Self::storage_err)?;
+            revoked += 1;
+        }
+        Ok(revoked)
+    }
+
     pub(super) fn revoke_consent_inner(
         &self,
         realm_id: &RealmId,
@@ -3539,6 +3925,9 @@ impl EmbeddedIdentityEngine {
             // Also clean up any lingering legacy key.
             let legacy_key = keys::encode_consent_key(user_id, client_id);
             let _ = self.storage.delete(realm_id, &legacy_key);
+            // The grant families issued under this consent are dead with it
+            // (audit 2026-08-28 §4.16#11).
+            self.revoke_grant_families_for_consent(realm_id, user_id, Some(client_id))?;
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -3563,6 +3952,9 @@ impl EmbeddedIdentityEngine {
             self.storage
                 .delete(realm_id, &legacy_key)
                 .map_err(Self::storage_err)?;
+            // The grant families issued under this consent are dead with it
+            // (audit 2026-08-28 §4.16#11).
+            self.revoke_grant_families_for_consent(realm_id, user_id, Some(client_id))?;
             self.record_audit(
                 realm_id,
                 Some(&AuditContext {
@@ -3596,6 +3988,9 @@ impl EmbeddedIdentityEngine {
                 .delete(realm_id, &entry.key)
                 .map_err(Self::storage_err)?;
         }
+        // Every grant family this user holds against any client was issued
+        // under one of the consents just deleted (audit 2026-08-28 §4.16#11).
+        self.revoke_grant_families_for_consent(realm_id, user_id, None)?;
         self.record_audit(
             realm_id,
             Some(&AuditContext {
@@ -3614,7 +4009,9 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &PendingAuthorizationRequest,
     ) -> Result<String, IdentityError> {
-        let ticket = uuid::Uuid::new_v4().to_string();
+        // 22.27 (audit 2026-08-28 §4.25#5): 128-bit consent ticket; a UUID v4
+        // spends six bits on the version/variant and carries only 122.
+        let ticket = crate::core::random_secret_hex();
         let key = keys::encode_pending_auth_key(&ticket);
         let bytes = serde_json::to_vec(request).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
@@ -3809,9 +4206,14 @@ impl EmbeddedIdentityEngine {
     ) -> Result<RpLogoutResult, IdentityError> {
         // Resolve session ID and user ID from id_token_hint or explicit session_id.
         let (session_id, user_id) = if let Some(hint) = &request.id_token_hint {
-            // Decode without signature verification — OIDC spec allows expired hints.
-            let claims =
-                tokens::decode_claims_unverified(hint).map_err(|_| IdentityError::InvalidToken)?;
+            // Verify the hint's Ed25519 signature against this realm's key
+            // (retiring keys included) BEFORE acting on any claim. Expiry is
+            // deliberately not enforced — OIDC RP-Initiated Logout §2 allows an
+            // expired hint — but an unsigned or forged hint must revoke no
+            // session and mint no logout token: otherwise an unauthenticated
+            // caller sets `sub`/`sid` freely and gets a realm-signed logout
+            // token for a victim (audit 2026-08-28 §4.2#3, §4.19#1).
+            let claims = self.verify_token_signature_for_realm(realm_id, hint)?;
             let sid = Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
             let uid = Self::parse_user_id_claim(&claims)?;
             (sid, uid)
@@ -3878,7 +4280,12 @@ impl EmbeddedIdentityEngine {
                     _ => continue,
                 };
 
-                if let Some(bcl_uri) = client.backchannel_logout_uri() {
+                // Read-side backstop: a row written before the scheme
+                // allowlist existed must not be framed or fetched now.
+                if let Some(bcl_uri) = client
+                    .backchannel_logout_uri()
+                    .filter(|u| validation::is_allowed_backchannel_logout_uri(u))
+                {
                     let jti = uuid::Uuid::new_v4().to_string();
                     let logout_claims = LogoutTokenClaims::new(
                         issuer.clone(),
@@ -3896,7 +4303,10 @@ impl EmbeddedIdentityEngine {
                     }
                 }
 
-                if let Some(fcl_uri) = client.frontchannel_logout_uri() {
+                if let Some(fcl_uri) = client
+                    .frontchannel_logout_uri()
+                    .filter(|u| validation::is_allowed_frontchannel_logout_uri(u))
+                {
                     frontchannel_targets.push(FrontchannelTarget {
                         uri: fcl_uri.to_string(),
                         client_id: client_id.clone(),

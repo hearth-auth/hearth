@@ -8,19 +8,32 @@
 # (musl-dev, cc-variants, `cargo build --target`) isn't worth the ~10 MB image
 # savings for local dev.
 #
-# Stage 2 ("runtime"): copy the static-ish binary onto a minimal
-# `debian:bookworm-slim` base, drop privileges to UID 10001, and run
-# `hearth serve -c /etc/hearth/hearth.yaml`.
+# Stage 2 ("runtime"): copy the binary onto a minimal `debian:bookworm-slim`
+# base, drop privileges to UID 10001, and run
+# `hearth serve -c /etc/hearth/hearth.yaml` under tini.
 #
-# Build context is trimmed by `.dockerignore` (sibling file) to keep the
-# streaming phase under a couple of megabytes.
+# The binary is dynamically linked against glibc — that is why the runtime base
+# is Debian and not `scratch`, and it is the same reason stage 1 gives for
+# choosing Debian over Alpine two lines above.
+#
+# Build context is trimmed by `.dockerignore` (sibling file), which excludes
+# target/, .git/, docs/ (bar the two OpenAPI files the build copies), the SDK
+# node_modules trees and the local data directory.
+#
+# Expect roughly 22 MB from a clean checkout. A working tree streams an order
+# of magnitude more, because .dockerignore does not exclude ui/tailwindcss,
+# sdks/python/.venv or sdks/php/vendor.
 
 # -----------------------------------------------------------------------------
 # Stage 1: builder
 # -----------------------------------------------------------------------------
-# Pinned to 1.89 — the repo's declared `rust-version = "1.75"` is aspirational;
-# transitive deps (e.g. ureq-proto 0.6) require edition 2024, which stabilized
-# in Rust 1.85. Bump in lockstep with the host toolchain when deps move.
+# Pinned to 1.89. The MSRV is whatever Cargo.toml's `rust-version` says, and it
+# is enforced, not aspirational: ci.yml's `msrv` job builds the whole workspace
+# at exactly that toolchain on every PR. This image is newer than the MSRV
+# because transitive deps (e.g. ureq-proto) require edition 2024, stabilized in
+# Rust 1.85. Bump this tag in lockstep with the host toolchain when deps move.
+# scripts/check-dockerfile-claims.sh fails if this stage drops below the MSRV,
+# or if a comment here quotes an MSRV that is not the declared one (§4.8#15).
 #
 # Supply-chain hardening: pinned by both tag and digest.
 # To re-pin after a base-image upgrade:
@@ -38,7 +51,11 @@ FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f05
 #     together. `build.rs` looks for WKTs in /usr/include as a fallback when
 #     the buf module cache is absent (which it always is inside Docker).
 #   - pkg-config: cargo convention for native-dep crates even though we avoid
-#     the big ones (no libssl-dev: Hearth uses ring + rustls, pure-Rust TLS).
+#     the big ones. No libssl-dev: TLS is rustls with the `ring` provider, so
+#     OpenSSL is never linked. The crypto is not all Rust, though — `ring`
+#     bundles C and assembly, and `aws-lc-rs` compiles AWS-LC (C) for rcgen's
+#     RSA key generation. Both build from vendored source using the toolchain
+#     already in this image, so no system crypto package is needed.
 #   - ca-certificates: so cargo can fetch from crates.io over HTTPS.
 #   - git: a handful of crates pull git metadata during `build.rs`.
 RUN apt-get update \
@@ -73,11 +90,32 @@ COPY benches ./benches
 # must be in the build context. Unlike hearth.yaml (runtime secrets), the
 # example config contains no credentials and is safe to include.
 COPY hearth.example.yaml ./
+# vendor/swagger-ui-*/ is embedded via include_str!() in
+# src/protocol/web/openapi.rs — must be present at compile time.
+COPY vendor ./vendor
 
+# Thread the release version into the compiled binary. The build context has
+# no .git (`.dockerignore` strips it), so build.rs cannot `git describe` here;
+# without an explicit version the binary inside the published image reports
+# Cargo.toml's stale fallback (audit 2026-08-28 §4.8#11, §4.12#5). CI passes
+# BUILD_VERSION=<git tag>; a non-release value (the `dev` default, `pr-N`)
+# deliberately leaves HEARTH_RELEASE_VERSION unset, and build.rs warns loudly.
+ARG BUILD_VERSION=dev
+# `--no-default-features` drops the `dev-endpoints` feature, so `/admin/bootstrap`,
+# the `/dev/seed-*` family and the hard-coded `admin@hearth.test` password are not
+# compiled into the shipped binary at all (audit §4.7#2, task 20.1). The runtime
+# `dev_mode` check and the per-request loopback guard remain as defence in depth
+# for anyone who builds with default features.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release --bin hearth \
+    case "$BUILD_VERSION" in \
+        v[0-9]*) export HEARTH_RELEASE_VERSION="${BUILD_VERSION#v}" ;; \
+        [0-9]*)  export HEARTH_RELEASE_VERSION="$BUILD_VERSION" ;; \
+        *)       echo "BUILD_VERSION='$BUILD_VERSION' is not a release version;" \
+                      "the binary will report the Cargo.toml fallback" ;; \
+    esac \
+    && cargo build --release --no-default-features --bin hearth \
     && strip target/release/hearth \
     && cp target/release/hearth /tmp/hearth
 
@@ -102,7 +140,15 @@ FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5
 #     already handles SIGTERM cleanly, but tini costs ~200 KB and gives us
 #     correct behaviour under `docker stop` (10s grace → SIGKILL) with zero
 #     application code changes.
+#
+# `apt-get upgrade` runs because the base image is pinned by digest: the pin
+# buys reproducibility, and the cost is that the layer's packages freeze on the
+# day the digest was taken. Trivy scans the final image and fails the build on
+# CRITICAL/HIGH with a fix available, which is exactly what a frozen base
+# accumulates — libgnutls30 (pulled in by wget) and libpcre2 were the first to
+# trip it. Upgrading at build time patches those without unpinning the digest.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         wget \
@@ -127,7 +173,7 @@ ARG BUILD_VERSION=dev
 ARG BUILD_REVISION=unknown
 LABEL org.opencontainers.image.title="Hearth" \
       org.opencontainers.image.description="Purpose-built identity database: authentication, authorization, and session management" \
-      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${BUILD_REVISION}"
 

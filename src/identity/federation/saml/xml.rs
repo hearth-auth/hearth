@@ -255,12 +255,51 @@ pub fn escape_attr(s: &str) -> String {
 /// bytes the IdP signed, not a re-serialized form. Works by tracking
 /// buffer position offsets from the quick-xml reader.
 ///
-/// Returns the first matching element. Nested recursion supported.
+/// Returns the first matching element at **any** depth. Callers that need a
+/// structural guarantee about where the element sits — signature discovery,
+/// for one — must use [`find_child_element_range`] instead.
 pub fn find_element_range(
     xml: &[u8],
     namespace_uri: &str,
     local: &str,
     id_attr: Option<&str>,
+) -> Result<Option<(usize, usize)>, IdentityError> {
+    find_element_range_at_depth(xml, namespace_uri, local, id_attr, None)
+}
+
+/// Locates a **direct child of the document's root element** by
+/// (namespace_uri, local_name), returning its raw byte range in `xml`.
+///
+/// XML-DSIG structure is positional: an enveloped `<ds:Signature>` is a
+/// child of the element it signs, and `<ds:SignedInfo>` is a child of
+/// `<ds:Signature>`. Searching at any depth lets a signature belonging to a
+/// descendant be read as though it were the root's own — the digest and
+/// `Reference URI` bindings then have to carry the whole defence alone.
+/// Constraining discovery to the declared depth removes that class outright.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, on a `DOCTYPE` declaration, or
+/// when the document exceeds `MAX_SAML_XML_EVENTS`.
+pub fn find_child_element_range(
+    xml: &[u8],
+    namespace_uri: &str,
+    local: &str,
+) -> Result<Option<(usize, usize)>, IdentityError> {
+    // Root element is depth 1, so its direct children sit at depth 2.
+    find_element_range_at_depth(xml, namespace_uri, local, None, Some(2))
+}
+
+/// Shared scanner for [`find_element_range`] and [`find_child_element_range`].
+///
+/// `required_depth`, when set, restricts matching to elements opening at
+/// exactly that depth (the document's root element is depth 1).
+fn find_element_range_at_depth(
+    xml: &[u8],
+    namespace_uri: &str,
+    local: &str,
+    id_attr: Option<&str>,
+    required_depth: Option<i32>,
 ) -> Result<Option<(usize, usize)>, IdentityError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().expand_empty_elements = false;
@@ -284,6 +323,7 @@ pub fn find_element_range(
             Ok(Event::Start(ref e)) => {
                 depth += 1;
                 if target_depth.is_none()
+                    && required_depth.is_none_or(|want| want == depth)
                     && is_element(e, namespace_uri, local)
                     && id_match(e, id_attr)
                 {
@@ -300,7 +340,10 @@ pub fn find_element_range(
             }
             Ok(Event::Empty(ref e)) => {
                 let pos_after = reader.buffer_position() as usize;
+                // An `Empty` event does not move `depth`, so the element it
+                // represents sits one level below the currently-open element.
                 if target_depth.is_none()
+                    && required_depth.is_none_or(|want| want == depth + 1)
                     && is_element(e, namespace_uri, local)
                     && id_match(e, id_attr)
                 {
@@ -311,6 +354,53 @@ pub fn find_element_range(
                 return Err(parse_err("DOCTYPE declarations are rejected"));
             }
             Ok(Event::Eof) => return Ok(None),
+            Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Counts every element with the given (namespace_uri, local_name) in the
+/// document, at any depth — including elements nested inside a
+/// `<ds:Signature>`, which the enveloped-signature transform removes
+/// before a digest is computed.
+///
+/// Signature-wrapping defences need this: a wrapped document is one where
+/// the number of candidate elements the parser can reach differs from the
+/// one element whose signature was verified.
+///
+/// # Errors
+///
+/// Returns a parse error on malformed XML, on a `DOCTYPE` declaration, or
+/// when the document exceeds `MAX_SAML_XML_EVENTS`.
+pub fn count_elements(
+    xml: &[u8],
+    namespace_uri: &str,
+    local: &str,
+) -> Result<usize, IdentityError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut buf = Vec::new();
+    let mut count: usize = 0;
+    let mut event_count: usize = 0;
+
+    loop {
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+                if is_element(e, namespace_uri, local) {
+                    count += 1;
+                }
+            }
+            Ok(Event::DocType(_)) => {
+                return Err(parse_err("DOCTYPE declarations are rejected"));
+            }
+            Ok(Event::Eof) => return Ok(count),
             Err(e) => return Err(parse_err(format!("XML scan error: {e}"))),
             _ => {}
         }
@@ -339,5 +429,43 @@ mod tests {
     #[test]
     fn escape_attr_covers_whitespace_quote() {
         assert_eq!(escape_attr("\"\t\n\r<&"), "&quot;&#x9;&#xA;&#xD;&lt;&amp;");
+    }
+
+    const NESTED: &[u8] = br#"<Root><Mid><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">deep</ds:Signature></Mid></Root>"#;
+    const DIRECT: &[u8] = br#"<Root><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">shallow</ds:Signature><Mid/></Root>"#;
+
+    #[test]
+    fn find_child_element_range_ignores_a_nested_match() {
+        let found =
+            find_child_element_range(NESTED, ns::DS, "Signature").expect("well-formed input");
+        assert!(
+            found.is_none(),
+            "a grandchild must not be reported as a direct child"
+        );
+    }
+
+    #[test]
+    fn find_child_element_range_finds_a_direct_child() {
+        let (start, end) = find_child_element_range(DIRECT, ns::DS, "Signature")
+            .expect("well-formed input")
+            .expect("the direct-child signature must be found");
+        let slice = std::str::from_utf8(&DIRECT[start..end]).expect("utf8");
+        assert!(slice.contains("shallow"), "wrong range returned: {slice}");
+        assert!(
+            slice.ends_with("</ds:Signature>"),
+            "range not closed: {slice}"
+        );
+    }
+
+    /// The unconstrained scanner still reaches any depth — the two functions
+    /// differ only in the depth constraint, which is what `Signature`
+    /// discovery relies on.
+    #[test]
+    fn find_element_range_still_matches_at_any_depth() {
+        let found = find_element_range(NESTED, ns::DS, "Signature", None)
+            .expect("well-formed input")
+            .expect("the unconstrained scanner must still find a nested match");
+        let slice = std::str::from_utf8(&NESTED[found.0..found.1]).expect("utf8");
+        assert!(slice.contains("deep"), "wrong range returned: {slice}");
     }
 }

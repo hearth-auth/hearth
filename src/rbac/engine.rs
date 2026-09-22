@@ -23,10 +23,10 @@ use super::resolve::{self, Resolver};
 use super::seed::{self, StoredScope};
 use super::types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
-    GroupId, GroupMember, GroupMembership, Page, Permission, PermissionRecord, PermissionStatus,
-    ProtectedResource, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleStatus,
-    RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest,
-    UpdateRoleRequest, UserPermissionGrant,
+    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission, PermissionRecord,
+    PermissionStatus, ProtectedResource, ResolvedPermissions, Role, RoleAssignment, RoleId,
+    RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind,
+    UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 use super::{RbacEngine, SvBumper};
 
@@ -43,8 +43,8 @@ pub struct EmbeddedRbacEngine {
     /// Memoizes full permission resolutions to collapse the per-issuance N+1
     /// storage fan-out (HEA-1770). Invalidated per-realm on every mutation.
     ///
-    /// Sharded and lock-free (HEA-1906): reads are wait-free `ArcSwap` loads with
-    /// no mutex, fixing the −0.549 `permission_check` scaling the single
+    /// Sharded (HEA-1906): a read is two `SwapCell` loads rather than one
+    /// global mutex, fixing the −0.549 `permission_check` scaling the single
     /// `Mutex<ResolutionCache>` caused under saturation (HEA-1875 C7).
     resolution_cache: ShardedResolutionCache,
 }
@@ -107,6 +107,53 @@ impl EmbeddedRbacEngine {
         self.storage.delete(realm_id, key)?; // rbac-storage-write-ok
         self.invalidate_realm(realm_id);
         Ok(())
+    }
+
+    /// Deletes every `rba:org_role:` row under `prefix`, optionally keeping
+    /// only those whose key names `only_user`, and returns the row count.
+    ///
+    /// The key layout is `rba:org_role:{realm}:{org}:{user}:{role}`, so a scan
+    /// over one org (or one org + user) is a plain prefix, while a realm-wide
+    /// purge for a single user has to filter the user segment out of each key.
+    /// Shared by the three cascade entry points
+    /// (subsystem audit 2026-09-21, finding O-1).
+    fn purge_org_role_rows(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        only_user: Option<&UserId>,
+    ) -> Result<usize, RbacError> {
+        let end = keys::prefix_end(prefix);
+        let entries = self.storage.scan(realm_id, prefix, &end)?;
+        let mut removed = 0usize;
+        for entry in &entries {
+            if let Some(user_id) = only_user {
+                if !Self::org_role_key_names_user(&entry.key, user_id) {
+                    continue;
+                }
+            }
+            self.write_delete(realm_id, &entry.key)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// True when `key` is an `rba:org_role:{realm}:{org}:{user}:{role}` row
+    /// whose `{user}` segment is `user_id`. Anything that does not parse is
+    /// reported as "not this user" so a malformed row is never deleted by a
+    /// user-scoped purge.
+    fn org_role_key_names_user(key: &[u8], user_id: &UserId) -> bool {
+        let Ok(text) = std::str::from_utf8(key) else {
+            return false;
+        };
+        let Some(rest) = text.strip_prefix(keys::ORG_ROLE_PREFIX) else {
+            return false;
+        };
+        // `{realm}:{org}:{user}:{role}` — role names may themselves contain
+        // `:`, so bound the split at four parts and read the third.
+        let mut parts = rest.splitn(4, ':');
+        let (_realm, _org, user) = (parts.next(), parts.next(), parts.next());
+        user.is_some_and(|u| u == user_id.as_uuid().to_string())
     }
 
     /// Injects the [`SvBumper`] implementation. Called once at startup after
@@ -626,6 +673,18 @@ impl Resolver for EmbeddedRbacEngine {
 // ---------------------------------------------------------------------------
 
 impl RbacEngine for EmbeddedRbacEngine {
+    fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
+        // One prefix compare on the apply path; every non-RBAC row costs
+        // nothing beyond it.
+        if key.starts_with(keys::RBAC_KEY_PREFIX) {
+            self.resolution_cache.bump(realm_id);
+        }
+    }
+
+    fn on_replicated_snapshot(&self) {
+        self.resolution_cache.invalidate_all();
+    }
+
     fn resolve_permissions(
         &self,
         user_id: &UserId,
@@ -787,6 +846,25 @@ impl RbacEngine for EmbeddedRbacEngine {
             out.push(name);
         }
         Ok(out)
+    }
+
+    fn purge_org_roles_for_user(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<usize, RbacError> {
+        let prefix = keys::org_extra_role_scan_prefix(realm_id, org_id, user_id);
+        self.purge_org_role_rows(realm_id, &prefix, None)
+    }
+
+    fn purge_org_roles_for_org(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+    ) -> Result<usize, RbacError> {
+        let prefix = keys::org_extra_role_org_scan_prefix(realm_id, org_id);
+        self.purge_org_role_rows(realm_id, &prefix, None)
     }
 
     // ---------- Roles ----------
@@ -1405,6 +1483,13 @@ impl RbacEngine for EmbeddedRbacEngine {
             self.write_delete(realm_id, &e.key)?;
         }
 
+        // Remove every extra org-scoped role the user holds anywhere in the
+        // realm. Without this the rows outlive the user and are silently
+        // reactivated when the same `UserId` is re-imported
+        // (subsystem audit 2026-09-21, finding O-1).
+        let org_role_prefix = keys::org_extra_role_realm_scan_prefix(realm_id);
+        self.purge_org_role_rows(realm_id, &org_role_prefix, Some(user_id))?;
+
         Ok(())
     }
 
@@ -1773,6 +1858,29 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(out)
     }
 
+    fn export_all_group_memberships(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<GroupMembershipEdge>, RbacError> {
+        let prefix = keys::gm_forward_realm_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            // The forward value holds the member; the owning group lives only
+            // in the key (see `decode_gm_forward_group`, which is asserted to
+            // invert `encode_gm_forward`).
+            let Some(group_id) = keys::decode_gm_forward_group(&entry.key) else {
+                continue;
+            };
+            let Ok(member) = Self::de::<GroupMember>(&entry.value) else {
+                continue;
+            };
+            out.push(GroupMembershipEdge { group_id, member });
+        }
+        Ok(out)
+    }
+
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
         let prefix = keys::ASSIGN_PRI_PREFIX.as_bytes().to_vec();
         let end = keys::prefix_end(&prefix);
@@ -1911,6 +2019,36 @@ impl RbacEngine for EmbeddedRbacEngine {
             permissions: scope.permissions.clone(),
         };
         self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
+    }
+
+    fn import_group_membership(
+        &self,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, RbacError> {
+        let forward = keys::encode_gm_forward(&edge.group_id, &edge.member);
+        let exists = self.storage.get(realm_id, &forward)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        // Both entries, exactly as `add_group_member` writes them: the reverse
+        // index is what permission resolution scans.
+        let reverse = keys::encode_gm_reverse(&edge.member, &edge.group_id);
+        self.write_put_batch(
+            realm_id,
+            &[
+                (forward, Self::ser(&edge.member)?),
+                (reverse, Self::ser(&edge.group_id)?),
+            ],
+        )?;
+        // No session-version bump: import writes verbatim into a target that
+        // has no sessions of its own, matching the other `import_*` helpers.
         Ok(if exists {
             ImportOutcome::Overwritten
         } else {

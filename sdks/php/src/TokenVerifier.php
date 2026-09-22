@@ -13,6 +13,7 @@ use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
 use Hearth\Exceptions\TokenIssuerException;
 use Hearth\Exceptions\TokenInvalidException;
+use Hearth\Exceptions\TokenNotYetValidException;
 use JsonException;
 
 /**
@@ -49,6 +50,7 @@ final class TokenVerifier implements TokenVerifierInterface
      * @throws TokenInvalidException  On malformed JWT or invalid Ed25519 signature
      * @throws JWKSFetchException            When the signing key cannot be resolved
      * @throws TokenExpiredException    When `exp` is in the past
+     * @throws TokenNotYetValidException When `nbf` is in the future
      * @throws TokenIssuerException     When `iss` does not match
      * @throws TokenAudienceException   When `aud` does not include the client ID
      * @throws RequiredActionException  When `token_type === "required_action"`
@@ -78,7 +80,10 @@ final class TokenVerifier implements TokenVerifierInterface
             $this->checkAudience($claims);
         }
 
-        // Step 5 — issued-at / clock skew
+        // Step 5 — not-before (RFC 7519 §4.1.5)
+        $this->checkNotBefore($claims);
+
+        // Step 6 — issued-at / clock skew
         $this->checkIssuedAt($claims);
 
         $claimsObj = new Claims($claims);
@@ -218,6 +223,28 @@ final class TokenVerifier implements TokenVerifierInterface
 
         if (!in_array($this->clientId, $audiences, true)) {
             throw new TokenAudienceException((string) $this->clientId, $audiences);
+        }
+    }
+
+    /**
+     * Rejects a token presented before its `nbf` (not-before) claim.
+     *
+     * The same clock-skew allowance as the `iat` check applies, so a token
+     * minted a second or two ahead of this host's clock still verifies.
+     *
+     * @param array<string, mixed> $claims
+     * @throws TokenNotYetValidException
+     */
+    private function checkNotBefore(array $claims): void
+    {
+        if (!isset($claims['nbf'])) {
+            return;
+        }
+
+        $nbf = (int) $claims['nbf'];
+        if ($nbf > time() + self::CLOCK_SKEW_SECONDS) {
+            $notBefore = (new DateTimeImmutable())->setTimestamp($nbf);
+            throw new TokenNotYetValidException($notBefore);
         }
     }
 

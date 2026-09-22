@@ -435,9 +435,17 @@ pub struct Jwk {
     pub use_: String,
     /// Algorithm — `"EdDSA"`, `"RS256"`, or `"ES256"`.
     pub alg: String,
-    /// Non-standard informational role hint. Values:
-    /// `"access-token-signing"` (EdDSA), `"saml-signing"` (RSA),
-    /// `"ecdsa-compat"` (EC). Omitted by keys that predate this field.
+    /// Non-standard informational role hint.
+    ///
+    /// `"access-token-signing"` is the only value any JWKS Hearth publishes
+    /// has carried since the RSA and EC entries were withdrawn (audit
+    /// 2026-08-28 §4.2#4). The `"saml-signing"` and `"ecdsa-compat"` values
+    /// are still set by [`RsaSigningKey::to_jwk`] and
+    /// [`EcdsaSigningKey::to_jwk`], but neither is assembled into a published
+    /// document — SAML signing uses X.509 in the SAML metadata, not a JWK, so
+    /// a client MUST NOT branch on seeing those roles (§4.2#6, §4.19#10).
+    ///
+    /// Omitted by keys that predate this field.
     #[serde(
         rename = "x-key-role",
         default,
@@ -736,7 +744,7 @@ impl SigningKey {
             oid: request.oid.map(str::to_string),
             token_type: "access".to_string(),
             jti: Some(Uuid::new_v4().to_string()),
-            fid: None,
+            fid: request.fid.clone(),
             scope: request.scope.clone(),
             nonce: None,
             azp: None,
@@ -766,7 +774,7 @@ impl SigningKey {
             oid: request.oid.map(str::to_string),
             token_type: "refresh".to_string(),
             jti: None,
-            fid: None,
+            fid: request.fid.clone(),
             scope: None,
             nonce: None,
             azp: None,
@@ -843,6 +851,16 @@ pub struct IssueTokenRequest<'a> {
     /// Set to `Some(scope_str)` when the token is issued within an explicit
     /// OAuth grant so that token-exchange can enforce scope intersection.
     pub scope: Option<String>,
+    /// Grant-family identifier embedded in both tokens' `fid` claim.
+    ///
+    /// Every issued refresh token carries one. `refresh_tokens` rotates the
+    /// family's stored hash on each exchange and treats a stale hash as theft;
+    /// a refresh token presented **without** an `fid` is refused outright,
+    /// because the branch that used to serve one had neither rotation nor
+    /// reuse detection (audit 2026-08-28 §4.19#3, §4.16#6). The caller is
+    /// responsible for persisting the matching `StoredGrantFamily`; a token
+    /// minted with an `fid` whose family was never written is dead on arrival.
+    pub fid: Option<String>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -1584,6 +1602,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("issue pair");
 
@@ -1626,6 +1645,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("reissue pair");
 
@@ -2113,6 +2133,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("issue pair");
 
@@ -2146,6 +2167,7 @@ mod tests {
                 dpop_jkt: None,
                 sv: None,
                 scope: None,
+                fid: None,
             })
             .expect("issue pair2");
         let second_access_claims =

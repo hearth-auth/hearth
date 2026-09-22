@@ -17,8 +17,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use openraft::error::{ClientWriteError, RaftError};
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
@@ -27,10 +27,11 @@ use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
 use crate::cluster::log_store::HearthLogStore;
-use crate::cluster::network::HearthNetworkFactory;
+use crate::cluster::network::{HearthNetworkFactory, PeerFaults};
 use crate::cluster::server::IncomingRpcDispatch;
 use crate::cluster::state_machine::HearthStateMachine;
 use crate::cluster::types::{HearthNode, HearthRaftConfig, RaftCommand};
+use crate::cluster::ReplicatedWriteObserver;
 use crate::config::ClusterConfig;
 use crate::core::RealmId;
 use crate::storage::{EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine};
@@ -52,6 +53,22 @@ pub enum ClusterError {
     /// Underlying storage returned an error.
     #[error("storage: {0}")]
     Storage(#[from] crate::storage::StorageError),
+
+    /// A replicated write was accepted by this node but did not reach quorum
+    /// commit within `cluster.write_timeout_ms` (task 26.58).
+    ///
+    /// The proposal is **not** cancelled — openraft may still commit it after
+    /// this error is returned, so the caller must treat the outcome as
+    /// unknown and re-read rather than assume the write was lost.
+    #[error(
+        "replicated write did not reach quorum commit within {timeout_ms} ms and its outcome \
+         is unknown; leadership or quorum was most likely lost mid-write \
+         (last known leader: {leader_addr})"
+    )]
+    WriteTimeout {
+        timeout_ms: u64,
+        leader_addr: String,
+    },
 
     /// Raft or runtime error.
     #[error("raft: {0}")]
@@ -83,15 +100,32 @@ pub struct ClusterEngine {
     reads_allowed: Arc<AtomicBool>,
     /// Maximum acceptable replication lag in milliseconds (default 500).
     read_lag_threshold_ms: u64,
+    /// Upper bound on a single `client_write` (default 10 s). See
+    /// [`ClusterError::WriteTimeout`].
+    write_timeout: Duration,
     /// This node's own Raft node ID. `None` in single-node mode.
     self_node_id: Option<u64>,
     /// Initial membership derived from config at startup. Used by the
     /// bootstrap HTTP handler without requiring access to `ClusterConfig`.
     /// `None` in single-node mode.
     initial_members: Option<BTreeMap<u64, HearthNode>>,
+    /// Shared slot for the state machine's projection observer (audit
+    /// 2026-08-28 §4.16#5). `None` in single-node mode — there is no state
+    /// machine, and the node's own API handlers keep projections coherent.
+    observer_slot: Option<Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>>,
 }
 
 impl ClusterEngine {
+    /// How long [`Self::transfer_leadership`] waits for a replacement leader.
+    ///
+    /// openraft will not let a follower start an election before
+    /// `leader_lease + election_timeout` has elapsed, which under this node's
+    /// Raft config (`election_timeout` 1500–3000 ms, `leader_lease =
+    /// election_timeout_max` = 3000 ms) is 4.5–6.0 s. Add the vote round-trip
+    /// and the winner's no-op commit, then leave headroom for a loaded CI
+    /// runner. The old 5 s bound sat *below* openraft's own floor.
+    const STEP_DOWN_WAIT: Duration = Duration::from_secs(20);
+
     // ── Constructors ──────────────────────────────────────────────────────────
 
     /// Build a single-node engine (no Raft overhead, direct storage calls).
@@ -101,8 +135,26 @@ impl ClusterEngine {
             raft: None,
             reads_allowed: Arc::new(AtomicBool::new(true)),
             read_lag_threshold_ms: 500,
+            write_timeout: Duration::from_millis(ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS),
             self_node_id: None,
             initial_members: None,
+            observer_slot: None,
+        }
+    }
+
+    /// Register the node-local projection observer with the state machine
+    /// (audit 2026-08-28 §4.16#5).
+    ///
+    /// Called by the server composition root once the identity engine exists —
+    /// the state machine is consumed by `Raft::new` before that point, so the
+    /// registration goes through the shared slot. No-op in single-node mode.
+    /// A second call is ignored with a warning; the observer is set once at
+    /// startup.
+    pub fn set_replicated_write_observer(&self, observer: Arc<dyn ReplicatedWriteObserver>) {
+        if let Some(slot) = &self.observer_slot {
+            if slot.set(observer).is_err() {
+                warn!("replicated-write observer already set; ignoring second registration");
+            }
         }
     }
 
@@ -116,17 +168,53 @@ impl ClusterEngine {
         config: &ClusterConfig,
         storage_config: &StorageConfig,
     ) -> Result<Self, ClusterBuildError> {
+        Self::build_clustered_inner(inner, config, storage_config, None).await
+    }
+
+    /// Same as [`Self::build_clustered`], but every outbound Raft RPC this
+    /// node sends is routed through `faults` first.
+    ///
+    /// **Test-only.** It is the seam that makes a partition of a real,
+    /// socket-backed cluster possible — see [`PeerFaults`] for why no other
+    /// shape works. `serve` calls [`Self::build_clustered`], which installs no
+    /// injector, so a production node cannot reach this path.
+    pub async fn build_clustered_with_peer_faults(
+        inner: Arc<EmbeddedStorageEngine>,
+        config: &ClusterConfig,
+        storage_config: &StorageConfig,
+        faults: Arc<PeerFaults>,
+    ) -> Result<Self, ClusterBuildError> {
+        Self::build_clustered_inner(inner, config, storage_config, Some(faults)).await
+    }
+
+    async fn build_clustered_inner(
+        inner: Arc<EmbeddedStorageEngine>,
+        config: &ClusterConfig,
+        storage_config: &StorageConfig,
+        faults: Option<Arc<PeerFaults>>,
+    ) -> Result<Self, ClusterBuildError> {
         let raft_db_path = storage_config.data_dir.join("raft.db");
         let log_store = HearthLogStore::open(&raft_db_path)
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
         let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
-        let state_machine = HearthStateMachine::new(sm_engine);
+        // Shared observer slot: the state machine is consumed by `Raft::new`
+        // below, but the projection observer (the identity engine) is built
+        // later — the composition root fills the slot via
+        // `set_replicated_write_observer` (audit 2026-08-28 §4.16#5).
+        let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
+            Arc::new(OnceLock::new());
+        let state_machine =
+            HearthStateMachine::with_observer_slot(sm_engine, Arc::clone(&observer_slot));
 
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
         let ca_pem = tokio::fs::read(&config.tls_ca_cert_path).await?;
         let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem);
+        let network_factory = match faults {
+            Some(f) => network_factory.with_peer_faults(f),
+            None => network_factory,
+        };
 
         let raft_config = Arc::new(
             RaftConfig {
@@ -150,6 +238,11 @@ impl ClusterEngine {
         .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
 
         let threshold = config.read_lag_threshold_ms.unwrap_or(500);
+        let write_timeout = Duration::from_millis(
+            config
+                .write_timeout_ms
+                .unwrap_or(ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS),
+        );
         let reads_allowed = Arc::new(AtomicBool::new(true));
         let reads_flag = Arc::clone(&reads_allowed);
         let raft_for_monitor = raft.clone();
@@ -175,10 +268,13 @@ impl ClusterEngine {
             );
         }
 
+        Self::self_initialise_if_designated(&raft, config, &initial_members).await;
+
         info!(
             node_id = config.node_id,
             peer_address = %config.peer_address,
             read_lag_threshold_ms = threshold,
+            write_timeout_ms = write_timeout.as_millis(),
             "ClusterEngine initialised in cluster mode"
         );
 
@@ -187,9 +283,86 @@ impl ClusterEngine {
             raft: Some(raft),
             reads_allowed,
             read_lag_threshold_ms: threshold,
+            write_timeout,
             self_node_id: Some(config.node_id),
             initial_members: Some(initial_members),
+            observer_slot: Some(observer_slot),
         })
+    }
+
+    /// Cold-cluster self-initialisation (task 26.46).
+    ///
+    /// Extracted from `build_clustered_inner` verbatim so that function stays
+    /// under the pedantic line limit; the behaviour and the reasoning below
+    /// are unchanged.
+    async fn self_initialise_if_designated(
+        raft: &openraft::Raft<HearthRaftConfig>,
+        config: &ClusterConfig,
+        initial_members: &BTreeMap<u64, HearthNode>,
+    ) {
+        //
+        // `serve` builds the identity engine over this handle, and that
+        // constructor *writes* on a cold data directory (the KEK-enrolment
+        // marker, the global signing key, the system-realm row). In cluster
+        // mode each of those is a Raft proposal, so it needs a leader — and
+        // the only way to elect one was `POST /admin/cluster/bootstrap`, which
+        // is served by a router that does not exist until the identity engine
+        // has been built. Every node therefore died with
+        // `raft: not the leader; redirect to unknown` before the documented
+        // bootstrap step could be reached.
+        //
+        // Exactly ONE node self-initialises: the lowest node ID in the
+        // membership this node's own config names. That is the same shape as
+        // the documented "call bootstrap on one designated node", with the
+        // designation made deterministically from configuration instead of by
+        // an HTTP call that cannot be served yet. The other nodes stay
+        // pristine and adopt the membership from the first `AppendEntries`
+        // they receive — exactly what they do today under manual bootstrap.
+        //
+        // Having *every* node initialise is the obvious alternative and is
+        // worse twice over. openraft warns that concurrent `initialize()`
+        // with a *different* config "will result in split brain condition",
+        // so one node's `cluster.peers` typo would fork the cluster instead
+        // of merely failing to join. And even with identical config it makes
+        // the first election contested — three candidates, three terms — and
+        // a leader elected in that churn can be deposed part-way through the
+        // start-up write set it is serving. Measured: with all three
+        // initialising, this test hung on two runs in five.
+        //
+        // Nothing is trusted here that was not already trusted: the
+        // membership, the peer addresses and the mTLS material all come from
+        // this node's own configuration file, and no network surface is
+        // exposed to do it. `initialize_cluster` — and the
+        // `POST /admin/cluster/bootstrap` handler over it — still works, and
+        // is the escape hatch when the designated node is the one that is
+        // down.
+        //
+        // Skipped when `peers` is empty: that is a degenerate cluster-mode
+        // configuration with nothing to replicate to, and
+        // `initialize_cluster` remains the way to form it explicitly.
+        let designated_initialiser = initial_members.keys().copied().min();
+        if !config.peers.is_empty() && designated_initialiser == Some(config.node_id) {
+            match raft.is_initialized().await {
+                Ok(false) => match raft.initialize(initial_members.clone()).await {
+                    Ok(()) => info!(
+                        node_id = config.node_id,
+                        members = initial_members.len(),
+                        "cold cluster: Raft membership initialised from cluster.peers"
+                    ),
+                    Err(e) => warn!(
+                        node_id = config.node_id,
+                        error = %e,
+                        "cold cluster: self-initialisation refused; the cluster may need an \
+                         explicit POST /admin/cluster/bootstrap"
+                    ),
+                },
+                Ok(true) => {}
+                Err(e) => warn!(
+                    error = %e,
+                    "could not read Raft initialisation state; skipping self-initialisation"
+                ),
+            }
+        }
     }
 
     // ── Cluster initialisation ────────────────────────────────────────────────
@@ -227,6 +400,21 @@ impl ClusterEngine {
         self.self_node_id
     }
 
+    /// Whether a replicated write proposed on this node right now would be
+    /// accepted.
+    ///
+    /// Always `true` in single-node mode. In cluster mode only the current
+    /// Raft leader accepts one — every other node, and every node before an
+    /// election has completed, answers [`ClusterError::NotLeader`]. Advisory
+    /// only: leadership can move between this call and the write.
+    pub fn accepts_writes(&self) -> bool {
+        let Some(raft) = self.raft.as_ref() else {
+            return true;
+        };
+        let metrics = raft.metrics().borrow().clone();
+        metrics.current_leader == Some(metrics.id)
+    }
+
     /// Initial cluster membership map built from config at startup.
     ///
     /// Contains self + all configured peers. Used by the bootstrap HTTP
@@ -236,22 +424,62 @@ impl ClusterEngine {
         self.initial_members.as_ref()
     }
 
-    /// Transfer Raft leadership to another node.
+    /// Step this node down so that some other voter takes over leadership.
     ///
     /// This node must be the current leader; returns [`ClusterError::NotLeader`]
-    /// otherwise. The implementation gracefully steps down by:
-    /// 1. Disabling re-election on this node via `runtime_config().elect(false)`.
-    /// 2. Triggering a cluster-wide election via `trigger().elect()`.
-    /// 3. Polling until a different node confirms leadership (≤ 5 s).
-    /// 4. Re-enabling re-election on this node.
+    /// otherwise. Returns the new leader's node ID.
     ///
-    /// Returns the new leader's node ID. The caller decides whether the winner
-    /// matches a preferred target — this method does not attempt to target a
-    /// specific follower (openraft 0.9 has no targeted transfer API).
+    /// ## This is a step-down, not a targeted transfer
     ///
-    /// **Note on availability:** writes will fail with `NoLeader` for up to
-    /// one election timeout (~1.5–3 s) during the step-down window. Operators
-    /// should avoid initiating transfer during write bursts.
+    /// openraft 0.9.25 exposes no way to hand leadership to a *chosen* peer.
+    /// `Raft` has `trigger().elect()`, `heartbeat()`, `snapshot()` and
+    /// `purge_log()` and nothing else; the internal "node-a elects for node-b"
+    /// mechanism that would implement a targeted transfer
+    /// (`vote_handler::become_leader`) has no public entry point, and
+    /// `external_request` hands out an immutable `&RaftState`. A targeted
+    /// `Trigger::transfer_leader` arrived in openraft 0.10.
+    ///
+    /// So the caller names a preferred target and this method cannot honour
+    /// it. `POST /admin/cluster/transfer-leadership` reports which node
+    /// actually won in `new_leader_id`, and whether that was the requested one
+    /// in `exact_target`.
+    ///
+    /// ## How the step-down is performed, and why it used to do nothing
+    ///
+    /// The previous implementation always returned "leadership transfer timed
+    /// out after 5 s" on a healthy cluster, and leadership never moved. Three
+    /// separate faults, each sufficient on its own (task 26.57):
+    ///
+    /// 1. It called `trigger().elect()`, whose own documentation reads "if
+    ///    this node is already a leader, this is a no-op". Step 2 of the
+    ///    documented procedure did literally nothing — and had it done
+    ///    something, it would have elected *this* node, which holds the
+    ///    longest log and simply re-wins.
+    /// 2. Heartbeats were never stopped. A follower only elects when its
+    ///    leader lease expires (`RaftCore::handle_tick_election`), and this
+    ///    node kept renewing that lease every `heartbeat_interval` throughout
+    ///    the wait. Leadership could not move for any reason.
+    /// 3. The wait was 5 s. openraft's own floor for a follower to start an
+    ///    election is `leader_lease + election_timeout`, and this node
+    ///    configures `election_timeout` 1500–3000 ms with `leader_lease =
+    ///    election_timeout_max`, i.e. **4.5–6.0 s** before a vote is even
+    ///    cast. A 5 s bound was below the floor, so even with faults 1 and 2
+    ///    fixed it would still usually report failure on a transfer that was
+    ///    in fact about to succeed.
+    ///
+    /// What actually works, using only the pinned version's public API:
+    /// stop heartbeating so the followers' leases expire, refuse to stand in
+    /// the election they then hold, and wait longer than openraft's own floor.
+    /// The old leader steps down when it sees the winner's higher term.
+    ///
+    /// Both runtime flags are restored on every exit path, including the
+    /// timeout — leaving `heartbeat` disabled on a node that stayed leader
+    /// would hand the cluster a rolling election.
+    ///
+    /// **Note on availability:** this deliberately lets the cluster go without
+    /// a leader for one lease-plus-election window, so writes fail with
+    /// `NoLeader`/`NotLeader` for several seconds. Do not call it during a
+    /// write burst.
     pub async fn transfer_leadership(&self) -> Result<u64, ClusterError> {
         let raft = self.raft.as_ref().ok_or_else(|| {
             ClusterError::Raft("transfer_leadership called on single-node engine".to_string())
@@ -267,21 +495,24 @@ impl ClusterEngine {
             metrics.id
         };
 
-        // Disable re-election so this node yields without immediately re-winning.
-        // runtime_config().elect() is the non-deprecated replacement for enable_elect().
+        // Stop renewing the followers' leader leases, and decline to stand in
+        // the election that follows. Without the first, no follower ever times
+        // out; without the second, this node re-wins on its longer log.
+        raft.runtime_config().heartbeat(false);
         raft.runtime_config().elect(false);
 
-        // Wake all followers for a new election.
-        if let Err(e) = raft.trigger().elect().await {
-            raft.runtime_config().elect(true);
-            return Err(ClusterError::Raft(e.to_string()));
-        }
-
-        // Poll up to 5 s for a different node to become leader.
-        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        let result = tokio::time::timeout(Self::STEP_DOWN_WAIT, async {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 let metrics = raft.metrics().borrow().clone();
+                // Require both halves: some other node claims the leadership
+                // AND this node has accepted that it no longer holds it.
+                // Checking only `current_leader` would return as soon as a
+                // candidate announced itself, while this node still served
+                // writes for the old term.
+                if metrics.state == ServerState::Leader {
+                    continue;
+                }
                 if let Some(leader_id) = metrics.current_leader {
                     if leader_id != my_id {
                         return leader_id;
@@ -291,11 +522,19 @@ impl ClusterEngine {
         })
         .await;
 
-        // Always restore re-election capability regardless of outcome.
+        // Restore both flags on every path, success or not.
         raft.runtime_config().elect(true);
+        raft.runtime_config().heartbeat(true);
 
-        result
-            .map_err(|_| ClusterError::Raft("leadership transfer timed out after 5 s".to_string()))
+        result.map_err(|_| {
+            ClusterError::Raft(format!(
+                "leadership step-down did not complete within {} s: this node is still the \
+                 leader and no replacement was elected. A voter must be reachable and \
+                 up-to-date enough to win an election; check /admin/cluster/status for \
+                 unhealthy peers",
+                Self::STEP_DOWN_WAIT.as_secs()
+            ))
+        })
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -341,6 +580,29 @@ impl ClusterEngine {
     ///
     /// Used by conditional commands (e.g. `PutIfAbsent`) that need to inspect
     /// the `success` flag of the applied response.
+    ///
+    /// ## Why this is bounded (task 26.58)
+    ///
+    /// `Raft::client_write` resolves when the entry commits, when the node
+    /// learns it is no longer the leader, or **never**. The third case is
+    /// real, not theoretical: it was observed on a three-node cluster whose
+    /// leader lost contact with both followers immediately after accepting a
+    /// write. The entry is appended to the leader's own log and it waits for a
+    /// quorum acknowledgement that cannot arrive, while the leader — which
+    /// still believes it leads, because openraft 0.9 does not step down on a
+    /// lost quorum — never produces a `ForwardToLeader` either. An
+    /// unbounded await on a distributed write is a liveness bug: every caller
+    /// above this is an HTTP handler holding a connection and, on the login
+    /// path, an advisory lock.
+    ///
+    /// The bound is `cluster.write_timeout_ms` (default 10 s) rather than a
+    /// constant so that a cluster which legitimately commits slowly can raise
+    /// it. A fixed bound would trade this liveness bug for an availability
+    /// bug on any deployment slower than the number chosen here.
+    ///
+    /// The timeout does **not** cancel the proposal — openraft may still
+    /// commit it afterwards — so the error says the outcome is unknown rather
+    /// than claiming the write failed.
     async fn propose_with_response(
         &self,
         cmd: RaftCommand,
@@ -349,19 +611,31 @@ impl ClusterEngine {
             ClusterError::Raft("propose called on single-node engine".to_string())
         })?;
 
-        raft.client_write(cmd)
-            .await
-            .map(|resp| resp.data)
-            .map_err(|e| match e {
-                RaftError::APIError(ClientWriteError::ForwardToLeader(fwd)) => {
-                    let addr = fwd
-                        .leader_node
-                        .map(|n| n.addr)
-                        .unwrap_or_else(|| "unknown".to_string());
-                    ClusterError::NotLeader { leader_addr: addr }
-                }
-                other => ClusterError::Raft(other.to_string()),
-            })
+        let Ok(outcome) = tokio::time::timeout(self.write_timeout, raft.client_write(cmd)).await
+        else {
+            let timeout_ms = u64::try_from(self.write_timeout.as_millis()).unwrap_or(u64::MAX);
+            let leader_addr = self.current_leader_addr();
+            warn!(
+                timeout_ms,
+                leader_addr = %leader_addr,
+                "replicated write did not reach quorum commit within the configured bound"
+            );
+            return Err(ClusterError::WriteTimeout {
+                timeout_ms,
+                leader_addr,
+            });
+        };
+
+        outcome.map(|resp| resp.data).map_err(|e| match e {
+            RaftError::APIError(ClientWriteError::ForwardToLeader(fwd)) => {
+                let addr = fwd
+                    .leader_node
+                    .map(|n| n.addr)
+                    .unwrap_or_else(|| "unknown".to_string());
+                ClusterError::NotLeader { leader_addr: addr }
+            }
+            other => ClusterError::Raft(other.to_string()),
+        })
     }
 
     // ── Async storage API ─────────────────────────────────────────────────────
@@ -485,6 +759,46 @@ impl ClusterEngine {
             .map_err(ClusterError::Storage)
     }
 
+    /// Atomically apply a mix of writes and removals for a single realm.
+    ///
+    /// In cluster mode proposes one `RaftCommand::WriteBatch`, so followers
+    /// apply the puts and the deletes together. In single-node mode delegates
+    /// to the inner engine's atomic `write_batch` (audit 2026-08-28 §4.9#4).
+    pub async fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), ClusterError> {
+        if self.raft.is_some() {
+            return self
+                .propose(RaftCommand::WriteBatch {
+                    leader_timestamp: Self::leader_timestamp_now(),
+                    realm: realm_id.clone(),
+                    puts: puts.to_vec(),
+                    deletes: deletes.to_vec(),
+                })
+                .await;
+        }
+        let inner = Arc::clone(&self.inner);
+        let realm_id = realm_id.clone();
+        let puts = puts.to_vec();
+        let deletes = deletes.to_vec();
+        spawn_blocking(move || inner.write_batch(&realm_id, &puts, &deletes))
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?
+            .map_err(ClusterError::Storage)
+    }
+
+    /// The inner engine's backup consistency barrier.
+    ///
+    /// `serve` installs a [`ClusterStorageAdapter`] as the app-layer storage
+    /// handle in every topology, so the barrier has to reach through both
+    /// wrappers or a backup export takes no barrier at all (§4.9#4).
+    pub fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+        self.inner.backup_barrier()
+    }
+
     /// Conditionally insert a key-value pair only if the key is absent.
     ///
     /// In cluster mode proposes `RaftCommand::PutIfAbsent` through Raft,
@@ -545,6 +859,14 @@ impl ClusterEngine {
     /// [`EmbeddedStorageEngine::complete_snapshot_restore`].
     pub(crate) fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
         self.inner.complete_snapshot_restore()
+    }
+
+    /// Flushes the underlying storage engine's memtable.
+    ///
+    /// Local and durable, not a replicated write — the shutdown path calls it
+    /// on every node for its own data directory.
+    pub(crate) fn flush_memtable(&self) -> Result<(), crate::storage::StorageError> {
+        self.inner.flush_memtable()
     }
 }
 
@@ -657,6 +979,9 @@ fn check_clock_skew(payload: &[u8]) -> Option<u64> {
                 | RaftCommand::Batch {
                     leader_timestamp, ..
                 }
+                | RaftCommand::WriteBatch {
+                    leader_timestamp, ..
+                }
                 | RaftCommand::PutIfAbsent {
                     leader_timestamp, ..
                 } => *leader_timestamp,
@@ -722,11 +1047,50 @@ fn cluster_to_storage_err(e: ClusterError) -> crate::storage::StorageError {
                 "raft: replication lag exceeded; redirect to {leader_addr}"
             )))
         }
+        ClusterError::WriteTimeout {
+            timeout_ms,
+            leader_addr,
+        } => StorageError::Io(std::io::Error::other(format!(
+            "raft: replicated write did not reach quorum commit within {timeout_ms} ms and its \
+             outcome is unknown; leadership or quorum was most likely lost mid-write (last known \
+             leader: {leader_addr})"
+        ))),
         ClusterError::Raft(msg) => StorageError::Io(std::io::Error::other(format!("raft: {msg}"))),
     }
 }
 
 impl StorageEngine for ClusterStorageAdapter {
+    fn accepts_writes(&self) -> bool {
+        self.engine.accepts_writes()
+    }
+
+    /// Bypasses Raft: the row is this node's own and must not replicate.
+    ///
+    /// The identity engine's rate-limit trackers are per-node by design — each
+    /// node counts what it saw — so their rehydration rows have to be writable
+    /// on a follower. Proposing them broke both directions silently: a
+    /// follower could persist nothing, and a lockout row the leader had
+    /// replicated could never be deleted by a follower that later saw the
+    /// successful attempt, so the next restart rehydrated a lockout for a user
+    /// who had already authenticated (task 26.49).
+    fn put_node_local(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.engine.inner.put(realm_id, key, value)
+    }
+
+    /// Bypasses Raft; see [`Self::put_node_local`].
+    fn delete_node_local(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<(), crate::storage::StorageError> {
+        self.engine.inner.delete(realm_id, key)
+    }
+
     fn get(
         &self,
         realm_id: &RealmId,
@@ -802,6 +1166,27 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), crate::storage::StorageError> {
+        let engine = Arc::clone(&self.engine);
+        let realm_id = realm_id.clone();
+        let puts = puts.to_vec();
+        let deletes = deletes.to_vec();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { engine.write_batch(&realm_id, &puts, &deletes).await })
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+        self.engine.backup_barrier()
+    }
+
     fn put_if_absent(
         &self,
         realm_id: &RealmId,
@@ -832,6 +1217,10 @@ impl StorageEngine for ClusterStorageAdapter {
 
     fn complete_snapshot_restore(&self) -> Result<(), crate::storage::StorageError> {
         self.engine.complete_snapshot_restore()
+    }
+
+    fn flush_memtable(&self) -> Result<(), crate::storage::StorageError> {
+        self.engine.flush_memtable()
     }
 }
 
@@ -877,6 +1266,55 @@ mod tests {
             membership_config: Arc::new(StoredMembership::default()),
             replication: None,
         }
+    }
+
+    // ── §4.9#4: the app-layer storage handle ──────────────────────────────────
+
+    /// `serve` always installs a `ClusterStorageAdapter`, single-node included.
+    /// The adapter answered `None` for the backup consistency barrier, so the
+    /// export took no barrier and every mutating write ran straight through it.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_exposes_the_inner_backup_barrier() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let inner_barrier = inner
+            .backup_barrier()
+            .expect("embedded engine has a barrier");
+        let adapter = ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(inner)));
+
+        let adapter_barrier = adapter
+            .backup_barrier()
+            .expect("the adapter must expose the barrier, not swallow it");
+        assert!(
+            Arc::ptr_eq(&inner_barrier, &adapter_barrier),
+            "the adapter must expose the SAME barrier the export blocks on"
+        );
+    }
+
+    /// The adapter inherited the default `write_batch`, which is a sequential
+    /// `put`/`delete` loop with no atomicity — so the one primitive callers use
+    /// when a record and its index must land together silently lost it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_write_batch_applies_puts_and_deletes() {
+        let dir = tempdir().unwrap();
+        let adapter = ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(
+            open_engine(dir.path().join("data").as_path()),
+        )));
+        let realm = make_realm();
+
+        adapter.put(&realm, b"stale", b"v").unwrap();
+        adapter
+            .write_batch(
+                &realm,
+                &[(b"fresh".to_vec(), b"v2".to_vec())],
+                &[b"stale".to_vec()],
+            )
+            .unwrap();
+
+        assert_eq!(adapter.get(&realm, b"fresh").unwrap(), Some(b"v2".to_vec()));
+        assert_eq!(adapter.get(&realm, b"stale").unwrap(), None);
     }
 
     // ── Single-node passthrough ───────────────────────────────────────────────

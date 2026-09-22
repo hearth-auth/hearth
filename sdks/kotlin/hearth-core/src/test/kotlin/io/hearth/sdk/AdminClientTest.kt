@@ -45,8 +45,9 @@ class AdminClientTest {
     private fun groupJson(id: String = "grp-1") =
         """{"id":"$id","name":"engineering","description":"Engineering group"}"""
 
-    private fun memberJson(userId: String = "u1") =
-        """{"user_id":"$userId","role":"member","joined_at":1234567890}"""
+    private fun assignmentJson(id: String = "asg-1") =
+        """{"id":"$id","realm_id":"realm-1","subject":{"type":"user","id":"u1"},""" +
+            """"role_id":"role_456","scope":{"type":"realm"},"assigned_at":1234567890}"""
 
     // ── Realm-ID header ───────────────────────────────────────────────────────
 
@@ -84,10 +85,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateUser PUTs to admin slash users slash id`() = runTest {
+    fun `updateUser PATCHes admin slash users slash id`() = runTest {
         server.enqueue(MockResponse().setBody(userJson()).setResponseCode(200))
         client.updateUser("u1", UpdateUserRequest(displayName = "Alice Updated"))
-        assertEquals("/admin/users/u1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/users/u1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -123,13 +126,6 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateRealm PUTs to admin slash realms slash id`() = runTest {
-        server.enqueue(MockResponse().setBody(realmJson()).setResponseCode(200))
-        client.updateRealm("r1", UpdateRealmRequest(name = "Updated"))
-        assertEquals("/admin/realms/r1", server.takeRequest().path)
-    }
-
-    @Test
     fun `deleteRealm DELETEs admin slash realms slash id`() = runTest {
         server.enqueue(MockResponse().setResponseCode(204))
         client.deleteRealm("r1")
@@ -155,21 +151,23 @@ class AdminClientTest {
     fun `registerClient POSTs to admin slash clients`() = runTest {
         server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(200))
         client.registerClient(RegisterClientRequest("My App", listOf("https://app.example.com/callback")))
-        assertEquals("/admin/clients", server.takeRequest().path)
+        assertEquals("/admin/applications", server.takeRequest().path)
     }
 
     @Test
     fun `getClient GETs admin slash clients slash id`() = runTest {
         server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(200))
         client.getClient("c1")
-        assertEquals("/admin/clients/c1", server.takeRequest().path)
+        assertEquals("/admin/applications/c1", server.takeRequest().path)
     }
 
     @Test
-    fun `updateClient PUTs to admin slash clients slash id`() = runTest {
+    fun `updateClient PATCHes admin slash applications slash id`() = runTest {
         server.enqueue(MockResponse().setBody(clientJson()).setResponseCode(200))
         client.updateClient("c1", UpdateClientRequest(clientName = "Updated App"))
-        assertEquals("/admin/clients/c1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/applications/c1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -177,7 +175,7 @@ class AdminClientTest {
         server.enqueue(MockResponse().setResponseCode(204))
         client.deleteClient("c1")
         val req = server.takeRequest()
-        assertEquals("/admin/clients/c1", req.path)
+        assertEquals("/admin/applications/c1", req.path)
         assertEquals("DELETE", req.method)
     }
 
@@ -189,7 +187,7 @@ class AdminClientTest {
                 .setResponseCode(200)
         )
         client.listClients()
-        assertTrue(server.takeRequest().path!!.startsWith("/admin/clients"))
+        assertTrue(server.takeRequest().path!!.startsWith("/admin/applications"))
     }
 
     // ── Roles ─────────────────────────────────────────────────────────────────
@@ -209,10 +207,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateRole PUTs to admin slash roles slash id`() = runTest {
+    fun `updateRole PATCHes admin slash roles slash id`() = runTest {
         server.enqueue(MockResponse().setBody(roleJson()).setResponseCode(200))
         client.updateRole("role-1", UpdateRoleRequest(description = "Updated"))
-        assertEquals("/admin/roles/role-1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/roles/role-1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -252,10 +252,12 @@ class AdminClientTest {
     }
 
     @Test
-    fun `updateGroup PUTs to admin slash groups slash id`() = runTest {
+    fun `updateGroup PATCHes admin slash groups slash id`() = runTest {
         server.enqueue(MockResponse().setBody(groupJson()).setResponseCode(200))
         client.updateGroup("grp-1", UpdateGroupRequest(description = "Updated"))
-        assertEquals("/admin/groups/grp-1", server.takeRequest().path)
+        val req = server.takeRequest()
+        assertEquals("/admin/groups/grp-1", req.path)
+        assertEquals("PATCH", req.method)
     }
 
     @Test
@@ -278,43 +280,61 @@ class AdminClientTest {
         assertTrue(server.takeRequest().path!!.startsWith("/admin/groups"))
     }
 
-    // ── Organization Memberships ──────────────────────────────────────────────
+    // ── Organization Memberships — removed ────────────────────────────────────
+    //
+    // Hearth serves no organization route over HTTP: there is no /admin/orgs, no
+    // /admin/orgs/{id}/members and no per-member route anywhere in the router, so
+    // addOrgMember, removeOrgMember and listOrgMembers every one 404'd
+    // (audit 2026-08-28 §25.19). The X-Realm-ID coverage these tests carried is
+    // already held by `every request sends X-Realm-ID header` above.
+
+    // ── Role assignment ───────────────────────────────────────────────────────
 
     @Test
-    fun `addOrgMember POSTs to admin slash orgs slash orgId slash members`() = runTest {
-        server.enqueue(MockResponse().setBody(memberJson()).setResponseCode(200))
-        client.addOrgMember("org-1", AddOrgMemberRequest("u1", "member"))
-        assertEquals("/admin/orgs/org-1/members", server.takeRequest().path)
-    }
-
-    @Test
-    fun `removeOrgMember DELETEs admin slash orgs slash orgId slash members slash userId`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(204))
-        client.removeOrgMember("org-1", "u1")
+    fun `assignRole POSTs to admin slash users slash id slash roles`() = runTest {
+        // The server registers `/users/{id}/roles` as GET(list).POST(assign).
+        // A PUT gets a bare 405 from axum's method router
+        // (audit 2026-08-28 §25.19).
+        server.enqueue(MockResponse().setBody(assignmentJson()).setResponseCode(201))
+        client.assignRole("u1", "role_456")
         val req = server.takeRequest()
-        assertEquals("/admin/orgs/org-1/members/u1", req.path)
-        assertEquals("DELETE", req.method)
+        assertEquals("/admin/users/u1/roles", req.path)
+        assertEquals("POST", req.method)
     }
 
     @Test
-    fun `listOrgMembers GETs admin slash orgs slash orgId slash members`() = runTest {
-        server.enqueue(
-            MockResponse()
-                .setBody("""{"items":[${memberJson()}],"next_cursor":null}""")
-                .setResponseCode(200)
-        )
-        client.listOrgMembers("org-1")
-        assertTrue(server.takeRequest().path!!.startsWith("/admin/orgs/org-1/members"))
+    fun `assignRole sends the role_id body the server deserialises`() = runTest {
+        // `AssignRoleBody { role_id, org_id? }` — a `{"roles":[...]}` body is a
+        // 422 from the Json extractor before the handler ever runs.
+        server.enqueue(MockResponse().setBody(assignmentJson()).setResponseCode(201))
+        client.assignRole("u1", "role_456")
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(body.contains(""""role_id":"role_456""""), "body was $body")
+        assertTrue(!body.contains("\"roles\""), "body still sends the dead `roles` array: $body")
     }
 
     @Test
-    fun `listOrgMembers sends X-Realm-ID header`() = runTest {
+    fun `listUserRoleAssignments GETs the roles route and unwraps items`() = runTest {
+        // The handler answers `{"items": [...]}` — not a bare array — so a
+        // List<RoleAssignment> return type would fail to deserialise.
         server.enqueue(
             MockResponse()
-                .setBody("""{"items":[],"next_cursor":null}""")
+                .setBody("""{"items":[${assignmentJson()}]}""")
                 .setResponseCode(200)
         )
-        client.listOrgMembers("org-1")
-        assertEquals("realm-1", server.takeRequest().getHeader("X-Realm-ID"))
+        val page = client.listUserRoleAssignments("u1")
+        val req = server.takeRequest()
+        assertEquals("/admin/users/u1/roles", req.path)
+        assertEquals("GET", req.method)
+        assertEquals(1, page.items.size)
+        assertEquals("role_456", page.items[0].roleId)
+    }
+
+    @Test
+    fun `assignRole passes org_id through for an org-scoped assignment`() = runTest {
+        server.enqueue(MockResponse().setBody(assignmentJson()).setResponseCode(201))
+        client.assignRole("u1", "role_456", orgId = "org_abc")
+        val body = server.takeRequest().body.readUtf8()
+        assertTrue(body.contains(""""org_id":"org_abc""""), "body was $body")
     }
 }

@@ -212,7 +212,8 @@ impl BackupExporter {
     /// Exports all entities for `realm_id` into `writer`.
     ///
     /// Writes one encrypted JSON/NDJSON file per entity type (users, credentials,
-    /// clients, roles, groups, permissions, scopes, assignments, organizations)
+    /// MFA factors, clients, roles, groups, group memberships, permissions,
+    /// scopes, assignments, organizations, organization memberships, consents)
     /// plus an AES-256-GCM encrypted `signing_key.json` and, when
     /// `opts.include_audit` is true, an encrypted `audit.ndjson` file.
     ///
@@ -285,6 +286,21 @@ impl BackupExporter {
             let data = to_ndjson(&credentials)?;
             let encrypted = encrypt_bytes(&data, dek)?;
             writer.add_file(&format!("{prefix}/credentials.ndjson"), &encrypted)?;
+        }
+
+        // mfa_factors.ndjson — TOTP/recovery-code state (decrypted; every
+        // archive section is itself AES-256-GCM encrypted) and WebAuthn
+        // passkeys. Without this an operator who restores a realm silently
+        // loses every second factor (audit 2026-08-28 §4.18#5).
+        let mfa_factors = self
+            .identity
+            .export_all_mfa_factors(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.mfa_factors = mfa_factors.len() as u64;
+        if !mfa_factors.is_empty() {
+            let data = to_ndjson(&mfa_factors)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/mfa_factors.ndjson"), &encrypted)?;
         }
 
         // clients.ndjson
@@ -376,6 +392,175 @@ impl BackupExporter {
             writer.add_file(&format!("{prefix}/organizations.ndjson"), &encrypted)?;
         }
 
+        // group_memberships.ndjson — the edges between a group and its
+        // members. Without this, groups restore EMPTY: the group record and
+        // the role-to-group assignment both come back, so every count matches
+        // while the permissions the group granted silently vanish
+        // (OpenSpec 26.40).
+        let group_memberships = self
+            .rbac
+            .export_all_group_memberships(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.group_memberships = group_memberships.len() as u64;
+        if !group_memberships.is_empty() {
+            let data = to_ndjson(&group_memberships)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/group_memberships.ndjson"), &encrypted)?;
+        }
+
+        // organization_memberships.ndjson — same shape as group memberships:
+        // organizations used to restore with nobody in them.
+        let org_memberships = self
+            .identity
+            .export_all_organization_memberships(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.organization_memberships = org_memberships.len() as u64;
+        if !org_memberships.is_empty() {
+            let data = to_ndjson(&org_memberships)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(
+                &format!("{prefix}/organization_memberships.ndjson"),
+                &encrypted,
+            )?;
+        }
+
+        // consents.ndjson — a restored user must not be re-prompted for
+        // consent they already granted.
+        let consents = self
+            .identity
+            .export_all_consents(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.consents = consents.len() as u64;
+        if !consents.is_empty() {
+            let data = to_ndjson(&consents)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/consents.ndjson"), &encrypted)?;
+        }
+
+        // agents.ndjson — the agent record AND its credentials. An agent that
+        // vanishes on restore takes its credentials and its authority with it
+        // (OpenSpec 26.40).
+        let agents = self
+            .identity
+            .export_all_agents(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.agents = agents.len() as u64;
+        if !agents.is_empty() {
+            let data = to_ndjson(&agents)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/agents.ndjson"), &encrypted)?;
+        }
+
+        // identity_providers.ndjson — the connector configs. The IdpId must
+        // survive because every federation link is keyed by it.
+        let idps = self
+            .identity
+            .export_all_identity_providers(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.identity_providers = idps.len() as u64;
+        if !idps.is_empty() {
+            let data = to_ndjson(&idps)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/identity_providers.ndjson"), &encrypted)?;
+        }
+
+        // federation_links.ndjson — the user-to-IdP bindings. Without them a
+        // user who only ever signed in through an external IdP cannot get back
+        // in, even with the connector restored.
+        let links = self
+            .identity
+            .export_all_federation_links(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.federation_links = links.len() as u64;
+        if !links.is_empty() {
+            let data = to_ndjson(&links)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/federation_links.ndjson"), &encrypted)?;
+        }
+
+        // webhooks.ndjson — silent loss of an integration nobody notices until
+        // it is needed. The signing secret rides along so the receiver's
+        // signature check keeps passing.
+        let webhooks = self
+            .identity
+            .export_all_webhooks(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.webhooks = webhooks.len() as u64;
+        if !webhooks.is_empty() {
+            let data = to_ndjson(&webhooks)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/webhooks.ndjson"), &encrypted)?;
+        }
+
+        // saml_service_providers.ndjson + saml_signing_key.json — the SPs and
+        // the RSA key whose certificate they pinned. Restoring the SPs without
+        // the key would hand every one of them a certificate they do not
+        // trust, so the two travel together.
+        let sps = self
+            .identity
+            .export_all_saml_service_providers(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.saml_service_providers = sps.len() as u64;
+        if !sps.is_empty() {
+            let data = to_ndjson(&sps)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(
+                &format!("{prefix}/saml_service_providers.ndjson"),
+                &encrypted,
+            )?;
+        }
+        if let Some(saml_key) = self
+            .identity
+            .export_realm_saml_key(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?
+        {
+            // Unsealed on the way out, resealed under the destination's KEK on
+            // the way in. The archive member itself is DEK-encrypted.
+            let encrypted = encrypt_bytes(&saml_key, dek)?;
+            writer.add_file(&format!("{prefix}/saml_signing_key.json"), &encrypted)?;
+        }
+
+        // scim_mappings.ndjson — without them the next SCIM sync re-creates
+        // every user it provisioned instead of updating it.
+        let scim = self
+            .identity
+            .export_all_scim_mappings(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.scim_mappings = scim.len() as u64;
+        if !scim.is_empty() {
+            let data = to_ndjson(&scim)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/scim_mappings.ndjson"), &encrypted)?;
+        }
+
+        // invitations.ndjson — an outstanding invitation link must still
+        // redeem after the restore.
+        let invitations = self
+            .identity
+            .export_all_invitations(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.invitations = invitations.len() as u64;
+        if !invitations.is_empty() {
+            let data = to_ndjson(&invitations)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/invitations.ndjson"), &encrypted)?;
+        }
+
+        // retiring_signing_keys.json — a restore taken mid-rotation is exactly
+        // when the outgoing key matters. Deadlines are absolute, so the window
+        // resumes rather than restarting, and keys already past theirs are not
+        // exported at all.
+        let retiring = self
+            .identity
+            .export_retiring_signing_keys(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        counts.retiring_signing_keys = retiring.len() as u64;
+        if !retiring.is_empty() {
+            let data = to_ndjson(&retiring)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/retiring_signing_keys.json"), &encrypted)?;
+        }
+
         // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
         let pkcs8 = self
             .identity
@@ -384,7 +569,9 @@ impl BackupExporter {
         let encrypted = encrypt_bytes(&pkcs8, dek)?;
         writer.add_file(&format!("{prefix}/signing_key.json"), &encrypted)?;
 
-        // audit.ndjson (optional)
+        // audit.ndjson (optional), plus the chain material a restore needs to
+        // check the exported hashes instead of discarding them (§4.14#5).
+        let mut audit_chain_included = false;
         if opts.include_audit {
             let events = self
                 .audit
@@ -395,6 +582,22 @@ impl BackupExporter {
                 let data = to_ndjson(&events)?;
                 let encrypted = encrypt_bytes(&data, dek)?;
                 writer.add_file(&format!("{prefix}/audit.ndjson"), &encrypted)?;
+
+                let material = self
+                    .audit
+                    .export_chain_material(realm_id)
+                    .map_err(|e| BackupError::Engine(e.to_string()))?
+                    .ok_or_else(|| {
+                        BackupError::Engine(
+                            "realm has audit events but no chain material; refusing to write an \
+                             archive whose audit log cannot be verified on restore"
+                                .to_string(),
+                        )
+                    })?;
+                let chain_json = serde_json::to_vec(&material)?;
+                let encrypted_chain = encrypt_bytes(&chain_json, dek)?;
+                writer.add_file(&format!("{prefix}/audit_chain.json"), &encrypted_chain)?;
+                audit_chain_included = true;
             }
         }
 
@@ -402,6 +605,7 @@ impl BackupExporter {
             realm_id: format!("realm_{}", realm_id.as_uuid()),
             slug,
             record_counts: counts,
+            audit_chain_included,
         })
     }
 
