@@ -90,6 +90,9 @@ COPY benches ./benches
 # must be in the build context. Unlike hearth.yaml (runtime secrets), the
 # example config contains no credentials and is safe to include.
 COPY hearth.example.yaml ./
+# vendor/swagger-ui-*/ is embedded via include_str!() in
+# src/protocol/web/openapi.rs — must be present at compile time.
+COPY vendor ./vendor
 
 # Thread the release version into the compiled binary. The build context has
 # no .git (`.dockerignore` strips it), so build.rs cannot `git describe` here;
