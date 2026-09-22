@@ -184,7 +184,7 @@ async fn read_server_settings(sock: &mut TcpStream) -> std::io::Result<Vec<(u16,
         // 0x4 = SETTINGS; flag 0x1 = ACK, which carries no parameters.
         if frame_type == 0x4 && flags & 0x1 == 0 {
             let mut params = Vec::new();
-            for chunk in payload.chunks_exact(6) {
+            for chunk in payload.as_chunks::<6>().0 {
                 let id = u16::from_be_bytes([chunk[0], chunk[1]]);
                 let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
                 params.push((id, value));

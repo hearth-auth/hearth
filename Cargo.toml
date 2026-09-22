@@ -283,6 +283,12 @@ unnecessary_cast = "allow"
 unnecessary_literal_bound = "allow"
 format_push_string = "allow"
 unused_async = "allow"
+# Clippy 1.98 split the trait-impl case out of `unused_async` into its own lint,
+# so the allow above stopped covering it and 25 sites turned red on a toolchain
+# bump alone. Every one is an `async fn` whose signature an external trait
+# dictates — axum's `FromRequestParts`, openraft's `RaftLogStorage` /
+# `RaftNetwork` / `RaftStateMachine` — so the `async` cannot be removed.
+unused_async_trait_impl = "allow"
 useless_format = "allow"
 redundant_closure = "allow"
 collapsible_if = "allow"
