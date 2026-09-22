@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **The Go and TypeScript SDKs can authenticate client registration and authorization** — `POST /clients`
+  and `POST /authorize` are admin operations, and neither SDK ever sent an `Authorization` header, so both
+  answered `401` for every caller. `registerClient` / `RegisterClient` and `authorize` / `Authorize` now
+  take an optional access token (a trailing optional argument in TypeScript, a variadic one in Go, so no
+  existing caller breaks). **The other five SDKs have the same gap and are not fixed here** — the Python
+  SDK's own docstring says registration "requires admin/realm token" while sending none. Only Go and
+  TypeScript run integration tests against a live server, which is why only they exposed it.
 - **The container image builds again** — `src/protocol/web/openapi.rs` embeds the vendored Swagger UI
   assets with `include_str!()`, and the Dockerfile never copied `vendor/` into the build stage, so
   every image build failed at compile time with *"couldn't read

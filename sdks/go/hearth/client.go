@@ -138,21 +138,47 @@ func Bootstrap(ctx context.Context, baseURL string) (*BootstrapResponse, error) 
 }
 
 // RegisterClient registers a new OAuth 2.0 client.
-func (c *Client) RegisterClient(ctx context.Context, req RegisterClientRequest) (*OAuthClient, error) {
+//
+// Registration is an admin operation: the server answers
+// `401 missing authorization header` without a bearer token. Pass one as the
+// optional third argument — variadic so that existing callers still compile,
+// matching how StartDeviceFlow takes its optional scope.
+func (c *Client) RegisterClient(
+	ctx context.Context,
+	req RegisterClientRequest,
+	accessToken ...string,
+) (*OAuthClient, error) {
+	token := ""
+	if len(accessToken) > 0 {
+		token = accessToken[0]
+	}
 	var result OAuthClient
-	if err := c.post(ctx, "/clients", req, &result); err != nil {
+	if err := c.postWithToken(ctx, "/clients", req, &result, token); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
 // Authorize initiates an authorization code flow.
-func (c *Client) Authorize(ctx context.Context, req AuthorizeRequest) (*AuthorizeResponse, error) {
+//
+// A bearer token is required whenever UserID selects the subject directly
+// instead of the caller holding a session: that is an administrative act and
+// the server answers `401 invalid_token` without one. Variadic so existing
+// callers still compile.
+func (c *Client) Authorize(
+	ctx context.Context,
+	req AuthorizeRequest,
+	accessToken ...string,
+) (*AuthorizeResponse, error) {
 	if req.ResponseType == "" {
 		req.ResponseType = "code"
 	}
+	token := ""
+	if len(accessToken) > 0 {
+		token = accessToken[0]
+	}
 	var result AuthorizeResponse
-	if err := c.post(ctx, "/authorize", req, &result); err != nil {
+	if err := c.postWithToken(ctx, "/authorize", req, &result, token); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -378,6 +404,16 @@ func (c *Client) Admin(accessToken string) *AdminClient {
 }
 
 func (c *Client) post(ctx context.Context, path string, body, result any) error {
+	return c.postWithToken(ctx, path, body, result, "")
+}
+
+// postWithToken is post with an optional bearer token.
+//
+// The token is passed per call rather than attached to every request, because
+// the OAuth endpoints (/token, /authorize) authenticate the *client*, and an
+// unexpected Authorization header there changes how the server reads the
+// request. Only the admin-authenticated routes pass one.
+func (c *Client) postWithToken(ctx context.Context, path string, body, result any, token string) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -388,6 +424,9 @@ func (c *Client) post(ctx context.Context, path string, body, result any) error 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	if token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	return doRequest(c.http, httpReq, result)
 }

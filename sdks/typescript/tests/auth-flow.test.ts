@@ -16,11 +16,15 @@ describe("TypeScript SDK: Auth Code Flow", () => {
   it("completes a full auth code flow: authorize → exchange → userinfo → refresh", async () => {
     const { client, bootstrap } = server;
 
-    // 1. Register an OAuth client
-    const oauthClient = await client.registerClient({
-      clientName: "test-app",
-      redirectUris: ["http://localhost:3000/callback"],
-    });
+    // 1. Register an OAuth client. Registration is an admin operation and
+    // answers 401 without a bearer token.
+    const oauthClient = await client.registerClient(
+      {
+        clientName: "test-app",
+        redirectUris: ["http://localhost:3000/callback"],
+      },
+      bootstrap.access_token,
+    );
     expect(oauthClient.client_id).toBeTruthy();
 
     // 2. Create a user for the flow
@@ -31,14 +35,18 @@ describe("TypeScript SDK: Auth Code Flow", () => {
     });
     expect(user.id).toBeTruthy();
 
-    // 3. Authorize — get an auth code
-    const authResp = await client.authorize({
-      clientId: oauthClient.client_id,
-      redirectUri: "http://localhost:3000/callback",
-      scope: "openid profile email",
-      state: "test-state-123",
-      userId: user.id,
-    });
+    // 3. Authorize — get an auth code. Selecting the subject with `userId`
+    // rather than a session is an admin act, so it needs the bearer token too.
+    const authResp = await client.authorize(
+      {
+        clientId: oauthClient.client_id,
+        redirectUri: "http://localhost:3000/callback",
+        scope: "openid profile email",
+        state: "test-state-123",
+        userId: user.id,
+      },
+      bootstrap.access_token,
+    );
     expect(authResp.code).toBeTruthy();
     expect(authResp.state).toBe("test-state-123");
 

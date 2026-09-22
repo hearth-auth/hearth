@@ -115,11 +115,12 @@ func TestAuthCodeFlow(t *testing.T) {
 	srv := startServer(t)
 	ctx := context.Background()
 
-	// 1. Register an OAuth client
+	// 1. Register an OAuth client. Registration is an admin operation and
+	// answers 401 without a bearer token.
 	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
 		ClientName:   "go-test-app",
 		RedirectURIs: []string{"http://localhost:3000/callback"},
-	})
+	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("register client: %v", err)
 	}
@@ -151,7 +152,7 @@ func TestAuthCodeFlow(t *testing.T) {
 		UserID:              user.ID,
 		CodeChallenge:       pkce.Challenge,
 		CodeChallengeMethod: pkce.Method,
-	})
+	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
@@ -302,7 +303,7 @@ func TestTransparentRefresh(t *testing.T) {
 	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
 		ClientName:   "go-refresh-app",
 		RedirectURIs: []string{"http://localhost:3000/callback"},
-	})
+	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("register client: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestTransparentRefresh(t *testing.T) {
 		UserID:              user.ID,
 		CodeChallenge:       pkce.Challenge,
 		CodeChallengeMethod: pkce.Method,
-	})
+	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
@@ -395,7 +396,7 @@ func TestVerifyToken(t *testing.T) {
 	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
 		ClientName:   "verify-token-test",
 		RedirectURIs: []string{"http://localhost:3000/callback"},
-	})
+	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("register client: %v", err)
 	}
@@ -422,7 +423,7 @@ func TestVerifyToken(t *testing.T) {
 		UserID:              user.ID,
 		CodeChallenge:       pkce.Challenge,
 		CodeChallengeMethod: pkce.Method,
-	})
+	}, srv.bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}

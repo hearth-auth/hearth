@@ -74,27 +74,54 @@ export class HearthApiClient {
     return resp.json() as Promise<BootstrapResponse>;
   }
 
-  /** POST /clients — register an OAuth 2.0 client. */
-  async registerClient(params: RegisterClientParams): Promise<OAuthClient> {
-    return this.post("/clients", {
-      client_name: params.clientName,
-      redirect_uris: params.redirectUris,
-    });
+  /**
+   * POST /clients — register an OAuth 2.0 client.
+   *
+   * `accessToken` is required by the server: client registration is an admin
+   * operation and answers `401 missing authorization header` without one. It is
+   * optional here only so that adding it does not break existing callers.
+   */
+  async registerClient(
+    params: RegisterClientParams,
+    accessToken?: string,
+  ): Promise<OAuthClient> {
+    return this.post(
+      "/clients",
+      {
+        client_name: params.clientName,
+        redirect_uris: params.redirectUris,
+      },
+      accessToken,
+    );
   }
 
-  /** POST /authorize — initiate an authorization code flow. */
-  async authorize(params: AuthorizeParams): Promise<AuthorizeResponse> {
-    return this.post("/authorize", {
-      client_id: params.clientId,
-      redirect_uri: params.redirectUri,
-      scope: params.scope,
-      state: params.state,
-      response_type: params.responseType ?? "code",
-      user_id: params.userId,
-      code_challenge: params.codeChallenge,
-      code_challenge_method: params.codeChallengeMethod,
-      nonce: params.nonce,
-    });
+  /**
+   * POST /authorize — initiate an authorization code flow.
+   *
+   * `accessToken` is required whenever `userId` selects the subject directly
+   * instead of the caller having a session: that is an administrative act and
+   * the server answers `401 invalid_token` without one. Optional here so that
+   * adding it does not break existing callers.
+   */
+  async authorize(
+    params: AuthorizeParams,
+    accessToken?: string,
+  ): Promise<AuthorizeResponse> {
+    return this.post(
+      "/authorize",
+      {
+        client_id: params.clientId,
+        redirect_uri: params.redirectUri,
+        scope: params.scope,
+        state: params.state,
+        response_type: params.responseType ?? "code",
+        user_id: params.userId,
+        code_challenge: params.codeChallenge,
+        code_challenge_method: params.codeChallengeMethod,
+        nonce: params.nonce,
+      },
+      accessToken,
+    );
   }
 
   /** POST /token — exchange an authorization code for tokens. */
