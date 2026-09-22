@@ -530,6 +530,26 @@ async fn a_leader_isolated_over_the_real_grpc_transport_is_replaced_and_writes_s
         cluster.partition(old_leader_id, f);
     }
 
+    // Snapshot the isolated node's applied index *after* its edge is cut, not
+    // before. `baseline_idx` is read before the partition, so an entry already
+    // in flight at that instant can still land on the old leader afterwards —
+    // which is a legal Raft outcome, not a partition failure. Asserting against
+    // the pre-partition value made the check race the partition taking effect,
+    // and it lost under coverage instrumentation, where everything is slower.
+    // What the test is actually about is that nothing committed *after* the
+    // partition reaches the isolated node, and that is what this measures.
+    let isolated_pos_at_cut = cluster.pos_of(old_leader_id);
+    let isolated_at_cut = cluster.engines[isolated_pos_at_cut]
+        .raft_metrics()
+        .and_then(|m| m.last_applied.map(|l| l.index))
+        .unwrap_or(0);
+    assert!(
+        isolated_at_cut >= baseline_idx,
+        "FAILOVER FAIL: the isolated node {old_leader_id} reports applied index \
+         {isolated_at_cut}, behind the committed baseline {baseline_idx} — it should never \
+         move backwards"
+    );
+
     // ── 1. The majority elects a replacement, at a higher term ───────────────
     let new_leader_id = cluster
         .wait_for_leader_excluding(old_leader_id, Duration::from_secs(25))
@@ -563,9 +583,9 @@ async fn a_leader_isolated_over_the_real_grpc_transport_is_replaced_and_writes_s
         .and_then(|m| m.last_applied.map(|l| l.index))
         .unwrap_or(0);
     assert_eq!(
-        isolated_applied, baseline_idx,
+        isolated_applied, isolated_at_cut,
         "FAILOVER FAIL: the isolated node {old_leader_id} applied index {isolated_applied}, past \
-         the pre-partition {baseline_idx} — its outbound edge is cut, so it can only have \
+         the {isolated_at_cut} it held once its outbound edge was cut — it can only have \
          advanced if the partition is not being injected"
     );
 
