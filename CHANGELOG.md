@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **The container image builds again** — `src/protocol/web/openapi.rs` embeds the vendored Swagger UI
+  assets with `include_str!()`, and the Dockerfile never copied `vendor/` into the build stage, so
+  every image build failed at compile time with *"couldn't read
+  `vendor/swagger-ui-5.17.14/swagger-ui.css`"*. The files are tracked in git and were never excluded
+  by `.dockerignore` — only the `COPY` was missing, alongside the ones already there for
+  `docs/api/openapi.json` and `hearth.example.yaml`. No released image is affected: the break is
+  newer than the last release, and it failed loudly rather than shipping a partial image.
 - **The Kotlin SDK's publish job succeeded while publishing nothing (task 26.53)** — the `publishing` block
   declared a publication and **no repository**, so `gradle publish` had zero targets, did no work and exited
   `0`. Forty-three `sdk-kotlin-v*` tags produced forty-three green workflow runs and no artifact: `io.hearth`
@@ -312,6 +319,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   sessions would resurrect exactly the sessions an operator revoked.
 
 ### Security
+- **`rustls` raised to 0.23.45 (GHSA-2mjx-qc3c-rqvc)** — 0.23.43 accepts a TLS handshake message
+  a conforming peer would reject, the same defect as Go's CVE-2025-61730. It reaches the server
+  through the HTTPS listener, the OIDC federation client, LDAP and outbound mail, so every
+  deployment that terminates or originates TLS is affected. `cargo deny check advisories` gates it.
+- **The gRPC reflection gate binds the caller it authenticates** — the interceptor called
+  `authenticate_admin` and discarded the `AdminAuth`, which is the shape the cross-realm BOLA class
+  of HEA-1629 took. Authentication was in fact enforced here (the `?` still propagated a rejection),
+  so this is hardening rather than an open hole, but the identity is now attached to the request
+  extensions so the reflection call can be attributed. `scripts/check-auth-discard.sh` gates it.
 - **Device-code redemption is now serialised and consumes the code first (task 26.44)** — it was the one
   single-use path with no advisory lock: the authorization-code exchange takes `code_exchange_lock` and
   deletes as its first write, refresh-token redemption takes `token_redemption_lock`, and this path read the
@@ -540,6 +556,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   certificate recipe that produces a leaf with no `subjectAltName`, which rustls rejects.
 
 ### Changed
+- **A control asserted on another node is observed within 200 ms rather than on every validation** —
+  task 24.6 made `validate_token` reconcile the control epoch and the realm signing-key epoch ahead of
+  its claims cache, so a realm suspended, a token revoked or a DPoP key blocked on one node binds on
+  the others. Correct, but it charged **two storage reads to every token validation** — measured at
+  exactly two per call — on a path whose budget is zero reads and zero heap allocations. The
+  reconciliation is now debounced: staleness is bounded at 200 ms instead of zero, and the warm path
+  is back to no storage read and no allocation. Before task 24.6 that staleness was *unbounded*, so
+  this keeps nearly all of its benefit. Tokens this node has not seen before are still judged against
+  freshly-read epochs, because the cache-miss path reconciles unconditionally.
 - **`docs/STATUS.md` no longer lists LDAP / Active Directory federation as shipped (task 23.8)** —
   `src/identity/ldap/` is a complete connector and is exercised against a real OpenLDAP container by
   the `ldap-integration` CI job, but it is not reachable by an operator: there is no `ldap:` block in
