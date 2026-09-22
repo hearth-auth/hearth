@@ -1045,8 +1045,12 @@ jobs:
       # hearth cannot finish in that, so every server-backed file (admin-crud,
       # auth-flow, jwks) died on "Hook timed out in 60000ms" rather than on
       # anything it asserted. Building here leaves `ensureBinary()` a no-op.
+      # Exactly `cargo build`, not `cargo build --bin hearth`: `ensureBinary()`
+      # runs the former, which also compiles every example in the package, so a
+      # narrower build here leaves work in front of the 60 s hook and the
+      # timeout comes back.
       - name: Build the hearth test server
-        run: cargo build --bin hearth
+        run: cargo build
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
