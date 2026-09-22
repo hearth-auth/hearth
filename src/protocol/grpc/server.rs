@@ -107,11 +107,16 @@ fn extract_grpc_peer_ip(req: &tonic::Request<()>) -> Option<IpAddr> {
 /// DPoP-bound token it cannot verify a proof for.
 ///
 /// Returns a closure rather than being one, because the check needs the engine.
+///
+/// The authenticated [`AdminAuth`](super::auth::AdminAuth) is attached to the
+/// request extensions, so anything downstream of the gate can attribute the
+/// reflection call to a realm and a user rather than re-deriving it.
 pub fn grpc_reflection_auth_interceptor(
     state: GrpcState,
 ) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
-    move |req: tonic::Request<()>| {
-        super::auth::authenticate_admin(req.metadata(), &state)?;
+    move |mut req: tonic::Request<()>| {
+        let auth = super::auth::authenticate_admin(req.metadata(), &state)?;
+        req.extensions_mut().insert(auth);
         Ok(req)
     }
 }
