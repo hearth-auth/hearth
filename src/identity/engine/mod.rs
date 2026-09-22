@@ -4,7 +4,7 @@
 //! and `Clock` trait for deterministic timestamps.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -205,6 +205,25 @@ const PROMPT_NONE_MAX_PROBES: u32 = 50;
 /// 60 seconds matches common JWT library defaults and absorbs NTP drift without
 /// opening a meaningful replay window.
 const CLOCK_SKEW_SECS: i64 = 60;
+
+/// How long the token-validation hot path may reuse its last epoch
+/// reconciliation before reading the rows again.
+///
+/// `validate_token` reconciles the control epoch and the realm signing-key
+/// epoch before consulting the token-claims cache, so a control asserted on
+/// another node binds even on a warm hit (task 24.6). Both reads touch storage
+/// and both allocate, which the hot path forbids — see the zero-allocation gate
+/// in `benches/validate_token.rs`.
+///
+/// Debouncing bounds the staleness instead of paying per call. 200 ms is below
+/// human perception for an operator revoking access, and it cuts the rows from
+/// one read per validation to five per second. Before task 24.6 a warm hit
+/// reconciled nothing at all, so the staleness this leaves is bounded where it
+/// used to run to the token's natural expiry.
+///
+/// Not configurable on purpose: an operator has no way to choose it well, and
+/// the cache-miss path reconciles unconditionally regardless.
+const EPOCH_SYNC_INTERVAL_MICROS: i64 = 200_000;
 
 /// Maximum entries in the in-process session cache (S12-F1).
 const SESSION_CACHE_MAX: usize = 4096;
@@ -606,6 +625,12 @@ pub struct EmbeddedIdentityEngine {
     /// The epoch row replicates with the rows it describes, so observing it
     /// needs no new transport. See [`Self::sync_control_epoch`].
     control_epoch: AtomicU64,
+    /// Micros timestamp before which the hot path skips epoch reconciliation.
+    ///
+    /// Reconciling both epochs costs two storage reads, and the validation hot
+    /// path may perform none. This bounds how often it pays for them. See
+    /// [`Self::sync_epochs_debounced`] and [`EPOCH_SYNC_INTERVAL_MICROS`].
+    epoch_sync_after: AtomicI64,
     /// Wait-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
@@ -1242,6 +1267,7 @@ impl EmbeddedIdentityEngine {
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
             control_epoch: AtomicU64::new(0),
+            epoch_sync_after: AtomicI64::new(0),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -1813,6 +1839,7 @@ impl EmbeddedIdentityEngine {
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
             control_epoch: AtomicU64::new(0),
+            epoch_sync_after: AtomicI64::new(0),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
@@ -4592,6 +4619,48 @@ impl EmbeddedIdentityEngine {
         // the epoch locally too; otherwise it would reload on its next read
         // for no reason.
         self.control_epoch.store(next, Ordering::Release);
+    }
+
+    /// Reconciles both cluster epochs, at most once per
+    /// [`EPOCH_SYNC_INTERVAL_MICROS`].
+    ///
+    /// This is the form the epoch reconciliation takes on the validation hot
+    /// path. [`Self::sync_control_epoch`] and [`Self::sync_realm_key_epoch`]
+    /// each read a storage row, and the hot path may perform no storage read
+    /// and allocate nothing (`benches/validate_token.rs` gates the second at
+    /// zero). Inside a window this reads the clock and one atomic and returns.
+    ///
+    /// The deadline is claimed before the reads rather than after, so a burst
+    /// of concurrent validations sends one of them to storage and turns the
+    /// rest back at the comparison above. A racing thread that loses the
+    /// exchange returns rather than retrying: the winner is already performing
+    /// the very reconciliation it would repeat.
+    ///
+    /// The cache-miss path in
+    /// [`Self::verify_token_signature_for_realm_detailed`] keeps reconciling
+    /// unconditionally. It is already paying for an Ed25519 verify, so two
+    /// rows cost it nothing worth debouncing, and it means a token this engine
+    /// has never seen is always judged against fresh epochs.
+    fn sync_epochs_debounced(&self, realm_id: &RealmId) {
+        let now = self.clock.now().as_micros();
+        let due = self.epoch_sync_after.load(Ordering::Acquire);
+        if now < due {
+            return;
+        }
+        if self
+            .epoch_sync_after
+            .compare_exchange(
+                due,
+                now.saturating_add(EPOCH_SYNC_INTERVAL_MICROS),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        self.sync_control_epoch();
+        self.sync_realm_key_epoch(realm_id);
     }
 
     /// Reloads the three authoritative control caches when another node has
@@ -8441,8 +8510,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // epoch's was — is skipped exactly when the token is most likely to be
         // one an operator has just revoked (task 24.6). Both epochs are
         // reconciled here for that reason.
-        self.sync_control_epoch();
-        self.sync_realm_key_epoch(realm_id);
+        //
+        // Debounced, because reconciling reads two storage rows and this path
+        // may read none: staleness is bounded by EPOCH_SYNC_INTERVAL_MICROS
+        // rather than eliminated.
+        self.sync_epochs_debounced(realm_id);
 
         // Resolve claims: check the in-process token claims cache first (S12-F2).
         //
@@ -17226,6 +17298,9 @@ mod tests {
     /// Refresh-rotation family coverage, revocation lost-update races and the
     /// consent cascade (audit 2026-08-28 §4.16#2, #6, #7, #10, #11).
     mod refresh_races;
+
+    /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
+    mod epoch_sync_debounce;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.

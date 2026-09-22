@@ -397,7 +397,7 @@ async fn a_control_asserted_on_the_leader_binds_on_both_followers() {
             .unwrap_or_else(|e| panic!("node {} rejected a valid token: {e:?}", node.id()));
     }
 
-    assert_session_revocation_binds(&cluster, &seeded).await;
+    assert_session_revocation_binds(&cluster, &clock, &seeded).await;
     assert_realm_suspension_binds(&cluster, &clock, &seeded).await;
 
     cluster.shutdown();
@@ -461,13 +461,23 @@ async fn seed_realm_user_and_token(
 
 /// B-4 — revoking the session on the leader must stop **both** followers
 /// validating a token bound to it.
-async fn assert_session_revocation_binds(cluster: &ThreeNodeCluster, seeded: &SeededRealm) {
+async fn assert_session_revocation_binds(
+    cluster: &ThreeNodeCluster,
+    clock: &Arc<FakeClock>,
+    seeded: &SeededRealm,
+) {
     cluster
         .leader()
         .identity
         .revoke_session(&seeded.realm_id, &seeded.session_id)
         .unwrap();
     cluster.converge().await;
+    // Each follower reconciles the control epoch at most once per
+    // `EPOCH_SYNC_INTERVAL_MICROS`, because the validation path may perform no
+    // storage read. Replication having converged is therefore not on its own
+    // enough for a follower to have observed the revocation; the window has to
+    // close too. What is asserted is that it binds within one, not instantly.
+    clock.advance(1_000_000);
 
     for node in cluster.followers() {
         let err = node
@@ -538,6 +548,11 @@ async fn assert_realm_suspension_binds(
         )
         .unwrap();
     cluster.converge().await;
+    // The advance above is spent: the validations that followed it claimed each
+    // follower's epoch-reconciliation window. Close that window again, or the
+    // followers are still entitled to answer from the caches they warmed before
+    // the leader suspended the realm.
+    clock.advance(1_000_000);
 
     for node in cluster.followers() {
         let err = node

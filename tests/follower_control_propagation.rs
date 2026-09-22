@@ -1,5 +1,6 @@
 //! Task 24.6 (audit 2026-08-28 §4.1 objection, §4.16#5, §4.19#12, §9 item 5) —
-//! a control asserted on one node must bind on every node.
+//! a control asserted on one node must bind on every node, within one epoch
+//! reconciliation window.
 //!
 //! `serve` always installs a `ClusterStorageAdapter`, so every storage write is
 //! a Raft command that reaches every node. Three caches in the identity engine
@@ -35,6 +36,15 @@ use hearth::identity::{
     IdentityConfig, IdentityEngine, RealmConfig, SessionContext, UpdateRealmRequest,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+
+/// How far to move the clock so the validating node reconciles the epoch again.
+///
+/// The validation path debounces the two epoch reads, because it may perform no
+/// storage read and no heap allocation — see `EPOCH_SYNC_INTERVAL_MICROS` in
+/// `src/identity/engine/mod.rs`, which this must stay comfortably above. One
+/// second against a 200 ms window leaves room for that constant to be retuned
+/// without silently making these tests vacuous.
+const PAST_THE_EPOCH_WINDOW_MICROS: i64 = 1_000_000;
 
 fn open_storage(dir: &tempfile::TempDir) -> Arc<dyn StorageEngine> {
     let config = StorageConfig::dev(dir.path().to_path_buf());
@@ -123,6 +133,17 @@ fn suspending_a_realm_on_one_node_binds_on_the_other() {
         )
         .unwrap();
 
+    // Node B reconciles the epoch at most once per window, so it is
+    // deliberately stale until this point. Asserted rather than skipped past:
+    // the bound is the cost of keeping the validation path free of storage
+    // reads, and a test that hid it would let the window grow unnoticed.
+    assert!(
+        node_b.validate_token(&realm_id, &token).is_ok(),
+        "node B is expected to be stale inside its reconciliation window"
+    );
+
+    clock.advance(PAST_THE_EPOCH_WINDOW_MICROS);
+
     assert!(
         node_b.validate_token(&realm_id, &token).is_err(),
         "a realm suspended on node A must stop node B validating its tokens"
@@ -161,6 +182,13 @@ fn revoking_a_token_on_one_node_binds_on_the_other() {
             },
         )
         .unwrap();
+
+    assert!(
+        node_b.validate_token(&realm_id, &token).is_ok(),
+        "node B is expected to be stale inside its reconciliation window"
+    );
+
+    clock.advance(PAST_THE_EPOCH_WINDOW_MICROS);
 
     assert!(
         node_b.validate_token(&realm_id, &token).is_err(),
