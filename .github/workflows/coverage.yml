@@ -101,6 +101,16 @@ jobs:
             --no-report
         env:
           PROTOC: protoc
+          # This job died on "No space left on device". It builds the same 307
+          # test binaries the quality job does — one measures 429 MB, 90% of it
+          # debug sections — and instrumentation adds to that. Coverage maps
+          # counters to source through the `__llvm_covmap` sections, which are
+          # emitted by `-C instrument-coverage` and are independent of DWARF,
+          # so dropping to line tables costs the report nothing. Unverified
+          # locally: a full coverage run is not reproducible on this hardware,
+          # and this job is report-only and outside the required-summary gate.
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
       - name: Generate HTML and LCOV reports
         if: always()
