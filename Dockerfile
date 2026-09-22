@@ -140,7 +140,15 @@ FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5
 #     already handles SIGTERM cleanly, but tini costs ~200 KB and gives us
 #     correct behaviour under `docker stop` (10s grace → SIGKILL) with zero
 #     application code changes.
+#
+# `apt-get upgrade` runs because the base image is pinned by digest: the pin
+# buys reproducibility, and the cost is that the layer's packages freeze on the
+# day the digest was taken. Trivy scans the final image and fails the build on
+# CRITICAL/HIGH with a fix available, which is exactly what a frozen base
+# accumulates — libgnutls30 (pulled in by wget) and libpcre2 were the first to
+# trip it. Upgrading at build time patches those without unpinning the digest.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         wget \
