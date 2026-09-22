@@ -519,7 +519,9 @@ fn baseline_realm() -> RealmId {
 /// 3. after the heal, the deposed node rejoins and converges on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_leader_isolated_over_the_real_grpc_transport_is_replaced_and_writes_survive() {
-    let (cluster, old_leader_id, baseline_idx) =
+    // The baseline index is deliberately unused: this test asserts on the
+    // presence of a key, not on index arithmetic. See step 2.
+    let (cluster, old_leader_id, _baseline_idx) =
         cluster_with_committed_baseline(Some(3_000), 3).await;
     let old_term = cluster.current_term(old_leader_id);
     let followers = cluster.peers_of(old_leader_id);
@@ -529,26 +531,6 @@ async fn a_leader_isolated_over_the_real_grpc_transport_is_replaced_and_writes_s
     for &f in &followers {
         cluster.partition(old_leader_id, f);
     }
-
-    // Snapshot the isolated node's applied index *after* its edge is cut, not
-    // before. `baseline_idx` is read before the partition, so an entry already
-    // in flight at that instant can still land on the old leader afterwards —
-    // which is a legal Raft outcome, not a partition failure. Asserting against
-    // the pre-partition value made the check race the partition taking effect,
-    // and it lost under coverage instrumentation, where everything is slower.
-    // What the test is actually about is that nothing committed *after* the
-    // partition reaches the isolated node, and that is what this measures.
-    let isolated_pos_at_cut = cluster.pos_of(old_leader_id);
-    let isolated_at_cut = cluster.engines[isolated_pos_at_cut]
-        .raft_metrics()
-        .and_then(|m| m.last_applied.map(|l| l.index))
-        .unwrap_or(0);
-    assert!(
-        isolated_at_cut >= baseline_idx,
-        "FAILOVER FAIL: the isolated node {old_leader_id} reports applied index \
-         {isolated_at_cut}, behind the committed baseline {baseline_idx} — it should never \
-         move backwards"
-    );
 
     // ── 1. The majority elects a replacement, at a higher term ───────────────
     let new_leader_id = cluster
@@ -577,16 +559,28 @@ async fn a_leader_isolated_over_the_real_grpc_transport_is_replaced_and_writes_s
         .await
         .unwrap_or_else(|e| panic!("post-failover put on new leader {new_leader_id} failed: {e}"));
 
+    // Assert the property this step is named for — the isolated node cannot see
+    // the replacement's write — by reading for the key, not by watching an
+    // index.
+    //
+    // The applied index is the wrong instrument here. The deposed node was the
+    // leader, so entries it had already *committed* before losing its edge are
+    // still waiting to be applied; Raft applies asynchronously, and commit and
+    // apply are separate steps. Its index therefore advances after the cut
+    // through entirely legal work of its own, which is what made this assertion
+    // fail under coverage instrumentation, where the extra time let that
+    // pending apply land. Reading for the key cannot be fooled that way: the
+    // only path to it is replication from the new leader, which is severed.
     let isolated_pos = cluster.pos_of(old_leader_id);
-    let isolated_applied = cluster.engines[isolated_pos]
-        .raft_metrics()
-        .and_then(|m| m.last_applied.map(|l| l.index))
-        .unwrap_or(0);
     assert_eq!(
-        isolated_applied, isolated_at_cut,
-        "FAILOVER FAIL: the isolated node {old_leader_id} applied index {isolated_applied}, past \
-         the {isolated_at_cut} it held once its outbound edge was cut — it can only have \
-         advanced if the partition is not being injected"
+        cluster.engines[isolated_pos]
+            .get(&realm, b"post-failover")
+            .await
+            .expect("get on isolated node"),
+        None,
+        "FAILOVER FAIL: the isolated node {old_leader_id} can read the write the replacement \
+         leader {new_leader_id} committed after the partition — its inbound edge is cut, so it \
+         can only have received it if the partition is not being injected"
     );
 
     // ── 3. After the heal the deposed node rejoins and converges ─────────────
