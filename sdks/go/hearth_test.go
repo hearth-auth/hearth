@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,35 @@ import (
 
 	"github.com/hearth-auth/hearth/sdks/go/hearth"
 )
+
+// realmBaseURL returns the base URL of the bootstrapped realm.
+//
+// Realm-scoped routes are keyed by the realm's *name*, and a UUID there answers
+// 404; bootstrap hands back only the id, so the name is looked up.
+func realmBaseURL(t *testing.T, srv *testServer) string {
+	t.Helper()
+	req, err := http.NewRequest("GET", srv.baseURL+"/admin/realms/"+srv.bootstrap.RealmID, nil)
+	if err != nil {
+		t.Fatalf("realm lookup request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+srv.bootstrap.AccessToken)
+	req.Header.Set("X-Realm-ID", srv.bootstrap.RealmID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("realm lookup: %v", err)
+	}
+	defer resp.Body.Close()
+	var realm struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&realm); err != nil {
+		t.Fatalf("decode realm: %v", err)
+	}
+	if realm.Name == "" {
+		t.Fatalf("realm %s has no name (status %d)", srv.bootstrap.RealmID, resp.StatusCode)
+	}
+	return srv.baseURL + "/realms/" + realm.Name
+}
 
 // testServer holds a running Hearth dev server and its bootstrap credentials.
 type testServer struct {
@@ -442,7 +472,16 @@ func TestVerifyToken(t *testing.T) {
 	}
 
 	// 3. VerifyToken must succeed and return correct claims.
-	claims, err := srv.client.VerifyToken(ctx, tokens.AccessToken)
+	//
+	// Verified through a client pointed at the *realm's* base URL, not the
+	// server root. A realm signs with its own Ed25519 key and issues
+	// `iss = {base}/realms/{name}`; the root discovery document describes the
+	// server itself, so its issuer and its JWKS both belong to a different key.
+	// Pointing the client one level down makes discovery resolve the realm's
+	// issuer and the realm's JWKS, and the existing verification path then
+	// works unchanged.
+	verifier := hearth.NewClient(realmBaseURL(t, srv), srv.bootstrap.RealmID)
+	claims, err := verifier.VerifyToken(ctx, tokens.AccessToken)
 	if err != nil {
 		t.Fatalf("VerifyToken: %v", err)
 	}
@@ -458,7 +497,7 @@ func TestVerifyToken(t *testing.T) {
 
 	// 4. A tampered token must be rejected with a typed error and nil claims.
 	badToken := tokens.AccessToken[:len(tokens.AccessToken)-4] + "XXXX"
-	badClaims, err := srv.client.VerifyToken(ctx, badToken)
+	badClaims, err := verifier.VerifyToken(ctx, badToken)
 	if err == nil {
 		t.Fatal("expected error for tampered token")
 	}
