@@ -1026,10 +1026,17 @@ jobs:
           persist-credentials: false
       - name: Free disk space (hearth debug build needs headroom)
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-      - name: Setup Rust toolchain + protoc (builds the hearth test server)
+      - name: Setup Rust toolchain + protoc
         uses: ./.github/actions/setup-rust
         with:
           toolchain: stable
+      # The suite's `ensureBinary()` shells out to `cargo build` from inside a
+      # vitest `beforeAll`, which vitest caps at 60 s. A cold debug build of
+      # hearth cannot finish in that, so every server-backed file (admin-crud,
+      # auth-flow, jwks) died on "Hook timed out in 60000ms" rather than on
+      # anything it asserted. Building here leaves `ensureBinary()` a no-op.
+      - name: Build the hearth test server
+        run: cargo build --bin hearth
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
