@@ -560,6 +560,16 @@ jobs:
     if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # `nextest --workspace` links 307 test binaries. Measured on one of them:
+      # 429 MB, of which 388 MB (90%) is debug sections. At that size the set
+      # does not fit the runner's ~108 GB, and `ld` dies mid-link with
+      # "collect2: fatal error: ld terminated with signal 7 [Bus error]" —
+      # SIGBUS because the mmap'd output cannot be extended on a full disk, not
+      # a compiler bug. Line tables keep file and line in test backtraces, which
+      # is all a CI failure report needs, and drop roughly 90% of the bytes.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
       - name: Checkout
@@ -1115,6 +1125,11 @@ jobs:
       HEARTH_TEST_LDAP_BASE_DN: dc=hearth,dc=test
       HEARTH_TEST_LDAP_USER: hearthldaptest
       HEARTH_TEST_LDAP_USER_PASSWORD: HearthLdapUser1!
+      # Same reason as the quality job: this run died on "ld terminated with
+      # signal 7 [Bus error]" followed by "No space left on device". Full debug
+      # info is ~90% of every test binary's bytes.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
       - name: Checkout
