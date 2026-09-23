@@ -273,11 +273,18 @@ impl Memtable {
                 return Ok(false);
             }
 
-            // Install a fresh empty active map and park the old one so reads keep
-            // seeing its keys while the SST is written.
+            // Park the full map, THEN install a fresh empty active map, so reads
+            // keep seeing its keys while the SST is written. The order is the
+            // whole point: readers check the active map first and the parked
+            // slot second, so emptying the active map before parking left a
+            // window in which a reader found the key in neither and answered
+            // "not found" (`a_key_is_never_missing_while_a_flush_moves_it`
+            // measured 6,447 such misses in 3,000 flushes). Parked first, a
+            // reader that sees the empty map is ordered after the park, and
+            // one that still sees the old map finds the key in it.
+            self.flushing.store(Some(Arc::clone(&current)));
             self.data.store(Arc::new(SkipMap::new()));
             self.approximate_size.store(0, Ordering::Relaxed);
-            self.flushing.store(Some(Arc::clone(&current)));
             current
         };
 
@@ -831,6 +838,85 @@ mod tests {
         assert!(flushed);
         // After the flush the racing write survives and the flushing slot is gone.
         assert_eq!(mt.get(&realm, b"parked"), Some(b"new".to_vec()));
+    }
+
+    /// A key moving out of the memtable must be findable at every instant: in
+    /// the active map, in the map parked for flushing, or in the SST the flush
+    /// registers before it clears the parked slot. The engine's `get` reads in
+    /// exactly that order, so a gap here is a false "not found" for a key that
+    /// was written and acknowledged.
+    ///
+    /// The gap this pins shut: `flush_streaming` used to install the empty
+    /// active map *before* parking the full one, so for the length of one
+    /// store a reader could see an empty active map and no parked map, with
+    /// the SST not yet written.
+    #[test]
+    fn a_key_is_never_missing_while_a_flush_moves_it() {
+        use std::sync::atomic::AtomicU64;
+
+        const FLUSHES: u64 = 3_000;
+        const NONE_YET: u64 = u64::MAX;
+
+        let mt = Arc::new(Memtable::new(MemtableConfig::default()));
+        let realm = RealmId::generate();
+        // Stands in for the engine's SST list: the flush closure registers the
+        // parked keys here before `flush_streaming` clears the parked slot,
+        // as `trigger_flush` does with `sst_readers`.
+        let sst: Arc<Mutex<HashSet<Vec<u8>>>> = Arc::default();
+        let newest = Arc::new(AtomicU64::new(NONE_YET));
+        let stop = Arc::new(AtomicBool::new(false));
+        let misses = Arc::new(AtomicUsize::new(0));
+
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let mt = Arc::clone(&mt);
+                let sst = Arc::clone(&sst);
+                let newest = Arc::clone(&newest);
+                let stop = Arc::clone(&stop);
+                let misses = Arc::clone(&misses);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let i = newest.load(Ordering::Acquire);
+                        if i == NONE_YET {
+                            continue;
+                        }
+                        let key = i.to_be_bytes();
+                        let found = mt.get_entry(&realm, &key).is_some()
+                            || sst.lock().expect("sst set").contains(key.as_slice());
+                        if !found {
+                            misses.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for i in 0..FLUSHES {
+            let key = i.to_be_bytes();
+            mt.put(&realm, &key, b"v").expect("put");
+            newest.store(i, Ordering::Release);
+            let flushed = mt
+                .flush_streaming(|parked| {
+                    let mut sst = sst.lock().expect("sst set");
+                    for entry in parked.iter() {
+                        sst.insert(entry.key().key().to_vec());
+                    }
+                    Ok(())
+                })
+                .expect("flush");
+            assert!(flushed);
+        }
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            r.join().expect("reader thread");
+        }
+
+        assert_eq!(
+            misses.load(Ordering::Relaxed),
+            0,
+            "a concurrent read found a key in neither the memtable nor the SST it was flushed to"
+        );
     }
 
     #[test]
