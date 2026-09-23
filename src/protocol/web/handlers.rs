@@ -621,10 +621,26 @@ pub(super) fn otp_factor_for(
     // simply never configured the key could never route to an OTP challenge.
     let methods = realm.config().mfa_methods.clone();
     let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
-    if offers("sms") && user.phone_verified() && state.sms.is_some() {
+    let holds_sms = offers("sms") && user.phone_verified();
+    let holds_email = offers("email_otp") && user.email_otp_enabled();
+    let sms_deliverable = state.sms.is_some() && state.sms_otp_hmac_key.is_some();
+    let email_deliverable = state.email.is_some();
+    // Prefer a factor we can actually send a code for.
+    if holds_sms && sms_deliverable {
         return Some(OtpFactor::Sms);
     }
-    if offers("email_otp") && user.email_otp_enabled() && state.email.is_some() {
+    if holds_email && email_deliverable {
+        return Some(OtpFactor::Email);
+    }
+    // The user holds a factor we cannot deliver. It is still their factor, so
+    // it is still challenged — and the challenge fails closed at issuance.
+    // Returning `None` here used to let the login issue the session on the
+    // password alone, i.e. an unreachable transport or a missing OTP HMAC key
+    // silently removed the user's second factor.
+    if holds_sms {
+        return Some(OtpFactor::Sms);
+    }
+    if holds_email {
         return Some(OtpFactor::Email);
     }
     None
@@ -645,7 +661,10 @@ fn issue_login_otp(
         OtpFactor::Sms => {
             let sender = state.sms.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
             let phone = user.phone_number().ok_or(IdentityError::MfaNotEnabled)?;
-            let key = super::required_action::sms_otp_hmac_key_bytes(state);
+            // No key ⇒ no code: fail closed rather than HMAC under a
+            // guessable key. The caller renders an error; no session issues.
+            let key = super::required_action::sms_otp_hmac_key_bytes(state)
+                .ok_or(IdentityError::MfaNotEnabled)?;
             let nonce =
                 state
                     .identity
@@ -813,13 +832,17 @@ pub async fn mfa_otp_challenge_submit(
         .unwrap_or(0);
     let code = form.code.trim();
     let verified = match factor {
-        OtpFactor::Sms => state.identity.verify_sms_otp(
-            &pending.realm_id,
-            &form.otp_nonce,
-            code,
-            &super::required_action::sms_otp_hmac_key_bytes(&state),
-            now_ts,
-        ),
+        OtpFactor::Sms => match super::required_action::sms_otp_hmac_key_bytes(&state) {
+            Some(key) => state.identity.verify_sms_otp(
+                &pending.realm_id,
+                &form.otp_nonce,
+                code,
+                &key,
+                now_ts,
+            ),
+            // No key: nothing can verify, so the factor is not proved.
+            None => Err(IdentityError::MfaNotEnabled),
+        },
         OtpFactor::Email => state.identity.verify_email_otp(
             &pending.realm_id,
             &form.otp_nonce,

@@ -22,11 +22,12 @@ use tower::ServiceExt as _;
 // ===== Helpers =====
 
 fn build_app(h: &common::TestHarness) -> axum::Router {
-    router(Arc::new(AppState::new(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-    )))
+    // A real SMS transport: enabling `sms` MFA on the default `log` transport
+    // outside dev mode is refused (see tests/sms_mfa_fail_closed.rs).
+    router(Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_sms_transport(hearth::config::SmsTransport::Twilio),
+    ))
 }
 
 async fn admin_token(h: &common::TestHarness, realm: &RealmId) -> String {

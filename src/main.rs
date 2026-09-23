@@ -780,16 +780,23 @@ fn loadtest_unthrottle_decision(
 /// The key cryptographically binds OTP codes to the server. It is required
 /// **only when SMS is actually enabled** — i.e. `sms.transport` is a real
 /// transport (Twilio, AWS SNS). The `log` transport dispatches no real SMS, so
-/// the key is optional there in *both* dev and production (HEA-2105/H): forcing
-/// it on every non-dev deployment, even ones with no SMS configured at all, was
-/// a needless operator burden. When the key is absent under the `log` transport
-/// the handlers substitute a deterministic dev key.
+/// the key is optional there (HEA-2105/H).
 ///
-/// Pure (no env access, no I/O) so the startup gate is unit tested; the caller
-/// reads the env var and maps the `Err` message onto the fatal-startup path.
+/// When the key is absent:
+/// * in dev mode a fresh random 32-byte key is generated for this process, so
+///   SMS MFA works out of the box against the (body-logging) dev transport;
+/// * otherwise the result is `None`, and every SMS OTP surface fails closed —
+///   no code is issued and no SMS challenge can pass. There is no fallback
+///   key: the handlers used to substitute an all-zero one, which made every
+///   stored OTP digest brute-forceable offline by anyone.
+///
+/// Pure apart from the OS RNG (no env access, no other I/O) so the startup gate
+/// is unit tested; the caller reads the env var and maps the `Err` message onto
+/// the fatal-startup path.
 fn resolve_sms_otp_hmac_key(
     env_value: Option<&str>,
     sms_transport: SmsTransport,
+    dev_mode: bool,
 ) -> Result<Option<Vec<u8>>, String> {
     match env_value {
         Some(key) if !key.is_empty() => {
@@ -808,6 +815,14 @@ fn resolve_sms_otp_hmac_key(
                 return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
                      when sms.transport is not 'log' (a real SMS transport is configured)"
                     .into());
+            }
+            if dev_mode {
+                use ring::rand::SecureRandom as _;
+                let mut key = vec![0u8; 32];
+                ring::rand::SystemRandom::new()
+                    .fill(&mut key)
+                    .map_err(|_| "failed to generate a dev-mode SMS OTP HMAC key".to_string())?;
+                return Ok(Some(key));
             }
             Ok(None)
         }
@@ -1557,14 +1572,18 @@ async fn run_serve(
     // SMS sender (default: log transport).
     // HEARTH_SMS_OTP_HMAC_KEY cryptographically binds OTP codes to the server.
     // It is required only when a real SMS transport is configured; the Log
-    // transport (dev or production) needs no key because no real SMS is sent
-    // (HEA-2105/H).
+    // transport needs no key because no real SMS is sent (HEA-2105/H). Without
+    // one, dev mode generates a per-process key and production SMS OTP fails
+    // closed.
     let sms_env = std::env::var("HEARTH_SMS_OTP_HMAC_KEY").ok();
     let sms_hmac_key_bytes: Option<Vec<u8>> =
-        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport)?;
+        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport, config.dev_mode)?;
     let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
     if config.sms.transport == SmsTransport::Log && !config.dev_mode {
-        warn!("sms.transport = log is active outside dev mode — no real SMS messages will be sent");
+        warn!(
+            "sms.transport = log is active outside dev mode — no real SMS messages will be \
+             sent, SMS MFA cannot be enabled, and SMS OTP challenges fail closed"
+        );
     }
 
     // Ensure a first-run setup token exists BEFORE realm reconciliation.
@@ -2556,7 +2575,8 @@ async fn run_serve(
             .with_agent_approval(true)
             .with_agent_advanced(true)
             .with_email(Some(Arc::clone(&email_service)))
-            .with_public_base_url(public_base_url.clone()),
+            .with_public_base_url(public_base_url.clone())
+            .with_sms_transport(config.sms.transport),
         )
     } else {
         Arc::new(
@@ -2580,7 +2600,8 @@ async fn run_serve(
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced)
             .with_email(Some(Arc::clone(&email_service)))
-            .with_public_base_url(public_base_url.clone()),
+            .with_public_base_url(public_base_url.clone())
+            .with_sms_transport(config.sms.transport),
         )
     };
 
@@ -2635,6 +2656,7 @@ async fn run_serve(
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
     .with_sms(sms_sender, sms_hmac_key_bytes)
+    .with_sms_transport(config.sms.transport)
     .with_abuse_guards(Arc::clone(&abuse_guards))
     .with_dev_mode(config.dev_mode);
 
@@ -3412,6 +3434,8 @@ fn build_sms_sender(config: &Config) -> Result<SharedSmsSender, Box<dyn std::err
     use hearth::identity::sms::http::UreqSmsTransport;
 
     Ok(match config.sms.transport {
+        // Only dev mode may log the body: it carries the one-time code.
+        SmsTransport::Log if config.dev_mode => Arc::new(LoggingSmsSender::new_dev()),
         SmsTransport::Log => Arc::new(LoggingSmsSender::new()),
         SmsTransport::Twilio => {
             let tw = config
@@ -6288,21 +6312,21 @@ mod tests {
         // the server must start with no HMAC key rather than refusing to boot.
         // This is the fail-then-pass case for HEA-2105/H — before the fix the
         // `|| !dev_mode` clause forced the key on every non-dev deployment.
-        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log);
+        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log, false);
         assert_eq!(decision, Ok(None));
     }
 
     #[test]
     fn sms_key_optional_for_log_transport_when_empty() {
         // An empty env var is treated the same as absent under Log transport.
-        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log);
+        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, false);
         assert_eq!(decision, Ok(None));
     }
 
     #[test]
     fn sms_key_required_for_real_transport_when_missing() {
         // SMS actually enabled (Twilio) but no key → hard startup error.
-        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio)
+        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio, false)
             .expect_err("real transport without a key must be rejected");
         assert!(
             err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
@@ -6312,7 +6336,7 @@ mod tests {
 
     #[test]
     fn sms_key_required_for_real_transport_when_empty() {
-        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns)
+        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns, false)
             .expect_err("real transport with an empty key must be rejected");
         assert!(
             err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
@@ -6322,7 +6346,7 @@ mod tests {
 
     #[test]
     fn sms_key_too_short_is_rejected_for_real_transport() {
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio)
+        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio, false)
             .expect_err("a sub-32-byte key must be rejected");
         assert!(
             err.contains("at least 32 bytes"),
@@ -6334,7 +6358,7 @@ mod tests {
     fn sms_key_too_short_is_rejected_even_under_log_transport() {
         // A supplied-but-malformed key is always an error, even for Log — the
         // operator clearly intended to set one, so surface the mistake.
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log)
+        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log, false)
             .expect_err("a sub-32-byte key must be rejected");
         assert!(
             err.contains("at least 32 bytes"),
@@ -6345,8 +6369,32 @@ mod tests {
     #[test]
     fn sms_key_accepted_when_valid() {
         let key = "0123456789abcdef0123456789abcdef"; // exactly 32 bytes
-        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio);
+        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio, false);
         assert_eq!(decision, Ok(Some(key.as_bytes().to_vec())));
+    }
+
+    // ── fix/ga-sms: no all-zero key, random per-process key in dev only ──
+
+    #[test]
+    fn dev_mode_without_a_key_gets_a_random_non_zero_key() {
+        let a = resolve_sms_otp_hmac_key(None, SmsTransport::Log, true)
+            .expect("dev mode must start without a key")
+            .expect("dev mode must get a generated key, not none");
+        let b = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, true)
+            .expect("dev mode must start without a key")
+            .expect("dev mode must get a generated key, not none");
+        assert_eq!(a.len(), 32, "a 32-byte HMAC-SHA256 key");
+        assert!(a.iter().any(|&x| x != 0), "never the all-zero key");
+        assert_ne!(a, b, "generated per call from the OS RNG, not a constant");
+    }
+
+    #[test]
+    fn dev_mode_keeps_an_operator_supplied_key() {
+        let key = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            resolve_sms_otp_hmac_key(Some(key), SmsTransport::Log, true),
+            Ok(Some(key.as_bytes().to_vec()))
+        );
     }
 
     // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────

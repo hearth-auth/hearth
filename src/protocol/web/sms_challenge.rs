@@ -177,7 +177,10 @@ fn clear_sms_mfa_cookie(secure: bool) -> String {
 /// Intercept conditions (all must hold):
 /// 1. Realm has `mfa_methods` containing `"sms"`.
 /// 2. User has a verified phone number.
-/// 3. The SMS sender and HMAC key are configured on `WebState`.
+///
+/// When both hold but the factor cannot be challenged — no SMS sender or no
+/// OTP HMAC key on `WebState`, or a realm/user lookup fails — the returned
+/// response is an error: the authorization is refused, never waved through.
 #[allow(clippy::too_many_lines)]
 pub fn sms_mfa_challenge_check(
     state: &Arc<WebState>,
@@ -193,7 +196,18 @@ pub fn sms_mfa_challenge_check(
     let secure = state.is_secure_request(headers);
 
     // 1. Is SMS MFA required for this realm?
-    let realm_obj = state.identity.get_realm(realm).ok().flatten()?;
+    // A lookup failure must not read as "SMS not required": that would skip
+    // the factor on a storage error. Refuse instead.
+    let realm_obj = match state.identity.get_realm(realm) {
+        Ok(Some(r)) => r,
+        Ok(None) | Err(_) => {
+            tracing::warn!(
+                realm_id = %realm.as_uuid(),
+                "sms_mfa_challenge_check: realm lookup failed; refusing the authorization"
+            );
+            return Some(handlers_common::server_error());
+        }
+    };
     let sms_required = realm_obj
         .config()
         .mfa_methods
@@ -205,32 +219,50 @@ pub fn sms_mfa_challenge_check(
     }
 
     // 2. Does this user have a verified phone?
-    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
+    let user = match state.identity.get_user(realm, user_id) {
+        Ok(Some(u)) => u,
+        Ok(None) | Err(_) => {
+            tracing::warn!(
+                realm_id = %realm.as_uuid(),
+                "sms_mfa_challenge_check: user lookup failed; refusing the authorization"
+            );
+            return Some(handlers_common::server_error());
+        }
+    };
     if !user.phone_verified() {
         // No phone enrolled — RA interceptor should have handled enrollment.
         // Allow the flow to continue; phone is not a hard requirement here.
         return None;
     }
-    let phone = user.phone_number()?;
+    // Verified but no number is an inconsistent record; there is nowhere to
+    // send the code, so the factor cannot be proved.
+    let Some(phone) = user.phone_number() else {
+        return Some(handlers_common::server_error());
+    };
     let masked_phone = user
         .masked_phone_number()
         .unwrap_or_else(|| "****".to_string());
 
-    // 3. SMS sender and HMAC key must be configured.
-    let sms_sender = match state.sms.as_ref() {
-        Some(s) => s,
-        None => {
-            tracing::warn!(
-                realm_id = %realm.as_uuid(),
-                "sms_mfa_challenge_check: realm requires SMS MFA but no SMS transport is configured"
-            );
-            return None;
-        }
+    // 3. SMS sender and HMAC key must be configured. Either missing means the
+    //    factor cannot be challenged, so the authorization is refused. These
+    //    branches used to `return None` — "no challenge needed" — so the code
+    //    was issued without the realm's SMS factor (or, with no key, the OTP
+    //    was HMAC'd under an all-zero key).
+    let Some(sms_sender) = state.sms.as_ref() else {
+        tracing::warn!(
+            realm_id = %realm.as_uuid(),
+            "sms_mfa_challenge_check: realm requires SMS MFA but no SMS transport is \
+             configured; refusing the authorization"
+        );
+        return Some(handlers_common::server_error());
     };
-    let hmac_key: Vec<u8> = state
-        .sms_otp_hmac_key
-        .clone()
-        .unwrap_or_else(|| vec![0u8; 32]);
+    let Some(hmac_key) = super::required_action::sms_otp_hmac_key_bytes(state) else {
+        tracing::warn!(
+            realm_id = %realm.as_uuid(),
+            "sms_mfa_challenge_check: no SMS OTP HMAC key is loaded; refusing the authorization"
+        );
+        return Some(handlers_common::server_error());
+    };
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -456,10 +488,11 @@ pub async fn sms_challenge_post(
         });
     }
 
-    let hmac_key: Vec<u8> = state
-        .sms_otp_hmac_key
-        .clone()
-        .unwrap_or_else(|| vec![0u8; 32]);
+    // No key: nothing can verify, so refuse rather than HMAC under a
+    // guessable key.
+    let Some(hmac_key) = super::required_action::sms_otp_hmac_key_bytes(&state) else {
+        return handlers_common::server_error();
+    };
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

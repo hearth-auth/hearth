@@ -2822,6 +2822,17 @@ pub async fn admin_api_realm_config_patch(
         config.default_required_actions = actions;
     }
     if let Some(methods) = body.mfa_methods {
+        // The same rule the YAML validator and the JSON admin API apply:
+        // known names only, and no `sms` on a transport that cannot deliver.
+        if let Err(reason) =
+            crate::config::check_mfa_methods(&methods, state.sms_transport, state.dev_mode)
+        {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response();
+        }
         config.mfa_methods = if methods.is_empty() {
             None
         } else {

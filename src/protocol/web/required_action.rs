@@ -1587,7 +1587,12 @@ pub async fn enroll_phone_otp_send(
         );
     };
 
-    let hmac_key = sms_otp_hmac_key_bytes(&state);
+    let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
+        return render_enroll_phone_page(
+            &state,
+            Some("SMS delivery is not configured. Contact your administrator."),
+        );
+    };
     let now_ts = now_unix_ts();
 
     let nonce = match state.identity.issue_sms_otp(
@@ -1676,7 +1681,12 @@ pub async fn enroll_phone_otp_verify_submit(
         );
     }
 
-    let hmac_key = sms_otp_hmac_key_bytes(&state);
+    let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
+        return render_enroll_phone_page(
+            &state,
+            Some("SMS delivery is not configured. Contact your administrator."),
+        );
+    };
     let now_ts = now_unix_ts();
 
     match state
@@ -1843,17 +1853,26 @@ fn is_e164(s: &str) -> bool {
     digits.len() >= 7 && digits.len() <= 15 && digits.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Returns the HMAC key bytes to use for OTP operations.
+/// Returns the HMAC key bytes to use for SMS OTP operations, or `None` when
+/// no key is loaded.
 ///
-/// When no key is configured (the `log` transport, in dev or production),
-/// returns a zero-filled 32-byte key. This path is unreachable whenever a real
-/// SMS transport is configured because startup rejects a missing
-/// `HEARTH_SMS_OTP_HMAC_KEY` when `sms.transport` is not `log`.
-pub(super) fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
-    state
-        .sms_otp_hmac_key
-        .clone()
-        .unwrap_or_else(|| vec![0u8; 32])
+/// There is deliberately no fallback. This used to substitute an all-zero
+/// 32-byte key whenever `HEARTH_SMS_OTP_HMAC_KEY` was unset (the `log`
+/// transport), which made every stored OTP digest brute-forceable by anyone
+/// who could read storage. Every caller now treats `None` as "SMS OTP is
+/// unavailable" and fails closed: no code is issued and nothing verifies.
+///
+/// Startup always loads a key for a real SMS transport, and generates a random
+/// per-process key in dev mode, so `None` means a production `log` transport.
+pub(super) fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Option<Vec<u8>> {
+    let key = state.sms_otp_hmac_key.clone();
+    if key.is_none() {
+        tracing::warn!(
+            "SMS OTP refused: no HEARTH_SMS_OTP_HMAC_KEY is loaded, so no code can be \
+             issued or verified (configure a real sms.transport and the key)"
+        );
+    }
+    key
 }
 
 /// Returns the current Unix timestamp in whole seconds.

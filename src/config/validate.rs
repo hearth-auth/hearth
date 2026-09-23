@@ -88,6 +88,50 @@ const DEMO_FORBIDDEN_IN_PROD: &str =
 /// config error for a documented value (audit 2026-08-28 §4.18#10).
 const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms", "email_otp"];
 
+/// The one rule every surface that writes `mfa_methods` applies — the YAML
+/// validator (global `auth.mfa_methods` and `realms.<name>.auth.mfa_methods`),
+/// the JSON admin API and the admin console realm config PATCH.
+///
+/// Refuses:
+/// * any name outside [`VALID_MFA_METHODS`];
+/// * `sms` when the effective SMS transport cannot deliver a code — the
+///   `log` transport outside dev mode. In dev mode the log transport writes
+///   the full message body to the log, so the developer does receive the
+///   code; in production it writes a redacted line and delivers nothing, so
+///   an `sms` factor there could never be satisfied.
+///
+/// Runtime surfaces used to skip both checks, so an admin could enable SMS
+/// MFA on a server that can only log (and, before the redaction, leak) OTPs.
+///
+/// # Errors
+///
+/// Returns the operator-facing reason for the first violation. It names the
+/// offending method or transport, never a secret.
+pub fn check_mfa_methods(
+    methods: &[String],
+    sms_transport: SmsTransport,
+    dev_mode: bool,
+) -> Result<(), String> {
+    if let Some(unknown) = methods
+        .iter()
+        .find(|m| !VALID_MFA_METHODS.contains(&m.as_str()))
+    {
+        return Err(format!(
+            "unknown MFA method '{unknown}'; valid methods are: {}",
+            VALID_MFA_METHODS.join(", ")
+        ));
+    }
+    if !dev_mode && sms_transport == SmsTransport::Log && methods.iter().any(|m| m == "sms") {
+        return Err(
+            "'sms' is listed as an MFA method but sms.transport is 'log', which delivers no \
+             message outside dev mode; configure a real SMS transport (twilio or awssns) to \
+             deliver OTP codes"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Valid authentication method names.
 const VALID_AUTH_METHODS: &[&str] = &["password", "magic_link", "passkey"];
 
@@ -444,7 +488,20 @@ impl Config {
             }
         }
         validate_realm_web_configs_all(self.realms.as_ref(), &mut issues);
-        validate_realm_auth_configs_all(self.realms.as_ref(), &self.sms, &mut issues);
+        if let Some(methods) = &self.auth.mfa_methods {
+            if let Err(reason) = check_mfa_methods(methods, self.sms.transport, self.dev_mode) {
+                issues.push(ValidationIssue {
+                    field: "auth.mfa_methods".to_string(),
+                    reason,
+                });
+            }
+        }
+        validate_realm_auth_configs_all(
+            self.realms.as_ref(),
+            &self.sms,
+            self.dev_mode,
+            &mut issues,
+        );
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
         validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
@@ -1611,6 +1668,7 @@ fn validate_realm_web_configs_all(
 fn validate_realm_auth_configs_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     sms: &SmsConfig,
+    dev_mode: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(realms) = realms else { return };
@@ -1637,25 +1695,10 @@ fn validate_realm_auth_configs_all(
             issues,
         );
         if let Some(methods) = &auth.mfa_methods {
-            for m in methods {
-                if !VALID_MFA_METHODS.contains(&m.as_str()) {
-                    issues.push(ValidationIssue {
-                        field: format!("realms.{name}.auth.mfa_methods"),
-                        reason: format!(
-                            "unknown MFA method '{}'; valid methods are: {}",
-                            m,
-                            VALID_MFA_METHODS.join(", ")
-                        ),
-                    });
-                }
-            }
-            if methods.iter().any(|m| m == "sms") && sms.transport == SmsTransport::Log {
+            if let Err(reason) = check_mfa_methods(methods, sms.transport, dev_mode) {
                 issues.push(ValidationIssue {
                     field: format!("realms.{name}.auth.mfa_methods"),
-                    reason:
-                        "'sms' is listed as an MFA method but sms.transport is 'log'; \
-                             configure a real SMS transport (twilio or awssns) to deliver OTP codes"
-                            .to_string(),
+                    reason,
                 });
             }
         }
@@ -1962,7 +2005,7 @@ mod tests {
         sms: &SmsConfig,
     ) -> Result<(), ConfigError> {
         let mut issues = Vec::new();
-        super::validate_realm_auth_configs_all(realms, sms, &mut issues);
+        super::validate_realm_auth_configs_all(realms, sms, false, &mut issues);
         first_error(issues)
     }
 
@@ -2348,12 +2391,94 @@ mod tests {
         assert!(reason.contains("carrier_pigeon"), "{reason}");
     }
 
+    // ===== fix/ga-sms: one shared MFA-methods rule for YAML and runtime =====
+
+    fn methods(ms: &[&str]) -> Vec<String> {
+        ms.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn shared_mfa_rule_refuses_sms_on_the_log_transport_outside_dev() {
+        let err = check_mfa_methods(&methods(&["totp", "sms"]), SmsTransport::Log, false)
+            .expect_err("log transport cannot deliver an OTP in production");
+        assert!(err.contains("log"), "reason must name the transport: {err}");
+    }
+
+    #[test]
+    fn shared_mfa_rule_allows_sms_on_the_log_transport_in_dev() {
+        // Dev mode logs the full SMS body, so the developer does get the code.
+        assert_eq!(
+            check_mfa_methods(&methods(&["sms"]), SmsTransport::Log, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn shared_mfa_rule_allows_sms_on_a_real_transport() {
+        for t in [SmsTransport::Twilio, SmsTransport::AwsSns] {
+            assert_eq!(check_mfa_methods(&methods(&["sms"]), t, false), Ok(()));
+        }
+    }
+
+    #[test]
+    fn shared_mfa_rule_refuses_unknown_methods_even_in_dev() {
+        let err = check_mfa_methods(&methods(&["carrier_pigeon"]), SmsTransport::Twilio, true)
+            .expect_err("unknown method");
+        assert!(err.contains("carrier_pigeon"), "{err}");
+    }
+
+    #[test]
+    fn shared_mfa_rule_accepts_non_sms_methods_on_the_log_transport() {
+        assert_eq!(
+            check_mfa_methods(
+                &methods(&["totp", "webauthn", "email_otp"]),
+                SmsTransport::Log,
+                false
+            ),
+            Ok(())
+        );
+    }
+
+    /// The global `auth.mfa_methods` default is inherited by every realm that
+    /// does not override it, but only the per-realm list was ever validated.
+    #[test]
+    fn global_auth_mfa_methods_with_sms_on_the_log_transport_is_refused() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nauth:\n  mfa_methods: [\"sms\"]\n\
+               storage:\n  data_dir: \"/tmp/ga-sms-global\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("log")),
+            "global sms MFA on the log transport must be refused: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn global_auth_mfa_methods_with_an_unknown_method_is_refused() {
+        let yaml = "security:\n  key_encryption_key: \"".to_string()
+            + &"ab".repeat(32)
+            + "\"\nauth:\n  mfa_methods: [\"carrier_pigeon\"]\n\
+               storage:\n  data_dir: \"/tmp/ga-sms-global2\"\n";
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        let issues = config.validate_all();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("carrier_pigeon")),
+            "an unknown global MFA method must be refused: {issues:?}"
+        );
+    }
+
     #[test]
     fn validate_all_sms_mfa_with_log_transport_accumulates_issue() {
         let mut realms = std::collections::HashMap::new();
         realms.insert("default".to_string(), realm_with_mfa(&["sms"]));
         let mut issues = Vec::new();
-        validate_realm_auth_configs_all(Some(&realms), &sms_log(), &mut issues);
+        validate_realm_auth_configs_all(Some(&realms), &sms_log(), false, &mut issues);
         assert!(
             issues
                 .iter()

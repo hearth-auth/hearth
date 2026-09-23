@@ -58,4 +58,4 @@ pub use types::{
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{ClusterConfig, PeerConfig};
 pub use types::{Config, ValidationIssue};
-pub use validate::deferred_server_warnings;
+pub use validate::{check_mfa_methods, deferred_server_warnings};

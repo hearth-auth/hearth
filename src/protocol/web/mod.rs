@@ -193,9 +193,15 @@ pub struct WebState {
     /// SMS sender for OTP delivery. `None` when SMS is not configured.
     pub sms: Option<crate::identity::sms::SharedSmsSender>,
     /// Raw bytes of the HMAC-SHA256 key used to sign/verify SMS OTP codes.
-    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY`. `None` when the Log transport is
-    /// active (in dev or production; a deterministic dev key is substituted).
+    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY` (or, in dev mode only, a random
+    /// per-process key). `None` means no key is loaded, and every SMS OTP
+    /// surface then fails closed: no code is issued and no challenge passes.
     pub sms_otp_hmac_key: Option<Vec<u8>>,
+    /// The configured `sms.transport`. Together with [`Self::dev_mode`] it
+    /// decides whether SMS MFA can deliver a code, which the realm config
+    /// PATCH checks before enabling `sms` in `mfa_methods`. Defaults to the
+    /// fail-closed [`crate::config::SmsTransport::Log`].
+    pub sms_transport: crate::config::SmsTransport,
     /// CAPTCHA provider for challenge-gated forms (P-1 — HEA-1202).
     ///
     /// Defaults to [`crate::abuse::challenge::NoopCaptchaProvider`] (fail-open).
@@ -315,6 +321,7 @@ impl WebState {
             trust_forwarded_proto: false,
             sms: None,
             sms_otp_hmac_key: None,
+            sms_transport: crate::config::SmsTransport::Log,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
             dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
             abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
@@ -530,6 +537,13 @@ impl WebState {
     ) -> Self {
         self.sms = Some(sender);
         self.sms_otp_hmac_key = hmac_key;
+        self
+    }
+
+    /// Records the configured `sms.transport` (see [`Self::sms_transport`]).
+    #[must_use]
+    pub fn with_sms_transport(mut self, transport: crate::config::SmsTransport) -> Self {
+        self.sms_transport = transport;
         self
     }
 
