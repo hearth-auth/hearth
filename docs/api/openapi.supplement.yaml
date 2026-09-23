@@ -875,12 +875,22 @@ paths:
 
   /admin/cluster/transfer-leadership:
     post:
-      summary: Transfer Raft leadership
+      summary: Step the Raft leader down
+      description: >-
+        Steps this node down so another voter wins the next election. This is
+        not a targeted transfer: the pinned Raft library cannot choose the
+        winner, so a body naming target_node_id is refused with 422.
       operationId: adminClusterTransferLeadership
       tags: [Cluster]
       responses:
-        "204":
-          description: Leadership transferred
+        "200":
+          description: Another voter now leads; body is {"new_leader_id":<u64>}
+        "409":
+          description: This node is not the leader
+        "422":
+          description: target_node_id was supplied; targeted leadership transfer is not supported
+        "503":
+          description: Not in cluster mode
 
   # ── Admin — assignments (extended) ───────────────────────────────────────
   /admin/assignments/{id}:

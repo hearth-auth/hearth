@@ -407,10 +407,77 @@ async fn transfer_leadership_returns_503_in_single_node_mode() {
                 .header("Authorization", format!("Bearer {token}"))
                 .header("X-Realm-ID", system_realm.as_uuid().to_string())
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"target_node_id": 2}"#))
+                .body(Body::from("{}"))
                 .expect("req"),
         )
         .await
         .expect("resp");
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ── Task 26.60: a targeted transfer is refused, not silently ignored ──────────
+//
+// openraft 0.9.25 cannot hand leadership to a chosen node, so a request that
+// names one must be refused before anything happens — never answered with a
+// step-down to whichever voter wins. The check is request validation, so it
+// fires in single-node mode too, and therefore before any Raft side effect.
+
+async fn post_transfer(app: axum::Router, token: &str, body: &'static str) -> (StatusCode, String) {
+    let system_realm = RealmId::new(Uuid::nil());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/cluster/transfer-leadership")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", system_realm.as_uuid().to_string())
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
+}
+
+#[tokio::test]
+async fn transfer_leadership_rejects_target_node_id_with_422() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let token = issue_system_token(&h, "admin@example.com").await;
+    let app = build_app(&h).await;
+
+    let (status, body) = post_transfer(app, &token, r#"{"target_node_id": 2}"#).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a named target cannot be honoured and must be refused; body: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    let error = json["error"].as_str().expect("error string");
+    assert!(
+        error.contains("targeted leadership transfer is not supported"),
+        "error must say why the request was refused; got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn transfer_leadership_without_target_is_not_refused() {
+    // `null`, an absent field and an empty body all mean "no target" and must
+    // not be refused — they reach the cluster check (503 here: no Raft engine).
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let token = issue_system_token(&h, "admin@example.com").await;
+
+    for body in [r#"{"target_node_id": null}"#, "{}", ""] {
+        let app = build_app(&h).await;
+        let (status, resp_body) = post_transfer(app, &token, body).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "body {body:?} names no target and must not be refused; got {resp_body}"
+        );
+    }
 }

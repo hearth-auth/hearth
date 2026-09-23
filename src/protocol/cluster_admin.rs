@@ -175,14 +175,23 @@ pub(crate) async fn admin_cluster_status(
 /// Request body for `POST /admin/cluster/transfer-leadership`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TransferLeadershipRequest {
-    /// Preferred target node ID for the new leader.
+    /// Node the caller wants to become leader.
     ///
-    /// A preference only. openraft 0.9.25 has no targeted-transfer API, so
-    /// the winner of the election this node stands down from is whichever
-    /// voter's timer fires first. Inspect `exact_target` in the response to
-    /// see whether it happened to match.
+    /// **Not supported; a request that sets it is refused with 422** (task
+    /// 26.60). openraft 0.9.25 has no targeted-transfer API, so the winner of
+    /// the election this node stands down from is whichever voter's timer
+    /// fires first. Accepting the field and stepping down anyway would report
+    /// success for a request the server did not carry out. The field stays in
+    /// the schema so the refusal is explicit rather than a silent
+    /// unknown-field drop; `null` is treated as absent.
     pub target_node_id: Option<u64>,
 }
+
+/// Error returned when a caller names a `target_node_id`.
+pub(crate) const TARGETED_TRANSFER_UNSUPPORTED: &str =
+    "targeted leadership transfer is not supported: the Raft library Hearth pins (openraft \
+     0.9.25) cannot hand leadership to a chosen node. Omit target_node_id to step this node \
+     down; the response's new_leader_id reports which voter won the election";
 
 /// `POST /admin/cluster/transfer-leadership`
 ///
@@ -191,10 +200,18 @@ pub(crate) struct TransferLeadershipRequest {
 ///
 /// This is a **step-down, not a targeted transfer.** openraft 0.9.25 exposes
 /// no API for handing leadership to a chosen peer (`Trigger::transfer_leader`
-/// arrived in 0.10), so `target_node_id` is a preference the server cannot
-/// honour. The response reports which node actually won in `new_leader_id`
-/// and whether that was the requested one in `exact_target`, which will
-/// normally be `false`.
+/// arrived in 0.10). A body naming a `target_node_id` is therefore refused
+/// with **422** before anything is changed, rather than answered with a
+/// step-down to whichever voter happens to win. The response reports the
+/// winner in `new_leader_id`.
+///
+/// Why no targeted transfer can be built from the 0.9.25 public API: asking
+/// the target to `trigger().elect()` fails while the followers' leader
+/// leases are live (`Engine::handle_vote_req` rejects every vote inside the
+/// lease), and once the leases lapse every other follower's election timer
+/// races the target's. Only suppressing elections cluster-wide would make the
+/// outcome deterministic, and a lost "re-enable" would leave a voter that can
+/// never stand again.
 ///
 /// **Availability note:** this deliberately lets the followers' leader leases
 /// expire, so the cluster is without a leader for
@@ -233,6 +250,17 @@ pub(crate) async fn admin_cluster_transfer_leadership(
         }
     };
 
+    // Refuse a named target before touching Raft: the step-down below cannot
+    // choose its winner, so going ahead would report success for a request
+    // the server did not carry out (task 26.60).
+    if body.target_node_id.is_some() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": TARGETED_TRANSFER_UNSUPPORTED})),
+        )
+            .into_response();
+    }
+
     let Some(cluster) = state.cluster.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -242,17 +270,11 @@ pub(crate) async fn admin_cluster_transfer_leadership(
     };
 
     match cluster.transfer_leadership().await {
-        Ok(new_leader_id) => {
-            let exact_target = body.target_node_id.map_or(false, |t| t == new_leader_id);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "new_leader_id": new_leader_id,
-                    "exact_target": exact_target,
-                })),
-            )
-                .into_response()
-        }
+        Ok(new_leader_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "new_leader_id": new_leader_id })),
+        )
+            .into_response(),
         Err(ClusterError::NotLeader { .. }) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "this node is not the leader"})),

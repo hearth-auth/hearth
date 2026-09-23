@@ -316,7 +316,7 @@ replacement while the old leader is still reachable:
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/transfer-leadership \
   -H "Authorization: Bearer <system-admin-token>" \
   -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
-# => {"new_leader_id": 2, "exact_target": false}
+# => {"new_leader_id": 2}
 
 # Then stop the process
 systemctl stop hearth
@@ -324,9 +324,11 @@ systemctl stop hearth
 
 > **This is a step-down, not a targeted transfer.** openraft 0.9.25 — the
 > version Hearth pins — has no API for handing leadership to a *chosen* peer;
-> `Trigger::transfer_leader` arrived in 0.10. `target_node_id` is therefore a
-> preference the server cannot honour, and `exact_target` will normally be
-> `false`. Read `new_leader_id` to find out who actually took over.
+> `Trigger::transfer_leader` arrived in 0.10. A request body that names a
+> `target_node_id` is therefore **refused with `422`** and nothing changes —
+> the server will not step down and then report success for a handover it did
+> not perform. Send no body (or `{}`) and read `new_leader_id` to find out
+> which voter won the election.
 
 > **It is not instantaneous, and it is not free.** The endpoint works by
 > letting the followers' leader leases expire, so the cluster has **no leader**
