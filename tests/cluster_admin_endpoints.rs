@@ -481,3 +481,32 @@ async fn transfer_leadership_without_target_is_not_refused() {
         );
     }
 }
+
+#[tokio::test]
+async fn transfer_leadership_rejects_misspelled_target_with_400() {
+    // A target sent under any spelling but `target_node_id` (the camelCase
+    // form generated JSON uses, or a guess) must be refused as an unknown
+    // field — not dropped, which would step the leader down and answer 200.
+    // The check is request parsing, so it fires before the cluster check.
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let token = issue_system_token(&h, "admin@example.com").await;
+
+    for body in [
+        r#"{"targetNodeId": 2}"#,
+        r#"{"target": 2}"#,
+        r#"{"node_id": 2}"#,
+    ] {
+        let app = build_app(&h).await;
+        let (status, resp_body) = post_transfer(app, &token, body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "body {body:?} names a target under an unknown key and must be refused; \
+             got {resp_body}"
+        );
+        assert!(
+            resp_body.contains("unknown field"),
+            "body {body:?}: error must name the unknown field; got {resp_body}"
+        );
+    }
+}

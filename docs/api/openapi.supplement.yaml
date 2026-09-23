@@ -879,12 +879,18 @@ paths:
       description: >-
         Steps this node down so another voter wins the next election. This is
         not a targeted transfer: the pinned Raft library cannot choose the
-        winner, so a body naming target_node_id is refused with 422.
+        winner, so a body naming target_node_id is refused with 422, and a body
+        with any other field is refused with 400.
       operationId: adminClusterTransferLeadership
       tags: [Cluster]
       responses:
         "200":
-          description: Another voter now leads; body is {"new_leader_id":<u64>}
+          description: >-
+            Another voter now leads; body is {"new_leader_id":<u64>,"exact_target":false}.
+            exact_target is deprecated and always false (a request naming a target
+            is refused with 422).
+        "400":
+          description: Body is not valid JSON or contains an unknown field
         "409":
           description: This node is not the leader
         "422":

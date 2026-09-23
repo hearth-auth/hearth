@@ -173,7 +173,12 @@ pub(crate) async fn admin_cluster_status(
 // ── Transfer leadership ───────────────────────────────────────────────────────
 
 /// Request body for `POST /admin/cluster/transfer-leadership`.
+// A-47: admin request bodies use deny_unknown_fields. Here it also closes the
+// task 26.60 hole from the other side: a target sent under any other spelling
+// (`targetNodeId`, `target`, `node_id`) is refused with 400 instead of being
+// dropped and followed by a step-down that answers 200.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TransferLeadershipRequest {
     /// Node the caller wants to become leader.
     ///
@@ -182,8 +187,9 @@ pub(crate) struct TransferLeadershipRequest {
     /// the election this node stands down from is whichever voter's timer
     /// fires first. Accepting the field and stepping down anyway would report
     /// success for a request the server did not carry out. The field stays in
-    /// the schema so the refusal is explicit rather than a silent
-    /// unknown-field drop; `null` is treated as absent.
+    /// the schema so its refusal names the reason (422) rather than the
+    /// generic unknown-field 400 every other key gets; `null` is treated as
+    /// absent.
     pub target_node_id: Option<u64>,
 }
 
@@ -202,8 +208,9 @@ pub(crate) const TARGETED_TRANSFER_UNSUPPORTED: &str =
 /// no API for handing leadership to a chosen peer (`Trigger::transfer_leader`
 /// arrived in 0.10). A body naming a `target_node_id` is therefore refused
 /// with **422** before anything is changed, rather than answered with a
-/// step-down to whichever voter happens to win. The response reports the
-/// winner in `new_leader_id`.
+/// step-down to whichever voter happens to win, and any other body field is
+/// refused with **400**. The response reports the winner in `new_leader_id`
+/// (plus the deprecated, always-`false` `exact_target`).
 ///
 /// Why no targeted transfer can be built from the 0.9.25 public API: asking
 /// the target to `trigger().elect()` fails while the followers' leader
@@ -270,11 +277,7 @@ pub(crate) async fn admin_cluster_transfer_leadership(
     };
 
     match cluster.transfer_leadership().await {
-        Ok(new_leader_id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "new_leader_id": new_leader_id })),
-        )
-            .into_response(),
+        Ok(new_leader_id) => (StatusCode::OK, Json(step_down_body(new_leader_id))).into_response(),
         Err(ClusterError::NotLeader { .. }) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": "this node is not the leader"})),
@@ -285,5 +288,54 @@ pub(crate) async fn admin_cluster_transfer_leadership(
             Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// JSON body of a successful `POST /admin/cluster/transfer-leadership`.
+///
+/// `exact_target` is **deprecated** and always `false`. 1.0.0 documented the
+/// body as `{new_leader_id, exact_target}`, and dropping a documented field is
+/// a breaking change under VERSIONING.md, so it stays until 2.0. It is still
+/// accurate: a request naming a target is refused with 422 and never gets
+/// here, so no request reaching this body had its target matched.
+fn step_down_body(new_leader_id: u64) -> serde_json::Value {
+    serde_json::json!({ "new_leader_id": new_leader_id, "exact_target": false })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_down_body_keeps_the_documented_exact_target_field() {
+        // 1.0.0 documented the 200 body as `{new_leader_id, exact_target}`
+        // (VERSIONING.md: dropping a documented response field is breaking).
+        // Every request reaching the 200 path names no target, so the field
+        // is always `false` — deprecated, but still present.
+        assert_eq!(
+            step_down_body(2),
+            serde_json::json!({ "new_leader_id": 2, "exact_target": false })
+        );
+    }
+
+    #[test]
+    fn transfer_request_refuses_unknown_fields() {
+        // A-47: a target under any other spelling must not be dropped
+        // silently and then followed by a step-down (task 26.60).
+        for body in [
+            r#"{"targetNodeId": 2}"#,
+            r#"{"target": 2}"#,
+            r#"{"node_id": 2}"#,
+        ] {
+            let err = serde_json::from_str::<TransferLeadershipRequest>(body)
+                .expect_err(&format!("{body} must be refused"));
+            assert!(
+                err.to_string().contains("unknown field"),
+                "{body}: expected an unknown-field error, got {err}"
+            );
+        }
+        let ok: TransferLeadershipRequest =
+            serde_json::from_str(r#"{"target_node_id": null}"#).expect("known field");
+        assert_eq!(ok.target_node_id, None);
     }
 }
