@@ -5045,6 +5045,17 @@ impl EmbeddedIdentityEngine {
             device_authorization_endpoint: Some(format!("{issuer}/device_authorization")),
             revocation_endpoint: Some(format!("{issuer}/revoke")),
             introspection_endpoint: Some(format!("{issuer}/introspect")),
+            revocation_endpoint_auth_methods_supported: vec![
+                "none".to_string(),
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+            ],
+            // Task 26.43: confidential clients only — never `none`.
+            introspection_endpoint_auth_methods_supported: vec![
+                "client_secret_basic".to_string(),
+                "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
+            ],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some(format!("{issuer}/end_session")),
@@ -11059,6 +11070,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client_secret: Option<&str>,
     ) -> Result<(), IdentityError> {
         self.authenticate_client_inner(realm_id, client_id, client_secret)
+    }
+
+    fn authenticate_confidential_client(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        self.authenticate_confidential_client_inner(realm_id, client_id, client_secret)
     }
 
     fn update_client(

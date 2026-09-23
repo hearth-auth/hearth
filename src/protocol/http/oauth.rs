@@ -435,7 +435,8 @@ struct HttpRevocationBody {
 ///
 /// Extends the proto type with optional client credentials for HTTP endpoints.
 /// Clients may authenticate via HTTP Basic Auth or via these body fields
-/// per RFC 6749 §2.3.1.
+/// per RFC 6749 §2.3.1, or with a `private_key_jwt` assertion (RFC 7523 §2.2).
+/// Only confidential clients are served (RFC 7662 §2.1, task 26.43).
 #[derive(Debug, Deserialize)]
 struct HttpIntrospectionBody {
     token: String,
@@ -445,6 +446,10 @@ struct HttpIntrospectionBody {
     client_id: Option<String>,
     #[serde(default)]
     client_secret: Option<String>,
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    #[serde(default)]
+    client_assertion: Option<String>,
 }
 
 /// Parses HTTP Basic Auth credentials from the `Authorization` header.
@@ -576,7 +581,8 @@ fn resolve_client_credentials(
 /// Returns the authenticated `ClientId` on success, or a 401 response if
 /// client_id is missing, the client does not exist, or the secret is wrong.
 /// Confidential clients require a secret; public clients are accepted with
-/// client_id alone.
+/// client_id alone — right for `/revoke` (RFC 7009 §2.1), never for
+/// `/introspect`, which uses [`verify_introspection_client`] (task 26.43).
 fn verify_endpoint_client(
     state: &AppState,
     realm_id: &RealmId,
@@ -624,6 +630,104 @@ fn verify_endpoint_client(
             )
                 .into_response()
         })
+}
+
+/// `client_assertion_type` value for `private_key_jwt` (RFC 7523 §2.2).
+const CLIENT_ASSERTION_TYPE_JWT_BEARER: &str =
+    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// The uniform RFC 6749 §5.2 `invalid_client` refusal for introspection.
+fn invalid_client_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [("www-authenticate", "Basic realm=\"hearth\"")],
+        Json(serde_json::json!({"error": "invalid_client"})),
+    )
+        .into_response()
+}
+
+/// Authenticates the caller of the token-introspection endpoint, which serves
+/// CONFIDENTIAL clients only (RFC 7662 §2.1 and §4, task 26.43).
+///
+/// A public client is refused with `401 invalid_client`: its `client_id` is
+/// public by construction — it travels in every browser authorization request
+/// and dynamic registration hands it out — so accepting it alone made the
+/// endpoint an anonymous token-information oracle. Accepted methods are
+/// `client_secret_basic`, `client_secret_post` and `private_key_jwt`, matching
+/// `introspection_endpoint_auth_methods_supported` in discovery.
+///
+/// `/revoke` keeps [`verify_endpoint_client`], which accepts a public client:
+/// RFC 7009 §2.1 lets public clients revoke.
+fn verify_introspection_client(
+    state: &AppState,
+    realm_id: &RealmId,
+    headers: &HeaderMap,
+    body: &HttpIntrospectionBody,
+) -> Result<ClientId, Response> {
+    let assertion_type = body
+        .client_assertion_type
+        .as_deref()
+        .and_then(non_empty_credential);
+    let assertion = body
+        .client_assertion
+        .as_deref()
+        .and_then(non_empty_credential);
+
+    if assertion_type.is_none() && assertion.is_none() {
+        let (raw_id, secret) = match resolve_client_credentials(
+            headers,
+            body.client_id.as_deref(),
+            body.client_secret.as_deref(),
+        )? {
+            (Some(id), secret) => (id, secret),
+            (None, _) => return Err(invalid_client_response()),
+        };
+        let client_id = raw_id
+            .parse::<uuid::Uuid>()
+            .map(ClientId::new)
+            .map_err(|_| invalid_client_response())?;
+        return state
+            .identity
+            .authenticate_confidential_client(realm_id, &client_id, secret.as_deref())
+            .map(|()| client_id)
+            .map_err(|_| invalid_client_response());
+    }
+
+    // RFC 6749 §2.3 / §5.2: a client MUST NOT use more than one
+    // authentication mechanism in a request.
+    if parse_basic_auth(headers).is_some()
+        || body
+            .client_secret
+            .as_deref()
+            .and_then(non_empty_credential)
+            .is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": "more than one client authentication method was used"
+            })),
+        )
+            .into_response());
+    }
+    let (Some(CLIENT_ASSERTION_TYPE_JWT_BEARER), Some(assertion)) = (assertion_type, assertion)
+    else {
+        return Err(invalid_client_response());
+    };
+    // The assertion's `iss`/`sub` must equal this id — the engine checks it.
+    let client_id = body
+        .client_id
+        .as_deref()
+        .and_then(non_empty_credential)
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
+        .map(ClientId::new)
+        .ok_or_else(invalid_client_response)?;
+    state
+        .identity
+        .verify_client_assertion(realm_id, &client_id, assertion)
+        .map(|()| client_id)
+        .map_err(|_| invalid_client_response())
 }
 
 /// Backfills an absent or empty body `client_id` from the Basic Auth username.
@@ -2141,8 +2245,9 @@ async fn token_revocation(
 
 /// POST /introspect — introspects an OAuth 2.0 token.
 ///
-/// Returns metadata about the token including its active status. Requires
-/// client authentication via HTTP Basic Auth or body `client_id`/`client_secret`.
+/// Returns metadata about the token including its active status. Serves
+/// confidential clients only — `client_secret_basic`, `client_secret_post` or
+/// `private_key_jwt`; a public client gets `401 invalid_client` (task 26.43).
 async fn token_introspection(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2153,13 +2258,7 @@ async fn token_introspection(
         Err(e) => return e.into_response(),
     };
 
-    let client_id = match verify_endpoint_client(
-        &state,
-        &realm_id,
-        &headers,
-        body.client_id.as_deref(),
-        body.client_secret.as_deref(),
-    ) {
+    let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
@@ -3232,8 +3331,9 @@ async fn realm_token_revocation(
 
 /// `POST /realms/{realm}/introspect` — realm-scoped twin of `/introspect`.
 ///
-/// Requires client authentication, applies the RFC 7662 §2 audience
-/// restriction via `introspecting_client_id`, and answers with the same
+/// Requires confidential-client authentication (task 26.43), applies the
+/// RFC 7662 §2 audience restriction via `introspecting_client_id`, and
+/// answers with the same
 /// wire format as the header-form twin — the domain type always emits
 /// `active: false` for inactive tokens, where the previous proto3
 /// serialization omitted it (audit 2026-08-28 §4.1#3, §4.1#4).
@@ -3247,13 +3347,7 @@ async fn realm_token_introspection(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let client_id = match verify_endpoint_client(
-        &state,
-        &realm_id,
-        &headers,
-        body.client_id.as_deref(),
-        body.client_secret.as_deref(),
-    ) {
+    let client_id = match verify_introspection_client(&state, &realm_id, &headers, &body) {
         Ok(id) => id,
         Err(resp) => return resp,
     };

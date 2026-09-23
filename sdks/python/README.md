@@ -90,9 +90,13 @@ app = RequirePermissionMiddleware(
     permission="docs.write",
     mode="introspection",
     client_id="<resource-server-client-id>",
-    client_secret="<secret>",   # optional for public clients
+    client_secret="<secret>",   # required — introspection serves confidential clients only
 )
 ```
+
+Hearth refuses a public client at the introspection endpoint with `401 invalid_client`, so
+`introspect()` raises `ConfigurationError` without sending a request when `client_secret` is
+missing; the middleware maps that to a denial.
 
 Or call directly:
 

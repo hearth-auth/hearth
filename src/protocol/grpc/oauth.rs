@@ -19,7 +19,7 @@ use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::{
     extract_grpc_user_auth, extract_realm_id, identity_to_status, verify_grpc_client_auth,
-    CLIENT_ID_META_KEY,
+    verify_grpc_confidential_client_auth, CLIENT_ID_META_KEY,
 };
 use super::server::GrpcState;
 
@@ -146,8 +146,17 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::TokenIntrospectionRequest>,
     ) -> Result<Response<pb::IntrospectionResponse>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
-        verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
-        let body: domain::TokenIntrospectionRequest = req.into_inner().into();
+        // Task 26.43: confidential clients only (RFC 7662 §2.1). The
+        // authenticated client is passed on so the RFC 7662 audience
+        // restriction applies here exactly as on the HTTP routes — this path
+        // used to pass `None`, which skipped it.
+        let client_id = verify_grpc_confidential_client_auth(
+            req.metadata(),
+            &realm_id,
+            self.state.identity.as_ref(),
+        )?;
+        let mut body: domain::TokenIntrospectionRequest = req.into_inner().into();
+        body.introspecting_client_id = Some(client_id);
         let resp = self
             .state
             .identity

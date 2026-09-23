@@ -1198,6 +1198,16 @@ pub struct OidcDiscoveryDocument {
     /// URL of the token introspection endpoint (RFC 7662).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_endpoint: Option<String>,
+    /// Client authentication methods the revocation endpoint accepts
+    /// (RFC 8414 §2). Includes `none`: RFC 7009 §2.1 lets public clients
+    /// revoke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocation_endpoint_auth_methods_supported: Vec<String>,
+    /// Client authentication methods the introspection endpoint accepts
+    /// (RFC 8414 §2). Never includes `none`: introspection serves confidential
+    /// clients only (RFC 7662 §2.1, task 26.43).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub introspection_endpoint_auth_methods_supported: Vec<String>,
     /// Whether RFC 8707 resource indicators are supported.
     #[serde(default)]
     pub resource_indicators_supported: bool,
@@ -1930,6 +1940,8 @@ mod tests {
             ),
             revocation_endpoint: Some("https://hearth.local/revoke".to_string()),
             introspection_endpoint: Some("https://hearth.local/introspect".to_string()),
+            revocation_endpoint_auth_methods_supported: vec![],
+            introspection_endpoint_auth_methods_supported: vec![],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),

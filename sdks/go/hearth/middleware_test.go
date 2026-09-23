@@ -2,6 +2,7 @@ package hearth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -440,5 +441,30 @@ func TestIntrospectActive(t *testing.T) {
 	}
 	if len(resp.Permissions) != 1 || resp.Permissions[0] != "billing.read" {
 		t.Fatalf("permissions: %v", resp.Permissions)
+	}
+}
+
+// Hearth's introspection endpoint serves confidential clients only (task
+// 26.43): a public client presenting client_id alone gets 401 invalid_client.
+// Introspect therefore refuses a missing secret before any network call.
+func TestIntrospectRequiresClientSecret(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "r1")
+	_, err := c.Introspect(t.Context(), IntrospectRequest{
+		Token:    "access-token",
+		ClientID: "public-client",
+	})
+	var cfgErr *ConfigurationError
+	if !errors.As(err, &cfgErr) {
+		t.Fatalf("expected *ConfigurationError for a missing client secret, got %T: %v", err, err)
+	}
+	if called {
+		t.Fatal("Introspect must not send a request without a client secret")
 	}
 }

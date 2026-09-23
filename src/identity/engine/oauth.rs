@@ -3328,6 +3328,36 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Confidential-only twin of [`Self::authenticate_client_inner`] for the
+    /// introspection endpoint (RFC 7662 §2.1, task 26.43).
+    ///
+    /// Keeps the 22.25 cost rule — hashing work is a function of whether the
+    /// caller presented a secret, never of what the lookup found — and differs
+    /// only in the decision: a client with no stored hash (public, or
+    /// `private_key_jwt`-only) is refused rather than accepted, AFTER the one
+    /// verification a presented secret always costs.
+    pub(super) fn authenticate_confidential_client_inner(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        client_secret: Option<&str>,
+    ) -> Result<(), IdentityError> {
+        let client = self.get_client(realm_id, client_id)?;
+        // No secret: refuse on every arm without hashing. A public client has
+        // nothing else to prove, so it cannot pass here.
+        let Some(secret) = client_secret else {
+            return Err(IdentityError::InvalidClientSecret);
+        };
+        let stored_hash = client.as_ref().and_then(OAuthClient::client_secret_hash);
+        let matched = self.verify_presented_client_secret(realm_id, stored_hash, secret)?;
+        // `matched` is false whenever there is no stored hash (the dummy never
+        // matches), so an unknown or public client is refused here too.
+        if stored_hash.is_none() || !matched {
+            return Err(IdentityError::InvalidClientSecret);
+        }
+        Ok(())
+    }
+
     pub(super) fn update_client_inner(
         &self,
         realm_id: &RealmId,

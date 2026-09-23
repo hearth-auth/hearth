@@ -337,12 +337,20 @@ func (c *Client) UserInfo(ctx context.Context, accessToken string) (*UserInfoRes
 }
 
 // Introspect calls POST /introspect (RFC 7662) to validate a token and retrieve
-// live RBAC claims. Requires client credentials for the resource-server client.
+// live RBAC claims. Requires the credentials of a CONFIDENTIAL resource-server
+// client: Hearth refuses a public client with 401 invalid_client, so a missing
+// ClientSecret is rejected here with a *ConfigurationError before any request.
 //
 // For ModeIntrospection middleware, prefer using RequirePermission which checks
 // the echoed mode for you. Call Introspect directly when you need the full
 // claim set.
 func (c *Client) Introspect(ctx context.Context, req IntrospectRequest) (*IntrospectResponse, error) {
+	if req.ClientID == "" || req.ClientSecret == "" {
+		return nil, &ConfigurationError{
+			Field:   "ClientSecret",
+			Message: "introspection requires a confidential client's ClientID and ClientSecret",
+		}
+	}
 	body, err := json.Marshal(map[string]string{
 		"token":           req.Token,
 		"token_type_hint": req.TokenTypeHint,

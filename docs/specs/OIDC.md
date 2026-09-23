@@ -424,9 +424,13 @@ The `/.well-known/openid-configuration` endpoint advertises FAPI-relevant capabi
   "response_modes_supported": ["query", "fragment", "form_post", "query.jwt", "fragment.jwt", "jwt"],
   "request_parameter_supported": true,
   "request_uri_parameter_supported": true,
-  "end_session_endpoint": "https://as.example.com/realms/{realm}/end_session"
+  "end_session_endpoint": "https://as.example.com/realms/{realm}/end_session",
+  "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "private_key_jwt"],
+  "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"]
 }
 ```
+
+`introspection_endpoint_auth_methods_supported` never lists `none` — see §8.1.
 
 When a FAPI 2.0 Advanced realm is active, `require_pushed_authorization_requests` is set to `true`.
 
@@ -531,6 +535,47 @@ the same rule the `authorization_code` arm applies. HTTP Basic Auth takes preced
 `invalid_client`. Public clients carry no secret and are unaffected. Dynamic client registration
 (`POST /register`, RFC 7591) and the JSON permission-decision endpoint remain JSON-only by design.
 
+### 8.1 Introspection and Revocation — Client Authentication
+
+**Introspection serves confidential clients only** (RFC 7662 §2.1, §4; task 26.43). `POST
+/introspect`, `POST /realms/{realm}/introspect` and the gRPC `OAuthService.Introspect` RPC MUST
+authenticate the caller as a confidential client, by exactly one of:
+
+| Method | How it is presented |
+|--------|---------------------|
+| `client_secret_basic` | `Authorization: Basic base64(client_id:client_secret)` |
+| `client_secret_post` | `client_id` + `client_secret` body fields |
+| `private_key_jwt` | `client_id` + `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` + `client_assertion` (RFC 7523 §2.2 — same rules as the token endpoint: EdDSA, `iss`/`sub` = the client, `aud` = the realm issuer, single-use `jti`, lifetime ≤ 5 min). HTTP only. |
+
+gRPC callers present `x-hearth-client-id` + `x-hearth-client-secret` metadata.
+
+A **public client** (no stored secret) is refused with `401` `{"error":"invalid_client"}` and
+`WWW-Authenticate: Basic` (RFC 6749 §5.2) — including when it presents a made-up secret. A
+`client_id` is public by construction (it travels in every browser authorization request and DCR
+hands it out), so accepting it alone would make the endpoint an anonymous token-information
+oracle. A `private_key_jwt` client presenting `client_id` without an assertion, a confidential
+client with a missing or wrong secret, and an unknown client all receive the same `401
+invalid_client`. The work done is a function of the caller's input only — a presented secret costs
+exactly one Argon2id verification on every arm, and no secret costs none — so response time does
+not reveal whether a client exists or which type it is. Combining an assertion with a secret or a
+Basic header is `400 invalid_request` (RFC 6749 §2.3, §5.2). After authentication the RFC 7662
+audience restriction applies to the authenticated client on every surface, gRPC included.
+
+**Revocation still accepts public clients** (RFC 7009 §2.1): `POST /revoke`, its realm twin and
+gRPC `Revoke` authenticate a public client by `client_id` alone and a confidential client by its
+secret. Note that revocation does not currently check that the token was issued to the revoking
+client (RFC 7009 §2.1 says the server "verifies whether the token was issued to the client making
+the revocation request") — tracked as an open finding.
+
+Discovery advertises both sets (RFC 8414 §2):
+
+```json
+{
+  "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "private_key_jwt"],
+  "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"]
+}
+```
+
 ---
 
 ## 9. Test Coverage
@@ -545,6 +590,7 @@ the same rule the `authorization_code` arm applies. HTTP Basic Auth takes preced
 | `tests/rfc9207_iss.rs` | `iss` in authorization responses per RFC 9207 |
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
+| `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin, gRPC); secret and `private_key_jwt` authentication; gRPC audience restriction; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 

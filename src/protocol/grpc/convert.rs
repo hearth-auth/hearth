@@ -389,3 +389,31 @@ pub fn verify_grpc_client_auth(
         .map(|()| client_id)
         .map_err(|_| Status::unauthenticated("invalid client credentials"))
 }
+
+/// Confidential-only twin of [`verify_grpc_client_auth`] for `Introspect`
+/// (RFC 7662 §2.1, task 26.43).
+///
+/// A public client's identifier is public, so it cannot authenticate an
+/// introspection caller: only a client whose stored secret matches
+/// `x-hearth-client-secret` is accepted. Returns `UNAUTHENTICATED` for any
+/// failure, with the same message as the permissive twin.
+pub fn verify_grpc_confidential_client_auth(
+    md: &MetadataMap,
+    realm_id: &RealmId,
+    identity: &dyn crate::identity::IdentityEngine,
+) -> Result<crate::core::ClientId, Status> {
+    let raw_id = md
+        .get(CLIENT_ID_META_KEY)
+        .ok_or_else(|| Status::unauthenticated("missing x-hearth-client-id metadata"))?
+        .to_str()
+        .map_err(|_| Status::invalid_argument("x-hearth-client-id is not valid ASCII"))?;
+    let client_id = raw_id
+        .parse::<uuid::Uuid>()
+        .map(crate::core::ClientId::new)
+        .map_err(|_| Status::unauthenticated("invalid client credentials"))?;
+    let secret = md.get(CLIENT_SECRET_META_KEY).and_then(|v| v.to_str().ok());
+    identity
+        .authenticate_confidential_client(realm_id, &client_id, secret)
+        .map(|()| client_id)
+        .map_err(|_| Status::unauthenticated("invalid client credentials"))
+}
