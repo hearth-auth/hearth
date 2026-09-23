@@ -212,9 +212,15 @@ pub struct MePermissionsResponse {
     pub groups: Vec<String>,
 }
 
+/// An OAuth client as returned by `POST /clients`.
+///
+/// The server answers with the proto `OAuthClient` shape (`client_id`,
+/// `client_name`); the legacy `id` / `name` keys are still accepted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthClient {
+    #[serde(rename = "client_id", alias = "id")]
     pub id: String,
+    #[serde(rename = "client_name", alias = "name")]
     pub name: String,
     #[serde(default)]
     pub redirect_uris: Vec<String>,
@@ -227,8 +233,13 @@ pub struct OAuthClient {
     pub access_token_authorization: AccessTokenAuthorization,
 }
 
+/// Body of `POST /clients`.
+///
+/// `name` is sent on the wire as `client_name` — the server rejects an
+/// unknown `name` key with `422`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterClientRequest {
+    #[serde(rename = "client_name", alias = "name")]
     pub name: String,
     #[serde(default)]
     pub redirect_uris: Vec<String>,

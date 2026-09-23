@@ -2,7 +2,7 @@
 
 from typing import Literal, Optional, List, Any, Generic, TypeVar
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
 
@@ -112,15 +112,31 @@ class MePermissionsResponse(BaseModel):
 
 
 class OAuthClient(BaseModel):
-    id: str
-    name: str
+    """An OAuth client.
+
+    ``POST /clients`` answers with the proto shape (``client_id`` /
+    ``client_name``); the admin applications API uses ``id`` / ``name``. Both
+    are accepted.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(validation_alias=AliasChoices("id", "client_id"))
+    name: str = Field(validation_alias=AliasChoices("name", "client_name"))
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
     secret: Optional[str] = None
 
 
 class RegisterClientRequest(BaseModel):
-    name: str
+    """Body of ``POST /clients``; ``name`` is sent on the wire as ``client_name``."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str = Field(
+        validation_alias=AliasChoices("name", "client_name"),
+        serialization_alias="client_name",
+    )
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
 

@@ -422,6 +422,50 @@ final class NewFlowsTest extends TestCase
         self::assertSame('new-client-secret', $result->clientSecret);
     }
 
+    /**
+     * A realm whose `dcr_policy` is `authenticated` requires an RFC 7591 §3.1
+     * initial access token as `Authorization: Bearer`; without it the server
+     * answers `401`.
+     */
+    public function testRegisterClientSendsInitialAccessTokenAsBearer(): void
+    {
+        $mock    = new CapturingMockClient([
+            $this->discoveryResponse(),
+            new Response(201, ['Content-Type' => 'application/json'], json_encode([
+                'client_id'     => 'new-client-id',
+                'client_secret' => 'new-client-secret',
+            ])),
+        ]);
+        $factory = new HttpFactory();
+        $client  = new HearthClient('https://auth.example.com/realms/test', 'tc', 'sc', httpClient: $mock, requestFactory: $factory, streamFactory: $factory);
+
+        $client->registerClient(['client_name' => 'My App'], 'iat-token-xyz');
+
+        $request = $mock->requests[1];
+        self::assertSame('POST', $request->getMethod());
+        self::assertSame('https://auth.example.com/realms/test/register', (string) $request->getUri());
+        self::assertSame('Bearer iat-token-xyz', $request->getHeaderLine('Authorization'));
+        self::assertSame('My App', json_decode((string) $request->getBody(), true)['client_name']);
+    }
+
+    /** `open` DCR is anonymous: no token given ⇒ no Authorization header sent. */
+    public function testRegisterClientWithoutTokenSendsNoAuthorizationHeader(): void
+    {
+        $mock    = new CapturingMockClient([
+            $this->discoveryResponse(),
+            new Response(201, ['Content-Type' => 'application/json'], json_encode([
+                'client_id'     => 'new-client-id',
+                'client_secret' => 'new-client-secret',
+            ])),
+        ]);
+        $factory = new HttpFactory();
+        $client  = new HearthClient('https://auth.example.com/realms/test', 'tc', 'sc', httpClient: $mock, requestFactory: $factory, streamFactory: $factory);
+
+        $client->registerClient(['client_name' => 'My App']);
+
+        self::assertFalse($mock->requests[1]->hasHeader('Authorization'));
+    }
+
     // -------------------------------------------------------------------------
     // /v1/me/permissions
     // -------------------------------------------------------------------------

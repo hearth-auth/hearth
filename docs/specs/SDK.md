@@ -374,6 +374,28 @@ curl -s -X POST https://auth.example.com/v1/my-realm/auth/magic-link \
 # Always → 202 Accepted: {"message":"If an account exists, a magic link has been sent"}
 ```
 
+### 4.5.4 Client Registration
+
+Hearth serves two registration routes with **different** credentials. An SDK that exposes
+either MUST send the credential that route requires — neither is anonymous by default.
+
+| Route | Credential | Success |
+|-------|------------|---------|
+| `POST /clients` (admin) | `Authorization: Bearer <token>` carrying `hearth.clients.admin` (or `hearth.admin`) in the realm, plus `X-Realm-ID` | `201` with the proto `OAuthClient` (`client_id`, `client_name`, …) |
+| `registration_endpoint` from discovery (RFC 7591, e.g. `/realms/{name}/register`) | Set by the realm's `dcr_policy`: `disabled` (default) → `403`; `open` → none; `authenticated` → an RFC 7591 §3.1 initial access token as `Authorization: Bearer` | `201` with `client_id` + generated `client_secret` |
+
+SDK requirements:
+
+- The admin route answers `401 missing authorization header` without a token. SDKs MUST send
+  the caller's token: the client's configured access token, or an explicit token argument.
+  Adding that argument MUST NOT break existing callers where the language allows it (optional
+  or variadic parameter; in Rust, a new `register_client_with_token` method).
+- The admin route's request body uses the proto field name `client_name`. The server rejects
+  an unknown `name` key with `422`.
+- SDKs MUST treat `201 Created` as success.
+- An RFC 7591 method MUST accept an optional initial access token and send it as
+  `Authorization: Bearer` when it is given.
+
 ---
 
 ## 5. Error Taxonomy
