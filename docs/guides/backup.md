@@ -142,13 +142,63 @@ chain that does not match its own hashes aborts the restore with the index of
 the first broken link.
 
 The manifest records whether the chain material was written
-(`audit_chain_included`). Because the manifest is checksum-covered — and signed
-when `security.backup.verify_key` is configured — deleting `audit_chain.json`
-to reach the unverified path fails the restore rather than skipping the check.
+(`audit_chain_included`). Because the manifest is checksum-covered — and its
+signature is verified on every production restore (see
+[Signed archives](#signed-archives)) — deleting `audit_chain.json` to reach the
+unverified path fails the restore rather than skipping the check.
 
 Archives written before this member existed carry audit events with no chain
 material. Those still restore, with a warning: their restored chain attests to
 the restore, not to the source. Re-export to get a verifiable audit section.
+
+### Signed archives
+
+Encryption and checksums do not prove **who** produced an archive: the
+checksums live in the very `manifest.json` an attacker would rewrite, and the
+encryption passphrase is shared by every operator who can run a restore. The
+only proof of origin is a detached **Ed25519 signature** over the manifest
+(`detached_signature_b64`). Because the manifest carries the SHA-256 of every
+member, signing it signs the whole archive.
+
+**Restore is fail-closed.** Outside dev mode an archive is restored only when
+its signature verifies against the configured verify key:
+
+| Verify key (`security.backup.verify_key` / `--verify-key`) | Archive | CLI `backup restore` | HTTP `POST /admin/backup/restore` |
+|---|---|---|---|
+| configured | signed with the matching key | restores | restores |
+| configured | unsigned, or signed with another key, or edited after signing | **refused** — `--allow-unsigned` does not override a configured key | **refused** (also in dev mode) |
+| not configured | any | **refused** unless `--allow-unsigned` is passed | **refused** outside dev mode — no override; `--dev` servers restore with a warning |
+
+The private key never needs to be on a server that restores. Keep it on the
+host that takes backups; give restoring instances only the public key.
+
+**One-time setup:**
+
+```bash
+# 1. Generate a key pair. Writes the private key (PEM, mode 0600) and prints
+#    the public verify_key.
+hearth backup keygen --output /etc/hearth/backup-signing.pem
+# → verify_key: <43-character base64url public key>
+
+# 2. Configure the public key on every instance that restores (hearth.yaml):
+#      security:
+#        backup:
+#          verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"
+```
+
+A key from `openssl genpkey -algorithm ed25519 -out backup-signing.pem` works
+too; derive its `verify_key` with
+`openssl pkey -in backup-signing.pem -pubout -outform DER | tail -c 32 | basenc --base64url | tr -d '='`.
+
+**Signing:** pass `--sign-key` to `hearth backup create`, or sign an existing
+archive — including every archive downloaded from `POST /admin/backup`, which
+the server cannot sign because it holds no private key — with
+[`hearth backup sign`](#hearth-backup-sign).
+
+**Restoring without a key.** Archives created before this release are
+unsigned. Verify one (`hearth backup verify`), then either sign it with
+`hearth backup sign` or restore it with `hearth backup restore --allow-unsigned`
+— only for an archive whose origin you have established out of band.
 
 ### Signing key encryption
 
@@ -180,6 +230,7 @@ hearth backup create [OPTIONS]
 | `--realm` | all realms | Export only this realm (name or UUID) |
 | `--include-audit` | off | Include audit events in the export (can be very large) |
 | `--encrypt` | off | Protect the signing-key DEK with an interactively-prompted passphrase |
+| `--sign-key` | none | Sign the manifest with this Ed25519 private key (PEM) so a production restore can authenticate it. Without it the archive is unsigned — see [Signed archives](#signed-archives) |
 | `--data-dir` | `data` | Path to the Hearth data directory |
 | `--config`, `-c` | none | Path to `hearth.yaml`, read for `security.key_encryption_key`. Needed for a KEK-encrypted store unless `HEARTH_KEK` is exported |
 
@@ -195,11 +246,12 @@ hearth backup create \
   --realm production \
   --output /backups/prod-$(date +%F).hearth-backup
 
-# Encrypted backup including audit log
+# Encrypted, signed backup including audit log
 hearth backup create \
   --data-dir /var/lib/hearth/data \
   --include-audit \
   --encrypt \
+  --sign-key /etc/hearth/backup-signing.pem \
   --output /backups/full-encrypted-$(date +%F).hearth-backup
 # → prompts: "Enter backup passphrase:"
 ```
@@ -224,7 +276,10 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--dry-run` | off | Parse and report without writing anything |
 | `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band |
 | `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
+| `--verify-key` | from `--config` | Base64url Ed25519 public key the archive's manifest must be signed with. Overrides `security.backup.verify_key` |
+| `--allow-unsigned` | off | Restore even though **no** verify key is configured, so the archive's origin is not authenticated. Never overrides a configured key. See [Signed archives](#signed-archives) |
 | `--data-dir` | `data` | Path to the target data directory |
+| `--config`, `-c` | none | Path to `hearth.yaml`, read for `security.backup.verify_key` and `security.key_encryption_key` |
 
 Restore prints a per-entity-type table of inserted and skipped counts, broken down by entity type (roles, permissions, groups, assignments, scopes, organizations, audit events). Exit `0` means all records imported cleanly; exit `1` means partial success (some records skipped or failed); exit `2` means a fatal error (archive unreadable, target unopenable, or unrecognized archive member).
 
@@ -234,19 +289,32 @@ Restore prints a per-entity-type table of inserted and skipped counts, broken do
 # Dry-run to preview what would be restored
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --config /etc/hearth/hearth.yaml \
   --dry-run
 
-# Full restore into an empty data directory
+# Full restore into an empty data directory; the verify key comes from the config
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --config /etc/hearth/hearth.yaml \
   --data-dir /var/lib/hearth/data-restored
 
-# Restore a single realm into a data directory where it is absent
+# Restore a single realm, passing the verify key directly
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --verify-key "$HEARTH_BACKUP_VERIFY_KEY" \
   --realm production \
   --data-dir /var/lib/hearth/data-restored
 ```
+
+> **Fail-closed on an unauthenticated archive (A-30).** Restore checks the
+> manifest signature before it verifies checksums or writes anything. With no
+> verify key configured it refuses and names the fix: configure
+> `security.backup.verify_key` (or pass `--verify-key`), or pass
+> `--allow-unsigned` for an archive whose origin you have verified out of band.
+> A configured key is authoritative — an unsigned or badly signed archive is
+> refused even with `--allow-unsigned`. Before this, the CLI restore never
+> checked the signature at all, and the HTTP restore skipped it whenever no key
+> was configured, which was the default.
 
 > **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — rotate it explicitly with `POST /admin/realms/{id}/rotate-signing-key`. There is no `hearth realm rotate-signing-key` CLI command; `hearth realm` has one subcommand, `create`. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
 >
@@ -316,6 +384,45 @@ hearth backup verify --input /backups/prod-2026-05-19.hearth-backup
 
 **Exit codes:** `0` all checksums match · `3` one or more checksums do not match.
 
+`verify` checks integrity, not origin: it does not check the manifest
+signature. Restore does.
+
+---
+
+### `hearth backup sign`
+
+Signs an existing archive's manifest with an Ed25519 private key, so a
+production restore can authenticate it (see [Signed archives](#signed-archives)).
+Use it for archives taken without `--sign-key`, including every archive from
+`POST /admin/backup`. The archive's checksums are verified first, so a
+tampered archive is never signed.
+
+```
+hearth backup sign --input <archive> --key-file <key.pem> [--output <archive>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--input`, `-i` | required | Archive to sign |
+| `--key-file` | required | Ed25519 private key (PEM, PKCS#8) — from `backup keygen` or `openssl genpkey -algorithm ed25519` |
+| `--output`, `-o` | `--input` | Where to write the signed archive; the input is replaced atomically by default |
+
+**Exit codes:** `0` signed · `2` error (unreadable key, integrity failure, I/O).
+
+---
+
+### `hearth backup keygen`
+
+Generates an Ed25519 key pair for signing archives. Writes the private key
+(PEM, PKCS#8, mode `0600`; refuses to overwrite an existing file) and prints
+the public `verify_key` to configure as `security.backup.verify_key`.
+
+```
+hearth backup keygen --output <key.pem>
+```
+
+**Exit codes:** `0` written · `2` error.
+
 ---
 
 ### `hearth backup inspect`
@@ -326,7 +433,7 @@ Prints a human-readable summary of the archive manifest without decompressing en
 hearth backup inspect --input <archive>
 ```
 
-Output includes: archive version, creation timestamp, Hearth version, per-realm record counts, whether signing keys are present, and whether the DEK is passphrase-protected.
+Output includes: archive version, creation timestamp, Hearth version, per-realm record counts, whether signing keys are present, whether the DEK is passphrase-protected, and whether the manifest is signed.
 
 ```bash
 hearth backup inspect --input /backups/prod-2026-05-19.hearth-backup
@@ -446,12 +553,18 @@ caps how tight a cadence you can schedule. Note that `POST /admin/backup` has
 no equivalent of the CLI's `--encrypt` flag; encrypt the resulting archive at
 rest yourself, or take encrypted archives from a stopped node with the CLI.
 
+The server holds no signing key, so these archives are **unsigned**, and a
+production restore refuses them until they are signed. Sign each one on the
+backup host as part of the same job (see
+[Verifying backups](#verifying-backups)).
+
 Use the CLI form only against a data directory no server is using:
 
 ```bash
 systemctl stop hearth
 hearth backup create --data-dir /var/lib/hearth/data \
-  --output /backups/hearth-$(date +%F).hearth-backup --encrypt
+  --output /backups/hearth-$(date +%F).hearth-backup --encrypt \
+  --sign-key /etc/hearth/backup-signing.pem
 systemctl start hearth
 ```
 
@@ -475,6 +588,8 @@ does not touch the data directory:
 curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
   "http://127.0.0.1:8420/admin/backup" -o /tmp/latest.hearth-backup \
   && hearth backup verify --input /tmp/latest.hearth-backup \
+  && hearth backup sign --input /tmp/latest.hearth-backup \
+       --key-file /etc/hearth/backup-signing.pem \
   && mv /tmp/latest.hearth-backup /backups/
 ```
 
@@ -489,9 +604,10 @@ undetected until a restore.
 # 2. Create an empty data directory
 mkdir -p /var/lib/hearth/data
 
-# 3. Restore
+# 3. Restore (the config supplies security.backup.verify_key)
 hearth backup restore \
   --input /backups/prod-2026-05-19.hearth-backup \
+  --config /etc/hearth/hearth.yaml \
   --data-dir /var/lib/hearth/data
 
 # 4. Start the server

@@ -123,6 +123,7 @@ This usually indicates one of:
 
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data-restored
 
    # Cut over only after the restore reports success.
@@ -676,13 +677,23 @@ post-restore validation checklist appropriate for an incident.
    mkdir -p /var/lib/hearth/data
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data
    ```
 
    Exit code `0` means every record imported cleanly. Exit `1` means
    partial success — read the report carefully; some realms/users may be
-   missing. Exit `2` means the archive is unreadable; try the previous
-   backup.
+   missing. Exit `2` means the archive is unreadable or was refused; try the
+   previous backup.
+
+   Restore authenticates the archive first: its manifest signature must verify
+   against `security.backup.verify_key` (read from `--config`, or pass
+   `--verify-key`). An unsigned archive, a bad signature, or no configured key
+   is refused before anything is written — see
+   [Signed archives](./backup.md#signed-archives). In an incident, do **not**
+   reach for `--allow-unsigned` to get past a refusal: an archive that fails
+   authentication may be the attacker's. Use it only for an archive whose
+   origin you have established out of band.
 
 3. **Verify signing-key continuity.** Hearth's restore preserves the
    per-realm Ed25519 signing key (HEA-745). A token issued before backup
@@ -821,6 +832,7 @@ Run this drill quarterly. An untested backup is not a backup.
    ```bash
    hearth backup restore \
      --input /backups/latest.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir "$DRILL_DIR" \
      | tee /tmp/restore-report.txt
    echo "exit: $?"

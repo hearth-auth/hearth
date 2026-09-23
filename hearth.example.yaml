@@ -435,8 +435,11 @@ oidc:
 #       - "/etc/hearth/crl/ca.crl"
 
 # --- Backup restore signing (A-30) -----------------------------------------
-# When set, the restore endpoint rejects archives without a valid Ed25519
-# detached signature on manifest.json. export_rate_limit caps exports per hour.
+# Restore requires archives to carry a valid Ed25519 detached signature on
+# manifest.json that verifies against verify_key. Without verify_key, restore
+# is REFUSED outside dev mode (the CLI accepts --allow-unsigned). Generate a
+# pair with `hearth backup keygen`; sign with `hearth backup create --sign-key`
+# or `hearth backup sign`. export_rate_limit caps exports per hour.
 #
 # security:
 #   backup:

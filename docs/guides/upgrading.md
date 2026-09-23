@@ -366,6 +366,7 @@ Older binaries cannot read WAL files written by newer binaries. To roll back:
    mkdir -p /var/lib/hearth/data
    hearth backup restore \
      --input /backups/pre-upgrade-<timestamp>.hearth-backup \
+     --config /etc/hearth/hearth.yaml \
      --data-dir /var/lib/hearth/data
    ```
 

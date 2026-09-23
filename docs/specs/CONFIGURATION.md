@@ -747,11 +747,16 @@ CPU/memory headroom exists, since the bound exists to protect them.
 
 #### `security.backup`
 
-Backup and restore hardening (A-30). When `verify_key` is set, the restore endpoint verifies that every uploaded archive's `manifest.json` carries a valid Ed25519 detached signature. Archives without a valid signature are rejected unconditionally (fail-closed). When absent, signature verification is skipped.
+Backup and restore hardening (A-30). Restore authenticates an archive by the Ed25519 detached signature on its `manifest.json`, and is **fail-closed**:
+
+- **`verify_key` set** — every restore (HTTP and CLI) requires a signature that verifies against it. An unsigned archive, a bad signature, or a manifest edited after signing is rejected; nothing overrides a configured key.
+- **`verify_key` unset** — outside dev mode `POST /admin/backup/restore` refuses every archive (`400`, with an error naming this key), and `hearth backup restore` refuses unless the operator passes `--allow-unsigned`. Servers started with `--dev` restore unsigned archives with a warning.
+
+Generate a key pair with `hearth backup keygen`; sign archives with `hearth backup create --sign-key` or `hearth backup sign`. The private key is not a config key — it stays on the host that takes backups. See the [Backup guide](../guides/backup.md#signed-archives).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, all restore uploads must carry a matching `detached_signature_b64` in their manifest or they are rejected. A value that does not decode to exactly 32 bytes is a startup error — a key that cannot verify is refused rather than silently ignored. |
+| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, every restore must carry a matching `detached_signature_b64` in its manifest or it is rejected. **When unset, restore is refused outside dev mode** (the CLI accepts `--allow-unsigned`). `hearth backup restore` reads it from `--config`, or takes `--verify-key`. A value that does not decode to exactly 32 bytes is a startup error — a key that cannot verify is refused rather than silently ignored. |
 | `export_rate_limit` | integer | `10` | Maximum backup/export calls per admin user per hour. Set to `0` to disable per-export rate limiting. |
 
 ```yaml
