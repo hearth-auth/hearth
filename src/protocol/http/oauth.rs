@@ -513,6 +513,14 @@ fn form_urldecode_lenient(input: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
+/// Returns `true` when a body `client_secret` is absent or equals the Basic
+/// one. The comparison is constant-time and length-blind
+/// ([`crate::core::ct_eq_secret_str`]) because the operands are client
+/// secrets, even though both arrive in the same request.
+fn body_secret_agrees(body_secret: Option<&str>, basic_secret: &str) -> bool {
+    body_secret.is_none_or(|b| crate::core::ct_eq_secret_str(b, basic_secret))
+}
+
 /// Builds the RFC 6749 §5.2 `invalid_request` rejection for a request that
 /// supplies both Basic and body client credentials that disagree — using
 /// more than one client authentication mechanism per request is forbidden
@@ -559,7 +567,8 @@ fn resolve_client_credentials(
     let body_client_secret = body_client_secret.and_then(non_empty_credential);
 
     if let Some((id, sec)) = parse_basic_auth(headers) {
-        if body_client_id.is_some_and(|b| b != id) || body_client_secret.is_some_and(|b| b != sec) {
+        if body_client_id.is_some_and(|b| b != id) || !body_secret_agrees(body_client_secret, &sec)
+        {
             return Err(basic_body_mismatch_response());
         }
         return Ok((Some(id), Some(sec)));
@@ -700,7 +709,7 @@ pub(super) fn enforce_confidential_client_auth(
         // An absent/empty body client_id is fine — RFC 6749 §4.1.3 only
         // requires it when the client is not otherwise authenticating.
         if non_empty_credential(body_client_id).is_some_and(|b| basic_id != b)
-            || body_client_secret.is_some_and(|b| b != basic_secret)
+            || !body_secret_agrees(body_client_secret, basic_secret)
         {
             return Err(basic_body_mismatch_response());
         }
@@ -964,6 +973,49 @@ mod tests {
         let (id, secret) = parse_basic_auth(&headers).expect("must parse");
         assert_eq!(id, "client-id");
         assert_eq!(secret, "sec ret%end");
+    }
+
+    fn basic_headers(id: &str, secret: &str) -> HeaderMap {
+        use base64::Engine as _;
+        let mut headers = HeaderMap::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{id}:{secret}"));
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Basic {encoded}")).expect("valid header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn body_secret_agreement_accepts_a_match_or_an_absent_body() {
+        assert!(body_secret_agrees(Some("s3cret-value"), "s3cret-value"));
+        assert!(body_secret_agrees(None, "s3cret-value"));
+    }
+
+    #[test]
+    fn body_secret_agreement_rejects_a_same_length_mismatch() {
+        assert!(!body_secret_agrees(Some("s3cret-valuf"), "s3cret-value"));
+    }
+
+    #[test]
+    fn body_secret_agreement_rejects_a_different_length() {
+        assert!(!body_secret_agrees(Some("s3cret-valu"), "s3cret-value"));
+        assert!(!body_secret_agrees(Some("s3cret-value0"), "s3cret-value"));
+    }
+
+    #[test]
+    fn resolve_client_credentials_checks_the_body_secret_against_basic() {
+        let headers = basic_headers("cid", "s3cret-value");
+        let (id, sec) = resolve_client_credentials(&headers, Some("cid"), Some("s3cret-value"))
+            .expect("agreeing Basic and body credentials must resolve");
+        assert_eq!(id.as_deref(), Some("cid"));
+        assert_eq!(sec.as_deref(), Some("s3cret-value"));
+
+        for wrong in ["s3cret-valuf", "s3cret-valu", "s3cret-value0"] {
+            let err = resolve_client_credentials(&headers, Some("cid"), Some(wrong))
+                .expect_err("a disagreeing body secret must be refused");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "wrong = {wrong}");
+        }
     }
 }
 

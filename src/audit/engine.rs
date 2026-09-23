@@ -989,7 +989,7 @@ impl AuditEngine for EmbeddedAuditEngine {
             };
 
             let expected_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
-            if event.integrity_hash != expected_hash {
+            if !integrity_tag_matches(&event.integrity_hash, &expected_hash) {
                 crate::metrics::metrics()
                     .audit_integrity_failures_total
                     .inc();
@@ -1005,7 +1005,7 @@ impl AuditEngine for EmbeddedAuditEngine {
         // the event count and final hash will no longer match the head.
         if full_range {
             if let Some(head) = head {
-                if count != head.count || prev_hash != head.last_hash {
+                if count != head.count || !integrity_tag_matches(&prev_hash, &head.last_hash) {
                     crate::metrics::metrics()
                         .audit_integrity_failures_total
                         .inc();
@@ -1266,6 +1266,15 @@ impl EmbeddedAuditEngine {
     }
 }
 
+/// Compares a stored HMAC chain tag with the recomputed one in constant time.
+///
+/// Length-blind via [`crate::core::ct_eq_secret_str`]; a plain `!=` returns at
+/// the first differing byte, which is a MAC-forgery oracle wherever the
+/// verdict is observable.
+fn integrity_tag_matches(stored: &str, expected: &str) -> bool {
+    crate::core::ct_eq_secret_str(stored, expected)
+}
+
 /// Verifies that `events` form an intact HMAC chain from `anchor` under `key`.
 ///
 /// The events must be in the order they were written — which is the order a
@@ -1277,7 +1286,10 @@ impl EmbeddedAuditEngine {
 pub fn first_broken_link(events: &[AuditEvent], key: &[u8], anchor: &str) -> Option<usize> {
     let mut prev = anchor.to_string();
     for (i, event) in events.iter().enumerate() {
-        if event.integrity_hash != EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event) {
+        if !integrity_tag_matches(
+            &event.integrity_hash,
+            &EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event),
+        ) {
             return Some(i);
         }
         prev.clone_from(&event.integrity_hash);
@@ -1319,6 +1331,76 @@ mod tests {
     use crate::core::{FakeClock, RealmId, Timestamp};
     use crate::storage::{EmbeddedStorageEngine, StorageConfig};
     use std::sync::Arc;
+
+    fn fixture_event(realm_id: RealmId) -> AuditEvent {
+        AuditEvent {
+            id: AuditEventId::generate(),
+            realm_id,
+            actor: "user_123".to_string(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".to_string(),
+            resource_id: "user_456".to_string(),
+            timestamp: Timestamp::from_micros(1_700_000_000_000_000),
+            metadata: None,
+            integrity_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn integrity_tag_match_is_accepted() {
+        let tag = EmbeddedAuditEngine::compute_hmac_hash(
+            b"k",
+            "anchor",
+            &fixture_event(RealmId::generate()),
+        );
+        let stored = tag.clone();
+        assert!(integrity_tag_matches(&stored, &tag));
+    }
+
+    #[test]
+    fn integrity_tag_same_length_mismatch_is_rejected() {
+        let tag = "a".repeat(64);
+        let forged = format!("{}b", "a".repeat(63));
+        assert!(!integrity_tag_matches(&forged, &tag));
+    }
+
+    #[test]
+    fn integrity_tag_different_length_is_rejected() {
+        let tag = "a".repeat(64);
+        assert!(!integrity_tag_matches(&"a".repeat(63), &tag));
+        assert!(!integrity_tag_matches(&"a".repeat(65), &tag));
+        assert!(!integrity_tag_matches("", &tag));
+    }
+
+    /// `first_broken_link` must flag a stored tag that was swapped for another
+    /// value — the same length or not — at that event's own index.
+    #[test]
+    fn first_broken_link_flags_a_substituted_tag_of_any_length() {
+        let key = b"chain-key";
+        let realm = RealmId::generate();
+        let mut events = Vec::new();
+        let mut prev = "anchor".to_string();
+        for _ in 0..3 {
+            let mut e = fixture_event(realm.clone());
+            e.integrity_hash = EmbeddedAuditEngine::compute_hmac_hash(key, &prev, &e);
+            prev.clone_from(&e.integrity_hash);
+            events.push(e);
+        }
+        assert_eq!(first_broken_link(&events, key, "anchor"), None);
+
+        let real = events[1].integrity_hash.clone();
+        let flipped_last = if real.ends_with('0') { '1' } else { '0' };
+        let same_len = format!("{}{flipped_last}", &real[..real.len() - 1]);
+        for forged in [
+            same_len,
+            real[..real.len() - 1].to_string(),
+            format!("{real}0"),
+        ] {
+            let mut tampered = events.clone();
+            tampered[1].integrity_hash = forged;
+            assert_eq!(first_broken_link(&tampered, key, "anchor"), Some(1));
+        }
+    }
 
     fn setup() -> (EmbeddedAuditEngine, RealmId) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
