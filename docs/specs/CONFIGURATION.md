@@ -1068,8 +1068,9 @@ Weights for the step-up MFA risk engine. These become the default
 | `email_reputation.extra_disposable_domains` | list of strings | `[]` | Extra disposable domains beyond the built-in list. |
 
 Only the disposable-domain signal refuses a registration. A role address
-(`admin@`, `support@`) or a domain with no MX is recorded and allowed — both are
-legitimate in plenty of tenants.
+(`admin@`, `support@`) is recorded and allowed — it is legitimate in plenty of
+tenants. Hearth performs no DNS or MX lookup of the email domain; an address
+whose domain does not receive mail is caught by email verification, not here.
 
 ```yaml
 security:
