@@ -83,7 +83,7 @@ func startServer(t *testing.T) *testServer {
 	t.Helper()
 
 	// Build the binary
-	buildCmd := exec.Command("cargo", "build", "--bin", "hearth")
+	buildCmd := exec.Command("cargo", "build", "--bin", "hearth", "--features", "dev-endpoints")
 	_, filename, _, _ := runtime.Caller(0)
 	buildCmd.Dir = filepath.Join(filepath.Dir(filename), "..", "..")
 	if out, err := buildCmd.CombinedOutput(); err != nil {

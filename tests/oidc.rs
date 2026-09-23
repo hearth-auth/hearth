@@ -159,6 +159,7 @@ async fn oidc_authorization_code_flow_roundtrip() {
 
 // ===== Scenario: Full authorization code flow via HTTP endpoints =====
 
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn oidc_authorization_code_flow_via_http() {

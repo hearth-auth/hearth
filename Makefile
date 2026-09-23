@@ -5,6 +5,14 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
+## The dev-only cargo feature: `POST /admin/bootstrap`, the `/dev/seed-*`
+## routes and the hard-coded dev admin password. It is NOT a default feature
+## (a plain `cargo build --release` / `cargo install` is a production build),
+## so every target that compiles the test suite or boots `serve --dev` for a
+## bootstrap-driven workflow opts in here. Package-qualified so it also works
+## with `--workspace`.
+DEV_FEATURES ?= --features hearth/dev-endpoints
+
 .PHONY: setup build test clippy fmt loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
@@ -55,8 +63,10 @@ tailwind-install:
 
 # ── Rust ──────────────────────────────────────────────
 
+## Local dev build (debug profile, dev endpoints compiled in). A production
+## binary is `cargo build --release` with no features — see the Dockerfile.
 build: css
-	PROTOC=$(PROTOC) cargo build $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo build $(DEV_FEATURES) $(CARGO_FLAGS)
 
 ## Run every Rust test across both workspace crates (main + simulation)
 ## via nextest. Doctests are intentionally excluded — Hearth favors
@@ -64,10 +74,14 @@ build: css
 ## same coverage, faster compile, shared helpers, single runner.
 ## Runnable documentation examples live under `examples/`.
 test:
-	PROTOC=$(PROTOC) cargo nextest run --workspace $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo nextest run --workspace $(DEV_FEATURES) $(CARGO_FLAGS)
 
+## Lint both feature sets: the production one (no `dev-endpoints`, what a plain
+## `cargo build` ships) and the dev one the test suite compiles under. Each
+## hides code from the other, so a single pass leaves one surface unlinted.
 clippy:
 	PROTOC=$(PROTOC) cargo clippy --all-targets $(CARGO_FLAGS) -- -D warnings
+	PROTOC=$(PROTOC) cargo clippy --all-targets $(DEV_FEATURES) $(CARGO_FLAGS) -- -D warnings
 
 ## `make loadtest` — that's the whole contract. Nothing else is required: no
 ## running server, no bootstrap, no seed, no ARGS, no env vars, no free port.
@@ -133,6 +147,7 @@ coverage:
 	mkdir -p coverage
 	PROTOC=$(PROTOC) cargo llvm-cov nextest \
 		--workspace \
+		$(DEV_FEATURES) \
 		--ignore-filename-regex 'src/protocol/generated/' \
 		--html \
 		--output-dir coverage/html \
@@ -506,7 +521,7 @@ sdk-smoke-local: ## Build hearth, boot --dev, run TS + Go SDK examples, tear dow
 ## Emails are captured in-process — mailcatcher inbox at http://127.0.0.1:8420/dev/mail
 ## No Docker required.
 dev:
-	HEARTH_DEV_DATA_DIR=./data/dev cargo run -- serve --dev
+	HEARTH_DEV_DATA_DIR=./data/dev cargo run $(DEV_FEATURES) -- serve --dev
 
 ## Wipe the persistent dev data directory (irreversible).
 dev-reset:
@@ -520,7 +535,7 @@ dev-reset:
 ## are instant thanks to a per-realm sentinel. Browse at http://127.0.0.1:8420
 ## and log in as user0000001@acme.demo / DemoPassw0rd!
 seed-large:
-	HEARTH_DEV_DATA_DIR=./data/demo cargo run --release -- serve --dev \
+	HEARTH_DEV_DATA_DIR=./data/demo cargo run --release $(DEV_FEATURES) -- serve --dev \
 		--config examples/large-scale-demo/hearth.yaml
 
 ## Wipe the large demo data directory (forces a fresh re-seed).

@@ -424,6 +424,7 @@ fn confirm_link_submit_redirect_on_failure_goes_to_login() {
 /// `/.well-known/agent.json?agent_id=<X>` cannot return an agent from a different realm.
 /// The storage layer prefixes all keys with realm_id, so a lookup in realm B
 /// for an agent that lives in realm A returns None.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn agent_card_is_realm_scoped() {
     #[allow(unused_unsafe)]

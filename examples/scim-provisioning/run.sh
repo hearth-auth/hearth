@@ -39,7 +39,7 @@ wait_for() {
 }
 
 echo "▸ cargo build (hearth binary)"
-(cd "$REPO_ROOT" && cargo build --release --quiet --bin hearth)
+(cd "$REPO_ROOT" && cargo build --release --features dev-endpoints --quiet --bin hearth)
 
 # Resolve the target directory — respects CARGO_TARGET_DIR if set.
 TARGET_DIR="$(cd "$REPO_ROOT" && \

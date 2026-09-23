@@ -290,7 +290,7 @@ Boot the demo config whose hot tier is deliberately capped below the working set
 (streams 1M users on first boot; instant thereafter via a per-realm sentinel):
 
 ```bash
-HEARTH_DEV_DATA_DIR=./data/tier-miss cargo run --release -- serve --dev \
+HEARTH_DEV_DATA_DIR=./data/tier-miss cargo run --release --features dev-endpoints -- serve --dev \
     --config examples/large-scale-demo/hearth-tier-miss.yaml
 ```
 

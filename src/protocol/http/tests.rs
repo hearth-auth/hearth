@@ -1,3 +1,10 @@
+// Most of the cross-realm and admin-surface tests below drive the router
+// through `POST /admin/bootstrap`, so they are compiled only with the
+// `dev-endpoints` feature (which is not a default). Their shared fixtures are
+// then unreferenced in a featureless build; that is expected, not dead code —
+// the `--features dev-endpoints` build still reports genuinely unused items.
+#![cfg_attr(not(feature = "dev-endpoints"), allow(dead_code, unused_imports))]
+
 use super::*;
 use crate::audit::{AuditEngine, EmbeddedAuditEngine};
 use crate::core::SystemClock;
@@ -112,6 +119,7 @@ async fn bootstrap_returns_404_in_production_mode() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_returns_admin_credentials_in_dev_mode() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -157,6 +165,7 @@ async fn bootstrap_returns_admin_credentials_in_dev_mode() {
 /// realm's `rotate-signing-key` (the `scoped_realm` BOLA guard only lets a
 /// nil-UUID system token operate cross-realm); the new `system_access_token`
 /// (issued for the seeded `admin@hearth.test` system admin) must succeed.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_system_token_can_rotate_other_realm_signing_key() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -257,6 +266,7 @@ async fn bootstrap_system_token_can_rotate_other_realm_signing_key() {
 /// HEA-2087: Re-bootstrap (dev-realm already exists) must still return a working
 /// cross-realm `system_access_token`, so an integration harness that re-bootstraps
 /// after a restart can keep managing realms.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn rebootstrap_returns_working_system_token() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -344,6 +354,7 @@ async fn rebootstrap_returns_working_system_token() {
 
 /// HEA-1670: First bootstrap must return `admin_password`; the password must
 /// authenticate the `admin@hearth.test` user.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_returns_admin_password_on_first_call() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -395,6 +406,7 @@ async fn bootstrap_returns_admin_password_on_first_call() {
 }
 
 /// HEA-1670: Re-bootstrap must NOT reset the existing password.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_does_not_reset_password_on_second_call() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -469,6 +481,7 @@ async fn bootstrap_does_not_reset_password_on_second_call() {
 /// HEA-1998: `POST /dev/seed-password` sets a credential the login path can
 /// verify, so the load-test login / KDF saturation plane has authenticatable
 /// users.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_seed_password_sets_verifiable_credential() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -536,6 +549,7 @@ async fn dev_seed_password_sets_verifiable_credential() {
 /// returning the id makes it usable without weakening anything (the route is
 /// dev-only, unauthenticated, and loopback-bound, and `POST /dev/seed-token`
 /// on the same server is already strictly more powerful).
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_probe_user_returns_user_id_for_known_email() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -587,6 +601,7 @@ async fn dev_probe_user_returns_user_id_for_known_email() {
 
 /// HEA-2143: an unknown email still returns 200 (the C8 latency sweep depends
 /// on found/not-found being indistinguishable in status), with a null id.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_probe_user_unknown_email_is_200_with_null_id() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -622,6 +637,7 @@ async fn dev_probe_user_unknown_email_is_200_with_null_id() {
 }
 
 /// HEA-1998: an invalid `user_id` is a 400, not a 500 or a panic.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_seed_password_rejects_invalid_user_id() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -668,6 +684,7 @@ async fn dev_seed_password_absent_in_production_mode() {
 }
 
 /// HEA-1670: Unauthenticated re-bootstrap must return 401 after first bootstrap.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_requires_auth_on_second_call() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -706,6 +723,7 @@ async fn bootstrap_requires_auth_on_second_call() {
 ///
 /// The system admin now uses a stable password (DEV_SYSTEM_ADMIN_PASSWORD) so
 /// the Playwright UI test suite can log in without reading the bootstrap response.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_returns_fixed_dev_password_on_first_call() {
     async fn first_password(dir: &std::path::Path) -> String {
@@ -1108,6 +1126,7 @@ async fn par_without_jar_rejected_under_fapi_advanced() {
 /// `proto_authorize_to_domain` tried to parse an empty string as a UUID and
 /// returned 400 "invalid user_id UUID" even though the handler always overwrites
 /// the body-supplied user_id with the authenticated principal anyway (HEA-1721).
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn authorize_succeeds_without_user_id_in_body_when_bearer_present() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1215,6 +1234,7 @@ async fn authorize_succeeds_without_user_id_in_body_when_bearer_present() {
 // ==================== HEA-2111: trust_level via API ====================
 
 /// Helper: bootstrap a dev realm and return (realm_id, access_token).
+#[cfg(feature = "dev-endpoints")]
 async fn bootstrap_dev(state: &Arc<AppState>) -> (String, String) {
     let resp = router(Arc::clone(state))
         .oneshot(
@@ -1244,6 +1264,7 @@ async fn bootstrap_dev(state: &Arc<AppState>) -> (String, String) {
 /// persist FirstParty trust on the stored client.  A subsequent PATCH that does
 /// not include trust_level must leave it unchanged (the ..Default::default()
 /// landmine must not silently swallow the field).
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn admin_create_first_party_client_via_api() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1334,6 +1355,7 @@ async fn admin_create_first_party_client_via_api() {
 
 /// HEA-2111: DCR path (POST /register) must always produce ThirdParty trust
 /// even when the caller sends trust_level=FIRST_PARTY in the body.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dcr_cannot_self_grant_first_party_trust() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1383,6 +1405,7 @@ async fn dcr_cannot_self_grant_first_party_trust() {
 
 /// HEA-2111: PATCH /admin/applications/{id} with trust_level=first_party must
 /// upgrade the client's trust level; trust_level=third_party must downgrade it.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn patch_client_trust_level_roundtrip() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -1493,6 +1516,7 @@ struct CrossRealmFixture {
 }
 
 /// Bootstraps a deployment and creates a peer realm with one user in it.
+#[cfg(feature = "dev-endpoints")]
 async fn cross_realm_fixture(peer_name: &str) -> CrossRealmFixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = test_state_dev(dir.path());
@@ -1581,6 +1605,7 @@ async fn admin_patch_status(
 /// hand-rolled copy drops the nil-UUID system-realm branch, so the system
 /// operator was locked out of an operation every other `/admin/realms/{id}/*`
 /// handler grants them. A peer realm's admin must still be refused.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn system_token_patches_another_realms_config() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -1606,6 +1631,7 @@ async fn system_token_patches_another_realms_config() {
 
 /// Audit 2026-08-28 §4.1#6 — the same defect and the same fix in
 /// `admin_patch_user_required_actions`.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn system_token_patches_another_realms_user_required_actions() {
     const BODY: &str = r#"{"add":["VERIFY_EMAIL"],"remove":[]}"#;
@@ -1666,6 +1692,7 @@ const REALM_SCOPED_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
 /// realm's object. Rather than trusting a reading of each handler, this walks
 /// every such route with a realm-scoped token aimed at a peer realm and
 /// requires `403` from all of them.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn every_realm_scoped_admin_route_refuses_a_peer_realms_admin() {
     let f = cross_realm_fixture("bola-parity-peer").await;
@@ -1722,6 +1749,7 @@ const RBAC_WRITE_ROUTES: &[(&str, &str, &str)] = &[
 /// The gate sits at the protocol edge, not in the RBAC engine: the operator
 /// console at `/ui/admin/admin-users` legitimately writes system-realm roles
 /// and calls the engine directly.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn public_rbac_writes_reject_the_system_realm() {
     let f = cross_realm_fixture("system-rbac-gate").await;
@@ -1750,6 +1778,7 @@ async fn public_rbac_writes_reject_the_system_realm() {
 
 /// The same routes must stay open to a tenant realm's admin — the gate must
 /// refuse the system realm only, not RBAC writes in general.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn public_rbac_writes_still_serve_a_tenant_realm() {
     let f = cross_realm_fixture("tenant-rbac-open").await;
@@ -1810,6 +1839,7 @@ fn store_cross_realm_policy(
 ///
 /// A policy that governs the (target, source) pair but withholds the admin
 /// capability must now refuse the crossing.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn denying_cross_realm_policy_refuses_the_system_operator() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -1836,6 +1866,7 @@ async fn denying_cross_realm_policy_refuses_the_system_operator() {
 
 /// The permitting half of the same property: a policy that grants the admin
 /// capability leaves the crossing open.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn permitting_cross_realm_policy_allows_the_system_operator() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -1860,6 +1891,7 @@ async fn permitting_cross_realm_policy_allows_the_system_operator() {
 }
 
 /// A wildcard capability permits every cross-realm admin operation.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn wildcard_cross_realm_policy_allows_the_system_operator() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -1881,6 +1913,7 @@ async fn wildcard_cross_realm_policy_allows_the_system_operator() {
 /// A policy naming a *different* source realm does not govern this crossing,
 /// so the permissive-with-audit default still applies. This is the guard that
 /// keeps an unrelated tenant's policy from locking the operator out.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn unrelated_cross_realm_policy_leaves_the_default_permissive() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -1998,6 +2031,7 @@ struct AdminSurfaceFixture {
 /// Bootstraps a dev deployment, mints a single-permission sub-admin token, and
 /// creates one real user, group and webhook so both directions of the property
 /// can be asserted.
+#[cfg(feature = "dev-endpoints")]
 #[allow(clippy::too_many_lines)]
 async fn admin_surface_fixture() -> AdminSurfaceFixture {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2267,6 +2301,7 @@ const UNGATED_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
 /// Both directions are asserted: the narrow token must be refused, and the
 /// `hearth.admin` superuser must still get through — a gate that refuses
 /// everyone would otherwise pass the first half vacuously.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn every_authenticated_admin_handler_gates_on_a_sub_admin_permission() {
     let f = admin_surface_fixture().await;
@@ -2304,6 +2339,7 @@ async fn every_authenticated_admin_handler_gates_on_a_sub_admin_permission() {
 ///
 /// The `{present}` form of each route is walked too: a handler that answered
 /// `404` unconditionally would pass the first half and fail here.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn admin_subresource_routes_answer_404_for_a_parent_absent_from_the_realm() {
     let f = admin_surface_fixture().await;
@@ -2361,6 +2397,7 @@ struct XRealmWriteFixture {
     _dir: tempfile::TempDir,
 }
 
+#[cfg(feature = "dev-endpoints")]
 async fn xrealm_write_fixture(peer_name: &str) -> XRealmWriteFixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = test_state_dev_full(dir.path());
@@ -2443,6 +2480,7 @@ async fn post_cross_realm_policy(
 ///
 /// A policy whose source is the system realm may now only be authored by a
 /// system-realm actor.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn tenant_realm_cannot_author_a_system_source_cross_realm_policy() {
     let f = xrealm_write_fixture("xrealm-write-deny").await;
@@ -2459,6 +2497,7 @@ async fn tenant_realm_cannot_author_a_system_source_cross_realm_policy() {
 }
 
 /// The permitting half: a system-realm actor authoring the same policy succeeds.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn system_realm_actor_may_author_a_system_source_cross_realm_policy() {
     let f = xrealm_write_fixture("xrealm-write-allow").await;
@@ -2479,6 +2518,7 @@ async fn system_realm_actor_may_author_a_system_source_cross_realm_policy() {
 }
 
 /// Policies between two tenant realms are unaffected by the new rule.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn tenant_to_tenant_cross_realm_policy_is_unaffected() {
     let f = xrealm_write_fixture("xrealm-write-tenant").await;
@@ -2499,6 +2539,7 @@ async fn tenant_to_tenant_cross_realm_policy_is_unaffected() {
 /// a system-source policy can only ever *relax* the operator's access — the
 /// ungoverned default is permissive. Refusing the delete would make a legacy
 /// lockout unrecoverable from either side.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn tenant_realm_may_delete_a_legacy_system_source_policy() {
     let f = xrealm_write_fixture("xrealm-write-residue").await;
@@ -2572,6 +2613,7 @@ const CLUSTER_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
 ///    sub-admin in (1) never learns whether this deployment runs a cluster.
 /// 3. A tenant-realm token is still refused, so the pre-existing realm boundary
 ///    has not regressed.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn cluster_admin_routes_require_hearth_admin_not_just_a_system_realm_identity() {
     let f = admin_surface_fixture().await;
@@ -2668,6 +2710,7 @@ async fn admin_request(
 /// The new route is deliberately **exempt** from the cross-realm policy consult
 /// — a valve gated on the thing it exists to undo is not a valve — so the
 /// operator can delete the policy and recover.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn operator_recovers_from_a_locking_policy_through_the_admin_route() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -2747,6 +2790,7 @@ async fn operator_recovers_from_a_locking_policy_through_the_admin_route() {
 /// makes the 17.5 deny branch reachable on a clean deployment: before this
 /// route, no principal could put a system-source policy into a tenant realm at
 /// all (25.11 refuses the tenant, and `/v1/*` is keyed on the caller's realm).
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn operator_authors_a_cross_realm_policy_into_a_tenant_realm() {
     const BODY: &str = r#"{"default_required_actions":["VERIFY_EMAIL"]}"#;
@@ -2797,6 +2841,7 @@ async fn operator_authors_a_cross_realm_policy_into_a_tenant_realm() {
 
 /// 25.14 — the exemption is narrow: it removes the policy consult, not the BOLA
 /// guard. A tenant admin still cannot reach a peer realm's policies.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn tenant_admin_cannot_reach_a_peer_realms_cross_realm_policies() {
     let f = cross_realm_fixture("xrealm-bola").await;
@@ -2825,6 +2870,7 @@ async fn tenant_admin_cannot_reach_a_peer_realms_cross_realm_policies() {
 /// 25.14 — the 25.11 write rule still applies on this route. A tenant admin
 /// operating on their *own* realm (path realm == token realm, so the BOLA guard
 /// passes) must still not author a policy naming the system realm as source.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn tenant_admin_cannot_author_a_system_source_policy_on_the_admin_route() {
     let f = cross_realm_fixture("xrealm-own-realm").await;
@@ -2873,6 +2919,7 @@ fn request_from_peer(
 /// serves it themselves — nothing constrains the bind address, so `dev_mode`
 /// on a public listener publishes `/admin/bootstrap` and the `/dev/seed-*`
 /// family to the internet (audit §4.7#2).
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_endpoints_refuse_a_non_loopback_peer() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2900,6 +2947,7 @@ async fn dev_endpoints_refuse_a_non_loopback_peer() {
 
 /// The same endpoints stay reachable from loopback, which is the only place
 /// `make dev` and the Playwright suite ever call them from.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_endpoints_remain_reachable_from_loopback() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2918,6 +2966,7 @@ async fn dev_endpoints_remain_reachable_from_loopback() {
 }
 
 /// IPv6 loopback is loopback.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_endpoints_accept_ipv6_loopback() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2934,6 +2983,7 @@ async fn dev_endpoints_accept_ipv6_loopback() {
 /// An IPv4-mapped IPv6 loopback (`::ffff:127.0.0.1`) is what a dual-stack
 /// listener reports for a local IPv4 client. Treating it as remote would break
 /// `make dev` on a `::`-bound server.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn dev_endpoints_accept_ipv4_mapped_loopback() {
     let dir = tempfile::tempdir().expect("tempdir");

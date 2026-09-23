@@ -1110,6 +1110,7 @@ async fn agent_endpoints_require_auth() {
 /// An admin token valid for realm A must not grant access to realm B's agents.
 /// The BOLA protection is architectural: tokens are signed with per-realm keys,
 /// so presenting realm A's token with X-Realm-ID: realm_B fails token validation.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn agent_endpoint_cross_realm_bola() {
     #[allow(unused_unsafe)]
@@ -1329,6 +1330,7 @@ async fn agent_credential_audit_actor_attributed() {
 /// create → get → list → patch → issue-key → list-creds → agent-card → delete
 /// against a running server with a valid admin token, asserting status codes
 /// and response bodies at each step.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn agent_rest_crud_positive_http() {
@@ -1538,6 +1540,7 @@ async fn agent_rest_crud_positive_http() {
 
 /// The REST list endpoint honours `?status=`, `?capability=`, `?owner_id=`,
 /// and cursor pagination via `?limit=` / `?cursor=`.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn agent_rest_list_supports_filters_and_cursor() {
@@ -1690,6 +1693,7 @@ async fn agent_rest_list_supports_filters_and_cursor() {
 /// realm, and creates one agent over HTTP.
 ///
 /// Returns `(harness, base_url, realm_id, admin_token, agent_id)`.
+#[cfg(feature = "dev-endpoints")]
 async fn agent_lifecycle_fixture() -> (common::TestHarness, String, String, String, String) {
     #[allow(unused_unsafe)]
     unsafe {
@@ -1742,6 +1746,7 @@ async fn agent_lifecycle_fixture() -> (common::TestHarness, String, String, Stri
 }
 
 /// `POST` helper for the three lifecycle routes: returns `(status, body)`.
+#[cfg(feature = "dev-endpoints")]
 async fn lifecycle_post(
     base: &str,
     realm_id: &str,
@@ -1763,6 +1768,7 @@ async fn lifecycle_post(
 
 /// Suspend → reactivate is a reversible round trip over HTTP, and `GET` agrees
 /// with the transition response at every step.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn agent_suspend_reactivate_round_trip_http() {
     let (h, base, realm_id, token, agent_id) = agent_lifecycle_fixture().await;
@@ -1811,6 +1817,7 @@ async fn agent_suspend_reactivate_round_trip_http() {
 /// A revoke over HTTP flips the persisted status AND kills a token the agent
 /// already holds: an AAT issued while the agent was `Active` stops validating.
 /// Revocation is terminal — reactivate afterwards is refused.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn agent_revoke_http_kills_a_live_aat() {
     let (h, base, realm_id, token, agent_id) = agent_lifecycle_fixture().await;
@@ -1861,6 +1868,7 @@ async fn agent_revoke_http_kills_a_live_aat() {
 
 /// The lifecycle routes are realm-scoped: an admin token for realm A must not
 /// be able to name an agent that lives in realm B.
+#[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn agent_lifecycle_routes_reject_another_realms_agent() {
     let (h, base, realm_id, token, own_agent_id) = agent_lifecycle_fixture().await;
