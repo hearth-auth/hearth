@@ -35,6 +35,7 @@ pub fn registered_security_key_paths() -> impl Iterator<Item = &'static str> {
     security_keys::registered_paths()
 }
 pub use types::parse_duration_to_micros;
+pub use types::BackupSecurityYaml;
 pub use types::{
     AbuseProvidersYaml, AdaptiveBackoffYaml, BotSignalYaml, CidrPolicyYaml, CrossRealmAggCapYaml,
     DistributedAttackDetectorYaml, EmailReputationProviderYaml, OutboundVolumeShieldYaml,

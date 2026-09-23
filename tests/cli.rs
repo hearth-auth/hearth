@@ -624,3 +624,218 @@ security:
         "the configured verify key must reach the server; logs: {logs}"
     );
 }
+
+// ===== A-30: `backup restore` refuses archives it cannot authenticate =====
+//
+// The CLI restore never looked at the manifest signature at all — not even
+// with `security.backup.verify_key` configured — so an archive anyone could
+// write restored silently. It now requires a verify key (flag or config) and
+// a valid signature, unless the operator passes `--allow-unsigned`.
+
+/// Writes an unsigned archive with no realms: small, and it restores to exit 0
+/// once past the signature gate, so the gate is the only thing under test.
+fn write_empty_archive(path: &std::path::Path) {
+    let writer = hearth::backup::BackupArchive::create(path).expect("create archive");
+    writer
+        .finish(hearth::backup::BackupManifest::new(vec![]))
+        .expect("finish archive");
+}
+
+fn run_hearth(args: &[&std::ffi::OsStr]) -> (Option<i32>, String) {
+    let out = Command::new(hearth_bin())
+        .args(args)
+        .env_remove("HEARTH_KEK")
+        // Opening a store outside dev mode requires a master key.
+        .env(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        )
+        .output()
+        .expect("run hearth");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), text)
+}
+
+fn os(s: &str) -> &std::ffi::OsStr {
+    std::ffi::OsStr::new(s)
+}
+
+#[test]
+fn backup_restore_refuses_without_a_verify_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = dir.path().join("a.hearth-backup");
+    let data_dir = dir.path().join("data");
+    write_empty_archive(&archive);
+
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir.as_os_str(),
+    ]);
+    assert_eq!(code, Some(2), "restore must refuse; output: {out}");
+    assert!(
+        out.contains("security.backup.verify_key") && out.contains("--allow-unsigned"),
+        "the refusal must say how to configure the key and how to opt out: {out}"
+    );
+    assert!(
+        !data_dir.exists(),
+        "the refusal must come before anything is written"
+    );
+
+    // Control: the explicit opt-in restores the same archive.
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir.as_os_str(),
+        os("--allow-unsigned"),
+    ]);
+    assert_eq!(
+        code,
+        Some(0),
+        "--allow-unsigned must restore; output: {out}"
+    );
+    assert!(
+        out.contains("WITHOUT signature verification"),
+        "an unverified restore must say so: {out}"
+    );
+}
+
+#[test]
+fn backup_keygen_sign_and_verified_restore_round_trip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key_file = dir.path().join("backup-signing.pem");
+    let archive = dir.path().join("a.hearth-backup");
+    write_empty_archive(&archive);
+
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("keygen"),
+        os("--output"),
+        key_file.as_os_str(),
+    ]);
+    assert_eq!(code, Some(0), "keygen: {out}");
+    let key = hearth::backup::BackupSigningKey::from_pem(
+        &std::fs::read_to_string(&key_file).expect("key file written"),
+    )
+    .expect("keygen writes a key the library reads");
+    let verify_key = key.verify_key_b64();
+    assert!(
+        out.contains(&verify_key),
+        "keygen must print the verify key to configure: {out}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&key_file)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "private key must not be group/world readable"
+        );
+    }
+    // keygen never overwrites an existing key.
+    let (code, _) = run_hearth(&[
+        os("backup"),
+        os("keygen"),
+        os("--output"),
+        key_file.as_os_str(),
+    ]);
+    assert_ne!(code, Some(0), "keygen must refuse to overwrite a key");
+
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("sign"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--key-file"),
+        key_file.as_os_str(),
+    ]);
+    assert_eq!(code, Some(0), "sign: {out}");
+
+    let data_dir = dir.path().join("data");
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+    ]);
+    assert_eq!(code, Some(0), "signed archive must restore; output: {out}");
+    assert!(out.contains("signature verified"), "{out}");
+
+    // A different key must not verify it — and `--allow-unsigned` does not
+    // override a key that was given.
+    let (other, _) = hearth::backup::BackupSigningKey::generate().expect("generate");
+    let other_key = other.verify_key_b64();
+    let data_dir2 = dir.path().join("data2");
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir2.as_os_str(),
+        os("--verify-key"),
+        os(&other_key),
+        os("--allow-unsigned"),
+    ]);
+    assert_eq!(code, Some(2), "wrong key must refuse; output: {out}");
+    assert!(out.contains("signature is invalid"), "{out}");
+}
+
+#[test]
+fn backup_restore_reads_the_verify_key_from_config_and_it_is_authoritative() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = dir.path().join("a.hearth-backup");
+    write_empty_archive(&archive);
+    let (key, _) = hearth::backup::BackupSigningKey::generate().expect("generate");
+    let config = dir.path().join("hearth.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "server:\n  port: 8420\n  bind_address: \"127.0.0.1\"\nstorage:\n  data_dir: \"{}\"\n\
+             oidc:\n  issuer: \"http://127.0.0.1:8420\"\nemail:\n  transport: log\n\
+             security:\n  backup:\n    verify_key: \"{}\"\n",
+            dir.path().join("unused").display(),
+            key.verify_key_b64()
+        ),
+    )
+    .expect("write config");
+
+    // The archive is unsigned. A configured key is authoritative, so the
+    // opt-in for key-less deployments does not wave it through.
+    let data_dir = dir.path().join("data");
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir.as_os_str(),
+        os("--config"),
+        config.as_os_str(),
+        os("--allow-unsigned"),
+    ]);
+    assert_eq!(
+        code,
+        Some(2),
+        "unsigned archive must be refused; output: {out}"
+    );
+    assert!(out.contains("archive is unsigned"), "{out}");
+}

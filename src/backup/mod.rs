@@ -65,6 +65,7 @@ mod encryption;
 mod error;
 mod export;
 mod import;
+mod signature;
 mod types;
 
 pub use encryption::{decrypt_archive, encrypt_archive};
@@ -73,11 +74,15 @@ pub use export::{decrypt_bytes, unwrap_dek, wrap_dek, BackupExporter, ExportOpti
 pub use import::{
     BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode,
 };
+pub use signature::{
+    check_restore_signature, sign_archive, verify_manifest_signature, BackupSigningKey,
+    SignatureCheck,
+};
 pub use types::{
     BackupManifest, BackupRecord, DekWrappingParams, RealmManifest, RecordCounts, MANIFEST_VERSION,
 };
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -142,7 +147,7 @@ impl BackupArchive {
         let builder = tar::Builder::new(encoder);
         Ok(ArchiveWriter {
             builder,
-            checksums: HashMap::new(),
+            checksums: BTreeMap::new(),
         })
     }
 
@@ -174,7 +179,7 @@ impl BackupArchive {
 /// write the manifest and seal the archive.
 pub struct ArchiveWriter {
     builder: tar::Builder<zstd::Encoder<'static, std::fs::File>>,
-    checksums: HashMap<String, String>,
+    checksums: BTreeMap<String, String>,
 }
 
 impl ArchiveWriter {
@@ -207,7 +212,30 @@ impl ArchiveWriter {
     ///
     /// Returns [`BackupError::Crypto`] when `sections_encrypted=true` but the
     /// required DEK fields are absent or inconsistent.
-    pub fn finish(mut self, mut manifest: BackupManifest) -> Result<(), BackupError> {
+    pub fn finish(self, manifest: BackupManifest) -> Result<(), BackupError> {
+        self.finish_inner(manifest, None)
+    }
+
+    /// Like [`finish`](Self::finish), but signs the manifest with `key` once
+    /// its checksums are known, so a restore can authenticate the archive
+    /// against `security.backup.verify_key` (A-30).
+    ///
+    /// # Errors
+    ///
+    /// As [`finish`](Self::finish).
+    pub fn finish_signed(
+        self,
+        manifest: BackupManifest,
+        key: &BackupSigningKey,
+    ) -> Result<(), BackupError> {
+        self.finish_inner(manifest, Some(key))
+    }
+
+    fn finish_inner(
+        mut self,
+        mut manifest: BackupManifest,
+        signer: Option<&BackupSigningKey>,
+    ) -> Result<(), BackupError> {
         if manifest.sections_encrypted
             && (manifest.wrapped_dek_b64.is_none() || manifest.dek_wrapping_params.is_none())
         {
@@ -221,6 +249,12 @@ impl ArchiveWriter {
             ));
         }
         manifest.checksums = self.checksums;
+        // The signature covers the checksums, so it must be computed after
+        // they are set — and any stale signature must not survive.
+        manifest.detached_signature_b64 = None;
+        if let Some(key) = signer {
+            key.sign_manifest(&mut manifest)?;
+        }
 
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
 
@@ -415,7 +449,7 @@ mod tests {
                 },
                 audit_chain_included: false,
             }],
-            checksums: HashMap::new(),
+            checksums: BTreeMap::new(),
             sections_encrypted: false,
             wrapped_dek_b64: None,
             dek_wrapping_params: None,

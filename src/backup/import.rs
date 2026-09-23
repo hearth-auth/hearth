@@ -1346,7 +1346,7 @@ mod tests {
                 },
                 audit_chain_included: false,
             }],
-            checksums: std::collections::HashMap::new(),
+            checksums: std::collections::BTreeMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
             signing_key_dek_b64: None,
@@ -1362,7 +1362,7 @@ mod tests {
             .add_file(&format!("realms/{slug}/users.ndjson"), &users_encrypted)
             .expect("add users.ndjson");
         // Manually set checksums (finish guard requires sections_encrypted fields to be set)
-        manifest.checksums = std::collections::HashMap::new();
+        manifest.checksums = std::collections::BTreeMap::new();
         // Use a raw finish path that bypasses the guard by finishing directly.
         // The manifest already has sections_encrypted=true + wrapped_dek_b64 set.
         writer.finish(manifest).expect("finish archive");
@@ -1654,7 +1654,7 @@ mod tests {
                 record_counts: RecordCounts::default(),
                 audit_chain_included: false,
             }],
-            checksums: std::collections::HashMap::new(),
+            checksums: std::collections::BTreeMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
             signing_key_dek_b64: None,
@@ -1740,7 +1740,7 @@ mod tests {
                 record_counts: RecordCounts::default(),
                 audit_chain_included: false,
             }],
-            checksums: std::collections::HashMap::new(),
+            checksums: std::collections::BTreeMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
             signing_key_dek_b64: None,

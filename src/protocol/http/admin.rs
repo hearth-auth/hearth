@@ -34,8 +34,8 @@ use super::extract_realm_id;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
     identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
-    require_admin_permission, require_any_admin_permission, verify_manifest_signature, AdminAuth,
-    AppState, BACKUP_RESTORE_BODY_LIMIT,
+    require_admin_permission, require_any_admin_permission, AdminAuth, AppState,
+    BACKUP_RESTORE_BODY_LIMIT,
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
@@ -5080,6 +5080,11 @@ async fn admin_backup_restore(
     let dry_run = params.dry_run;
     // Clone out of Arc before entering spawn_blocking.
     let verify_key_bytes = state.backup_verify_key_bytes;
+    // A-30: outside dev mode a restore must be authenticated by a configured
+    // verify key. There is no request-level override: the CLI's
+    // `--allow-unsigned` is an operator acting on the data directory, while
+    // this route is reachable by anyone holding an export-capable token.
+    let allow_unsigned = state.dev_mode;
 
     // Stream the `file` multipart field to a tempfile to avoid holding the
     // entire archive in memory while parsing.
@@ -5211,10 +5216,20 @@ async fn admin_backup_restore(
         let reader = BackupArchive::open(&tmp_path)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("open archive: {e}")))?;
 
-        // A-30: verify detached manifest signature when an operator verify key is configured.
-        if let Some(key_bytes) = verify_key_bytes.as_ref() {
-            verify_manifest_signature(&reader.manifest, key_bytes)
-                .map_err(|(_, body)| (StatusCode::BAD_REQUEST, format!("{}", body.0)))?;
+        // A-30: authenticate the archive before anything else reads it. An
+        // unsigned archive, a bad signature, or — outside dev mode — no verify
+        // key at all is refused (fail-closed).
+        match crate::backup::check_restore_signature(
+            &reader.manifest,
+            verify_key_bytes.as_ref(),
+            allow_unsigned,
+        ) {
+            Ok(crate::backup::SignatureCheck::Verified) => {}
+            Ok(_) => tracing::warn!(
+                "dev mode: restoring a backup archive WITHOUT signature verification \
+                 (security.backup.verify_key is not configured)"
+            ),
+            Err(e) => return Err((StatusCode::BAD_REQUEST, e.to_string())),
         }
 
         // Task 26.42: verify the archive against its manifest BEFORE importing.
