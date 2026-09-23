@@ -390,8 +390,12 @@ SDK requirements:
   the caller's token: the client's configured access token, or an explicit token argument.
   Adding that argument MUST NOT break existing callers where the language allows it (optional
   or variadic parameter; in Rust, a new `register_client_with_token` method).
-- The admin route's request body uses the proto field name `client_name`. The server rejects
-  an unknown `name` key with `422`.
+- The admin route's request body is the proto `RegisterClientRequest`: the name key is
+  `client_name` (the server rejects an unknown `name` key with `422`), and the enum fields take
+  their proto names — `trust_level` is `CLIENT_TRUST_LEVEL_FIRST_PARTY` /
+  `CLIENT_TRUST_LEVEL_THIRD_PARTY`, `access_token_authorization` is `EMBEDDED` /
+  `INTROSPECTION` / `DECISION`. The snake_case spellings (`first_party`, `embedded`) are a `422`.
+  `POST /admin/applications` takes the same body (see [OAuth Clients](#oauth-clients-roles-groups)).
 - SDKs MUST treat `201 Created` as success.
 - An RFC 7591 method MUST accept an optional initial access token and send it as
   `Authorization: Bearer` when it is given.
@@ -572,6 +576,17 @@ These entities follow the same CRUD + list pattern targeting:
 - `/admin/applications` — OAuth 2.0 client registrations. **Note the path**: the server
   has never served `/admin/clients`, and an SDK that addresses it 404s on every call
   (audit 2026-08-28 §25.4, §25.18). The mutation verb is `PATCH`, not `PUT`.
+  Wire shapes — no client route sends `id` / `name`, and none reads them:
+  - `POST /admin/applications` takes the proto `RegisterClientRequest`, the same body as
+    `POST /clients` (§4.5.4): `client_name`, and proto enum names for `trust_level` and
+    `access_token_authorization`. An unknown key such as `name` is a `422`.
+  - `PATCH /admin/applications/{id}` takes `client_name`, but with `trust_level`
+    (`first_party` / `third_party`) and `access_token_authorization` (`embedded` /
+    `introspection` / `decision`) as snake_case strings. It **ignores** unknown keys, so an
+    SDK that sends `name` gets `200` and the client is not renamed.
+  - Every client route answers with the proto `OAuthClient`: `client_id`, `client_name`,
+    `redirect_uris`, `grant_types`, `created_at`, and `access_token_authorization` as a proto
+    enum name (omitted when it is `EMBEDDED`, proto3's zero value).
 - `/admin/roles` — realm-level role definitions
 - `/admin/groups` — realm-level group definitions
 

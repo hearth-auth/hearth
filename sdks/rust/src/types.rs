@@ -8,16 +8,71 @@ use serde::{Deserialize, Serialize};
 /// SDK middleware and [`crate::HearthClient::check_permission`] take an explicit
 /// mode — absence of `permissions` in the JWT is **never** used to infer mode
 /// (HEA-921 design constraint).
+///
+/// Serializes as `snake_case` (`embedded`, …). Deserialization also accepts the
+/// proto enum names (`EMBEDDED`, …), which is what every client route answers
+/// with inside an `OAuthClient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessTokenAuthorization {
     /// Permissions, roles, and groups are embedded in the JWT at issuance (default).
     #[default]
+    #[serde(alias = "EMBEDDED")]
     Embedded,
     /// JWT carries only identity claims; resource servers call `/introspect` for live data.
+    #[serde(alias = "INTROSPECTION")]
     Introspection,
     /// JWT carries only identity claims; resource servers call `POST /oauth/authorize` per request.
+    #[serde(alias = "DECISION")]
     Decision,
+}
+
+impl AccessTokenAuthorization {
+    /// The proto `AccessTokenAuthorization` enum name (`EMBEDDED`, …).
+    fn proto_name(self) -> &'static str {
+        match self {
+            Self::Embedded => "EMBEDDED",
+            Self::Introspection => "INTROSPECTION",
+            Self::Decision => "DECISION",
+        }
+    }
+}
+
+/// Serde helpers for the proto `RegisterClientRequest` body shared by
+/// `POST /clients` and `POST /admin/applications`.
+///
+/// That body is deserialized by the generated proto JSON codec, which takes
+/// enums by their proto names only: `embedded` and `first_party` answer
+/// `422 unknown variant`. `PATCH /admin/applications/{id}` is the opposite — it
+/// reads `snake_case` strings — so only the create/register types use these.
+mod proto_wire {
+    use super::AccessTokenAuthorization;
+    use serde::Serializer;
+
+    /// Serialize an [`AccessTokenAuthorization`] as its proto enum name.
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde's `serialize_with` signature
+    pub(super) fn access_token_authorization<S: Serializer>(
+        mode: &AccessTokenAuthorization,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.serialize_str(mode.proto_name())
+    }
+
+    /// Serialize a trust level, mapping `first_party` / `third_party` to the
+    /// proto `ClientTrustLevel` names. Any other value is sent unchanged so
+    /// the server rejects it instead of the SDK silently choosing a level.
+    #[allow(clippy::ref_option)] // serde's `serialize_with` signature
+    pub(super) fn trust_level<S: Serializer>(
+        level: &Option<String>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match level.as_deref() {
+            Some("first_party") => s.serialize_str("CLIENT_TRUST_LEVEL_FIRST_PARTY"),
+            Some("third_party") => s.serialize_str("CLIENT_TRUST_LEVEL_THIRD_PARTY"),
+            Some(other) => s.serialize_str(other),
+            None => s.serialize_none(),
+        }
+    }
 }
 
 /// Response from `POST /introspect` (RFC 7662, extended by Hearth).
@@ -212,10 +267,14 @@ pub struct MePermissionsResponse {
     pub groups: Vec<String>,
 }
 
-/// An OAuth client as returned by `POST /clients`.
+/// An OAuth client, as returned by `POST /clients` and every
+/// `/admin/applications` route.
 ///
-/// The server answers with the proto `OAuthClient` shape (`client_id`,
-/// `client_name`); the legacy `id` / `name` keys are still accepted.
+/// All of them answer with the proto `OAuthClient` shape, so the wire keys are
+/// `client_id` / `client_name`; `id` / `name` are only this struct's field
+/// names. Deserialization also accepts `id` / `name` so JSON this struct
+/// serialized under earlier SDK versions still loads — no Hearth route sends
+/// them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthClient {
     #[serde(rename = "client_id", alias = "id")]
@@ -233,17 +292,22 @@ pub struct OAuthClient {
     pub access_token_authorization: AccessTokenAuthorization,
 }
 
-/// Body of `POST /clients`.
+/// Body of `POST /clients` (the proto `RegisterClientRequest`).
 ///
 /// `name` is sent on the wire as `client_name` — the server rejects an
-/// unknown `name` key with `422`.
+/// unknown `name` key with `422` — and `trust_level` (`first_party` /
+/// `third_party`) as the proto `ClientTrustLevel` name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterClientRequest {
     #[serde(rename = "client_name", alias = "name")]
     pub name: String,
     #[serde(default)]
     pub redirect_uris: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "proto_wire::trust_level"
+    )]
     pub trust_level: Option<String>,
 }
 
@@ -329,21 +393,41 @@ pub struct UpdateGroupRequest {
     pub description: Option<String>,
 }
 
-/// A create/update request for an OAuth client via admin API.
+/// Body of `POST /admin/applications` (the proto `RegisterClientRequest`).
+///
+/// Same wire shape as [`RegisterClientRequest`]: `name` is sent as
+/// `client_name`, and `trust_level` / `access_token_authorization` as their
+/// proto enum names (`CLIENT_TRUST_LEVEL_FIRST_PARTY`, `EMBEDDED`, …).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateClientRequest {
+    #[serde(rename = "client_name", alias = "name")]
     pub name: String,
     #[serde(default)]
     pub redirect_uris: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "proto_wire::trust_level"
+    )]
     pub trust_level: Option<String>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "proto_wire::access_token_authorization")]
     pub access_token_authorization: AccessTokenAuthorization,
 }
 
+/// Body of `PATCH /admin/applications/{id}`.
+///
+/// `name` is sent as `client_name`. The route ignores unknown keys, so a
+/// `name` key would answer `200` and rename nothing. Unlike the create body,
+/// this route reads `trust_level` and `access_token_authorization` as
+/// `snake_case` strings (`first_party`, `introspection`, …).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateClientRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "client_name",
+        alias = "name",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uris: Option<Vec<String>>,

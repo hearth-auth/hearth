@@ -2,7 +2,7 @@
 
 from typing import Literal, Optional, List, Any, Generic, TypeVar
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 T = TypeVar("T")
 
@@ -111,48 +111,98 @@ class MePermissionsResponse(BaseModel):
     groups: List[str]
 
 
+# Proto ``ClientTrustLevel`` names for the SDK's snake_case trust levels.
+#
+# ``POST /clients`` and ``POST /admin/applications`` deserialize the proto
+# ``RegisterClientRequest``, whose ``trust_level`` is an enum: the server answers
+# ``422 unknown variant`` for ``first_party``. ``PATCH /admin/applications/{id}``
+# is the opposite — it reads the snake_case string.
+_PROTO_TRUST_LEVEL = {
+    "first_party": "CLIENT_TRUST_LEVEL_FIRST_PARTY",
+    "third_party": "CLIENT_TRUST_LEVEL_THIRD_PARTY",
+}
+
+
+def _proto_trust_level(value: Optional[str]) -> Optional[str]:
+    """Map ``first_party`` / ``third_party`` to the proto enum name.
+
+    Any other value is sent unchanged, so the server rejects a typo instead of
+    the SDK silently choosing a trust level.
+    """
+    if value is None:
+        return None
+    return _PROTO_TRUST_LEVEL.get(value, value)
+
+
 class OAuthClient(BaseModel):
     """An OAuth client.
 
-    ``POST /clients`` answers with the proto shape (``client_id`` /
-    ``client_name``); the admin applications API uses ``id`` / ``name``. Both
-    are accepted.
+    Every client route (``POST /clients`` and ``/admin/applications``) answers
+    with the proto ``OAuthClient`` shape, so the wire keys are ``client_id`` /
+    ``client_name``. ``id`` / ``name`` are only this model's attribute names
+    (accepted as constructor keywords too); no Hearth route sends them.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: str = Field(validation_alias=AliasChoices("id", "client_id"))
-    name: str = Field(validation_alias=AliasChoices("name", "client_name"))
+    id: str = Field(validation_alias="client_id")
+    name: str = Field(validation_alias="client_name")
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
     secret: Optional[str] = None
 
 
 class RegisterClientRequest(BaseModel):
-    """Body of ``POST /clients``; ``name`` is sent on the wire as ``client_name``."""
+    """Body of ``POST /clients`` (the proto ``RegisterClientRequest``).
+
+    ``name`` is sent as ``client_name`` — the server rejects an unknown ``name``
+    key with ``422`` — and ``trust_level`` (``first_party`` / ``third_party``)
+    as the proto enum name.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    name: str = Field(
-        validation_alias=AliasChoices("name", "client_name"),
-        serialization_alias="client_name",
-    )
+    name: str = Field(validation_alias="client_name", serialization_alias="client_name")
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
+
+    @field_serializer("trust_level")
+    def _serialize_trust_level(self, value: Optional[str]) -> Optional[str]:
+        return _proto_trust_level(value)
 
 
 class CreateClientRequest(BaseModel):
-    """Request body for POST /admin/applications."""
+    """Body of ``POST /admin/applications`` (the proto ``RegisterClientRequest``).
 
-    name: str
+    Same wire shape as :class:`RegisterClientRequest`: ``name`` is sent as
+    ``client_name`` and ``trust_level`` as the proto enum name.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str = Field(validation_alias="client_name", serialization_alias="client_name")
     redirect_uris: List[str] = []
     trust_level: Optional[str] = None
 
+    @field_serializer("trust_level")
+    def _serialize_trust_level(self, value: Optional[str]) -> Optional[str]:
+        return _proto_trust_level(value)
+
 
 class UpdateClientRequest(BaseModel):
-    """Request body for PATCH /admin/applications/{id}."""
+    """Body of ``PATCH /admin/applications/{id}``.
 
-    name: Optional[str] = None
+    ``name`` is sent as ``client_name``. The route ignores unknown keys, so a
+    ``name`` key would answer ``200`` and rename nothing. ``trust_level`` stays
+    snake_case (``first_party`` / ``third_party``), which is what this route
+    reads.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: Optional[str] = Field(
+        default=None, validation_alias="client_name", serialization_alias="client_name"
+    )
     redirect_uris: Optional[List[str]] = None
     trust_level: Optional[str] = None
 

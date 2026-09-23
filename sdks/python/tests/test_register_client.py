@@ -84,3 +84,17 @@ def test_register_client_surfaces_server_error(respx_mock):
         client.register_client(_req())
 
     assert exc.value.status_code == 403
+
+
+def test_register_client_sends_trust_level_as_proto_enum_name(respx_mock):
+    # The proto body's `trust_level` is the `ClientTrustLevel` enum: the server
+    # rejects the snake_case spelling `first_party` with a 422.
+    route = respx_mock.post(f"{BASE}/clients").mock(
+        return_value=httpx.Response(201, json=CREATED)
+    )
+    client = HearthClient(BASE, "realm-1", access_token="admin-token-xyz")
+
+    client.register_client(RegisterClientRequest(name="My App", trust_level="first_party"))
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["trust_level"] == "CLIENT_TRUST_LEVEL_FIRST_PARTY"
