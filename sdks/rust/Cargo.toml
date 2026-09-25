@@ -37,3 +37,6 @@ actix-web = { version = "4", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 actix-web = "4"
+# Test-only: mints the RS256 tokens that prove `verify_token` refuses them.
+# Already in the lock file via jsonwebtoken's `rust_crypto` backend.
+rsa = { version = "0.9", features = ["getrandom"] }

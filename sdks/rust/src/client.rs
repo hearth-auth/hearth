@@ -1790,4 +1790,88 @@ mod tests {
 
         assert_eq!(client.verify_token(&token).await.unwrap().subject(), "u");
     }
+
+    // ── RS256 ID-token key in the JWKS (Hearth task 26.55) ───────────────
+    //
+    // A realm whose clients selected `id_token_signed_response_alg: RS256`
+    // publishes an RSA `id-token-signing` key beside its Ed25519 key.
+    // `verify_token` verifies ACCESS tokens, which Hearth signs with EdDSA
+    // only: it must keep parsing such a JWKS, keep verifying EdDSA tokens,
+    // and refuse an RS256 token even though the key that signed it is
+    // published — otherwise an ID token could be replayed as a bearer token.
+
+    const RSA_KID: &str = "rsa-id-token-key";
+
+    /// Signs `claims` RS256 with a fresh RSA key and returns the token plus
+    /// the RSA JWK Hearth would publish for that key.
+    fn make_rs256_jwt_and_jwk(claims: &serde_json::Value) -> (String, jsonwebtoken::jwk::Jwk) {
+        use rsa::pkcs1::EncodeRsaPrivateKey as _;
+        use rsa::traits::PublicKeyParts as _;
+        let key = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let der = key.to_pkcs1_der().unwrap();
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(RSA_KID.to_string());
+        let token = encode(&header, claims, &EncodingKey::from_rsa_der(der.as_bytes())).unwrap();
+        let jwk = serde_json::from_value(json!({
+            "kty": "RSA",
+            "alg": "RS256",
+            "use": "sig",
+            "kid": RSA_KID,
+            "n": URL_SAFE_NO_PAD.encode(key.n().to_bytes_be()),
+            "e": URL_SAFE_NO_PAD.encode(key.e().to_bytes_be()),
+            "x-key-role": "id-token-signing",
+        }))
+        .unwrap();
+        (token, jwk)
+    }
+
+    #[test]
+    fn a_jwks_with_an_rs256_id_token_key_still_parses() {
+        let (_pkcs8, pub_key) = make_ed25519_pkcs8();
+        let (_token, rsa_jwk) = make_rs256_jwt_and_jwk(&json!({ "sub": "u" }));
+        let doc = json!({
+            "keys": [
+                serde_json::to_value(&rsa_jwk).unwrap(),
+                serde_json::to_value(make_jwk("ed-1", &pub_key)).unwrap(),
+            ]
+        });
+        let set: jsonwebtoken::jwk::JwkSet =
+            serde_json::from_value(doc).expect("a mixed RSA + OKP JWKS must parse");
+        assert_eq!(set.keys.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn verify_token_still_accepts_eddsa_beside_a_published_rsa_key() {
+        let (pkcs8, pub_key) = make_ed25519_pkcs8();
+        let client = client_with_cached_jwk("ed-1", make_jwk("ed-1", &pub_key), None).await;
+        let (_token, rsa_jwk) = make_rs256_jwt_and_jwk(&json!({ "sub": "u" }));
+        client.jwks_cache.inject_for_test(RSA_KID, rsa_jwk).await;
+
+        let now = now_secs();
+        let token = make_test_jwt(
+            &json!({ "sub": "u", "iss": "https://auth.example.com", "exp": now + 3600, "iat": now }),
+            &pkcs8,
+            "ed-1",
+        );
+        assert_eq!(client.verify_token(&token).await.unwrap().subject(), "u");
+    }
+
+    #[tokio::test]
+    async fn verify_token_refuses_rs256_signed_by_a_published_rsa_key() {
+        let now = now_secs();
+        let (id_token, rsa_jwk) = make_rs256_jwt_and_jwk(&json!({
+            "sub": "u",
+            "iss": "https://auth.example.com",
+            "exp": now + 3600,
+            "iat": now,
+            "token_type": "id_token",
+        }));
+        let client = client_with_cached_jwk(RSA_KID, rsa_jwk, None).await;
+
+        let err = client.verify_token(&id_token).await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenInvalidError { .. }),
+            "an RS256 ID token must never verify as an access token, got {err:?}"
+        );
+    }
 }

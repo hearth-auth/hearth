@@ -206,3 +206,48 @@ describe("HearthClient.verifyToken() — EdDSA / Ed25519", () => {
     expect(claims.inGroup("eng")).toBe(true);
   });
 });
+
+// Task 26.55 — a realm whose clients selected RS256 ID tokens publishes an RSA
+// `id-token-signing` key beside its Ed25519 key. verifyToken() verifies ACCESS
+// tokens, which Hearth signs with EdDSA only, so it must (a) keep verifying
+// EdDSA tokens against such a JWKS and (b) refuse an RS256 token even though
+// the key that signed it is published — otherwise an ID token could be
+// replayed as a bearer token.
+describe("HearthClient.verifyToken() — JWKS carrying an RS256 ID-token key", () => {
+  const RSA_KID = "rsa-id-token-key";
+
+  async function mixedJwksDoc(rsaPublicKey: KeyLike) {
+    const okp = await exportJWK(publicKey);
+    const rsa = await exportJWK(rsaPublicKey);
+    return {
+      keys: [
+        { ...rsa, kid: RSA_KID, use: "sig", alg: "RS256", "x-key-role": "id-token-signing" },
+        { ...okp, kid: KID, use: "sig", alg: "EdDSA", "x-key-role": "access-token-signing" },
+      ],
+    };
+  }
+
+  it("still verifies an EdDSA access token", async () => {
+    const rsa = await generateKeyPair("RS256", { modulusLength: 2048 });
+    const token = await signToken(privateKey);
+    mockFetch([{ body: DISCOVERY }, { body: await mixedJwksDoc(rsa.publicKey as KeyLike) }]);
+
+    const claims = await new HearthClient({ issuerUrl: ISSUER }).verifyToken(token);
+    expect(claims.subject()).toBe("user123");
+  });
+
+  it("refuses an RS256 token signed by the published RSA key", async () => {
+    const rsa = await generateKeyPair("RS256", { modulusLength: 2048 });
+    const idToken = await new SignJWT({ sub: "user123", token_type: "id_token" })
+      .setProtectedHeader({ alg: "RS256", kid: RSA_KID, typ: "JWT" })
+      .setIssuedAt()
+      .setIssuer(ISSUER)
+      .setExpirationTime("1h")
+      .sign(rsa.privateKey as KeyLike);
+    mockFetch([{ body: DISCOVERY }, { body: await mixedJwksDoc(rsa.publicKey as KeyLike) }]);
+
+    await expect(
+      new HearthClient({ issuerUrl: ISSUER }).verifyToken(idToken),
+    ).rejects.toBeInstanceOf(TokenInvalidError);
+  });
+});
