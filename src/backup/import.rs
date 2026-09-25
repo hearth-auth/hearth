@@ -59,6 +59,8 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "invitations.ndjson",
     "retiring_signing_keys.json",
     "signing_key.json",
+    "id_token_signing_key.json",
+    "retiring_id_token_signing_keys.json",
     "audit.ndjson",
     "audit_chain.json",
 ];
@@ -197,6 +199,10 @@ pub struct ImportReport {
     /// grace window had already closed by the time of the restore
     /// (OpenSpec 26.40).
     pub retiring_signing_keys: EntityCounts,
+    /// Outcome for the realm's RS256 ID-token signing key (0 or 1), task 26.55.
+    pub id_token_signing_key: EntityCounts,
+    /// Outcome counts for retiring RS256 ID-token signing keys (task 26.55).
+    pub retiring_id_token_signing_keys: EntityCounts,
     /// Outcome counts for restored audit events.
     pub audit_events: EntityCounts,
     /// Whether the archive's audit hashes were checked against the source
@@ -397,6 +403,29 @@ impl BackupImporter {
             );
         }
 
+        // ── RS256 ID-token key (task 26.55), same fail-closed rule ──────────
+        //
+        // An archive whose clients receive RS256 ID tokens must carry the key
+        // that signed them. Restoring without it would provision a fresh RSA
+        // key on the first RS256 client import, and every ID token issued
+        // before the backup would stop verifying. Checked before any write.
+        let id_token_rsa_pkcs8 = self.load_id_token_rsa_key(realm_slug, &files, dek.as_deref())?;
+        if id_token_rsa_pkcs8.is_none()
+            && archive_has_rs256_clients(realm_slug, &files, &try_decrypt)?
+        {
+            if !opts.allow_missing_signing_key {
+                return Err(BackupError::IdTokenSigningKeyMissing {
+                    slug: realm_slug.to_string(),
+                });
+            }
+            warn!(
+                slug = realm_slug,
+                "RS256 ID-token key not restored — proceeding under allow_missing_signing_key: \
+                 ID tokens issued before the backup will not verify against the freshly \
+                 generated key"
+            );
+        }
+
         // Parse realm.json — required.
         //
         // This runs BEFORE any write so the realm-authorization check below can
@@ -561,6 +590,27 @@ impl BackupImporter {
                 &mut report,
             )?
         };
+
+        // ── RS256 ID-token signing key (task 26.55) ─────────────────────────
+        //
+        // Restored BEFORE the clients: importing an RS256 client provisions the
+        // realm's RSA key when none exists, so the archived key must already be
+        // in place or a freshly generated one would take its slot.
+        if let Some(pkcs8) = id_token_rsa_pkcs8.as_ref() {
+            if opts.dry_run {
+                report.id_token_signing_key.created += 1;
+            } else {
+                let outcome = self
+                    .identity
+                    .import_realm_id_token_rsa_key(
+                        &restored_realm_id,
+                        pkcs8,
+                        opts.mode == RestoreMode::Overwrite,
+                    )
+                    .map_err(|e| BackupError::Engine(e.to_string()))?;
+                tally(&mut report.id_token_signing_key, outcome);
+            }
+        }
 
         // ── Users ──────────────────────────────────────────────────────────
         let users_key = format!("realms/{realm_slug}/users.ndjson");
@@ -843,6 +893,19 @@ impl BackupImporter {
 
         self.restore_member_ndjson(
             &files,
+            &format!("realms/{realm_slug}/retiring_id_token_signing_keys.json"),
+            &try_decrypt,
+            opts,
+            &mut report.retiring_id_token_signing_keys,
+            |this, key: &RetiringSigningKeyExport| {
+                this.identity
+                    .import_retiring_id_token_rsa_key(&restored_realm_id, key, overwrite)
+                    .map_err(|e| BackupError::Engine(e.to_string()))
+            },
+        )?;
+
+        self.restore_member_ndjson(
+            &files,
             &format!("realms/{realm_slug}/scopes.ndjson"),
             &try_decrypt,
             opts,
@@ -926,6 +989,24 @@ impl BackupImporter {
         let pkcs8 = decrypt_bytes(encrypted, d)?;
         debug!(slug = realm_slug, "signing_key restored from archive");
         Ok(Some(pkcs8))
+    }
+
+    /// Decrypts `realms/<slug>/id_token_signing_key.json` (task 26.55).
+    ///
+    /// `Ok(None)` when the member is absent (the realm never had an RS256
+    /// client, or the archive predates RS256) or no DEK is available; a hard
+    /// error when it is present but cannot be decrypted.
+    fn load_id_token_rsa_key(
+        &self,
+        realm_slug: &str,
+        files: &std::collections::HashMap<String, Vec<u8>>,
+        dek: Option<&[u8; 32]>,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, BackupError> {
+        let member = format!("realms/{realm_slug}/id_token_signing_key.json");
+        let (Some(encrypted), Some(d)) = (files.get(&member), dek) else {
+            return Ok(None);
+        };
+        Ok(Some(decrypt_bytes(encrypted, d)?))
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -1149,6 +1230,31 @@ impl BackupImporter {
 }
 
 // ── Free helpers ─────────────────────────────────────────────────────────────
+
+/// Whether any client in the realm's `clients.ndjson` receives RS256 ID
+/// tokens (task 26.55) — the condition under which the archive MUST carry the
+/// realm's RS256 ID-token key.
+fn archive_has_rs256_clients(
+    realm_slug: &str,
+    files: &std::collections::HashMap<String, Vec<u8>>,
+    try_decrypt: &impl Fn(&[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
+) -> Result<bool, BackupError> {
+    let Some(raw) = files.get(&format!("realms/{realm_slug}/clients.ndjson")) else {
+        return Ok(false);
+    };
+    let decrypted = try_decrypt(raw)?;
+    for line in decrypted.split(|&b| b == b'\n') {
+        let line = trim_bytes(line);
+        if line.is_empty() {
+            continue;
+        }
+        let client: BackupClient = serde_json::from_slice(line)?;
+        if client.id_token_signed_response_alg.as_deref() == Some("RS256") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// Parses `credentials.ndjson` bytes into a map from raw user UUID string to
 /// [`RawCredential`].

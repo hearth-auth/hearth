@@ -110,6 +110,25 @@ pub enum BackupError {
         slug: String,
     },
 
+    /// The archive has clients registered for RS256 ID tokens but carries no
+    /// restorable RS256 ID-token signing key for their realm (task 26.55).
+    ///
+    /// Restoring anyway would provision a NEW RSA key, and every ID token
+    /// issued before the backup — including any `id_token_hint` a relying
+    /// party still holds for logout — would stop verifying. Fails closed for
+    /// the same reason as [`Self::SigningKeyMissing`], with the same override.
+    #[error(
+        "backup archive has clients that receive RS256 ID tokens in realm '{slug}' but no \
+         restorable RS256 ID-token signing key — restoring would generate a NEW key and \
+         invalidate every ID token issued before the backup. Re-export the realm with \
+         encryption enabled so the key round-trips, or pass `--allow-missing-signing-key` \
+         to `hearth backup restore` to proceed anyway with a freshly generated key."
+    )]
+    IdTokenSigningKeyMissing {
+        /// Archive slug of the realm whose RS256 ID-token key could not be restored.
+        slug: String,
+    },
+
     /// The archive carries a realm the caller is not authorized to restore.
     ///
     /// A restore takes the realm it may write from the caller's identity. An
