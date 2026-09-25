@@ -5043,6 +5043,42 @@ async fn admin_backup_create(
     }
 }
 
+/// Why `POST /admin/backup/restore` refused, as the blocking restore task
+/// reports it.
+///
+/// `code` is set for an archive-authentication failure and becomes the
+/// response's `error` field — the machine-readable contract restore has
+/// documented since HEA-1206 (`missing_manifest_signature`,
+/// `invalid_manifest_signature`) — with the human explanation moved to
+/// `error_description`. Every other refusal keeps `{"error": "<message>"}`.
+struct RestoreRefusal {
+    status: StatusCode,
+    code: Option<&'static str>,
+    message: String,
+}
+
+impl From<(StatusCode, String)> for RestoreRefusal {
+    fn from((status, message): (StatusCode, String)) -> Self {
+        Self {
+            status,
+            code: None,
+            message,
+        }
+    }
+}
+
+/// The stable `error` code for a [`crate::backup::check_restore_signature`]
+/// refusal, or `None` for an error that is not about the signature.
+fn restore_signature_error_code(e: &crate::backup::BackupError) -> Option<&'static str> {
+    use crate::backup::BackupError;
+    match e {
+        BackupError::VerifyKeyNotConfigured => Some("backup_verify_key_not_configured"),
+        BackupError::SignatureMissing => Some("missing_manifest_signature"),
+        BackupError::SignatureInvalid(_) => Some("invalid_manifest_signature"),
+        _ => None,
+    }
+}
+
 /// `POST /admin/backup/restore` — restore from a `.hearth-backup` archive.
 ///
 /// Body: `multipart/form-data`, field `file` = `.hearth-backup` archive.
@@ -5087,9 +5123,16 @@ async fn admin_backup_restore(
     let allow_unsigned = state.dev_mode;
 
     // Stream the `file` multipart field to a tempfile to avoid holding the
-    // entire archive in memory while parsing.
-    let tmp = match tempfile::NamedTempFile::new() {
-        Ok(f) => f,
+    // entire archive in memory while parsing. The file is anonymous (unlinked
+    // from creation) and every later read goes through this one handle, so the
+    // bytes imported are exactly the bytes whose signature and checksums were
+    // verified: there is no path through which they could be swapped between
+    // the two passes.
+    let (tmp, mut async_tmp) = match tempfile::tempfile().and_then(|f| {
+        let writer = f.try_clone()?;
+        Ok((f, writer))
+    }) {
+        Ok((f, writer)) => (f, tokio::fs::File::from_std(writer)),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -5098,7 +5141,6 @@ async fn admin_backup_restore(
                 .into_response()
         }
     };
-    let tmp_path = tmp.path().to_path_buf();
 
     let mut file_found = false;
     'fields: while let Ok(Some(field)) = multipart.next_field().await {
@@ -5108,20 +5150,6 @@ async fn admin_backup_restore(
         file_found = true;
 
         use tokio::io::AsyncWriteExt as _;
-        let mut async_tmp = match tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&tmp_path)
-            .await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("open tempfile: {e}")})),
-                )
-                    .into_response()
-            }
-        };
 
         // Chunk the field into the tempfile.
         let mut field = field;
@@ -5209,11 +5237,12 @@ async fn admin_backup_restore(
                 return Err((
                     StatusCode::BAD_REQUEST,
                     format!("unknown mode '{other}'; expected skip | overwrite | merge"),
-                ))
+                )
+                    .into())
             }
         };
 
-        let reader = BackupArchive::open(&tmp_path)
+        let reader = BackupArchive::from_file(tmp)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("open archive: {e}")))?;
 
         // A-30: authenticate the archive before anything else reads it. An
@@ -5229,7 +5258,13 @@ async fn admin_backup_restore(
                 "dev mode: restoring a backup archive WITHOUT signature verification \
                  (security.backup.verify_key is not configured)"
             ),
-            Err(e) => return Err((StatusCode::BAD_REQUEST, e.to_string())),
+            Err(e) => {
+                return Err(RestoreRefusal {
+                    status: StatusCode::BAD_REQUEST,
+                    code: restore_signature_error_code(&e),
+                    message: e.to_string(),
+                })
+            }
         }
 
         // Task 26.42: verify the archive against its manifest BEFORE importing.
@@ -5281,7 +5316,8 @@ async fn admin_backup_restore(
                 return Err((
                     StatusCode::NOT_FOUND,
                     format!("realm '{slug}' not found in archive"),
-                ));
+                )
+                    .into());
             }
         } else {
             reader.realms().iter().map(|r| r.slug.clone()).collect()
@@ -5304,7 +5340,7 @@ async fn admin_backup_restore(
             reports.insert(slug.clone(), report);
         }
 
-        Ok::<_, (StatusCode, String)>(reports)
+        Ok::<_, RestoreRefusal>(reports)
     })
     .await;
 
@@ -5314,7 +5350,20 @@ async fn admin_backup_restore(
             Json(serde_json::json!({"error": format!("restore task panicked: {e}")})),
         )
             .into_response(),
-        Ok(Err((status, msg))) => (status, Json(serde_json::json!({"error": msg}))).into_response(),
+        Ok(Err(RestoreRefusal {
+            status,
+            code: Some(code),
+            message,
+        })) => (
+            status,
+            Json(serde_json::json!({"error": code, "error_description": message})),
+        )
+            .into_response(),
+        Ok(Err(RestoreRefusal {
+            status,
+            code: None,
+            message,
+        })) => (status, Json(serde_json::json!({"error": message}))).into_response(),
         Ok(Ok(reports)) => {
             let mut realms_restored = 0u64;
             let mut counts = serde_json::Map::new();

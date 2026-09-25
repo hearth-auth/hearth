@@ -839,3 +839,108 @@ fn backup_restore_reads_the_verify_key_from_config_and_it_is_authoritative() {
     );
     assert!(out.contains("archive is unsigned"), "{out}");
 }
+
+/// Rewrites the archive at `path` in place, replacing the bytes of member
+/// `name` with `bytes` and leaving `manifest.json` — and so its signature —
+/// exactly as it was.
+fn swap_member(path: &std::path::Path, name: &str, bytes: &[u8]) {
+    use std::io::Read as _;
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let decoder = zstd::Decoder::new(std::fs::File::open(path).expect("open")).expect("dec");
+    for entry in tar::Archive::new(decoder).entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let p = entry.path().expect("path").to_string_lossy().into_owned();
+        let mut b = Vec::new();
+        entry.read_to_end(&mut b).expect("read");
+        entries.push((p, b));
+    }
+    let encoder = zstd::Encoder::new(std::fs::File::create(path).expect("create"), 0).expect("enc");
+    let mut builder = tar::Builder::new(encoder);
+    for (p, b) in entries {
+        let data = if p == name { bytes.to_vec() } else { b };
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, &p, data.as_slice())
+            .expect("append");
+    }
+    builder
+        .into_inner()
+        .expect("into_inner")
+        .finish()
+        .expect("finish");
+}
+
+/// The signature covers the manifest only; members are authenticated through
+/// the manifest's checksums. `--skip-verify` skipped exactly those checksums,
+/// so a signed archive whose members were swapped after signing restored with
+/// "archive signature verified" in the log. A verified signature must imply
+/// verified members.
+#[test]
+fn backup_restore_refuses_skip_verify_when_the_signature_is_checked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = dir.path().join("a.hearth-backup");
+    let mut writer = hearth::backup::BackupArchive::create(&archive).expect("create archive");
+    writer
+        .add_file("realms/ghost/users.ndjson", b"{\"id\":\"original\"}\n")
+        .expect("add member");
+    writer
+        .finish(hearth::backup::BackupManifest::new(vec![]))
+        .expect("finish archive");
+    let (key, _) = hearth::backup::BackupSigningKey::generate().expect("generate");
+    hearth::backup::sign_archive(&archive, &archive, &key).expect("sign");
+    swap_member(
+        &archive,
+        "realms/ghost/users.ndjson",
+        b"{\"id\":\"attacker\"}\n",
+    );
+    let verify_key = key.verify_key_b64();
+
+    let data_dir = dir.path().join("data");
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+        os("--skip-verify"),
+    ]);
+    assert_eq!(
+        code,
+        Some(2),
+        "--skip-verify must not bypass member authentication; output: {out}"
+    );
+    assert!(
+        out.contains("--skip-verify"),
+        "the refusal must name the flag: {out}"
+    );
+    assert!(
+        !out.contains("signature verified"),
+        "nothing may claim the archive was verified: {out}"
+    );
+    assert!(
+        !data_dir.exists(),
+        "the refusal must come before anything is written"
+    );
+
+    // Without the flag the tampered member is caught by the checksum check.
+    let (code, out) = run_hearth(&[
+        os("backup"),
+        os("restore"),
+        os("--input"),
+        archive.as_os_str(),
+        os("--data-dir"),
+        data_dir.as_os_str(),
+        os("--verify-key"),
+        os(&verify_key),
+    ]);
+    assert_eq!(code, Some(2), "tampered member must be refused: {out}");
+    assert!(out.contains("realms/ghost/users.ndjson"), "{out}");
+    assert!(!data_dir.exists(), "nothing may be written");
+}

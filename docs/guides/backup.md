@@ -274,7 +274,7 @@ hearth backup restore --input <archive> [OPTIONS]
 | `--realm` | all realms | Restore only this realm (by archive slug) |
 | `--mode` | `skip` | Conflict resolution: `skip` keeps existing records. `overwrite` is **refused** when the target realm is already present — see below |
 | `--dry-run` | off | Parse and report without writing anything |
-| `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band |
+| `--skip-verify` | off | Skip the integrity check restore runs before it writes. Only for a very large archive already verified out of band. **Refused whenever a verify key is configured** — usable only together with `--allow-unsigned` (see below) |
 | `--allow-missing-signing-key` | off | Restore anyway when the archive has no restorable signing key, accepting a freshly generated key (see below) |
 | `--verify-key` | from `--config` | Base64url Ed25519 public key the archive's manifest must be signed with. Overrides `security.backup.verify_key` |
 | `--allow-unsigned` | off | Restore even though **no** verify key is configured, so the archive's origin is not authenticated. Never overrides a configured key. See [Signed archives](#signed-archives) |
@@ -315,6 +315,26 @@ hearth backup restore \
 > refused even with `--allow-unsigned`. Before this, the CLI restore never
 > checked the signature at all, and the HTTP restore skipped it whenever no key
 > was configured, which was the default.
+>
+> **A signed restore always verifies every member.** The signature covers
+> `manifest.json` only; each member is bound to it by the SHA-256 the manifest
+> records, and by nothing else — the importer does not re-hash what it imports.
+> `--skip-verify` skips exactly those checksums, so combining it with a verify
+> key would have logged "archive signature verified" over members anyone could
+> have replaced after signing. Restore therefore **refuses** `--skip-verify`
+> whenever a verify key is configured (exit `2`, before anything is written).
+> The flag remains only for an `--allow-unsigned` restore, where nothing is
+> being authenticated anyway.
+>
+> **What is imported is what was verified.** Restore reads the archive through
+> a private, unlinked copy taken when it starts (the HTTP endpoint streams the
+> upload into one), and every later pass — signature, checksums, import — reads
+> that copy. It used to reopen `--input` for each pass, so anyone able to write
+> that path could replace the archive after it had been verified and have the
+> replacement imported. The copy lives in the system temporary directory
+> (`$TMPDIR`) and needs as much free space there as the compressed archive.
+> `hearth backup sign` works the same way, so it signs exactly the members it
+> verified.
 
 > **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — rotate it explicitly with `POST /admin/realms/{id}/rotate-signing-key`. There is no `hearth realm rotate-signing-key` CLI command; `hearth realm` has one subcommand, `create`. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
 >

@@ -1220,6 +1220,10 @@ async fn restore_without_a_verify_key_is_refused_outside_dev_mode() {
         body.contains("security.backup.verify_key"),
         "the refusal must say how to configure the key; got {body}"
     );
+    assert!(
+        body.contains("backup_verify_key_not_configured"),
+        "the refusal must carry a stable machine-readable code; got {body}"
+    );
 }
 
 #[tokio::test]
@@ -1260,6 +1264,11 @@ async fn unsigned_archive_is_refused_when_a_verify_key_is_configured() {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "dev={dev}: {body}");
         assert!(body.contains("unsigned"), "dev={dev}: {body}");
+        // The documented contract token (CHANGELOG, HEA-1206) survives.
+        assert!(
+            body.contains("missing_manifest_signature"),
+            "dev={dev}: {body}"
+        );
     }
 }
 
@@ -1276,4 +1285,5 @@ async fn archive_signed_by_another_key_is_refused() {
     let (status, body) = dry_run_restore(build_app(&h).await, &realm, &token, &archive).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("signature is invalid"), "{body}");
+    assert!(body.contains("invalid_manifest_signature"), "{body}");
 }

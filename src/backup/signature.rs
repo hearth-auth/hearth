@@ -197,7 +197,10 @@ pub fn sign_archive(
     output: &Path,
     key: &BackupSigningKey,
 ) -> Result<(), BackupError> {
-    let reader = BackupArchive::open(input)?;
+    // A private copy, so the members re-added below are the ones just
+    // verified: `finish_signed` re-checksums whatever it is given, so a member
+    // swapped at `input` between the two passes would otherwise be signed.
+    let reader = BackupArchive::open_private_copy(input)?;
     reader.verify_checksums()?;
 
     let dir = match output.parent() {
@@ -207,8 +210,7 @@ pub fn sign_archive(
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
     let mut writer = BackupArchive::create(tmp.path())?;
 
-    let file = std::fs::File::open(&reader.path)?;
-    let mut archive = tar::Archive::new(zstd::Decoder::new(file)?);
+    let mut archive = tar::Archive::new(zstd::Decoder::new(reader.source.reader()?)?);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().into_owned();

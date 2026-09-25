@@ -2041,10 +2041,19 @@ Behaviour (`crate::backup::check_restore_signature`, shared by the HTTP route
 and `hearth backup restore`):
 - **Key configured, signature present and valid** → restore proceeds.
 - **Key configured, signature absent or invalid** → refused (`400 Bad Request`
-  over HTTP, exit `2` on the CLI). Nothing overrides a configured key.
-- **Key not configured** → refused outside dev mode. The HTTP route has no
+  over HTTP with `error` = `missing_manifest_signature` or
+  `invalid_manifest_signature`, exit `2` on the CLI). Nothing overrides a
+  configured key, and the CLI refuses `--skip-verify` alongside one: the
+  signature covers only the manifest, and members are authenticated solely by
+  the manifest checksums that flag would skip.
+- **Key not configured** → refused outside dev mode (`error` =
+  `backup_verify_key_not_configured` over HTTP). The HTTP route has no
   override; the CLI accepts `--allow-unsigned` as an explicit operator opt-in.
   A `--dev` server restores with a warning.
+
+Both restore paths read the archive through one private, unlinked copy, so the
+bytes imported are the bytes whose signature and checksums were verified — the
+input path is never reopened between the check and the import.
 
 Signing: `hearth backup create --sign-key <key.pem>` or `hearth backup sign`
 signs `manifest.canonical_bytes()` with the operator's Ed25519 private key

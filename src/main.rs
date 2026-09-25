@@ -207,6 +207,13 @@ enum BackupAction {
         /// 23.5, B-7). Pass this only when re-reading a very large archive is
         /// genuinely too expensive and it has already been verified out of
         /// band; a corrupt archive will then be applied without warning.
+        ///
+        /// Refused whenever a verify key is configured (`--verify-key` or
+        /// `security.backup.verify_key`): the signature covers only
+        /// `manifest.json`, and the archive's members are authenticated only
+        /// by the checksums this flag skips. A signed restore therefore always
+        /// verifies every member. The flag is usable only together with
+        /// `--allow-unsigned`, when nothing is being authenticated anyway.
         #[arg(long)]
         skip_verify: bool,
 
@@ -4698,7 +4705,26 @@ fn run_backup_restore(
         _ => RestoreMode::Skip,
     };
 
-    let reader = BackupArchive::open(input)?;
+    // The signature covers `manifest.json` only; each member is bound to it by
+    // the manifest's checksum, and nothing else — the importer does not hash
+    // what it imports. Skipping the checksums of a signed archive would log
+    // "signature verified" over members anyone could have replaced, so the
+    // combination is refused outright rather than half-honoured.
+    if skip_verify && verify_key.is_some() {
+        return Err(
+            "refusing --skip-verify: a backup verify key is configured, and the \
+             archive signature covers only manifest.json — its members are \
+             authenticated only by the checksums --skip-verify would skip. Restore \
+             without --skip-verify; a signed restore always verifies every member."
+                .into(),
+        );
+    }
+
+    // Read the archive through a private copy: the signature and checksums are
+    // checked in one pass and the members imported in later ones, and a reader
+    // that reopened `input` for each pass would import whatever sat at that
+    // path by then, not what was verified.
+    let reader = BackupArchive::open_private_copy(input)?;
 
     // A-30: authenticate the archive before anything is read from it or
     // written. This path never checked the signature at all — not even with a

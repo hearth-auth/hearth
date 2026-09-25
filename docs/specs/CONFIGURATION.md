@@ -749,7 +749,7 @@ CPU/memory headroom exists, since the bound exists to protect them.
 
 Backup and restore hardening (A-30). Restore authenticates an archive by the Ed25519 detached signature on its `manifest.json`, and is **fail-closed**:
 
-- **`verify_key` set** — every restore (HTTP and CLI) requires a signature that verifies against it. An unsigned archive, a bad signature, or a manifest edited after signing is rejected; nothing overrides a configured key.
+- **`verify_key` set** — every restore (HTTP and CLI) requires a signature that verifies against it. An unsigned archive, a bad signature, or a manifest edited after signing is rejected; nothing overrides a configured key. Because the signature covers only the manifest and members are bound to it by their checksums, a signed restore always verifies every member: `hearth backup restore --skip-verify` is refused while a key is configured.
 - **`verify_key` unset** — outside dev mode `POST /admin/backup/restore` refuses every archive (`400`, with an error naming this key), and `hearth backup restore` refuses unless the operator passes `--allow-unsigned`. Servers started with `--dev` restore unsigned archives with a warning.
 
 Generate a key pair with `hearth backup keygen`; sign archives with `hearth backup create --sign-key` or `hearth backup sign`. The private key is not a config key — it stays on the host that takes backups. See the [Backup guide](../guides/backup.md#signed-archives).
