@@ -42,7 +42,7 @@ use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
-use crate::protocol::web::oauth_consent::{build_authorization_redirect, AuthorizeQuery};
+use crate::protocol::web::oauth_consent::{issue_code_and_redirect, AuthorizeQuery};
 
 use super::handlers::append_cookie;
 use super::handlers_common;
@@ -180,6 +180,7 @@ pub fn required_action_check(
         },
         response_type: q.response_type.clone(),
         response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
+        resource: q.resource.clone(),
         via_par,
     };
 
@@ -443,8 +444,8 @@ pub async fn action_complete(
 /// Clears the RA cookie and issues the authorization code.
 ///
 /// Called when all required actions have been completed.  Reconstructs the
-/// original OIDC authorize request from `RaClaims` and calls
-/// `identity.issue_authorization_code`.
+/// original OIDC authorize request from `RaClaims`, runs the SMS MFA gate,
+/// and issues the code through `issue_code_and_redirect`.
 pub fn resume_oidc_flow(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -485,6 +486,7 @@ pub fn resume_oidc_flow(
         response_mode: oidc_params.response_mode.clone(),
         request: None,
         request_uri: None,
+        resource: oidc_params.resource.clone(),
     };
     if let Some(mut sms_response) = super::sms_challenge::sms_mfa_challenge_gate(
         state,
@@ -514,7 +516,12 @@ pub fn resume_oidc_flow(
         .as_deref()
         .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok());
 
-    match state.identity.issue_authorization_code(
+    // The shared issuer: it redirects to the engine-validated URI (22.3) and
+    // binds the code to the carried RFC 8707 `resource` — which this path
+    // used to drop, so a JAR / PAR `resource` never reached the token `aud`
+    // once a required action had intervened.
+    let mut response = issue_code_and_redirect(
+        state,
         realm,
         &user_id,
         &client_id,
@@ -526,23 +533,11 @@ pub fn resume_oidc_flow(
         oidc_params.nonce.clone(),
         Vec::new(),
         response_mode,
-        None,                // jar_request — RA resume restores pre-validated params
+        oidc_params.resource.clone(),
         oidc_params.via_par, // propagated from the original authorize request
-    ) {
-        Ok(resp) => {
-            // 22.3: always deliver to the engine-validated URI. `jar_request`
-            // is `None` here so the two agree today, but reading it off the
-            // response keeps that true if RA resume ever carries a JAR.
-            let location = build_authorization_redirect(resp.redirect_uri(), &resp);
-            let mut response = Redirect::to(&location).into_response();
-            append_cookie(&mut response, &clear_cookie);
-            response
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "resume_oidc_flow: issue_authorization_code failed");
-            handlers_common::server_error()
-        }
-    }
+    );
+    append_cookie(&mut response, &clear_cookie);
+    response
 }
 
 /// Generates a fresh RA session JWT for the remaining actions and redirects

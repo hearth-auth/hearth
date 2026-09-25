@@ -9,6 +9,10 @@
 //! | `/ui/sms-challenge` | GET  | Render the OTP entry form |
 //! | `/ui/sms-challenge` | POST | Verify OTP → issue auth code with `amr=["sms"]` |
 //!
+//! The same challenge also guards device approval (`POST /ui/device`,
+//! RFC 8628): there the verified OTP approves the pending user code instead
+//! of issuing an authorization code.
+//!
 //! # State management
 //!
 //! Challenge state (OIDC params + OTP nonce + masked phone) is stored in
@@ -99,6 +103,74 @@ struct SmsMfaState {
     /// reject code issuance when this flag is `false`.
     #[serde(default)]
     via_par: bool,
+    /// RFC 8707 resource indicator from a verified JAR or PAR entry, bound
+    /// into the code issued once the OTP verifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource: Option<String>,
+    /// Set when the challenge guards a device approval (`/ui/device`) rather
+    /// than an authorization code: the RFC 8628 user code to approve once
+    /// the OTP verifies. The OIDC fields are then empty and unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_user_code: Option<String>,
+}
+
+/// What a verified SMS OTP unlocks.
+#[derive(Clone, Copy)]
+enum SmsResume<'a> {
+    /// Issue the authorization code for this (already validated) request.
+    Authorize {
+        q: &'a AuthorizeQuery,
+        via_par: bool,
+    },
+    /// Approve this device authorization user code (RFC 8628).
+    Device { user_code: &'a str },
+}
+
+impl SmsMfaState {
+    /// The pending state for `resume`, keyed to the issued OTP `otp_nonce`.
+    fn pending(
+        realm: &RealmId,
+        user_id: &UserId,
+        otp_nonce: String,
+        masked_phone: String,
+        resume: SmsResume<'_>,
+    ) -> Self {
+        let mut s = Self {
+            realm_id: realm.as_uuid().to_string(),
+            user_id: user_id.as_uuid().to_string(),
+            otp_nonce,
+            masked_phone,
+            client_id: String::new(),
+            redirect_uri: String::new(),
+            scope: String::new(),
+            oauth_state: String::new(),
+            code_challenge: String::new(),
+            code_challenge_method: String::new(),
+            nonce: String::new(),
+            response_type: String::new(),
+            via_par: false,
+            resource: None,
+            device_user_code: None,
+        };
+        match resume {
+            SmsResume::Authorize { q, via_par } => {
+                s.client_id.clone_from(&q.client_id);
+                s.redirect_uri.clone_from(&q.redirect_uri);
+                s.scope.clone_from(&q.scope);
+                s.oauth_state.clone_from(&q.state);
+                s.code_challenge.clone_from(&q.code_challenge);
+                s.code_challenge_method.clone_from(&q.code_challenge_method);
+                s.nonce.clone_from(&q.nonce);
+                s.response_type.clone_from(&q.response_type);
+                s.via_par = via_par;
+                s.resource.clone_from(&q.resource);
+            }
+            SmsResume::Device { user_code } => {
+                s.device_user_code = Some(user_code.to_string());
+            }
+        }
+        s
+    }
 }
 
 /// Issues an HMAC-signed SMS MFA pending cookie value.
@@ -199,7 +271,6 @@ pub fn sms_mfa_challenge_check(
 /// [`sms_mfa_challenge_check`] for a caller that has already resolved whether
 /// the request is secure — the required-action resume path, which carries
 /// `secure` rather than the request headers.
-#[allow(clippy::too_many_lines)]
 pub(super) fn sms_mfa_challenge_gate(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -207,6 +278,48 @@ pub(super) fn sms_mfa_challenge_gate(
     q: &AuthorizeQuery,
     secure: bool,
     via_par: bool,
+) -> Option<Response> {
+    sms_gate(
+        state,
+        realm,
+        user_id,
+        secure,
+        SmsResume::Authorize { q, via_par },
+    )
+}
+
+/// The SMS MFA gate for a device approval (`POST /ui/device`).
+///
+/// Approving a device code hands the device client tokens for the session
+/// user, so it needs the same second factor as issuing an authorization
+/// code: without this a session created without the SMS factor (passkey,
+/// magic link, federation) could approve a device on a realm that requires
+/// it. Same conditions and same fail-closed refusals as
+/// [`sms_mfa_challenge_check`]; on success `POST /ui/sms-challenge`
+/// approves `user_code` instead of issuing a code.
+pub(super) fn sms_mfa_device_gate(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    user_code: &str,
+    secure: bool,
+) -> Option<Response> {
+    sms_gate(
+        state,
+        realm,
+        user_id,
+        secure,
+        SmsResume::Device { user_code },
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn sms_gate(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    secure: bool,
+    resume: SmsResume<'_>,
 ) -> Option<Response> {
     // 1. Is SMS MFA required for this realm?
     // A lookup failure must not read as "SMS not required": that would skip
@@ -299,21 +412,9 @@ pub(super) fn sms_mfa_challenge_gate(
                 // need to redirect to the challenge page with an error redirect.
                 // Return a redirect to the challenge page; the user must wait or
                 // reload the authorize flow to get a fresh code.
-                let state_cookie = SmsMfaState {
-                    realm_id: realm.as_uuid().to_string(),
-                    user_id: user_id.as_uuid().to_string(),
-                    otp_nonce: String::new(), // no valid nonce
-                    masked_phone,
-                    client_id: q.client_id.clone(),
-                    redirect_uri: q.redirect_uri.clone(),
-                    scope: q.scope.clone(),
-                    oauth_state: q.state.clone(),
-                    code_challenge: q.code_challenge.clone(),
-                    code_challenge_method: q.code_challenge_method.clone(),
-                    nonce: q.nonce.clone(),
-                    response_type: q.response_type.clone(),
-                    via_par,
-                };
+                // No valid nonce: the POST re-renders "wait and retry".
+                let state_cookie =
+                    SmsMfaState::pending(realm, user_id, String::new(), masked_phone, resume);
                 if let Some(cookie) =
                     issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie, secure)
                 {
@@ -329,21 +430,7 @@ pub(super) fn sms_mfa_challenge_gate(
             }
         };
 
-    let state_cookie = SmsMfaState {
-        realm_id: realm.as_uuid().to_string(),
-        user_id: user_id.as_uuid().to_string(),
-        otp_nonce,
-        masked_phone,
-        client_id: q.client_id.clone(),
-        redirect_uri: q.redirect_uri.clone(),
-        scope: q.scope.clone(),
-        oauth_state: q.state.clone(),
-        code_challenge: q.code_challenge.clone(),
-        code_challenge_method: q.code_challenge_method.clone(),
-        nonce: q.nonce.clone(),
-        response_type: q.response_type.clone(),
-        via_par,
-    };
+    let state_cookie = SmsMfaState::pending(realm, user_id, otp_nonce, masked_phone, resume);
 
     let Some(cookie) = issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie, secure)
     else {
@@ -471,12 +558,6 @@ pub async fn sms_challenge_post(
     };
     let user_id = UserId::new(user_uuid);
 
-    let client_uuid = match uuid::Uuid::parse_str(&sms_state.client_id) {
-        Ok(u) => u,
-        Err(_) => return handlers_common::server_error(),
-    };
-    let client_id = ClientId::new(client_uuid);
-
     // Handle the "resend throttled" case (empty nonce was stored).
     if sms_state.otp_nonce.is_empty() {
         let admin = super::handlers::is_admin(state.as_ref(), &session);
@@ -543,6 +624,19 @@ pub async fn sms_challenge_post(
             // Clear the SMS challenge cookie.
             let clear = clear_sms_mfa_cookie(state.is_secure_request(&headers));
 
+            // A device approval: the factor is proved, approve the code.
+            if let Some(user_code) = sms_state.device_user_code.as_deref() {
+                let mut response =
+                    super::handlers::finish_device_approval(&state, &realm, &user_id, user_code);
+                append_cookie(&mut response, &clear);
+                return response;
+            }
+
+            let Ok(client_uuid) = uuid::Uuid::parse_str(&sms_state.client_id) else {
+                return handlers_common::server_error();
+            };
+            let client_id = ClientId::new(client_uuid);
+
             // Reconstruct PKCE and nonce params.
             let code_challenge = if sms_state.code_challenge.is_empty() {
                 None
@@ -572,7 +666,7 @@ pub async fn sms_challenge_post(
                 nonce,
                 vec!["sms".to_string()],
                 None,
-                None,              // jar_request — SMS MFA resume uses pre-validated params
+                sms_state.resource.clone(),
                 sms_state.via_par, // propagated from originating authorize request
             );
             append_cookie(&mut response, &clear);
@@ -671,6 +765,8 @@ mod tests {
             nonce: String::new(),
             response_type: "code".to_string(),
             via_par: false,
+            resource: None,
+            device_user_code: None,
         }
     }
 
@@ -735,6 +831,8 @@ mod tests {
             nonce: "nonce456".to_string(),
             response_type: "code".to_string(),
             via_par: false,
+            resource: None,
+            device_user_code: None,
         };
 
         let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s, false)
@@ -783,6 +881,8 @@ mod tests {
             nonce: String::new(),
             response_type: "code".to_string(),
             via_par: false,
+            resource: None,
+            device_user_code: None,
         };
 
         let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s, false)

@@ -5406,10 +5406,61 @@ pub async fn device_approve_submit(
         return Redirect::to("/ui/device?flash=invalid").into_response();
     }
 
-    match state
-        .identity
-        .approve_device(&session.realm_id, &code, &session.user_id)
-    {
+    // Approving a device hands the device client tokens for this user, so it
+    // passes the same gates as issuing an authorization code. It used to run
+    // neither: pending required actions were skipped, and a session created
+    // without the realm's SMS factor (passkey, magic link, federation)
+    // approved a device on a realm that requires it.
+    //
+    // 1. Required actions first. The RA flow ends by returning here, where
+    //    the user submits the code again and meets the SMS gate.
+    let now = crate::core::Timestamp::from_micros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_micros()).ok())
+            .unwrap_or(0),
+    );
+    if let Some(ra_response) = super::required_action::required_action_check_browser(
+        &state,
+        &session.realm_id,
+        &session.user_id,
+        Some("/ui/device"),
+        &headers,
+        now,
+    ) {
+        return ra_response;
+    }
+    // 2. The SMS factor. Fails closed (no transport, no key, lookup error)
+    //    exactly like the authorize intercept; on success the challenge POST
+    //    approves the code via `finish_device_approval`.
+    if let Some(sms_response) = super::sms_challenge::sms_mfa_device_gate(
+        &state,
+        &session.realm_id,
+        &session.user_id,
+        &code,
+        state.is_secure_request(&headers),
+    ) {
+        return sms_response;
+    }
+
+    finish_device_approval(&state, &session.realm_id, &session.user_id, &code)
+}
+
+/// Approves device user code `code` for `user_id` once every gate has passed,
+/// charging a wrong code to the brute-force guard, and redirects to the
+/// device page with the outcome.
+///
+/// Called by `device_approve_submit` and, when the realm requires the SMS
+/// factor, by `POST /ui/sms-challenge` after the OTP verifies.
+pub(super) fn finish_device_approval(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &crate::core::UserId,
+    code: &str,
+) -> Response {
+    let guard_key = format!("{}:{}", realm.as_uuid(), user_id.as_uuid());
+    match state.identity.approve_device(realm, code, user_id) {
         Ok(()) => {
             state.device_approval_guard.record_success(&guard_key);
             Redirect::to("/ui/device?flash=approved").into_response()

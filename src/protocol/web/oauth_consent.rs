@@ -127,6 +127,16 @@ pub struct AuthorizeQuery {
     /// sets `via_par = true` on the resulting authorization request.
     #[serde(default)]
     pub request_uri: Option<String>,
+    /// RFC 8707 resource indicator carried by a verified request object
+    /// (JAR) or a stored PAR entry.
+    ///
+    /// Never read from the query string (`serde(skip)`): this entry point
+    /// takes a resource only from a source the server verified. It exists so
+    /// the required-action and SMS intercepts can carry it to the code they
+    /// eventually issue — dropping it issued a code, and a token, without
+    /// the audience the client asked for.
+    #[serde(skip)]
+    pub resource: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +283,7 @@ async fn authorize_get_impl(
             response_mode: stored.response_mode.clone(),
             request: None,
             request_uri: None,
+            resource: stored.resource.clone(),
         };
 
         // Required-action intercept: carries via_par=true in OidcParams so
@@ -316,7 +327,7 @@ async fn authorize_get_impl(
             stored.nonce,
             Vec::new(),
             None, // response_mode — PAR stores these; extend when needed
-            None, // jar_request — already consumed at PAR push time
+            stored.resource,
             true, // via_par
         );
     }
@@ -333,25 +344,17 @@ async fn authorize_get_impl(
     //     state / redirect_uri checks here; the engine enforces them after
     //     JAR extraction. Never redirect for JAR errors (open-redirect risk).
     if let Some(ref request_jwt) = q.request {
-        // Load client to confirm it exists; redirect_uri check is deferred.
-        match state.identity.get_client(realm, &client_id) {
-            Ok(Some(_)) => {}
+        // Load the client; its redirect_uri check runs on the JAR's
+        // authoritative value inside `authorize_jar`.
+        let client = match state.identity.get_client(realm, &client_id) {
+            Ok(Some(c)) => c,
             Ok(None) => return handlers_common::bad_request("unknown client"),
             Err(e) => {
                 tracing::warn!(error = %e, "authorize_get(JAR): get_client failed");
                 return handlers_common::server_error();
             }
-        }
-        return authorize_jar(
-            state,
-            session,
-            realm,
-            &client_id,
-            q,
-            request_jwt,
-            headers,
-            now,
-        );
+        };
+        return authorize_jar(state, session, realm, &client, q, request_jwt, headers, now);
     }
 
     // Non-JAR path: validate outer params normally.
@@ -536,7 +539,7 @@ async fn authorize_get_impl(
             optional(&q.nonce),
             Vec::new(),
             parsed_response_mode,
-            None,  // jar_request — already handled above for JAR path
+            None,  // resource — this entry point reads none from the query
             false, // not via PAR (direct /authorize)
         );
     }
@@ -860,7 +863,7 @@ pub async fn consent_submit(
                 pending.nonce.clone(),
                 Vec::new(),
                 pending_response_mode,
-                None,  // jar_request — consent was already approved; no JAR needed
+                None,  // resource — the consent path never carries one
                 false, // not via PAR (direct /authorize)
             );
             append_cookie(&mut response, &clear_cookie);
@@ -1011,6 +1014,11 @@ fn peek_pending(
 
 /// Issues an authorization code by calling into the engine and redirects
 /// the user-agent to `redirect_uri?code=...&state=...`.
+///
+/// Every parameter is already authoritative: a request object (JAR) is
+/// verified by the caller before its values reach here, so no raw JWT is
+/// passed on. `resource` is the RFC 8707 indicator the code — and so the
+/// access token's audience — is bound to.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn issue_code_and_redirect(
     state: &Arc<WebState>,
@@ -1025,24 +1033,31 @@ pub(super) fn issue_code_and_redirect(
     nonce: Option<String>,
     amr_values: Vec<String>,
     response_mode: Option<crate::identity::ResponseMode>,
-    jar_request: Option<String>,
+    resource: Option<String>,
     via_par: bool,
 ) -> Response {
-    match state.identity.issue_authorization_code(
-        realm,
-        user_id,
-        client_id,
-        redirect_uri,
-        scope,
-        state_param,
+    // `authorize`, not `issue_authorization_code`: the latter has no resource
+    // parameter and always stored `resource: None`. Consent gating is the
+    // caller's job either way — `authorize` checks only a recorded consent's
+    // digest, exactly as `issue_authorization_code` (a thin wrapper over it)
+    // did.
+    let request = crate::identity::AuthorizationRequest {
+        client_id: client_id.clone(),
+        redirect_uri: redirect_uri.to_string(),
+        scope: scope.to_string(),
+        state: state_param.to_string(),
+        resource,
+        response_type: "code".to_string(),
+        user_id: user_id.clone(),
         code_challenge,
         code_challenge_method,
         nonce,
         amr_values,
         response_mode,
-        jar_request,
+        request: None,
         via_par,
-    ) {
+    };
+    match state.identity.authorize(realm, &request) {
         Ok(resp) => {
             // 22.3 (audit 2026-08-28 §4.3#5): redirect to the URI the engine
             // actually validated and bound the code to, not to our own outer
@@ -1073,22 +1088,32 @@ pub(super) fn issue_code_and_redirect(
 /// authorization code on a realm that requires it, and pending required
 /// actions were skipped.
 ///
-/// The parameter merge mirrors the engine's own JAR handling (the claim
-/// wins, the outer value is the fallback), so the code issued below — or by
-/// an intercept's resume path — carries the same values the engine would
-/// have extracted. The JWT is not passed on: its `jti` is spent.
-#[allow(clippy::too_many_arguments)]
+/// Because the JWT is no longer passed on (its `jti` is spent), every check
+/// the engine used to make on the merged parameters is made here, before
+/// either intercept can send an SMS or start a required-action flow:
+///
+/// * the merge itself — claim wins, outer value is the fallback — for
+///   `redirect_uri`, `response_type`, `scope`, `state`, `code_challenge`,
+///   `nonce` and the RFC 8707 `resource`; `code_challenge_method` comes from
+///   the claim only, and `response_mode` / `prompt` from the outer query,
+///   as the engine took them;
+/// * `response_type` must be `code`, `state` non-empty, PKCE `S256` present;
+/// * `redirect_uri` must be registered for the client.
+///
+/// `resource` rides the intercepts' resume state to the code it binds. JAR
+/// errors are never redirected (open-redirect risk): each is a 400.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn authorize_jar(
     state: &Arc<WebState>,
     session: &UiSession,
     realm: &RealmId,
-    client_id: &ClientId,
+    client: &crate::identity::OAuthClient,
     q: &AuthorizeQuery,
     request_jwt: &str,
     headers: &axum::http::HeaderMap,
     now: Timestamp,
 ) -> Response {
-    // Never redirect for JAR errors (open-redirect risk).
+    let client_id = client.client_id();
     let jar = match state.identity.verify_jar(realm, client_id, request_jwt) {
         Ok(jar) => jar,
         Err(e) => {
@@ -1122,6 +1147,42 @@ fn authorize_jar(
         response_mode: q.response_mode.clone(),
         request: None,
         request_uri: None,
+        // The outer query never supplies a resource on this entry point, so
+        // the verified claim is the only source (the engine's fallback was
+        // always `None` here).
+        resource: jar.resource,
+    };
+
+    // The engine's own checks on the merged request, made before any
+    // intercept acts on it.
+    if jar_q.response_type != "code" {
+        return handlers_common::bad_request("response_type must be 'code'");
+    }
+    if jar_q.state.is_empty() {
+        return handlers_common::bad_request("state parameter is required for CSRF protection");
+    }
+    if !client
+        .redirect_uris()
+        .iter()
+        .any(|u| u == &jar_q.redirect_uri)
+    {
+        return handlers_common::bad_request("invalid redirect_uri");
+    }
+    let code_challenge_method = match jar_q.code_challenge_method.as_str() {
+        "S256" => Some(CodeChallengeMethod::S256),
+        _ => None,
+    };
+    if jar_q.code_challenge.is_empty() || code_challenge_method.is_none() {
+        return handlers_common::bad_request(
+            "PKCE is required (code_challenge with code_challenge_method=S256)",
+        );
+    }
+    let response_mode = match jar_q.response_mode.as_deref() {
+        None => None,
+        Some(m) => match m.parse::<crate::identity::ResponseMode>() {
+            Ok(mode) => Some(mode),
+            Err(_) => return handlers_common::bad_request("unsupported response_mode"),
+        },
     };
 
     if let Some(ra_response) = super::required_action::required_action_check(
@@ -1156,17 +1217,11 @@ fn authorize_jar(
         &jar_q.scope,
         &jar_q.state,
         optional(&jar_q.code_challenge),
-        match jar_q.code_challenge_method.as_str() {
-            "S256" => Some(CodeChallengeMethod::S256),
-            _ => None,
-        },
+        code_challenge_method,
         optional(&jar_q.nonce),
         Vec::new(),
-        jar_q
-            .response_mode
-            .as_deref()
-            .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
-        None,  // the request object was verified (and its jti spent) above
+        response_mode,
+        jar_q.resource,
         false, // JAR path: not via PAR (JAR != PAR)
     )
 }

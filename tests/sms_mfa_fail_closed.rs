@@ -461,13 +461,22 @@ struct LoginRig {
 /// A realm offering only `sms` and a user with a verified phone and no TOTP.
 /// `configure` decides what SMS wiring the web tier gets.
 fn login_rig(configure: impl FnOnce(WebState, Arc<CapturingSms>) -> WebState) -> LoginRig {
+    login_rig_with_mfa(Some(vec!["sms".to_string()]), configure)
+}
+
+/// [`login_rig`] with the realm's `mfa_methods` chosen by the caller (`None`
+/// = the realm restricts nothing and requires no SMS factor).
+fn login_rig_with_mfa(
+    mfa_methods: Option<Vec<String>>,
+    configure: impl FnOnce(WebState, Arc<CapturingSms>) -> WebState,
+) -> LoginRig {
     let e = engines();
     let realm = e
         .identity
         .create_realm(&CreateRealmRequest {
             name: format!("sms-fc-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
-                mfa_methods: Some(vec!["sms".to_string()]),
+                mfa_methods,
                 ..RealmConfig::default()
             }),
         })
@@ -1484,6 +1493,14 @@ const JAR_KID: &str = "sms-fc-jar-key";
 
 /// Registers a JWKS client and signs a JAR for it; returns the authorize URI.
 fn jar_authorize_uri(rig: &LoginRig) -> String {
+    jar_authorize_uri_with(rig, &serde_json::json!({})).0
+}
+
+/// [`jar_authorize_uri`] with `overrides` merged into the request object's
+/// claims (a `null` value removes the claim). Returns the authorize URI and
+/// the client id.
+#[allow(clippy::too_many_lines)]
+fn jar_authorize_uri_with(rig: &LoginRig, overrides: &serde_json::Value) -> (String, String) {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -1523,7 +1540,7 @@ fn jar_authorize_uri(rig: &LoginRig) -> String {
     let now = i64::try_from(now_secs()).expect("now");
     let challenge = pkce_challenge();
     let header = serde_json::json!({ "alg": "EdDSA", "kid": JAR_KID });
-    let claims = serde_json::json!({
+    let mut claims = serde_json::json!({
         "iss": cid,
         "aud": format!("https://hearth.local/realms/{realm_name}"),
         "exp": now + 600,
@@ -1537,13 +1554,25 @@ fn jar_authorize_uri(rig: &LoginRig) -> String {
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     });
+    if let (Some(claims), Some(overrides)) = (claims.as_object_mut(), overrides.as_object()) {
+        for (k, v) in overrides {
+            if v.is_null() {
+                claims.remove(k);
+            } else {
+                claims.insert(k.clone(), v.clone());
+            }
+        }
+    }
     let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
     let c = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
     let input = format!("{h}.{c}");
     let sig = URL_SAFE_NO_PAD.encode(pair.sign(input.as_bytes()).as_ref());
-    format!(
-        "/ui/oauth/authorize?client_id={}&request={input}.{sig}",
-        client.client_id().as_uuid()
+    (
+        format!(
+            "/ui/oauth/authorize?client_id={}&request={input}.{sig}",
+            client.client_id().as_uuid()
+        ),
+        client.client_id().as_uuid().to_string(),
     )
 }
 
@@ -1913,4 +1942,452 @@ async fn email_otp_login_works_without_an_sms_key() {
         has_cookie(&resp, SESSION_COOKIE),
         "own email code must log in"
     );
+}
+
+// ===========================================================================
+// JAR authorize — the request object's own parameters are honoured
+// ===========================================================================
+
+/// An RFC 8707 resource indicator for the JAR / PAR audience tests.
+const RESOURCE: &str = "https://api.example.com/v1";
+const PKCE_VERIFIER: &str = "verifier-verifier-verifier-verifier-4";
+
+async fn jar_authorize_with(
+    rig: &LoginRig,
+    user: &UserId,
+    overrides: &serde_json::Value,
+) -> (Response<Body>, String) {
+    let (uri, client_id) = jar_authorize_uri_with(rig, overrides);
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, ui_session_cookie(rig, user))
+                .body(Body::empty())
+                .expect("build JAR authorize"),
+        )
+        .await
+        .expect("JAR authorize");
+    (resp, client_id)
+}
+
+/// The value of query parameter `name` in a redirect `location`.
+fn query_param(location: &str, name: &str) -> Option<String> {
+    let (_, query) = location.split_once('?')?;
+    form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// Exchanges the code in `location` and returns the access token's `aud`.
+fn exchanged_audience(rig: &LoginRig, client_id: &str, location: &str) -> Vec<String> {
+    let code = query_param(location, "code")
+        .unwrap_or_else(|| panic!("no code in the redirect: {location}"));
+    let tokens = rig
+        .state
+        .identity
+        .exchange_authorization_code(
+            &rig.realm_id,
+            &hearth::identity::TokenExchangeRequest {
+                client_id: hearth::core::ClientId::new(
+                    uuid::Uuid::parse_str(client_id).expect("client uuid"),
+                ),
+                code,
+                redirect_uri: REDIRECT.to_string(),
+                code_verifier: Some(PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange the code");
+    let payload = tokens
+        .access_token()
+        .split('.')
+        .nth(1)
+        .expect("JWT payload");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &data_encoding::BASE64URL_NOPAD
+            .decode(payload.as_bytes())
+            .expect("base64url payload"),
+    )
+    .expect("claims json");
+    match &claims["aud"] {
+        serde_json::Value::String(s) => vec![s.clone()],
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        other => panic!("unexpected aud {other}"),
+    }
+}
+
+/// Happy path of the rewritten JAR branch: no SMS factor and no required
+/// action, so the code is issued at once — to the JAR's redirect_uri, with
+/// the JAR's state.
+#[tokio::test]
+async fn jar_authorize_without_gates_issues_a_code_with_the_jar_state() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    let (resp, _) = jar_authorize_with(&rig, &rig.user_id, &serde_json::json!({})).await;
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT),
+        "a JAR authorize with no gate pending must issue the code; got {loc} ({})",
+        resp.status()
+    );
+    assert!(query_param(&loc, "code").is_some(), "no code in {loc}");
+    assert_eq!(query_param(&loc, "state").as_deref(), Some("jar-state"));
+}
+
+/// The JAR's RFC 8707 `resource` claim must still bind the code: the engine
+/// used to take it from the request object, and the token audience with it.
+#[tokio::test]
+async fn jar_resource_reaches_the_access_token_audience() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    let (resp, client_id) = jar_authorize_with(
+        &rig,
+        &rig.user_id,
+        &serde_json::json!({ "resource": RESOURCE }),
+    )
+    .await;
+    let aud = exchanged_audience(&rig, &client_id, &location(&resp));
+    assert!(
+        aud.iter().any(|a| a == RESOURCE),
+        "the JAR resource must reach the token audience; aud = {aud:?}"
+    );
+}
+
+/// ... also when the code is issued at the end of the SMS challenge.
+#[tokio::test]
+async fn jar_resource_survives_the_sms_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (resp, client_id) = jar_authorize_with(
+        &rig,
+        &rig.user_id,
+        &serde_json::json!({ "resource": RESOURCE }),
+    )
+    .await;
+    assert_eq!(location(&resp), "/ui/sms-challenge");
+    let sms_cookie = cookie_pair(&resp, "hearth_ui_sms_mfa").expect("SMS challenge cookie");
+    let code = rig.sms.last_code();
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/sms-challenge")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    format!("{}; {sms_cookie}", ui_session_cookie(&rig, &rig.user_id)),
+                )
+                .body(Body::from(format!("code={code}&_csrf={CSRF}")))
+                .expect("build sms-challenge POST"),
+        )
+        .await
+        .expect("sms-challenge");
+    let aud = exchanged_audience(&rig, &client_id, &location(&resp));
+    assert!(
+        aud.iter().any(|a| a == RESOURCE),
+        "the JAR resource must survive the SMS challenge; aud = {aud:?}"
+    );
+}
+
+/// ... and when it is issued at the end of the required-action flow.
+#[tokio::test]
+async fn jar_resource_survives_a_required_action() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![hearth::identity::RequiredAction::UpdatePassword]),
+                ..Default::default()
+            },
+        )
+        .expect("require a password update");
+    let (resp, client_id) = jar_authorize_with(
+        &rig,
+        &rig.user_id,
+        &serde_json::json!({ "resource": RESOURCE }),
+    )
+    .await;
+    let ra = cookie_pair(&resp, "hearth_ra_session").expect("RA cookie from the intercept");
+    let new_password = ["a", "brand", "new", "jar", "passphrase", "7"].join("-");
+    let resp = enroll_post(
+        &rig,
+        &format!("{ra}; hearth_ui_csrf={CSRF}"),
+        "/required-action/UPDATE_PASSWORD",
+        format!(
+            "current_password={}&new_password={new_password}&confirm_password={new_password}\
+             &_csrf={CSRF}",
+            password()
+        ),
+    )
+    .await;
+    let aud = exchanged_audience(&rig, &client_id, &location(&resp));
+    assert!(
+        aud.iter().any(|a| a == RESOURCE),
+        "the JAR resource must survive the required-action flow; aud = {aud:?}"
+    );
+}
+
+/// The engine refused a request object whose `response_type` is not `code`;
+/// the web tier now verifies the JAR itself and must refuse it too, not
+/// issue a code for a `token` request.
+#[tokio::test]
+async fn jar_with_a_non_code_response_type_is_refused() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    let (resp, _) = jar_authorize_with(
+        &rig,
+        &rig.user_id,
+        &serde_json::json!({ "response_type": "token" }),
+    )
+    .await;
+    assert!(
+        !location(&resp).starts_with(REDIRECT),
+        "a JAR with response_type=token must not get a code; got {}",
+        location(&resp)
+    );
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A JAR naming a redirect_uri the client never registered is refused
+/// before any intercept runs: no SMS is sent, nothing is redirected there.
+#[tokio::test]
+async fn jar_with_an_unregistered_redirect_uri_is_refused_before_the_sms_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (resp, _) = jar_authorize_with(
+        &rig,
+        &rig.user_id,
+        &serde_json::json!({ "redirect_uri": "https://evil.example/cb" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        rig.sms.sent(),
+        0,
+        "no code may be sent for a refused request"
+    );
+}
+
+/// The PAR branch dropped the stored `resource` the same way.
+#[tokio::test]
+async fn par_resource_reaches_the_access_token_audience() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    let client = register_client(&rig);
+    let pushed = rig
+        .state
+        .identity
+        .push_authorization_request(
+            &rig.realm_id,
+            &hearth::identity::PushedAuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: REDIRECT.to_string(),
+                scope: "openid".to_string(),
+                state: "par-state".to_string(),
+                resource: Some(RESOURCE.to_string()),
+                response_type: "code".to_string(),
+                code_challenge: Some(pkce_challenge()),
+                code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
+                nonce: None,
+                request: None,
+                response_mode: None,
+            },
+        )
+        .expect("push");
+    let uri = format!(
+        "/ui/oauth/authorize?client_id={}&request_uri={}",
+        client.client_id().as_uuid(),
+        form_urlencoded::byte_serialize(pushed.request_uri.as_bytes()).collect::<String>()
+    );
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, ui_session_cookie(&rig, &rig.user_id))
+                .body(Body::empty())
+                .expect("build PAR authorize"),
+        )
+        .await
+        .expect("PAR authorize");
+    let aud = exchanged_audience(
+        &rig,
+        &client.client_id().as_uuid().to_string(),
+        &location(&resp),
+    );
+    assert!(
+        aud.iter().any(|a| a == RESOURCE),
+        "the PAR resource must reach the token audience; aud = {aud:?}"
+    );
+}
+
+// ===========================================================================
+// Device approval (/ui/device) — the same gates as code issuance
+// ===========================================================================
+
+/// Registers a device-grant client and starts a device authorization;
+/// returns `(client_id, device_code, user_code)`.
+fn start_device_flow(rig: &LoginRig) -> (hearth::core::ClientId, String, String) {
+    let client = rig
+        .state
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "TV app".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                require_consent: false,
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register device client");
+    let started = rig
+        .state
+        .identity
+        .device_authorize(
+            &rig.realm_id,
+            &hearth::identity::DeviceAuthorizationRequest {
+                client_id: client.client_id().clone(),
+                scope: Some("openid".to_string()),
+            },
+        )
+        .expect("device authorize");
+    (
+        client.client_id().clone(),
+        started.device_code,
+        started.user_code,
+    )
+}
+
+async fn post_device(rig: &LoginRig, cookies: &str, user_code: &str) -> Response<Body> {
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/device")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookies)
+                .body(Body::from(format!(
+                    "user_code={user_code}&csrf_token={CSRF}"
+                )))
+                .expect("build device POST"),
+        )
+        .await
+        .expect("device approve")
+}
+
+/// Whether the device client can now collect tokens for the device code.
+fn device_approved(rig: &LoginRig, client: &hearth::core::ClientId, device_code: &str) -> bool {
+    rig.state
+        .identity
+        .poll_device_token(&rig.realm_id, device_code, client)
+        .is_ok()
+}
+
+/// A session made without the SMS factor used to approve a device on a realm
+/// that requires it — the device client then got tokens for the user.
+#[tokio::test]
+async fn device_approval_on_an_sms_realm_runs_the_sms_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (client, device_code, user_code) = start_device_flow(&rig);
+    let resp = post_device(&rig, &ui_session_cookie(&rig, &rig.user_id), &user_code).await;
+    assert_eq!(
+        location(&resp),
+        "/ui/sms-challenge",
+        "the SMS factor must be challenged before the device is approved"
+    );
+    assert_eq!(rig.sms.sent(), 1);
+    assert!(
+        !device_approved(&rig, &client, &device_code),
+        "the device must not be approved before the SMS factor is proved"
+    );
+}
+
+/// ... and proving the factor approves the device.
+#[tokio::test]
+async fn device_approval_completes_after_the_sms_challenge() {
+    let rig = login_rig(|s, sms| s.with_sms(sms as _, Some(KEY.to_vec())));
+    let (client, device_code, user_code) = start_device_flow(&rig);
+    let session = ui_session_cookie(&rig, &rig.user_id);
+    let resp = post_device(&rig, &session, &user_code).await;
+    let sms_cookie = cookie_pair(&resp, "hearth_ui_sms_mfa").expect("SMS challenge cookie");
+    let code = rig.sms.last_code();
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/sms-challenge")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("{session}; {sms_cookie}"))
+                .body(Body::from(format!("code={code}&_csrf={CSRF}")))
+                .expect("build sms-challenge POST"),
+        )
+        .await
+        .expect("sms-challenge");
+    assert_eq!(location(&resp), "/ui/device?flash=approved");
+    assert!(device_approved(&rig, &client, &device_code));
+}
+
+/// With no SMS transport the factor cannot be proved, so nothing is approved.
+#[tokio::test]
+async fn device_approval_without_an_sms_transport_approves_nothing() {
+    let rig = login_rig(|s, _| s);
+    let (client, device_code, user_code) = start_device_flow(&rig);
+    let _ = post_device(&rig, &ui_session_cookie(&rig, &rig.user_id), &user_code).await;
+    assert!(
+        !device_approved(&rig, &client, &device_code),
+        "a device must not be approved without the realm's SMS factor"
+    );
+}
+
+/// Pending required actions are completed before a device is approved.
+#[tokio::test]
+async fn device_approval_runs_the_required_action_intercept() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    rig.state
+        .identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                required_actions: Some(vec![hearth::identity::RequiredAction::UpdatePassword]),
+                ..Default::default()
+            },
+        )
+        .expect("require a password update");
+    let (client, device_code, user_code) = start_device_flow(&rig);
+    let resp = post_device(&rig, &ui_session_cookie(&rig, &rig.user_id), &user_code).await;
+    assert!(
+        cookie_pair(&resp, "hearth_ra_session").is_some(),
+        "the RA intercept must start; got {} ({})",
+        location(&resp),
+        resp.status()
+    );
+    assert!(
+        !device_approved(&rig, &client, &device_code),
+        "the device must not be approved while required actions are pending"
+    );
+}
+
+/// Control: with no gate pending the device is approved at once.
+#[tokio::test]
+async fn device_approval_without_gates_approves_the_device() {
+    let rig = login_rig_with_mfa(None, |s, _| s);
+    let (client, device_code, user_code) = start_device_flow(&rig);
+    let resp = post_device(&rig, &ui_session_cookie(&rig, &rig.user_id), &user_code).await;
+    assert_eq!(location(&resp), "/ui/device?flash=approved");
+    assert!(device_approved(&rig, &client, &device_code));
 }
