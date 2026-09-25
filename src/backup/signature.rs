@@ -183,10 +183,15 @@ impl BackupSigningKey {
 
 /// Re-writes the archive at `input` to `output` with a signed manifest.
 ///
-/// The archive's checksums are verified first — signing an archive that has
-/// already been tampered with would bless the tampering. `output` may equal
-/// `input`; the new archive is written to a temporary file beside `output`
-/// and renamed over it only once complete.
+/// The archive's checksums are verified first, which catches corruption and a
+/// member changed without updating the manifest. It does **not** catch
+/// tampering: the manifest being signed is the unsigned one that carries those
+/// checksums, so anyone who replaced a member can have updated its checksum as
+/// well, and this function would then sign the replacement. The signature is a
+/// statement about origin that only the caller can make — sign only archives
+/// obtained over a trusted channel. `output` may equal `input`; the new archive
+/// is written to a temporary file beside `output` and renamed over it only once
+/// complete.
 ///
 /// # Errors
 ///

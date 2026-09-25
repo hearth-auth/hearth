@@ -30,13 +30,25 @@ Work through this list for every upgrade, including patch releases.
   > `security.key_encryption_key`. `HEARTH_MASTER_KEY` must be set as well, just
   > as it is for `serve`.
 
+  > **Sign it now, not during a rollback.** The [rollback](#rollback-procedure) restores
+  > this archive, and restore refuses an unsigned archive outside dev mode
+  > (exit `2`: `the archive is unsigned` with a verify key configured,
+  > `no backup verify key is configured` without one). Pass
+  > `--sign-key` so the archive is restorable the moment it is written. If the
+  > signing key lives only on a separate backup host, copy the archive there and
+  > run `hearth backup sign` on it before you start the upgrade — do not leave
+  > that step for the middle of a rollback. See
+  > [Signed archives](./backup.md#signed-archives).
+
   ```bash
   export HEARTH_KEK=$(cat /etc/hearth/kek.hex)
+  PRE_UPGRADE=/backups/pre-upgrade-$(date +%Y%m%d-%H%M%S).hearth-backup
 
   hearth backup create \
     --data-dir /var/lib/hearth/data \
     --include-audit \
-    --output /backups/pre-upgrade-$(date +%Y%m%d-%H%M%S).hearth-backup
+    --sign-key /etc/hearth/backup-signing.pem \
+    --output "$PRE_UPGRADE"
   ```
 
   > **A bad `--data-dir` now fails loudly.** `backup create` refuses a path that
@@ -47,8 +59,7 @@ Work through this list for every upgrade, including patch releases.
   Verify it was written cleanly:
 
   ```bash
-  hearth backup verify \
-    --input /backups/pre-upgrade-$(date +%Y%m%d-%H%M%S).hearth-backup
+  hearth backup verify --input "$PRE_UPGRADE"
   ```
 
 - [ ] **Record the current version.** You will need this for rollback.
@@ -359,7 +370,10 @@ Older binaries cannot read WAL files written by newer binaries. To roll back:
           /var/lib/hearth/data.post-upgrade-$(date +%s)
    ```
 
-3. **Restore from the pre-upgrade backup** you took before the upgrade.
+3. **Restore from the pre-upgrade backup** you took before the upgrade. It must
+   be the archive you signed in the pre-upgrade checklist: restore authenticates
+   it against `security.backup.verify_key` from `--config` and refuses an
+   unsigned one (exit `2`, nothing written).
 
    ```bash
    rm -rf /var/lib/hearth/data

@@ -198,7 +198,9 @@ the server cannot sign because it holds no private key — with
 **Restoring without a key.** Archives created before this release are
 unsigned. Verify one (`hearth backup verify`), then either sign it with
 `hearth backup sign` or restore it with `hearth backup restore --allow-unsigned`
-— only for an archive whose origin you have established out of band.
+— either way, only for an archive whose origin you have established out of
+band. `verify` passing does not establish it (see
+[`hearth backup sign`](#hearth-backup-sign)).
 
 ### Signing key encryption
 
@@ -414,8 +416,17 @@ signature. Restore does.
 Signs an existing archive's manifest with an Ed25519 private key, so a
 production restore can authenticate it (see [Signed archives](#signed-archives)).
 Use it for archives taken without `--sign-key`, including every archive from
-`POST /admin/backup`. The archive's checksums are verified first, so a
-tampered archive is never signed.
+`POST /admin/backup`.
+
+`sign` verifies the archive's checksums first, but that proves only that the
+archive is **internally consistent** — every member matches the checksum the
+unsigned manifest records. It says nothing about where the archive came from:
+anyone who replaced a member can rewrite its checksum in that same manifest,
+and `sign` would then sign the replacement, which every production restore
+would accept. The signature is your statement that you produced the archive.
+Sign only archives you took yourself and moved over a trusted channel, into a
+directory no other user can write — never a file at a shared or predictable
+path such as `/tmp/latest.hearth-backup`.
 
 ```
 hearth backup sign --input <archive> --key-file <key.pem> [--output <archive>]
@@ -605,13 +616,24 @@ reads only the archive, so it works regardless of which path produced it and
 does not touch the data directory:
 
 ```bash
+# A private (0700) staging directory: `sign` vouches for whatever file sits at
+# the path it is given, so no other user may be able to write that path.
+STAGE=$(mktemp -d) || exit 1
+trap 'rm -rf "$STAGE"' EXIT
+ARCHIVE="$STAGE/hearth-$(date +%F-%H%M%S).hearth-backup"
+
 curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
-  "http://127.0.0.1:8420/admin/backup" -o /tmp/latest.hearth-backup \
-  && hearth backup verify --input /tmp/latest.hearth-backup \
-  && hearth backup sign --input /tmp/latest.hearth-backup \
+  "http://127.0.0.1:8420/admin/backup" -o "$ARCHIVE" \
+  && hearth backup verify --input "$ARCHIVE" \
+  && hearth backup sign --input "$ARCHIVE" \
        --key-file /etc/hearth/backup-signing.pem \
-  && mv /tmp/latest.hearth-backup /backups/
+  && mv "$ARCHIVE" /backups/
 ```
+
+`verify` and `sign` here establish integrity and then origin only because this
+job downloaded the archive itself, over the loopback admin listener, into a
+directory only it can write. Do not point `sign` at an archive you did not
+produce this way.
 
 An unverified backup is not a backup. Fold the `verify` step into the same
 scheduled job so a corrupt archive fails the run loudly instead of sitting

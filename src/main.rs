@@ -262,8 +262,12 @@ enum BackupAction {
     ///
     /// Use this for archives produced without `--sign-key`, including every
     /// archive downloaded from `POST /admin/backup` (the server holds no
-    /// signing key). The archive's checksums are verified first, so a
-    /// tampered archive is never signed.
+    /// signing key). The archive's checksums are verified first, but that
+    /// proves only that the archive is internally consistent, not where it came
+    /// from: anyone who rewrote a member can rewrite its checksum in the
+    /// unsigned manifest too. Signing vouches for the archive's origin, so sign
+    /// only archives you produced yourself and moved over a trusted channel
+    /// into a directory nobody else can write.
     Sign {
         /// Path to the archive to sign.
         #[arg(long, short)]

@@ -315,3 +315,58 @@ fn known_broken_invocations_are_still_broken_and_still_documented() {
         );
     }
 }
+
+/// Returns the value of `--output`/`-o` in a normalized invocation, if any.
+fn output_arg(text: &str) -> Option<&str> {
+    let mut tokens = text.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if let Some(v) = tok.strip_prefix("--output=") {
+            return Some(v);
+        }
+        if tok == "--output" || tok == "-o" {
+            return tokens.next();
+        }
+    }
+    None
+}
+
+/// Every restore point a runbook creates must be signed when it is created.
+///
+/// Outside dev mode restore refuses an unsigned archive, so a runbook that
+/// creates an unsigned backup and later restores it fails at the restore — in
+/// the middle of a rollback or an incident, with the private signing key kept
+/// (as the backup guide advises) somewhere else. The only unsigned archives a
+/// runbook may create are throwaway scans written under `/tmp/`, which the
+/// surrounding prose must say are not restore points.
+#[test]
+fn runbook_backups_that_can_be_restored_are_created_signed() {
+    let mut unsigned = Vec::new();
+    let mut checked = 0usize;
+
+    for guide in GUIDES {
+        for inv in extract_invocations(guide) {
+            // A bare `hearth backup create` is a prose mention, not a command
+            // an operator runs.
+            if inv.path != ["backup", "create"] || inv.long_flags.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let scratch = output_arg(&inv.text).is_some_and(|o| o.starts_with("/tmp/"));
+            if !scratch && !inv.long_flags.iter().any(|f| f == "--sign-key") {
+                unsigned.push(format!("{}:{}: `{}`", inv.guide, inv.line, inv.text));
+            }
+        }
+    }
+
+    assert!(
+        checked >= 3,
+        "expected at least 3 `hearth backup create` invocations across the runbooks, \
+         found {checked} — the guard would be vacuous"
+    );
+    assert!(
+        unsigned.is_empty(),
+        "runbook backups created without --sign-key cannot be restored outside dev mode \
+         (restore refuses unsigned archives):\n  {}",
+        unsigned.join("\n  ")
+    );
+}

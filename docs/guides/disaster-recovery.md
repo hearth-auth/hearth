@@ -158,7 +158,14 @@ This usually indicates one of:
    ```bash
    hearth backup create --data-dir /var/lib/hearth/data --output /tmp/post-recovery.hearth-backup
    hearth backup verify --input /tmp/post-recovery.hearth-backup
+   rm /tmp/post-recovery.hearth-backup
    ```
+
+   This archive is a checksum scan, not a restore point: it is unsigned, so
+   `hearth backup restore` refuses it outside dev mode. If you want a
+   post-recovery restore point, take a signed one into your backup directory
+   (`hearth backup create --sign-key /etc/hearth/backup-signing.pem --output
+   /backups/…`) — see [Signed archives](./backup.md#signed-archives).
 
 ---
 
@@ -469,6 +476,9 @@ rejoined empty.
    # the highest user/credential counts.
    ```
 
+   These archives are unsigned and only for `inspect`; restore refuses them.
+   The restorable copies are the signed backups in step 3.
+
    Sessions are **not** in the manifest, so this comparison cannot tell you
    which side served more logins — only which side holds more durable
    records. `hearth backup create` takes an exclusive lock on the data
@@ -480,10 +490,17 @@ rejoined empty.
    hearth backup create \
      --data-dir /var/lib/hearth/data \
      --include-audit \
+     --sign-key /etc/hearth/backup-signing.pem \
      --output /backups/divergence-$(hostname)-$(date +%s).hearth-backup
    ```
 
-   These backups are evidence — store them off-cluster.
+   These backups are evidence — store them off-cluster. Sign them as they are
+   taken: restore refuses an unsigned archive outside dev mode, and if you
+   later need to restore a losing node's data you should not have to fetch the
+   private signing key in the middle of an incident. If that key lives only on
+   a separate backup host, omit `--sign-key` here and run `hearth backup sign`
+   on each archive there before step 5 wipes anything
+   ([Signed archives](./backup.md#signed-archives)).
 
 4. **Bootstrap the authoritative node alone.** Edit its `hearth.yaml` to
    list only itself in `cluster.peers`, start it, and confirm it elects
