@@ -136,6 +136,11 @@ pub struct ImportClientRequest {
     pub declared_scopes: Vec<String>,
     /// Whether a realm-level consent spans org contexts.
     pub consent_spans_orgs: bool,
+    /// ID-token signing algorithm (`"RS256"` or `"EdDSA"`), task 26.55.
+    ///
+    /// `None` means EdDSA, the administrative default. A backup restore passes
+    /// the archived client's value, so an RS256 client comes back RS256.
+    pub id_token_signed_response_alg: Option<String>,
 }
 
 /// Parameters for the large-scale demo seeder ([`IdentityEngine::seed_demo_users`]).

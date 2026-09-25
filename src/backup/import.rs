@@ -259,6 +259,10 @@ struct BackupClient {
     declared_scopes: Vec<String>,
     #[serde(default)]
     consent_spans_orgs: bool,
+    /// `"RS256"` / `"EdDSA"`; absent in archives written before task 26.55
+    /// (and on legacy client records), which restore as EdDSA.
+    #[serde(default)]
+    id_token_signed_response_alg: Option<String>,
 }
 
 // ── BackupImporter ────────────────────────────────────────────────────────────
@@ -1092,6 +1096,7 @@ impl BackupImporter {
                 trust_level: client.trust_level,
                 declared_scopes: client.declared_scopes,
                 consent_spans_orgs: client.consent_spans_orgs,
+                id_token_signed_response_alg: client.id_token_signed_response_alg,
             };
 
             if opts.dry_run {

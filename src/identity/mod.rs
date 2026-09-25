@@ -94,7 +94,7 @@ pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
     AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
     ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
-    DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
+    DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus, IdTokenSigningAlg,
     IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
     OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
     PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
@@ -111,8 +111,10 @@ pub use step_up::{
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
-    verify_token_signature, CnfClaim, IssueTokenRequest, Jwk, JwksDocument, JwtAssertionClaims,
-    SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
+    verify_rs256_id_token_signature, verify_token_signature, CnfClaim, IssueTokenRequest, Jwk,
+    JwksDocument, JwtAssertionClaims, RsaIdTokenSigningKey, SigningKey, TokenClaims, TokenConfig,
+    TokenPair, REQUIRED_ACTION_TOKEN_TYPE, RSA_ID_TOKEN_MIN_MODULUS_BITS,
+    RSA_ID_TOKEN_MODULUS_BITS,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -2533,6 +2535,50 @@ pub trait IdentityEngine: Send + Sync {
     /// The caller is responsible for encrypting the bytes before writing
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
+
+    /// Returns the realm's RS256 ID-token signing key as plaintext PKCS#8, or
+    /// `None` when no client in the realm has ever selected RS256 (task 26.55).
+    ///
+    /// Unsealed for the same reason as
+    /// [`export_realm_saml_key`](Self::export_realm_saml_key): the destination's
+    /// KEK is a different key. The caller MUST encrypt the bytes before they
+    /// leave the process. Used exclusively by the backup exporter.
+    fn export_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, IdentityError>;
+
+    /// Installs a restored RS256 ID-token signing key, re-sealed under **this**
+    /// node's KEK, so every ID token it signed before the backup still verifies
+    /// against the restored realm's JWKS.
+    ///
+    /// Refuses material that is not an RSA private key of at least 2048 bits,
+    /// so an unusable key fails the restore instead of the first RS256 login
+    /// after it. An existing key is kept unless `overwrite`.
+    fn import_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
+
+    /// Returns the realm's retiring RS256 ID-token keys still inside their
+    /// rotation grace window, as plaintext PKCS#8 — the RS256 twin of
+    /// [`export_retiring_signing_keys`](Self::export_retiring_signing_keys).
+    fn export_retiring_id_token_rsa_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError>;
+
+    /// Re-installs one retiring RS256 ID-token key under its original `kid`
+    /// and **absolute** deadline, re-sealed under this node's KEK. Returns
+    /// [`ImportOutcome::Skipped`] when the deadline has already passed.
+    fn import_retiring_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError>;
 
     /// Returns the underlying storage engine's backup-consistency barrier, or
     /// `None` if snapshot isolation is unavailable (HEA-2167).

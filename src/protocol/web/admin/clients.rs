@@ -239,6 +239,8 @@ struct AppNewTemplate {
     form_declared_scopes: String,
     form_client_logo_url: String,
     form_access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"` — the client's ID-token signing algorithm.
+    form_id_token_signed_response_alg: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -270,6 +272,8 @@ impl AppNewTemplate {
             form_declared_scopes: String::new(),
             form_client_logo_url: String::new(),
             form_access_token_authorization: "embedded".to_string(),
+            // Hearth's administrative default; RS256 is opt-in (task 26.55).
+            form_id_token_signed_response_alg: "EdDSA".to_string(),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -327,6 +331,10 @@ pub struct AppCreateForm {
     pub client_logo_url: String,
     #[serde(default)]
     pub access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"`; empty keeps the default (create) or the
+    /// current value (edit). The engine refuses anything else.
+    #[serde(default)]
+    pub id_token_signed_response_alg: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -409,6 +417,8 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
+        id_token_signed_response_alg: (!form.id_token_signed_response_alg.is_empty())
+            .then(|| form.id_token_signed_response_alg.clone()),
         profile: crate::identity::ClientProfile::Standard,
         mfa_required: None,
     }
@@ -460,6 +470,7 @@ pub async fn admin_app_create_submit(
             tpl.form_declared_scopes = form.declared_scopes.clone();
             tpl.form_client_logo_url = form.client_logo_url.clone();
             tpl.form_access_token_authorization = form.access_token_authorization.clone();
+            tpl.form_id_token_signed_response_alg = form.id_token_signed_response_alg.clone();
             render(&tpl)
         }
         Err(e) => {
@@ -493,6 +504,8 @@ struct AppEditTemplate {
     form_declared_scopes: String,
     form_client_logo_url: String,
     form_access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"` — the client's ID-token signing algorithm.
+    form_id_token_signed_response_alg: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -541,6 +554,7 @@ impl AppEditTemplate {
             _ => "embedded",
         }
         .to_string();
+        let id_token_alg = app.id_token_signed_response_alg().as_str().to_string();
 
         Self {
             app,
@@ -558,6 +572,7 @@ impl AppEditTemplate {
             form_declared_scopes: declared_scopes,
             form_client_logo_url: client_logo_url,
             form_access_token_authorization: access_token_authorization_mode,
+            form_id_token_signed_response_alg: id_token_alg,
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -640,6 +655,10 @@ pub struct AppEditForm {
     pub client_logo_url: String,
     #[serde(default)]
     pub access_token_authorization: String,
+    /// `"EdDSA"` or `"RS256"`; empty keeps the default (create) or the
+    /// current value (edit). The engine refuses anything else.
+    #[serde(default)]
+    pub id_token_signed_response_alg: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -757,6 +776,8 @@ pub async fn admin_app_edit_submit(
         assertion_public_key: None,
         access_token_authorization,
         authorization_signed_response_alg: None,
+        id_token_signed_response_alg: (!form.id_token_signed_response_alg.is_empty())
+            .then(|| form.id_token_signed_response_alg.clone()),
         profile: None,
         mfa_required: None,
     };
@@ -783,6 +804,8 @@ pub async fn admin_app_edit_submit(
                     tpl.error = Some(reason);
                     tpl.form_client_name = form.client_name.clone();
                     tpl.form_access_token_authorization = form.access_token_authorization.clone();
+                    tpl.form_id_token_signed_response_alg =
+                        form.id_token_signed_response_alg.clone();
                     render(&tpl)
                 }
                 _ => super::handlers_common::server_error(),
@@ -842,5 +865,29 @@ pub async fn admin_app_delete(
             tracing::warn!(error = %e, "delete_client failed");
             super::handlers_common::server_error()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_form(body: &str) -> AppCreateForm {
+        serde_urlencoded::from_str(body).expect("create form parses")
+    }
+
+    /// Task 26.55: the console's ID-token algorithm radio reaches the engine
+    /// verbatim — the engine validates it — and an unset radio keeps the
+    /// administrative default (EdDSA) rather than inventing a value.
+    #[test]
+    fn create_form_carries_the_id_token_signing_algorithm() {
+        let base = "client_name=Console+App&redirect_uris=https%3A%2F%2Fapp.example.com%2Fcb";
+        let rs256 = parse_app_create_form(&create_form(&format!(
+            "{base}&id_token_signed_response_alg=RS256"
+        )));
+        assert_eq!(rs256.id_token_signed_response_alg.as_deref(), Some("RS256"));
+
+        let unset = parse_app_create_form(&create_form(base));
+        assert_eq!(unset.id_token_signed_response_alg, None);
     }
 }

@@ -225,7 +225,6 @@ impl EmbeddedIdentityEngine {
             }
             client.set_authorization_signed_response_alg(Some(alg.clone()));
         }
-
         // FAPI 2.0 registration constraints.
         if request.profile.is_fapi2() {
             // FAPI2 clients must not use client_secret — private_key_jwt only.
@@ -252,6 +251,16 @@ impl EmbeddedIdentityEngine {
         if !request.cors_origins.is_empty() {
             client.set_cors_origins(request.cors_origins.clone());
         }
+
+        // ID-token signing algorithm (task 26.55). `None` is the administrative
+        // default, EdDSA; both Dynamic Client Registration handlers resolve an
+        // omitted value to RS256 (OIDC Registration §2) before reaching here.
+        // Resolved last among the validations and persisted explicitly; RS256
+        // provisions the realm's RSA key before the client exists.
+        client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
+            realm_id,
+            request.id_token_signed_response_alg.as_deref(),
+        )?);
 
         // Serialize and persist
         let client_bytes =
@@ -925,6 +934,14 @@ impl EmbeddedIdentityEngine {
 
         // 9. (Code already consumed atomically in step 3 — no further write needed.)
 
+        // 9b. Resolve the key this client's ID token is signed with — Ed25519,
+        //     or the realm's RSA key for a client that registered RS256 (task
+        //     26.55) — before any side effect, so a key failure refuses the
+        //     grant rather than leaving a session behind it.
+        let signing_key = self.get_signing_key_or_default(realm_id);
+        let id_token_signer =
+            self.id_token_signer(realm_id, Some(&client), std::sync::Arc::clone(&signing_key))?;
+
         // 10. Create a session for the user (OAuth code exchange — no browser context).
         //     The MFA proof is inherited: an authorization code is only minted by
         //     `/authorize`, which requires a live UI session, and that session
@@ -941,9 +958,9 @@ impl EmbeddedIdentityEngine {
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
 
-        // 12. Issue tokens with family ID
+        // 12. Issue tokens with family ID. Access and refresh tokens are always
+        //     Ed25519, whatever the client's ID-token algorithm.
         let iat = now.as_micros() / 1_000_000;
-        let signing_key = self.get_signing_key_or_default(realm_id);
 
         // Apply per-realm token TTL overrides.
         let (access_ttl_secs, refresh_ttl_secs) = self.effective_token_ttl_secs(realm_id);
@@ -1119,8 +1136,8 @@ impl EmbeddedIdentityEngine {
             sv: None,
         };
         let id_token =
-            signing_key
-                .issue_token(&id_token_claims)
+            id_token_signer
+                .sign(&id_token_claims)
                 .map_err(|e| IdentityError::SigningError {
                     reason: format!("failed to issue ID token: {e}"),
                 })?;
@@ -2346,6 +2363,17 @@ impl EmbeddedIdentityEngine {
                 }
                 drop(poll_guard);
 
+                // Resolve the client's ID-token signer (task 26.55) before the
+                // session exists, so a key failure leaves nothing behind. A
+                // client deleted since it started the flow keeps the EdDSA
+                // behaviour this path always had.
+                let device_client = self.get_client(realm_id, client_id)?;
+                let id_token_signer = self.id_token_signer(
+                    realm_id,
+                    device_client.as_ref(),
+                    self.get_or_load_realm_signing_key(realm_id)?,
+                )?;
+
                 // Issue tokens like exchange_authorization_code (device flow — no browser context).
                 // The MFA proof is inherited: the device code reached `Approved`
                 // only because a browser user approved it from a live session,
@@ -2390,8 +2418,7 @@ impl EmbeddedIdentityEngine {
                     custom: std::collections::BTreeMap::new(),
                     sv: None,
                 };
-                let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-                let id_token = signing_key.issue_token(&id_token_claims).map_err(|e| {
+                let id_token = id_token_signer.sign(&id_token_claims).map_err(|e| {
                     IdentityError::SigningError {
                         reason: format!("failed to issue ID token: {e}"),
                     }
@@ -2652,7 +2679,11 @@ impl EmbeddedIdentityEngine {
         // RFC 7009: invalid tokens → 200 OK (no error). Signature
         // verification prevents forged tokens from targeting real sessions
         // or grant families for revocation.
-        let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
+        //
+        // An RS256 ID token (task 26.55) is verified too, so a client that
+        // selected RS256 can still end a session with its ID token, exactly as
+        // an EdDSA client can. The RS256 path yields only `id_token` claims.
+        let Ok(claims) = self.verify_realm_issued_id_token(realm_id, &request.token) else {
             return Ok(());
         };
 
@@ -3471,6 +3502,13 @@ impl EmbeddedIdentityEngine {
         if let Some(cors) = &request.cors_origins {
             client.set_cors_origins(cors.clone());
         }
+        // ID-token signing algorithm (task 26.55): validated, and the realm's
+        // RSA key provisioned, before the change is persisted.
+        if let Some(alg) = request.id_token_signed_response_alg.as_deref() {
+            client.set_id_token_signed_response_alg(
+                self.resolve_client_id_token_alg(realm_id, Some(alg))?,
+            );
+        }
 
         let updated_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -4206,14 +4244,16 @@ impl EmbeddedIdentityEngine {
     ) -> Result<RpLogoutResult, IdentityError> {
         // Resolve session ID and user ID from id_token_hint or explicit session_id.
         let (session_id, user_id) = if let Some(hint) = &request.id_token_hint {
-            // Verify the hint's Ed25519 signature against this realm's key
-            // (retiring keys included) BEFORE acting on any claim. Expiry is
+            // Verify the hint's signature against this realm's keys (retiring
+            // keys included) BEFORE acting on any claim: Ed25519, or — for a
+            // client that registered RS256 — the realm's RSA ID-token key
+            // (task 26.55), which only ever verifies an `id_token`. Expiry is
             // deliberately not enforced — OIDC RP-Initiated Logout §2 allows an
             // expired hint — but an unsigned or forged hint must revoke no
             // session and mint no logout token: otherwise an unauthenticated
             // caller sets `sub`/`sid` freely and gets a realm-signed logout
             // token for a victim (audit 2026-08-28 §4.2#3, §4.19#1).
-            let claims = self.verify_token_signature_for_realm(realm_id, hint)?;
+            let claims = self.verify_realm_issued_id_token(realm_id, hint)?;
             let sid = Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
             let uid = Self::parse_user_id_claim(&claims)?;
             (sid, uid)

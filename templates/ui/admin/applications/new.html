@@ -180,6 +180,29 @@
       {% endif %}
     </fieldset>
 
+    <fieldset class="space-y-2">
+      <legend class="text-sm font-medium text-ht-content-secondary">ID token signing algorithm</legend>
+      <p class="mb-2 text-xs text-ht-content-muted">Signs this application's ID tokens only. Access and refresh tokens are always EdDSA.</p>
+      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+        <input type="radio" name="id_token_signed_response_alg" value="EdDSA"
+               {% if form_id_token_signed_response_alg == "EdDSA" %}checked{% endif %}
+               class="mt-0.5 h-4 w-4 text-ht-content-brand">
+        <span>
+          <span class="block text-sm font-medium text-ht-content-primary">EdDSA <span class="ml-1 text-xs font-normal text-ht-content-muted">(default)</span></span>
+          <span class="block text-xs text-ht-content-muted">Ed25519 — the realm key that signs every other Hearth token.</span>
+        </span>
+      </label>
+      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+        <input type="radio" name="id_token_signed_response_alg" value="RS256"
+               {% if form_id_token_signed_response_alg == "RS256" %}checked{% endif %}
+               class="mt-0.5 h-4 w-4 text-ht-content-brand">
+        <span>
+          <span class="block text-sm font-medium text-ht-content-primary">RS256</span>
+          <span class="block text-xs text-ht-content-muted">RSA with SHA-256, for relying parties that only verify the OpenID Connect default. Uses the realm's RSA ID-token key, created on first use.</span>
+        </span>
+      </label>
+    </fieldset>
+
     <div>
       <label for="declared_scopes" class="block text-sm font-medium text-ht-content-secondary">Declared scopes <span class="text-ht-content-muted">(optional)</span></label>
       <input type="text" id="declared_scopes" name="declared_scopes"

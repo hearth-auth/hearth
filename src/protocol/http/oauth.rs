@@ -211,13 +211,16 @@ async fn protected_resource_metadata(State(state): State<Arc<AppState>>) -> impl
 /// Returns the JSON Web Key Set containing the server's public signing
 /// keys for external token verification, per RFC 7517.
 ///
-/// **Ed25519 (`EdDSA`) only** — the sole algorithm Hearth signs with, and the
-/// sole one `id_token_signing_alg_values_supported` advertises. RSA-2048
-/// (`RS256`) and EC P-256 (`ES256`) entries were also published "for ecosystem
-/// compatibility"; Hearth signed with neither, and the ES256 private key was
-/// regenerated on every process start, so a relying party that selected that
-/// entry cached — for the `max-age=3600` below — a public key whose private
-/// half no longer existed (audit 2026-08-28 §4.2#4, §4.15#5).
+/// **Ed25519 (`EdDSA`) only** — this global document carries the global key
+/// and the system realm's keys, and the system realm never holds an RS256
+/// ID-token key (it has no OAuth clients). A realm whose clients selected RS256
+/// ID tokens publishes its RSA key in the realm-scoped JWKS instead
+/// (`/realms/{realm}/.well-known/jwks.json`, task 26.55). RSA-2048
+/// (`RS256`) and EC P-256 (`ES256`) entries were once published here "for
+/// ecosystem compatibility"; Hearth signed with neither, and the ES256 private
+/// key was regenerated on every process start, so a relying party that
+/// selected that entry cached — for the `max-age=3600` below — a public key
+/// whose private half no longer existed (audit 2026-08-28 §4.2#4, §4.15#5).
 ///
 /// Renders the domain [`crate::identity::tokens::JwksDocument`] directly
 /// as JSON rather than through the proto `JsonWebKey` type, which carries
@@ -1046,6 +1049,31 @@ struct DcrResponse {
     client_secret_expires_at: u64,
     token_endpoint_auth_method: String,
     client_id_issued_at: i64,
+    /// The registered ID-token algorithm — RFC 7591 §3.2.1 returns every
+    /// registered value, including one the server defaulted (task 26.55).
+    id_token_signed_response_alg: String,
+}
+
+/// Error description for an `id_token_signed_response_alg` this server cannot
+/// honour. The rejected value is deliberately not echoed.
+const DCR_UNSUPPORTED_ID_TOKEN_ALG: &str = "id_token_signed_response_alg must be RS256 or EdDSA";
+
+/// Resolves a dynamic registration's `id_token_signed_response_alg`.
+///
+/// Omitted means RS256 — the default OpenID Connect Dynamic Client
+/// Registration 1.0 §2 prescribes, and what a certification client registering
+/// without the parameter expects (task 26.55). Anything but `RS256`/`EdDSA`
+/// (notably `none` and every `HS*`) is `Err`, which the caller answers with
+/// RFC 7591 §3.2.2 `invalid_client_metadata`.
+fn resolve_dcr_id_token_alg(requested: Option<&str>) -> Result<String, ()> {
+    match requested {
+        None => Ok(crate::identity::IdTokenSigningAlg::Rs256
+            .as_str()
+            .to_string()),
+        Some(alg) => crate::identity::IdTokenSigningAlg::parse(alg)
+            .map(|alg| alg.as_str().to_string())
+            .map_err(|_| ()),
+    }
 }
 
 /// Dynamic Client Registration (RFC 7591) endpoint.
@@ -1134,6 +1162,12 @@ async fn register_client_dynamic(
     request.client_secret = None;
     request.trust_level = crate::identity::ClientTrustLevel::ThirdParty;
 
+    // OIDC Registration §2: omitted means RS256 (task 26.55).
+    match resolve_dcr_id_token_alg(request.id_token_signed_response_alg.as_deref()) {
+        Ok(alg) => request.id_token_signed_response_alg = Some(alg),
+        Err(()) => return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG),
+    }
+
     // Generate server-side random secret.
     use base64::Engine as _;
     use ring::rand::SecureRandom;
@@ -1178,6 +1212,10 @@ async fn register_client_dynamic(
                 token_endpoint_auth_method: "client_secret_basic".to_string(),
                 #[allow(clippy::cast_possible_truncation)]
                 client_id_issued_at: client.created_at().as_micros() / 1_000_000,
+                id_token_signed_response_alg: client
+                    .id_token_signed_response_alg()
+                    .as_str()
+                    .to_string(),
             };
 
             (
@@ -3508,6 +3546,16 @@ async fn realm_register_client_dynamic(
         }
         Some(_) => return dcr_invalid_metadata("grant_types must be an array of strings"),
     };
+    // OIDC Registration §2: omitted (or null) means RS256; anything but
+    // RS256/EdDSA is refused rather than narrowed (task 26.55).
+    let requested_id_token_alg = match body.get("id_token_signed_response_alg") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(alg)) => Some(alg.as_str()),
+        Some(_) => return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG),
+    };
+    let Ok(id_token_signed_response_alg) = resolve_dcr_id_token_alg(requested_id_token_alg) else {
+        return dcr_invalid_metadata(DCR_UNSUPPORTED_ID_TOKEN_ALG);
+    };
     let base_slug = client_name
         .to_lowercase()
         .chars()
@@ -3534,6 +3582,7 @@ async fn realm_register_client_dynamic(
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
+        id_token_signed_response_alg: Some(id_token_signed_response_alg),
         profile: crate::identity::ClientProfile::Standard,
         mfa_required: None,
     };
@@ -3549,6 +3598,8 @@ async fn realm_register_client_dynamic(
                 "client_name": client.client_name(),
                 "redirect_uris": client.redirect_uris(),
                 "grant_types": client.grant_types(),
+                // RFC 7591 §3.2.1: echo registered metadata, defaults included.
+                "id_token_signed_response_alg": client.id_token_signed_response_alg().as_str(),
             });
             (StatusCode::CREATED, Json(resp)).into_response()
         }

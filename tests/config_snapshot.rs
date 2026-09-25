@@ -393,6 +393,7 @@ async fn diff_detects_application_added() {
             declared_scopes: None,
             consent_spans_orgs: None,
             profile: None,
+            id_token_signed_response_alg: None,
         },
     );
     realm_v2.applications = Some(apps);
@@ -435,6 +436,7 @@ async fn diff_detects_application_removed() {
             declared_scopes: None,
             consent_spans_orgs: None,
             profile: None,
+            id_token_signed_response_alg: None,
         },
     );
     realm_v1.applications = Some(apps);

@@ -2525,6 +2525,10 @@ struct AdminUpdateClientBody {
     /// against a key an operator had no way to install.
     #[serde(default, deserialize_with = "deserialize_nullable_string")]
     assertion_public_key: Option<Option<String>>,
+    /// ID-token signing algorithm: `"RS256"` or `"EdDSA"` (task 26.55).
+    /// Omit to leave unchanged; the engine refuses any other value. Without
+    /// this field the body silently dropped the key and answered `200`.
+    id_token_signed_response_alg: Option<String>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -2607,6 +2611,9 @@ async fn admin_update_client(
         // `update_client_inner` validates the base64url decode and the 32-byte
         // Ed25519 length before it writes.
         assertion_public_key: body.assertion_public_key,
+        // Validated (RS256 | EdDSA) by `update_client_inner`, which also
+        // provisions the realm's RSA ID-token key on a switch to RS256.
+        id_token_signed_response_alg: body.id_token_signed_response_alg,
         ..Default::default()
     };
 

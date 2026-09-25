@@ -329,6 +329,7 @@ use crate::storage::StorageEngine;
 
 mod advisory_lock;
 pub(super) mod approval;
+mod id_token_keys;
 pub(super) mod oauth;
 mod sharded_cache;
 // Phase D engine modules
@@ -597,6 +598,16 @@ pub struct EmbeddedIdentityEngine {
     /// expired retiring key is never accepted even before the cache entry is
     /// invalidated. Invalidated on rotation and realm delete.
     realm_retiring_keys: Arc<ShardedArcSwapMap<RealmId, Arc<Vec<RetiringSigningKey>>>>,
+    /// Per-realm RSA keys that sign RS256 ID tokens (task 26.55), lazily
+    /// loaded. A realm is absent until a client in it selects RS256.
+    ///
+    /// Guarded by the same `realm_key_epoch` as `realm_signing_keys`, so a
+    /// rotation on any node evicts both key families together.
+    realm_id_token_rsa_keys: Arc<ShardedArcSwapMap<RealmId, Arc<tokens::RsaIdTokenSigningKey>>>,
+    /// Per-realm retiring RSA ID-token keys still inside their rotation grace
+    /// period — the RS256 twin of `realm_retiring_keys`.
+    realm_id_token_rsa_retiring_keys:
+        Arc<ShardedArcSwapMap<RealmId, Arc<Vec<id_token_keys::RetiringRsaIdTokenKey>>>>,
     /// Per-realm rotation epoch guarding the `realm_signing_keys` cache-miss
     /// fill against a racing rotation (HEA-2096).
     ///
@@ -1265,6 +1276,8 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_id_token_rsa_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_id_token_rsa_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
             control_epoch: AtomicU64::new(0),
             epoch_sync_after: AtomicI64::new(0),
@@ -1837,6 +1850,8 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_id_token_rsa_keys: Arc::new(ShardedArcSwapMap::new()),
+            realm_id_token_rsa_retiring_keys: Arc::new(ShardedArcSwapMap::new()),
             realm_key_epoch: Arc::new(ShardedArcSwapMap::new()),
             control_epoch: AtomicU64::new(0),
             epoch_sync_after: AtomicI64::new(0),
@@ -2036,7 +2051,8 @@ impl EmbeddedIdentityEngine {
     /// Covers every family of stored key material:
     ///
     /// - System-realm scans — `sys:global:key`, `realm:key:*`,
-    ///   `realm:retiring:*` and `realm:saml_key:*`.
+    ///   `realm:retiring:*`, `realm:saml_key:*`, and the RS256 ID-token keys
+    ///   `realm:idtoken_rsa:*` / `realm:idtoken_rsa_retiring:*`.
     /// - A realm walk — `agt:dpop:nonce-secret`, `mfa:dek:key` and the audit
     ///   chain's HMAC key, which are written into each tenant realm's own
     ///   namespace and therefore cannot be reached by a system-realm scan
@@ -2080,6 +2096,8 @@ impl EmbeddedIdentityEngine {
             keys::realm_signing_key_scan_prefix(),
             keys::realm_retiring_key_all_scan_prefix(),
             keys::realm_saml_key_scan_prefix(),
+            keys::realm_id_token_rsa_key_scan_prefix(),
+            keys::realm_id_token_rsa_retiring_all_scan_prefix(),
         ] {
             let end = keys::prefix_end(&prefix);
             let entries = storage
@@ -4766,6 +4784,9 @@ impl EmbeddedIdentityEngine {
         self.realm_key_epoch.insert(realm_id.clone(), persisted);
         self.realm_signing_keys.remove(realm_id);
         self.realm_retiring_keys.remove(realm_id);
+        // The RS256 ID-token keys rotate under the same epoch (task 26.55).
+        self.realm_id_token_rsa_keys.remove(realm_id);
+        self.realm_id_token_rsa_retiring_keys.remove(realm_id);
         self.flush_token_claims_cache();
         tracing::info!(
             realm = %realm_id.as_uuid(),
@@ -5009,7 +5030,14 @@ impl EmbeddedIdentityEngine {
                 "jwt".to_string(),
             ],
             subject_types_supported: vec!["public".to_string()],
-            id_token_signing_alg_values_supported: vec!["EdDSA".to_string()],
+            // OIDC Discovery 1.0 §3: RS256 MUST be listed. It signs ID tokens
+            // only, for clients that registered it (task 26.55); every other
+            // token is EdDSA.
+            id_token_signing_alg_values_supported:
+                crate::identity::oidc::IdTokenSigningAlg::SUPPORTED
+                    .iter()
+                    .map(|alg| alg.as_str().to_string())
+                    .collect(),
             scopes_supported: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -5530,6 +5558,23 @@ impl EmbeddedIdentityEngine {
         //    are wrapped private keys (plaintext when no KEK is configured) and
         //    must not outlive the realm (HEA-2093).
         if Self::purge_realm_retiring_keys(storage, realm_id, None) > 0 {
+            cascade_work_done = true;
+        }
+
+        // 5b. The RS256 ID-token key and its retiring predecessors (task
+        //     26.55) — private keys under the system realm, like the above.
+        let rsa_key_storage_key = keys::encode_realm_id_token_rsa_key(realm_id);
+        if storage
+            .get(&sys_realm, &rsa_key_storage_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            cascade_work_done = true;
+            storage
+                .delete(&sys_realm, &rsa_key_storage_key)
+                .map_err(Self::storage_err)?;
+        }
+        if Self::purge_realm_id_token_rsa_retiring_keys(storage, realm_id, None) > 0 {
             cascade_work_done = true;
         }
 
@@ -6583,6 +6628,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 let realm_id_bg = realm_id.clone();
                 let signing_keys = self.realm_signing_keys.clone();
                 let retiring_keys = self.realm_retiring_keys.clone();
+                let rsa_id_token_keys = self.realm_id_token_rsa_keys.clone();
+                let rsa_id_token_retiring_keys = self.realm_id_token_rsa_retiring_keys.clone();
                 let status_cache = self.realm_status_cache.clone();
                 let existing_realm_bg = existing_realm.clone();
 
@@ -6633,6 +6680,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     // Remove from in-memory caches.
                     signing_keys.remove(&realm_id_bg);
                     retiring_keys.remove(&realm_id_bg);
+                    rsa_id_token_keys.remove(&realm_id_bg);
+                    rsa_id_token_retiring_keys.remove(&realm_id_bg);
                     status_cache.rcu(|current| {
                         let mut new_map = (**current).clone();
                         new_map.remove(&realm_id_bg);
@@ -6668,6 +6717,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let id = realm_id.clone();
             self.realm_signing_keys.remove(&id);
             self.realm_retiring_keys.remove(&id);
+            self.realm_id_token_rsa_keys.remove(&id);
+            self.realm_id_token_rsa_retiring_keys.remove(&id);
             self.realm_status_cache.rcu(|current| {
                 let mut new_map = (**current).clone();
                 new_map.remove(&id);
@@ -6728,6 +6779,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
             jwks.keys.extend(entry.key.to_jwks().keys);
         }
+
+        // RS256 ID-token keys (task 26.55): the active one and any still in
+        // their grace window. Present only once a client in the realm selected
+        // RS256; never provisioned from here, so this read path never writes.
+        jwks.keys.extend(self.realm_id_token_rsa_jwks(realm_id));
 
         Ok(jwks)
     }
@@ -6936,6 +6992,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // dropped; put() takes &[u8] so Deref chain handles the coercion (HEA-750).
         let old_pkcs8 = Zeroizing::new(old_key.pkcs8_bytes().to_vec());
 
+        // The realm's RS256 ID-token key rotates alongside (task 26.55) — but
+        // only in a realm that has one. Its replacement is generated here,
+        // before any write, so a key-generation failure leaves the realm
+        // exactly as it was. An RSA key that cannot be loaded must not block
+        // what may be an emergency rotation: it is replaced without a grace
+        // window, since nothing could verify with it anyway.
+        let (old_rsa, rsa_present) = match self.load_realm_id_token_rsa_key(realm_id) {
+            Ok(Some(key)) => (Some(key), true),
+            Ok(None) => (None, false),
+            Err(e) => {
+                tracing::error!(
+                    realm = %realm_id.as_uuid(),
+                    error = %e,
+                    "RS256 ID-token key could not be loaded; rotation replaces it with no \
+                     grace window"
+                );
+                (None, true)
+            }
+        };
+        let new_rsa = if rsa_present {
+            Some(tokens::RsaIdTokenSigningKey::generate()?)
+        } else {
+            None
+        };
+
         // Generate and store the new active signing key.
         let new_key = SigningKey::generate()?;
         let new_pkcs8 = Zeroizing::new(new_key.pkcs8_bytes().to_vec());
@@ -6981,6 +7062,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // RS256 ID-token key: same grace, same purge rules, written before the
+        // single epoch bump below so every node evicts both families together.
+        let rsa_rotation = self.rotate_realm_id_token_rsa_key_locked(
+            realm_id,
+            old_rsa.as_deref(),
+            new_rsa.as_ref(),
+            now_secs,
+            deadline_secs,
+            revoking,
+        )?;
+
         // Bump the rotation epoch *before* clearing the cache so a concurrent
         // cache-miss fill that snapshotted the old epoch and read the outgoing
         // key sees the change and discards its stale insert instead of
@@ -7010,16 +7102,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Invalidate the retiring-key cache so the just-retired key is picked up
         // on the next validation (HEA-2090).
         self.realm_retiring_keys.remove(realm_id);
+        // And the RS256 ID-token caches, for the same two reasons.
+        self.realm_id_token_rsa_keys.remove(realm_id);
+        self.realm_id_token_rsa_retiring_keys.remove(realm_id);
         // Drop memoized claims: a token already validated under the outgoing key
         // must be re-verified against the new key set, so an emergency rotation
         // (grace 0) actually cuts it off instead of letting a warm cache entry
         // carry it to its own `exp` (HEA-2093).
         self.flush_token_claims_cache();
 
+        let (rsa_old_kid, rsa_new_kid) = match &rsa_rotation {
+            Some((old, new)) => (old.clone().unwrap_or_default(), new.clone()),
+            None => (String::new(), String::new()),
+        };
         tracing::info!(
             realm = %realm_id.as_uuid(),
             old_kid = %old_key_id,
             new_kid = %new_key.key_id(),
+            rs256_old_kid = %rsa_old_kid,
+            rs256_new_kid = %rsa_new_kid,
             grace_period_secs,
             deadline_secs,
             purged_retiring_keys = purged,
@@ -8808,8 +8909,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn jwks(&self) -> JwksDocument {
-        // Ed25519 only. Hearth signs every token it issues with EdDSA, and
-        // `id_token_signing_alg_values_supported` advertises exactly that.
+        // Ed25519 only: the global key plus the system realm's keys. RS256
+        // ID-token keys (task 26.55) live in the *realm* JWKS of a realm whose
+        // clients selected RS256; the system realm has no OAuth clients, so it
+        // never has one and this document never carries an RSA key.
         //
         // This document used to carry two more entries. An RSA-2048 `RS256`
         // key Hearth never signs with, and an EC P-256 `ES256` key whose
@@ -11713,6 +11816,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         );
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
+        // ID-token signing algorithm (task 26.55), resolved as a registration
+        // resolves it. A backup restore installs the archived RSA key first,
+        // so an RS256 client finds that key rather than minting a new one.
+        client.set_id_token_signed_response_alg(self.resolve_client_id_token_alg(
+            realm_id,
+            request.id_token_signed_response_alg.as_deref(),
+        )?);
 
         let client_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -15752,6 +15862,38 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError> {
         let key = self.get_or_load_realm_signing_key(realm_id)?;
         Ok(key.pkcs8_bytes().to_vec())
+    }
+
+    fn export_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, IdentityError> {
+        self.export_realm_id_token_rsa_key_inner(realm_id)
+    }
+
+    fn import_realm_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        pkcs8: &[u8],
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        self.import_realm_id_token_rsa_key_inner(realm_id, pkcs8, overwrite)
+    }
+
+    fn export_retiring_id_token_rsa_keys(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RetiringSigningKeyExport>, IdentityError> {
+        self.export_retiring_id_token_rsa_keys_inner(realm_id)
+    }
+
+    fn import_retiring_id_token_rsa_key(
+        &self,
+        realm_id: &RealmId,
+        key: &RetiringSigningKeyExport,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, IdentityError> {
+        self.import_retiring_id_token_rsa_key_inner(realm_id, key, overwrite)
     }
 
     fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {

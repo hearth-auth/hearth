@@ -444,6 +444,10 @@ impl Auth0Importer {
             trust_level: crate::identity::ClientTrustLevel::FirstParty,
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
+            // Hearth's administrative default (EdDSA). Auth0 signs ID tokens
+            // RS256 by default, so an RP that pinned RS256 must be switched
+            // with `id_token_signed_response_alg` after the migration.
+            id_token_signed_response_alg: None,
         };
         self.identity.import_client(realm_id, &request)?;
         Ok(())

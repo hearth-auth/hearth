@@ -1810,6 +1810,19 @@ fn validate_realm_applications_all(
                     }
                 }
             }
+            // The engine refuses anything but RS256/EdDSA at reconcile time;
+            // `hearth config validate` must say so first, not after a boot
+            // that already failed (task 26.55).
+            if let Some(alg) = &app.id_token_signed_response_alg {
+                if crate::identity::IdTokenSigningAlg::parse(alg).is_err() {
+                    issues.push(ValidationIssue {
+                        field: format!("{prefix}.id_token_signed_response_alg"),
+                        reason: "must be \"RS256\" or \"EdDSA\" (case-sensitive); \"none\" and \
+                                 symmetric HS* algorithms are never supported"
+                            .to_string(),
+                    });
+                }
+            }
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -3095,6 +3108,52 @@ auth:
             "SECURITY: 'password' (ROPC, RFC 6749 §4.3) must not appear in \
              VALID_GRANT_TYPES — remove it and use client_credentials or auth-code+PKCE instead"
         );
+    }
+
+    #[test]
+    fn config_validates_application_id_token_signed_response_alg() {
+        let yaml = |alg: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+        id_token_signed_response_alg: "{alg}"
+"#
+            )
+        };
+        // Look only at this field's issues: the fixture is deliberately
+        // minimal and trips unrelated production-mode rules (email transport).
+        let alg_issues = |alg: &str| {
+            Config::from_yaml_str_unchecked(&yaml(alg))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|issue| {
+                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
+                })
+                .count()
+        };
+        for ok in ["RS256", "EdDSA"] {
+            assert_eq!(alg_issues(ok), 0, "{ok} must be accepted");
+        }
+        for bad in ["HS256", "none", "rs256", "ES256", ""] {
+            assert_eq!(
+                alg_issues(bad),
+                1,
+                "{bad:?} must be refused by `hearth config validate`, not first at reconcile"
+            );
+        }
     }
 
     #[test]

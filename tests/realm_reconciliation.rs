@@ -472,6 +472,81 @@ realms:
     );
 }
 
+/// Task 26.55 — `id_token_signed_response_alg` is a YAML application key.
+/// `RS256` lands on the client (provisioning the realm's RSA ID-token key),
+/// and YAML stays authoritative: dropping the key reverts the client to the
+/// EdDSA default on the next reconcile.
+#[tokio::test]
+async fn reconcile_applies_id_token_signed_response_alg_from_yaml() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hearth.yaml");
+    let config_with = |alg_line: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+realms:
+  rs256demo:
+    applications:
+      legacy-rp:
+        name: "Legacy RP"
+        redirect_uris:
+          - "https://rp.example.com/callback"
+        grant_types:
+          - authorization_code
+{alg_line}
+"#
+            ),
+        )
+        .expect("write config");
+        Config::from_file_as_dev(&path).expect("config must parse")
+    };
+    let find_client = || {
+        let realm = identity
+            .get_realm_by_name("rs256demo")
+            .expect("lookup realm")
+            .expect("realm exists");
+        let client = identity
+            .list_clients(realm.id(), &hearth::core::PageRequest::new(0, 10))
+            .expect("list clients")
+            .items
+            .into_iter()
+            .find(|c| c.client_name() == "Legacy RP")
+            .expect("client exists");
+        (realm, client)
+    };
+
+    let config = config_with("        id_token_signed_response_alg: RS256");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+    let (realm, client) = find_client();
+    assert_eq!(
+        client.id_token_signed_response_alg(),
+        hearth::identity::IdTokenSigningAlg::Rs256
+    );
+    assert_eq!(
+        identity
+            .realm_jwks(realm.id())
+            .expect("jwks")
+            .keys
+            .iter()
+            .filter(|k| k.kty == "RSA" && k.alg == "RS256")
+            .count(),
+        1,
+        "an RS256 application provisions and publishes the realm's RSA key"
+    );
+
+    let config = config_with("");
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile again");
+    let (_realm, client) = find_client();
+    assert_eq!(
+        client.id_token_signed_response_alg(),
+        hearth::identity::IdTokenSigningAlg::EdDsa,
+        "YAML is authoritative: without the key the client reverts to EdDSA"
+    );
+}
+
 /// Task 25.27 — `trust_asserted_email` must survive the YAML → `IdpConfig` hop.
 ///
 /// This repo has repeatedly shipped a config key that parsed, validated and
