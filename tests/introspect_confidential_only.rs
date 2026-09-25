@@ -16,8 +16,10 @@
 //! confidential, so it now authenticates at `/introspect` the way it does at
 //! `/token`: with a signed `client_assertion` (RFC 7523 §2.2).
 //!
-//! `/revoke` is deliberately unchanged: RFC 7009 §2.1 lets a public client
-//! revoke, and the regression guard below keeps that working.
+//! `/revoke` keeps accepting public clients: RFC 7009 §2.1 lets a public
+//! client revoke the tokens issued to it, and the regression guard below keeps
+//! that working. That a client can revoke ONLY its own tokens is covered by
+//! `tests/revoke_client_ownership.rs`.
 
 mod common;
 
@@ -29,7 +31,8 @@ use hearth::core::{ClientId, RealmId};
 use hearth::identity::tokens::{Audience, JwtAssertionClaims};
 use hearth::identity::{
     ClientCredentialsRequest, ClientTrustLevel, CreateRealmRequest, CreateUserRequest,
-    RegisterClientRequest, SessionContext, SigningKey, UpdateClientRequest,
+    RegisterClientRequest, SessionContext, SigningKey, TokenIntrospectionRequest,
+    TokenIssuanceContext, UpdateClientRequest,
 };
 use hearth::protocol::admin_auth::AdminRateLimiter;
 use hearth::protocol::grpc::oauth::OAuthSvc;
@@ -439,7 +442,40 @@ async fn introspect_refuses_an_assertion_combined_with_a_secret() {
 async fn revoke_still_accepts_a_public_client() {
     let env = server_env().await;
     let public = register(&env.h, &env.realm_id, None);
-    let (token, _) = user_session_token(&env.h, &env.realm_id);
+    // A token issued TO the public client: RFC 7009 §2.1 lets a client revoke
+    // only its own tokens (tests/revoke_client_ownership.rs).
+    let user = env
+        .h
+        .identity()
+        .create_user(
+            &env.realm_id,
+            &CreateUserRequest {
+                email: format!("owner-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Owner".to_string(),
+                ..CreateUserRequest::default()
+            },
+        )
+        .expect("create user");
+    let session = env
+        .h
+        .identity()
+        .create_session(&env.realm_id, user.id(), &SessionContext::default())
+        .expect("create session");
+    let token = env
+        .h
+        .identity()
+        .issue_tokens_with_context(
+            &env.realm_id,
+            user.id(),
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: Some(public.clone()),
+                ..TokenIssuanceContext::default()
+            },
+        )
+        .expect("issue tokens")
+        .access_token()
+        .to_string();
 
     let resp = reqwest::Client::new()
         .post(format!("{}/realms/{}/revoke", env.base, env.realm_name))
@@ -454,6 +490,22 @@ async fn revoke_still_accepts_a_public_client() {
         resp.status().as_u16(),
         200,
         "RFC 7009 §2.1 lets a public client revoke; this change must not break it"
+    );
+    let still = env
+        .h
+        .identity()
+        .introspect_token(
+            &env.realm_id,
+            &TokenIntrospectionRequest {
+                token,
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("introspect");
+    assert!(
+        !still.active,
+        "the public client's own token must actually be revoked"
     );
 }
 

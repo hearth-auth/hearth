@@ -132,8 +132,12 @@ impl OAuthService for OAuthSvc {
         req: Request<pb::TokenRevocationRequest>,
     ) -> Result<Response<pb::OAuthEmpty>, Status> {
         let realm_id = extract_realm_id(req.metadata())?;
-        verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
-        let body: domain::TokenRevocationRequest = req.into_inner().into();
+        let client_id =
+            verify_grpc_client_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
+        // RFC 7009 §2.1: revoke only a token issued to the authenticated
+        // client; any other token is a silent OK no-op, as on the HTTP routes.
+        let mut body: domain::TokenRevocationRequest = req.into_inner().into();
+        body.revoking_client_id = Some(client_id);
         self.state
             .identity
             .revoke_token(&realm_id, &body)

@@ -483,6 +483,7 @@ fn revoke_access_token_invalidates_session() {
             &TokenRevocationRequest {
                 token: tokens.access_token().to_string(),
                 token_type_hint: Some("access_token".to_string()),
+                revoking_client_id: None,
             },
         )
         .expect("revoke should succeed");
@@ -561,6 +562,7 @@ fn revoke_refresh_token_invalidates_family() {
             &TokenRevocationRequest {
                 token: tokens.refresh_token().to_string(),
                 token_type_hint: Some("refresh_token".to_string()),
+                revoking_client_id: None,
             },
         )
         .expect("revoke should succeed");
@@ -628,6 +630,7 @@ fn introspect_revoked_token_is_inactive() {
             &TokenRevocationRequest {
                 token: tokens.access_token().to_string(),
                 token_type_hint: None,
+                revoking_client_id: None,
             },
         )
         .expect("revoke");
@@ -1055,6 +1058,7 @@ mod oauth_proptests {
                             &TokenRevocationRequest {
                                 token: access_tokens[idx].clone(),
                                 token_type_hint: Some("access_token".to_string()),
+                                revoking_client_id: None,
                             },
                         ).expect("revoke");
                         oracle_revoked[idx] = true;

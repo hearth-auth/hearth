@@ -427,6 +427,7 @@ async fn revoke_token_ignores_tampered_payload() {
             &TokenRevocationRequest {
                 token: tampered,
                 token_type_hint: Some("access_token".to_string()),
+                revoking_client_id: None,
             },
         )
         .expect("revoke token");

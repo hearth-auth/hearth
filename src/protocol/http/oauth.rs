@@ -2195,7 +2195,9 @@ async fn token_exchange_impl(
 ///
 /// Per RFC 7009, returns 200 OK regardless of whether the token was
 /// actually revoked (to prevent information leakage). Requires client
-/// authentication via HTTP Basic Auth or body `client_id`/`client_secret`.
+/// authentication via HTTP Basic Auth or body `client_id`/`client_secret`,
+/// and revokes only a token issued to the authenticated client (RFC 7009
+/// §2.1); any other token is a silent 200 no-op.
 async fn token_revocation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2220,9 +2222,12 @@ async fn token_revocation(
         return resp;
     }
 
+    // RFC 7009 §2.1: only a token issued to the authenticated client is
+    // revoked; any other token is a silent 200 no-op (task 26.43 follow-up).
     let request = crate::identity::TokenRevocationRequest {
         token: body.token,
         token_type_hint: body.token_type_hint,
+        revoking_client_id: Some(client_id.clone()),
     };
 
     let mut resp = match state.identity.revoke_token(&realm_id, &request) {
@@ -3280,8 +3285,8 @@ async fn realm_token_exchange(
 
 /// `POST /realms/{realm}/revoke` — realm-scoped twin of `/revoke`.
 ///
-/// Requires client authentication and applies the same rate limit and RFC
-/// 7009 semantics as the header-form twin. Before this the route read no
+/// Requires client authentication and applies the same rate limit, RFC 7009
+/// semantics and §2.1 token-ownership check as the header-form twin. Before this the route read no
 /// client credentials at all, so an anonymous internet caller could destroy
 /// any session it held a token string for (audit 2026-08-28 §4.1#3,
 /// §4.19#2, §4.22#1, §4.25#1).
@@ -3309,9 +3314,12 @@ async fn realm_token_revocation(
         return resp;
     }
 
+    // RFC 7009 §2.1: only a token issued to the authenticated client is
+    // revoked; any other token is a silent 200 no-op (task 26.43 follow-up).
     let request = crate::identity::TokenRevocationRequest {
         token: body.token,
         token_type_hint: body.token_type_hint,
+        revoking_client_id: Some(client_id.clone()),
     };
     let mut resp = match state.identity.revoke_token(&realm_id, &request) {
         Ok(()) => {

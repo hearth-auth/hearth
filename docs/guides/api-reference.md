@@ -357,7 +357,14 @@ clients only** (RFC 7662 §2.1). Authenticate with `client_secret_basic`,
 `client_assertion`). A public client — one registered without a secret — receives
 `401 invalid_client` even though its `client_id` is valid, because client IDs are
 public. Register a confidential client for each resource server that introspects.
-`POST /revoke` continues to accept public clients by `client_id` (RFC 7009 §2.1).
+`POST /revoke` continues to accept public clients by `client_id` (RFC 7009 §2.1), but
+revokes only a token **issued to the calling client**: the client in the token's `azp`,
+the client that owns its grant family (every access and refresh token a grant mints),
+or — for a `client_credentials` token — the client itself. Any other token, including
+a Hearth first-party session token issued to no OAuth client, is left untouched and the
+endpoint still answers `200` (RFC 7009 §2.2), so the response reveals nothing about the
+token. Being named in a token's `aud` does not make a resource server its owner. To end
+a session that no client owns, use the admin session API (`DELETE /admin/sessions/{id}`).
 Discovery lists the accepted methods in `introspection_endpoint_auth_methods_supported`
 and `revocation_endpoint_auth_methods_supported`.
 

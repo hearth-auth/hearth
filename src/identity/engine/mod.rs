@@ -24141,6 +24141,7 @@ mod tests {
                 &TokenRevocationRequest {
                     token: forged_token,
                     token_type_hint: Some("access_token".to_string()),
+                    revoking_client_id: None,
                 },
             )
             .expect("forged revoke should silently succeed per RFC 7009");

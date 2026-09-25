@@ -298,6 +298,8 @@ impl From<pb::TokenRevocationRequest> for domain::TokenRevocationRequest {
         Self {
             token: r.token,
             token_type_hint: r.token_type_hint,
+            // The gRPC handler sets the authenticated client after conversion.
+            revoking_client_id: None,
         }
     }
 }

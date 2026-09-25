@@ -1624,12 +1624,23 @@ pub(crate) struct StoredGrantFamily {
 // ===== Token Revocation (RFC 7009) =====
 
 /// Request to revoke an OAuth 2.0 token (RFC 7009).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TokenRevocationRequest {
     /// The token to revoke (access or refresh).
     pub token: String,
     /// Optional hint about the token type.
     pub token_type_hint: Option<String>,
+    /// The client that authenticated for this revocation call.
+    ///
+    /// RFC 7009 §2.1: the server "verifies whether the token was issued to the
+    /// client making the revocation request". When `Some`, the engine revokes
+    /// only a token issued to this client — its `azp`, its grant family's
+    /// client, or (for a `client_credentials` token) its `sub` — and treats any
+    /// other token, including one issued to no client at all, as a silent
+    /// no-op (RFC 7009 §2.2). Every wire surface (`/revoke`, its realm twin,
+    /// gRPC `Revoke`) MUST set it. `None` is reserved for trusted in-process
+    /// callers that have already authorized the revocation themselves.
+    pub revoking_client_id: Option<crate::core::ClientId>,
 }
 
 // ===== Token Introspection (RFC 7662) =====

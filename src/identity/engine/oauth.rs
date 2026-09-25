@@ -2644,6 +2644,52 @@ impl EmbeddedIdentityEngine {
         format!("sha256:{}", digest.get(..16).unwrap_or(digest.as_str()))
     }
 
+    /// Whether `claims` belong to a token issued to `client` (RFC 7009 §2.1).
+    ///
+    /// The issuing client is, in order:
+    /// 1. `azp` — set on ID tokens and any token bound to an authorized party;
+    /// 2. the grant family's `client_id` — every user access and refresh token
+    ///    minted by a grant carries its family id in `fid`;
+    /// 3. `sub` — for a sessionless `client_credentials` token, whose subject
+    ///    is the client itself.
+    ///
+    /// Audience membership deliberately does NOT count: a resource server
+    /// named in `aud` received the token, it was not issued it, and it must
+    /// not be able to end the user's session. A token no client was issued —
+    /// a Hearth first-party session token, or a family whose owning client is
+    /// unrecorded or already swept — belongs to no client and yields `false`
+    /// (fail closed).
+    fn token_issued_to_client(
+        &self,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        client: &crate::core::ClientId,
+    ) -> Result<bool, IdentityError> {
+        let client_str = client.to_string();
+        if let Some(azp) = claims.azp.as_deref() {
+            return Ok(azp == client_str);
+        }
+        if let Some(ref fid) = claims.fid {
+            let family_key = keys::encode_grant_family(fid);
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &family_key)
+                .map_err(Self::storage_err)?
+            else {
+                return Ok(false);
+            };
+            let family: StoredGrantFamily =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            return Ok(family.client_id.as_ref() == Some(client));
+        }
+        if claims.sid == "none" {
+            return Ok(claims.sub == client_str);
+        }
+        Ok(false)
+    }
+
     pub(super) fn revoke_token_inner(
         &self,
         realm_id: &RealmId,
@@ -2659,6 +2705,23 @@ impl EmbeddedIdentityEngine {
         // Verify realm matches
         if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
             return Ok(()); // Silent success per RFC 7009
+        }
+
+        // RFC 7009 §2.1: the server "verifies whether the token was issued to
+        // the client making the revocation request". Without this, any
+        // authenticated client — and a public client authenticates on its
+        // `client_id` alone — could end the session or grant family behind
+        // any token it held: a resource server that legitimately received a
+        // user's token, or anyone holding a leaked one. A foreign token is a
+        // silent no-op (RFC 7009 §2.2), exactly like an invalid one.
+        if let Some(revoking) = request.revoking_client_id.as_ref() {
+            if !self.token_issued_to_client(realm_id, &claims, revoking)? {
+                tracing::debug!(
+                    realm_id = %realm_id,
+                    "revocation ignored: token was not issued to the revoking client"
+                );
+                return Ok(());
+            }
         }
 
         match claims.token_type.as_str() {

@@ -262,6 +262,7 @@ fn rfc7009_revocation_survives_a_concurrent_rotation() {
                 let request = TokenRevocationRequest {
                     token,
                     token_type_hint: Some("refresh_token".to_string()),
+                    revoking_client_id: None,
                 };
                 if engine.revoke_token(&realm, &request).is_ok() {
                     flag.store(true, Ordering::Release);
@@ -552,6 +553,7 @@ fn revoking_an_access_token_fails_when_the_session_write_fails() {
             &TokenRevocationRequest {
                 token: tokens.access_token().to_string(),
                 token_type_hint: None,
+                revoking_client_id: None,
             },
         )
         .expect("an unarmed revocation must succeed");
@@ -569,6 +571,7 @@ fn revoking_an_access_token_fails_when_the_session_write_fails() {
         &TokenRevocationRequest {
             token: tokens2.access_token().to_string(),
             token_type_hint: None,
+            revoking_client_id: None,
         },
     );
     assert!(

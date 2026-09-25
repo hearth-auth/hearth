@@ -563,9 +563,29 @@ audience restriction applies to the authenticated client on every surface, gRPC 
 
 **Revocation still accepts public clients** (RFC 7009 §2.1): `POST /revoke`, its realm twin and
 gRPC `Revoke` authenticate a public client by `client_id` alone and a confidential client by its
-secret. Note that revocation does not currently check that the token was issued to the revoking
-client (RFC 7009 §2.1 says the server "verifies whether the token was issued to the client making
-the revocation request") — tracked as an open finding.
+secret.
+
+**Revocation is restricted to the caller's own tokens** (RFC 7009 §2.1: the server "verifies
+whether the token was issued to the client making the revocation request"). Every wire surface
+passes the authenticated client to the engine as `TokenRevocationRequest.revoking_client_id`, and
+the engine revokes the token only when it was issued to that client. The issuing client is
+resolved, in order, from:
+
+| Token shape | Issuing client |
+|-------------|----------------|
+| Carries `azp` (ID tokens, authorized-party-bound tokens) | `azp` |
+| Carries `fid` (every access and refresh token a grant mints) | the grant family's `client_id` |
+| Sessionless (`sid = "none"`: `client_credentials`, `jwt-bearer`) | `sub` (the client itself) |
+| Anything else | none |
+
+Audience membership does **not** confer ownership — a resource server named in `aud` received the
+token; it was not issued it, and it MUST NOT be able to end the user's session or grant family.
+A token issued to no client (a Hearth first-party session token, or a grant family with no recorded
+client) is not revocable through these endpoints by any client; the admin session API ends such a
+session. A token issued to another client is a silent no-op: the response is `200` (gRPC `OK`),
+identical to the response for an invalid token (RFC 7009 §2.2), and nothing is revoked or audited.
+`revoking_client_id: None` is reserved for trusted in-process callers that have authorized the
+revocation themselves. Covered by `tests/revoke_client_ownership.rs`.
 
 Discovery advertises both sets (RFC 8414 §2):
 
@@ -591,6 +611,7 @@ Discovery advertises both sets (RFC 8414 §2):
 | `tests/oauth_form_encoding.rs` | Form + JSON content-type acceptance on token/revoke/introspect/PAR/device-authorization and their realm twins (HEA-2077) |
 | `tests/device_grant_client_auth.rs` | Confidential-client authentication on both device-grant endpoints and both realm twins (audit 2026-08-28 §4.19#4, §4.22#6) |
 | `tests/introspect_confidential_only.rs` | Introspection refuses public clients (HTTP, realm twin, gRPC); secret and `private_key_jwt` authentication; gRPC audience restriction; discovery auth-method metadata; public-client revocation still accepted (task 26.43) |
+| `tests/revoke_client_ownership.rs` | RFC 7009 §2.1 revocation ownership — a client revokes only tokens issued to it (`azp`, grant family, `client_credentials` subject) on `/revoke`, the realm twin and gRPC `Revoke`; foreign and first-party tokens are a silent `200` no-op |
 | `tests/realm_token_exchange_client_auth.rs` | Token-exchange client auth enforcement + DPoP re-binding prevention on both endpoints (HEA-2024) |
 | `tests/fixtures/fapi2/conformance_vectors.json` | Test vectors for per-client FAPI 2.0 |
 

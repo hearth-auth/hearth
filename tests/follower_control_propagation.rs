@@ -179,6 +179,7 @@ fn revoking_a_token_on_one_node_binds_on_the_other() {
             &TokenRevocationRequest {
                 token: token.clone(),
                 token_type_hint: None,
+                revoking_client_id: None,
             },
         )
         .unwrap();
